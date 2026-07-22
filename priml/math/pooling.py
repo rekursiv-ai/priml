@@ -163,6 +163,17 @@ def _adaptive_avg_pool(
             lambda: f"Expected non-zero spatial dims, got shape {tuple(x.shape)}",
         )
 
+    # Plain mean pooling has a fused primitive; only the variance-preserving
+    # scaling (mean * sqrt(window_size)) needs the per-window counts computed
+    # by the index-gather path below, since no adaptive sum-pool exists to
+    # recover ragged window sizes.
+    if not variance_preserving:
+        if n == 2:
+            oh, ow = output_size
+            return torch.nn.functional.adaptive_avg_pool2d(x, (oh, ow))
+        of, oh, ow = output_size
+        return torch.nn.functional.adaptive_avg_pool3d(x, (of, oh, ow))
+
     # Fast path: all dims evenly divisible.
     if all(s % o == 0 for s, o in zip(spatial, output_size, strict=True)):
         stride = tuple(s // o for s, o in zip(spatial, output_size, strict=True))
