@@ -1,0 +1,141 @@
+from collections.abc import Callable, Sequence
+from typing import Any, Self
+
+from torchao.dtypes import Layout
+from torchao.quantization.unified import Quantizer
+
+import torch
+
+GPTQ_FUNC_LIST = ...
+__all__ = [
+    "GPTQQuantizer",
+    "Int4WeightOnlyGPTQQuantizer",
+    "MultiTensor",
+    "MultiTensorInputRecorder",
+    "StateDictManager",
+]
+
+class MultiTensor(torch.Tensor):
+    get_qparams_func = ...
+    quantize_func = ...
+    dequantize_func = ...
+    combine_qparams_list_func = ...
+    make_qtensor = ...
+    skip_layer_func = ...
+    act_fake_quant_func = ...
+    group_size: int = ...
+    percdamp: float = ...
+    blocksize: int = ...
+    in_place_threshold: int = ...
+    @staticmethod
+    def __new__(
+        cls, input: torch.Tensor | Sequence[torch.Tensor], **kwargs: Any
+    ) -> Self: ...
+    def __init__(
+        self, input: torch.Tensor | Sequence[torch.Tensor], **kwargs: Any
+    ) -> None: ...
+    def append(self, input: torch.Tensor):  # -> MultiTensor:
+        ...
+    def add_tensors(
+        self, input: torch.Tensor | Sequence[torch.Tensor]
+    ) -> MultiTensor: ...
+    def pad_to_length(self, length, pad_in_place=...):  # -> MultiTensor | Self:
+        ...
+    def unpad(self, count=...):  # -> None:
+        ...
+    @classmethod
+    def configure_quantization_mode(
+        cls,
+        get_qparams_func,
+        quantize_func,
+        dequantize_func,
+        combine_qparams_list_func,
+        make_qtensor,
+        skip_layer_func,
+        act_fake_quant_func=...,
+        group_size=...,
+        percdamp=...,
+        blocksize=...,
+        device: torch.device = ...,
+    ):  # -> None:
+        ...
+    @classmethod
+    def __torch_function__(
+        cls,
+        func: Callable,
+        types: tuple[type, ...],
+        args: tuple[Any, ...] = ...,
+        kwargs: dict[str, Any] | None = ...,
+        skip_gptq: bool = ...,
+    ) -> Any: ...
+    @classmethod
+    def grouped_to_flat(
+        cls, grouped: list[tuple[Any, ...]]
+    ) -> tuple[list[Any], bool]: ...
+    @classmethod
+    def faster_quant(cls, H, W, device):  # -> tuple[Any, Tensor, Any]:
+        ...
+    @classmethod
+    def __torch_dispatch__(
+        cls,
+        func: Callable,
+        types: tuple[type, ...],
+        args: tuple[Any, ...] = ...,
+        kwargs: dict[str, Any] = ...,
+        skip_gptq: bool = ...,
+    ) -> Any: ...
+    def __tensor_flatten__(self) -> tuple[list[str], Any | None]: ...
+    @classmethod
+    def __tensor_unflatten__(
+        cls,
+        tensor_data_dict: dict[str, Any],
+        tensor_attributes: Any | None,
+        outer_size: torch.Size,
+        outer_stride: tuple[int, ...],
+    ) -> MultiTensor: ...
+    @classmethod
+    def is_linear_layer(cls, func: Callable) -> bool: ...
+
+class MultiTensorInputRecorder(torch.nn.Module):
+    def __init__(self, disable_input_validation=..., target_class=...) -> None: ...
+    def forward(self, *args: Any, **kwargs: Any) -> MultiTensorInputRecorder: ...
+    def get_recorded_inputs(self) -> tuple[Any, ...]: ...
+    def get_recorded_args_and_kwargs(
+        self,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]: ...
+
+class GPTQQuantizer(Quantizer):
+    def __init__(self) -> None: ...
+    def covert_multi_tensors_to_tensors(self, state_dict): ...
+
+class Int4WeightOnlyGPTQQuantizer(GPTQQuantizer):
+    def __init__(
+        self,
+        group_size=...,
+        blocksize=...,
+        percdamp=...,
+        inner_k_tiles=...,
+        padding_allowed=...,
+        device: torch.device = ...,
+        layout: Layout | None = ...,
+    ) -> None: ...
+    def quantize(
+        self, model: torch.nn.Module, *args: tuple[Any, ...], **kwargs: dict[str, Any]
+    ) -> torch.nn.Module: ...
+
+class StateDictManager:
+    _instance = ...
+    @staticmethod
+    def get_instance():  # -> StateDictManager:
+        ...
+    def __init__(self) -> None: ...
+    def set_state_dict(self, model):  # -> None:
+        ...
+    def update_id_to_name(self, model):  # -> None:
+        ...
+    def get_name_for_param(self, param):  # -> None:
+        ...
+    def update_param(self, name, new_value):  # -> None:
+        ...
+    def get_state_dict(self):  # -> dict[Any, Any]:
+        ...

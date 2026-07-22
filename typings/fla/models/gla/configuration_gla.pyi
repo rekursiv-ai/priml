@@ -1,0 +1,42 @@
+from transformers.configuration_utils import PretrainedConfig
+
+class GLAConfig(PretrainedConfig):
+    model_type = ...
+    keys_to_ignore_at_inference = ...
+    def __init__(
+        self,
+        hidden_size: int = ...,
+        expand_k: float = ...,
+        expand_v: float = ...,
+        hidden_ratio: int | None = ...,
+        intermediate_size: int | None = ...,
+        num_hidden_layers: int = ...,
+        num_heads: int = ...,
+        num_kv_heads: int | None = ...,
+        feature_map: str | None = ...,
+        attn_mode: str = ...,
+        use_short_conv: bool = ...,
+        conv_size: int = ...,
+        use_output_gate: bool = ...,
+        clamp_min: float | None = ...,
+        hidden_act: str = ...,
+        max_position_embeddings: int = ...,
+        elementwise_affine: bool | None = ...,
+        norm_eps: float = ...,
+        use_gk: bool = ...,
+        use_gv: bool = ...,
+        attn: dict | None = ...,
+        use_cache: bool = ...,
+        pad_token_id: int | None = ...,
+        bos_token_id: int = ...,
+        eos_token_id: int = ...,
+        tie_word_embeddings: bool = ...,
+        initializer_range: float = ...,
+        fuse_norm: bool = ...,
+        fuse_swiglu: bool = ...,
+        fuse_cross_entropy: bool = ...,
+        fuse_linear_cross_entropy: bool = ...,
+        use_l2warp: bool = ...,
+        vocab_size: int = ...,
+        **kwargs,
+    ) -> None: ...
