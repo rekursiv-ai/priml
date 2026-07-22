@@ -1,0 +1,34 @@
+from fla.models.utils import Cache
+from torch import nn
+from transformers.processing_utils import Unpack
+
+import torch
+
+class KimiDeltaAttention(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int = ...,
+        expand_v: float = ...,
+        head_dim: int = ...,
+        num_heads: int = ...,
+        num_v_heads: int = ...,
+        mode: str = ...,
+        use_short_conv: bool = ...,
+        allow_neg_eigval: bool = ...,
+        safe_gate: bool = ...,
+        lower_bound: float | None = ...,
+        conv_size: int = ...,
+        conv_bias: bool = ...,
+        layer_idx: int = ...,
+        norm_eps: float = ...,
+        **kwargs,
+    ) -> KimiDeltaAttention: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
+        past_key_values: Cache | None = ...,
+        use_cache: bool | None = ...,
+        output_attentions: bool | None = ...,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...

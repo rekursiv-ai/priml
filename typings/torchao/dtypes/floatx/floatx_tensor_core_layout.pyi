@@ -1,0 +1,63 @@
+from dataclasses import dataclass
+
+from torch import Tensor
+from torchao.dtypes.affine_quantized_tensor import register_layout
+from torchao.dtypes.utils import AQTTensorImpl, Layout
+
+import torch
+
+aten = ...
+_ONES_TABLE = ...
+
+def pack_tc_floatx(tensor: Tensor, nbits: int) -> Tensor: ...
+def to_scaled_tc_floatx(
+    tensor: Tensor, ebits: int, mbits: int
+) -> tuple[Tensor, Tensor]: ...
+def unpack_tc_floatx(tensor: Tensor, nbits: int) -> Tensor: ...
+def from_scaled_tc_floatx(
+    tensor: Tensor, ebits: int, mbits: int, scale=...
+) -> Tensor: ...
+
+_SPLIT_K_MAP = ...
+
+@dataclass(frozen=True)
+class FloatxTensorCoreLayout(Layout):
+    ebits: int
+    mbits: int
+
+@register_layout(FloatxTensorCoreLayout)
+class FloatxTensorCoreAQTTensorImpl(AQTTensorImpl):
+    def __new__(
+        cls, packed_floatx_data: torch.Tensor, scale: torch.Tensor, _layout: Layout
+    ):  # -> Self:
+        ...
+    def __init__(
+        self, packed_floatx_data: torch.Tensor, scale: torch.Tensor, _layout: Layout
+    ) -> None: ...
+    def __tensor_flatten__(self):  # -> tuple[list[str], list[Layout]]:
+        ...
+    @classmethod
+    def __tensor_unflatten__(
+        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+    ):  # -> Self:
+        ...
+    def get_plain(self) -> tuple[torch.Tensor, torch.Tensor]: ...
+    @classmethod
+    def from_plain(
+        cls,
+        unpacked_floatx_data: torch.Tensor,
+        scale: torch.Tensor,
+        zero_point: torch.Tensor | None,
+        _layout: Layout,
+    ):  # -> Self:
+        ...
+    def __repr__(self):  # -> str:
+        ...
+    def to(self, *args, **kwargs):  # -> Self:
+        ...
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs):  # -> tuple[Any, ...] | Any:
+        ...
+
+    __torch_function__ = ...
+    def get_layout(self) -> Layout: ...
