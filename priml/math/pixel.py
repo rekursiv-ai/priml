@@ -297,14 +297,14 @@ def interpolate(
         x = x.moveaxis(-1, -rank_ - 1)
 
     if rank_ < output_rank:
-        # We need to pad.
+        # Fewer input spatial dims than requested: insert unit axes to lift rank.
         x = x.reshape(
             *x.shape[:-rank_],
             *(1,) * (output_rank - rank_),
             *x.shape[-rank_:],
         )
     elif rank_ > output_rank:
-        # We need to permute.
+        # More input spatial dims than requested: fold the extras via axis reorder.
         x = torch.permute(
             x,
             dims=tuple(
