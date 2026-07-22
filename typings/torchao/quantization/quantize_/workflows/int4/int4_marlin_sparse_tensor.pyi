@@ -1,0 +1,26 @@
+from torchao.utils import TorchAOBaseTensor
+
+import torch
+
+__all__ = ["Int4MarlinSparseTensor"]
+aten = ...
+
+class Int4MarlinSparseTensor(TorchAOBaseTensor):
+    tensor_data_names = ...
+    tensor_attribute_names = ...
+    def __new__(
+        cls, qdata, scale, zero_point, meta, block_size, num_bits, shape
+    ):  # -> Self:
+        ...
+    def __init__(
+        self, qdata, scale, zero_point, meta, block_size, num_bits, shape
+    ) -> None: ...
+    @classmethod
+    def from_hp(cls, w: torch.Tensor, block_size: list[int]):  # -> Self:
+        ...
+
+implements = ...
+
+@implements([torch.nn.functional.linear, aten.linear.default])
+def _(func, types, args, kwargs):  # -> Tensor:
+    ...

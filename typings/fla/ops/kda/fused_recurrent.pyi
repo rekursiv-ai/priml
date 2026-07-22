@@ -1,0 +1,102 @@
+from fla.utils import input_guard
+
+import torch
+import triton
+import triton.language as tl
+
+@triton.heuristics(
+    {
+        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+        "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
+        "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
+        "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
+    }
+)
+@triton.jit(do_not_specialize=["N", "T"])
+def fused_recurrent_kda_fwd_kernel(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A_log,
+    dt_bias,
+    o,
+    h0,
+    ht,
+    cu_seqlens,
+    ssm_state_indices,
+    num_accepted_tokens,
+    lower_bound,
+    scale: tl.constexpr,
+    N: tl.int64,
+    T: tl.int64,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    stride_indices_seq: tl.constexpr,
+    stride_indices_tok: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    INPLACE_FINAL_STATE: tl.constexpr,
+    IS_BETA_HEADWISE: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    IS_SPEC_DECODING: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
+    HAS_DT_BIAS: tl.constexpr,
+    USE_GATE_IN_KERNEL: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
+    num_stages: tl.constexpr,
+): ...
+@torch.compiler.disable
+def fused_recurrent_kda_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A_log: torch.Tensor | None = ...,
+    dt_bias: torch.Tensor | None = ...,
+    initial_state: torch.Tensor | None = ...,
+    scale: float | None = ...,
+    output_final_state: bool = ...,
+    inplace_final_state: bool = ...,
+    cu_seqlens: torch.LongTensor | None = ...,
+    ssm_state_indices: torch.Tensor | None = ...,
+    num_accepted_tokens: torch.Tensor | None = ...,
+    use_qk_l2norm_in_kernel: bool = ...,
+    use_gate_in_kernel: bool = ...,
+    lower_bound: float | None = ...,
+    out: torch.Tensor | None = ...,
+    transpose_state_layout: bool = ...,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]: ...
+@input_guard
+def fused_recurrent_kda(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A_log: torch.Tensor | None = ...,
+    dt_bias: torch.Tensor | None = ...,
+    scale: float | None = ...,
+    initial_state: torch.Tensor = ...,
+    output_final_state: bool = ...,
+    use_qk_l2norm_in_kernel: bool = ...,
+    use_gate_in_kernel: bool = ...,
+    lower_bound: float | None = ...,
+    cu_seqlens: torch.LongTensor | None = ...,
+    transpose_state_layout: bool = ...,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]: ...

@@ -1,0 +1,33 @@
+from _typeshed import Incomplete
+from rich.progress import ProgressColumn
+
+from .std import tqdm as std_tqdm
+
+__all__ = ["tqdm", "tqdm_rich", "trange", "trrange"]
+
+class FractionColumn(ProgressColumn):
+    unit_scale: Incomplete
+    unit_divisor: Incomplete
+    def __init__(self, unit_scale: bool = False, unit_divisor: int = 1000) -> None: ...
+    def render(self, task): ...
+
+class RateColumn(ProgressColumn):
+    unit: Incomplete
+    unit_scale: Incomplete
+    unit_divisor: Incomplete
+    def __init__(
+        self, unit: str = "", unit_scale: bool = False, unit_divisor: int = 1000
+    ) -> None: ...
+    def render(self, task): ...
+
+class tqdm_rich(std_tqdm):
+    def __init__(self, *args, **kwargs) -> None: ...
+    def close(self) -> None: ...
+    def clear(self, *_, **__) -> None: ...
+    def display(self, *_, **__) -> None: ...
+    def reset(self, total=None) -> None: ...
+
+def trrange(*args, **kwargs): ...
+
+tqdm = tqdm_rich
+trange = trrange

@@ -1,0 +1,36 @@
+from transformers.configuration_utils import PretrainedConfig
+
+class MambaConfig(PretrainedConfig):
+    model_type = ...
+    def __init__(
+        self,
+        vocab_size: int = ...,
+        hidden_size: int = ...,
+        state_size: int = ...,
+        num_hidden_layers: int = ...,
+        norm_eps=...,
+        pad_token_id: int = ...,
+        bos_token_id: int = ...,
+        eos_token_id: int = ...,
+        expand: int = ...,
+        conv_kernel: int = ...,
+        use_bias: bool = ...,
+        use_conv_bias: bool = ...,
+        hidden_act: str = ...,
+        initializer_range: float = ...,
+        residual_in_fp32: bool = ...,
+        dt_rank: str | int = ...,
+        dt_scale: float = ...,
+        dt_min: float = ...,
+        dt_max: float = ...,
+        dt_init_scheme: str = ...,
+        dt_init_floor: float = ...,
+        rescale_prenorm_residual: bool = ...,
+        use_cache: bool = ...,
+        fuse_norm: bool = ...,
+        fuse_cross_entropy: bool = ...,
+        fuse_linear_cross_entropy: bool = ...,
+        use_l2warp: bool = ...,
+        tie_word_embeddings: bool = ...,
+        **kwargs,
+    ) -> None: ...

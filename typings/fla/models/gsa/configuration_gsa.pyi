@@ -1,0 +1,43 @@
+from transformers.configuration_utils import PretrainedConfig
+
+class GSAConfig(PretrainedConfig):
+    model_type = ...
+    keys_to_ignore_at_inference = ...
+    def __init__(
+        self,
+        hidden_size: int = ...,
+        gate_logit_normalizer: int | None = ...,
+        clamp_min: float | None = ...,
+        clamp_max: float | None = ...,
+        hidden_ratio: int | None = ...,
+        intermediate_size: int | None = ...,
+        num_hidden_layers: int = ...,
+        num_heads: int = ...,
+        num_kv_heads: int | None = ...,
+        num_slots: int | None = ...,
+        use_short_conv: bool = ...,
+        conv_size: int = ...,
+        exapnd_k: float = ...,
+        exapnd_v: float = ...,
+        feature_map: str = ...,
+        use_output_gate: bool = ...,
+        use_norm: bool = ...,
+        max_position_embeddings: int = ...,
+        hidden_act: str = ...,
+        elementwise_affine: bool | None = ...,
+        norm_eps: float = ...,
+        attn: dict | None = ...,
+        use_cache: bool = ...,
+        pad_token_id: int | None = ...,
+        bos_token_id: int = ...,
+        eos_token_id: int = ...,
+        initializer_range: float = ...,
+        tie_word_embeddings: bool = ...,
+        fuse_norm: bool = ...,
+        fuse_swiglu: bool = ...,
+        fuse_cross_entropy: bool = ...,
+        fuse_linear_cross_entropy: bool = ...,
+        use_l2warp: bool = ...,
+        vocab_size: int = ...,
+        **kwargs,
+    ) -> None: ...
