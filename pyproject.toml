@@ -380,8 +380,6 @@ skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-
 [tool.uv]
 package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
-# Guarantee at lock time that aarch64 Linux (Grace/GB10-class boxes) stays resolvable.
-required-environments = ["sys_platform == 'linux' and platform_machine == 'aarch64'"]
 [tool.uv.pip]
 compile-bytecode = true
 
@@ -401,13 +399,7 @@ explicit = true
 # full rationale on why an explicit index pin (not torch-backend=auto) is the
 # only viable option across the fleet.
 torch = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
-# torchao's cu128 build ships x86_64-only wheels; its +cpu build is a pure-python
-# py3-none-any wheel (custom kernels are optional), so aarch64 Linux takes that
-# branch while torch/torchvision stay on cu128 (both ship aarch64 CUDA wheels).
-torchao = [
-    {index = "pytorch-cu128", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'"},
-    {index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'"},
-]
+torchao = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 torchvision = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 
 [tool.uv.workspace]

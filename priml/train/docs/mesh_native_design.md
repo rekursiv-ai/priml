@@ -65,10 +65,12 @@ wired the same way — the parent sets the child's `shard` at the inline
 class SelfAttention:
     def __init__(self, config: Config) -> None:
         self.proj_qkv = EnsembleLinear.Config(
-            ..., shard="colwise",   # heads are the parallel axis
+            ...,
+            shard="colwise",  # heads are the parallel axis
         ).make()
         self.proj_out = Linear.Config(
-            ..., shard="rowwise",   # reduce-scatter back to residual
+            ...,
+            shard="rowwise",  # reduce-scatter back to residual
         ).make()
 ```
 
