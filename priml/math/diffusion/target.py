@@ -67,6 +67,7 @@ class TargetFn(Protocol):
         x_noisy: Tensor,
         log_snr: Tensor,
         log_sigma: Tensor,
+        *,
         x_original: Tensor | None = None,
         eps_original: Tensor | None = None,
     ) -> TargetResult: ...
@@ -77,6 +78,7 @@ def target_x(
     x_noisy: Tensor,
     log_snr: Tensor,
     log_sigma: Tensor,
+    *,
     x_original: Tensor | None = None,
     eps_original: Tensor | None = None,
 ) -> TargetResult:
@@ -112,6 +114,7 @@ def target_eps(
     x_noisy: Tensor,
     log_snr: Tensor,
     log_sigma: Tensor,
+    *,
     x_original: Tensor | None = None,
     eps_original: Tensor | None = None,
 ) -> TargetResult:
@@ -151,6 +154,7 @@ def target_v(
     x_noisy: Tensor,
     log_snr: Tensor,
     log_sigma: Tensor,
+    *,
     x_original: Tensor | None = None,
     eps_original: Tensor | None = None,
 ) -> TargetResult:
@@ -241,6 +245,7 @@ def target_rectified_flow(
     x_noisy: Tensor,
     log_snr: Tensor,
     log_sigma: Tensor,
+    *,
     x_original: Tensor | None = None,
     eps_original: Tensor | None = None,
 ) -> TargetResult:
@@ -328,6 +333,7 @@ def target_v_x(
     x_noisy: Tensor,
     log_snr: Tensor,
     log_sigma: Tensor,
+    *,
     x_original: Tensor | None = None,
     eps_original: Tensor | None = None,
 ) -> TargetResult:
@@ -384,6 +390,7 @@ def target_v_eps(
     x_noisy: Tensor,
     log_snr: Tensor,
     log_sigma: Tensor,
+    *,
     x_original: Tensor | None = None,
     eps_original: Tensor | None = None,
 ) -> TargetResult:

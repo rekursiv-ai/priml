@@ -191,6 +191,7 @@ def _torch_chunk_gated_delta_rule(
     value: Tensor,
     g: Tensor,
     beta: Tensor,
+    *,
     chunk_size: int = 64,
     initial_state: Tensor | None = None,
     output_final_state: bool = False,

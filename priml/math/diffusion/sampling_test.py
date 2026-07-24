@@ -177,7 +177,7 @@ def test_ddpm_step_matches_ddpm(eta: float) -> None:
         log_snr1_t,
         log_snr0_t,
         log_sigma_next,
-        eta,
+        eta=eta,
     )
 
     # x_clean from ddpm wrapper vs target_fn

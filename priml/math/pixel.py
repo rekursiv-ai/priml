@@ -248,6 +248,7 @@ InterpolateMode = Literal[
 def interpolate(
     input_: Tensorable,
     mode: InterpolateMode = "nearest",
+    *,
     size: int | Sequence[int] = (),
     scale_factor: float | Sequence[int | float] = (),
     align_corners: bool = False,
@@ -461,6 +462,7 @@ def decode_jpeg_turbojpeg(
     turbo_jpeg: TurboJPEG,
     height: int,
     width: int,
+    *,
     crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
     channels_first: bool = True,
 ) -> Tensor | None:
@@ -489,6 +491,7 @@ def decode_image_pil(
     image_bytes: bytes,
     height: int,
     width: int,
+    *,
     crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
     channels_format: Literal["rgb", "rgba"] = "rgb",
     channels_first: bool = True,
