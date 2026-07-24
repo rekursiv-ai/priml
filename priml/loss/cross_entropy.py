@@ -8,6 +8,7 @@ from torch import Tensor, nn
 def cross_entropy_with_batched_smoothing(
     input: Tensor,
     target: Tensor,
+    *,
     weight: Tensor | None = None,
     ignore_index: int = -100,
     reduction: str = "mean",

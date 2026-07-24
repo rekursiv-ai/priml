@@ -75,6 +75,7 @@ def ddpm_ddim_step(
     log_snr_curr: Tensor,
     log_snr_next: Tensor,
     log_sigma_next: Tensor,
+    *,
     eta: float = 1,
 ) -> tuple[Tensor, Tensor]:
     """DDPM/DDIM sampling step.
@@ -277,7 +278,7 @@ def ddpm_ddim(
         log_snr_curr,
         log_snr_next,
         log_sigma_next,
-        eta,
+        eta=eta,
     )
     return SampleOneStepResult(x_clean, mean, log_std)
 

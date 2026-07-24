@@ -81,8 +81,8 @@ class WorkerPool:
                         port,
                         queue,
                         ack_queue,
-                        ready_queue,
                     ),
+                    kwargs={"ready_queue": ready_queue},
                 )
                 p.start()
                 processes.append(p)
@@ -297,6 +297,7 @@ class WorkerPool:
         port: int,
         command_queue: tm.Queue[Any],
         ack_queue: tm.Queue[Any],
+        *,
         ready_queue: tm.Queue[Any],
     ) -> None:
         mesh_dim_sizes = tuple(mesh_dims.values())

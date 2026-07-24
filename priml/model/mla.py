@@ -332,7 +332,7 @@ class MultiHeadLatentAttention(nn.Module):
         c_kv_full = c_kv_full_c.squeeze(-3)  # [*, T, L]
         k_pe_full = k_pe_full_c.squeeze(-3)  # [*, T, R]
 
-        out = self._absorb_attention(q_nope, q_pe, c_kv_full, k_pe_full, S, T)
+        out = self._absorb_attention(q_nope, q_pe, c_kv_full, k_pe_full, S, total_len=T)
         return out, cache
 
     def _project_q(self, x: Tensor) -> Tensor:
@@ -359,6 +359,7 @@ class MultiHeadLatentAttention(nn.Module):
         c_kv_full: Tensor,
         k_pe_full: Tensor,
         seq_len: int,
+        *,
         total_len: int,
     ) -> Tensor:
         """Absorb-math MLA attention (rank-local under tensor parallelism).

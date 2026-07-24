@@ -149,6 +149,7 @@ def jsd(
 def entropy_logits_mean_all_to_all(
     x: Tensorable,
     y: Tensorable | None = None,
+    *,
     dim: int | Sequence[int] = -1,
     dim_mean: int | Sequence[int] | None = None,
     keepdim: bool = False,

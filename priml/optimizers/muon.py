@@ -33,6 +33,7 @@ class Muon(torch.optim.Optimizer):
         self,
         params: Iterable[Tensor] | Iterable[dict[str, Any]],
         lr: float = 1e-3,
+        *,
         weight_decay: float | None = 0.1,
         momentum: float = 0.95,
         nesterov: bool = True,

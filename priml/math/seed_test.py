@@ -183,6 +183,7 @@ def test_set_seed_distributed_salting_combinations(
     broadcast: Callable[..., None] | None,
     mesh: MagicMock | None,
     salt_by_rank: bool,
+    *,
     expected_local_salt: tuple[str, int, int] | None,
 ) -> None:
     """Salting matrix: rank × broadcast-fill × mesh × salt_by_rank.

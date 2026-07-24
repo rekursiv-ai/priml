@@ -242,6 +242,7 @@ def _write_back(
     kwargs: dict[str, Any],
     up_args: tuple[Any, ...],
     up_kwargs: dict[str, Any],
+    *,
     result: object,
 ) -> object:
     """Restore an in-place / ``out=`` / foreach op's mutation onto the originals.
@@ -333,7 +334,7 @@ class _Float64Compute(TorchDispatchMode):
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
             # the caller's float32 originals. Narrow each back and return the
             # originals in the op's own return shape.
-            return _write_back(func, args, kwargs, up_args, up_kwargs, result)
+            return _write_back(func, args, kwargs, up_args, up_kwargs, result=result)
         return _downcast_f64(result)
 
 
