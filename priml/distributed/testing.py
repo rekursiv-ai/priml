@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import field
 from datetime import timedelta
+from multiprocessing.process import BaseProcess
 from types import TracebackType
 from typing import Any, Self
 
@@ -65,15 +66,24 @@ class WorkerPool:
         """
         world_size = math.prod(self.mesh_dims.values())
         port = self._pick_bindable_port()
-        queue: tm.Queue[Any] = tm.Queue()
-        ack_queue: tm.Queue[Any] = tm.Queue()
-        ready_queue: tm.Queue[Any] = tm.Queue()
-        processes: list[tm.Process] = []
+        # Spawn (not the platform-default fork) so each worker starts in a fresh
+        # interpreter. A forked child inherits the pytest parent's process image,
+        # which is unsafe here in two ways: (1) if an earlier test initialized
+        # CUDA in the parent, the child inherits a half-initialized CUDA context
+        # and every torch.cuda call raises "CUDA error: initialization error";
+        # (2) torch's multi-threaded intra-op pool guards a mutex that fork()
+        # copies locked (the owning thread is absent in the child), deadlocking
+        # any child that runs a torch op. Spawn sidesteps both by construction.
+        ctx = tm.get_context("spawn")
+        queue: tm.Queue[Any] = ctx.Queue()
+        ack_queue: tm.Queue[Any] = ctx.Queue()
+        ready_queue: tm.Queue[Any] = ctx.Queue()
+        processes: list[BaseProcess] = []
         # ``__exit__`` does not run when ``__enter__`` raises (PEP 343), so a
         # failure mid-spawn must kill the children already started here.
         try:
             for rank in range(world_size):
-                p: tm.Process = tm.Process(
+                p: BaseProcess = ctx.Process(
                     target=type(self).worker,
                     args=(
                         rank,
@@ -102,7 +112,7 @@ class WorkerPool:
 
     def _await_ready(
         self,
-        processes: list[tm.Process],
+        processes: list[BaseProcess],
         ready_queue: tm.Queue[Any],
         world_size: int,
     ) -> None:
@@ -199,7 +209,7 @@ class WorkerPool:
         msg = f"worker pool {self.mesh_dims} failed to rendezvous"
         raise RuntimeError(msg) from last_exc
 
-    def _await_dispatch_ack(self, processes: list[tm.Process]) -> None:
+    def _await_dispatch_ack(self, processes: list[BaseProcess]) -> None:
         """Wait for rank 0's command ack; fail if the warm pool died."""
         assert self.ack_queue is not None
         deadline = time.monotonic() + self._RENDEZVOUS_TIMEOUT.total_seconds()
@@ -225,7 +235,7 @@ class WorkerPool:
         self._kill_all(self.processes)
 
     @classmethod
-    def _kill_all(cls, processes: list[tm.Process]) -> None:
+    def _kill_all(cls, processes: list[BaseProcess]) -> None:
         """Join each child with a bounded timeout, killing any that hang.
 
         A wedged worker (stuck in ``init_process_group`` or a user ``fn``)
@@ -306,14 +316,6 @@ class WorkerPool:
         # setup fake process group
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(port)
-        # These workers always run on a CPU device mesh (see the cpu DeviceMesh
-        # below), so hide CUDA in the child. The worker is forked from the pytest
-        # parent; if any earlier test initialized CUDA in that parent, the forked
-        # child inherits a half-initialized CUDA context and every torch.cuda
-        # call raises "CUDA error: initialization error". Clearing
-        # CUDA_VISIBLE_DEVICES makes torch.cuda.is_available() False here, so the
-        # child never touches the poisoned context and takes the gloo path.
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
         # The combined "cpu:gloo,cuda:nccl" backend eagerly constructs the NCCL
         # backend even when no CUDA tensor is ever used, which raises on a
         # GPU-less host. Select gloo-only there so CPU multirank tests run.

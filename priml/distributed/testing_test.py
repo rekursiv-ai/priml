@@ -19,7 +19,8 @@ from priml.distributed.testing import WorkerPool
 
 
 if TYPE_CHECKING:
-    from torch import multiprocessing as tm
+    from multiprocessing.process import BaseProcess
+
     from torch.distributed.device_mesh import DeviceMesh
 
 
@@ -40,9 +41,17 @@ def test_enter_kills_started_children_when_a_later_start_fails() -> None:
         started.append(proc)
         return proc
 
+    # The pool builds its children through a spawn context
+    # (``tm.get_context("spawn")``), so patch that context's Process/Queue
+    # rather than the top-level ``tm.Process``/``tm.Queue``.
+    fake_ctx = MagicMock()
+    fake_ctx.Process = _make_process
+    fake_ctx.Queue = MagicMock()
     with (
-        patch("priml.distributed.testing.tm.Process", _make_process),
-        patch("priml.distributed.testing.tm.Queue", MagicMock()),
+        patch(
+            "priml.distributed.testing.tm.get_context",
+            return_value=fake_ctx,
+        ),
         # A persistent spawn failure exhausts the retries and surfaces as a
         # rendezvous error chaining the underlying OSError.
         pytest.raises(RuntimeError, match="failed to rendezvous"),
@@ -62,7 +71,7 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
 
     pool = _pool(2)
     pool.queue = MagicMock()
-    pool.processes = cast("list[tm.Process]", [healthy, wedged])
+    pool.processes = cast("list[BaseProcess]", [healthy, wedged])
 
     pool.terminate()
 
@@ -113,7 +122,7 @@ def test_call_retries_then_raises_when_worker_keeps_dying(
     pool.queue = MagicMock()
     pool.ack_queue = MagicMock()
     pool.ack_queue.get.side_effect = queue_mod.Empty
-    pool.processes = cast("list[tm.Process]", [proc])
+    pool.processes = cast("list[BaseProcess]", [proc])
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
     respawns: list[int] = []
 
@@ -147,12 +156,12 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     pool.queue = MagicMock()
     pool.ack_queue = MagicMock()
     pool.ack_queue.get.side_effect = queue_mod.Empty  # never acks -> timeout
-    pool.processes = cast("list[tm.Process]", [proc])
+    pool.processes = cast("list[BaseProcess]", [proc])
     # Make the ack deadline elapse immediately so the test does not sleep.
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
 
-    def _noop_kill(_self: WorkerPool, _procs: list[tm.Process]) -> None:
+    def _noop_kill(_self: WorkerPool, _procs: list[BaseProcess]) -> None:
         return None
 
     monkeypatch.setattr(WorkerPool, "_kill_all", _noop_kill)
