@@ -306,6 +306,14 @@ class WorkerPool:
         # setup fake process group
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(port)
+        # These workers always run on a CPU device mesh (see the cpu DeviceMesh
+        # below), so hide CUDA in the child. The worker is forked from the pytest
+        # parent; if any earlier test initialized CUDA in that parent, the forked
+        # child inherits a half-initialized CUDA context and every torch.cuda
+        # call raises "CUDA error: initialization error". Clearing
+        # CUDA_VISIBLE_DEVICES makes torch.cuda.is_available() False here, so the
+        # child never touches the poisoned context and takes the gloo path.
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
         # The combined "cpu:gloo,cuda:nccl" backend eagerly constructs the NCCL
         # backend even when no CUDA tensor is ever used, which raises on a
         # GPU-less host. Select gloo-only there so CPU multirank tests run.

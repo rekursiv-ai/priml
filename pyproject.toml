@@ -124,6 +124,7 @@ filterwarnings = [
     "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable under -n parallel workers; CPU-only tests probe CUDA during backward and torch warns benignly.
     "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:.*invalid escape sequence:SyntaxWarning",  # torchao 0.17.0 FqnToConfig docstring; mirrors root pyproject.
+    "ignore:DTensor random operators may not have complete support on cpu device mesh:UserWarning",  # torch limitation on CPU test meshes; the distributed integration tests validate the materialized result (finiteness/values), not exact RNG parity.
 ]
 norecursedirs = [
     "*.egg-info",
