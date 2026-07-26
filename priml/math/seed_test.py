@@ -531,9 +531,17 @@ def test_enable_determinism_warns_on_cublas_env_overwrite(
     """
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+    algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
 
-    with caplog.at_level("WARNING", logger="priml.math.seed"):
-        enable_determinism(cudnn=False, sdpa=False)
+    try:
+        with caplog.at_level("WARNING", logger="priml.math.seed"):
+            enable_determinism(cudnn=False, sdpa=False)
+    finally:
+        torch.use_deterministic_algorithms(
+            algorithms_enabled,
+            warn_only=warn_only_enabled,
+        )
 
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
     assert any("CUBLAS_WORKSPACE_CONFIG" in r.message for r in caplog.records), (
@@ -551,8 +559,18 @@ def test_enable_determinism_warns_when_called_after_cuda_init(
     taken effect.
     """
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
-    with caplog.at_level("WARNING", logger="priml.math.seed"):
-        enable_determinism(cudnn=False, sdpa=False)
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
+
+    try:
+        with caplog.at_level("WARNING", logger="priml.math.seed"):
+            enable_determinism(cudnn=False, sdpa=False)
+    finally:
+        torch.use_deterministic_algorithms(
+            algorithms_enabled,
+            warn_only=warn_only_enabled,
+        )
     assert any("after CUDA initialization" in r.message for r in caplog.records), (
         f"expected post-init warning; got: {[r.message for r in caplog.records]}"
     )
@@ -575,7 +593,15 @@ def test_enable_determinism_sets_cublas_env_when_unset(
     """
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
-    enable_determinism(cudnn=False, sdpa=False)
+    algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        enable_determinism(cudnn=False, sdpa=False)
+    finally:
+        torch.use_deterministic_algorithms(
+            algorithms_enabled,
+            warn_only=warn_only_enabled,
+        )
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
 
 
@@ -850,6 +876,6 @@ def test_salt_accepts_stable_primitives() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing import test_main
 
     test_main(__file__)

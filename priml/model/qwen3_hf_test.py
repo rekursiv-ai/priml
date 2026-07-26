@@ -14,20 +14,26 @@ from __future__ import annotations
 
 from typing import Any
 
+import platform
+
 import pytest
 import torch
 
-from priml.math.seed import enable_determinism
 from priml.model.attention import SdpaNaive, SelfAttention
 from priml.model.qwen3 import Qwen3, remap_hf_state_dict
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import TransformerBlock
 
 
+def _cpu_matmul_is_not_bit_exact() -> bool:
+    """Return whether this host has the observed Apple-silicon CPU drift."""
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        torch.backends.mps.is_available(),
+        _cpu_matmul_is_not_bit_exact(),
         reason="CPU matmul ordering is not bit-exact on MPS-capable Macs",
     ),
 ]
@@ -68,10 +74,27 @@ def _hf_state_dict_to_loop_format(
 
 
 @pytest.mark.parametrize("tie_embeddings", [False, True])
-def test_qwen3_matches_hf(tie_embeddings: bool):
+def test_qwen3_matches_hf(tie_embeddings: bool) -> None:
     """Our Qwen3 output must match HF's Qwen3ForCausalLM bit-for-bit."""
-    enable_determinism(sdpa=True)
-    torch.manual_seed(0)
+    algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
+    rng_state = torch.get_rng_state()
+    try:
+        torch.use_deterministic_algorithms(True)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(0)
+        torch.set_rng_state(generator.get_state())
+        _assert_qwen3_matches_hf(tie_embeddings)
+    finally:
+        torch.use_deterministic_algorithms(
+            algorithms_enabled,
+            warn_only=warn_only_enabled,
+        )
+        torch.set_rng_state(rng_state)
+
+
+def _assert_qwen3_matches_hf(tie_embeddings: bool) -> None:
+    """Assert parity after the caller establishes deterministic process state."""
     cfg_dict = _tiny_hf_config()
     cfg_dict["tie_word_embeddings"] = tie_embeddings
 
@@ -104,6 +127,6 @@ def test_qwen3_matches_hf(tie_embeddings: bool):
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing import test_main
 
     test_main(__file__)
