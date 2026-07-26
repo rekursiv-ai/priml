@@ -77,6 +77,42 @@ def torch_compiler_isolation() -> Generator[None]:
             clear_caches()
 
 
+def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
+    """Leave NaN in freed heap blocks that a later ``torch.empty`` may reuse.
+
+    A module that allocates parameters with ``torch.empty`` and defers filling
+    them to an external initializer hands its caller whatever the allocator had
+    left in that block. A unit test that builds such a module directly then
+    passes or fails on what previous tests happened to free, not on the module.
+    Poisoning first makes that dependence visible: a parameter the module leaves
+    unwritten reads back NaN instead of plausible-looking numbers.
+
+    Best effort by construction -- which block a platform's allocator returns is
+    its own business, so a caller must assert that values it *does* define are
+    correct, never that unwritten memory is observably poisoned. Filling many
+    blocks per shape rather than one keeps this effective on allocators that do
+    not reuse most-recently-freed blocks first.
+
+    Args:
+      shapes: Every parameter shape the module under test allocates. The
+        allocator pools by block size, so a shape that is not poisoned can
+        still come back clean.
+      blocks: How many blocks to fill and free per shape.
+
+    Raises:
+      RuntimeError: If torch is not installed.
+
+    """
+    if torch is None:
+        raise RuntimeError("torch is not installed")
+    for shape in shapes:
+        # Built and dropped one at a time rather than held in a list: each block
+        # has to be freed before the next same-size allocation can receive it.
+        for _ in range(blocks):
+            block = torch.full(shape, float("nan"))
+            del block
+
+
 def _reclaim_cuda() -> None:
     """Synchronize and empty the CUDA cache when a CUDA device is present."""
     if torch is not None and torch.cuda.is_available():

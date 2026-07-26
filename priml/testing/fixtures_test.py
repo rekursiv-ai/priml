@@ -8,7 +8,11 @@ import warnings
 import pytest
 import torch
 
-from priml.testing.fixtures import get_device, torch_compiler_isolation
+from priml.testing.fixtures import (
+    get_device,
+    poison_free_pool,
+    torch_compiler_isolation,
+)
 
 
 def test_get_device_returns_device():
@@ -112,6 +116,34 @@ def test_compiler_isolation_compiles_with_deprecations_fatal() -> None:
     with torch_compiler_isolation():
         compiled = torch.compile(add_one, dynamic=False)
         assert torch.equal(compiled(torch.zeros(4)), torch.ones(4))
+
+
+def test_poison_free_pool_makes_a_later_empty_read_back_nan() -> None:
+    """An unwritten allocation should surface as NaN rather than as luck.
+
+    Which block an allocator hands back is platform policy, not a guarantee we
+    can assert: glibc returns freed small blocks eagerly, and macOS need not.
+    Skipping rather than failing keeps this honest -- callers of the helper
+    assert that values they define are correct, never that undefined memory is
+    observably poisoned, so a platform that declines simply loses the sharper
+    diagnostic.
+    """
+    poison_free_pool((6, 12))
+
+    recycled = torch.empty(6, 12)
+
+    if not bool(torch.isnan(recycled).any()):
+        pytest.skip("allocator does not recycle freed blocks on this platform")
+    assert bool(torch.isnan(recycled).any())
+
+
+def test_poison_free_pool_leaves_written_allocations_alone() -> None:
+    """Poisoning must not disturb tensors that do define their own contents."""
+    poison_free_pool((6, 12))
+
+    written = torch.zeros(6, 12)
+
+    assert bool(torch.isfinite(written).all())
 
 
 def test_test_main_calls_pytest():
