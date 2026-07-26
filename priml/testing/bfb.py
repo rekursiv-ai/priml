@@ -40,8 +40,8 @@ Cross-architecture portability (the whole point):
   ``MKL_CBWR`` for the benefit of other, non-bfb numeric-parity tests; bfb no
   longer depends on it.)
 
-Determinism is required: the harness calls ``enable_determinism(sdpa=True)``
-and ``torch.manual_seed(seed)`` before any tensor allocation.
+Determinism is required: the harness enables deterministic Torch algorithms
+and seeds the CPU default generator before any tensor allocation.
 
 Usage::
 
@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, override
 
@@ -77,10 +78,17 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import pytest
 import torch
 
-from priml.math.seed import enable_determinism
-
 
 _ENV_REGENERATE = "BFB_REGENERATE"  # config-globals: ignore -- test env var name.
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _TorchProcessState:
+    """Process-global Torch state temporarily changed by a BFB assertion."""
+
+    algorithms_enabled: bool
+    warn_only_enabled: bool
+    rng_state: Tensor
 
 
 # The allowlist of float32 aten ops that run NATIVELY (not upcast) because their
@@ -352,40 +360,19 @@ def host_agnostic_numerics() -> Generator[None]:
         yield
 
 
-def bfb_devices(*, cuda: bool = False) -> list[str]:
-    """Devices a golden test parametrizes over. CPU only by default.
+def bfb_devices() -> list[str]:
+    """Return the sole device supported by portable BFB goldens.
 
-    Bit-for-bit goldens are a CPU-only contract. The CPU golden is portable to
-    every host: ``host_agnostic_numerics`` upcasts every float32 arithmetic op
-    (including matmul) to float64, so ``torch.equal`` holds across x86 of any
-    vector width, ARM, Apple silicon, and OpenBLAS builds. CUDA has no
-    equivalent. A CUDA float32 result depends on the GPU's parallel reduction
-    order, which differs by SM count and the cuBLAS/cuDNN kernel autotuned for
-    it -- so a golden minted on one GPU (e.g. an RTX 5050) does not reproduce
-    bit-for-bit on another (e.g. an RTX 5090), even within the same
-    architecture, and no env var pins it (``CUBLAS_WORKSPACE_CONFIG`` fixes
-    only same-GPU run-to-run variation). Chasing cross-GPU bit-equality would
-    require upcasting CUDA to float64 too, which breaks fused/Triton kernels --
-    so CUDA goldens are deliberately omitted.
-
-    The ``cuda`` flag is retained, defaulting off, so the CUDA leg can be
-    re-enabled per test if a same-GPU-only golden is ever wanted, without
-    reintroducing the parametrization machinery.
-
-    Args:
-      cuda: Whether to also parametrize the ``cuda`` leg when a GPU is present.
-        Defaults to ``False`` (CPU-only); a CUDA golden is then valid only on
-        the exact GPU model that minted it.
+    CPU goldens are portable because ``host_agnostic_numerics`` upcasts every
+    float32 arithmetic operation to float64. CUDA has no equivalent portable
+    contract: kernel selection and reduction order vary across GPU models, and
+    initializing CUDA cannot be undone to make an in-process test hermetic.
 
     Returns:
-      devices: ``["cpu"]``, plus ``"cuda"`` when ``cuda`` is set and a GPU is
-        available.
+      devices: ``["cpu"]``.
 
     """
-    devices = ["cpu"]
-    if cuda and torch.cuda.is_available():
-        devices.append("cuda")
-    return devices
+    return ["cpu"]
 
 
 def move_to_device(value: Any, device: str) -> Any:
@@ -526,32 +513,63 @@ def assert_bfb_against_golden(
         dict inputs, and ``module(*input)`` for tuple inputs.
 
     """
-    golden_dir.mkdir(parents=True, exist_ok=True)
-    golden_path = golden_dir / f"{golden_name}.pt"
-    regenerate = os.environ.get(_ENV_REGENERATE, "0") == "1" or not golden_path.exists()
-
-    if regenerate:
-        _write_golden(
-            golden_path=golden_path,
-            build_module=build_module,
-            build_input=build_input,
-            seed=seed,
-            run=run or _default_runner,
+    state = _capture_torch_process_state()
+    try:
+        golden_dir.mkdir(parents=True, exist_ok=True)
+        golden_path = golden_dir / f"{golden_name}.pt"
+        regenerate = (
+            os.environ.get(_ENV_REGENERATE, "0") == "1" or not golden_path.exists()
         )
+
+        if regenerate:
+            _write_golden(
+                golden_path=golden_path,
+                build_module=build_module,
+                build_input=build_input,
+                seed=seed,
+                run=run or _default_runner,
+            )
+            _replay_golden(
+                golden_path=golden_path,
+                build_module=build_module,
+                seed=seed,
+                run=run or _default_runner,
+            )
+            return
+
         _replay_golden(
             golden_path=golden_path,
             build_module=build_module,
             seed=seed,
             run=run or _default_runner,
         )
-        return
+    finally:
+        _restore_torch_process_state(state)
 
-    _replay_golden(
-        golden_path=golden_path,
-        build_module=build_module,
-        seed=seed,
-        run=run or _default_runner,
+
+def _capture_torch_process_state() -> _TorchProcessState:
+    """Capture every process-global setting changed by the BFB harness."""
+    return _TorchProcessState(
+        algorithms_enabled=torch.are_deterministic_algorithms_enabled(),
+        warn_only_enabled=torch.is_deterministic_algorithms_warn_only_enabled(),
+        rng_state=torch.get_rng_state(),
     )
+
+
+def _restore_torch_process_state(state: _TorchProcessState) -> None:
+    """Restore every process-global setting changed by the BFB harness."""
+    torch.use_deterministic_algorithms(
+        state.algorithms_enabled,
+        warn_only=state.warn_only_enabled,
+    )
+    torch.set_rng_state(state.rng_state)
+
+
+def _seed_bfb(seed: int) -> None:
+    """Seed the CPU default generator without queuing a lazy CUDA seed."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    torch.set_rng_state(generator.get_state())
 
 
 def regenerate_golden(
@@ -599,29 +617,6 @@ def regenerate_golden(
             os.environ[_ENV_REGENERATE] = prior
 
 
-@contextmanager
-def _host_agnostic_for(device: str) -> Generator[None]:
-    """Apply CPU cross-host float64 pinning only on CPU; no-op on CUDA.
-
-    ``host_agnostic_numerics`` upcasts ops to float64 to remove vector-width and
-    reduction-order variation across CPU hosts -- the precondition for a portable
-    CPU golden. On CUDA that upcast is both pointless (a golden replays only on
-    its own GPU architecture, which reproduces natively) and harmful: float64
-    inputs break fused/jit-script CUDA kernels and create Half/Float
-    autocast-backward dtype mismatches. So CUDA goldens run in their native
-    precision.
-
-    Args:
-      device: The golden's compute device type (``"cpu"`` or ``"cuda"``).
-
-    """
-    if device == "cuda":
-        yield
-        return
-    with host_agnostic_numerics():
-        yield
-
-
 def _write_golden(
     *,
     golden_path: Path,
@@ -631,14 +626,16 @@ def _write_golden(
     run: Callable[[nn.Module, Any], Tensor],
 ) -> None:
     """Build, randomize, run, and snapshot pre- and post-run state."""
-    enable_determinism(cudnn=True, sdpa=True)
-    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    _seed_bfb(seed)
     module = build_module()
     device = _module_device(module)
+    if device != "cpu":
+        raise ValueError("The BFB harness is CPU-only.")
     inp = build_input()
     randomize_parameters(module, seed=seed)
     pre_state = _cpu_state_dict(module.state_dict())
-    with _host_agnostic_for(device):
+    with host_agnostic_numerics():
         output = run(module, inp)
     post_state = _cpu_state_dict(module.state_dict())
     torch.save(
@@ -662,18 +659,17 @@ def _replay_golden(
     run: Callable[[nn.Module, Any], Tensor],
 ) -> None:
     """Load a golden, rerun, and assert output and post-run state match."""
-    enable_determinism(cudnn=True, sdpa=True)
-    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    _seed_bfb(seed)
     module = build_module()
     device = _module_device(module)
+    if device != "cpu":
+        raise ValueError("The BFB harness is CPU-only.")
     payload = torch.load(golden_path, weights_only=False, map_location="cpu")
     _assert_sdpa_backend_match(payload.get("sdpa_backend"), device=device)
     module.load_state_dict(payload["state_dict"])
-    # The golden's input is stored on CPU; move it onto the module's
-    # device so a CUDA golden replays against CUDA tensors rather than
-    # raising a device mismatch in the first matmul.
     inp = move_to_device(payload["input"], device)
-    with _host_agnostic_for(device):
+    with host_agnostic_numerics():
         output = run(module, inp)
     _assert_state_match(module, payload["post_state_dict"])
     _assert_equal(output, payload["output"], label="output")

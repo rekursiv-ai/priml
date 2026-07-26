@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast, override
 
+import inspect
 import os
 
 from torch import Tensor, nn
@@ -21,6 +23,7 @@ from priml.testing.bfb import (
     _EXACT_F32_OPS,
     _assert_sdpa_backend_match,
     assert_bfb_against_golden,
+    bfb_devices,
     host_agnostic_numerics,
     randomize_parameters,
     regenerate_golden,
@@ -47,6 +50,79 @@ def _build_min_linear() -> nn.Linear:
 
 def _build_min_input() -> torch.Tensor:
     return torch.linspace(-1.0, 1.0, 8).reshape(2, 4)
+
+
+def _raise_runner_failure(module: nn.Module, inp: Any) -> Tensor:
+    del module, inp
+    raise RuntimeError("runner failed")
+
+
+def _fake_cuda_module_device(module: nn.Module) -> str:
+    del module
+    return "cuda"
+
+
+def _seed_cpu(seed: int) -> None:
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    torch.set_rng_state(generator.get_state())
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _TorchProcessState:
+    """Independent snapshot used to verify BFB process-state restoration."""
+
+    algorithms_enabled: bool
+    warn_only_enabled: bool
+    cudnn_benchmark: bool
+    cudnn_deterministic: bool
+    flash_sdp_enabled: bool
+    memory_efficient_sdp_enabled: bool
+    rng_state: torch.Tensor
+    cublas_workspace_config: str | None
+
+
+def _capture_torch_process_state() -> _TorchProcessState:
+    return _TorchProcessState(
+        algorithms_enabled=torch.are_deterministic_algorithms_enabled(),
+        warn_only_enabled=torch.is_deterministic_algorithms_warn_only_enabled(),
+        cudnn_benchmark=torch.backends.cudnn.benchmark,
+        cudnn_deterministic=torch.backends.cudnn.deterministic,
+        flash_sdp_enabled=torch.backends.cuda.flash_sdp_enabled(),
+        memory_efficient_sdp_enabled=(torch.backends.cuda.mem_efficient_sdp_enabled()),
+        rng_state=torch.get_rng_state(),
+        cublas_workspace_config=os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+    )
+
+
+def _restore_torch_process_state(state: _TorchProcessState) -> None:
+    torch.use_deterministic_algorithms(
+        state.algorithms_enabled,
+        warn_only=state.warn_only_enabled,
+    )
+    torch.backends.cudnn.benchmark = state.cudnn_benchmark
+    torch.backends.cudnn.deterministic = state.cudnn_deterministic
+    torch.backends.cuda.enable_flash_sdp(state.flash_sdp_enabled)
+    torch.backends.cuda.enable_mem_efficient_sdp(state.memory_efficient_sdp_enabled)
+    torch.set_rng_state(state.rng_state)
+    if state.cublas_workspace_config is None:
+        os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    else:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = state.cublas_workspace_config
+
+
+def _assert_torch_process_state_equal(
+    actual: _TorchProcessState,
+    expected: _TorchProcessState,
+) -> None:
+    assert actual.algorithms_enabled == expected.algorithms_enabled
+    assert actual.warn_only_enabled == expected.warn_only_enabled
+    assert actual.cudnn_benchmark == expected.cudnn_benchmark
+    assert actual.cudnn_deterministic == expected.cudnn_deterministic
+    assert actual.flash_sdp_enabled == expected.flash_sdp_enabled
+    assert actual.memory_efficient_sdp_enabled == expected.memory_efficient_sdp_enabled
+    assert torch.equal(actual.rng_state, expected.rng_state)
+    assert actual.cublas_workspace_config == expected.cublas_workspace_config
 
 
 def test_randomize_parameters_replaces_all() -> None:
@@ -87,6 +163,95 @@ def test_bfb_round_trip(tmp_path: Path) -> None:
         build_input=_build_min_input,
         seed=0,
     )
+
+
+def test_bfb_devices_is_cpu_only() -> None:
+    assert bfb_devices() == ["cpu"]
+    assert "cuda" not in inspect.signature(bfb_devices).parameters
+
+
+def test_bfb_rejects_non_cpu_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "priml.testing.bfb._module_device",
+        _fake_cuda_module_device,
+    )
+
+    with pytest.raises(ValueError, match="CPU-only"):
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="cuda_is_not_hermetic",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+        )
+
+
+def test_bfb_restores_process_state_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _capture_torch_process_state()
+    try:
+        torch.use_deterministic_algorithms(False, warn_only=True)
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        _seed_cpu(981)
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+        monkeypatch.setattr(torch.backends.cudnn, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        expected = _capture_torch_process_state()
+
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="restores_success",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+        )
+
+        _assert_torch_process_state_equal(
+            _capture_torch_process_state(),
+            expected,
+        )
+    finally:
+        _restore_torch_process_state(original)
+
+
+def test_bfb_restores_process_state_after_runner_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _capture_torch_process_state()
+    try:
+        torch.use_deterministic_algorithms(False, warn_only=True)
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        _seed_cpu(982)
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+        monkeypatch.setattr(torch.backends.cudnn, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        expected = _capture_torch_process_state()
+
+        with pytest.raises(RuntimeError, match="runner failed"):
+            assert_bfb_against_golden(
+                golden_dir=tmp_path,
+                golden_name="restores_failure",
+                build_module=_build_min_linear,
+                build_input=_build_min_input,
+                run=_raise_runner_failure,
+            )
+
+        _assert_torch_process_state_equal(
+            _capture_torch_process_state(),
+            expected,
+        )
+    finally:
+        _restore_torch_process_state(original)
 
 
 def test_bfb_detects_forward_drift(tmp_path: Path) -> None:
@@ -974,6 +1139,6 @@ def test_regenerate_golden_preserves_existing_regenerate_env(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing import test_main
 
     test_main(__file__)
