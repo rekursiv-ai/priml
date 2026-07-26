@@ -67,7 +67,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast, override
+from typing import Any, Final, cast, override
 
 import os
 
@@ -79,7 +79,7 @@ import pytest
 import torch
 
 
-_ENV_REGENERATE = "BFB_REGENERATE"  # config-globals: ignore -- test env var name.
+_ENV_REGENERATE: Final = "BFB_REGENERATE"
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -113,7 +113,7 @@ class _TorchProcessState:
 # (``scatter_add_``/``index_add_``/``embedding_dense_backward``, and
 # ``index_put_`` with ``accumulate=True``), which sum float32 in a host-dependent
 # order.
-_EXACT_F32_OPS: dict[str, str] = {  # config-globals: ignore -- BFB op allowlist.
+_EXACT_F32_OPS: Final[dict[str, str]] = {
     "add": "arith",
     "add_": "arith",
     "sub": "arith",
