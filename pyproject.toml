@@ -69,6 +69,7 @@ lint = [
 test = [
     "hypothesis>=6.155.1",
     "pytest-cov",
+    "pytest-testmon>=2.1",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pytest>=7.0",
