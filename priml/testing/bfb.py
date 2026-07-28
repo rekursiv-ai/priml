@@ -59,6 +59,37 @@ Usage::
 
 The test fails if either (a) shapes mismatch, (b) ``torch.equal`` returns
 ``False`` on the output, or (c) the state_dict keys differ from the golden.
+
+Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
+  A test that asserts ``torch.equal`` on the float32 outputs of TWO DIFFERENT
+  computation paths -- not a golden round-trip, but e.g. our module vs HF's --
+  faces the SAME host-dependence this harness exists to remove, and one extra
+  trap. Both paths must run their arithmetic in the SAME order, or a float32
+  matmul/softmax/reduction lands on a different last bit on a different host
+  (AVX2 vs AVX-512, thread count, AMD vs Intel), and the golden minted on one
+  host fails ``torch.equal`` on another. Such a test is typically
+  ``@pytest.mark.integration``, so it is deselected by default and can pass on
+  the author's Intel box while silently never running on the AMD host where it
+  would fail -- the failure only surfaces when someone forces integration marks
+  on a different machine.
+
+  Two ways to make such a comparison portable:
+    1. Wrap BOTH paths in ``host_agnostic_numerics()`` (below). This upcasts
+       every float32 arithmetic op to float64, so both reduce identically.
+       This is the default choice for two paths YOU control.
+    2. When one path is a third-party model (HuggingFace), the dispatch-mode
+       upcast does NOT reach inside its FUSED kernels -- notably HF's default
+       attention, ``F.scaled_dot_product_attention`` (SDPA), whose fp32
+       accumulation order differs from a manual matmul+softmax. Upcasting your
+       side alone then still diverges. Fix by forcing BOTH sides onto the SAME
+       UNFUSED kernel: build HF with ``attn_implementation="eager"`` (plain
+       matmul+softmax) and use loop's ``SdpaNaive`` attention kernel. Both then
+       run the identical op sequence and ``torch.equal`` holds cross-platform.
+       See ``priml/model/qwen3_hf_test.py`` for the canonical example.
+
+  Do NOT "fix" such a test by loosening ``torch.equal`` to ``allclose`` with a
+  tolerance -- that hides the very reduction-order regression the bit-for-bit
+  check exists to catch. Align the kernels instead.
 """
 
 from __future__ import annotations
@@ -355,6 +386,15 @@ def host_agnostic_numerics() -> Generator[None]:
     ``_EXACT_F32_OPS`` allowlist of already-host-independent ops. A forward,
     backward, or full optimizer step is then bit-identical across hosts of any
     vector width or thread count under ``torch.equal``.
+
+    Caveat for third-party interop: this intercepts ops at the aten-dispatch
+    layer, so it upcasts everything torch itself dispatches -- but it does NOT
+    reach inside a fused kernel that a third-party model invokes as one opaque
+    call (e.g. HuggingFace's default ``F.scaled_dot_product_attention``). To
+    compare bit-for-bit against such a model, also force it onto an UNFUSED
+    kernel (HF: ``attn_implementation="eager"``) so both sides issue the same
+    primitive ops. See the module docstring's cross-implementation section and
+    ``priml/model/qwen3_hf_test.py``.
     """
     with sdpa_kernel(SDPBackend.MATH), _Float64Compute():
         yield
