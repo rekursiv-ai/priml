@@ -59,7 +59,15 @@ def _tiny_hf_config() -> dict[str, Any]:
 
 def _build_hf_model(cfg_dict: dict[str, Any]) -> Any:
     transformers = pytest.importorskip("transformers")
-    config = transformers.Qwen3Config(**cfg_dict)
+    # Force HF's eager (matmul + softmax) attention. HF defaults to the fused
+    # ``sdpa`` kernel (F.scaled_dot_product_attention), whose fp32 accumulation
+    # order differs from the manual matmul+softmax our SdpaNaive uses -- a
+    # host-dependent ~1e-7 drift that breaks the bit-exact assert on some CPUs
+    # (e.g. AMD). Eager makes both sides run the identical matmul+softmax
+    # sequence, so ``torch.equal`` holds cross-platform. This isolates the
+    # weight-remap/architecture parity the test targets from attention-kernel
+    # dispatch, matching the test's SdpaNaive injection below.
+    config = transformers.Qwen3Config(**cfg_dict, attn_implementation="eager")
     model = transformers.Qwen3ForCausalLM(config)
     model.eval()
     return model.to(dtype=torch.float32)
