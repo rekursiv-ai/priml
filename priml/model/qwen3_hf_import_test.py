@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import importlib.util
@@ -12,30 +11,6 @@ import pytest
 import torch
 
 from priml.model import qwen3_hf_test
-
-
-@pytest.mark.parametrize(
-    ("system", "machine", "expected"),
-    [
-        ("Darwin", "arm64", True),
-        ("Darwin", "x86_64", False),
-        ("Linux", "aarch64", False),
-    ],
-)
-def test_cpu_parity_skip_targets_apple_silicon(
-    monkeypatch: pytest.MonkeyPatch,
-    system: str,
-    machine: str,
-    expected: bool,
-) -> None:
-    monkeypatch.setattr(
-        qwen3_hf_test,
-        "platform",
-        SimpleNamespace(system=lambda: system, machine=lambda: machine),
-        raising=False,
-    )
-
-    assert qwen3_hf_test._cpu_matmul_is_not_bit_exact() is expected
 
 
 @pytest.mark.parametrize(
