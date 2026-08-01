@@ -5,6 +5,13 @@ All notable priml changes are documented here. This project follows
 
 ## Unreleased
 
+## 0.1.2 - 2026-08-01
+
+### Changed
+
+- Requires configgle 1.3.5 or newer.
+- README leads with a Quick Start and carries a one-line description.
+
 ## 0.1.1 - 2026-08-01
 
 ### Changed
