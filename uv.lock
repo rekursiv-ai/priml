@@ -1189,7 +1189,7 @@ wheels = [
 
 [[package]]
 name = "priml"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "configgle", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
