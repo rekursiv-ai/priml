@@ -26,8 +26,15 @@ which builds, validates, and uploads to PyPI via OIDC trusted publishing
 2. **Bump the version** in `pyproject.toml` (source of truth). Must
    increase; PyPI rejects re-uploads.
 
-3. **Validate locally** (same checks CI runs):
+3. **Refresh the lockfile and validate locally** (same checks CI runs):
+
+   `uv lock` first: the lockfile pins this package's own version, so
+   building without it publishes an artifact whose lock still names the
+   previous one -- and `uv run` below resolves from the lock, so the smoke
+   test imports the OLD code and passes.
+
    ```bash
+   uv lock
    uv build
    uv run python -c "import priml; print(priml.__file__)"
    ```
