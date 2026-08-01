@@ -15,8 +15,8 @@
 
 # Ubuntu/Debian:
 #   # Required for quick install.
-#   sudo apt-get install -y curl &&
-#       curl -LsSf https://astral.sh/uv/install.sh | sh
+#   sudo apt-get install -y curl
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv add priml
 ```
