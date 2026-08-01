@@ -1,4 +1,4 @@
-# priml
+# priml✴️
 
 [![PyPI version](https://img.shields.io/pypi/v/priml.svg)](https://pypi.org/project/priml/)
 [![CI](https://github.com/rekursiv-ai/priml/actions/workflows/package-validation.yml/badge.svg?branch=main)](https://github.com/rekursiv-ai/priml/actions/workflows/package-validation.yml)
