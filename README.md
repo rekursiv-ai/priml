@@ -6,15 +6,24 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/discord/1530237005311639592?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/2GZFPPvCqn)
 
-ML building blocks for training experiments.
-
-## Install
+## Quick Start
 
 ```bash
-pip install priml
+# Mac:
+#   # Required for quick install.
+#   brew install uv
+
+# Ubuntu/Debian:
+#   # Required for quick install.
+#   sudo apt-get install -y curl
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv add priml
+
+# Alternatively: python -m pip install priml
 ```
 
-Requires Python 3.12 or newer.
+ML building blocks for training experiments. Requires Python 3.12 or newer.
 
 ## What's inside
 
