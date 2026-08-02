@@ -27,7 +27,7 @@ uv add priml
 
 ## What's inside
 
-- **models** -- composable model definitions and building blocks.
+- **model** -- composable model definitions and building blocks.
 - **optimizers** -- optimizer implementations for training.
 - **loss** -- loss functions.
 - **metrics** -- evaluation metrics.
