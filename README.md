@@ -41,6 +41,16 @@ uv add priml
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local validation and the public
 contribution flow.
 
-## License
+## Citing
 
-Apache License 2.0
+If you find our work useful, please consider citing:
+
+```bibtex
+@misc{rekursivai2026priml,
+      title={Priml - ML building blocks for training experiments.},
+      author={Joshua V. Dillon and Dan Kondratyuk},
+      year={2026},
+      howpublished={Github},
+      url={https://github.com/rekursiv-ai/priml},
+}
+```

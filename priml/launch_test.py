@@ -12,7 +12,7 @@ from configgle import Fig, Makeable
 
 import pytest
 
-from priml.launch import _graceful_sigterm, apply_overrides, main
+from priml.launch import _graceful_sigterm, main
 
 
 class MockJob:
@@ -53,26 +53,6 @@ class NestedJob:
         name: str = ""
         enabled: bool = False
         child: ChildJob.Config = field(default_factory=ChildJob.Config)
-
-    def __init__(self, config: Config):
-        self.config = config
-
-    def run(self, *args: str) -> None:
-        del args
-
-
-class FrozenInner(Fig["object"], frozen=True):
-    """Frozen nested config for frozen-override testing."""
-
-    lr: float = 1e-3
-
-
-class FrozenJob:
-    """Job whose config (and nested config) are frozen Figs."""
-
-    class Config(Fig["FrozenJob"], frozen=True):
-        name: str = ""
-        inner: FrozenInner = field(default_factory=FrozenInner)
 
     def __init__(self, config: Config):
         self.config = config
@@ -179,7 +159,7 @@ def test_main_not_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
     test_args = ["prog", "priml.launch_test.non_configurable_returner"]
     monkeypatch.setattr(sys, "argv", test_args)
 
-    with pytest.raises(TypeError, match="not a Makeable"):
+    with pytest.raises(TypeError, match="not a config"):
         main()
 
 
@@ -206,66 +186,6 @@ def test_main_with_unparsed_args(monkeypatch: pytest.MonkeyPatch) -> None:
     # Just verify it runs successfully with extra args - the important
     # thing is that the unparsed args are passed through without error
     main()
-
-
-def test_apply_overrides_top_level_scalar() -> None:
-    """A top-level override casts the RHS to the field's declared type."""
-    config = NestedJob.Config()
-    apply_overrides(config, ["enabled=true", "name=run_a"])
-    assert config.enabled is True
-    assert config.name == "run_a"
-
-
-def test_apply_overrides_nested_depth() -> None:
-    """A dotted override walks into a nested Fig and casts the leaf."""
-    config = NestedJob.Config()
-    apply_overrides(config, ["child.lr=3e-4", "child.steps=99"])
-    assert config.child.lr == 3e-4
-    assert isinstance(config.child.lr, float)
-    assert config.child.steps == 99
-    assert isinstance(config.child.steps, int)
-
-
-def test_apply_overrides_frozen_fig() -> None:
-    """Overrides write through frozen Figs, top-level and nested."""
-    config = FrozenJob.Config()
-    apply_overrides(config, ["name=frozen_run", "inner.lr=2e-4"])
-    assert config.name == "frozen_run"
-    assert config.inner.lr == 2e-4
-    assert isinstance(config.inner.lr, float)
-
-
-def test_apply_overrides_unknown_path_raises() -> None:
-    """An override naming a non-existent field is a hard error."""
-    config = NestedJob.Config()
-    with pytest.raises(ValueError, match="no field `nonexistent`"):
-        apply_overrides(config, ["child.nonexistent=1"])
-
-
-def test_apply_overrides_malformed_spec_raises() -> None:
-    """An override missing ``=`` is rejected."""
-    config = NestedJob.Config()
-    with pytest.raises(ValueError, match="expected PATH=VALUE"):
-        apply_overrides(config, ["child.lr"])
-
-
-def test_apply_overrides_scalar_for_config_field_raises_valueerror() -> None:
-    """Setting a nested-config field to a scalar raises ValueError.
-
-    Not a codec TypeError. ``child`` is a Fig; ``child=5`` is a likely typo
-    for ``child.lr=5`` and must fail with a path-naming ValueError.
-    """
-    config = NestedJob.Config()
-    with pytest.raises(ValueError, match="child"):
-        apply_overrides(config, ["child=5"])
-
-
-def test_apply_overrides_empty_segment_paths_raise() -> None:
-    """Paths with empty segments are rejected with a clear message."""
-    config = NestedJob.Config()
-    for spec in ["=1", "child.=1", "child..lr=1", ".child=1"]:
-        with pytest.raises(ValueError, match="no empty segments"):
-            apply_overrides(config, [spec])
 
 
 _captured_name: list[str] = []
