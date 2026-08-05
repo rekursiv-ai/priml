@@ -322,11 +322,6 @@ reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
 reportInvalidCast = false                  # All cast() calls are intentional.
 reportPrivateUsage = false                 # Redundant with ruff SLF001.
 reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
-# The standalone export ships a leaner type environment than the monorepo (fewer
-# installed stubs). math/frequency_test.py exercises scipy.fft, whose members
-# resolve to Unknown here because the export omits scipy-stubs (present in the
-# monorepo's stubs group), where the full env resolves them. These are test-only
-# stub-completeness gaps, not correctness issues.
 reportUnknownMemberType = false
 reportUnknownVariableType = false
 reportUnknownArgumentType = false
