@@ -46,5 +46,4 @@ jobs:
           uv run python -c "import priml"
           rm -rf dist
           uv build --out-dir dist
-          wheel="$(ls dist/priml-*.whl | head -n 1)"
-          uv run --isolated --with "$wheel" python -P -c "import priml; print(priml.__file__)"
+          wheel="$(ls dist/priml-*.whl | head -n 1)"; uv run --isolated --with "$wheel" python -P -c "import priml; print(priml.__file__)"
