@@ -148,7 +148,7 @@ class tqdm(Comparable):
         self,
         iterable: Any = None,
         desc: str | None = None,
-        total: int | None = None,
+        total: int | float | None = None,
         leave: bool = True,
         file: Any = None,
         ncols: int | None = None,
@@ -162,7 +162,7 @@ class tqdm(Comparable):
         dynamic_ncols: bool = False,
         smoothing: float = 0.3,
         bar_format: str | None = None,
-        initial: int = 0,
+        initial: int | float = 0,
         position: int | None = None,
         postfix: Any = None,
         unit_divisor: int = 1000,
@@ -188,7 +188,7 @@ class tqdm(Comparable):
     def __del__(self) -> None: ...
     def __hash__(self) -> int: ...
     def __iter__(self) -> Any: ...
-    def update(self, n: int = 1) -> bool | None: ...
+    def update(self, n: int | float = 1) -> bool | None: ...
     def close(self) -> None: ...
     def clear(self, nolock: bool = False) -> None: ...
     def refresh(self, nolock: bool = False, lock_args: Any = None) -> bool: ...
