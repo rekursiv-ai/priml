@@ -5,6 +5,21 @@ All notable priml changes are documented here. This project follows
 
 ## Unreleased
 
+## 0.1.4 - 2026-08-05
+
+### Changed
+
+- Requires configgle 1.3.7 or newer.
+- `runtime_output_path` expands `~` and is canonicalized; the Git-checkout
+  guard is removed.
+- Distributed topology is validated before resources are acquired.
+- Normalization layer widths are inferred rather than declared.
+
+### Added
+
+- Gradient clipping (`priml.train.grad_clip`).
+- Optional numpy recovery and variance correction in seeding.
+
 ## 0.1.2 - 2026-08-01
 
 ### Changed
