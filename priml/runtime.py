@@ -60,10 +60,8 @@ __all__ = [
     "global_device_mesh",
     "initialize_global_device_mesh",
     "is_rank_zero",
-    "runtime_child_path",
     "runtime_initialized",
     "runtime_output_path",
-    "runtime_root_path",
 ]
 
 
@@ -102,93 +100,41 @@ def get_device(device: torch.device | str | None = "auto") -> torch.device:
     return torch.device(device)
 
 
-def runtime_child_path(path: Path | str, *, root: Path | str) -> Path:
-    """Return a runtime path after proving it stays below its logical root.
-
-    Args:
-        path: Runtime path to validate.
-        root: Validated runtime tree root that must contain ``path``.
-
-    Returns:
-        child: The validated path within ``root``.
-
-    Raises:
-        ValueError: The path escapes ``root`` lexically or, outside trusted
-            ``/scratch``, after resolving symlinks.
-
-    """
-    root_path = runtime_root_path(root)
-    child = Path(path)
-    if Path(os.path.normpath(child)) != child or (
-        child != root_path and root_path not in child.parents
-    ):
-        raise ValueError(f"runtime path must remain below root {root_path}: {child}")
-    scratch_root = Path("/scratch")
-    if root_path == scratch_root or scratch_root in root_path.parents:
-        return child
-    resolved_root = root_path.resolve(strict=False)
-    resolved_child = child.resolve(strict=False)
-    if resolved_child != resolved_root and resolved_root not in resolved_child.parents:
-        raise ValueError(
-            f"runtime path must remain below root {resolved_root}: {resolved_child}"
-        )
-    return child
-
-
 def runtime_output_path(path: Path | str) -> Path:
-    """Return a runtime output path after rejecting unusable destinations.
+    """Return the canonical output path, or raise if it is unusable.
 
-    The output need not exist yet. Relative components are resolved only for
-    validation; the returned path preserves the caller's spelling.
+    The destination need not exist yet. Write to the path this returns rather
+    than to the argument, so callers share one notion of what a path means
+    instead of each expanding and absolutising it their own way.
+
+    This does NOT inspect version control. An earlier revision walked ancestors
+    looking for ``.git`` and refused paths inside a checkout; that is a
+    repository-hygiene rule, enforced by a ``.gitignore`` (an ignored file
+    cannot be staged, so the harm is prevented before a commit rather than
+    detected after a job has already written the bytes). A published library
+    has no business inspecting a user's version control, and the check refused
+    legitimate work for anyone whose workspace sits inside a repository.
 
     Args:
-        path: Explicit runtime output path.
+      path: Intended output destination, absolute or relative, ``~`` allowed.
 
     Returns:
-        output_path: The validated path.
+      output_path: The expanded, absolute, validated destination.
 
     Raises:
-        ValueError: The path is not normalized, or it names the filesystem root
-            either literally or after resolving symlinks.
+      ValueError: The path is not normalized, or it names the filesystem root
+        either literally or after resolving symlinks.
 
     """
-    output_path = Path(path)
-    lexical_path = output_path.absolute()
-    if lexical_path == Path(lexical_path.anchor):
-        raise ValueError(f"runtime output path must not be root: {output_path}")
-    if Path(os.path.normpath(lexical_path)) != lexical_path:
-        raise ValueError(f"runtime output path must be normalized: {output_path}")
+    output_path = Path(path).expanduser().absolute()
+    if output_path == Path(output_path.anchor):
+        raise ValueError(f"runtime output path must not be root: {path}")
+    if Path(os.path.normpath(output_path)) != output_path:
+        raise ValueError(f"runtime output path must be normalized: {path}")
     resolved = output_path.resolve(strict=False)
     if resolved == Path(resolved.anchor):
-        raise ValueError(f"runtime output path must not be root: {output_path}")
+        raise ValueError(f"runtime output path must not be root: {path}")
     return output_path
-
-
-def runtime_root_path(path: Path | str) -> Path:
-    """Return a validated root directory for a runtime output tree.
-
-    Args:
-        path: Explicit runtime root path.
-
-    Returns:
-        root: The absolute, normalized, non-root path.
-
-    Raises:
-        ValueError: The path is relative, non-normalized, or the filesystem
-            root.
-
-    """
-    root = Path(path)
-    if (
-        not root.is_absolute()
-        or root.anchor != os.sep
-        or root == Path(os.sep)
-        or Path(os.path.normpath(root)) != root
-    ):
-        raise ValueError(
-            f"runtime root must be absolute, normalized, and non-root: {root}"
-        )
-    return runtime_output_path(root)
 
 
 _device_mesh: DeviceMesh | None = None
