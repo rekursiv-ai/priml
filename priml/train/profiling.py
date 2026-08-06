@@ -16,7 +16,7 @@ from configgle import Fig
 from wrapt import lazy_import
 
 from priml.lib.userdirs import resolve_working_dir
-from priml.runtime import is_rank_zero, runtime_output_path
+from priml.runtime import is_rank_zero
 from priml.train.custom_types import CudaEventProtocol
 
 
@@ -210,7 +210,7 @@ class TorchProfiling:
             )
             logger.info("Profiler top ops:\n%s", table)
             if self.export_trace:
-                trace_path = runtime_output_path(
+                trace_path = Path(
                     self.working_dir / f"trace_step_{step}{rank_suffix}.json.gz"
                 )
                 trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,7 +222,7 @@ class TorchProfiling:
             and step == self.memory_profile_end
             and torch.cuda.is_available()
         ):
-            snapshot_path = runtime_output_path(
+            snapshot_path = Path(
                 self.working_dir / f"memory_step_{step}{rank_suffix}.pickle"
             )
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,7 +392,7 @@ class PhaseTimer:
         narrate = is_rank_zero()
         if self._profiler:
             self._profiler.stop()
-            trace_path = runtime_output_path(self._torch_profile_path)
+            trace_path = Path(self._torch_profile_path)
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             self._profiler.export_chrome_trace(str(trace_path))
             table = self._profiler.key_averages().table(
