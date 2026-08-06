@@ -37,9 +37,7 @@ dependencies = [
     # experiment tracking
     "wandb>=0.22.2",
     # config
-    # 1.3.6 is the floor for `apply_overrides` / `configgle.launch`, which
-    # priml/launch.py imports; an earlier configgle fails the export typecheck.
-    "configgle>=1.3.6",
+    "configgle>=1.3.7",
     # containers / utils
     "tqdm",
     "wrapt",
