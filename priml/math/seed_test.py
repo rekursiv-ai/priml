@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from priml.math import seed
 from priml.math.seed import (
     RngState,
     dataloader_worker_init_fn,
@@ -500,6 +501,54 @@ def test_set_rng_state_restores_when_count_matches(
 
     assert len(set_all_calls) == 1
     assert len(set_all_calls[0]) == 2
+
+
+def _fake_device_identity(index: int) -> str:
+    """Stand in for the CUDA device probe on a host without CUDA initialized."""
+    return f"cuda:{index}"
+
+
+def test_cuda_entries_are_droppable_by_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CPU run on a GPU host narrows the capture itself, without an API knob.
+
+    Keeping CUDA state a CPU run never advances makes resume equality
+    host-dependent, so the caller pops it; ``set_rng_state`` then takes the
+    no-CUDA path.
+    """
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_rng_state_all",
+        lambda: [torch.zeros(8, dtype=torch.uint8)],
+    )
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(seed, "_cuda_device_identity", _fake_device_identity)
+
+    state = get_rng_state()
+    assert "cuda" in state
+
+    state.pop("cuda", None)
+    state.pop("cuda_uuids", None)
+
+    assert {"python", "numpy", "torch"} <= set(state)
+    set_rng_state(state)
+
+
+def test_set_rng_state_without_numpy_key_restores_the_rest() -> None:
+    """Checkpoints predating numpy tracking must still resume, not KeyError."""
+    legacy: RngState = {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+    }
+    pre_numpy = numpy_rng.bit_generator.state
+
+    set_rng_state(legacy)
+
+    # numpy is untouched rather than restored: the state simply is not there.
+    assert numpy_rng.bit_generator.state == pre_numpy
 
 
 def test_set_rng_state_no_cuda_key_does_not_touch_cuda(

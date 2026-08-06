@@ -11,7 +11,6 @@ import tempfile
 
 from configgle import Fig
 
-import pytest
 import torch
 
 from priml.train import tracker as tracker_mod
@@ -26,6 +25,8 @@ from priml.train.tracker import (
 
 if TYPE_CHECKING:
     from wandb.sdk.wandb_run import Run
+
+    import pytest
 
 
 class _FakeWriter:
@@ -108,53 +109,6 @@ def test_tensorboard_working_dir_is_scoped_to_the_run(
     config.make()
 
     assert observed == [str(tmp_path / "tensorboard")]
-
-
-def test_tensorboard_log_dir_rejects_git_checkout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    monkeypatch.chdir(checkout)
-    observed: list[str] = []
-
-    def writer_factory(log_dir: str) -> _FakeWriter:
-        observed.append(log_dir)
-        return _FakeWriter()
-
-    monkeypatch.setattr(tracker_mod, "_summary_writer_cls", writer_factory)
-
-    with pytest.raises(
-        ValueError,
-        match="runtime output path must be outside Git checkout",
-    ):
-        TensorBoardTracker.Config(working_dir=".").make()
-
-    assert observed == []
-
-
-def test_tensorboard_constructor_rejects_git_checkout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    monkeypatch.chdir(checkout)
-
-    def writer_factory(log_dir: str) -> _FakeWriter:
-        del log_dir
-        return _FakeWriter()
-
-    monkeypatch.setattr(tracker_mod, "_summary_writer_cls", writer_factory)
-
-    with pytest.raises(
-        ValueError,
-        match="runtime output path must be outside Git checkout",
-    ):
-        TensorBoardTracker(TensorBoardTracker.Config(working_dir="."))
 
 
 # -- WandbTracker ------------------------------------------------------------
@@ -582,24 +536,6 @@ def test_file_tracker_last_write_wins(tmp_path: Path) -> None:
     tracker.log_metrics({"score": 0.1}, 1, prefix="eval/")
     tracker.log_metrics({"score": 0.9}, 2, prefix="eval/")
     assert json.loads(target.read_text()) == {"eval/score": 0.9}
-
-
-def test_file_tracker_rejects_path_inside_git_checkout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    monkeypatch.chdir(checkout)
-    tracker = FileTracker.Config(working_dir="metrics.json").make()
-    with pytest.raises(
-        ValueError,
-        match="runtime output path must be outside Git checkout",
-    ):
-        tracker.log_metrics({"score": 1.0}, 0, prefix="eval/")
-
-    assert not (checkout / "metrics.json").exists()
 
 
 def test_file_tracker_ignores_non_capture_prefix(tmp_path: Path) -> None:

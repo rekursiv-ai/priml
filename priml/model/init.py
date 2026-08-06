@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import inspect
+import math
 
 from torch import Tensor, nn
 
@@ -62,9 +63,48 @@ def normal(w: Tensor, *, std: float = 0.02, depth: int = 1) -> None:
     _depth_scale(w, depth)
 
 
-def truncated_normal(w: Tensor, *, std: float = 0.02, depth: int = 1) -> None:
-    """Truncated normal (±2 std), scaled by 1/sqrt(depth)."""
-    nn.init.trunc_normal_(w, std=std, a=-2 * std, b=2 * std)
+def truncated_normal(
+    w: Tensor,
+    *,
+    std: float = 0.02,
+    depth: int = 1,
+    lower: float = -2.0,
+    upper: float = 2.0,
+    variance_correction: bool = False,
+) -> None:
+    """Truncated normal, scaled by 1/sqrt(depth).
+
+    Args:
+      w: Tensor to initialize in place.
+      std: Standard deviation. The pre-truncation parameter by default; the
+        realized value when ``variance_correction`` is set.
+      depth: Block depth index; >0 divides by sqrt(depth + 1).
+      lower: Lower truncation bound in units of ``std``.
+      upper: Upper truncation bound in units of ``std``.
+      variance_correction: Divide by the truncated distribution's own standard
+        deviation so the realized value matches ``std``. Truncation removes
+        tail mass, so the uncorrected default realizes about 0.88x the request
+        at the default bounds. Matches the JAX/flax default initializer, which
+        reference ports depend on for bit-parity.
+
+    References:
+      https://github.com/jax-ml/jax/blob/main/jax/_src/nn/initializers.py
+        ``jax.nn.initializers.variance_scaling`` (truncated distribution).
+
+    """
+    if variance_correction:
+        if std == 0:
+            nn.init.zeros_(w)
+            return
+        sqrt2 = 2.0**0.5
+        z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
+        pdf_u = (2.0 * math.pi) ** -0.5 * math.exp(-0.5 * upper * upper)
+        pdf_l = (2.0 * math.pi) ** -0.5 * math.exp(-0.5 * lower * lower)
+        # Std of N(0,1) truncated to [lower, upper].
+        std /= (
+            1.0 - (upper * pdf_u - lower * pdf_l) / z - ((pdf_u - pdf_l) / z) ** 2
+        ) ** 0.5
+    nn.init.trunc_normal_(w, std=std, a=lower * std, b=upper * std)
     _depth_scale(w, depth)
 
 

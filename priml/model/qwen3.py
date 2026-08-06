@@ -137,7 +137,6 @@ class Qwen3(CausalLM):
                         hf_inv_freq=self.hf_inv_freq,
                     ),
                     norm_qk=RMSNorm.Config(
-                        channels_in=self.head_dim,
                         eps=self.rms_norm_eps,
                         elementwise_affine=True,
                     ),

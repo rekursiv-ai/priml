@@ -136,10 +136,10 @@ def runtime_child_path(path: Path | str, *, root: Path | str) -> Path:
 
 
 def runtime_output_path(path: Path | str) -> Path:
-    """Return a runtime output path after rejecting Git checkouts.
+    """Return a runtime output path after rejecting unusable destinations.
 
-    The output need not exist yet. Symlinks and relative components are resolved
-    only for validation; the returned path preserves the caller's spelling.
+    The output need not exist yet. Relative components are resolved only for
+    validation; the returned path preserves the caller's spelling.
 
     Args:
         path: Explicit runtime output path.
@@ -148,8 +148,8 @@ def runtime_output_path(path: Path | str) -> Path:
         output_path: The validated path.
 
     Raises:
-        ValueError: The path resolves to the filesystem root or inside a Git
-            checkout.
+        ValueError: The path is not normalized, or it names the filesystem root
+            either literally or after resolving symlinks.
 
     """
     output_path = Path(path)
@@ -158,28 +158,9 @@ def runtime_output_path(path: Path | str) -> Path:
         raise ValueError(f"runtime output path must not be root: {output_path}")
     if Path(os.path.normpath(lexical_path)) != lexical_path:
         raise ValueError(f"runtime output path must be normalized: {output_path}")
-    for ancestor in (lexical_path, *lexical_path.parents):
-        if ancestor.is_symlink():
-            continue
-        git_metadata = ancestor / ".git"
-        if git_metadata.is_dir() or git_metadata.is_file():
-            raise ValueError(
-                "runtime output path must be outside Git checkout "
-                f"{ancestor}: {output_path}"
-            )
-    scratch_root = Path("/scratch")
-    if lexical_path == scratch_root or scratch_root in lexical_path.parents:
-        return output_path
     resolved = output_path.resolve(strict=False)
     if resolved == Path(resolved.anchor):
         raise ValueError(f"runtime output path must not be root: {output_path}")
-    for ancestor in (resolved, *resolved.parents):
-        git_metadata = ancestor / ".git"
-        if git_metadata.is_dir() or git_metadata.is_file():
-            raise ValueError(
-                "runtime output path must be outside Git checkout "
-                f"{ancestor}: {output_path}"
-            )
     return output_path
 
 
@@ -190,11 +171,11 @@ def runtime_root_path(path: Path | str) -> Path:
         path: Explicit runtime root path.
 
     Returns:
-        root: The absolute, normalized, non-root path outside Git checkouts.
+        root: The absolute, normalized, non-root path.
 
     Raises:
-        ValueError: The path is relative, non-normalized, the filesystem root,
-            or resolves inside a Git checkout.
+        ValueError: The path is relative, non-normalized, or the filesystem
+            root.
 
     """
     root = Path(path)
@@ -213,6 +194,9 @@ def runtime_root_path(path: Path | str) -> Path:
 _device_mesh: DeviceMesh | None = None
 _runtime_initialized: bool = (
     False  # config-globals: ignore -- mutable process-init state flag, not a knob
+)
+_single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = (
+    None  # config-globals: ignore -- mutable process-init state, not a knob
 )
 
 
@@ -254,20 +238,46 @@ class SingleProcess:
         )
 
     def initialize(self) -> None:
-        """Initialize execution resources (set deterministic mode if configured)."""
-        global _runtime_initialized  # noqa: PLW0603
+        """Initialize execution resources (set deterministic mode if configured).
+
+        Idempotent for an equivalent config. A single-process runtime owns no
+        process group or device mesh, so re-initializing is a no-op -- and one
+        process legitimately builds several runtimes (an eval sweep constructs
+        a fresh trainer per round). Raising there would kill every construction
+        after the first. A *different* config still raises: settings apply
+        process-globally, so the second one would silently not take effect.
+
+        Raises:
+          RuntimeError: A multi-process runtime is already initialized, or a
+            single-process runtime was initialized with different settings.
+
+        """
+        global _runtime_initialized, _single_process_settings  # noqa: PLW0603
+        settings = (self.deterministic, self.float32_matmul_precision)
         if _runtime_initialized:
-            raise RuntimeError("Runtime already initialized.")
+            if _single_process_settings is None:
+                raise RuntimeError(
+                    "Runtime already initialized by a multi-process strategy.",
+                )
+            if _single_process_settings != settings:
+                raise RuntimeError(
+                    "Runtime already initialized with different settings "
+                    f"{_single_process_settings}; cannot re-initialize as "
+                    f"{settings}. These apply process-globally.",
+                )
+            return
         _set_float32_matmul_precision(self.float32_matmul_precision)
         if self.deterministic:
             enable_determinism()
+        _single_process_settings = settings
         _runtime_initialized = True
 
     def destroy(self) -> None:
         """Cleanup runtime resources."""
-        global _runtime_initialized  # noqa: PLW0603
+        global _runtime_initialized, _single_process_settings  # noqa: PLW0603
         if global_device_mesh() is not None:
             raise RuntimeError("Device mesh initialized but single process.")
+        _single_process_settings = None
         _runtime_initialized = False
 
 
@@ -510,10 +520,11 @@ def destroy_global_device_mesh() -> None:
     WARNING: Must be called manually before process exit in distributed training.
     Do NOT rely on garbage collection to call this.
     """
-    global _runtime_initialized, _device_mesh  # noqa: PLW0603
+    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
     if not _runtime_initialized:
         return
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _device_mesh = None
+    _single_process_settings = None
     _runtime_initialized = False
