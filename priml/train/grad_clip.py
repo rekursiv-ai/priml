@@ -112,3 +112,32 @@ def total_grad_norm(
     if isinstance(total_norm, DTensor):
         total_norm = total_norm.full_tensor()
     return total_norm
+
+
+def total_param_norm(
+    parameters: Tensor | Iterable[Tensor],
+    *,
+    norm_type: float = 2.0,
+) -> Tensor:
+    """Return the global norm over parameter VALUES, not their gradients.
+
+    The weight-scale counterpart to :func:`total_grad_norm`: logging both makes
+    the update-to-weight ratio readable, which is how a too-hot or dead learning
+    rate shows up before the loss does.
+
+    Args:
+      parameters: A parameter/tensor or iterable thereof.
+      norm_type: p-norm order.
+
+    Returns:
+      total_norm: The global parameter norm as a tensor.
+
+    """
+    if isinstance(parameters, Tensor):
+        parameters = [parameters]
+    total_norm = torch.stack([p.detach().norm(norm_type) for p in parameters]).norm(
+        norm_type
+    )
+    if isinstance(total_norm, DTensor):
+        total_norm = total_norm.full_tensor()
+    return total_norm

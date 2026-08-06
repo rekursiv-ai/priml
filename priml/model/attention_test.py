@@ -121,6 +121,81 @@ def test_self_attention_with_norm_qk():
     assert m.norm_q is m.norm_k
 
 
+def test_self_attention_norm_qk_channels_inferred_from_channels_head():
+    """An unset norm_qk width resolves to channels_head, not channels_in."""
+    config = SelfAttention.Config(
+        channels_in=64,
+        heads=4,
+        channels_head=16,
+        norm_qk=RMSNorm.Config(),
+    ).finalize()
+
+    assert isinstance(config.norm_qk, RMSNorm.Config)
+    assert config.norm_qk.channels_in == 16
+    out, _ = config.make()(torch.randn(2, 8, 64))
+    assert out.shape == (2, 8, 64)
+
+
+def test_self_attention_norm_out_channels_inferred_from_inner_width():
+    """An unset norm_out width resolves to heads * channels_head.
+
+    An explicit head_dim makes that differ from channels_in (64 vs 128 here),
+    so the residual width would be the wrong answer, not merely unresolved.
+    """
+    config = SelfAttention.Config(
+        channels_in=64,
+        heads=4,
+        channels_head=32,
+        norm_out=RMSNorm.Config(),
+    ).finalize()
+
+    assert isinstance(config.norm_out, RMSNorm.Config)
+    assert config.norm_out.channels_in == 128
+    out, _ = config.make()(torch.randn(2, 8, 64))
+    assert out.shape == (2, 8, 64)
+
+
+def test_self_attention_norm_qk_explicit_channels_preserved():
+    """An explicit width is the caller's decision; inference must not clobber it."""
+    config = SelfAttention.Config(
+        channels_in=64,
+        heads=4,
+        channels_head=16,
+        norm_qk=RMSNorm.Config(16),
+    ).finalize()
+
+    assert isinstance(config.norm_qk, RMSNorm.Config)
+    assert config.norm_qk.channels_in == 16
+
+
+def test_multi_stream_norm_qk_channels_inferred_from_channels_head():
+    """MultiStreamAttention resolves the norm width like SelfAttention does."""
+    config = MultiStreamAttention.Config(
+        channels_in=64,
+        heads=4,
+        channels_head=16,
+        norm_qk=RMSNorm.Config(),
+    ).finalize()
+
+    assert isinstance(config.norm_qk, RMSNorm.Config)
+    assert config.norm_qk.channels_in == 16
+    streams = config.make()(torch.randn(2, 2, 8, 64))
+    assert all(s.shape == (2, 8, 64) for s in streams)
+
+
+def test_multi_stream_norm_out_channels_inferred_from_inner_width():
+    """MultiStreamAttention resolves norm_out like SelfAttention does."""
+    config = MultiStreamAttention.Config(
+        channels_in=64,
+        heads=4,
+        channels_head=32,
+        norm_out=RMSNorm.Config(),
+    ).finalize()
+
+    assert isinstance(config.norm_out, RMSNorm.Config)
+    assert config.norm_out.channels_in == 128
+
+
 def test_self_attention_independent_qk_norms():
     m = SelfAttention.Config(
         channels_in=64,

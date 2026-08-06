@@ -37,11 +37,15 @@ class RngState(TypedDict):
     python: PythonRngState
     """``random.getstate()``. Opaque round-trip value."""
 
-    numpy: NumpyRngState
-    """``numpy_rng.bit_generator.state``. Opaque round-trip value."""
-
     torch: torch.Tensor
     """``torch.get_rng_state()`` byte tensor."""
+
+    numpy: NotRequired[NumpyRngState]
+    """``numpy_rng.bit_generator.state``. Opaque round-trip value.
+
+    ``get_rng_state`` always writes it, but it is not required on read:
+    checkpoints minted by a capture that predates numpy tracking omit it,
+    and ``set_rng_state`` must still resume them rather than raising."""
 
     cuda: NotRequired[list[torch.Tensor]]
     """``torch.cuda.get_rng_state_all()``. Present iff CUDA was
@@ -333,6 +337,13 @@ def get_rng_state() -> RngState:
         or XPU backends are logged as warnings -- those backends are
         not yet supported by this module.
 
+        A pure CPU run never initializes a CUDA context, so it omits the
+        CUDA entries on a GPU host too. The exception is a process that
+        touched CUDA incidentally (a capability probe, an earlier GPU eval)
+        and then checkpoints a CPU run: the entries appear despite nothing
+        advancing them, which makes resume equality host-dependent. Pop
+        them at that call site.
+
     """
     state: RngState = {
         "python": random.getstate(),
@@ -355,23 +366,25 @@ def set_rng_state(state: RngState) -> None:
     """Restore RNG state captured by ``get_rng_state``.
 
     Args:
-      state: A previously captured ``RngState``. The python/numpy/torch
-        keys are required. If ``cuda`` is present, its length must
-        match the visible CUDA device count exactly; callers who want
-        to load a multi-GPU checkpoint on fewer devices must slice
+      state: A previously captured ``RngState``. The python/torch keys
+        are required; ``numpy`` is restored when present and skipped
+        otherwise, so a checkpoint minted before numpy tracking still
+        resumes. If ``cuda`` is present, its length must match the
+        visible CUDA device count exactly; callers who want to load a
+        multi-GPU checkpoint on fewer devices must slice
         ``state['cuda']`` themselves. If ``cuda_uuids`` is present and
         differs from the current devices' identifiers, a warning is
         logged but the restore proceeds.
 
     Raises:
-      KeyError: If any of the required ``python``/``numpy``/``torch``
-        keys is absent.
+      KeyError: If either required ``python``/``torch`` key is absent.
       ValueError: If ``len(state['cuda']) != torch.cuda.device_count()``.
 
     """
     random.setstate(state["python"])
-    numpy_rng.bit_generator.state = state["numpy"]
     torch.set_rng_state(state["torch"])
+    if "numpy" in state:
+        numpy_rng.bit_generator.state = state["numpy"]
     if "cuda" in state:
         cuda_states = state["cuda"]
         n_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0

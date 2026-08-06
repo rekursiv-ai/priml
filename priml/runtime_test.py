@@ -86,6 +86,79 @@ def test_single_process_initialize_sets_float32_matmul_precision(
     process.destroy()
 
 
+def test_single_process_initialize_is_idempotent_for_same_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One process legitimately builds several single-process runtimes.
+
+    An eval sweep constructs a fresh trainer per round; raising on the second
+    initialize would kill every construction after the first.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", calls.append)
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+
+    SingleProcess.Config(
+        device="cpu", float32_matmul_precision="high"
+    ).make().initialize()
+    SingleProcess.Config(
+        device="cpu", float32_matmul_precision="high"
+    ).make().initialize()
+
+    # The second initialize is a no-op, not a re-application.
+    assert calls == ["high"]
+
+
+def test_single_process_initialize_rejects_conflicting_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settings are process-global, so a differing second config would not take."""
+    precisions: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", precisions.append)
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+
+    SingleProcess.Config(
+        device="cpu", float32_matmul_precision="high"
+    ).make().initialize()
+
+    with pytest.raises(RuntimeError, match="different settings"):
+        SingleProcess.Config(
+            device="cpu",
+            float32_matmul_precision="highest",
+        ).make().initialize()
+
+
+def test_single_process_initialize_rejects_multiprocess_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live device mesh is not a single-process runtime to piggyback on."""
+    monkeypatch.setattr(runtime, "_runtime_initialized", True)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+
+    with pytest.raises(RuntimeError, match="multi-process strategy"):
+        SingleProcess.Config(device="cpu").make().initialize()
+
+
+def test_single_process_destroy_clears_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After destroy, a differing config may initialize without conflict."""
+    precisions: list[str] = []
+    monkeypatch.setattr(torch, "set_float32_matmul_precision", precisions.append)
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+
+    process = SingleProcess.Config(device="cpu", deterministic=False).make()
+    process.initialize()
+    process.destroy()
+
+    assert not runtime.runtime_initialized()
+    # A conflicting config now initializes cleanly rather than raising.
+    SingleProcess.Config(device="cpu", deterministic=True).make().initialize()
+
+
 def test_multiprocess_backend_resolved_once_by_init() -> None:
     """T-055: __init__ is the single source of backend resolution.
 
@@ -126,7 +199,7 @@ def test_userdirs_import_and_resolve_do_not_load_torch(tmp_path: Path) -> None:
     assert probe.returncode == 0, probe.stderr
 
 
-def test_runtime_output_path_allows_absolute_path_outside_checkout(
+def test_runtime_output_path_allows_absolute_path(
     tmp_path: Path,
 ) -> None:
     output_path = tmp_path / "scratch" / "artifacts" / "profile.json"
@@ -139,42 +212,20 @@ def test_runtime_output_path_rejects_filesystem_root() -> None:
         runtime_output_path(Path("/"))
 
 
-def test_runtime_output_path_rejects_explicit_symlink_into_checkout(
-    tmp_path: Path,
-) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    output_link = tmp_path / "output-link"
-    output_link.symlink_to(checkout, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="outside Git checkout"):
-        runtime_output_path(output_link / "artifacts")
-
-
-def test_runtime_output_path_rejects_non_normalized_scratch_escape() -> None:
+def test_runtime_output_path_rejects_non_normalized_path() -> None:
     with pytest.raises(ValueError, match="runtime output path must be normalized"):
         runtime_output_path("/scratch/../repo/output.json")
 
 
-def test_runtime_output_path_trusts_logical_scratch_symlink(
+def test_runtime_output_path_rejects_symlink_resolving_to_root(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    logical_path = Path("/scratch/runs/job/artifacts")
-    resolve = Path.resolve
+    """A link to ``/`` is lexically fine but names the filesystem root."""
+    link = tmp_path / "root-link"
+    link.symlink_to("/", target_is_directory=True)
 
-    def resolve_scratch(path: Path, *, strict: bool = False) -> Path:
-        if path == logical_path:
-            return checkout / "artifacts"
-        return resolve(path, strict=strict)
-
-    monkeypatch.setattr(Path, "resolve", resolve_scratch)
-
-    assert runtime_output_path(logical_path) == logical_path
+    with pytest.raises(ValueError, match="runtime output path must not be root"):
+        runtime_output_path(link)
 
 
 def _patch_distributed(

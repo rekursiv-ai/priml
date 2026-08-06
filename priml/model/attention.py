@@ -176,6 +176,13 @@ class SelfAttention(nn.Module):
                     f"heads={self.heads} must be divisible by "
                     f"num_heads_kv={self.num_heads_kv}.",
                 )
+            if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
+                self.norm_qk.channels_in = self.channels_head
+            if (
+                isinstance(self.norm_out, ChannelsIn)
+                and self.norm_out.channels_in == -1
+            ):
+                self.norm_out.channels_in = self.heads * self.channels_head
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -502,6 +509,13 @@ class MultiStreamAttention(nn.Module):
                 raise ValueError(
                     "causal=True requires num_streams=1.",
                 )
+            if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
+                self.norm_qk.channels_in = self.channels_head
+            if (
+                isinstance(self.norm_out, ChannelsIn)
+                and self.norm_out.channels_in == -1
+            ):
+                self.norm_out.channels_in = self.heads * self.channels_head
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

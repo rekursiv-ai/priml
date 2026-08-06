@@ -14,6 +14,7 @@ import torch
 from priml.train.grad_clip import (
     clip_grad_norm_,
     total_grad_norm,
+    total_param_norm,
 )
 
 
@@ -114,6 +115,31 @@ def test_inf_norm_uses_max_abs_gradient() -> None:
     params = _params_with_grads([torch.tensor([-7.0, 4.0])])
     norm = total_grad_norm(params, norm_type=float("inf"), foreach=_FOREACH)
     _close(norm, torch.tensor(7.0))
+
+
+def test_total_param_norm_spans_all_parameters() -> None:
+    """The parameter norm is the global norm over values across all tensors."""
+    device = _test_device()
+    params = [
+        torch.nn.Parameter(torch.tensor([3.0, 4.0], device=device)),
+        torch.nn.Parameter(torch.tensor([12.0], device=device)),
+    ]
+    _close(total_param_norm(params), torch.tensor(13.0))
+
+
+def test_total_param_norm_ignores_gradients() -> None:
+    """Values drive the norm; a grad on the same parameter must not contribute."""
+    device = _test_device()
+    param = torch.nn.Parameter(torch.tensor([3.0, 4.0], device=device))
+    param.grad = torch.tensor([100.0, 100.0], device=device)
+    _close(total_param_norm(param), torch.tensor(5.0))
+
+
+def test_total_param_norm_inf_uses_max_abs_value() -> None:
+    """norm_type=inf reports the max absolute parameter component."""
+    device = _test_device()
+    param = torch.nn.Parameter(torch.tensor([-7.0, 4.0], device=device))
+    _close(total_param_norm(param, norm_type=float("inf")), torch.tensor(7.0))
 
 
 if __name__ == "__main__":

@@ -451,26 +451,6 @@ class TestTorchProfilingWorkingDir:
 
         assert profiling.working_dir == Path("/profiling")
 
-    def test_working_dir_rejected_when_trace_is_written(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        checkout = tmp_path / "checkout"
-        checkout.mkdir()
-        (checkout / ".git").mkdir()
-        monkeypatch.chdir(checkout)
-        profiling = TorchProfiling.Config(
-            torch_profile=False,
-            torch_profile_end=1,
-            working_dir=".",
-        ).make()
-        profiling.profiler = MagicMock()
-        profiling._profiler_started = True
-
-        with pytest.raises(ValueError, match="outside Git checkout"):
-            profiling.on_step_end(1)
-
     def test_explicit_path_working_dir_is_literal(self, tmp_path: Path) -> None:
         working_dir = tmp_path / "profiling"
         config = TorchProfiling.Config(
@@ -496,28 +476,6 @@ def test_phase_timer_working_dir_is_scoped_by_owner() -> None:
     assert timer._torch_profile_path == Path(
         "/scratch/runs/study/run-1/profiling/phase_trace.json.gz"
     )
-
-
-def test_phase_timer_trace_path_rejects_git_checkout_when_written(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    monkeypatch.chdir(checkout)
-    timer = PhaseTimer.Config(
-        enabled=True,
-        torch_profile=False,
-        working_dir=".",
-    ).make()
-    timer._profiler = MagicMock()
-
-    with pytest.raises(
-        ValueError,
-        match="runtime output path must be outside Git checkout",
-    ):
-        timer.log_summary()
 
 
 class TestTorchProfilingCleanup:

@@ -88,6 +88,57 @@ def test_depth_zero_no_scaling():
     assert torch.allclose(w_neg, w_zero)
 
 
+def test_truncated_normal_variance_correction_realizes_requested_std():
+    """With correction on, realized std equals the request; off, it undershoots."""
+    torch.manual_seed(0)
+    corrected = torch.empty(400_000)
+    truncated_normal(corrected, std=1.0, depth=-1, variance_correction=True)
+    torch.manual_seed(0)
+    uncorrected = torch.empty(400_000)
+    truncated_normal(uncorrected, std=1.0, depth=-1)
+
+    assert abs(corrected.std().item() - 1.0) < 0.01
+    # ~0.88: the truncated tail mass the correction restores.
+    assert uncorrected.std().item() < 0.92
+
+
+def test_truncated_normal_default_is_uncorrected():
+    """The flag defaults off, so existing callers keep their init unchanged."""
+    torch.manual_seed(0)
+    default = torch.empty(4096)
+    truncated_normal(default, std=0.02, depth=-1)
+    torch.manual_seed(0)
+    explicit = torch.empty(4096)
+    truncated_normal(explicit, std=0.02, depth=-1, variance_correction=False)
+
+    assert torch.equal(default, explicit)
+
+
+def test_truncated_normal_respects_scaled_bounds():
+    """Correction scales the truncation bounds along with the std."""
+    torch.manual_seed(0)
+    w = torch.empty(100_000)
+    truncated_normal(w, std=1.0, depth=-1, variance_correction=True)
+
+    assert w.abs().max().item() <= 2.0 * 1.1372
+
+
+def test_truncated_normal_corrected_zero_std_zeros_tensor():
+    w = torch.ones(16)
+    truncated_normal(w, std=0.0, depth=-1, variance_correction=True)
+    assert w.abs().sum() == 0
+
+
+def test_truncated_normal_corrected_depth_scaling():
+    torch.manual_seed(0)
+    w0 = torch.empty(4096)
+    truncated_normal(w0, std=1.0, depth=0, variance_correction=True)
+    torch.manual_seed(0)
+    w3 = torch.empty(4096)
+    truncated_normal(w3, std=1.0, depth=3, variance_correction=True)
+    assert torch.allclose(w3, w0 / 2.0)
+
+
 def test_dirac_conv2d():
     w = torch.empty(8, 8, 3, 3)
     dirac(w)
