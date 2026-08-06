@@ -250,6 +250,43 @@ def test_runtime_output_path_allows_a_checkout_path(tmp_path: Path) -> None:
     assert runtime_output_path(output) == output
 
 
+def test_initialize_validates_topology_before_acquiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad topology must not leave an initialized process group behind.
+
+    Validation ran after init_process_group, so a config error acquired a
+    distributed resource and then raised, with _runtime_initialized still
+    False -- nothing owns the cleanup.
+    """
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    with pytest.raises(ValueError, match="mesh_topology cannot be empty"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={},
+        )
+
+    assert "init_kwargs" not in record
+
+
+def test_initialize_validates_negative_dims_before_acquiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two auto dimensions are unresolvable; reject before acquiring."""
+    record = _patch_distributed(monkeypatch, world_size=4)
+
+    with pytest.raises(ValueError, match="At most one mesh dimension"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": -1, "pp": -1, "tp": 1},
+        )
+
+    assert "init_kwargs" not in record
+
+
 def _patch_distributed(
     monkeypatch: pytest.MonkeyPatch,
     *,
