@@ -389,6 +389,20 @@ def initialize_global_device_mesh(
     if _runtime_initialized:
         raise RuntimeError("Runtime already initialized.")
 
+    # Validate the topology BEFORE acquiring anything. These checks used to run
+    # after init_process_group, so a config error left an initialized process
+    # group behind that nothing owned -- _runtime_initialized stays False on
+    # the raise path, so no later destroy() would tear it down.
+    if not mesh_topology:
+        raise ValueError(
+            "mesh_topology cannot be empty. "
+            "Specify dimensions, e.g., {'dp': -1, 'pp': 1, 'tp': 1}",
+        )
+    if sum(size < 0 for size in mesh_topology.values()) > 1:
+        raise ValueError(
+            f"At most one mesh dimension can be -1 (auto), got {mesh_topology}",
+        )
+
     device = get_device(device)
 
     _set_float32_matmul_precision(float32_matmul_precision)
@@ -416,19 +430,9 @@ def initialize_global_device_mesh(
             device_id=device if device.type == "cuda" else None,
         )
 
-    if not mesh_topology:
-        raise ValueError(
-            "mesh_topology cannot be empty. "
-            "Specify dimensions, e.g., {'dp': -1, 'pp': 1, 'tp': 1}",
-        )
-
     world_size_actual = torch.distributed.get_world_size()
 
     if any(s < 0 for s in mesh_topology.values()):
-        if sum(s < 0 for s in mesh_topology.values()) > 1:
-            raise ValueError(
-                f"At most one mesh dimension can be -1 (auto), got {mesh_topology}",
-            )
         world_size_expected = math.prod(s for s in mesh_topology.values() if s > 0)
         n = world_size_actual // world_size_expected
         mesh_topology = {k: n if v < 0 else v for k, v in mesh_topology.items()}
