@@ -61,7 +61,7 @@ cap_math_threads()
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_global() -> Generator[None]:  # pyright: ignore[reportUnusedFunction] -- pytest invokes autouse fixtures by injection, not by name
+def reset_runtime_global() -> Generator[None]:
     """Clear a leaked process-global runtime flag after every test.
 
     ``priml.runtime`` keeps a module-global ``_runtime_initialized``. A
@@ -70,6 +70,12 @@ def _reset_runtime_global() -> Generator[None]:  # pyright: ignore[reportUnusedF
     runtime and its own ``initialize()`` raises ``RuntimeError: Runtime already
     initialized``. Clearing the flag at teardown makes runtime-touching tests
     order-independent.
+
+    The flag is a PROCESS global, so the guard has to cover every test in the
+    process, not just priml's -- ``TrainLoop`` is constructed by suites under
+    baselines/ and experimental/ too. Public (not ``_``-prefixed) so the
+    repo-root conftest can re-export it and widen the autouse scope to the whole
+    repo; priml keeps the definition so the public export ships it.
 
     Only acts if the module is already imported -- importing it eagerly in
     conftest would pull in ``torch.distributed`` at collection time.
