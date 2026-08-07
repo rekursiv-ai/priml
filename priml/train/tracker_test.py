@@ -509,7 +509,7 @@ def test_file_tracker_writes_prefixed_scalar_json(tmp_path: Path) -> None:
     """FileTracker expands explicit context and writes prefixed scalar JSON.
 
     Non-scalar values (an ``extras`` payload) are dropped; the file holds only
-    numeric metrics, keyed by ``prefix + name`` (the format knowop reads).
+    numeric metrics, keyed by ``prefix + name`` (the format consumers read).
     """
     tracker = FileTracker.Config(
         working_dir=tmp_path / "metrics.json",

@@ -61,8 +61,8 @@ class FileTracker:
     (default ``"eval/"``), so the file holds eval scores -- not train-step
     metrics that share the same tracker -- and converges to the final eval's
     value (last write wins). Non-scalar values (e.g. an ``extras`` payload) are
-    ignored. Downstream (e.g. the knowop remote-eval reconciler) reads this as
-    the eval-results file, so it must contain ``eval/*`` keys only.
+    ignored. A downstream remote-eval reconciler reads this as the
+    eval-results file, so it must contain ``eval/*`` keys only.
     """
 
     class Config(Fig["FileTracker"]):
