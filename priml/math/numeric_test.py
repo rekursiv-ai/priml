@@ -19,6 +19,7 @@ from priml.math.numeric import (
     log_arctan_exp,
     log_cosh,
     log_cumsum_exp,
+    log_modulus,
     log_tan_exp,
     logerfc,
     logsubexp,
@@ -1017,6 +1018,39 @@ def test_power_transform_out_of_domain_is_finite() -> None:
     y.sum().backward()
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
+
+
+def test_log_modulus_values() -> None:
+    x = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
+    expected = torch.tensor([-math.log(2.0), 0.0, math.log(2.0)], dtype=torch.float64)
+    torch.testing.assert_close(log_modulus(x), expected)
+
+
+def test_log_modulus_is_odd() -> None:
+    x = torch.tensor([-1e6, -1.0, 0.0, 1.0, 1e6], dtype=torch.float64)
+    torch.testing.assert_close(log_modulus(x), -log_modulus(-x))
+
+
+def test_log_modulus_gradients() -> None:
+    """d/dx = 1/(1+|x|) off the origin; sign(0) == 0 kills it at the kink."""
+    x = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64, requires_grad=True)
+    log_modulus(x).sum().backward()
+    assert x.grad is not None
+    expected = torch.tensor([0.5, 0.0, 0.5], dtype=torch.float64)
+    torch.testing.assert_close(x.grad, expected)
+
+
+def test_log_modulus_gradient_is_finite_in_the_tails() -> None:
+    x = torch.tensor([-1e30, 1e30], dtype=torch.float32)
+    _ = x.requires_grad_()
+    log_modulus(x).sum().backward()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all(), x.grad
+
+
+def test_log_modulus_preserves_dtype() -> None:
+    for dtype in (torch.bfloat16, torch.float32, torch.float64):
+        assert log_modulus(torch.zeros(3, dtype=dtype)).dtype == dtype
 
 
 if __name__ == "__main__":

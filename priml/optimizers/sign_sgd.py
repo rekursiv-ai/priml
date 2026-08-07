@@ -18,9 +18,12 @@ non-persistent ``local_weights`` that receives gradients, and non-persistent
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import Any, overload, override
 
+from configgle import Fig
 from torch import Tensor
+from torch.optim import Optimizer
 
 import torch
 import torch.distributed as dist
@@ -29,8 +32,45 @@ import torch.distributed as dist
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, Any]]
 
 
-class SignSGD(torch.optim.Optimizer):
+class SignSGD(Optimizer):
     """SignSGD with decoupled weight decay."""
+
+    class Config(Fig["Callable[..., SignSGD]"]):
+        """SignSGD hyperparameters.
+
+        ``make()`` yields a ``partial``, not the optimizer: a config tree has
+        no parameters to hand it. Call the result with them::
+
+            optimizer = SignSGD.Config().make()(model.parameters())
+        """
+
+        lr: float = 1e-2
+        """Step size."""
+
+        weight_decay: float = 0.0
+        """Decoupled weight decay."""
+
+        aggregate_distributed: bool = True
+        """All-gather sparse-embedding gradient rows across ranks.
+
+        Set False for TASK-parallel use, where each rank optimizes an
+        independent problem: see :class:`SignSGD` for why a per-step gather
+        then desyncs the job."""
+
+        @override
+        def make(self) -> Callable[..., SignSGD]:
+            """Return a constructor awaiting the parameters to optimize."""
+            final = (
+                self.copy_tree()
+                if getattr(self, "_finalized", False)
+                else self.copy_tree().finalize()
+            )
+            return partial(
+                SignSGD,
+                lr=final.lr,
+                weight_decay=final.weight_decay,
+                aggregate_distributed=final.aggregate_distributed,
+            )
 
     def __init__(
         self,

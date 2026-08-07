@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from typing import Literal, Protocol, runtime_checkable
 
+from configgle import Makeable
+from torch import nn
+
+from priml.math.custom_types import TensorFn
+
 
 __all__ = [
+    "ActivationFn",
     "ChannelsIn",
     "ChannelsInOut",
     "ChannelsOut",
@@ -15,6 +21,9 @@ __all__ = [
 
 ShardStyle = Literal["none", "colwise", "rowwise", "vocab"]
 """Tensor-parallel shard style for a building-block config; none = replicated."""
+
+type ActivationFn = Makeable[nn.Module | TensorFn] | nn.Module | TensorFn
+"""An activation: a config that builds one, a Module, or a plain function."""
 
 
 @runtime_checkable

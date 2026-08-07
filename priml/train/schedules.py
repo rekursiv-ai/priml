@@ -7,11 +7,16 @@ from collections.abc import Callable
 import math
 
 
-_Schedule = Callable[[int, int], float]
-"""A schedule: ``(step, total_steps) -> multiplier``."""
+type Schedule = Callable[[int, int], float]
+"""A schedule: ``(step, total_steps) -> multiplier``.
+
+Public because a Config injects one: a slot typed ``Makeable[Schedule]`` lets a
+caller supply any callable of this shape, so the schedule set is open rather
+than an enumeration the library has to branch on.
+"""
 
 
-def multiply_schedules(*schedules: _Schedule) -> _Schedule:
+def multiply_schedules(*schedules: Schedule) -> Schedule:
     """Combine schedules by multiplying their multipliers.
 
     Bind per-schedule keyword args with ``functools.partial`` first, e.g.::

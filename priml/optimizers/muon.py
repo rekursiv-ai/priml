@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Any, Literal, override
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal, override
 
 import math
 
+from configgle import Fig
 from torch import Tensor, nn
+from torch.optim import Optimizer
 
 import torch
 
 from priml.math.numeric import matrix_signum_via_newtonschulz
 
 
-class Muon(torch.optim.Optimizer):
+if TYPE_CHECKING:
+    from torch.nn import Parameter
+
+
+class Muon(Optimizer):
     """Muon optimizer: SGD with momentum in the orthogonal manifold.
 
     Uses Newton-Schulz iteration to project gradients onto the
@@ -28,6 +35,86 @@ class Muon(torch.optim.Optimizer):
       https://github.com/KellerJordan/Muon
 
     """
+
+    @classmethod
+    def eligible_tensor(cls, name: str, parameter: Parameter) -> bool:
+        """Whether Muon is defined on this parameter.
+
+        Muon orthogonalizes each update, which is meaningful for a linear
+        operator and undefined for the 1-D scales and biases beside it --
+        :meth:`step` raises on anything lower-rank. This is the algorithm's own
+        constraint; a recipe that also wants the classifier head left out
+        composes ``excluding(Muon.eligible_tensor, "head")``.
+
+        Args:
+          name: Qualified parameter name, as ``named_parameters`` reports it.
+          parameter: The parameter itself.
+
+        Returns:
+          eligible: True for a rank >= 2 weight.
+
+        """
+        del cls, name
+        return parameter.ndim >= 2
+
+    class Config(Fig["Callable[..., Muon]"]):
+        """Muon hyperparameters; see :class:`Muon` for what each one does.
+
+        ``make()`` yields a ``partial``, not a ``Muon``: a config tree has no
+        parameters to hand an optimizer. Call the result with them::
+
+            optimizer = Muon.Config().make()(model.parameters())
+        """
+
+        lr: float = 1e-3
+        """Step size."""
+
+        weight_decay: float | None = 0.1
+        """Decoupled weight decay; None disables it."""
+
+        momentum: float = 0.95
+        """Momentum coefficient on the update."""
+
+        nesterov: bool = True
+        """Look ahead by the momentum term before orthogonalizing."""
+
+        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+        """Newton-Schulz polynomial coefficients."""
+
+        eps: float = 1e-7
+        """Floor on the gradient norm used to normalize before iterating."""
+
+        ns_steps: int = 5
+        """Newton-Schulz iterations per update."""
+
+        adjust_lr_fn: Literal["original", "match_rms_adamw", "conv_heuristic"] = (
+            "original"
+        )
+        """How the step is rescaled for a parameter's shape."""
+
+        ensemble_dims: int = 0
+        """Leading dimensions treated as an ensemble, not as matrix axes."""
+
+        @override
+        def make(self) -> Callable[..., Muon]:
+            """Return a constructor awaiting the parameters to optimize."""
+            final = (
+                self.copy_tree()
+                if getattr(self, "_finalized", False)
+                else self.copy_tree().finalize()
+            )
+            return partial(
+                Muon,
+                lr=final.lr,
+                weight_decay=final.weight_decay,
+                momentum=final.momentum,
+                nesterov=final.nesterov,
+                ns_coefficients=final.ns_coefficients,
+                eps=final.eps,
+                ns_steps=final.ns_steps,
+                adjust_lr_fn=final.adjust_lr_fn,
+                ensemble_dims=final.ensemble_dims,
+            )
 
     def __init__(
         self,

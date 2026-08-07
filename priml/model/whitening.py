@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from torch import Tensor, nn
@@ -33,14 +34,16 @@ class PCAWhiteningConv2d(nn.Conv2d):
         self,
         train_images: Tensor,
         eps: float = 5e-4,
-        algorithm: str = "eigh",
+        fit: Callable[..., tuple[Tensor, Tensor]] = pca,
     ) -> None:
         """Initialize weights with PCA eigenvectors from image patches.
 
         Args:
           train_images: Training images of shape (N, C, H, W).
           eps: Regularization for whitening eigenvalues.
-          algorithm: PCA algorithm ("eigh", "svd", or "power").
+          fit: PCA fitter returning ``(eigenvalues, eigenvectors)``. The
+            default reaches ``linalg.eigh``, which MPS lacks; pass
+            ``pca_power`` there.
 
         """
         out_channels, C, kH, kW = self.weight.shape
@@ -56,6 +59,6 @@ class PCAWhiteningConv2d(nn.Conv2d):
             .transpose(1, 3)
             .reshape(-1, C * kH * kW)
         )
-        _, eigenvectors = pca(patches, whiten=True, eps=eps, algorithm=algorithm)
+        _, eigenvectors = fit(patches, whiten=True, eps=eps)
         kernel = eigenvectors.T.reshape(-1, C, kH, kW).to(self.weight.dtype)
         self.weight.data[:] = torch.cat([kernel, -kernel])

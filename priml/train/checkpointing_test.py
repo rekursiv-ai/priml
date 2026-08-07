@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, override
 
 import functools
 import shutil
-import socket
 import tempfile
 
 from torch import nn
@@ -20,6 +19,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.distributed.testing import WorkerPool
 from priml.train.checkpointing import (
     AsyncLocalStateDictStorer,
     Checkpointer,
@@ -45,16 +45,19 @@ def temp_checkpoint_dir() -> Generator[Path, None, None]:
 
 @pytest.fixture
 def single_rank_group(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[None, None, None]:
     """Initialize a 1-rank gloo process group for sharded-checkpoint tests."""
-    interfaces = {name for _, name in socket.if_nameindex()}
-    loopback = next(name for name in ("lo", "lo0") if name in interfaces)
-    monkeypatch.setenv("GLOO_SOCKET_IFNAME", loopback)
+    try:
+        port = WorkerPool.find_free_port()
+    except OSError as error:
+        pytest.skip(f"Gloo requires a permitted loopback socket: {error}")
+    monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
+    monkeypatch.setenv("MASTER_PORT", str(port))
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
     dist.init_process_group(
         backend="gloo",
-        init_method=(tmp_path / "rendezvous").as_uri(),
         rank=0,
         world_size=1,
     )

@@ -11,6 +11,13 @@ from torch import Tensor, nn
 import torch
 
 from priml.optimizers.adam_atan2 import AdamATan2
+from priml.optimizers.composite import (
+    CompositeOptimizer,
+    Selector,
+    complement,
+    everything,
+    excluding,
+)
 from priml.optimizers.muon import Muon
 from priml.optimizers.newton import Newton
 from priml.optimizers.sign_sgd import SignSGD
@@ -18,11 +25,16 @@ from priml.optimizers.sign_sgd import SignSGD
 
 __all__ = [
     "AdamATan2",
+    "CompositeOptimizer",
     "Muon",
     "Newton",
+    "Selector",
     "SignSGD",
     "apply_lr_scale",
     "clip_grad_norm",
+    "complement",
+    "everything",
+    "excluding",
     "lr_scale",
     "remember_initial_lrs",
     "step_optimizers",

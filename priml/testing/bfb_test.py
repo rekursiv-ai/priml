@@ -16,6 +16,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import pytest
 import torch
 
+from priml.math.custom_types import TensorFn
 from priml.model.attention import SelfAttention
 from priml.model.transformer import TransformerBlock
 from priml.testing.bfb import (
@@ -635,7 +636,7 @@ def test_sdpa_backend_match_is_noop() -> None:
     _assert_sdpa_backend_match({"device": "cpu"}, device="cpu")
 
 
-def _f32_equals_f64_downcast(op: Callable[[Tensor], Tensor]) -> bool:
+def _f32_equals_f64_downcast(op: TensorFn) -> bool:
     """True if ``op``'s float32 result equals its float64-then-downcast result.
 
     An exact-allowlist op must be host-independent: computing it in float64 and
@@ -659,7 +660,7 @@ def _f32_equals_f64_downcast(op: Callable[[Tensor], Tensor]) -> bool:
 # rounding is under test). Pure data-movement ops (views, reshapes, gathers)
 # carry no arithmetic and so are trivially host-independent; only ops that
 # compute a value need proving here.
-_EXACT_ARITHMETIC_PROBES: dict[str, Callable[[Tensor], Tensor]] = {
+_EXACT_ARITHMETIC_PROBES: dict[str, TensorFn] = {
     "add": lambda a: a + a,
     "sub": lambda a: a - a.flip(0),
     "mul": lambda a: a * a,
@@ -694,7 +695,7 @@ def test_exact_f32_ops_are_host_independent(name: str) -> None:
 # Declared non-arithmetic ops that touch float32 data, each with a single-op
 # probe using a FIXED index/operand so the f32 and f64 calls are identical. Used
 # to prove the "host-independent by construction" claim rather than trust it.
-_NONARITHMETIC_PROBES: dict[str, Callable[[Tensor], Tensor]] = {
+_NONARITHMETIC_PROBES: dict[str, TensorFn] = {
     "gather": lambda a: a.gather(0, torch.arange(0, a.numel(), 7) % a.numel()),
     "index_select": lambda a: a.index_select(0, torch.arange(0, 50)),
     "masked_fill": lambda a: a.masked_fill(a > 0, 0.123),

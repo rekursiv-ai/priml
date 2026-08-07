@@ -553,6 +553,28 @@ def sqrt1pm1(x: Tensorable) -> Tensor:
     return torch.where(is_small, stable, direct)
 
 
+def log_modulus(x: Tensorable) -> Tensor:
+    """Log-modulus: sign(x) log1p(|x|).
+
+    Maps R to R, log-like in both tails and linear through the origin with
+    slope 1.
+
+    Args:
+      x: Input tensor.
+
+    Returns:
+      result: sign(x) log1p(|x|).
+
+    References:
+      John and Draper (1980). An Alternative Family of Transformations.
+      Journal of the Royal Statistical Society C, 29(2), 190-197.
+      https://doi.org/10.2307/2986305
+
+    """
+    x = convert_to_tensor(x)
+    return x.sign() * torch.log1p(x.abs())
+
+
 def softsign(x: Tensorable) -> Tensor:
     """Softsign: x / (1 + |x|).
 

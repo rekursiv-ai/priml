@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from torch import Tensor, nn
 
 import torch
@@ -21,7 +19,6 @@ from priml.math.probability import (
 
 
 __all__ = [
-    "LogSNRFn",
     "compute_log_alpha",
     "input_conditioning_identity",
     "input_conditioning_rectified_flow",
@@ -36,8 +33,6 @@ __all__ = [
     "log_time_from_log_snr_per_logtan",
     "log_time_from_log_snr_per_truncnormicdf",
 ]
-
-LogSNRFn = Callable[[Tensorable], Tensor]
 
 
 def compute_log_alpha(log_snr: Tensor, log_sigma: Tensor) -> Tensor:
