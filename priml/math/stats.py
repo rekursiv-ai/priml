@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from torch import Tensor
 
@@ -12,6 +12,19 @@ import torch.linalg
 from priml.math.custom_types import Tensorable, convert_to_tensor
 from priml.math.distributed import logmeanexp_all_to_all
 from priml.math.numeric import logmeanexp
+
+
+type PcaDecompose = Callable[[Tensor], tuple[Tensor, Tensor]]
+"""Factors a mean-centered ``(N, D)`` matrix into ascending eigenpairs.
+
+The injection point of :func:`pca`: ``pca_eigh``, ``pca_svd``, and ``pca_power``
+all satisfy it, and a caller can supply its own. Tuning knobs belong to one
+implementation, so they ride in a ``partial`` rather than on ``pca``.
+
+Returns:
+  eigenvalues: Ascending, shape ``(D,)``.
+  eigenvectors: Columns are the components, shape ``(D, D)``.
+"""
 
 
 def cov(
@@ -187,14 +200,94 @@ def entropy_logits_mean_all_to_all(
     return -torch.sum(mean_p * log_mean_q, dim=dim, keepdim=keepdim)
 
 
+def pca_eigh(x_centered: Tensor) -> tuple[Tensor, Tensor]:
+    """Decompose the covariance matrix with ``linalg.eigh`` (CUDA/CPU).
+
+    MPS does not implement ``linalg.eigh``; use :func:`pca_power` there.
+
+    Args:
+      x_centered: Mean-centered observations of shape ``(N, D)``.
+
+    Returns:
+      eigenvalues: Ascending eigenvalues of shape ``(D,)``.
+      eigenvectors: Columns are the corresponding eigenvectors ``(D, D)``.
+
+    """
+    sigma = (x_centered.T @ x_centered) / len(x_centered)
+    return torch.linalg.eigh(sigma)
+
+
+def pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
+    """Decompose the data matrix with ``linalg.svd`` (CUDA/CPU).
+
+    MPS does not implement ``linalg.svd``; use :func:`pca_power` there.
+
+    Args:
+      x_centered: Mean-centered observations of shape ``(N, D)``.
+
+    Returns:
+      eigenvalues: Ascending eigenvalues of shape ``(D,)``, flipped from
+        SVD's descending order to match the ``eigh`` convention.
+      eigenvectors: Columns are the corresponding eigenvectors ``(D, D)``.
+
+    Raises:
+      RuntimeError: If the input lives on an MPS device.
+
+    """
+    if x_centered.device.type == "mps":
+        raise RuntimeError("pca_svd is not supported on MPS; use pca_power instead.")
+    _U, s, vh = torch.linalg.svd(x_centered, full_matrices=False)
+    del _U
+    eigenvalues = s * s / len(x_centered)
+    eigenvectors = vh.T
+    return eigenvalues.flip(0), eigenvectors.flip(1)
+
+
+def pca_power(
+    x_centered: Tensor,
+    num_iters: int = 200,
+    tol: float = 0.0,
+) -> tuple[Tensor, Tensor]:
+    """Decompose by simultaneous power iteration with QR orthogonalization.
+
+    Only uses matmul and basic arithmetic — runs natively on MPS
+    (no CPU fallback). Uses Householder QR for numerical stability.
+
+    Args:
+      x_centered: Mean-centered observations of shape ``(N, D)``.
+      num_iters: Maximum power-iteration sweeps.
+      tol: Subspace-convergence threshold; when > 0, iteration stops once the
+        basis update changes the eigenvalue estimate by less than ``tol``.
+
+    Returns:
+      eigenvalues: Ascending eigenvalues of shape ``(D,)``.
+      eigenvectors: Columns are the corresponding eigenvectors ``(D, D)``.
+
+    """
+    sigma = (x_centered.T @ x_centered) / len(x_centered)
+    d = sigma.shape[0]
+    basis = torch.randn(d, d, device=sigma.device, dtype=sigma.dtype)
+    basis, _ = _householder_qr(basis)
+    prev = (basis * (sigma @ basis)).sum(dim=0)
+    for _ in range(num_iters):
+        basis, _ = _householder_qr(sigma @ basis)
+        if tol > 0:
+            eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
+            if (eigenvalues - prev).abs().max() < tol:
+                prev = eigenvalues
+                break
+            prev = eigenvalues
+    eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
+    idx = eigenvalues.argsort()
+    return eigenvalues[idx], basis[:, idx]
+
+
 def pca(
     x: Tensorable,
     *,
     whiten: bool = False,
     eps: float = 0.0,
-    algorithm: str = "eigh",
-    power_iters: int = 200,
-    power_tol: float = 0.0,
+    decompose: PcaDecompose = pca_eigh,
 ) -> tuple[Tensor, Tensor]:
     """PCA decomposition via eigendecomposition of the covariance matrix.
 
@@ -221,13 +314,12 @@ def pca(
       whiten: Scale eigenvectors by ``1/sqrt(λ + eps)``.
       eps: Regularization added to eigenvalues (only used when
         ``whiten=True``).
-      algorithm: ``"eigh"`` (eigendecomposition of covariance,
-        efficient when N >> D), ``"svd"`` (SVD on data matrix,
-        falls back to CPU on MPS), or ``"power"`` (simultaneous
-        power iteration — runs natively on MPS, no CPU fallback).
-      power_iters: Maximum sweeps for the ``"power"`` algorithm.
-      power_tol: Eigenvalue-convergence threshold for early exit of the
-        ``"power"`` algorithm; 0 disables early stopping.
+      decompose: Eigendecomposition of the mean-centered matrix. Defaults to
+        :func:`pca_eigh`; :func:`pca_svd` decomposes the data matrix
+        directly, and :func:`pca_power` runs natively on MPS. Tuning knobs
+        belong to the implementation, so bind them at the call site::
+
+            pca(x, decompose=functools.partial(pca_power, num_iters=50))
 
     Returns:
       eigenvalues: Shape ``(D,)``, ascending order.
@@ -236,81 +328,10 @@ def pca(
 
     """
     x_t = convert_to_tensor(x).float()
-    x_centered = x_t - x_t.mean(dim=0, keepdim=True)
-    if algorithm == "eigh":
-        eigenvalues, eigenvectors = _pca_eigh(x_centered)
-    elif algorithm == "svd":
-        eigenvalues, eigenvectors = _pca_svd(x_centered)
-    elif algorithm == "power":
-        eigenvalues, eigenvectors = _pca_power(x_centered, power_iters, power_tol)
-    else:
-        raise ValueError(f"Unknown PCA algorithm: {algorithm!r}")
+    eigenvalues, eigenvectors = decompose(x_t - x_t.mean(dim=0, keepdim=True))
     if whiten:
         eigenvectors = eigenvectors * torch.rsqrt(eigenvalues.unsqueeze(0) + eps)
     return eigenvalues, eigenvectors
-
-
-def _pca_eigh(x_centered: Tensor) -> tuple[Tensor, Tensor]:
-    """PCA via eigendecomposition of the covariance matrix (CUDA/CPU).
-
-    Not supported on MPS — use ``"power"`` instead.
-    """
-    sigma = (x_centered.T @ x_centered) / len(x_centered)
-    return torch.linalg.eigh(sigma)
-
-
-def _pca_svd(x_centered: Tensor) -> tuple[Tensor, Tensor]:
-    """PCA via SVD on the data matrix (CUDA/CPU).
-
-    Returned in ascending eigenvalue order to match eigh convention.
-    Not supported on MPS — use ``"power"`` instead.
-    """
-    if x_centered.device.type == "mps":
-        raise RuntimeError("pca algorithm svd is not supported on MPS; use 'power'")
-    _U, s, vh = torch.linalg.svd(x_centered, full_matrices=False)
-    del _U
-    eigenvalues = s * s / len(x_centered)
-    eigenvectors = vh.T
-    return eigenvalues.flip(0), eigenvectors.flip(1)
-
-
-def _pca_power(
-    x_centered: Tensor,
-    num_iters: int = 200,
-    tol: float = 0.0,
-) -> tuple[Tensor, Tensor]:
-    """PCA via simultaneous power iteration with QR orthogonalization.
-
-    Only uses matmul and basic arithmetic — runs natively on MPS
-    (no CPU fallback). Uses Householder QR for numerical stability.
-
-    Args:
-      x_centered: Mean-centered observations (N, D).
-      num_iters: Maximum power-iteration sweeps.
-      tol: Subspace-convergence threshold; when > 0, iteration stops once the
-        basis update changes the eigenvalue estimate by less than ``tol``.
-
-    Returns:
-      eigenvalues: Ascending eigenvalues (D,).
-      eigenvectors: Columns are the corresponding eigenvectors (D, D).
-
-    """
-    sigma = (x_centered.T @ x_centered) / len(x_centered)
-    d = sigma.shape[0]
-    basis = torch.randn(d, d, device=sigma.device, dtype=sigma.dtype)
-    basis, _ = _householder_qr(basis)
-    prev = (basis * (sigma @ basis)).sum(dim=0)
-    for _ in range(num_iters):
-        basis, _ = _householder_qr(sigma @ basis)
-        if tol > 0:
-            eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
-            if (eigenvalues - prev).abs().max() < tol:
-                prev = eigenvalues
-                break
-            prev = eigenvalues
-    eigenvalues = (basis * (sigma @ basis)).sum(dim=0)
-    idx = eigenvalues.argsort()
-    return eigenvalues[idx], basis[:, idx]
 
 
 def _householder_qr(mat: Tensor) -> tuple[Tensor, Tensor]:

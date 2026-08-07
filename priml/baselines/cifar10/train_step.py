@@ -28,9 +28,9 @@ from torch.nn import functional
 
 import torch
 
-from priml.baselines.cifar10.model import PcaFn, ResNet
+from priml.baselines.cifar10.model import ResNet
 from priml.data.augmentation_gpu import pad_crop_flip
-from priml.math.stats import pca
+from priml.math.stats import PcaDecompose, pca_eigh
 from priml.optimizers import (
     CompositeOptimizer,
     apply_lr_scale,
@@ -122,8 +122,8 @@ class Cifar10TrainStep:
         whiten_cache_path: Path | str = ""
         """File caching fitted whitening weights; empty disables the cache."""
 
-        whiten_fit: PcaFn = pca
-        """PCA fitter for the whitening layer.
+        whiten_decompose: PcaDecompose = pca_eigh
+        """Eigendecomposition backing the whitening layer's PCA fit.
 
         The default reaches ``linalg.eigh``, which MPS lacks; pass
         ``pca_power`` there.
@@ -293,7 +293,7 @@ class Cifar10TrainStep:
         else:
             model.init_whiten(
                 media[: self.config.whiten_num_images],
-                fit=self.config.whiten_fit,
+                decompose=self.config.whiten_decompose,
             )
             if cache is not None:
                 cache.parent.mkdir(parents=True, exist_ok=True)

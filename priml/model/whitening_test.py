@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
+
 import pytest
 import torch
 
-from priml.math.stats import pca
+from priml.math.stats import pca_eigh, pca_power
 from priml.model.whitening import PCAWhiteningConv2d
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
@@ -22,13 +24,13 @@ def test_init_whiten_rejects_wrong_out_channels():
     layer = PCAWhiteningConv2d(3, 48, kernel_size=3, padding=1, bias=False)
     images = torch.randn(16, 3, 8, 8)
     with pytest.raises(ValueError, match="out_channels"):
-        layer.init_whiten(images, fit=pca)
+        layer.init_whiten(images, decompose=pca_eigh)
 
 
 def test_init_whiten_shape():
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
     images = torch.randn(100, 3, 8, 8)
-    layer.init_whiten(images, fit=pca)
+    layer.init_whiten(images, decompose=pca_eigh)
     assert layer.weight.shape == (54, 3, 3, 3)
     assert not layer.weight.requires_grad
 
@@ -36,7 +38,7 @@ def test_init_whiten_shape():
 def test_init_whiten_forward():
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
     images = torch.randn(100, 3, 8, 8)
-    layer.init_whiten(images, fit=pca)
+    layer.init_whiten(images, decompose=pca_eigh)
     out = layer(images[:4])
     assert out.shape == (4, 54, 8, 8)
 
@@ -45,10 +47,18 @@ def test_rank_doubling():
     """Verify [V, -V] structure: second half = negated first half."""
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
     images = torch.randn(100, 3, 8, 8)
-    layer.init_whiten(images, fit=pca)
+    layer.init_whiten(images, decompose=pca_eigh)
     first_half = layer.weight.data[:27]
     second_half = layer.weight.data[27:]
     assert torch.allclose(first_half, -second_half)
+
+
+def test_init_whiten_accepts_injected_decompose():
+    """The layer forwards an arbitrary decomposer, e.g. the MPS-native one."""
+    layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
+    images = torch.randn(100, 3, 8, 8)
+    layer.init_whiten(images, decompose=functools.partial(pca_power, num_iters=20))
+    assert layer.weight.shape == (54, 3, 3, 3)
 
 
 def test_weights_frozen():
