@@ -21,6 +21,10 @@ import sys
 import pytest
 
 
+if TYPE_CHECKING:
+    from priml.distributed.testing import WarmPoolGetter
+
+
 def cap_math_threads() -> None:
     """Give each process one math thread, before any native library loads.
 
@@ -54,10 +58,6 @@ def cap_math_threads() -> None:
 
 
 cap_math_threads()
-
-
-if TYPE_CHECKING:
-    from priml.distributed.testing import WarmPoolGetter
 
 
 @pytest.fixture(autouse=True)
