@@ -215,7 +215,7 @@ jobs:
             --validation-command 'uv run python -c "import priml"' \
             --validation-command 'rm -rf dist' \
             --validation-command 'uv build --out-dir dist' \
-            --validation-command 'wheel="$(ls dist/priml-*.whl | head -n 1)"; uv run --isolated --with "$wheel" python -P -c "import priml; print(priml.__file__)"' \
+            --validation-command 'wheels=(dist/priml-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" python -P -c "import priml; print(priml.__file__)"' \
             --open-pr false
 
       - name: Open or update target import PR
