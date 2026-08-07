@@ -1,12 +1,12 @@
 """Package-level pytest fixtures for priml.
 
-Clears leaked process-global runtime state between tests so runtime-touching
-tests are order-independent, and provides the ``warm_pools`` fixture the
-distributed integration tests need. Both are defined here (not only in the
-monorepo root conftest) so the public export -- which ships this file but not
-the root conftest -- can still collect and run those tests: everything
-``warm_pools`` needs lives inside priml (``priml.distributed.testing``), so the
-fixture is self-contained in the exported package.
+Owns every piece of test setup priml needs: the native-thread caps, the
+process-global runtime reset that keeps runtime-touching tests
+order-independent, and the ``warm_pools`` fixture the distributed integration
+tests need. All of it lives here rather than in the monorepo's repo-root
+conftest, which does not ship: the exported package would otherwise lose the
+caps and an 8-worker run would oversubscribe the box. The root conftest imports
+from this module instead of repeating it, so the two cannot drift.
 """
 
 from __future__ import annotations
@@ -15,9 +15,45 @@ from collections.abc import Generator, Mapping
 from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
+import os
 import sys
 
 import pytest
+
+
+def cap_math_threads() -> None:
+    """Give each process one math thread, before any native library loads.
+
+    xdist parallelizes at the process level, so a worker that also spawns a
+    full-width BLAS/OpenMP pool oversubscribes the box: N workers x N threads.
+    The effect is not a mild slowdown -- an 8-worker run turns 2ms training
+    steps into seconds and trips per-test timeouts.
+
+    Must run before NumPy/PyTorch/SciPy import: torch reads ``OMP_NUM_THREADS``
+    at import and pins its ATen intra-op pool to match. Conftest import is early
+    enough; ``addopts`` is not.
+
+    ``MKL_CBWR`` pins a CPU-independent GEMM kernel so float32 matmul is
+    bit-identical across x86 hosts (Intel AVX-512 vs AMD EPYC), which
+    numeric-parity tests compare under tight tolerances. MKL reads it only at
+    its first GEMM, so it too must be set before any matmul runs.
+
+    Every variable uses ``setdefault``, so an explicit
+    ``OMP_NUM_THREADS=8 pytest`` always wins.
+    """
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",  # macOS Accelerate
+        "BLIS_NUM_THREADS",
+    ):
+        os.environ.setdefault(name, "1")
+    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")
+
+
+cap_math_threads()
 
 
 if TYPE_CHECKING:
