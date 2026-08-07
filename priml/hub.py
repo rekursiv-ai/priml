@@ -31,7 +31,7 @@ def get_cache_dir() -> Path:
     """Return the per-user cache directory for downloaded models.
 
     Model weights are regenerable downloads, not experiment state, so they
-    live under the XDG cache root (``~/.cache/loop/models``) rather than the
+    live under ``cache_dir("rekursiv-ai") / "models"`` rather than the
     runtime scratch tree -- the hub is a shared client utility, not a
     ``runtime.py`` derivative. The single overridable cache seam (tests patch
     this function).
@@ -40,7 +40,7 @@ def get_cache_dir() -> Path:
       models_dir: Path to the model cache directory (created if absent).
 
     """
-    models_dir = cache_dir("loop") / "models"
+    models_dir = cache_dir("rekursiv-ai") / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     return models_dir
 

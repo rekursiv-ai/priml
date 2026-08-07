@@ -43,7 +43,7 @@ def test_get_cache_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", "/xdg-cache")
     with patch("pathlib.Path.mkdir"):
         cache_dir = get_cache_dir()
-    assert cache_dir == Path("/xdg-cache/loop/models")
+    assert cache_dir == Path("/xdg-cache/rekursiv-ai/models")
 
 
 def test_get_cache_dir_creates_directory():
