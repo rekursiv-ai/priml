@@ -15,7 +15,6 @@ an explicit list whose length IS the block count.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import field
 from typing import Self, cast, override
 
@@ -26,7 +25,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.math.custom_types import TensorFn
-from priml.math.stats import pca
+from priml.math.stats import PcaDecompose, pca_eigh
 from priml.model.custom_types import (
     ActivationFn,
     ChannelsIn,
@@ -35,10 +34,6 @@ from priml.model.custom_types import (
 )
 from priml.model.init import InitFn, call_init
 from priml.model.whitening import PCAWhiteningConv2d
-
-
-type PcaFn = Callable[..., tuple[Tensor, Tensor]]
-"""Fits a PCA decomposition, returning ``(eigenvalues, eigenvectors)``."""
 
 
 class ResidualBlock(nn.Module):
@@ -473,16 +468,22 @@ class SpeedNet(nn.Module):
             head_weight = cast("nn.Linear", self.head).weight.data
             head_weight.div_(head_weight.std())
 
-    def init_whiten(self, media: Tensor, *, fit: PcaFn = pca) -> None:
+    def init_whiten(
+        self,
+        media: Tensor,
+        *,
+        decompose: PcaDecompose = pca_eigh,
+    ) -> None:
         """Fit the whitening layer to a batch of training images.
 
         Args:
           media: ``(N, channels_in, H, W)`` images to decompose.
-          fit: PCA fitter. The default reaches ``linalg.eigh``, which MPS
-            lacks; pass a power-iteration fitter there.
+          decompose: Eigendecomposition backing the PCA fit. The default
+            reaches ``linalg.eigh``, which MPS lacks; pass ``pca_power``
+            there.
 
         """
-        self.whiten.init_whiten(media, fit=fit)
+        self.whiten.init_whiten(media, decompose=decompose)
 
     @override
     def forward(self, media: Tensor) -> Tensor:

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from torch import Tensor, nn
 
 import torch
 
-from priml.math.stats import pca
+from priml.math.stats import PcaDecompose, pca, pca_eigh
 
 
 class PCAWhiteningConv2d(nn.Conv2d):
@@ -34,15 +33,15 @@ class PCAWhiteningConv2d(nn.Conv2d):
         self,
         train_images: Tensor,
         eps: float = 5e-4,
-        fit: Callable[..., tuple[Tensor, Tensor]] = pca,
+        decompose: PcaDecompose = pca_eigh,
     ) -> None:
         """Initialize weights with PCA eigenvectors from image patches.
 
         Args:
           train_images: Training images of shape (N, C, H, W).
           eps: Regularization for whitening eigenvalues.
-          fit: PCA fitter returning ``(eigenvalues, eigenvectors)``. The
-            default reaches ``linalg.eigh``, which MPS lacks; pass
+          decompose: Eigendecomposition backing the PCA fit. The default
+            ``pca_eigh`` reaches ``linalg.eigh``, which MPS lacks; pass
             ``pca_power`` there.
 
         """
@@ -59,6 +58,6 @@ class PCAWhiteningConv2d(nn.Conv2d):
             .transpose(1, 3)
             .reshape(-1, C * kH * kW)
         )
-        _, eigenvectors = fit(patches, whiten=True, eps=eps)
+        _, eigenvectors = pca(patches, whiten=True, eps=eps, decompose=decompose)
         kernel = eigenvectors.T.reshape(-1, C, kH, kW).to(self.weight.dtype)
         self.weight.data[:] = torch.cat([kernel, -kernel])

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import functools
+
 import pytest
 import torch
 
 from priml.math.stats import (
     SlidingWindow,
-    _pca_eigh,
-    _pca_power,
     cov,
     ema_update,
     entropy_logits,
     entropy_logits_mean_all_to_all,
     entropy_probs,
     pca,
+    pca_eigh,
+    pca_power,
+    pca_svd,
     quantile_normalize,
 )
 
@@ -163,30 +166,57 @@ def test_pca_power_matches_eigh():
     torch.manual_seed(7)
     x = torch.randn(100, 8)
     x_centered = (x - x.mean(0)).float()
-    vals_eigh, vecs_eigh = _pca_eigh(x_centered)
-    vals_power, vecs_power = _pca_power(x_centered)
+    vals_eigh, vecs_eigh = pca_eigh(x_centered)
+    vals_power, vecs_power = pca_power(x_centered)
     torch.testing.assert_close(vals_power, vals_eigh, atol=1e-3, rtol=1e-3)
     # Eigenvectors may differ by sign; compare absolute values.
     torch.testing.assert_close(vecs_power.abs(), vecs_eigh.abs(), atol=1e-3, rtol=1e-3)
 
 
 def test_pca_power_tol_early_exit_matches_full():
-    """power_tol early-exit still recovers the eigenvalues to tolerance."""
+    """The ``tol`` early-exit still recovers the eigenvalues to tolerance."""
     torch.manual_seed(7)
     x = torch.randn(100, 8)
     x_centered = (x - x.mean(0)).float()
-    vals_full, _ = _pca_power(x_centered, num_iters=200, tol=0.0)
-    vals_tol, _ = _pca_power(x_centered, num_iters=200, tol=1e-6)
+    vals_full, _ = pca_power(x_centered, num_iters=200, tol=0.0)
+    vals_tol, _ = pca_power(x_centered, num_iters=200, tol=1e-6)
     torch.testing.assert_close(vals_tol, vals_full, atol=1e-3, rtol=1e-3)
 
 
-def test_pca_exposes_power_params():
-    """Pca threads power_iters/power_tol into the power algorithm."""
+def test_pca_accepts_injected_decompose():
+    """A partial binds the power iteration's knobs without touching ``pca``."""
     torch.manual_seed(7)
     x = torch.randn(100, 8)
-    vals, vecs = pca(x, algorithm="power", power_iters=50, power_tol=1e-6)
+    vals, vecs = pca(
+        x,
+        decompose=functools.partial(pca_power, num_iters=50, tol=1e-6),
+    )
     assert vals.shape == (8,)
     assert vecs.shape == (8, 8)
+
+
+def test_pca_svd_matches_eigh():
+    """The SVD decomposer agrees with eigh up to eigenvector sign."""
+    torch.manual_seed(8)
+    x = torch.randn(100, 6)
+    vals_eigh, vecs_eigh = pca(x, decompose=pca_eigh)
+    vals_svd, vecs_svd = pca(x, decompose=pca_svd)
+    torch.testing.assert_close(vals_svd, vals_eigh, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(vecs_svd.abs(), vecs_eigh.abs(), atol=1e-4, rtol=1e-4)
+
+
+def test_pca_third_party_decompose_needs_no_library_change():
+    """An arbitrary caller-supplied decomposer is honored verbatim."""
+
+    def scaled_eigh(x_centered: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        eigenvalues, eigenvectors = pca_eigh(x_centered)
+        return eigenvalues * 2, eigenvectors
+
+    torch.manual_seed(9)
+    x = torch.randn(50, 4)
+    baseline, _ = pca(x)
+    scaled, _ = pca(x, decompose=scaled_eigh)
+    torch.testing.assert_close(scaled, baseline * 2)
 
 
 def test_pca_zca_whitens():
