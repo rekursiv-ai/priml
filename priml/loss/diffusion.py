@@ -10,8 +10,8 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.math.custom_types import TensorableFn
 from priml.math.diffusion.schedule import (
-    LogSNRFn,
     compute_log_alpha,
     log_sigma_from_log_snr_per_rectified_flow,
     log_snr_from_log_time_per_truncnormicdf,
@@ -35,15 +35,13 @@ class DiffusionLoss(nn.Module):
     """
 
     class Config(Fig["DiffusionLoss"]):
-        logsnr_fn: LogSNRFn = log_snr_from_log_time_per_truncnormicdf
+        logsnr_fn: TensorableFn = log_snr_from_log_time_per_truncnormicdf
         """Maps log_t to log signal-to-noise ratio."""
         target_fn: TargetFn = target_rectified_flow
         """Computes training target and prediction from model output."""
-        corruption_fn: Callable[[Tensor], Tensor] = (
-            log_sigma_from_log_snr_per_rectified_flow
-        )
+        corruption_fn: TensorableFn = log_sigma_from_log_snr_per_rectified_flow
         """Maps log_snr to log noise coefficient."""
-        time_transform: Callable[[Tensor], Tensor] | None = None
+        time_transform: TensorableFn | None = None
         """Optional transform applied to log_t before logsnr_fn."""
         snr_gamma: float = 0.0
         """Min-SNR-γ loss weighting (Hang et al. 2023). 0 disables.

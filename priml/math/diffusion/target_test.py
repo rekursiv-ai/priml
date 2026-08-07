@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from torch import Tensor, exp
 
 import pytest
 import torch
 
+from priml.math.custom_types import TensorFn
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
     log_sigma_from_log_snr_per_rectified_flow,
@@ -36,7 +35,7 @@ from priml.math.diffusion.target import (
 )
 def test_target_x(
     target_fn: TargetFn,
-    corrupt_fn: Callable[[Tensor], Tensor],
+    corrupt_fn: TensorFn,
 ) -> None:
     torch.manual_seed(42)
     x_shape = 2, 4, 3, 6, 5
@@ -82,7 +81,7 @@ def test_target_x(
 )
 def test_target_reconstruction(
     target_fn: TargetFn,
-    corrupt_fn: Callable[[Tensor], Tensor],
+    corrupt_fn: TensorFn,
 ) -> None:
     """With a perfect model, x_clean == x_original and eps_clean == eps_original."""
     torch.manual_seed(0)

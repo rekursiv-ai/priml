@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 import functools
 import math
@@ -10,7 +10,11 @@ from torch import Tensor
 import torch
 import torch.fft
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import (
+    Tensorable,
+    TensorableFn,
+    convert_to_tensor,
+)
 
 
 def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
@@ -144,7 +148,7 @@ def _dctnd(
     x: Tensorable,
     *,
     axis: int | Sequence[int] | None = None,
-    dct_fn: Callable[[Tensor], Tensor],
+    dct_fn: TensorableFn,
 ) -> Tensor:
     x = convert_to_tensor(x)
     axes = _normalize_axes(x.ndim, axis)

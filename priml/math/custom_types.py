@@ -9,7 +9,7 @@ on startup.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast, overload
 
 import functools
@@ -24,8 +24,10 @@ import torch
 
 __all__ = [
     "Numeric",
+    "TensorFn",
     "TensorNest",
     "Tensorable",
+    "TensorableFn",
     "TensorableNest",
     "convert_to_tensor",
     "jaxtypechecked",
@@ -44,6 +46,28 @@ TensorableNest = (
     Sequence["TensorableNest"] | Mapping[str, "TensorableNest"] | Tensorable
 )
 TensorNest = Sequence["TensorNest"] | Mapping[str, "TensorNest"] | Tensor
+
+
+type TensorFn = Callable[[Tensor], Tensor]
+"""TITO -- tensor in, tensor out.
+
+Mathematically an *endomorphism* (a map from a set into itself), or more
+precisely an endofunction, since the set here is one of values rather than an
+arbitrary category. Both words are avoided: they are fancier than the thing they
+name, and a reader who looks one up learns nothing that ``Tensor -> Tensor`` did
+not already say.
+"""
+
+
+type TensorableFn = Callable[[Tensorable], Tensor]
+"""The usual ``priml.math`` shape: accept anything coercible, return a Tensor.
+
+Not TITO: the domain (lists, arrays, scalars, tensors) is wider than the
+codomain, so this is not a :data:`TensorFn`. Such a function composes with
+itself only because ``Tensor`` is one of the things ``Tensorable`` admits. It IS
+assignable where a ``TensorFn`` is wanted, since parameters are contravariant;
+the reverse is rejected.
+"""
 
 
 @overload

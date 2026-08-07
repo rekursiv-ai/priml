@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import cast
 
 import functools
@@ -10,7 +10,11 @@ from torch import Tensor, distributions
 
 import torch
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import (
+    Tensorable,
+    TensorableFn,
+    convert_to_tensor,
+)
 from priml.math.numeric import logsubexp
 
 
@@ -270,7 +274,7 @@ def quantile_truncated_normal(
 
 def pdf_logit_distribution(
     x: Tensorable,
-    base_pdf: Callable[[Tensor], Tensor],
+    base_pdf: TensorableFn,
 ) -> Tensor:
     """Density of Y = sigmoid(X) at y, given density of X.
 
@@ -301,7 +305,7 @@ def pdf_logit_distribution(
 
 def cdf_logit_distribution(
     x: Tensorable,
-    base_cdf: Callable[[Tensor], Tensor],
+    base_cdf: TensorableFn,
 ) -> Tensor:
     """CDF of Y = sigmoid(X), given CDF of X.
 
@@ -320,7 +324,7 @@ def cdf_logit_distribution(
 
 def quantile_logit_distribution(
     x: Tensorable,
-    base_quantile: Callable[[Tensor], Tensor],
+    base_quantile: TensorableFn,
 ) -> Tensor:
     """Quantile function of Y = sigmoid(X), given quantile of X.
 

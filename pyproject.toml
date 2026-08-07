@@ -81,11 +81,14 @@ typecheck = [
     # the type gate resolves it without shipping it as a core dep.
     "safetensors",
 ]
-dev = [
-    {include-group = "debug"},
+"pre-commit" = [
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
+]
+dev = [
+    {include-group = "debug"},
+    {include-group = "pre-commit"},
 ]
 
 [project.scripts]

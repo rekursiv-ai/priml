@@ -14,7 +14,6 @@ from priml.math.diffusion.sampling import (
     sample_iter,
 )
 from priml.math.diffusion.schedule import (
-    LogSNRFn,
     compute_log_alpha,
     input_conditioning_identity,
     input_conditioning_rectified_flow,
@@ -42,7 +41,6 @@ from priml.math.diffusion.target import (
 
 
 __all__ = [
-    "LogSNRFn",
     "SampleModelFn",
     "SampleOneStepFn",
     "SampleOneStepResult",

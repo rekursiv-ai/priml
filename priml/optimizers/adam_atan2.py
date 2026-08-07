@@ -17,9 +17,12 @@ References:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import Any, cast, overload, override
 
+from configgle import Fig
 from torch import Tensor
+from torch.optim import Optimizer
 
 import torch
 
@@ -27,8 +30,41 @@ import torch
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, Any]]
 
 
-class AdamATan2(torch.optim.Optimizer):
+class AdamATan2(Optimizer):
     """Adam variant using atan2 normalization in place of m/(sqrt(v)+eps)."""
+
+    class Config(Fig["Callable[..., AdamATan2]"]):
+        """AdamATan2 hyperparameters.
+
+        ``make()`` yields a ``partial``, not the optimizer: a config tree has
+        no parameters to hand it. Call the result with them::
+
+            optimizer = AdamATan2.Config().make()(model.parameters())
+        """
+
+        lr: float = 1e-3
+        """Step size."""
+
+        betas: tuple[float, float] = (0.9, 0.999)
+        """Decay rates for the first and second moment estimates."""
+
+        weight_decay: float = 1e-2
+        """Decoupled weight decay."""
+
+        @override
+        def make(self) -> Callable[..., AdamATan2]:
+            """Return a constructor awaiting the parameters to optimize."""
+            final = (
+                self.copy_tree()
+                if getattr(self, "_finalized", False)
+                else self.copy_tree().finalize()
+            )
+            return partial(
+                AdamATan2,
+                lr=final.lr,
+                betas=final.betas,
+                weight_decay=final.weight_decay,
+            )
 
     def __init__(
         self,
