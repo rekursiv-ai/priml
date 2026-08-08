@@ -46,4 +46,4 @@ jobs:
           uv run python -c "import priml"
           rm -rf dist
           uv build --out-dir dist
-          wheels=(dist/priml-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" python -P -c "import priml; print(priml.__file__)"
+          wheels=(dist/priml-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "configgle @ git+https://github.com/rekursiv-ai/configgle" python -P -c "import priml; print(priml.__file__)"
