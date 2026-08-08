@@ -14,9 +14,9 @@ what priml's Configs MEAN and where new code belongs.
 An experiment's entire state is one config tree. Four properties make that worth
 doing, and every rule below follows from one of them.
 
-1. **Hierarchical** -- a reader holds one node at a time. A slot's contents are
-   somebody else's problem until you open them, so complexity stays bounded
-   however large the tree grows.
+1. **Hierarchical** -- a reader holds one node at a time. A slot's contents stay
+   unread until opened, so complexity stays bounded however large the tree
+   grows.
 2. **Injectable** -- leaves own churn, not ancestors. Adding an optimizer must
    not edit the train step; the root holds a slot and no knowledge of what
    fills it.
@@ -55,7 +55,7 @@ Experiments should be entirely defined by their `Config`. NEVER USE: a
 module-level constant holding a tunable, an `os.environ` read, etc.
 
 Since `finalize()` is for config inspection, it should be lightweight. NEVER use
-it for durable side-efftcs, stage data, monkeypatch, etc.
+it for durable side-effects, staging data, monkeypatching, etc.
 
 Future-proof `Config`s by facilitating dependency injection for likely-to-change
 components. Eg, rather than `"relu"` just assign the field as `torch.relu`.
@@ -65,12 +65,12 @@ introduces the possibility for error.
 ## 1. What a tree looks like
 
 Construct, then mutate. Every line names its full path, so the file reads as a
-config and a reader sees _what changed, linearly,_ and without the cognitive
-burden of parsing indents.
+config and _what changed_ reads linearly, without parsing indents to place a
+value.
 
-Be sure that every docstring explicitly names: "Hypothesis", "References", and
-"Results (to be added after the fact). Exception: it is permissible to drop
-"Hypothesis" and/or "References" on grid sweeps.
+Be sure that every docstring explicitly names "Hypothesis", "References", and
+"Results" (the last filled in after the fact). Exception: it is permissible to
+drop "Hypothesis" and/or "References" on grid sweeps.
 
 The canonical example is `priml.baselines.cifar10.experiments`; excerpt:
 
@@ -154,11 +154,17 @@ def exp001() -> Cifar10TrainLoop:
 ```
 
 `exp001` reads as a diff: call the named parent, change one thing, return. The
-swap touches no other node -- the train step never learns Muon exists, because
-`optimizer` is a slot, not a `Literal` it branches on. Nothing here is a mode
-string: `model`, `block`, `optimizer`, and `schedule` hold a config or a
-function, so a variant is a different VALUE. `Cifar10TrainLoop` pre-narrows the
-`step` and `dataset` slots (section 6), so no line needs `isinstance`.
+swap touches no other node, because `optimizer` is a slot rather than a
+`Literal` the train step branches on. Nothing here is a mode string: `model`,
+`block`, `optimizer`, and `schedule` hold a config or a function, so a variant
+is a different VALUE.
+
+`Cifar10TrainLoop` pre-narrows the `step` and `dataset` slots (section 6), so no
+line needs `isinstance`. This NARROWS the `configgle` skill's guidance rather
+than contradicting it: that skill's per-factory `assert isinstance(...)` is
+correct wherever a slot's type varies between experiments. In a baseline it does
+not -- every experiment in the directory shares one step and one dataset -- so
+the assert belongs once, on the class.
 
 `CompositeOptimizer` is the adapter even for one member: the slot is called with
 the MODEL, so something must route parameters to optimizers -- a bare
@@ -184,18 +190,18 @@ new class        │ DEFAULT. A small Config in    │ A defensible ML primitive
                  │ existing slot.                │ needed by others.
 ```
 
-Bias toward the bottom-left. A new injected Config is cheap, local, and prints;
-a new attribute on a shared Config is permanent and taxes every other user.
+Bias toward the bottom-left. A new injected Config is local and prints; a new
+attribute on a shared Config is permanent and every other user carries it.
 
 Which column: state what the code does without naming your dataset, your model's
 layer names, or your experiment. If you cannot, it is not library code. Which
 row: a scalar parameter, or a behavior with state of its own? A field meaningful
-only when ANOTHER field has a particular value is a behavior wearing a scalar's
-clothes -- `conv_momentum` is noise on every AdamW run.
+only when ANOTHER field has a particular value is the second --
+`conv_momentum` is noise on every AdamW run.
 
 **Write it local, promote it later.** New code starts in the baseline that needs
-it, where being wrong costs one directory. It earns a move into priml on one of
-two triggers, never on a guess:
+it, where a wrong guess reaches one directory. Two triggers move it into priml;
+nothing else does:
 
 - **A second caller needs it.** Two baselines reaching for the same thing is
   evidence; one baseline and an intention is not. The second caller reveals
@@ -205,28 +211,30 @@ two triggers, never on a guess:
   independent of any experiment, so waiting only means the first caller wrote
   it worse.
 
-Speculative promotion is the failure mode: code that "looks reusable" moves up,
-carries its origin's assumptions in a default, and the location vouches for a
-claim nobody checked.
+Promote on a guess and the code carries its origin's assumptions in a default,
+where its position in `priml/` presents them as general.
 
-And what gets promoted is a CONFIGGLEABLE CLASS, never a function carrying
-keyword arguments. Kwarg functions are the scourge configgle exists to destroy.
+What gets promoted is a CONFIGGLEABLE CLASS, never a function carrying keyword
+arguments.
 
 ```python
-# priml/optimizers/partition.py  # Bad -- same body, now a library promise
+# priml/optimizers/partition.py
+# Bad -- the kwarg is invisible to pprint, --override, a fork, and a diff.
 def muon_and_sgd(model, *, matrix_excludes=("head",)): ...
 
 
-class MuonAndSgd:  # Good
-    class Config(Fig["MuonAndSgd"]): ...
+class MuonAndSgd:  # Good -- the same value is a node
+    class Config(Fig["MuonAndSgd"]):
+        matrix_excludes: list[str] = field(default_factory=list)
+        """Parameter-name substrings routed to SGD instead of Muon."""
 ```
 
 A function's keyword arguments are not nodes in the tree. They do not print, so
 `matrix_excludes=("head",)` never appears in `pprint` and the run stops being
 reproducible from its config; they cannot be reached by `--override`, mutated by
-a fork, or diffed against a parent. The default also smuggles in a claim -- that
-every model names its classifier `head` -- which was one model's recipe under
-`baselines/cifar10/` and becomes a library promise under `priml/optimizers/`.
+a fork, or diffed against a parent. The default also asserts that every model
+names its classifier `head` -- one model's recipe under `baselines/cifar10/`,
+a library-wide requirement under `priml/optimizers/`.
 
 A `Config` fixes both: its fields are nodes, so they print and diff, and each is
 a slot a caller can fill. Promotion then also cuts THROUGH the original
@@ -235,8 +243,19 @@ function: routing is general (`composite.py`'s `Selector`, `excluding`,
 `excluding(Muon.eligible_tensor, "head")` names a layer, so it stays in the
 experiment.
 
-Pure `math/` functions are the exception -- tensors in, tensors out, nothing to
-configure.
+**`math/` is the one deliberately anti-configgle layer.** Nothing in it defines
+a `Config`, and nothing should: a function there takes tensors and returns
+tensors, so there is no state to configure, nothing to print, and no slot to
+inject. Keyword arguments are fine and expected (`dim=-1`, `eps=5e-4`,
+`whiten=True`) because they are arguments to a computation, not hidden
+experiment state -- a caller passes them explicitly at every call, or binds them
+in a `PartialConfig`, which puts them back IN the tree.
+
+That is why the layer inverts: pure functions belong there, and the configgleable
+class that consumes one belongs in `loss/`, `model/`, or `optimizers/`.
+`stablemax_cross_entropy` lives in `math/loss.py`; the `SimpleLoss` that wraps
+it, with its `ignore_index` and reduction, lives in `loss/`. So a `Config`
+inside `math/` is wrong, and so is a kwarg-carrying function anywhere else.
 
 ## 3. The layers
 
@@ -275,11 +294,11 @@ Then it is an injection point, not an enumeration.
 
 ```python
 optimizer_kind: Literal["adamw", "muon"] = "adamw"  # Bad -- closed set
-conv_momentum: float = 0.6  # noise on every adamw run
-ns_steps: int = 3  # noise on every adamw run
+conv_momentum: float = 0.6  # Bad -- noise on every adamw run
+ns_steps: int = 3  # Bad -- noise on every adamw run
 
 optimizer: Makeable[Callable[..., Optimizer]] = field(  # Good -- one slot
-    default_factory=lambda: CompositeOptimizer.Config(...),
+    default_factory=CompositeOptimizer.Config,
 )
 ```
 
@@ -287,7 +306,7 @@ Under the enum, every option's parameters pile onto the shared node and adding
 Lion edits the train step -- an ANCESTOR -- to teach it a name; the print shows
 `"muon"`, a label, not what Muon does. Under the slot the root holds no
 knowledge of what fills it, Muon's parameters live on Muon where they are always
-meaningful, and Lion arrives as a leaf nobody above hears about.
+meaningful, and Lion is added without editing any node above it.
 
 ### A flag is a closed set of two
 
@@ -296,7 +315,7 @@ dirac_init: bool = False  # Bad -- a closed set of two
 init_conv: InitFn | None = None  # Good -- None keeps torch's
 
 
-def whiten_algorithm(device) -> str:  # Bad -- impl behind a string
+def whiten_algorithm(device: torch.device) -> str:  # Bad -- impl behind a string
     return "power" if device.type == "mps" else "eigh"
 
 
@@ -319,13 +338,42 @@ carries the `1 / fan_in` rule with the weights it divides: the branch disappears
 and a plain `nn.Linear` drops in. Same shape as `CausalLM.Config.lm_head`.
 
 Two more of the same shape: a field meaningful only when another field has a
-given value belongs on the injected piece; a count beside a list of the same
-thing is redundant, since the list's length IS the count. Declare what a slot
-must DO, not what it must BE.
+given value belongs on the injected piece; a count beside an EXPLICIT list is
+redundant, since the list's length IS the count. (A count is right when the slot
+holds one template to broadcast -- `blocks_per_stage` beside a single `block`.)
+Declare what a slot must DO, not what it must BE.
 
 Constants that are facts, not tunables, take `Final`:
 `NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset; a batch size
 is a tunable and belongs on the config, as `check-config-globals` enforces.
+
+### Prefer mutable containers
+
+A config is EDITED, not rebuilt, so a collection field should be mutable:
+
+```python
+optimizers: tuple[Makeable[Optimizer], ...] = ()  # Bad -- a fork rebuilds it
+optimizers: list[Makeable[Optimizer]] = field(default_factory=list)  # Good
+```
+
+With a tuple, changing one member means restating all of them, and which element
+the fork meant to change is buried in a rewritten literal. With a list, a fork
+says
+`cfg.step.optimizer.optimizers[1] = Muon.Config()` or appends, and both the diff
+and the `pprint` show exactly the one thing that moved. Same for `dict` over a
+frozen mapping: `cfg.metrics["accuracy"] = TopK.Config()` adds a metric without
+touching the others.
+
+`default_factory` is required for any mutable default -- a bare
+`optimizers: list = []` shares one list across every instance, which
+`dataclasses` rejects outright. Use the class itself where the default is a
+Config (`default_factory=Topping.Config`), and a `lambda` only when the default
+needs constructor arguments.
+
+Immutable is right for a tuple-of-scalars whose length is part of the shape --
+`channels_hidden: tuple[int, ...] = (64, 128, 256)` is one value describing the
+stage widths, and a fork that changes the width count changes the architecture,
+so restating the whole tuple states the change.
 
 ### Blessed nouns
 
@@ -354,14 +402,12 @@ words. Use these; do not invent a synonym.
 
 Batches are keyed `media` and `label`; a train step returns `loss` and `model`
 (`TrainStepOutput`). A name ending `_fn` is a callable slot; `_dir` is a path;
-`num_*` is a count; `*_kind` or `*_algorithm` is the enum smell section 4 bans.
+`num_*` is a count; `*_kind` or `*_algorithm` is the enum smell above.
 
 ## 5. Writing a module
 
-Every building block speaks `channels_in` / `channels_out` / `channels_hidden`,
-`-1` meaning "infer from the others in `finalize()`". A parent pushes dimensions
-down with `propagate_attr` (`model/custom_types.py`), gated on a
-runtime-checkable Protocol:
+A parent pushes the shape nouns down with `propagate_attr`
+(`model/custom_types.py`), gated on a runtime-checkable Protocol:
 
 ```python
 propagate_attr(self.block, "channels_in", channels, protocol=ChannelsIn)
@@ -369,11 +415,9 @@ propagate_attr(self.block, "depth", self.depth)  # protocol=None: best effort
 ```
 
 The Protocol is load-bearing: a child implementing `ChannelsIn` MUST accept the
-value, so a typo raises instead of silently building with the `-1` sentinel,
-while a child that does not implement it opts out. Never
+value, so a typo raises instead of building with the `-1` sentinel and no
+diagnostic, while a child that does not implement it opts out. Never
 `getattr(cfg, "f", None)` -- it bypasses the checker and hides the contract.
-`depth` is the block's INDEX in the stack, for depth-scaled init; do not reuse
-the name for a count.
 
 A repeated sub-module is a template or a list (`model/causal_lm.py`,
 `model/sequential.py`, `baselines/cifar10/model.py`):
@@ -452,14 +496,14 @@ lesson:
    cancels, and `log_softmax` subtracts the row max exactly where the
    `s`-then-divide form overflowed.
 4. **The branch disappears.** In logs the halves differ only by sign, so
-   hoisting it removes the `where` -- which matters because `where` does not
-   short-circuit on vector hardware: both branches cost.
+   hoisting it removes the `where`. `where` does not short-circuit on vector
+   hardware, so both branches execute.
 
 Try the log domain before optimizing a branch. And when an expression survives
-three rounds of tuning, search for its name: a published function brings a
-citation, a known domain, and somebody else's edge cases already found. Put it
-in `math/numeric.py` beside its relatives. Any implementation that is not the
-literal definition earns a `Derivation:` block.
+three rounds of tuning, search for its published name: that brings a citation, a
+stated domain, and the edge cases its authors already found. Put it in
+`math/numeric.py` beside its relatives. Any implementation that is not the
+literal definition carries a `Derivation:` block.
 
 Never auto-cast:
 
@@ -476,16 +520,14 @@ Test the gradient, not just the value: a finite-gradient assertion passes for
 every wrong variant. Pin both to closed forms, then confirm a wrong spelling
 goes red.
 
-Is every word of a comment load-bearing?
+Write a comment only when the reason is invisible from the code AND its absence
+invites a plausible wrong edit. Then state the consequence.
 
 ```python
 cfg.num_steps_eval = steps_per_epoch  # evaluate once per epoch  # Bad
 steps_per_epoch = NUM_TRAIN_SAMPLES // cfg.dataset.batch_size
 # Good -- Floors: a short final batch is not a whole step.
 ```
-
-A comment earns its place only when the reason is invisible from the code AND
-its absence invites a plausible wrong edit. Then state the consequence.
 
 ## 6. Writing an experiment
 
@@ -523,9 +565,9 @@ class Cifar10TrainLoop(Makes["TrainLoop"], TrainLoop.Config):
 ```
 
 `exp_smoke` answers one question -- is the data prepared and does the loop run
--- so cut every axis that costs time without bearing on it: one epoch AND a
-network narrow enough to finish in seconds. Shrinking only the step count wastes
-compute proving nothing.
+-- so cut every axis that adds time without bearing on it: one epoch AND a
+network narrow enough to finish in seconds. Shrinking only the step count still
+builds the full-width model.
 
 ```bash
 uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp000
@@ -534,12 +576,11 @@ uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp0
 ```
 
 The launcher applies either: `PATH=VALUE` is repeatable, dotted, JSON-parsed,
-cast to the field's type, and reaches any node. That reach is the point for
-DIRECTORIES -- where data lives is a property of the machine, so one config
-stays runnable everywhere. A hyperparameter is the opposite: overriding one
-produces a result whose config exists in no file, so nobody can rerun it, diff
-it, or tell later what ran -- the code stops being the truth. Write a fork, and
-never show an override in documentation; examples get copied.
+cast to the field's type, and reaches any node. Use that reach for DIRECTORIES
+-- where data lives is a property of the machine, so one config stays runnable
+everywhere. Overriding a hyperparameter instead produces a result whose config
+exists in no file: it cannot be rerun, diffed, or identified afterward. Write a
+fork, and never show an override in documentation; examples get copied.
 
 Every Python invocation -- code, docs, your own shell -- goes through
 `uv --quiet run --frozen`; never `python -c` or a heredoc. Commands in
@@ -549,7 +590,7 @@ docstrings stay on ONE line for copy-paste, with `# noqa: E501` naming why.
 
 CPU only; CI has no GPU. **No test exceeds 100 ms**, and that is always
 reachable: depth, width, batch, and step count are the only things making a test
-slow, and shrinking all four costs no generality. A 2-layer, 8-channel net run
+slow, and shrinking all four preserves coverage. A 2-layer, 8-channel net run
 for 3 steps exercises the same paths as the real one -- wiring, shapes,
 optimizer arithmetic -- because the recipe is unchanged. A test needing 100 steps
 to watch a schedule is testing a pure function the hard way: sample it.
@@ -564,8 +605,8 @@ config.device = "cpu"
 config.optimizer = plain_sgd  # Bad -- recipe, not size
 ```
 
-Touching the recipe (optimizer, schedule, loss, init) loses generality: the test
-stops covering the experiment. Size never does.
+Touching the recipe (optimizer, schedule, loss, init) means the test no longer
+covers the experiment. Changing size never does that.
 
 Goldens (`priml/testing/bfb.py`) make `exp000` frozen in practice rather than by
 convention: one per model (`state_dict` after init, plus the forward output) and
@@ -573,20 +614,20 @@ one per optimizer stack (a few train steps, so loss, augmentation draws,
 schedule, and optimizer all reach the compared post-state). Mint and replay
 inside `host_agnostic_numerics()` -- it upcasts fp32 to fp64, so AVX2 and
 AVX-512 agree. Assert `torch.equal`, never `allclose`. Verify a golden BITES
-before trusting it: perturb a constant and confirm the failure. Regenerating is
-deliberate -- it means the recipe changed.
+before trusting it: perturb a constant and confirm the failure. Regenerating one
+means the recipe changed.
 
 Experiment tests assert the DELTA -- exactly which fields each fork changes --
-so "one change per experiment" is enforced, not claimed, and that construction
-reads no files: a config must build with neither the dataset nor a GPU.
+which is what enforces "one change per experiment". That construction reads no
+files: a config must build with neither the dataset nor a GPU.
 
 Not every experiment needs one. A fork is a composition: if the parent and the
 injected piece are both tested, the fork adds no untested code, only an untested
 COMBINATION. Judgement call -- write a test when the fork wires two things
 together in a way neither covers (a new selector routing parameters, a schedule
 interacting with the budget); skip it when the fork swaps a value into a slot
-both sides already exercise. `exp000` is the exception: it is the control, so it
-carries goldens regardless.
+both sides already exercise. `exp000` carries goldens regardless, being the
+control.
 
 ## 8. When you are corrected
 
