@@ -11,8 +11,8 @@ what priml's Configs MEAN and where new code belongs.
 
 ## 0. Principles
 
-An experiment's entire state is one config tree. Four properties make that worth
-doing, and every rule below follows from one of them.
+An experiment's entire state is one config tree. Every rule below follows from
+one of four properties.
 
 1. **Hierarchical** -- a reader holds one node at a time. A slot's contents stay
    unread until opened, so complexity stays bounded however large the tree
@@ -27,8 +27,8 @@ doing, and every rule below follows from one of them.
    from its config, and the config outlives the process.
 
 ```python
-exp001().pprint()  # PPrints fields differing from Config class.
-exp001().pprint(hide_default_values=False)
+exp001().pprint()  # Only fields differing from the Config class defaults.
+exp001().pprint(hide_default_values=False)  # Every field.
 ```
 
 Both `copy_tree().finalize()`, so you see the tree after propagation. Eg,
@@ -57,10 +57,9 @@ module-level constant holding a tunable, an `os.environ` read, etc.
 Since `finalize()` is for config inspection, it should be lightweight. NEVER use
 it for durable side-effects, staging data, monkeypatching, etc.
 
-Future-proof `Config`s by facilitating dependency injection for likely-to-change
-components. Eg, rather than `"relu"` just assign the field as `torch.relu`.
-Using `Enum` or `Literal` means future changes requires upstream changes which
-introduces the possibility for error.
+Future-proof `Config`s by injecting likely-to-change components. Eg, assign the
+field `torch.relu` rather than `"relu"`. An `Enum` or `Literal` puts the next
+variant upstream, in code its author does not own.
 
 ## 1. What a tree looks like
 
@@ -68,9 +67,8 @@ Construct, then mutate. Every line names its full path, so the file reads as a
 config and _what changed_ reads linearly, without parsing indents to place a
 value.
 
-Be sure that every docstring explicitly names "Hypothesis", "References", and
-"Results" (the last filled in after the fact). Exception: it is permissible to
-drop "Hypothesis" and/or "References" on grid sweeps.
+Every docstring names "Hypothesis", "References", and "Results" (the last filled
+in after the fact). Grid sweeps may drop the first two.
 
 The canonical example is `priml.baselines.cifar10.experiments`; excerpt:
 
@@ -243,19 +241,14 @@ function: routing is general (`composite.py`'s `Selector`, `excluding`,
 `excluding(Muon.eligible_tensor, "head")` names a layer, so it stays in the
 experiment.
 
-**`math/` is the one deliberately anti-configgle layer.** Nothing in it defines
-a `Config`, and nothing should: a function there takes tensors and returns
-tensors, so there is no state to configure, nothing to print, and no slot to
-inject. Keyword arguments are fine and expected (`dim=-1`, `eps=5e-4`,
-`whiten=True`) because they are arguments to a computation, not hidden
-experiment state -- a caller passes them explicitly at every call, or binds them
-in a `PartialConfig`, which puts them back IN the tree.
-
-That is why the layer inverts: pure functions belong there, and the configgleable
-class that consumes one belongs in `loss/`, `model/`, or `optimizers/`.
-`stablemax_cross_entropy` lives in `math/loss.py`; the `SimpleLoss` that wraps
-it, with its `ignore_index` and reduction, lives in `loss/`. So a `Config`
-inside `math/` is wrong, and so is a kwarg-carrying function anywhere else.
+**`math/` is the one deliberately anti-configgle layer**, so the rule inverts
+there. Keyword arguments are expected (`dim=-1`, `eps=5e-4`, `whiten=True`):
+they are arguments to a computation, not hidden experiment state, and a caller
+either passes them at the call site or binds them in a `PartialConfig`, which
+puts them back IN the tree. `stablemax_cross_entropy` lives in `math/loss.py`;
+the `SimpleLoss` that wraps it, with its `ignore_index` and reduction, lives in
+`loss/`. So a `Config` inside `math/` is wrong, and so is a kwarg-carrying
+function anywhere else.
 
 ## 3. The layers
 
@@ -358,11 +351,10 @@ optimizers: list[Makeable[Optimizer]] = field(default_factory=list)  # Good
 
 With a tuple, changing one member means restating all of them, and which element
 the fork meant to change is buried in a rewritten literal. With a list, a fork
-says
-`cfg.step.optimizer.optimizers[1] = Muon.Config()` or appends, and both the diff
-and the `pprint` show exactly the one thing that moved. Same for `dict` over a
-frozen mapping: `cfg.metrics["accuracy"] = TopK.Config()` adds a metric without
-touching the others.
+writes `cfg.step.optimizer.optimizers[1] = Muon.Config()` or appends, and both
+the diff and the `pprint` show exactly the one thing that moved. Same for `dict`
+over a frozen mapping: `cfg.metrics["accuracy"] = TopK.Config()` adds a metric
+without touching the others.
 
 `default_factory` is required for any mutable default -- a bare
 `optimizers: list = []` shares one list across every instance, which
@@ -452,7 +444,7 @@ carries an address, so a config holding one never equals its parent.
 ### Numerics: work in the log domain
 
 `log_stablemax` normalizes the surrogate `s(x) = 1/(1-x)` if `x < 0` else
-`1 + x`. Four passes, each fixing what the last got wrong:
+`1 + x`. Four passes over the same expression:
 
 ```python
 # Bad -- NaN gradient
@@ -483,8 +475,7 @@ backward to `inf`, and `inf * 0` is `NaN` (measured
 ARGUMENT, not the result -- and broadcasting a scalar rather than `zeros_like`
 preserves dtype.
 
-Everything after that came from the log domain, which is the transferable
-lesson:
+The remaining three forms all came from moving to the log domain:
 
 1. **Sub-structure becomes recognizable.** `log(s(x))` is `sign(x) log1p(|x|)`,
    the log-modulus transform of John & Draper (1980). In the linear domain it
@@ -539,10 +530,10 @@ lives in that script, never in a config -- `finalize()` declares, it never does
 I/O. Assume `/opt/scratch` exists.
 
 `exp000` is the best NAIVE recipe -- what a strong first-year graduate student
-writes without exotica. Not a toy, not the state of the art. Frozen at birth:
-improvements are forks, never edits, so a number measured against it stays
-comparable across releases. Every later experiment forks a NAMED parent and
-applies ONE change, as `exp001` does in section 1:
+writes without exotica. Not a toy, not the state of the art. It is never edited
+after it lands -- improvements are forks -- so a number measured against it
+stays comparable across releases. Every later experiment forks a NAMED parent
+and applies ONE change, as `exp001` does in section 1:
 
 - Names are `expNNN`, sequential and never adorned: `exp007`, not `exp007_muon`,
   `exp007b`, or `exp_muon_v2`. The number is an identity, not a description -- a
