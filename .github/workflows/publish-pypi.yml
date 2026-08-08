@@ -32,6 +32,16 @@ jobs:
         run: |
           uv run python -c "import priml; print(priml.__file__)"
 
+      # priml tracks configgle's main branch via [tool.uv.sources], so nothing
+      # before this point proves the published dependency floor is sufficient.
+      # Resolve the wheel against PyPI alone -- a symbol that exists only on
+      # configgle main fails HERE, before an irreversible upload, instead of in a
+      # user's `pip install`.
+      - name: Validate against published dependencies
+        run: |
+          wheels=(dist/priml-*.whl)
+          uv run --isolated --with "${wheels[0]}" python -P -c "import priml"
+
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
