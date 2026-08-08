@@ -20,7 +20,10 @@ import sys
 
 import pytest
 
-from priml.lib.testing.userdirs_fixture import isolate_user_dirs
+from priml.lib.testing.userdirs_fixture import (
+    isolate_user_dirs,
+    pytest_configure,
+)
 
 
 if TYPE_CHECKING:
@@ -30,7 +33,7 @@ if TYPE_CHECKING:
 # Re-exported, not merely imported: an autouse fixture reaches only the
 # directory of the conftest that names it, so binding it here is what points
 # every priml test's XDG lookups at a tmp dir instead of the developer's own.
-__all__ = ["isolate_user_dirs"]
+__all__ = ["isolate_user_dirs", "pytest_configure"]
 
 
 def cap_math_threads() -> None:
