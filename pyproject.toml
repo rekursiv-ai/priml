@@ -428,5 +428,10 @@ torch = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 torchao = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 torchvision = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 
+# Github installs track configgle main; PyPI installs use the floor above.
+# Advance the lock with `uv lock --upgrade-package configgle` -- plain `uv lock`
+# leaves a branch source on its pinned SHA.
+configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
+
 [tool.uv.workspace]
 members = []
