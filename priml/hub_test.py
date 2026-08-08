@@ -13,13 +13,13 @@ import logging
 import os
 import sys
 
-import pytest
 import torch
 
 from priml.hub import (
     get_cache_dir,
     load_transformers_model,
 )
+from priml.lib.userdirs import cache_dir
 
 
 @contextmanager
@@ -38,12 +38,11 @@ def _mock_transformers(mock_auto_model: Any) -> Generator[MagicMock]:
             sys.modules["transformers"] = saved
 
 
-def test_get_cache_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_cache_dir() -> None:
     """get_cache_dir returns the XDG per-user models cache."""
-    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg-cache")
     with patch("pathlib.Path.mkdir"):
-        cache_dir = get_cache_dir()
-    assert cache_dir == Path("/xdg-cache/rekursiv-ai/models")
+        models_dir = get_cache_dir()
+    assert models_dir == cache_dir("rekursiv-ai") / "models"
 
 
 def test_get_cache_dir_creates_directory():
