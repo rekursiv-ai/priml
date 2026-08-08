@@ -9,199 +9,359 @@ ML building blocks for training experiments. Read the `configgle` skill for the
 Config mechanics (`Fig`, `make()`, `finalize()`, `pprint`); this skill covers
 what priml's Configs MEAN and where new code belongs.
 
-## 0. Why priml is shaped this way
+## 0. Principles
 
-An experiment's entire state is one printable, swappable tree. Every rule below
-follows from one of those two properties.
+An experiment's entire state is one config tree. Four properties make that worth
+doing, and every rule below follows from one of them.
 
-**Pprintable.** `cfg.pprint()` shows what this experiment changed;
-`cfg.pprint(hide_default_values=False)` shows everything it is. A value that
-affects the result and does not appear there makes the run unreproducible from
-its config, and the config is the only artifact that outlives the process.
+1. **Hierarchical** -- a reader holds one node at a time. A slot's contents are
+   somebody else's problem until you open them, so complexity stays bounded
+   however large the tree grows.
+2. **Injectable** -- leaves own churn, not ancestors. Adding an optimizer must
+   not edit the train step; the root holds a slot and no knowledge of what
+   fills it.
+3. **Hermetic** -- the tree is the whole input. No environment read, no global,
+   no staging at build time, so the same tree gives the same run anywhere.
+4. **Printable** -- the whole run is inspectable without running it. A value
+   affecting the result that is not in the print makes the run unreproducible
+   from its config, and the config outlives the process.
 
-**Swappable.** Every node is a slot a third party can fill. Someone wanting
-Lion, a different PCA backend, or their own block supplies one. They never patch
-priml to get it.
+```python
+exp001().pprint()  # PPrints fields differing from Config class.
+exp001().pprint(hide_default_values=False)
+```
 
-So the config tree is not a description of the experiment. It IS the
-experiment; rebuilding the tree rebuilds the run.
+Both `copy_tree().finalize()`, so you see the tree after propagation. Eg,
+`working_dir` resolved beneath `base_dir`, `channels_in` pushed into each block,
+sentinels filled in. That is why it is the debugging tool -- it shows what
+`make()` will use, not what you typed. Pass `finalize=False` for raw input.
 
-Unprintable: a module-level constant holding a tunable, an `os.environ` read, a
-`finalize()` that stages data, a monkeypatch in a test. Each puts state where
-the tree cannot show it.
+The default view is already a diff against the class defaults, so comparing two
+experiments is the same call on each:
 
-Unswappable: a `Literal` naming implementations, a `bool` selecting an
-algorithm, a helper returning `"power"`/`"eigh"`, a class constructed inside
-`__init__`. Each closes a set the library had no business closing.
+```python
+difflib.unified_diff(
+    exp000().pformat().splitlines(),
+    exp001().pformat().splitlines(),
+    "exp000",
+    "exp001",
+    lineterm="",
+)
+```
 
-A `Literal` selecting an implementation fails both, which is why it is the error
-to recognize first. `Literal` is right for a genuine MODE (`"reflect"` vs
-`"constant"` padding): a closed set the library defines, not an open set of
-implementations.
+`exp().pprint()` is the single best way to debug an experiment!
 
-## 1. Where does this change go?
+Experiments should be entirely defined by their `Config`. NEVER USE: a
+module-level constant holding a tunable, an `os.environ` read, etc.
 
-**Q1 -- knob or concept?** A scalar parameter of an existing thing, or a new
-behavior with state of its own? A field meaningful only when ANOTHER field has a
-particular value is a concept: `conv_momentum` is noise on every AdamW run.
+Since `finalize()` is for config inspection, it should be lightweight. NEVER use
+it for durable side-efftcs, stage data, monkeypatch, etc.
 
-**Q2 -- general or specific?** State what it does without naming your dataset,
-your model's layer names, or your experiment. If you cannot, it is not library
-code.
+Future-proof `Config`s by facilitating dependency injection for likely-to-change
+components. Eg, rather than `"relu"` just assign the field as `torch.relu`.
+Using `Enum` or `Literal` means future changes requires upstream changes which
+introduces the possibility for error.
+
+## 1. What a tree looks like
+
+Construct, then mutate. Every line names its full path, so the file reads as a
+config and a reader sees _what changed, linearly,_ and without the cognitive
+burden of parsing indents.
+
+Be sure that every docstring explicitly names: "Hypothesis", "References", and
+"Results (to be added after the fact). Exception: it is permissible to drop
+"Hypothesis" and/or "References" on grid sweeps.
+
+The canonical example is `priml.baselines.cifar10.experiments`; excerpt:
+
+```python
+NUM_TRAIN_SAMPLES: Final = 50_000
+
+
+def exp000() -> Cifar10TrainLoop:
+    """Pre-activation ResNet trained with AdamW and cosine decay.
+
+    trax experiment 42
+
+    Hypothesis:
+      A residual network with AdamW and cosine decay is the strongest recipe
+      using nothing exotic -- the bar any addition must clear.
+
+    References:
+      https://arxiv.org/abs/1603.05027
+
+    Results:
+      TBD.
+    """
+    cfg = Cifar10TrainLoop()
+    cfg.study_name = "cifar10"
+    cfg.experiment_name = "exp000"
+
+    cfg.step.model = ResNet.Config()
+    cfg.step.model.channels_hidden = (64, 128, 256)
+    cfg.step.model.blocks_per_stage = 2
+    cfg.step.model.block = ResidualBlock.Config()
+
+    adamw = PartialConfig(torch.optim.AdamW)
+    adamw.lr = 1e-3
+    adamw.weight_decay = 5e-2
+    cfg.step.optimizer = CompositeOptimizer.Config()
+    cfg.step.optimizer.optimizers = [adamw]
+    cfg.step.schedule = PartialConfig(cosine)
+
+    cfg.dataset.batch_size = 512
+    cfg.dataset.working_dir = "/datasets/cifar10"
+
+    topk = cfg.metrics["accuracy"] = TopK.Config()
+    topk.k_values = [1]
+
+    cfg.num_steps_eval = NUM_TRAIN_SAMPLES // cfg.dataset.batch_size
+    cfg.max_steps = cfg.step.total_train_steps = 30 * cfg.num_steps_eval
+    return cfg
+
+
+def exp001() -> Cifar10TrainLoop:
+    """exp000 + Muon on the convolution weights, SGD on the rest.
+
+    trax experiment 43
+
+    Hypothesis:
+      Muon orthogonalizes each update, making the step scale-invariant in the
+      weight matrix, which should suit convolution kernels. Its recipe anneals
+      polynomially, so the two travel together.
+
+    References:
+      https://kellerjordan.github.io/posts/muon/
+
+    Results:
+      TBD.
+    """
+    cfg = exp000()
+    cfg.experiment_name = "exp001"
+
+    sgd, muon = cfg.step.optimizer.optimizers = [
+        PartialConfig(torch.optim.SGD),
+        Muon.Config(),
+    ]
+    sgd.lr = 0.67
+    muon.lr = 0.24
+    on_muon = excluding(Muon.eligible_tensor, "head")
+    cfg.step.optimizer.select = [complement(on_muon), on_muon]
+
+    cfg.step.schedule = PartialConfig(polynomial)
+    cfg.step.schedule.power = 1.2
+    return cfg
+```
+
+`exp001` reads as a diff: call the named parent, change one thing, return. The
+swap touches no other node -- the train step never learns Muon exists, because
+`optimizer` is a slot, not a `Literal` it branches on. Nothing here is a mode
+string: `model`, `block`, `optimizer`, and `schedule` hold a config or a
+function, so a variant is a different VALUE. `Cifar10TrainLoop` pre-narrows the
+`step` and `dataset` slots (section 6), so no line needs `isinstance`.
+
+`CompositeOptimizer` is the adapter even for one member: the slot is called with
+the MODEL, so something must route parameters to optimizers -- a bare
+`PartialConfig` raises `'ResNet' object is not iterable`. `max_steps` and
+`total_train_steps` move together because a schedule whose horizon differs from
+the budget anneals past the end of training or short of it.
+
+Bind a local only to shorten a long path (`adamw`, `topk`), never to rename a
+short one. Set only what differs from the default: `cfg.x = <default>` is noise
+and pollutes the `pprint` diff section 0 relies on.
+
+## 2. Where does this change go?
 
 ```
-                 │ experiment-local           │ priml
-─────────────────┼────────────────────────────┼──────────────────────────────
-add an attribute │ subclass the Config. Rare: │ a real parameter of that
-                 │ usually you wanted a class │ concept, at every value of
-                 │                            │ the other fields
-─────────────────┼────────────────────────────┼──────────────────────────────
-new class        │ DEFAULT. A small Config    │ once a SECOND caller needs
-                 │ injected into a slot       │ it, and the mechanism only
+                 │ study-local                   │ priml-major
+─────────────────┼───────────────────────────────┼─────────────────────────────
+add an attribute │ Subclass the Config, add the  │ An essential arm of a core
+                 │ field. RARE -- classes should │ concept and/or error prone.
+                 │ be dependency injectable.     │
+─────────────────┼───────────────────────────────┼─────────────────────────────
+new class        │ DEFAULT. A small Config in    │ A defensible ML primitive
+                 │ your study dir into an        │ absent from priml but likely
+                 │ existing slot.                │ needed by others.
 ```
 
 Bias toward the bottom-left. A new injected Config is cheap, local, and prints;
 a new attribute on a shared Config is permanent and taxes every other user.
 
-Start local. Promote the mechanism, never the recipe:
+Which column: state what the code does without naming your dataset, your model's
+layer names, or your experiment. If you cannot, it is not library code. Which
+row: a scalar parameter, or a behavior with state of its own? A field meaningful
+only when ANOTHER field has a particular value is a behavior wearing a scalar's
+clothes -- `conv_momentum` is noise on every AdamW run.
+
+**Write it local, promote it later.** New code starts in the baseline that needs
+it, where being wrong costs one directory. It earns a move into priml on one of
+two triggers, never on a guess:
+
+- **A second caller needs it.** Two baselines reaching for the same thing is
+  evidence; one baseline and an intention is not. The second caller reveals
+  which parts were general.
+- **It is a fundamental operation** -- a definition rather than a choice. A
+  careful numeric transform, an eigendecomposition, a routing protocol: right
+  independent of any experiment, so waiting only means the first caller wrote
+  it worse.
+
+Speculative promotion is the failure mode: code that "looks reusable" moves up,
+carries its origin's assumptions in a default, and the location vouches for a
+claim nobody checked.
+
+And what gets promoted is a CONFIGGLEABLE CLASS, never a function carrying
+keyword arguments. Kwarg functions are the scourge configgle exists to destroy.
 
 ```python
-# priml/optimizers/partition.py  # error -- general name, one model inside
+# priml/optimizers/partition.py  # Bad -- same body, now a library promise
 def muon_and_sgd(model, *, matrix_excludes=("head",)): ...
+
+
+class MuonAndSgd:  # Good
+    class Config(Fig["MuonAndSgd"]): ...
 ```
 
-The name promised generality while `("head",)` encoded one model's layer names.
-The surviving split cuts THROUGH that file, into three homes:
+A function's keyword arguments are not nodes in the tree. They do not print, so
+`matrix_excludes=("head",)` never appears in `pprint` and the run stops being
+reproducible from its config; they cannot be reached by `--override`, mutated by
+a fork, or diffed against a parent. The default also smuggles in a claim -- that
+every model names its classifier `head` -- which was one model's recipe under
+`baselines/cifar10/` and becomes a library promise under `priml/optimizers/`.
 
-- **mechanism** -> `optimizers/composite.py`: `Selector`, `everything`,
-  `excluding`, `complement`. Routing is general.
-- **the algorithm's own claim** -> `optimizers/muon.py`:
-  `Muon.eligible_tensor` is `ndim >= 2`, Muon's constraint and nothing else.
-- **recipe** -> the experiment: `excluding(Muon.eligible_tensor, "head")`, which
-  names a layer, so it lives where layers are named.
+A `Config` fixes both: its fields are nodes, so they print and diff, and each is
+a slot a caller can fill. Promotion then also cuts THROUGH the original
+function: routing is general (`composite.py`'s `Selector`, `excluding`,
+`complement`), `ndim >= 2` is Muon's own claim (`Muon.eligible_tensor`), and
+`excluding(Muon.eligible_tensor, "head")` names a layer, so it stays in the
+experiment.
 
-The general/specific line runs through code, not around it.
+Pure `math/` functions are the exception -- tensors in, tensors out, nothing to
+configure.
 
-Where a thing lives once you know it is general:
+## 3. The layers
 
-```
-math/        pure functions: tensors in, tensors out. No state, Config, or I/O.
-model/       nn.Module + Config, consuming math/.
-optimizers/  Optimizer + Config.
-loss/        configgleable losses wrapping math/loss.py.
-metrics/     configgleable metrics.
-data/        datasets and input pipelines.
-train/       TrainLoop, TrainStep, schedules, checkpointing.
-baselines/   one dataset end to end.
-testing/     bit-for-bit goldens, fixtures.
-```
+One axis: how much state does this hold, and who owns it.
 
-`math/` is the floor and the rule runs both ways: a pure function found
-elsewhere belongs there, and stateful code inside it is the same defect
-inverted. Facades are thin -- import from the module that DEFINES a symbol
-(`from priml.model.init import dirac`), never from a re-exporter.
+| Dir | Holds | Why separate |
+|---|---|---|
+| `math/` | pure functions, `Tensor`/`Tensorable` in and always `Tensor`(s) out | No state, Config, or I/O -- testable without a model, device, or config. |
+| `model/` | `nn.Module` + `Config` | Parameters are state. Calls `math/`; keeps only what must persist. |
+| `optimizers/` | `Optimizer` + `Config` | Update state belongs to the algorithm, not the model it updates. |
+| `loss/` | configgleable losses | Math is in `math/loss.py`; these carry configuration only. |
+| `metrics/` | configgleable metrics | Accumulate across batches, so they hold state. |
+| `data/` | datasets, input pipelines | The only layer touching disk or network -- so a config BUILDS without either. |
+| `train/` | `TrainLoop`, `TrainStep`, schedules | Owns the run: steps, RNG, checkpoints. Everything above is a slot it fills. |
+| `inference/` | generation, serving | Read-only use of a trained model. |
+| `testing/` | goldens, fixtures | Test-only; production never imports it. |
+| `baselines/` | one dataset end to end | The only place a dataset name, layer name, or recipe may appear. |
 
-Before writing anything, grep priml: ~40 exports in `model/`, 15 in
-`optimizers/`, plus ten `math/` modules.
+Two directions of one rule: a pure function outside `math/` should move down; a
+stateful one inside it makes the floor unreliable for everyone above.
+Dependencies point down, never up -- `math/` imports nothing from priml, and a
+`model/` module reaching into `train/` is a layering error even when it
+type-checks.
 
-## 2. Writing a Config field
+Import from the module that DEFINES a symbol
+(`from priml.model.init import dirac`), never a re-exporter. Before writing
+anything, grep priml: ~40 exports in `model/`, 15 in `optimizers/`, ten `math/`
+modules.
+
+## 4. Writing a Config field
 
 Most errors happen here. Could someone reasonably want a value not in your list?
 Then it is an injection point, not an enumeration.
 
-### A name is not a behavior
+### An enum makes ancestors own churn; injection leaves it with the leaf
 
 ```python
-optimizer_kind: Literal["adamw", "muon"] = "adamw"  # error
-learning_rate: float = 1e-3
+optimizer_kind: Literal["adamw", "muon"] = "adamw"  # Bad -- closed set
 conv_momentum: float = 0.6  # noise on every adamw run
 ns_steps: int = 3  # noise on every adamw run
-```
 
-Adding Lion means editing the train step. The print shows `"muon"`, not what
-Muon does.
-
-#### Use instead
-
-```python
-optimizer: Makeable[Callable[..., Optimizer]] = field(
+optimizer: Makeable[Callable[..., Optimizer]] = field(  # Good -- one slot
     default_factory=lambda: CompositeOptimizer.Config(...),
 )
-"""Builds the optimizer from the model."""
-
-muon = Muon.Config()  # in the experiment, beside the values it explains
-muon.lr = 0.24
-muon.ns_steps = 3
 ```
 
-The per-branch hyperparameters leave the shared Config. Every run prints exactly
-the optimizer it used, and a stranger's optimizer fills the same slot.
+Under the enum, every option's parameters pile onto the shared node and adding
+Lion edits the train step -- an ANCESTOR -- to teach it a name; the print shows
+`"muon"`, a label, not what Muon does. Under the slot the root holds no
+knowledge of what fills it, Muon's parameters live on Muon where they are always
+meaningful, and Lion arrives as a leaf nobody above hears about.
 
 ### A flag is a closed set of two
 
 ```python
-dirac_init: bool = False  # error
+dirac_init: bool = False  # Bad -- a closed set of two
+init_conv: InitFn | None = None  # Good -- None keeps torch's
 
 
-def whiten_algorithm(device: torch.device) -> str:  # error
+def whiten_algorithm(device) -> str:  # Bad -- impl behind a string
     return "power" if device.type == "mps" else "eigh"
-```
 
-#### Use instead
 
-```python
-init_conv: InitFn | None = None
-"""Re-initializes every convolution; None keeps torch's."""
-
-whiten_decompose: PcaDecompose = pca_eigh
-"""Default reaches linalg.eigh, which MPS lacks; pass pca_power there."""
+whiten_decompose: PcaDecompose = pca_eigh  # Good -- pass pca_power on MPS
 ```
 
 ### A sentinel is a policy with no owner
 
 ```python
 logit_scale: float = 0.0
-"""Output multiplier; 0 means 1 / fan_in."""  # error
-```
+"""Output multiplier; 0 means 1 / fan_in."""  # Bad -- unowned policy
 
-The rule lives in the parent's `forward` as an `if scale > 0` branch, so a
-caller cannot turn it off without knowing the sentinel.
-
-#### Use instead
-
-```python
 proj_out: Makeable[nn.Module] = field(default_factory=ScaledLinear.Config)
-"""Output projection; owns its own scaling."""
+"""Output projection; owns its own scaling."""  # Good
 ```
 
-`ScaledLinear` carries the `1 / fan_in` rule with the weights it divides. The
-branch in `forward` disappears, and a plain `nn.Linear` drops in. Same shape as
-`CausalLM.Config.lm_head`.
+The sentinel's rule lives in the parent's `forward` as an `if scale > 0` branch,
+so a caller cannot turn it off without knowing the sentinel. `ScaledLinear`
+carries the `1 / fan_in` rule with the weights it divides: the branch disappears
+and a plain `nn.Linear` drops in. Same shape as `CausalLM.Config.lm_head`.
 
 Two more of the same shape: a field meaningful only when another field has a
 given value belongs on the injected piece; a count beside a list of the same
-thing is redundant, because the list's length IS the count.
-
-Declare what a slot must DO, not what it must BE -- `Makeable[Protocol]` over a
-concrete class, so an implementation priml has never seen still fits.
+thing is redundant, since the list's length IS the count. Declare what a slot
+must DO, not what it must BE.
 
 Constants that are facts, not tunables, take `Final`:
-`NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset. A batch size is
-not; it is a tunable and belongs on the config, which `check-config-globals`
-enforces. Name a constant only when the name carries meaning the number does not.
+`NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset; a batch size
+is a tunable and belongs on the config, as `check-config-globals` enforces.
 
-## 3. Writing a module
+### Blessed nouns
 
-Every building block speaks the same shape fields, `-1` meaning "infer":
+A field is reusable only if a stranger's config can be talked about in the same
+words. Use these; do not invent a synonym.
 
-```python
-channels_in: int = -1  # -1 to infer from channels_out
-channels_out: int = -1  # -1 to infer from channels_in
-channels_hidden: int  # or tuple[int, ...] for a multi-stage net
-```
+| Noun | Means |
+|---|---|
+| `channels_in` / `channels_out` | Feature widths at the boundary. `-1` infers from the other. |
+| `channels_hidden` | Internal width -- an `int`, or a `tuple` per stage. |
+| `channels_head` / `heads` | Per-head width and head count. |
+| `depth` | The block's INDEX in the stack, for depth-scaled init. Never a count. |
+| `num_layers` / `blocks_per_stage` | Counts. Omit when a block LIST already implies one. |
+| `block` | The injected sub-module: one template, or a list. |
+| `proj_out` / `lm_head` | Output projection slot; owns its own scaling and init. |
+| `norm` / `norm_qk` / `norm_out` | Normalization slots, named for their position. |
+| `init_weight` / `init_bias` | `InitFn` slots. |
+| `activation` | `ActivationFn`: a config, a Module, or a plain function. |
+| `eps` / `bias` / `dropout` / `stride` / `kernel_size` | Torch's own spellings; do not rename. |
+| `device` / `dtype` / `dtype_autocast` | Placement and precision. |
+| `base_dir` / `working_dir` | Resource root and the logical path resolved beneath it. |
+| `study_name` / `experiment_name` | Run identity; they build `working_dir`. |
+| `max_steps` / `total_train_steps` / `num_steps_eval` | Budget, schedule horizon, eval period. |
+| `seed` | `None` unless the experiment is about seed variance. |
+| `shard` | Tensor-parallel style for a block. |
 
-A parent pushes dimensions down in `finalize()` with `propagate_attr`
-(`model/custom_types.py`), gated on a runtime-checkable Protocol:
+Batches are keyed `media` and `label`; a train step returns `loss` and `model`
+(`TrainStepOutput`). A name ending `_fn` is a callable slot; `_dir` is a path;
+`num_*` is a count; `*_kind` or `*_algorithm` is the enum smell section 4 bans.
+
+## 5. Writing a module
+
+Every building block speaks `channels_in` / `channels_out` / `channels_hidden`,
+`-1` meaning "infer from the others in `finalize()`". A parent pushes dimensions
+down with `propagate_attr` (`model/custom_types.py`), gated on a
+runtime-checkable Protocol:
 
 ```python
 propagate_attr(self.block, "channels_in", channels, protocol=ChannelsIn)
@@ -209,16 +369,14 @@ propagate_attr(self.block, "depth", self.depth)  # protocol=None: best effort
 ```
 
 The Protocol is load-bearing: a child implementing `ChannelsIn` MUST accept the
-value, so a typo raises instead of silently building with the `-1` sentinel; a
-child that does not implement it opts out. Never `getattr(cfg, "f", None)` --
-it bypasses the checker and hides the contract.
+value, so a typo raises instead of silently building with the `-1` sentinel,
+while a child that does not implement it opts out. Never
+`getattr(cfg, "f", None)` -- it bypasses the checker and hides the contract.
+`depth` is the block's INDEX in the stack, for depth-scaled init; do not reuse
+the name for a count.
 
-`depth` is the block's INDEX in the stack, for depth-scaled init (see
-`model/transformer.py`, `model/linear.py`), not "how deep the network is". Do
-not reuse the name for a count.
-
-A repeated sub-module is a template or a list -- the shape in
-`model/causal_lm.py`, `model/sequential.py`, and `baselines/cifar10/model.py`:
+A repeated sub-module is a template or a list (`model/causal_lm.py`,
+`model/sequential.py`, `baselines/cifar10/model.py`):
 
 ```python
 block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
@@ -228,158 +386,132 @@ block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
 ```
 
 One entry stays simple; a list gives per-layer control and its length is the
-count. Copy the template per slot (`copy_tree`) or every block ends up carrying
-the last stage's width.
+count. Copy the template per slot (`copy_tree`) or every block carries the last
+stage's width.
 
-A function-shaped slot takes a named type, not a bare `Callable`. Read
-`math/custom_types.py` and `model/custom_types.py` before declaring one: their
-docstrings carry the distinctions, including why a `TensorableFn` is not a
-`TensorFn`. `InitFn`, `Schedule`, and `PcaDecompose` live beside their consumers
-in `model/init.py`, `train/schedules.py`, and `math/stats.py`.
+A function-shaped slot takes a named type, not a bare `Callable`: read
+`math/custom_types.py` and `model/custom_types.py` first, since their docstrings
+carry the distinctions (including why a `TensorableFn` is not a `TensorFn`).
+Never alias one; annotate with `from torch import Tensor`.
 
-Never alias one; one spelling per concept, since it is a monorepo. A one-domain
-type lives beside its consumer, not in a shared `custom_types.py` next to the
-universal ones. Annotate with `from torch import Tensor`, not `torch.Tensor`.
-
-Anything a caller might inject or subclass is public: `ResidualBlock`,
+Anything a caller might inject or subclass is public -- `ResidualBlock`,
 `ConvBlock`, `ScaledLinear` carry no underscore. Reserve `_` for implementation
-a caller can never reach, and place it after its public caller.
+a caller can never reach, placed after its public caller.
 
-`X.Config().make()` on an optimizer yields a deferred CONSTRUCTOR, not the
-optimizer -- parameters do not exist at config time:
+An optimizer's `Config.make()` yields a deferred CONSTRUCTOR, since parameters
+do not exist at config time. Annotate that slot
+`Makeable[Callable[..., Optimizer]]`, never `Makeable[partial[Optimizer]]`:
+`partial` is invariant, so `partial[Muon]` is not a `partial[Optimizer]`.
+Selectors must be comparable objects, never closures -- a closure's `repr`
+carries an address, so a config holding one never equals its parent.
 
-```python
-optimizer: Makeable[partial[Optimizer]]  # error -- partial is invariant
-optimizer: Makeable[Callable[..., Optimizer]]
-```
+### Numerics: work in the log domain
 
-`partial[Muon]` is not a `partial[Optimizer]`, so no concrete member fits;
-`Callable[..., T]` is covariant in its return. A split recipe presents as ONE
-optimizer via `CompositeOptimizer`, so the train step holds `self.optimizer`,
-not a list. Selectors must be comparable objects, never closures -- a closure's
-`repr` carries an address, so a config holding one never equals its parent and
-experiment diffing breaks.
-
-### Numerics
-
-`torch.where` evaluates BOTH branches, and the dead one's gradient still flows:
+`log_stablemax` normalizes the surrogate `s(x) = 1/(1-x)` if `x < 0` else
+`1 + x`. Four passes, each fixing what the last got wrong:
 
 ```python
-torch.where(x < 0, 1.0 / (1.0 - x + 1e-30), x + 1.0)  # error
-```
+# Bad -- NaN gradient
+s_x = torch.where(x < 0, 1.0 / (1.0 - x + 1e-30), x + 1.0)
+torch.log(s_x / s_x.sum(dim, keepdim=True))
 
-At `x = 1.0`, an ordinary logit, the unused branch reaches `1e30`, squared in
-backward to `inf`, and `inf * 0` is `NaN`. Measured: `grad=[nan, -0.053, 0.347]`.
-
-#### Use instead
-
-Mask each branch's ARGUMENT -- the double-where trick. Broadcast a scalar, not
-`zeros_like`, to preserve dtype:
-
-```python
+# Good -- the DOUBLE-WHERE trick: an outer `where` picks the branch, an inner
+# one sanitizes each branch's ARGUMENT so neither is evaluated off its domain.
 negative = x < 0
 torch.where(
     negative,
     -torch.log1p(-torch.where(negative, x, 0.0)),
     torch.log1p(torch.where(negative, 0.0, x)),
 )
+
+# Better -- no `where` at all
+sign = torch.where(x < 0, -one, one)
+sign * torch.log1p(sign * x)
+
+# Best -- it has a name, and the whole function collapses
+torch.log_softmax(log_modulus(x), dim=dim)
 ```
 
-`x.clamp(max=0.0)` is bit-identical and shorter when the safe value IS the
-boundary; not general, since `1/x` wants a safe input of `1.0` at boundary
-`0.0`. Better still, delete the branch -- `where` does not short-circuit on
-vector hardware, so both `log1p` calls cost:
+The first form NaNs because `where` evaluates BOTH branches and the dead one's
+gradient still flows: at `x=1.0` the unused branch reaches `1e30`, squared in
+backward to `inf`, and `inf * 0` is `NaN` (measured
+`grad=[nan, -0.053, 0.347]`). The double-where is the general fix -- mask the
+ARGUMENT, not the result -- and broadcasting a scalar rather than `zeros_like`
+preserves dtype.
 
-```python
-sign = torch.where(x < 0, -one, one)  # `one` carries x's dtype
-sign * torch.log1p(sign * x)  # sign * x is |x|, differentiably
-```
+Everything after that came from the log domain, which is the transferable
+lesson:
 
-Prefer a stable identity to a stabilized expression: `log_stablemax` is
-`log_softmax(log_modulus(x))`, because `log_softmax` subtracts the row max
-exactly where the manual form overflowed. Any implementation that is not the
+1. **Sub-structure becomes recognizable.** `log(s(x))` is `sign(x) log1p(|x|)`,
+   the log-modulus transform of John & Draper (1980). In the linear domain it
+   was a nameless two-branch expression.
+2. **Fusion opportunities appear.** Once each term is a log, normalizing is
+   `logsumexp` -- so the whole thing is `log_softmax`, one fused primitive
+   replacing a divide and a sum.
+3. **Numerics improve for free.** `log1p` is accurate near zero where `log(1+z)`
+   cancels, and `log_softmax` subtracts the row max exactly where the
+   `s`-then-divide form overflowed.
+4. **The branch disappears.** In logs the halves differ only by sign, so
+   hoisting it removes the `where` -- which matters because `where` does not
+   short-circuit on vector hardware: both branches cost.
+
+Try the log domain before optimizing a branch. And when an expression survives
+three rounds of tuning, search for its name: a published function brings a
+citation, a known domain, and somebody else's edge cases already found. Put it
+in `math/numeric.py` beside its relatives. Any implementation that is not the
 literal definition earns a `Derivation:` block.
 
 Never auto-cast:
 
 ```python
-logits = logits.to(torch.float64)  # error -- the caller cannot decline
+logits = logits.to(torch.float64)  # Bad -- the caller cannot decline
 ```
 
-That upcast protected the CALLER's reduction, not this function: ~900 bf16 terms
-summed in bf16 cost `1.16e-2` against bf16's own `5.8e-5` representation error.
-The accumulation is the caller's, so the decision is too --
-`stablemax_cross_entropy(logits.double(), labels)`. State the requirement in
-`Returns:`. Removing an implicit cast is a contract change: every call site, or
-none.
+That upcast protected the CALLER's reduction: ~900 bf16 terms summed in bf16
+cost `1.16e-2` against bf16's own `5.8e-5` representation error. The
+accumulation is the caller's, so the decision is too -- state it in `Returns:`.
+Removing an implicit cast is a contract change: every call site, or none.
 
-Test the gradient, not just the value -- a finite-gradient assertion passes for
-every wrong variant. Pin both to closed forms at the interesting points
-(`log_modulus` at `[-1, 0, 1]`: values `[-log 2, 0, log 2]`, gradients
-`[0.5, 0.0, 0.5]`), then confirm a plausible-but-wrong spelling goes red.
-`sign(x) * log1p(|x|)` matches on every value and differs on the gradient at the
-origin.
+Test the gradient, not just the value: a finite-gradient assertion passes for
+every wrong variant. Pin both to closed forms, then confirm a wrong spelling
+goes red.
 
 Is every word of a comment load-bearing?
 
 ```python
-cfg.num_steps_eval = steps_per_epoch  # evaluate once per epoch  # error
-
-# Floors: a short final batch is not a whole step.
+cfg.num_steps_eval = steps_per_epoch  # evaluate once per epoch  # Bad
 steps_per_epoch = NUM_TRAIN_SAMPLES // cfg.dataset.batch_size
+# Good -- Floors: a short final batch is not a whole step.
 ```
 
 A comment earns its place only when the reason is invisible from the code AND
 its absence invites a plausible wrong edit. Then state the consequence.
 
-## 4. Writing an experiment
+## 6. Writing an experiment
 
-Directories are named after the dataset -- `mnist`, `cifar10`, `arcagi1`.
-`nanochat` and `sudoku` are named exceptions, better known than their datasets.
-Layout mirrors priml so a reader navigates by analogy:
+Directories are named after the dataset -- `mnist`, `cifar10`, `arcagi1`;
+`nanochat` and `sudoku` are exceptions, better known than their datasets. Layout
+mirrors priml: `data.py`, `model.py`, `train_step.py`, `experiments.py`, each
+with a `*_test.py`, plus `goldens/` and `scripts/prepare_data.py`. Data staging
+lives in that script, never in a config -- `finalize()` declares, it never does
+I/O. Assume `/opt/scratch` exists.
 
-```
-priml/baselines/<dataset>/
-  README.md   __init__.py
-  data.py     model.py    train_step.py   experiments.py   (+ *_test.py each)
-  goldens/    scripts/prepare_data.py
-```
+`exp000` is the best NAIVE recipe -- what a strong first-year graduate student
+writes without exotica. Not a toy, not the state of the art. Frozen at birth:
+improvements are forks, never edits, so a number measured against it stays
+comparable across releases. Every later experiment forks a NAMED parent and
+applies ONE change, as `exp001` does in section 1:
 
-Extra modules welcome when a file would sprawl. Data staging lives in
-`scripts/prepare_data.py`, never in a config -- `finalize()` declares, it never
-does I/O. Assume `/opt/scratch` exists.
-
-`exp000` is the best NAIVE recipe -- what a strong first-year graduate
-student writes without exotica. Not a toy, not the state of the art. Frozen at
-birth: improvements are forks, never edits, so a number measured against it
-stays comparable across releases. Every later experiment forks a NAMED parent
-and applies ONE change:
-
-```python
-def exp002() -> Cifar10TrainLoop:
-    """exp001 + Muon on the convolution weights, SGD on the rest.
-
-    Hypothesis:
-      Muon orthogonalizes each update, making the step scale-invariant with
-      respect to the weight matrix, which should suit convolution kernels.
-
-    References:
-      https://kellerjordan.github.io/posts/muon/
-
-    Results:
-      TBD.
-    """
-    cfg = exp001()
-    cfg.experiment_name = "exp002"
-```
-
+- Names are `expNNN`, sequential and never adorned: `exp007`, not `exp007_muon`,
+  `exp007b`, or `exp_muon_v2`. The number is an identity, not a description -- a
+  slug goes stale when the experiment is revised, collides when two people pick
+  the same word, and breaks sorting. `exp_smoke` is the one exception.
 - The summary names the parent; the chain reconstructs without running anything.
 - Hypothesis, References, and Results are all three required. `Results: TBD.`
   until measured on reference hardware -- never a number from a dev laptop.
 - One delta. Two fields are one change only when inseparable (an optimizer and
-  the schedule its published recipe prescribes); say so in the Hypothesis.
-- Leave `seed` at its default (`None`) unless the experiment is about seed
-  variance; pinning it hides the variance you would want to measure.
+  the schedule its recipe prescribes); say so in the Hypothesis.
+- Leave `seed` at its default (`None`) unless studying seed variance.
 
 Narrow the loop's slots once, so no factory needs an `isinstance` to reach a
 field it is about to set:
@@ -390,81 +522,78 @@ class Cifar10TrainLoop(Makes["TrainLoop"], TrainLoop.Config):
     dataset: Cifar10Data.Config = field(default_factory=Cifar10Data.Config)
 ```
 
-Keep horizon and budget equal (`cfg.max_steps = cfg.step.total_train_steps`), or
-the schedule anneals past the end of training or short of it.
-
-A smoke experiment is not a result. It answers one question -- is the data
-prepared and does the loop run -- so cut every axis that costs time without
-bearing on it: one epoch AND a network narrow enough to finish in seconds.
-Shrinking only the step count wastes compute proving nothing.
-
-Launch with the module path, not a config file:
+`exp_smoke` answers one question -- is the data prepared and does the loop run
+-- so cut every axis that costs time without bearing on it: one epoch AND a
+network narrow enough to finish in seconds. Shrinking only the step count wastes
+compute proving nothing.
 
 ```bash
 uv --quiet run --frozen python -m priml priml.baselines.cifar10.experiments.exp000
+--override step.learning_rate=3e-4          # Bad -- a config that exists nowhere
+--override dataset.working_dir=/datasets/x  # Rare -- environment (as needed); uncommon.
 ```
 
-```bash
---override step.learning_rate=3e-4          # error -- a config that exists nowhere
---override dataset.working_dir=/datasets/x  # environment, not experiment
-```
-
-An overridden hyperparameter produces a result whose config is in no file, so it
-cannot be rerun or compared. Write a fork. Do not show one in documentation.
-`PATH=VALUE` is repeatable, dotted, JSON-parsed then cast to the field's type;
-path fields are logical, resolved beneath `base_dir`.
+The launcher applies either: `PATH=VALUE` is repeatable, dotted, JSON-parsed,
+cast to the field's type, and reaches any node. That reach is the point for
+DIRECTORIES -- where data lives is a property of the machine, so one config
+stays runnable everywhere. A hyperparameter is the opposite: overriding one
+produces a result whose config exists in no file, so nobody can rerun it, diff
+it, or tell later what ran -- the code stops being the truth. Write a fork, and
+never show an override in documentation; examples get copied.
 
 Every Python invocation -- code, docs, your own shell -- goes through
-`uv --quiet run --frozen`. Never `python -c`, never a heredoc; use Edit/Write
-for file changes and a repo-local `scripts/` module for probes. Commands in
-docstrings and READMEs stay on ONE line for copy-paste; the line-length rule is
-exempt (`# noqa: E501` naming the reason).
+`uv --quiet run --frozen`; never `python -c` or a heredoc. Commands in
+docstrings stay on ONE line for copy-paste, with `# noqa: E501` naming why.
 
-## 5. Tests and goldens
+## 7. Tests and goldens
 
-CPU only; CI has no GPU. priml has no slow tests -- target well under 100 ms
-each. A test running 100 training steps to watch a learning-rate schedule is
-testing a pure function the hard way: sample the function.
+CPU only; CI has no GPU. **No test exceeds 100 ms**, and that is always
+reachable: depth, width, batch, and step count are the only things making a test
+slow, and shrinking all four costs no generality. A 2-layer, 8-channel net run
+for 3 steps exercises the same paths as the real one -- wiring, shapes,
+optimizer arithmetic -- because the recipe is unchanged. A test needing 100 steps
+to watch a schedule is testing a pure function the hard way: sample it.
 
 Shrink by mutating the config. It is configgle; there is no framework to build:
 
 ```python
-config.model.channels_hidden = (4, 8)  # size: yes
+config.model.channels_hidden = (4, 8)  # Good -- size
 config.model.blocks_per_stage = 1
 config.device = "cpu"
 
-config.optimizer = plain_sgd  # error -- recipe, not size
+config.optimizer = plain_sgd  # Bad -- recipe, not size
 ```
 
-Shrink SIZE only; touching the recipe (optimizer, schedule, loss, init) means
-the test stops covering the experiment.
+Touching the recipe (optimizer, schedule, loss, init) loses generality: the test
+stops covering the experiment. Size never does.
 
 Goldens (`priml/testing/bfb.py`) make `exp000` frozen in practice rather than by
 convention: one per model (`state_dict` after init, plus the forward output) and
 one per optimizer stack (a few train steps, so loss, augmentation draws,
-schedule, and optimizer all reach the compared post-state).
-
-Mint and replay inside `host_agnostic_numerics()` -- it upcasts fp32 to fp64, so
-AVX2 and AVX-512 agree. Assert `torch.equal`, never `allclose`. Verify a golden
-BITES before trusting it: perturb a constant and confirm the failure.
-Regenerating is deliberate; it means the recipe changed.
+schedule, and optimizer all reach the compared post-state). Mint and replay
+inside `host_agnostic_numerics()` -- it upcasts fp32 to fp64, so AVX2 and
+AVX-512 agree. Assert `torch.equal`, never `allclose`. Verify a golden BITES
+before trusting it: perturb a constant and confirm the failure. Regenerating is
+deliberate -- it means the recipe changed.
 
 Experiment tests assert the DELTA -- exactly which fields each fork changes --
-so "one change per experiment" is enforced, not claimed. They also assert
-construction reads no files: a config must build on a laptop with neither the
-dataset nor a GPU.
+so "one change per experiment" is enforced, not claimed, and that construction
+reads no files: a config must build with neither the dataset nor a GPU.
 
-## 6. When you are corrected
+Not every experiment needs one. A fork is a composition: if the parent and the
+injected piece are both tested, the fork adds no untested code, only an untested
+COMBINATION. Judgement call -- write a test when the fork wires two things
+together in a way neither covers (a new selector routing parameters, a schedule
+interacting with the budget); skip it when the fork swaps a value into a slot
+both sides already exercise. `exp000` is the exception: it is the control, so it
+carries goldens regardless.
+
+## 8. When you are corrected
 
 - Apply the rule everywhere it holds, not where it was pointed. One `Literal`
   named means auditing every `Literal`. Grep for the shape.
 - A contract change takes every consumer, all or none. A dtype or signature
   change with 26 call sites and 24 updated is worse than not starting.
-- Inline the one-line helper; drop the pass-through local; do not extract a
-  private factory two callers barely share. Readability outranks DRY here: the
-  reader must see WHAT CHANGED without opening anything else.
-- Churn is a failure, not effort. Changing a spelling twice and landing back
-  where you started costs more than one wrong answer. Changing the same
-  mechanism a third time means the design is wrong -- stop and say so.
-- Run the gates: `ruff`, `ty`, `basedpyright`, `pytest`, then `pre-commit run
-  --files ...` over everything changed.
+- Inline the one-line helper; drop the pass-through local. Readability outranks
+  DRY: the reader must see WHAT CHANGED without opening anything else.
+- Run gates: `uv --quiet run --frozen --group pre-commit pre-commit run --files ...`
