@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from torch import Tensor
+from torch.optim.optimizer import Optimizer
 
 import pytest
 import torch
@@ -48,10 +49,23 @@ def test_adam_atan2_matches_reference_bias_corrections() -> None:
 
 
 @pytest.mark.cuda
-def test_adam_atan2_matches_external_package_when_available() -> None:
+def test_adam_atan2_matches_external_package_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     external = pytest.importorskip("adam_atan2")
     if not torch.cuda.is_available():
         pytest.skip("external adam-atan2 is a CUDA package")
+    # torch 2.11 renamed the capture guard to `_accelerator_...` and kept no
+    # deprecated alias, so the reference package's `step()` raises before it
+    # computes anything. 0.0.3 is the newest release on PyPI, so there is no
+    # version to upgrade to; restore the name it calls rather than lose the
+    # exact-parity comparison. The guard is a precondition check, not numerics.
+    monkeypatch.setattr(
+        Optimizer,
+        "_cuda_graph_capture_health_check",
+        Optimizer._accelerator_graph_capture_health_check,
+        raising=False,
+    )
     ref_param = torch.tensor([0.5, -0.25, 0.125], device="cuda")
     test_param = ref_param.clone()
     ref_opt = external.AdamATan2(
