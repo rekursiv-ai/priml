@@ -149,9 +149,7 @@ def _to_multiple(
         # torch stub's .to() overloads don't list the Python-type form.
         return (multiple * scaled).to(type(multiple))  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType] -- stub gap: .to(int) valid at runtime
     if isinstance(x, np.ndarray):
-        # Tensorable's recursive Sequence member leaves ty unable to prove
-        # ndarray `/` here even after the isinstance narrow.
-        ratio = x / multiple  # ty: ignore[unsupported-operator] -- x is ndarray; Sequence never passed
+        ratio = x / multiple
         scaled = np.ceil(ratio) if up else np.floor(ratio)
         return (multiple * scaled).astype(type(multiple))
     # Scalar path: Tensorable nominally includes Sequence and complex, neither

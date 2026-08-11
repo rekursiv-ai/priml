@@ -416,14 +416,14 @@ def _process_interpolate_args(
     # Compute target spatial dimensions.
     size_: tuple[int, ...] | None
     if isinstance(size, Sequence):
-        size_ = tuple(size) if size else None  # ty: ignore[invalid-assignment]
+        size_ = tuple(size) if size else None
     else:
         size_ = (size,) * output_rank
 
     # Derive scale factors from size if not given.
     sf_: tuple[int | float, ...] | None
     if isinstance(scale_factor, Sequence):
-        sf_ = tuple(scale_factor) if scale_factor else None  # ty: ignore[invalid-assignment]
+        sf_ = tuple(scale_factor) if scale_factor else None
     else:
         sf_ = (scale_factor,) * output_rank
 
