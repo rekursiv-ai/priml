@@ -2516,12 +2516,20 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
     """
     from priml.train.train_loop import _phase_heartbeat  # noqa: PLC0415
 
-    bits = 1 << 22
-    while True:  # Calibrate one GIL-holding op to >=0.15s on this machine.
+    def _timed(bits: int) -> float:
         start = time.perf_counter()
         x = 1 << bits
         _ = x * x
-        duration = time.perf_counter() - start
+        return time.perf_counter() - start
+
+    bits = 1 << 22
+    while True:  # Calibrate one GIL-holding op to >=0.15s on this machine.
+        # Best-of-5, not one sample: a single timing inflated by scheduler
+        # preemption (seen 5x on a loaded box) sets interval_s so high the
+        # real wedge below finishes before 2*interval_s and never arms the
+        # dump. The minimum is the preemption-free cost, which the wedge
+        # cannot undershoot.
+        duration = min(_timed(bits) for _ in range(5))
         if duration >= 0.15:
             break
         bits *= 2
