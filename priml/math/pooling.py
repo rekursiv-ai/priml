@@ -80,7 +80,7 @@ def _check(
     message: Callable[[], str] | None = None,
 ) -> None:
     """Compile-friendly assert (maps to C++ TORCH_CHECK)."""
-    torch._check(cond, message)  # noqa: SLF001  # pyright: ignore[reportUnknownMemberType]
+    torch._check(cond, message)  # noqa: SLF001
 
 
 class _DimInfo(NamedTuple):

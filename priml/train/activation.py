@@ -12,7 +12,7 @@ from configgle import Fig
 from torch import Tensor
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
-    apply_activation_checkpointing,  # pyright: ignore[reportUnknownVariableType]  -- partial torch stub
+    apply_activation_checkpointing,
     checkpoint_wrapper,  # pyright: ignore[reportUnknownVariableType]  -- partial torch stub
 )
 

@@ -263,12 +263,11 @@ class AsyncLocalStateDictStorer:
         """
         self._join()
         path.mkdir(parents=True, exist_ok=True)
-        # async_save is present at runtime but absent from torch's experimental
-        # stubs -- suppressions confined here. It returns either a bare Future or
-        # an AsyncSaveResponse; join on the upload (disk-write) future either way.
+        # async_save returns either a bare Future or an AsyncSaveResponse; join on
+        # the upload (disk-write) future either way.
         self._pending_start = time.perf_counter()
-        response: object = dcp.async_save(state_dict, checkpoint_id=str(path))  # ty: ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-        upload: object = getattr(response, "upload_completion", response)  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        response: object = dcp.async_save(state_dict, checkpoint_id=str(path))
+        upload: object = getattr(response, "upload_completion", response)
         self._pending = cast("Future[Any]", upload)
         self._pending_path = path
         self._after_write = after_write
