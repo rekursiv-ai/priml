@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 import torch
 
 def naive_parallel_attn(

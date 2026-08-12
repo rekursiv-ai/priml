@@ -46,6 +46,7 @@ def single_rank_group() -> Generator[None, None, None]:
 
 def test_ema_lerps_parameters_after_warmup() -> None:
     model = nn.Linear(1, 1, bias=True)
+    assert model.bias is not None
     with torch.no_grad():
         model.weight.fill_(1.0)
         model.bias.fill_(0.0)
@@ -355,6 +356,7 @@ def test_ema_apply_to_rolls_back_on_mid_swap_failure() -> None:
 def test_ema_param_dict_lerps_after_warmup() -> None:
     """param_dict mode lerps tracked params the same as module mode."""
     model = nn.Linear(1, 1, bias=True)
+    assert model.bias is not None
     with torch.no_grad():
         model.weight.fill_(1.0)
         model.bias.fill_(0.0)

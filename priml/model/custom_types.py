@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from configgle import Makeable
-from torch import nn
+from torch import Tensor, nn
 
 from priml.math.custom_types import TensorFn
 
@@ -16,14 +16,31 @@ __all__ = [
     "ChannelsInOut",
     "ChannelsOut",
     "ShardableConfig",
+    "TensorModule",
     "propagate_attr",
 ]
 
 ShardStyle = Literal["none", "colwise", "rowwise", "vocab"]
 """Tensor-parallel shard style for a building-block config; none = replicated."""
 
-type ActivationFn = Makeable[nn.Module | TensorFn] | nn.Module | TensorFn
-"""An activation: a config that builds one, a Module, or a plain function."""
+type ActivationFn = Makeable[nn.Module | TensorFn] | TensorFn
+"""An activation: a config that builds one, or a plain ``Tensor -> Tensor``.
+
+A bare ``nn.Module`` is deliberately not an arm: ``Module.__call__`` is untyped,
+so a Module is not statically a :data:`TensorFn` and admitting it would make
+every ``self.act(x)`` infer ``Any``. Pass a Module through a ``Makeable``.
+"""
+
+
+class TensorModule(Protocol):
+    """A module that maps a Tensor to a Tensor.
+
+    ``nn.Module.__call__`` is untyped, so a plain ``nn.Module`` annotation makes
+    every call site ``Any``. This names the contract those call sites need.
+    """
+
+    def __call__(self, x: Tensor, /, *args: Any, **kwargs: Any) -> Tensor: ...
+    def reset_parameters(self) -> None: ...
 
 
 @runtime_checkable

@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 import torch
 
 class L2Wrap(torch.autograd.Function):

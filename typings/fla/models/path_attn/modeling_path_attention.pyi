@@ -25,6 +25,11 @@ class PaTHAttentionBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class PaTHAttentionPreTrainedModel(PreTrainedModel):
     config_class = PaTHAttentionConfig
@@ -50,6 +55,7 @@ class PaTHAttentionModel(PaTHAttentionPreTrainedModel):
         return_dict: bool | None = ...,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
 
 class PaTHAttentionForCausalLM(PaTHAttentionPreTrainedModel, FLAGenerationMixin):
     _tied_weights_keys = ...

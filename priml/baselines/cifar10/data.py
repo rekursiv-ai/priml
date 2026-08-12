@@ -237,7 +237,7 @@ def _load_split(
             "--frozen python -m priml.baselines.cifar10.scripts.prepare_data` "
             "first.",
         )
-    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload: dict[str, Tensor] = torch.load(path, map_location="cpu", weights_only=True)
     # A cache written by some other tool can occupy this path with the same
     # filename and different keys; without this check that surfaces as a bare
     # KeyError from an unrelated line.

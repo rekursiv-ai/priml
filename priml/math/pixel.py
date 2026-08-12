@@ -414,16 +414,18 @@ def _process_interpolate_args(
         mode_ = cast(InterpolateMode, {"linear": "trilinear"}.get(mode, mode))
 
     # Compute target spatial dimensions.
+    # `isinstance(x, Sequence)` narrows to a bare `Sequence`, dropping the element
+    # type the parameter annotation already carries; re-state it on the way out.
     size_: tuple[int, ...] | None
     if isinstance(size, Sequence):
-        size_ = tuple(size) if size else None
+        size_ = tuple(int(s) for s in size) if size else None
     else:
         size_ = (size,) * output_rank
 
     # Derive scale factors from size if not given.
     sf_: tuple[int | float, ...] | None
     if isinstance(scale_factor, Sequence):
-        sf_ = tuple(scale_factor) if scale_factor else None
+        sf_ = tuple(float(s) for s in scale_factor) if scale_factor else None
     else:
         sf_ = (scale_factor,) * output_rank
 

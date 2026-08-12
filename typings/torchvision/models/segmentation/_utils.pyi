@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 """
@@ -13,3 +14,4 @@ class _SimpleSegmentationModel(nn.Module):
         aux_classifier: nn.Module | None = ...,
     ) -> None: ...
     def forward(self, x: Tensor) -> dict[str, Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Tensor]: ...

@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -186,4 +188,4 @@ def fused_recurrent(
     output_final_state: bool = ...,
     reverse: bool = ...,
     cu_seqlens: torch.LongTensor | None = ...,
-) -> Any | None: ...
+) -> None: ...

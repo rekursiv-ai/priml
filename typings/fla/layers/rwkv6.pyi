@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.utils import Cache
 from torch import nn
 
@@ -30,6 +31,9 @@ class RWKV6Attention(nn.Module):
         cu_seqlens: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
 
 class LoRA(nn.Module):
     def __init__(
@@ -42,6 +46,7 @@ class LoRA(nn.Module):
     ) -> None: ...
     def set_bias_value(self, value) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class LerpLinear(nn.Module):
     def __init__(
@@ -53,6 +58,7 @@ class LerpLinear(nn.Module):
         delta: torch.Tensor | None = ...,
         cu_seqlens: torch.LongTensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DDLerpLinear(nn.Module):
     def __init__(
@@ -65,3 +71,4 @@ class DDLerpLinear(nn.Module):
         delta: torch.Tensor | None = ...,
         cu_seqlens: torch.LongTensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

@@ -47,7 +47,7 @@ def multiply_schedules(*schedules: Schedule) -> Schedule:
 def polynomial(step: int, total_steps: int, *, power: float = 1.0) -> float:
     """Polynomial decay: (1 - t)^power."""
     t = step / max(1, total_steps)
-    return max(0.0, (1 - t) ** power)
+    return max(0.0, math.pow(1 - t, power))
 
 
 def cosine(step: int, total_steps: int) -> float:

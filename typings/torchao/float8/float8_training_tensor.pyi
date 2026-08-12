@@ -62,7 +62,7 @@ def hp_tensor_and_scale_to_float8(
     linear_mm_config: LinearMMConfig | None = ...,
     gemm_input_role: GemmInputRole | None = ...,
     axiswise_dim: int | None = ...,
-):  # -> Any | None:
+):  # -> None:
     ...
 
 class Float8TrainingTensor(torch.Tensor):
@@ -94,12 +94,10 @@ class Float8TrainingTensor(torch.Tensor):
         inner_tensors: dict, metadata, outer_size, outer_stride
     ):  # -> Float8TrainingTensor:
         ...
-    def to_original_precision(self):  # -> Any | None:
+    def to_original_precision(self):  # -> None:
         ...
     @classmethod
     def __torch_dispatch__(
         cls, func, types, args, kwargs=...
     ):  # -> _NotImplementedType | Any:
         ...
-
-    __torch_function__ = ...

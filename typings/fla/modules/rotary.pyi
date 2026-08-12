@@ -1,3 +1,5 @@
+from typing import Any
+from torch import Tensor
 from fla.utils import autotune_cache_kwargs, input_guard
 from torch import nn
 
@@ -81,7 +83,7 @@ def rotary_embedding(
     seqlen_offsets: int | torch.Tensor = ...,
     cu_seqlens: torch.Tensor | None = ...,
     chunk_indices: torch.LongTensor | None = ...,
-) -> Any | None: ...
+) -> None: ...
 
 class RotaryEmbedding(nn.Module):
     def __init__(
@@ -102,4 +104,7 @@ class RotaryEmbedding(nn.Module):
         cu_seqlens: torch.Tensor | None = ...,
         max_seqlen: int | None = ...,
         chunk_indices: torch.LongTensor | None = ...,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...

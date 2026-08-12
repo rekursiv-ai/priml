@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 import torch
@@ -21,3 +22,4 @@ class PSRoIAlign(nn.Module):
         self, output_size: int, spatial_scale: float, sampling_ratio: int
     ) -> None: ...
     def forward(self, input: Tensor, rois: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

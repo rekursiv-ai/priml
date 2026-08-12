@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.hgrn2.configuration_hgrn2 import HGRN2Config
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -27,6 +28,11 @@ class HGRN2Block(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class HGRN2PreTrainedModel(PreTrainedModel):
     config_class = HGRN2Config
@@ -51,6 +57,9 @@ class HGRN2Model(HGRN2PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class HGRN2ForCausalLM(HGRN2PreTrainedModel, FLAGenerationMixin):

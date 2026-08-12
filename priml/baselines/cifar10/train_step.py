@@ -151,7 +151,7 @@ class Cifar10TrainStep:
         if self.device.type != "mps":
             self.model.to(memory_format=torch.channels_last)
         if config.compile:
-            self.model = cast("nn.Module", torch.compile(self.model))
+            self.model = torch.compile(self.model)
         self.schedule: Schedule = config.schedule.make()
         self.optimizer: torch.optim.Optimizer = config.optimizer.make()(self.model)
         remember_initial_lrs([self.optimizer])
@@ -226,7 +226,9 @@ class Cifar10TrainStep:
         with torch.inference_mode(), self._autocast():
             if self.config.use_tta:
                 return _tta_logits(self.model, media)
-            return self.model(media)
+            logits = self.model(media)
+            assert isinstance(logits, Tensor)
+            return logits
 
     def on_epoch_end(self) -> None:
         """Do nothing: this step holds no state across epoch boundaries."""
@@ -332,7 +334,9 @@ def _tta_logits(model: nn.Module, media: Tensor) -> Tensor:
     """
 
     def mirrored(view: Tensor) -> Tensor:
-        return 0.5 * (model(view) + model(view.flip(-1)))
+        averaged = 0.5 * (model(view) + model(view.flip(-1)))
+        assert isinstance(averaged, Tensor)
+        return averaged
 
     size = media.shape[-1]
     padded = functional.pad(media, (1,) * 4, "reflect")

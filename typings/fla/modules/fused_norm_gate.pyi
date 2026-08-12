@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.utils import autotune_cache_kwargs, input_guard
 from torch import nn
 
@@ -278,7 +280,7 @@ def layer_norm_gated(
     prenorm: bool = ...,
     residual_in_fp32: bool = ...,
     eps: float = ...,
-) -> Any | None: ...
+) -> None: ...
 def rms_norm_gated(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -289,7 +291,7 @@ def rms_norm_gated(
     prenorm: bool = ...,
     residual_in_fp32: bool = ...,
     eps: float = ...,
-) -> Any | None: ...
+) -> None: ...
 def layer_norm_swish_gate_linear(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -301,7 +303,7 @@ def layer_norm_swish_gate_linear(
     prenorm: bool = ...,
     residual_in_fp32: bool = ...,
     eps: float = ...,
-) -> Any | None: ...
+) -> None: ...
 def rms_norm_swish_gate_linear(
     x,
     g: torch.Tensor,
@@ -313,7 +315,7 @@ def rms_norm_swish_gate_linear(
     prenorm: bool = ...,
     residual_in_fp32: bool = ...,
     eps: float = ...,
-) -> Any | None: ...
+) -> None: ...
 
 class FusedLayerNormGated(nn.Module):
     def __init__(
@@ -335,6 +337,7 @@ class FusedLayerNormGated(nn.Module):
         prenorm: bool = ...,
         residual_in_fp32: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class FusedRMSNormGated(nn.Module):
     def __init__(
@@ -355,6 +358,7 @@ class FusedRMSNormGated(nn.Module):
         prenorm: bool = ...,
         residual_in_fp32: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class FusedLayerNormSwishGate(FusedLayerNormGated):
     def __init__(
@@ -397,6 +401,7 @@ class FusedLayerNormGatedLinear(nn.Module):
         prenorm: bool = ...,
         residual_in_fp32: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class FusedLayerNormSwishGateLinear(FusedLayerNormGatedLinear):
     def __init__(
@@ -428,6 +433,7 @@ class FusedRMSNormGatedLinear(nn.Module):
         prenorm: bool = ...,
         residual_in_fp32: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class FusedRMSNormSwishGateLinear(FusedRMSNormGatedLinear):
     def __init__(

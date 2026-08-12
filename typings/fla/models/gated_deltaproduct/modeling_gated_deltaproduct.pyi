@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.gated_deltaproduct.configuration_gated_deltaproduct import (
     GatedDeltaProductConfig,
 )
@@ -28,6 +29,11 @@ class GatedDeltaProductBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class GatedDeltaProductPreTrainedModel(PreTrainedModel):
     config_class = GatedDeltaProductConfig
@@ -52,6 +58,9 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class GatedDeltaProductForCausalLM(

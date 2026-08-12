@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 import torch
@@ -6,9 +7,11 @@ from .anchor_utils import AnchorGenerator
 from .image_list import ImageList
 
 class RPNHead(nn.Module):
-    _version = ...
     def __init__(self, in_channels: int, num_anchors: int, conv_depth=...) -> None: ...
     def forward(self, x: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[list[Tensor], list[Tensor]]: ...
 
 def permute_and_flatten(
     layer: Tensor, N: int, A: int, C: int, H: int, W: int
@@ -56,4 +59,7 @@ class RegionProposalNetwork(torch.nn.Module):
         images: ImageList,
         features: dict[str, Tensor],
         targets: list[dict[str, Tensor]] | None = ...,
+    ) -> tuple[list[Tensor], dict[str, Tensor]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[list[Tensor], dict[str, Tensor]]: ...

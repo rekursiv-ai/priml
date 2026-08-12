@@ -1,3 +1,4 @@
+from torch import Tensor
 from collections import OrderedDict
 from typing import NamedTuple
 

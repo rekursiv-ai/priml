@@ -8,6 +8,7 @@ import torch
 from priml.model.attention import SelfAttention
 from priml.model.causal_lm import CausalLM
 from priml.model.generate import generate
+from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.rope import RoPE
 from priml.model.transformer import TransformerBlock
@@ -48,7 +49,7 @@ def test_tied_embeddings():
 
 def test_separate_lm_head():
     m = _tiny_config(tie=False).make()
-    assert m.lm_head is not None
+    assert isinstance(m.lm_head, Linear)
     # Distinct parameter, not the embed matrix.
     assert m.lm_head.weight.data_ptr() != m.embed.weight.data_ptr()
 

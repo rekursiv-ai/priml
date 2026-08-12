@@ -1,3 +1,5 @@
+from typing import Any
+from torch import Tensor
 from torch import nn
 
 import torch
@@ -94,4 +96,7 @@ class RoIHeads(nn.Module):
         proposals: list[torch.Tensor],
         image_shapes: list[tuple[int, int]],
         targets: list[dict[str, torch.Tensor]] | None = ...,
+    ) -> tuple[list[dict[str, torch.Tensor]], dict[str, torch.Tensor]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[list[dict[str, torch.Tensor]], dict[str, torch.Tensor]]: ...

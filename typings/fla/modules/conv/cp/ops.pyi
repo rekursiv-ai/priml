@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.ops.cp import FLACPContext
 
 import torch
@@ -29,4 +31,4 @@ def causal_conv1d_cp(
     cp_context: FLACPContext | None = ...,
     chunk_size: int | None = ...,
     backend: str = ...,
-) -> Any | None: ...
+) -> None: ...

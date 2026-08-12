@@ -63,7 +63,7 @@ class Float8Tensor(TorchAOBaseTensor):
 implements = ...
 
 @implements([torch.nn.functional.linear, aten.linear.default])
-def _(func, types, args, kwargs):  # -> Any | Tensor:
+def _(func, types, args, kwargs):  # -> Tensor:
     ...
 @implements(torch.bmm)
 def _(func, types, args, kwargs):  # -> Any:

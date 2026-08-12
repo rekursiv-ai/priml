@@ -128,6 +128,7 @@ def _assert_torch_process_state_equal(
 
 def test_randomize_parameters_replaces_all() -> None:
     m = nn.Linear(4, 3)
+    assert m.bias is not None
     with torch.no_grad():
         m.weight.zero_()
         m.bias.zero_()
@@ -141,6 +142,8 @@ def test_randomize_parameters_is_deterministic_per_seed() -> None:
     m2 = nn.Linear(4, 3)
     randomize_parameters(m1, seed=42)
     randomize_parameters(m2, seed=42)
+    assert m1.bias is not None
+    assert m2.bias is not None
     assert torch.equal(m1.weight, m2.weight)
     assert torch.equal(m1.bias, m2.bias)
 
@@ -361,6 +364,7 @@ def test_param_mutating_runner_captures_post_state(tmp_path: Path) -> None:
 
     def mutating_runner(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
         assert isinstance(module, nn.Linear)
+        assert module.bias is not None
         out = module(inp)
         with torch.no_grad():
             module.bias.add_(out.mean())
@@ -396,6 +400,7 @@ def test_detects_post_state_drift(tmp_path: Path) -> None:
 
     def runner_v1(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
         assert isinstance(module, nn.Linear)
+        assert module.bias is not None
         out = module(inp)
         with torch.no_grad():
             module.bias.add_(0.5)
@@ -405,6 +410,7 @@ def test_detects_post_state_drift(tmp_path: Path) -> None:
         # Same output (because we mutate AFTER computing out), but a
         # different post-state mutation.
         assert isinstance(module, nn.Linear)
+        assert module.bias is not None
         out = module(inp)
         with torch.no_grad():
             module.bias.add_(0.7)
@@ -521,6 +527,7 @@ def test_regenerate_round_trips_immediately(tmp_path: Path) -> None:
         # First call (capture) returns the clean output; the verification
         # rerun returns a perturbed output, so the golden cannot round-trip.
         out = module(inp)
+        assert isinstance(out, torch.Tensor)
         drift["n"] += 1
         if drift["n"] >= 2:
             return out + 1e-3

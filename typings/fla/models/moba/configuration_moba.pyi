@@ -1,7 +1,6 @@
 from transformers.configuration_utils import PretrainedConfig
 
 class MoBAConfig(PretrainedConfig):
-    model_type = ...
     keys_to_ignore_at_inference = ...
     def __init__(
         self,

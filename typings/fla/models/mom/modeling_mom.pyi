@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from fla.models.mom.configuration_mom import MomConfig
@@ -34,6 +35,11 @@ class MomBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class MomPreTrainedModel(PreTrainedModel):
     config_class = MomConfig
@@ -60,6 +66,9 @@ class MomModel(MomPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 @dataclass
@@ -91,3 +100,4 @@ class MomForCausalLM(MomPreTrainedModel, FLAGenerationMixin):
         num_logits_to_keep: int | None = ...,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...

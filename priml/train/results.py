@@ -16,6 +16,8 @@ import argparse
 import json
 import sys
 
+from priml.lib.custom_json import dict_val, float_val
+
 
 def read_metrics(path: Path) -> dict[str, float]:
     """Read a metrics JSON as a flat ``{key: value}`` mapping.
@@ -30,7 +32,8 @@ def read_metrics(path: Path) -> dict[str, float]:
       FileNotFoundError: If ``path`` does not exist.
 
     """
-    return json.loads(path.read_text())
+    decoded = json.loads(path.read_text())
+    return {k: float_val(v) for k, v in dict_val(decoded).items()}
 
 
 def format_summary(

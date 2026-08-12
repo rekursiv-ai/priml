@@ -274,11 +274,13 @@ class QuantizedActivationStorage:
             def unpack_hook(packed: Any) -> Tensor:
                 """Dequantize activation for gradient computation (backward pass)."""
                 quantized, scale, orig_dtype = packed
+                assert isinstance(quantized, Tensor)
 
                 if scale is _empty_marker:
                     return quantized
 
                 target_dtype = dtype_compute or orig_dtype
+                assert isinstance(scale, Tensor)
                 dequantized = quantized.to(target_dtype) * scale[0]
                 return dequantized.requires_grad_(quantized.requires_grad)
 
@@ -495,18 +497,22 @@ class QuantizedModuleActivationStorage:
             weight: Tensor,
             bias: Tensor | None,
         ) -> Tensor:
-            result: Tensor = cast(
-                Tensor,
-                QuantizedConv2dFunction.apply(
+            # Legacy `forward(ctx, ...)` convention: `apply` is typed against
+            # the modern ctx-less static `forward`, so every argument lands one
+            # position early. Converting would mean returning the quantized
+            # intermediates as outputs, which changes the autograd signature.
+            result = cast(  # ty: ignore[redundant-cast] -- pyright still infers Unknown here
+                "Tensor",
+                QuantizedConv2dFunction.apply(  # ty: ignore[missing-argument]  # pyright: ignore[reportCallIssue]
                     input,
                     weight,
-                    bias,
-                    module.stride,
+                    bias,  # ty: ignore[invalid-argument-type]
+                    module.stride,  # ty: ignore[invalid-argument-type]
                     module.padding,
                     module.dilation,
                     module.groups,
-                    self.dtype_storage,
-                    self.min_size,
+                    self.dtype_storage,  # ty: ignore[invalid-argument-type]
+                    self.min_size,  # ty: ignore[invalid-argument-type]
                 ),
             )
             return result

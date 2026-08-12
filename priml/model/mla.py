@@ -291,7 +291,7 @@ class MultiHeadLatentAttention(nn.Module):
         cos_sin: tuple[Tensor, Tensor] | None = None,
         cache: KVCache | None = None,
         **kwargs: Any,
-    ) -> Tensor | tuple[Tensor, KVCache]:
+    ) -> tuple[Tensor, KVCache]:
         del args, kwargs
         S = x.shape[-2]
 
@@ -350,6 +350,7 @@ class MultiHeadLatentAttention(nn.Module):
             assert self.q_a_layernorm is not None
             assert self.q_b_proj is not None
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
+        assert isinstance(q, Tensor)
         return q.view(*q.shape[:-1], self._heads_local, self.qk_head_dim)
 
     def _absorb_attention(

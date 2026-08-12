@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.ops.backends import dispatch
 from fla.ops.cp import FLACPContext
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -81,4 +83,4 @@ def chunk_kda(
     cp_context: FLACPContext = ...,
     transpose_state_layout: bool = ...,
     **kwargs,
-) -> Any | None: ...
+) -> None: ...

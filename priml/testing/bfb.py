@@ -98,7 +98,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, cast, override
+from typing import Any, Final, cast, overload, override
 
 import os
 
@@ -415,6 +415,10 @@ def bfb_devices() -> list[str]:
     return ["cpu"]
 
 
+@overload
+def move_to_device(value: list[Tensor], device: str) -> list[Tensor]: ...
+@overload
+def move_to_device(value: Any, device: str) -> Any: ...
 def move_to_device(value: Any, device: str) -> Any:
     """Recursively move tensors in a tensor / dict / list / tuple to device.
 
@@ -705,7 +709,9 @@ def _replay_golden(
     device = _module_device(module)
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
-    payload = torch.load(golden_path, weights_only=False, map_location="cpu")
+    payload: dict[str, Any] = torch.load(
+        golden_path, weights_only=False, map_location="cpu"
+    )
     _assert_sdpa_backend_match(payload.get("sdpa_backend"), device=device)
     module.load_state_dict(payload["state_dict"])
     inp = move_to_device(payload["input"], device)
@@ -717,10 +723,10 @@ def _replay_golden(
 
 def _default_runner(module: nn.Module, inp: Any) -> Tensor:
     if isinstance(inp, dict):
-        return module(**inp)
+        return cast(Tensor, module(**inp))
     if isinstance(inp, (list, tuple)):
-        return module(*inp)
-    return module(inp)
+        return cast(Tensor, module(*inp))
+    return cast(Tensor, module(inp))
 
 
 def _assert_sdpa_backend_match(

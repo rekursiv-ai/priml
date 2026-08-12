@@ -58,7 +58,6 @@ class MaskRCNN(FasterRCNN):
     ) -> None: ...
 
 class MaskRCNNHeads(nn.Sequential):
-    _version = ...
     def __init__(
         self,
         in_channels,

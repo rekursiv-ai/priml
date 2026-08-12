@@ -1,3 +1,4 @@
+from torch import Tensor
 from fla.utils import input_guard
 
 import torch

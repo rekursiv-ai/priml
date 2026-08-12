@@ -109,12 +109,7 @@ class TrainStep(Learnable):
         output: ModelOutput = forward_output
 
         # Loss computation (inherits autocast from forward)
-        # LossOutput is a TypedDict with `loss: Tensor` and auxiliary Tensor
-        # keys; the cast preserves Tensor typing across the widening to plain
-        # dict, which both checkers otherwise see as `dict[str, object]`.
-        loss_result = cast(
-            "dict[str, Tensor]", {**self.loss(output, **preprocessed_batch)}
-        )
+        loss_result = {**self.loss(output, **preprocessed_batch)}
         loss: Tensor = loss_result["loss"]
 
         # Validate loss is unreduced (per-element)
@@ -169,7 +164,7 @@ class TrainStep(Learnable):
         can take further derivatives.
         """
         output: ModelOutput = self(**preprocessed_batch)
-        loss = cast("dict[str, Tensor]", {**self.loss(output, **preprocessed_batch)})
+        loss = {**self.loss(output, **preprocessed_batch)}
         return loss["loss"].sum()
 
     def on_epoch_end(self) -> None:
@@ -201,7 +196,7 @@ class TrainStep(Learnable):
         output: ModelOutput = self(**preprocessed_batch)
 
         # Loss computation (inherits autocast)
-        result = cast("dict[str, Tensor]", {**self.loss(output, **preprocessed_batch)})
+        result = {**self.loss(output, **preprocessed_batch)}
         result["model"] = cast(Tensor, output)
         return cast(TrainStepOutput, result)
 
@@ -216,7 +211,7 @@ class TrainStep(Learnable):
         output: ModelOutput = super().call_eval(**preprocessed_batch)
 
         # Loss computation (inherits autocast)
-        result = cast("dict[str, Tensor]", {**self.loss(output, **preprocessed_batch)})
+        result = {**self.loss(output, **preprocessed_batch)}
         result["model"] = cast(Tensor, output)
         return cast(TrainStepOutput, result)
 

@@ -1,3 +1,5 @@
+from torch import Tensor
+
 def chunk_bwd_dqkwg_tilelang(
     q,
     k,

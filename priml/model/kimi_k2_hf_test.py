@@ -114,7 +114,9 @@ def _hf_state_dict_with_bias_fill(
     Our remap falls back to zeros in that case — mirror that here so our
     forward uses the same bias values as HF's.
     """
-    raw = {k: v.detach().cpu() for k, v in hf_model.state_dict().items()}
+    raw: dict[str, torch.Tensor] = {
+        k: v.detach().cpu() for k, v in hf_model.state_dict().items()
+    }
     for i in range(config.first_k_dense_replace, config.num_hidden_layers):
         key = f"model.layers.{i}.mlp.gate.e_score_correction_bias"
         if key not in raw:

@@ -30,7 +30,12 @@ from typing import Any, Self, cast, override
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
-from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    TensorModule,
+    propagate_attr,
+)
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -64,7 +69,7 @@ class CausalLM(nn.Module):
         tie_embeddings: bool = False
         """Reuse the token embedding matrix as the output projection."""
 
-        lm_head: Makeable[nn.Module] | None = None
+        lm_head: Makeable[TensorModule] | None = None
         """Explicit output projection. Ignored when ``tie_embeddings``."""
 
         @override
@@ -127,7 +132,7 @@ class CausalLM(nn.Module):
             self.blocks.append(block_cfg.make())
         self.final_norm = config.final_norm.make()
         if config.tie_embeddings:
-            self.lm_head: nn.Module | None = None
+            self.lm_head: TensorModule | None = None
         elif config.lm_head is not None:
             self.lm_head = config.lm_head.make()
         else:

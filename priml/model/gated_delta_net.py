@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import KW_ONLY
 from typing import TYPE_CHECKING, Any, Self, override
 
+import math
+
 from configgle import Fig
 from torch import Tensor, nn
 from torch.nn import functional as f
@@ -214,7 +216,7 @@ def _torch_chunk_gated_delta_rule(
     beta = f.pad(beta, (0, pad))
     g = f.pad(g, (0, pad))
     S_total = S + pad
-    scale = dk**-0.5
+    scale = 1.0 / math.sqrt(dk)
     query = query * scale
     v_beta = value * beta.unsqueeze(-1)
     k_beta = key * beta.unsqueeze(-1)

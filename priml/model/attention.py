@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, field
-from typing import Any, Self, cast, override
+from typing import Any, Self, cast, overload, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -293,7 +293,7 @@ class SelfAttention(nn.Module):
         cos_sin: tuple[Tensor, Tensor] | None = None,
         cache: KVCache | None = None,
         **kwargs: Any,
-    ) -> Tensor | tuple[Tensor, KVCache]:
+    ) -> tuple[Tensor, KVCache]:
         del args, kwargs
         S = x.shape[-2]
 
@@ -321,6 +321,7 @@ class SelfAttention(nn.Module):
             if positions is None:
                 offset = cache.seen if cache is not None else 0
                 positions = torch.arange(offset, offset + S, device=x.device)
+            assert isinstance(positions, Tensor)
             cos, sin = self.rope(positions)
             q, k = RoPE.rotate(q, k, cos, sin)
 
@@ -610,6 +611,35 @@ class MultiStreamAttention(nn.Module):
                 seen = norm
         if self.norm_out is not None and hasattr(self.norm_out, "reset_parameters"):
             self.norm_out.reset_parameters()
+
+    @overload
+    def __call__(
+        self,
+        xs: Sequence[Tensor],
+        *args: Any,
+        positions: Sequence[Tensor | list[Tensor] | None] | None = ...,
+        cos_sin: Sequence[tuple[Tensor, Tensor] | None] | None = ...,
+        cache: None = ...,
+        **kwargs: Any,
+    ) -> tuple[Tensor, ...]: ...
+    @overload
+    def __call__(
+        self,
+        xs: Sequence[Tensor],
+        *args: Any,
+        positions: Sequence[Tensor | list[Tensor] | None] | None = ...,
+        cos_sin: Sequence[tuple[Tensor, Tensor] | None] | None = ...,
+        cache: Sequence[KVCache | None],
+        **kwargs: Any,
+    ) -> tuple[tuple[Tensor, ...], list[KVCache]]: ...
+    @override
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[Tensor, ...] | tuple[tuple[Tensor, ...], list[KVCache]]:
+        return cast(  # pyright: ignore[reportUnnecessaryCast] -- ty cannot resolve the generic `Module.__call__` here; pyright can
+            "tuple[Tensor, ...] | tuple[tuple[Tensor, ...], list[KVCache]]",
+            super().__call__(*args, **kwargs),
+        )
 
     @override
     def forward(

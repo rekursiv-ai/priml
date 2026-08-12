@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from dataclasses import dataclass
 
 from fla.utils import (

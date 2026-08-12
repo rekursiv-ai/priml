@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import (
     LogLinearMamba2Config,
 )
@@ -25,6 +27,9 @@ class LogLinearMamba2Block(nn.Module):
         output_attentions: bool | None = ...,
         **kwargs,
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
 
 class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
     config_class = LogLinearMamba2Config
@@ -49,6 +54,9 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs,
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):

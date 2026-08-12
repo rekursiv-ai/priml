@@ -197,6 +197,7 @@ def test_enter_recovers_from_a_port_collision(
     dead = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     dead.bind(("127.0.0.1", 0))
     dead_port = dead.getsockname()[1]
+    assert isinstance(dead_port, int)
     real_find_free_port = WorkerPool.find_free_port
 
     ports: list[int] = []

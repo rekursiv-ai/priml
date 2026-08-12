@@ -35,6 +35,9 @@ class Pool(nn.Module):
     def forward(
         self, x: torch.Tensor, thw: tuple[int, int, int]
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
 
 class MultiscaleAttention(nn.Module):
     def __init__(
@@ -56,6 +59,9 @@ class MultiscaleAttention(nn.Module):
     def forward(
         self, x: torch.Tensor, thw: tuple[int, int, int]
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
 
 class MultiscaleBlock(nn.Module):
     def __init__(
@@ -73,6 +79,9 @@ class MultiscaleBlock(nn.Module):
     def forward(
         self, x: torch.Tensor, thw: tuple[int, int, int]
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
 
 class PositionalEncoding(nn.Module):
     def __init__(
@@ -83,6 +92,7 @@ class PositionalEncoding(nn.Module):
         rel_pos_embed: bool,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MViT(nn.Module):
     def __init__(
@@ -105,6 +115,7 @@ class MViT(nn.Module):
         patch_embed_padding: tuple[int, int, int] = ...,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MViT_V1_B_Weights(WeightsEnum):
     KINETICS400_V1 = ...

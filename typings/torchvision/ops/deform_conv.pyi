@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 """
@@ -31,3 +32,4 @@ class DeformConv2d(nn.Module):
     def forward(
         self, input: Tensor, offset: Tensor, mask: Tensor | None = ...
     ) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

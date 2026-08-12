@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+from typing_extensions import TypedDict
 
-
-if TYPE_CHECKING:
-    from torch import Tensor
+from torch import Tensor
 
 
 __all__ = [
@@ -16,7 +15,7 @@ __all__ = [
 ]
 
 
-class LossOutput(TypedDict, total=False):
+class LossOutput(TypedDict, extra_items=Tensor):
     """Output from loss functions.
 
     Primary loss must be in 'loss' key.

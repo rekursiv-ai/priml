@@ -1,3 +1,5 @@
+from typing import Any
+from torch import Tensor
 from fla.utils import input_guard
 from torch import nn
 
@@ -65,3 +67,4 @@ class FusedKLDivLoss(nn.Module):
         weight: torch.Tensor,
         target_weight: torch.Tensor,
     ) -> tuple[Tensor, Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]: ...

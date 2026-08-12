@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 import torch
@@ -26,6 +27,7 @@ class AnchorGenerator(nn.Module):
     def forward(
         self, image_list: ImageList, feature_maps: list[Tensor]
     ) -> list[Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> list[Tensor]: ...
 
 class DefaultBoxGenerator(nn.Module):
     def __init__(
@@ -41,3 +43,4 @@ class DefaultBoxGenerator(nn.Module):
     def forward(
         self, image_list: ImageList, feature_maps: list[Tensor]
     ) -> list[Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> list[Tensor]: ...

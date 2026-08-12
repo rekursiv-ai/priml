@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -27,6 +28,11 @@ class RodimusBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class RodimusPreTrainedModel(PreTrainedModel):
     config_class = RodimusConfig
@@ -51,6 +57,9 @@ class RodimusModel(RodimusPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class RodimusForCausalLM(RodimusPreTrainedModel, FLAGenerationMixin):

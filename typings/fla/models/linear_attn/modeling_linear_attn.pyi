@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.linear_attn.configuration_linear_attn import LinearAttentionConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -26,6 +27,11 @@ class LinearAttentionBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class LinearAttentionPreTrainedModel(PreTrainedModel):
     config_class = LinearAttentionConfig
@@ -49,6 +55,9 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
         output_attentions: bool | None = ...,
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, FLAGenerationMixin):

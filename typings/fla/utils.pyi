@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Callable
 from enum import Enum
 from functools import lru_cache

@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.retnet.configuration_retnet import RetNetConfig
 from fla.models.utils import FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -26,6 +27,11 @@ class RetNetBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class RetNetPreTrainedModel(PreTrainedModel):
     config_class = RetNetConfig
@@ -50,6 +56,9 @@ class RetNetModel(RetNetPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class RetNetForCausalLM(RetNetPreTrainedModel, FLAGenerationMixin):
