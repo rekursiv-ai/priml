@@ -338,7 +338,7 @@ Declare what a slot must DO, not what it must BE.
 
 Constants that are facts, not tunables, take `Final`:
 `NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset; a batch size
-is a tunable and belongs on the config, as `check-config-globals` enforces.
+is a tunable and belongs on the config, as `check-globals` enforces.
 
 ### Prefer mutable containers
 
