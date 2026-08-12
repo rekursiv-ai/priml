@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 import torch
@@ -15,3 +16,4 @@ def ps_roi_pool(
 class PSRoIPool(nn.Module):
     def __init__(self, output_size: int, spatial_scale: float) -> None: ...
     def forward(self, input: Tensor, rois: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

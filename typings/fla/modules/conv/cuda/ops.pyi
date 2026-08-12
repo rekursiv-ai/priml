@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.utils import input_guard
 
 import torch
@@ -41,7 +43,7 @@ def fast_causal_conv1d_fn(
     cu_seqlens_cpu: torch.LongTensor | None = ...,
     chunk_indices: torch.LongTensor | None = ...,
     seq_idx: torch.LongTensor | None = ...,
-) -> Any | None: ...
+) -> None: ...
 def causal_conv1d_cuda(
     x: torch.Tensor,
     weight: torch.Tensor,

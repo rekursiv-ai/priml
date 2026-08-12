@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.utils import autotune_cache_kwargs, input_guard
 
 import torch

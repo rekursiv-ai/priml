@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from torch import nn
 
 import torch
@@ -27,6 +29,9 @@ class ShortConvolution(nn.Conv1d):
         cu_seqlens: torch.LongTensor | None = ...,
         chunk_indices: torch.LongTensor | None = ...,
         **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def step(
         self,

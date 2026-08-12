@@ -27,6 +27,11 @@ class ForgettingTransformerBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class ForgettingTransformerPreTrainedModel(PreTrainedModel):
     config_class = ForgettingTransformerConfig
@@ -54,6 +59,7 @@ class ForgettingTransformerModel(ForgettingTransformerPreTrainedModel):
         return_dict: bool | None = ...,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
 
 class ForgettingTransformerForCausalLM(
     ForgettingTransformerPreTrainedModel, FLAGenerationMixin

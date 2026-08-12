@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 from torch.jit.annotations import BroadcastingList2
 
@@ -29,3 +30,4 @@ class RoIAlign(nn.Module):
         aligned: bool = ...,
     ) -> None: ...
     def forward(self, input: Tensor, rois: Tensor | list[Tensor]) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

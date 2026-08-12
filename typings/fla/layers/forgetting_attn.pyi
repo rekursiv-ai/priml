@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.utils import Cache
 from torch import nn
 
@@ -25,4 +26,7 @@ class ForgettingAttention(nn.Module):
         output_attentions: bool = ...,
         use_cache: bool = ...,
         **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...

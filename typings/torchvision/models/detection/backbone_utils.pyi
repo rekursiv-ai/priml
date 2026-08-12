@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Callable
 
 from torch import Tensor, nn
@@ -18,6 +19,7 @@ class BackboneWithFPN(nn.Module):
         norm_layer: Callable[..., nn.Module] | None = ...,
     ) -> None: ...
     def forward(self, x: Tensor) -> dict[str, Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Tensor]: ...
 
 @handle_legacy_interface(
     weights=(

@@ -1,3 +1,4 @@
+from torch import Tensor
 from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs
 
 import torch

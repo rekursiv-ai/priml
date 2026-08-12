@@ -11,7 +11,7 @@ from torch import Tensor
 import torch
 
 
-_AVG_POOL = {
+_AVG_POOL: dict[int, Callable[..., Tensor]] = {
     2: torch.nn.functional.avg_pool2d,
     3: torch.nn.functional.avg_pool3d,
 }
@@ -183,7 +183,7 @@ def _adaptive_avg_pool(
         )
         y = _AVG_POOL[n](x, kernel, stride)
         if variance_preserving:
-            y = y * math.prod(stride) ** 0.5
+            y = y * math.sqrt(math.prod(stride))
         return y
 
     # Per-dimension index tables.
@@ -199,7 +199,7 @@ def _adaptive_avg_pool(
         max_kernel_size_dims = tuple(-(2 * k + 1) for k in reversed(range(n)))
         y = vals.mean(dim=max_kernel_size_dims)
         if variance_preserving:
-            y = y * math.prod(vals.shape[d] for d in max_kernel_size_dims) ** 0.5
+            y = y * math.sqrt(math.prod(vals.shape[d] for d in max_kernel_size_dims))
         return y
 
     # Mask out-of-window positions; accumulate per-position window sizes.
@@ -228,4 +228,4 @@ def _adaptive_avg_pool(
         acc = term if acc is None else acc + term
 
     assert acc is not None
-    return acc / (window**0.5 if variance_preserving else window)
+    return acc / (math.sqrt(window) if isinstance(window, int) else window**0.5)

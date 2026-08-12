@@ -57,4 +57,6 @@ class Skip(nn.Module):
 
     @override
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        return x + self.inner(x, *args, **kwargs)
+        inner = self.inner(x, *args, **kwargs)
+        assert isinstance(inner, Tensor)
+        return x + inner

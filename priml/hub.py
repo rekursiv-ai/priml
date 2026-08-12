@@ -185,7 +185,11 @@ def load_local_state_dict(path: Path) -> dict[str, torch.Tensor]:
         return sd
     pt = path / "pytorch_model.bin"
     if pt.exists():
-        return torch.load(str(pt), map_location="cpu", weights_only=True)
+        # torch.load is annotated `-> Any`; weights_only=True guarantees tensors.
+        loaded: dict[str, torch.Tensor] = torch.load(
+            str(pt), map_location="cpu", weights_only=True
+        )
+        return loaded
     shards = sorted(path.glob("pytorch_model-*.bin"))
     if shards:
         pt_sd: dict[str, torch.Tensor] = {}

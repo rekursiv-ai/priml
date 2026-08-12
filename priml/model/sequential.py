@@ -109,5 +109,7 @@ class Sequential(nn.Sequential):
     @override
     def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         for module in self:
-            input = module(input, *args, **kwargs)
+            output = module(input, *args, **kwargs)
+            assert isinstance(output, Tensor)
+            input = output
         return input

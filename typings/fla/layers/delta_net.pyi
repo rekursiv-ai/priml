@@ -1,3 +1,5 @@
+from typing import Any
+from torch import Tensor
 from fla.models.utils import Cache
 from torch import nn
 from transformers.processing_utils import Unpack
@@ -36,4 +38,7 @@ class DeltaNet(nn.Module):
         use_cache: bool | None = ...,
         output_attentions: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...

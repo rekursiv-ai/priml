@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 """
@@ -40,3 +41,4 @@ class MultiScaleRoIAlign(nn.Module):
         boxes: list[Tensor],
         image_shapes: list[tuple[int, int]],
     ) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

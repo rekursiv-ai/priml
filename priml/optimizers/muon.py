@@ -222,10 +222,10 @@ def _adjust_lr(
     c_out = param.shape[ensemble_dims]
     c_in = math.prod(param.shape[ensemble_dims + 1 :])
     if adjust_lr_fn == "original":
-        return lr * max(1, c_out / c_in) ** 0.5
+        return lr * math.sqrt(max(1, c_out / c_in))
     if adjust_lr_fn == "match_rms_adamw":
-        return lr * 0.2 * max(c_out, c_in) ** 0.5
+        return lr * 0.2 * math.sqrt(max(c_out, c_in))
     if adjust_lr_fn == "conv_heuristic":
         # Keep on GPU: norm() returns 0-dim tensor, avoid .item() sync.
-        return lr * param.data.norm() / c_out**0.5
+        return lr * param.data.norm() / math.sqrt(c_out)
     raise ValueError(f"Unknown adjust_lr_fn: {adjust_lr_fn}")

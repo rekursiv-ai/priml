@@ -1,7 +1,6 @@
 from transformers.configuration_utils import PretrainedConfig
 
 class Mamba2Config(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         head_dim: int = ...,

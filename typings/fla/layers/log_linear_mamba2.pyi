@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.models.utils import Cache
 from fla.ops.log_linear_attn.chunk import LogLinearAttentionState
 from torch import nn
@@ -100,4 +102,7 @@ class LogLinearMamba2(nn.Module):
         use_cache: bool | None = ...,
         output_attentions: bool | None = ...,
         **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...

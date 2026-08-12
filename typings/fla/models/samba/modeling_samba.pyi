@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.models.samba.configuration_samba import SambaConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -24,6 +26,9 @@ class SambaBlock(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[dict],
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
 
 class SambaPreTrainedModel(PreTrainedModel):
     config_class = SambaConfig
@@ -46,6 +51,9 @@ class SambaModel(SambaPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class SambaForCausalLM(SambaPreTrainedModel, FLAGenerationMixin):

@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -26,6 +27,11 @@ class GLABlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class GLAPreTrainedModel(PreTrainedModel):
     config_class = GLAConfig
@@ -50,6 +56,9 @@ class GLAModel(GLAPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class GLAForCausalLM(GLAPreTrainedModel, FLAGenerationMixin):

@@ -1,3 +1,4 @@
+from torch import Tensor
 from typing import Any
 
 from fla.utils import input_guard
@@ -121,3 +122,6 @@ class FusedCrossEntropyLoss(nn.Module):
         return_z_loss: bool = ...,
     ) -> None: ...
     def forward(self, input, target) -> Tensor | tuple[Any | Tensor, Any | Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> Tensor | tuple[Any | Tensor, Any | Tensor]: ...

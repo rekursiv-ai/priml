@@ -1,3 +1,4 @@
+from torch import Tensor
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,

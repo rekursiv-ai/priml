@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torchao.quantization.qat import FakeQuantizeConfigBase
@@ -35,6 +36,7 @@ class NVFP4FakeQuantizedLinear(torch.nn.Linear):
         **kwargs,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     @classmethod
     def from_linear(
         cls,

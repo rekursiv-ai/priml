@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 from torch.jit.annotations import BroadcastingList2
 
@@ -21,3 +22,4 @@ class RoIPool(nn.Module):
         self, output_size: BroadcastingList2[int], spatial_scale: float
     ) -> None: ...
     def forward(self, input: Tensor, rois: Tensor | list[Tensor]) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

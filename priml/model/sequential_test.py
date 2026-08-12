@@ -40,8 +40,9 @@ def test_depth_propagation_nested():
     block = Sequential.Config(Linear.Config(128, 128))
     seq = Sequential.Config(block, repeat=4).make()
     for i, inner in enumerate(seq):
-        linear = inner[0]  # pyright: ignore[reportIndexIssue,reportUnknownVariableType]
-        assert linear.depth == i, f"block {i} linear depth={linear.depth}, expected {i}"  # pyright: ignore[reportUnknownMemberType]
+        assert isinstance(inner, Sequential)
+        linear = inner[0]
+        assert linear.depth == i, f"block {i} linear depth={linear.depth}, expected {i}"
 
 
 def test_depth_based_init():

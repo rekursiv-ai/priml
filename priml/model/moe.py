@@ -316,6 +316,7 @@ class MoE(nn.Module):
         y = self._dispatch_routed(x_flat, weights, indices, num_tokens)
         for shared in self.shared_experts:
             y = y + shared(x_flat)
+        assert isinstance(y, Tensor)
         return y.reshape(*shape[:-1], self.channels_out)
 
     def _dispatch_routed(

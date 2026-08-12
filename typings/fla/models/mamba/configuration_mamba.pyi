@@ -1,7 +1,6 @@
 from transformers.configuration_utils import PretrainedConfig
 
 class MambaConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size: int = ...,

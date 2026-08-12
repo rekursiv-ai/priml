@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.models.utils import Cache, FLAGenerationMixin
 from torch import nn
@@ -32,6 +33,7 @@ class RWKV7FeedForward(nn.Module):
         cu_seqlens: torch.LongTensor | None = ...,
         **kwargs,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class RWKV7Block(GradientCheckpointingLayer):
     def __init__(self, config: RWKV7Config, layer_idx: int) -> RWKV7Block: ...
@@ -45,6 +47,11 @@ class RWKV7Block(GradientCheckpointingLayer):
         v_first: torch.Tensor = ...,
         cu_seqlens: torch.LongTensor | None = ...,
         **kwargs,
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
@@ -75,6 +82,9 @@ class RWKV7Model(RWKV7PreTrainedModel):
         return_dict: bool | None = ...,
         cu_seqlens: torch.LongTensor | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class RWKV7ForCausalLM(RWKV7PreTrainedModel, FLAGenerationMixin):

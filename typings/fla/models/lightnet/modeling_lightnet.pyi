@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.lightnet.configuration_lightnet import LightNetConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -26,6 +27,11 @@ class LightNetBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class LightNetPreTrainedModel(PreTrainedModel):
     config_class = LightNetConfig
@@ -49,6 +55,9 @@ class LightNetModel(LightNetPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class LightNetForCausalLM(LightNetPreTrainedModel, FLAGenerationMixin):

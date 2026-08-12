@@ -123,7 +123,8 @@ class complement:  # noqa: N801 -- reads as a combinator at the call site
 
 def _name(select: Selector) -> str:
     """Return a stable name for a selector, never an address."""
-    return getattr(select, "__qualname__", None) or repr(select)
+    qualname = getattr(select, "__qualname__", None)
+    return qualname if isinstance(qualname, str) else repr(select)
 
 
 class CompositeOptimizer(Optimizer):

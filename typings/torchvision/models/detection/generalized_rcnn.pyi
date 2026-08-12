@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -22,4 +23,7 @@ class GeneralizedRCNN(nn.Module):
         self,
         images: list[torch.Tensor],
         targets: list[dict[str, torch.Tensor]] | None = ...,
+    ) -> tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor]]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor]]]: ...

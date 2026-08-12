@@ -99,4 +99,5 @@ class MLPMixerBlock(nn.Module):
             xt = self.norm_token(xt + self.token_mixer(xt))
             x = xt.movedim(-2, -1)
             x = self.norm_channel(x + self.channel_mixer(x))
+        assert isinstance(x, Tensor)
         return x

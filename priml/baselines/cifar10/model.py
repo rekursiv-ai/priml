@@ -30,6 +30,7 @@ from priml.model.custom_types import (
     ActivationFn,
     ChannelsIn,
     ChannelsOut,
+    TensorModule,
     propagate_attr,
 )
 from priml.model.init import InitFn, call_init
@@ -267,7 +268,7 @@ class ResNet(nn.Module):
         norm_momentum: float = 0.1
         """BatchNorm running-statistic momentum."""
 
-        proj_out: Makeable[nn.Module] | None = None
+        proj_out: Makeable[TensorModule] | None = None
         """Output projection. None builds an ``nn.Linear`` over the last width."""
 
         @override
@@ -397,7 +398,7 @@ class SpeedNet(nn.Module):
         registers its learnable slope); a bare function otherwise.
         """
 
-        proj_out: Makeable[nn.Module] = field(default_factory=ScaledLinear.Config)
+        proj_out: Makeable[TensorModule] = field(default_factory=ScaledLinear.Config)
         """Output projection; owns its own scaling."""
 
         init_conv: InitFn | None = None
@@ -496,16 +497,21 @@ class SpeedNet(nn.Module):
           logits: ``(B, channels_out)`` class scores.
 
         """
-        x = self.pool(self.blocks(self.act(self.whiten(media)))).flatten(1)
-        return self.head(x)
+        pooled = self.pool(self.blocks(self.act(self.whiten(media))))
+        assert isinstance(pooled, Tensor)
+        return self.head(pooled.flatten(1))
 
 
-def _activation(activation: ActivationFn) -> nn.Module | TensorFn:
-    """Build an activation from a config, or pass a callable through."""
+def _activation(activation: ActivationFn) -> TensorFn:
+    """Build an activation from a config, or pass a callable through.
+
+    An ``nn.Module`` activation satisfies ``TensorFn``; naming the callable type
+    rather than the union keeps ``self.act(x)`` inferring ``Tensor``.
+    """
     if isinstance(activation, Makeable):
         # ``Makeable`` is runtime-checkable, so isinstance erases its type
         # parameter: ``make`` reads as returning ``object`` without the cast.
-        return cast("nn.Module | TensorFn", activation.make())  # pyright: ignore[reportUnnecessaryCast] -- ty erases the Protocol type parameter; pyright keeps it
+        return cast("TensorFn", activation.make())
     return activation
 
 

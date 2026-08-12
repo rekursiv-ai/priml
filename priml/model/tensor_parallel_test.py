@@ -23,7 +23,7 @@ import torch
 from priml import runtime
 from priml.model.attention import MultiStreamAttention, SelfAttention
 from priml.model.causal_lm import CausalLM
-from priml.model.linear import EnsembleLinear
+from priml.model.linear import EnsembleLinear, Linear
 from priml.model.moe import MoE
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import TransformerBlock
@@ -73,7 +73,7 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
 def test_causal_lm_declares_embedding_and_head_vocab() -> None:
     model = CausalLM.Config(vocab_size=64, channels=32, num_layers=1).make()
     assert model.embed.shard == "vocab"
-    assert model.lm_head is not None
+    assert isinstance(model.lm_head, Linear)
     assert model.lm_head.shard == "vocab"
 
 

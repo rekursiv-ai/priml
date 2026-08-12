@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Self, override
+from typing import Any, Self, cast, overload, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -16,6 +16,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
     ShardableConfig,
+    TensorModule,
     propagate_attr,
 )
 from priml.model.kvcache import KVCache
@@ -39,13 +40,13 @@ class TransformerBlock(nn.Module):
         attn: Makeable[nn.Module] = field(default_factory=SelfAttention.Config)
         """Attention module config."""
 
-        ffn: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
+        ffn: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
         """Feed-forward module config."""
 
-        norm1: Makeable[nn.Module] = field(default_factory=RMSNorm.Config)
+        norm1: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
         """Normalization applied around attention."""
 
-        norm2: Makeable[nn.Module] = field(default_factory=RMSNorm.Config)
+        norm2: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
         """Normalization applied around the feed-forward."""
 
         prenorm: bool = True
@@ -86,6 +87,18 @@ class TransformerBlock(nn.Module):
             if hasattr(m, "reset_parameters"):
                 m.reset_parameters()
 
+    @overload
+    def __call__(
+        self, x: Tensor, *args: Any, cache: KVCache
+    ) -> tuple[Tensor, KVCache]: ...
+    @overload
+    def __call__(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor: ...
+    @override
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, KVCache]:
+        return cast(  # pyright: ignore[reportUnnecessaryCast] -- ty cannot resolve the generic `Module.__call__` here; pyright can
+            "Tensor | tuple[Tensor, KVCache]", super().__call__(*args, **kwargs)
+        )
+
     @override
     def forward(
         self,
@@ -115,10 +128,10 @@ class TransformerBlock(nn.Module):
         result: Tensor | tuple[Tensor, KVCache],
     ) -> tuple[Tensor, KVCache | None]:
         """Unpack attention output (may be (tensor, cache) tuple)."""
-        if isinstance(result, tuple):
-            x, cache = result
-            return x, cache
-        return result, None
+        if isinstance(result, Tensor):
+            return result, None
+        x, cache = result
+        return x, cache
 
     def _forward(
         self,

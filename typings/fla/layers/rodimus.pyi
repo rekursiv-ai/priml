@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.utils import Cache
 from torch import nn
 from transformers.processing_utils import Unpack
@@ -34,6 +35,9 @@ class RodimusAttention(nn.Module):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
 
 class SlidingWindowSharedKeyAttention(nn.Module):
     def __init__(
@@ -55,4 +59,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         output_attentions: bool = ...,
         use_cache: bool = ...,
         **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...

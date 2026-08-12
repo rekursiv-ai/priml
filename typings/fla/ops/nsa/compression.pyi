@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -146,4 +148,4 @@ def parallel_nsa_compression(
     block_size: int = ...,
     scale: float = ...,
     cu_seqlens: torch.LongTensor | None = ...,
-) -> Any | None: ...
+) -> None: ...

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 """
@@ -11,3 +12,4 @@ def stochastic_depth(
 class StochasticDepth(nn.Module):
     def __init__(self, p: float, mode: str) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

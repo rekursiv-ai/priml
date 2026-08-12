@@ -25,6 +25,11 @@ class TransformerBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class TransformerPreTrainedModel(PreTrainedModel):
     config_class = TransformerConfig
@@ -50,6 +55,7 @@ class TransformerModel(TransformerPreTrainedModel):
         return_dict: bool | None = ...,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
 
 class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
     _tied_weights_keys = ...

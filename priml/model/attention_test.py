@@ -179,7 +179,7 @@ def test_multi_stream_norm_qk_channels_inferred_from_channels_head():
 
     assert isinstance(config.norm_qk, RMSNorm.Config)
     assert config.norm_qk.channels_in == 16
-    streams = config.make()(torch.randn(2, 2, 8, 64))
+    streams = config.make()(list(torch.randn(2, 2, 8, 64)))
     assert all(s.shape == (2, 8, 64) for s in streams)
 
 
@@ -597,6 +597,7 @@ def test_output_gate_basic():
     ).make()
     x = torch.randn(2, 8, 64)
     out, cache = m(x)
+    assert isinstance(cache, KVCache)
     assert out.shape == (2, 8, 64)
     assert cache.length == 8
 

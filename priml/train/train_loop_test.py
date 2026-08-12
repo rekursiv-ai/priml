@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 from configgle import Fig, Makeable, PartialConfig
 
+from priml.custom_types import CheckpointableProtocol
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
 from priml.loss.custom_types import LossOutput
@@ -1767,7 +1768,7 @@ def _make_simple_loop_config(
     tmp: str,
     *,
     dataset: Makeable[DatasetProtocol] | None = None,
-):
+) -> TrainLoop.Config:
     """Build a minimal CPU TrainLoop.Config over the supplied dataset."""
     step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
@@ -1801,11 +1802,11 @@ def test_no_eval_or_checkpoint_at_step_zero() -> None:
         eval_steps: list[int] = []
         orig_eval = loop.eval
 
-        def spy_eval() -> dict[str, float]:
+        def spy_eval() -> dict[str, Any]:
             eval_steps.append(loop.step.global_step)
             return orig_eval()
 
-        loop.eval = spy_eval
+        loop.eval = spy_eval  # ty: ignore[invalid-assignment] -- test spy patches a bound method
         loop.train()
 
         # No eval should have run while global_step == 0.
@@ -1829,22 +1830,23 @@ def test_resume_does_not_eval_or_checkpoint_before_first_new_step() -> None:
         assert loop.step.global_step == 5
 
         maybe_save_steps: list[int] = []
-        assert loop.checkpointing is not None
-        original_maybe_save = loop.checkpointing.maybe_save
+        checkpointing = loop.checkpointing
+        assert checkpointing is not None
+        original_maybe_save = checkpointing.maybe_save
 
-        def spy_maybe_save(target: Any, step: int) -> bool:
+        def spy_maybe_save(target: CheckpointableProtocol, step: int) -> bool:
             maybe_save_steps.append(step)
             return original_maybe_save(target, step)
 
-        loop.checkpointing.maybe_save = spy_maybe_save
+        checkpointing.maybe_save = spy_maybe_save  # ty: ignore[invalid-assignment] -- test spy patches a bound method
         eval_steps: list[int] = []
         orig_eval = loop.eval
 
-        def spy_eval() -> dict[str, float]:
+        def spy_eval() -> dict[str, Any]:
             eval_steps.append(loop.step.global_step)
             return orig_eval()
 
-        loop.eval = spy_eval
+        loop.eval = spy_eval  # ty: ignore[invalid-assignment] -- test spy patches a bound method
         loop.train()
 
         assert loop.step.global_step == 6
@@ -2150,11 +2152,11 @@ def test_no_post_loop_eval_when_no_training() -> None:
         eval_count = [0]
         orig_eval = loop.eval
 
-        def spy_eval() -> dict[str, float]:
+        def spy_eval() -> dict[str, Any]:
             eval_count[0] += 1
             return orig_eval()
 
-        loop.eval = spy_eval
+        loop.eval = spy_eval  # ty: ignore[invalid-assignment] -- test spy patches a bound method
         loop.train()
 
         assert loop.step.global_step == 0

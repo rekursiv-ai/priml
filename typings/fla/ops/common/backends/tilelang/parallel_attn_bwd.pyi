@@ -1,3 +1,5 @@
+from torch import Tensor
+
 def parallel_attn_bwd_tilelang(
     q,
     k,

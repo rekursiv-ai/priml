@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.utils import (
     USE_CUDA_GRAPH,
     autocast_custom_bwd,

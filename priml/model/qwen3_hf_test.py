@@ -138,7 +138,7 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[torch.Tensor, torch.Ten
 
     tokens = torch.randint(0, cfg_dict["vocab_size"], (2, 5))
     with torch.no_grad():
-        hf_out = hf_model(input_ids=tokens).logits
+        hf_out: torch.Tensor = hf_model(input_ids=tokens).logits
         loop_out = loop_model(tokens)
     return hf_out, loop_out
 

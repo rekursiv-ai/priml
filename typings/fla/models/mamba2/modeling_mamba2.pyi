@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from fla.models.mamba2.configuration_mamba2 import Mamba2Config
 from fla.models.utils import Cache, FLAGenerationMixin
 from torch.distributed._tensor.placement_types import Placement
@@ -33,6 +35,9 @@ class Mamba2Block(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
         **kwargs,
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
 
 class Mamba2PreTrainedModel(PreTrainedModel):
     config_class = Mamba2Config
@@ -57,6 +62,9 @@ class Mamba2Model(Mamba2PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs,
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class Mamba2ForCausalLM(Mamba2PreTrainedModel, FLAGenerationMixin):

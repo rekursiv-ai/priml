@@ -8,6 +8,7 @@ import math
 from torch import Tensor
 
 import numpy as np
+import torch
 
 from priml.math.custom_types import Tensorable
 
@@ -145,9 +146,8 @@ def _to_multiple(
         return x
     if isinstance(x, Tensor):
         scaled = (x / multiple).ceil() if up else (x / multiple).floor()
-        # tensor.to(int|float) maps to the int64/float32 dtype at runtime; the
-        # torch stub's .to() overloads don't list the Python-type form.
-        return (multiple * scaled).to(type(multiple))  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType] -- stub gap: .to(int) valid at runtime
+        dtype = torch.int64 if isinstance(multiple, int) else torch.float32
+        return (multiple * scaled).to(dtype)
     if isinstance(x, np.ndarray):
         ratio = x / multiple
         scaled = np.ceil(ratio) if up else np.floor(ratio)

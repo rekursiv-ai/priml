@@ -48,12 +48,13 @@ from typing import Any, Literal, Self, cast, override
 import json
 
 from configgle import Makeable, Makes
-from torch import Tensor, nn
+from torch import Tensor
 
 import torch
 
 from priml import hub
 from priml.model.causal_lm import CausalLM
+from priml.model.custom_types import TensorModule
 from priml.model.mla import MultiHeadLatentAttention
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
@@ -195,7 +196,7 @@ class KimiK2(CausalLM):
                 rms_norm_eps=self.rms_norm_eps,
             )
 
-        def _ffn_for_layer(self, layer_idx: int) -> Makeable[nn.Module]:
+        def _ffn_for_layer(self, layer_idx: int) -> Makeable[TensorModule]:
             if layer_idx < self.first_k_dense_replace:
                 return SwiGLU.Config(
                     channels_in=self.hidden_size,

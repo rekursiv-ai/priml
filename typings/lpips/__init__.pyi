@@ -1,3 +1,6 @@
+from numpy import ndarray
+from torch import Tensor, dtype
+from typing import Any
 from lpips.lpips import *
 from lpips.trainer import *
 

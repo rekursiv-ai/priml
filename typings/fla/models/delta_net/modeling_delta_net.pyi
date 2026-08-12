@@ -1,3 +1,4 @@
+from typing import Any
 from fla.models.delta_net.configuration_delta_net import DeltaNetConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -26,6 +27,11 @@ class DeltaNetBlock(GradientCheckpointingLayer):
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
 
 class DeltaNetPreTrainedModel(PreTrainedModel):
     config_class = DeltaNetConfig
@@ -50,6 +56,9 @@ class DeltaNetModel(DeltaNetPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class DeltaNetForCausalLM(DeltaNetPreTrainedModel, FLAGenerationMixin):

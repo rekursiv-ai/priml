@@ -68,7 +68,7 @@ class _AffineFakeQuantizedTensor(TorchAOBaseTensor):
         zero_point_dtype: torch.dtype | None = ...,
         preserve_zero: bool = ...,
         zero_point_domain: ZeroPointDomain = ...,
-    ):  # -> Any | None:
+    ):  # -> None:
         ...
     def get_value(self) -> torch.Tensor: ...
     def to(self, *args, **kwargs):  # -> Self:
