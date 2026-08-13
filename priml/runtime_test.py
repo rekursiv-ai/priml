@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import cast
-
-import subprocess
-import sys
 
 import pytest
 import torch
@@ -18,11 +14,7 @@ from priml.runtime import (
     get_device,
     initialize_global_device_mesh,
     is_rank_zero,
-    runtime_output_path,
 )
-
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_get_device_explicit() -> None:
@@ -168,86 +160,6 @@ def test_multiprocess_backend_resolved_once_by_init() -> None:
     config = MultiProcess.Config(device="cpu").finalize()
     assert config.backend is None, "finalize must not pre-compute backend"
     assert MultiProcess(config).backend == "gloo"
-
-
-def test_userdirs_import_and_resolve_do_not_load_torch() -> None:
-    """Pure path resolution must stay independent of Torch.
-
-    ``userdirs`` is imported by torch-free processes; a module-top torch import
-    would add multi-second startup cost to every one of them.
-    """
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import sys; "
-                "assert 'torch' not in sys.modules; "
-                "from priml.lib.userdirs import resolve_working_dir; "
-                "resolve_working_dir('/opt/scratch', '/datasets/probe'); "
-                "assert 'torch' not in sys.modules"
-            ),
-        ],
-        cwd=_REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert probe.returncode == 0, probe.stderr
-
-
-def test_runtime_output_path_expands_tilde(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A tilde argument names the home directory, not a literal ``~`` dir."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-
-    assert runtime_output_path("~/artifacts/x.json") == home / "artifacts" / "x.json"
-
-
-def test_runtime_output_path_returns_absolute(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The caller writes to the RETURN value, so it must be canonical."""
-    monkeypatch.chdir(tmp_path)
-
-    assert runtime_output_path("artifacts/x.json") == tmp_path / "artifacts" / "x.json"
-
-
-def test_runtime_output_path_rejects_filesystem_root() -> None:
-    with pytest.raises(ValueError, match="must not be root"):
-        runtime_output_path(Path("/"))
-
-
-def test_runtime_output_path_rejects_non_normalized_path() -> None:
-    with pytest.raises(ValueError, match="must be normalized"):
-        runtime_output_path("/opt/scratch/../repo/output.json")
-
-
-def test_runtime_output_path_rejects_symlink_resolving_to_root(
-    tmp_path: Path,
-) -> None:
-    """A link to ``/`` is lexically fine but names the filesystem root."""
-    link = tmp_path / "root-link"
-    link.symlink_to("/", target_is_directory=True)
-
-    with pytest.raises(ValueError, match="must not be root"):
-        runtime_output_path(link)
-
-
-def test_runtime_output_path_allows_a_checkout_path(tmp_path: Path) -> None:
-    """Version control is .gitignore's concern, not this function's."""
-    checkout = tmp_path / "repo"
-    checkout.mkdir()
-    (checkout / ".git").mkdir()
-    output = checkout / "artifacts" / "x.json"
-
-    assert runtime_output_path(output) == output
 
 
 def test_initialize_validates_topology_before_acquiring(

@@ -15,7 +15,7 @@ import time
 from configgle import Fig
 from wrapt import lazy_import
 
-from priml.lib.userdirs import resolve_working_dir
+from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 from priml.train.custom_types import CudaEventProtocol
 

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import field
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, override
 
 import math
-import os
 
 from configgle import Fig
 
@@ -23,8 +21,8 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    # Torch costs seconds to import; deferring it keeps the pure path helpers
-    # (``scratch_dir`` and friends) cheap for torch-free consumers.
+    # Torch costs seconds to import; deferring it keeps this module importable
+    # by consumers that only touch its non-torch surface.
     torch = lazy_import("torch")
     init_device_mesh = lazy_import("torch.distributed.device_mesh", "init_device_mesh")
     enable_determinism = lazy_import("priml.math.seed", "enable_determinism")
@@ -61,7 +59,6 @@ __all__ = [
     "initialize_global_device_mesh",
     "is_rank_zero",
     "runtime_initialized",
-    "runtime_output_path",
 ]
 
 
@@ -98,43 +95,6 @@ def get_device(device: torch.device | str | None = "auto") -> torch.device:
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(device)
-
-
-def runtime_output_path(path: Path | str) -> Path:
-    """Return the canonical output path, or raise if it is unusable.
-
-    The destination need not exist yet. Write to the path this returns rather
-    than to the argument, so callers share one notion of what a path means
-    instead of each expanding and absolutising it their own way.
-
-    This does NOT inspect version control. An earlier revision walked ancestors
-    looking for ``.git`` and refused paths inside a checkout; that is a
-    repository-hygiene rule, enforced by a ``.gitignore`` (an ignored file
-    cannot be staged, so the harm is prevented before a commit rather than
-    detected after a job has already written the bytes). A published library
-    has no business inspecting a user's version control, and the check refused
-    legitimate work for anyone whose workspace sits inside a repository.
-
-    Args:
-      path: Intended output destination, absolute or relative, ``~`` allowed.
-
-    Returns:
-      output_path: The expanded, absolute, validated destination.
-
-    Raises:
-      ValueError: The path is not normalized, or it names the filesystem root
-        either literally or after resolving symlinks.
-
-    """
-    output_path = Path(path).expanduser().absolute()
-    if output_path == Path(output_path.anchor):
-        raise ValueError(f"runtime output path must not be root: {path}")
-    if Path(os.path.normpath(output_path)) != output_path:
-        raise ValueError(f"runtime output path must be normalized: {path}")
-    resolved = output_path.resolve(strict=False)
-    if resolved == Path(resolved.anchor):
-        raise ValueError(f"runtime output path must not be root: {path}")
-    return output_path
 
 
 _device_mesh: DeviceMesh | None = None

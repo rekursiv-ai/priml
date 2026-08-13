@@ -14,7 +14,7 @@ from pathlib import Path
 import json
 import os
 
-from priml.runtime import runtime_output_path
+from priml.paths import validated_output_path
 
 
 def write_progress(
@@ -44,7 +44,7 @@ def write_progress(
     """
     if not working_dir:
         raise ValueError("working_dir must not be empty")
-    path = runtime_output_path(Path(working_dir) / "progress.json")
+    path = validated_output_path(Path(working_dir) / "progress.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "step": step,
