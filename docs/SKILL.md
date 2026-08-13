@@ -212,6 +212,22 @@ nothing else does:
 Promote on a guess and the code carries its origin's assumptions in a default,
 where its position in `priml/` presents them as general.
 
+**Check the slots before reaching for a new module.** Three cases, and only the
+third is a promotion:
+
+| The new caller differs in | It gets |
+|---|---|
+| VALUES | the existing slots, filled differently |
+| BEHAVIOR | a new piece supplied to a slot |
+| something no slot can express | a promotion candidate |
+
+Two baselines are the same layer, so one may import another whenever it is in
+the first case: the borrowed piece stays where it lives and the borrower writes
+only what names its own problem. A second baseline reusing a solver at a
+different grid size and vocabulary has nothing to promote -- the difference was
+already values, and moving code to express it buys nothing while churning a
+directory that was working.
+
 What gets promoted is a CONFIGGLEABLE CLASS, never a function carrying keyword
 arguments.
 
@@ -628,4 +644,6 @@ control.
   change with 26 call sites and 24 updated is worse than not starting.
 - Inline the one-line helper; drop the pass-through local. Readability outranks
   DRY: the reader must see WHAT CHANGED without opening anything else.
+- Moving or renaming code the request did not name is a separate change. Ask in
+  one sentence first; "add X" never implies restructuring what X builds on.
 - Run gates: `uv --quiet run --frozen --group pre-commit pre-commit run --files ...`
