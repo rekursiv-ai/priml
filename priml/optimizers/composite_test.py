@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from configgle import PartialConfig
-from torch import nn
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -15,6 +15,7 @@ from priml.optimizers.composite import (
     excluding,
 )
 from priml.optimizers.muon import Muon
+from priml.optimizers.newton import Newton
 
 
 def split_model() -> nn.Module:
@@ -120,6 +121,43 @@ def test_step_returns_the_closure_value() -> None:
 
 def test_closure_is_evaluated_once() -> None:
     # Forwarding it to each member would recompute the loss per member.
+    calls: list[int] = []
+    model = split_model()
+    optimizer = split_optimizer(model)
+    backward(model)
+    _ = optimizer.step(lambda: calls.append(1) or 0.0)
+    assert len(calls) == 1
+
+
+def test_closure_reaches_a_member_that_requires_it() -> None:
+    """A closure-based member must receive the closure, not a bare step().
+
+    ``CompositeOptimizer`` IS an ``Optimizer``, so it owes members the same
+    ``step(closure)`` contract torch does; Newton cannot build a Hessian
+    without one and raises.
+    """
+    torch.manual_seed(0)
+    model = nn.Linear(3, 1, bias=False)
+    optimizer = CompositeOptimizer([Newton(model.parameters(), lr=1.0)])
+    inputs = torch.randn(32, 3)
+    labels = (inputs.sum(-1) > 0).float()
+
+    def closure() -> Tensor:
+        logits = model(inputs).squeeze(-1)
+        return nn.functional.binary_cross_entropy_with_logits(logits, labels)
+
+    before = closure().item()
+    for _ in range(3):
+        _ = optimizer.step(closure)
+    assert closure().item() < before
+
+
+def test_closure_is_withheld_from_first_order_members() -> None:
+    """Handing a torch optimizer a closure runs a second, wasteful forward.
+
+    It would also double-count BatchNorm statistics, so only members declaring
+    ``requires_closure`` may see it.
+    """
     calls: list[int] = []
     model = split_model()
     optimizer = split_optimizer(model)

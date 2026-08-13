@@ -123,7 +123,7 @@ def test_newton_rejects_dtensor_params(tmp_path: Path) -> None:
     try:
         mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
         param = nn.Parameter(distribute_tensor(torch.zeros(4), mesh, [Shard(0)]))
-        optimizer = Newton(lr=1.0, damping=0.0)([param])
+        optimizer = Newton([param], lr=1.0, damping=0.0)
 
         def closure() -> Tensor:
             return cast("DTensor", param.data).to_local().pow(2).sum()

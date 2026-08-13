@@ -15,7 +15,7 @@ def test_newton_fp64_quadratic_converges() -> None:
     ``torch.linalg.solve`` raise, silently falling back to gradient descent.
     """
     param = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
-    opt = Newton(lr=1.0, damping=0.0)([param])
+    opt = Newton([param], lr=1.0, damping=0.0)
 
     def closure() -> torch.Tensor:
         return ((param - 3.0) ** 2).sum()
