@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, ClassVar, Self, override
+from collections.abc import Callable, Iterable
+from functools import partial
+from typing import Any, ClassVar, override
 
 from configgle import Fig
 from torch import Tensor
@@ -81,36 +82,47 @@ class Newton(Optimizer):
     requires_closure: ClassVar[bool] = True
     """Newton needs the loss-recomputing closure to build the Hessian."""
 
-    class Config(Fig["Newton"], make_with_kwargs=True):
-        lr: float = 1.0
-        damping: float = 1e-5
+    class Config(Fig["Callable[..., Newton]"]):
+        """Newton hyperparameters; see :class:`Newton` for what each one does.
 
-    def __init__(self, lr: float = 1.0, damping: float = 1e-5):
+        ``make()`` yields a ``partial``, not a ``Newton``: a config tree has no
+        parameters to hand an optimizer. Call the result with them::
+
+            optimizer = Newton.Config().make()(model.parameters())
+        """
+
+        lr: float = 1.0
+        """Step size multiplier on the Newton direction."""
+
+        damping: float = 1e-5
+        """Added to the Hessian diagonal so a near-singular solve stays stable."""
+
+        @override
+        def make(self) -> Callable[..., Newton]:
+            """Return a constructor awaiting the parameters to optimize."""
+            final = (
+                self.copy_tree()
+                if getattr(self, "_finalized", False)
+                else self.copy_tree().finalize()
+            )
+            return partial(Newton, lr=final.lr, damping=final.damping)
+
+    def __init__(
+        self,
+        params: Iterable[Tensor] | Iterable[dict[str, Any]],
+        lr: float = 1.0,
+        *,
+        damping: float = 1e-5,
+    ) -> None:
         """Initialize Newton optimizer.
 
         Args:
+            params: Parameters to optimize, or parameter groups.
             lr: Learning rate (step size multiplier).
             damping: Damping factor added to Hessian diagonal for stability.
 
         """
-        self.lr = lr
-        self.damping = damping
-        self._optimizer: Optimizer | None = None
-
-    def __call__(self, params: Any) -> Self:
-        """Establish params and create underlying optimizer.
-
-        Args:
-            params: Parameters to optimize (iterable or param groups).
-
-        Returns:
-            self: For chaining.
-
-        """
-        defaults = {"lr": self.lr, "damping": self.damping}
-        Optimizer.__init__(self, params, defaults)
-        self._optimizer = self
-        return self
+        super().__init__(params, {"lr": lr, "damping": damping})
 
     @override
     def step(  # ty: ignore[invalid-method-override] -- single-signature override of torch's overloaded `Optimizer.step`; the union return matches `OptimizerProtocol`

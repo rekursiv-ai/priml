@@ -230,9 +230,13 @@ class CompositeOptimizer(Optimizer):
         """Step every member in order.
 
         Args:
-          closure: Evaluated once, before any member steps -- not forwarded.
-            A member that ran it would recompute the loss per member, and a
-            first-order torch optimizer executes any closure it is handed.
+          closure: Loss-recomputing closure. Forwarded ONLY to members that set
+            ``requires_closure`` (e.g. exact-Hessian Newton, which needs a
+            graph-bearing loss to differentiate twice); a first-order torch
+            optimizer executes any closure it is handed, running a wasteful
+            second forward that would also double-count BatchNorm stats. Called
+            once here for the return value, so a member that never sees it still
+            steps against gradients the caller already populated.
 
         Returns:
           loss: The closure's value, or None when no closure was given.
@@ -240,7 +244,10 @@ class CompositeOptimizer(Optimizer):
         """
         loss = closure() if closure is not None else None
         for optimizer in self.optimizers:
-            optimizer.step()
+            if closure is not None and getattr(optimizer, "requires_closure", False):
+                optimizer.step(closure)
+            else:
+                optimizer.step()
         return loss
 
     @override
