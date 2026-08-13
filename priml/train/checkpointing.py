@@ -39,8 +39,8 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 
 from priml.custom_types import CheckpointableProtocol
-from priml.lib.userdirs import resolve_working_dir
-from priml.runtime import is_rank_zero, runtime_output_path
+from priml.paths import resolve_working_dir, validated_output_path
+from priml.runtime import is_rank_zero
 
 
 if TYPE_CHECKING:
@@ -577,7 +577,7 @@ class Checkpointer:
     def _write(self, target: CheckpointableProtocol, step: int) -> None:
         """Serialize ``target`` and write it at ``step``; retention rides the write."""
         self.storage.write(
-            runtime_output_path(self._path(step)),
+            validated_output_path(self._path(step)),
             target.state_dict(),
             after_write=self._prune,
         )

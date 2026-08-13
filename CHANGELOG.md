@@ -5,6 +5,13 @@ All notable priml changes are documented here. This project follows
 
 ## Unreleased
 
+### Changed
+
+- Path helpers moved to `priml.paths`. `runtime_output_path` is renamed
+  `validated_output_path` and gained an optional `protected` argument that
+  refuses a destination aliasing one of the run's own inputs.
+- `resolve_working_dir` now lives in `priml.paths` (previously vendored).
+
 ## 0.1.4 - 2026-08-05
 
 ### Changed

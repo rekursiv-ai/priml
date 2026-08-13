@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from torch.utils.data import DataLoader
 
 from priml.custom_types import HasNormalizedWorkingDirPattern
-from priml.lib.userdirs import resolve_working_dir
 from priml.math.seed import (
     get_rng_state,
     salt,
@@ -54,6 +53,7 @@ from priml.math.seed import (
     set_seed_local,
 )
 from priml.metrics.custom_types import MetricProtocol
+from priml.paths import resolve_working_dir
 from priml.runtime import (
     RuntimeProtocol,
     SingleProcess,

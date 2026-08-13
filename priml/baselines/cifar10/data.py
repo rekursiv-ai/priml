@@ -25,7 +25,7 @@ from torch import Tensor
 
 import torch
 
-from priml.lib.userdirs import resolve_working_dir
+from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 
 

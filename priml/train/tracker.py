@@ -17,9 +17,9 @@ from torch import Tensor
 from wrapt import lazy_import
 
 from priml.custom_types import HasNormalizedWorkingDirPattern
-from priml.lib.userdirs import resolve_working_dir
 from priml.logger import bind_logging_to_current_stdout, replay_buffered_logs
-from priml.runtime import is_rank_zero, runtime_output_path
+from priml.paths import resolve_working_dir, validated_output_path
+from priml.runtime import is_rank_zero
 from priml.train.custom_types import TrackerProtocol
 
 
@@ -115,7 +115,7 @@ class FileTracker:
             return
         if not self.config.working_dir:
             return
-        path = runtime_output_path(self.config.working_dir)
+        path = validated_output_path(self.config.working_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
         prefixed = {
@@ -175,7 +175,7 @@ class TensorBoardTracker:
             msg = "tensorboard is not installed. Install with: pip install tensorboard"
             raise ImportError(msg)
         self.writer: _Writer | None = _summary_writer_cls(
-            str(runtime_output_path(config.working_dir))
+            str(validated_output_path(config.working_dir))
         )
 
     def log_metrics(
@@ -345,7 +345,7 @@ class WandbTracker:
                 config.system_metrics_interval_sec
             )
         settings = wandb.Settings(**settings_kwargs) if settings_kwargs else None
-        working_dir = runtime_output_path(config.working_dir)
+        working_dir = validated_output_path(config.working_dir)
         try:
             working_dir.mkdir(parents=True, exist_ok=True)
             logger.info(
