@@ -75,7 +75,12 @@ class Policy(Protocol):
         ...
 
 
-def play(*, seed: int = 0, block_pixels: int = 64) -> EnvState:
+def play(
+    *,
+    seed: int = 0,
+    block_pixels: int = 64,
+    asset_dir: Path | None = None,
+) -> EnvState:
     """Open a window and play one world from the keyboard.
 
     The world advances only when a key is pressed, so there is no clock to
@@ -84,6 +89,7 @@ def play(*, seed: int = 0, block_pixels: int = 64) -> EnvState:
     Args:
       seed: World seed.
       block_pixels: Tile size, and therefore window size.
+      asset_dir: Where sprites are cached; defaults to the user cache.
 
     Returns:
       state: The world as it stood when the window closed.
@@ -96,7 +102,7 @@ def play(*, seed: int = 0, block_pixels: int = 64) -> EnvState:
         generator=generator,
         device=torch.device("cpu"),
     )
-    renderer = Renderer(block_pixels=block_pixels)
+    renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
     frame = renderer.render(state)
     screen = pygame.display.set_mode((frame.shape[1], frame.shape[0]))
     pygame.display.set_caption(f"Craftax (seed {seed})")
@@ -137,6 +143,7 @@ def record(
     max_steps: int = 1_000,
     fps: int = 10,
     block_pixels: int = 64,
+    asset_dir: Path | None = None,
 ) -> int:
     """Write an mp4 of one episode played by ``policy``.
 
@@ -147,6 +154,7 @@ def record(
       max_steps: Cap on episode length.
       fps: Frames per second in the output.
       block_pixels: Tile size in the output.
+      asset_dir: Where sprites are cached; defaults to the user cache.
 
     Returns:
       steps: How many steps the episode ran.
@@ -172,7 +180,7 @@ def record(
     env = config.make()
     observation = env.reset()
 
-    renderer = Renderer(block_pixels=block_pixels)
+    renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
     generator = torch.Generator().manual_seed(seed)
     frames: list[np.ndarray] = []
     steps = 0

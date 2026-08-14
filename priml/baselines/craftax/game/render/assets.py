@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import hashlib
+import os
 import urllib.error
 import urllib.request
 
@@ -81,8 +82,15 @@ def fetch(
 
     # Written through a temporary path: an interrupted download must not leave
     # a truncated PNG that every later run treats as cached.
-    partial = path.with_suffix(".partial")
+    #
+    # The name carries the writer's pid because several processes fetch into
+    # one shared cache -- pytest-xdist workers do exactly this. A fixed
+    # ``.partial`` name means one worker renames the file while another is
+    # still writing to it, and the second rename raises FileNotFoundError.
+    partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
     partial.write_bytes(payload)
+    # ``replace`` is atomic on POSIX, so a reader either sees the old file or
+    # the whole new one -- never a half-written PNG.
     partial.replace(path)
     return path
 
