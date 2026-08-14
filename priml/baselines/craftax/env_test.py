@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.craftax import constants, renderer
 from priml.baselines.craftax.env import CraftaxEnv
+from priml.baselines.craftax.game import constants, observation
 from priml.data.environment import BatchedEnvironmentProtocol
 
 
@@ -36,21 +36,21 @@ def test_it_declares_the_published_geometry() -> None:
 
 def test_reset_returns_one_observation_per_worker() -> None:
     env = _env()
-    observation = env.reset()
-    assert observation.shape == (4, renderer.OBSERVATION_SIZE)
-    assert bool(torch.isfinite(observation).all())
+    rendered = env.reset()
+    assert rendered.shape == (4, observation.OBSERVATION_SIZE)
+    assert bool(torch.isfinite(rendered).all())
 
 
 def test_reset_can_change_the_batch_size() -> None:
     env = _env()
-    assert env.reset(7).shape == (7, renderer.OBSERVATION_SIZE)
+    assert env.reset(7).shape == (7, observation.OBSERVATION_SIZE)
 
 
 def test_stepping_returns_a_full_transition() -> None:
     env = _env()
     env.reset()
     transition = env.step(_actions(env, 4))
-    assert transition.observation.shape == (4, renderer.OBSERVATION_SIZE)
+    assert transition.observation.shape == (4, observation.OBSERVATION_SIZE)
     assert transition.reward.shape == (4,)
     assert transition.done.shape == (4,)
     assert transition.done.dtype == torch.bool
@@ -110,7 +110,7 @@ def test_the_observation_after_a_restart_is_the_new_episode() -> None:
     env.reset()
     env.state.player_health[1] = 0.0
     transition = env.step(_actions(env, 4))
-    assert torch.equal(transition.observation[1], renderer.render(env.state)[1])
+    assert torch.equal(transition.observation[1], observation.render(env.state)[1])
 
 
 def test_achievements_are_reported_only_when_an_episode_ends() -> None:
@@ -136,12 +136,11 @@ def test_an_episode_ends_when_the_step_limit_is_reached() -> None:
 
 def test_a_long_rollout_stays_finite_and_rectangular() -> None:
     env = _env()
-    observation = env.reset()
+    env.reset()
     for index in range(60):
         transition = env.step(_actions(env, 4, index))
-        observation = transition.observation
-        assert observation.shape == (4, renderer.OBSERVATION_SIZE)
-        assert bool(torch.isfinite(observation).all())
+        assert transition.observation.shape == (4, observation.OBSERVATION_SIZE)
+        assert bool(torch.isfinite(transition.observation).all())
         assert bool(torch.isfinite(transition.reward).all())
 
 
@@ -173,7 +172,7 @@ def test_a_checkpoint_taken_before_reset_restores_cleanly() -> None:
     saved = env.state_dict()
     restored = _env()
     restored.load_state_dict(saved)
-    assert restored.reset().shape == (4, renderer.OBSERVATION_SIZE)
+    assert restored.reset().shape == (4, observation.OBSERVATION_SIZE)
 
 
 def test_an_empty_batch_is_refused() -> None:

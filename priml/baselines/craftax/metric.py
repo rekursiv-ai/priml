@@ -22,8 +22,8 @@ from torch import Tensor
 import numpy as np
 import torch
 
-from priml.baselines.craftax import constants
 from priml.baselines.craftax.env import CraftaxEnv
+from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.model import ActorCritic
 
 

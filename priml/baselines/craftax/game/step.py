@@ -16,7 +16,7 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import (
+from priml.baselines.craftax.game import (
     abilities,
     constants,
     crafting,
@@ -26,9 +26,9 @@ from priml.baselines.craftax import (
     survival,
     world_gen,
 )
-from priml.baselines.craftax.constants import Achievement, Action, ItemType
-from priml.baselines.craftax.indexing import gather_tiles
-from priml.baselines.craftax.state import EnvState
+from priml.baselines.craftax.game.constants import Achievement, Action, ItemType
+from priml.baselines.craftax.game.indexing import gather_tiles
+from priml.baselines.craftax.game.state import EnvState
 
 
 def step(

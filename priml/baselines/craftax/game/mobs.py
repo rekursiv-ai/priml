@@ -17,12 +17,12 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import constants, mechanics
-from priml.baselines.craftax.constants import Achievement, BlockType
-from priml.baselines.craftax.indexing import (
+from priml.baselines.craftax.game import constants, mechanics
+from priml.baselines.craftax.game.constants import Achievement, BlockType
+from priml.baselines.craftax.game.indexing import (
     scatter_tiles_where,
 )
-from priml.baselines.craftax.state import EnvState, Mobs
+from priml.baselines.craftax.game.state import EnvState, Mobs
 
 
 def update_mobs(

@@ -10,12 +10,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.craftax import constants
 from priml.baselines.craftax.conftest import (
     as_tensor,
     reference,
     requires_craftax,
 )
+from priml.baselines.craftax.game import constants
 
 
 def test_reward_table_sums_to_the_scoring_denominator() -> None:

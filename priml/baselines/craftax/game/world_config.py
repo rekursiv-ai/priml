@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-from priml.baselines.craftax.constants import BlockType
+from priml.baselines.craftax.game.constants import BlockType
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

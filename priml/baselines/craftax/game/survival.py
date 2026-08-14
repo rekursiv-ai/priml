@@ -16,9 +16,9 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import constants, mechanics
-from priml.baselines.craftax.constants import Achievement, Action
-from priml.baselines.craftax.state import EnvState
+from priml.baselines.craftax.game import constants, mechanics
+from priml.baselines.craftax.game.constants import Achievement, Action
+from priml.baselines.craftax.game.state import EnvState
 
 
 def move_player(state: EnvState, action: Tensor) -> EnvState:

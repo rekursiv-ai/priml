@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from priml.baselines.craftax import constants
+from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.metric import CraftaxScore, crafter_score_pct
 from priml.baselines.craftax.model import ActorCritic
 from priml.metrics.custom_types import MetricProtocol

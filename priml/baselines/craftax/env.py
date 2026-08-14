@@ -21,8 +21,8 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import constants, renderer, step, world_gen
-from priml.baselines.craftax.state import EnvState
+from priml.baselines.craftax.game import constants, observation, step, world_gen
+from priml.baselines.craftax.game.state import EnvState
 from priml.runtime import get_device
 
 
@@ -86,7 +86,7 @@ class CraftaxEnv:
         if config.num_envs <= 0:
             raise ValueError("num_envs must be positive")
         self.num_actions = len(constants.Action)
-        self.observation_size = renderer.OBSERVATION_SIZE
+        self.observation_size = observation.OBSERVATION_SIZE
         self.reward_ceiling = constants.REWARD_CEILING
         self._num_envs = config.num_envs
         self._device = get_device(config.device)
@@ -123,7 +123,7 @@ class CraftaxEnv:
             generator=self._generator,
             device=self._device,
         )
-        return renderer.render(self._state)
+        return observation.render(self._state)
 
     def step(self, actions: Tensor) -> CraftaxStep:
         """Advance every worker one action, restarting those that finished.
@@ -156,7 +156,7 @@ class CraftaxEnv:
 
         self._state = state
         return CraftaxStep(
-            observation=renderer.render(state),
+            observation=observation.render(state),
             reward=reward,
             done=done,
             info=info,

@@ -20,15 +20,15 @@ from torch.nn import functional
 
 import torch
 
-from priml.baselines.craftax import constants
-from priml.baselines.craftax.constants import BlockType, ItemType
-from priml.baselines.craftax.indexing import (
+from priml.baselines.craftax.game import constants
+from priml.baselines.craftax.game.constants import BlockType, ItemType
+from priml.baselines.craftax.game.indexing import (
     scatter_tiles,
     scatter_tiles_where,
 )
-from priml.baselines.craftax.noise import fractal_noise
-from priml.baselines.craftax.state import EnvState, empty_state
-from priml.baselines.craftax.world_config import (
+from priml.baselines.craftax.game.noise import fractal_noise
+from priml.baselines.craftax.game.state import EnvState, empty_state
+from priml.baselines.craftax.game.world_config import (
     LEVEL_CONFIGS,
     DungeonConfig,
     SmoothWorldConfig,

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 try:
     import torch
 except ImportError:  # torch is optional; cleanup_cuda + get_device no-op without it.
-    torch = None  # ty: ignore[invalid-assignment] -- optional dep sentinel; pyright infers Module|None
+    torch = None
 
 
 def get_device() -> torch_typed.device:

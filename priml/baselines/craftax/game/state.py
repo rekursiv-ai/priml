@@ -20,7 +20,7 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import constants
+from priml.baselines.craftax.game import constants
 
 
 @dataclass(slots=True, kw_only=True)
