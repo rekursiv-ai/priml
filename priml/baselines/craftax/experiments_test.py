@@ -23,17 +23,20 @@ from priml.baselines.craftax import experiments
 from priml.baselines.craftax.data import CraftaxRollouts
 from priml.baselines.craftax.experiments import (
     CraftaxGTrXLTrainLoop,
+    CraftaxPQNTrainLoop,
     CraftaxRNNTrainLoop,
     CraftaxTrainLoop,
     exp000,
     exp001,
     exp002,
+    exp003,
     exp011,
     exp013,
     exp_smoke,
 )
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
 from priml.baselines.craftax.metric import CraftaxScore
+from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.train.train_loop import TrainLoop
@@ -46,24 +49,40 @@ class _Experiment(Protocol):
 
     def __call__(
         self,
-    ) -> CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop: ...
+    ) -> (
+        CraftaxTrainLoop
+        | CraftaxGTrXLTrainLoop
+        | CraftaxRNNTrainLoop
+        | CraftaxPQNTrainLoop
+    ): ...
 
 
 ALL_EXPERIMENTS: list[_Experiment] = [
     exp000,
     exp001,
     exp002,
+    exp003,
     exp011,
     exp013,
     exp_smoke,
 ]
 
-PUBLISHED_EXPERIMENTS: list[_Experiment] = [exp000, exp001, exp002, exp011, exp013]
+PUBLISHED_EXPERIMENTS: list[_Experiment] = [
+    exp000,
+    exp001,
+    exp002,
+    exp003,
+    exp011,
+    exp013,
+]
 
 
-def shrink(
-    config: CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop,
-) -> CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop:
+type _AnyLoop = (
+    CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop | CraftaxPQNTrainLoop
+)
+
+
+def shrink(config: _AnyLoop) -> _AnyLoop:
     """Narrow ``config`` to a size a CPU test can run, preserving its recipe.
 
     Only SIZE changes -- workers, rollout, widths, horizon. Objective,
@@ -89,8 +108,11 @@ def shrink(
         config.step.model.num_layers = 1
         config.step.model.qkv_dim = 8
         config.step.model.memory_length = 2
-    elif isinstance(config.step, CraftaxRNNTrainStep.Config):
-        # A GRU has no depth to shrink: its state is one vector.
+    elif isinstance(
+        config.step,
+        CraftaxRNNTrainStep.Config | CraftaxPQNTrainStep.Config,
+    ):
+        # Neither recurrence has depth to shrink: the state is its width.
         config.step.rollout_steps = 2
     elif isinstance(config.step, CraftaxTrainStep.Config):
         config.step.rollout_steps = 2
@@ -251,6 +273,21 @@ def test_exp002_changes_only_the_policy_class() -> None:
     assert child.max_steps == parent.max_steps
 
 
+def test_exp003_spends_one_billion_interactions() -> None:
+    cfg = exp003()
+    spent = cfg.max_steps * cfg.step.env.num_envs * cfg.step.rollout_steps
+    assert 999_000_000 <= spent <= 1_000_000_000
+
+
+def test_exp003_explores_by_schedule_rather_than_entropy() -> None:
+    # The defining difference from every other experiment here: a Q-learner
+    # has no entropy bonus, so the schedule is the whole of its exploration.
+    cfg = exp003()
+    assert cfg.step.epsilon_start == 1.0
+    assert cfg.step.epsilon_finish == 0.005
+    assert cfg.step.epsilon_decay_fraction == 0.1
+
+
 def test_exp013_spends_one_billion_interactions() -> None:
     cfg = exp013()
     spent = cfg.max_steps * cfg.step.env.num_envs * cfg.step.rollout_steps
@@ -341,6 +378,7 @@ def test_each_fork_names_its_parent_in_the_first_line() -> None:
     for child, parent in (
         (exp001, exp000),
         (exp002, exp001),
+        (exp003, exp001),
         (exp011, exp001),
         (exp013, exp001),
     ):

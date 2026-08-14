@@ -1,16 +1,19 @@
-"""PPO for a GRU policy: whole trajectories, whole rollouts.
+"""Q-learning on fresh experience: no buffer, no target network.
 
-The same clipped objective as everywhere else. What differs is the shape of a
-minibatch, and it differs for the same reason it does in
-:mod:`gtrxl_train_step`: a recurrent prediction depends on the steps before
-it, so transitions cannot be shuffled individually.
+One update collects a rollout with an epsilon-greedy policy, builds
+Q(lambda) targets from the network's OWN values, and regresses toward them.
+That is the whole algorithm -- there is no second network holding the target
+still, and nothing is stored between updates.
 
-Simpler than the transformer's version in one way and stricter in another.
-Simpler, because a GRU state is one vector: the rollout records the state it
-started from and everything else replays exactly, with no per-layer cache to
-rebuild. Stricter, because gradients run over the WHOLE rollout rather than a
-window -- the reference does this, and a recurrence has no parallel form to
-make a shorter window cheaper, so there is nothing to gain by truncating.
+What makes that stable is covered in :mod:`pqn`: enough parallel workers to
+decorrelate samples, batch renormalization to absorb the shift as the policy
+changes, and a multi-step target that leans less on any single bootstrap.
+
+Two things differ from the PPO steps beside it. The loss is a plain squared
+error rather than a clipped surrogate, because there is no policy ratio to
+trust-region. And the targets are built ONCE per rollout, before any
+optimization: recomputing them from the updated network each epoch would be
+chasing a value the network had already moved.
 """
 
 from __future__ import annotations
@@ -27,9 +30,8 @@ import torch
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import OBSERVATION_SIZE
-from priml.baselines.craftax.rnn import ActorCriticRNN
-from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
-from priml.math.advantage import explained_variance, generalized_advantage
+from priml.baselines.craftax.pqn import RecurrentQNetwork, epsilon_at
+from priml.math.advantage import explained_variance, q_lambda_targets
 from priml.runtime import get_device
 from priml.train.custom_types import TrainStepOutput
 
@@ -38,49 +40,56 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-type _Callable = Callable[..., Any]
-"""One of the model's recurrent entry points, compiled or not."""
+type _StepFn = Callable[
+    [tuple[Tensor, Tensor], Tensor, Tensor, Tensor],
+    tuple[tuple[Tensor, Tensor], Tensor],
+]
+"""The model's one-step entry point, compiled or not.
+
+Typed precisely rather than as ``Callable[..., Any]``: an ``Any`` here would
+erase the recurrent state's shape at every call site, and the state being a
+PAIR is the thing most easily got wrong."""
+
+type _SequenceFn = _StepFn
+"""The windowed entry point, whose signature matches the stepped one."""
 
 
-class RecurrentRollout:
-    """One batch of experience, plus the state the recurrence began from."""
+class QRollout:
+    """One batch of experience with its regression targets already built."""
 
     __slots__ = (
         "action",
-        "advantage",
-        "done",
-        "initial_state",
-        "log_prob",
+        "cell",
+        "hidden",
         "observation",
+        "previous_action",
         "previous_done",
+        "q_value",
         "reward",
         "target",
-        "value",
     )
 
     def __init__(
         self,
         *,
         observation: Tensor,
+        previous_action: Tensor,
         previous_done: Tensor,
-        initial_state: Tensor,
+        hidden: Tensor,
+        cell: Tensor,
         action: Tensor,
-        log_prob: Tensor,
-        value: Tensor,
         reward: Tensor,
-        done: Tensor,
-        advantage: Tensor,
+        q_value: Tensor,
         target: Tensor,
     ) -> None:
         self.observation = observation
+        self.previous_action = previous_action
         self.previous_done = previous_done
-        self.initial_state = initial_state
+        self.hidden = hidden
+        self.cell = cell
         self.action = action
-        self.log_prob = log_prob
-        self.value = value
         self.reward = reward
-        self.done = done
-        self.advantage = advantage
+        self.q_value = q_value
         self.target = target
 
     def minibatches(
@@ -90,11 +99,6 @@ class RecurrentRollout:
         generator: torch.Generator | None = None,
     ) -> Iterator[dict[str, Tensor]]:
         """Shuffle whole trajectories and yield ``count`` groups of them.
-
-        The environment axis is shuffled and split; time is never cut. Each
-        minibatch is therefore a set of complete trajectories with the exact
-        recurrent state each began from, which is what lets the loss replay
-        them.
 
         Args:
           count: Minibatches per pass; must divide the worker count.
@@ -111,73 +115,74 @@ class RecurrentRollout:
         )
         named = {
             "observation": self.observation,
+            "previous_action": self.previous_action,
             "previous_done": self.previous_done,
             "action": self.action,
-            "log_prob": self.log_prob,
-            "value": self.value,
-            "advantage": self.advantage,
             "target": self.target,
         }
         shuffled = {
             name: _split_environments(value, order=order, count=count)
             for name, value in named.items()
         }
-        states = self.initial_state[order].reshape(
-            count, -1, self.initial_state.shape[-1]
-        )
+        width = self.hidden.shape[-1]
+        hidden = self.hidden[order].reshape(count, -1, width)
+        cell = self.cell[order].reshape(count, -1, width)
 
         for index in range(count):
             minibatch = {name: value[index] for name, value in shuffled.items()}
-            minibatch["initial_state"] = states[index]
+            minibatch["hidden"] = hidden[index]
+            minibatch["cell"] = cell[index]
             yield minibatch
 
 
-class CraftaxRNNTrainStep:
-    """Model, environment, and optimizer for one recurrent PPO experiment."""
+class CraftaxPQNTrainStep:
+    """Model, environment, and optimizer for one Q-learning experiment."""
 
-    class Config(Fig["CraftaxRNNTrainStep"]):
-        """Model, environment, and the PPO hyperparameters."""
+    class Config(Fig["CraftaxPQNTrainStep"]):
+        """Model, environment, and the Q-learning hyperparameters."""
 
-        model: ActorCriticRNN.Config = field(default_factory=ActorCriticRNN.Config)
-        """Recurrent policy and value network."""
+        model: RecurrentQNetwork.Config = field(
+            default_factory=RecurrentQNetwork.Config,
+        )
+        """Recurrent Q-network."""
 
         env: CraftaxEnv.Config = field(default_factory=CraftaxEnv.Config)
         """Environment the rollout is collected from."""
 
-        rollout_steps: int = 64
+        rollout_steps: int = 128
         """Environment steps per worker in one update."""
 
         num_epochs: int = 4
         """Optimization passes over each rollout."""
 
-        num_minibatches: int = 8
+        num_minibatches: int = 4
         """Minibatches per pass; must divide the worker count."""
 
-        learning_rate: float = 2e-4
-        """Initial Adam learning rate."""
+        learning_rate: float = 3e-4
+        """Initial RAdam learning rate."""
 
         anneal_learning_rate: bool = True
         """Decay the rate linearly to zero across the run."""
 
-        total_train_steps: int = 15_258
-        """Updates in the run; the schedule horizon."""
+        total_train_steps: int = 7_629
+        """Updates in the run; the horizon for both schedules."""
 
         discount: float = 0.99
         """Reward discount factor."""
 
-        trace_decay: float = 0.8
-        """Advantage-estimation trace decay."""
+        trace_decay: float = 0.5
+        """Q(lambda) multi-step mixing factor."""
 
-        clip_epsilon: float = 0.2
-        """Trust-region half-width, for both the ratio and the value."""
+        epsilon_start: float = 1.0
+        """Initial probability of taking a random action."""
 
-        entropy_coefficient: float = 0.01
-        """Weight on the entropy bonus that keeps the policy exploring."""
+        epsilon_finish: float = 0.005
+        """Floor the exploration rate decays to."""
 
-        value_coefficient: float = 0.5
-        """Weight on the value-regression term."""
+        epsilon_decay_fraction: float = 0.1
+        """Fraction of the run spent decaying the exploration rate."""
 
-        max_grad_norm: float = 1.0
+        max_grad_norm: float = 0.5
         """Global gradient-norm clip."""
 
         device: str = "auto"
@@ -187,7 +192,7 @@ class CraftaxRNNTrainStep:
         """Compile the recurrent entry points with ``torch.compile``."""
 
         seed: int = 0
-        """Seed for action sampling and minibatch shuffling."""
+        """Seed for exploration and minibatch shuffling."""
 
         @override
         def finalize(self) -> Self:
@@ -201,24 +206,24 @@ class CraftaxRNNTrainStep:
         """Build the model, environment, and optimizer.
 
         Args:
-          config: Model, environment, and PPO settings.
+          config: Model, environment, and Q-learning settings.
 
         Raises:
           ValueError: A geometry or coefficient is invalid.
 
         """
         if config.rollout_steps <= 0 or config.num_epochs <= 0:
-            raise ValueError("PPO rollout geometry must be positive")
+            raise ValueError("Rollout geometry must be positive")
         if config.num_minibatches <= 0:
-            raise ValueError("PPO must have at least one minibatch")
+            raise ValueError("There must be at least one minibatch")
         if config.total_train_steps <= 0:
             raise ValueError("total_train_steps must be positive")
         if not 0.0 <= config.discount <= 1.0:
             raise ValueError("discount must be between zero and one")
         if not 0.0 <= config.trace_decay <= 1.0:
             raise ValueError("trace_decay must be between zero and one")
-        if config.clip_epsilon <= 0.0:
-            raise ValueError("clip_epsilon must be positive")
+        if not 0.0 < config.epsilon_decay_fraction <= 1.0:
+            raise ValueError("epsilon_decay_fraction must be in (0, 1]")
 
         self.config = config
         self.device = get_device(config.device)
@@ -233,25 +238,35 @@ class CraftaxRNNTrainStep:
         finally:
             torch.set_rng_state(saved_rng)
         self.model = model
-        # The compiled handles wrap the two RECURRENT entry points, not
-        # ``forward``: a rollout never calls ``forward``, so compiling the
-        # module would leave the hot path interpreted.
-        self._step = _compiled(model.step, enabled=config.compile)
-        self._sequence = _compiled(model.sequence, enabled=config.compile)
-        self.optimizer = torch.optim.Adam(
+        self._step: _StepFn = _compiled(model.step, enabled=config.compile)
+        self._sequence: _SequenceFn = _compiled(
+            model.sequence,
+            enabled=config.compile,
+        )
+        # RAdam, as the reference uses: its warmup-free variance rectification
+        # matters here because the first updates regress toward targets built
+        # by a network that has seen almost nothing.
+        self.optimizer = torch.optim.RAdam(
             self.model.parameters(),
             lr=config.learning_rate,
-            eps=1e-5,
         )
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(config.seed)
-        self._observation = self.env.reset()
+        self._observation: Tensor = self.env.reset()
 
         num_envs = int(self._observation.shape[0])
         if num_envs % config.num_minibatches:
             raise ValueError("num_minibatches must divide the worker count")
         self._state = self.model.initial_state(num_envs, device=self.device)
-        self._previous_done = torch.zeros(
+        # Declared, not merely assigned: these are rebound from the rollout
+        # and from a checkpoint, and without a declaration the widest of those
+        # assignments would set the attribute's type everywhere.
+        self._previous_action: Tensor = torch.zeros(
+            num_envs,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self._previous_done: Tensor = torch.zeros(
             num_envs,
             dtype=torch.bool,
             device=self.device,
@@ -270,108 +285,125 @@ class CraftaxRNNTrainStep:
         """Environment interactions consumed by one update."""
         return int(self._observation.shape[0]) * self.config.rollout_steps
 
+    @property
+    def epsilon(self) -> float:
+        """The exploration rate this update collects with."""
+        return epsilon_at(
+            self.global_step,
+            total_updates=self.config.total_train_steps,
+            start=self.config.epsilon_start,
+            finish=self.config.epsilon_finish,
+            decay_fraction=self.config.epsilon_decay_fraction,
+        )
+
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Pass the loop's batch through untouched."""
         return batch
 
     def train_step(self, **batch: Any) -> TrainStepOutput:
-        """Collect a rollout and optimize on it.
+        """Collect a rollout and regress toward its Q(lambda) targets.
 
         Args:
           **batch: Ignored; the data comes from the environment.
 
         Returns:
-          result: The final minibatch's loss and logits, with the update's
+          result: The final minibatch's loss and values, with the update's
             scalar diagnostics.
 
         """
         del batch
+        epsilon = self.epsilon
         rollout = self.collect()
         self._set_learning_rate()
         metrics = self._optimize(rollout)
 
         self.global_step += 1
         self.local_step += 1
+        metrics["epsilon"] = epsilon
         metrics.update(self._episode_metrics())
+        chosen = rollout.q_value.gather(-1, rollout.action[..., None])[..., 0]
         metrics["explained_variance"] = float(
-            explained_variance(rollout.value.flatten(), rollout.target.flatten()),
+            explained_variance(chosen.flatten(), rollout.target.flatten()),
         )
         return {
             "loss": metrics.pop("_loss_tensor"),
-            "model": metrics.pop("_logits"),
+            "model": metrics.pop("_values"),
             "metrics": metrics,
         }
 
     @torch.no_grad()
-    def collect(self) -> RecurrentRollout:
-        """Run the current policy for a fixed number of steps.
+    def collect(self) -> QRollout:
+        """Run the epsilon-greedy policy and build its regression targets.
 
         Returns:
-          rollout: The collected experience, already scored with advantages.
+          rollout: The collected experience with Q(lambda) targets attached.
 
         """
-        initial_state = self._state
+        hidden, cell = self._state
         observations: list[Tensor] = []
+        previous_actions: list[Tensor] = []
         previous_dones: list[Tensor] = []
         actions: list[Tensor] = []
-        log_probs: list[Tensor] = []
-        values: list[Tensor] = []
         rewards: list[Tensor] = []
         dones: list[Tensor] = []
+        values: list[Tensor] = []
+        epsilon = self.epsilon
 
-        for _ in range(self.config.rollout_steps):
-            observations.append(self._observation)
-            previous_dones.append(self._previous_done)
+        # Collection reads the running statistics rather than updating them:
+        # a rollout is inference, and folding it in would count every
+        # observation twice per update.
+        self.model.eval()
+        try:
+            for _ in range(self.config.rollout_steps):
+                observations.append(self._observation)
+                previous_actions.append(self._previous_action)
+                previous_dones.append(self._previous_done)
 
-            self._state, logits, value = self._step(
+                self._state, q_values = self._step(
+                    self._state,
+                    self._observation,
+                    self._previous_action,
+                    self._previous_done,
+                )
+                action = self._explore(q_values, epsilon=epsilon)
+
+                actions.append(action)
+                values.append(q_values)
+
+                transition = self.env.step(action)
+                self._observation = transition.observation
+                self._previous_action = action
+                self._previous_done = transition.done
+                rewards.append(transition.reward)
+                dones.append(transition.done)
+                self._record_episodes(transition.reward, transition.done)
+
+            _, bootstrap = self._step(
                 self._state,
                 self._observation,
+                self._previous_action,
                 self._previous_done,
             )
-            log_probs_all = logits.log_softmax(-1)
-            action = torch.multinomial(
-                log_probs_all.exp(),
-                1,
-                generator=self._generator,
-            ).squeeze(-1)
+        finally:
+            self.model.train()
 
-            actions.append(action)
-            log_probs.append(log_probs_all.gather(-1, action[:, None])[:, 0])
-            values.append(value)
-
-            transition = self.env.step(action)
-            self._observation = transition.observation
-            self._previous_done = transition.done
-            rewards.append(transition.reward)
-            dones.append(transition.done)
-            self._record_episodes(transition.reward, transition.done)
-
-        _, _, last_value = self._step(
-            self._state,
-            self._observation,
-            self._previous_done,
-        )
-        reward = torch.stack(rewards)
-        value = torch.stack(values)
-        done = torch.stack(dones)
-        advantage, target = generalized_advantage(
-            rewards=reward,
-            values=value,
-            dones=done,
-            last_value=last_value,
+        q_value = torch.stack(values)
+        target = q_lambda_targets(
+            rewards=torch.stack(rewards),
+            q_values=torch.cat((q_value, bootstrap[None])),
+            dones=torch.stack(dones),
             discount=self.config.discount,
             trace_decay=self.config.trace_decay,
         )
-        return RecurrentRollout(
+        return QRollout(
             observation=torch.stack(observations),
+            previous_action=torch.stack(previous_actions),
             previous_done=torch.stack(previous_dones),
-            initial_state=initial_state,
+            hidden=hidden,
+            cell=cell,
             action=torch.stack(actions),
-            log_prob=torch.stack(log_probs),
-            value=value,
-            reward=reward,
-            done=done,
-            advantage=advantage,
+            reward=torch.stack(rewards),
+            q_value=q_value,
             target=target,
         )
 
@@ -382,14 +414,14 @@ class CraftaxRNNTrainStep:
           **batch: Ignored; the data comes from the environment.
 
         Returns:
-          result: The loss and logits of one freshly collected rollout.
+          result: The loss and values of one freshly collected rollout.
 
         """
         del batch
         rollout = self.collect()
         minibatch = next(rollout.minibatches(count=1, generator=self._generator))
-        loss, logits, _ = self._loss(minibatch)
-        return {"loss": loss.detach(), "model": logits.detach()}
+        loss, values = self._loss(minibatch)
+        return {"loss": loss.detach(), "model": values.detach()}
 
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
         """Score a rollout in evaluation mode.
@@ -398,7 +430,7 @@ class CraftaxRNNTrainStep:
           **batch: Ignored; the data comes from the environment.
 
         Returns:
-          result: The loss and logits of one freshly collected rollout.
+          result: The loss and values of one freshly collected rollout.
 
         """
         self.model.eval()
@@ -408,28 +440,29 @@ class CraftaxRNNTrainStep:
             self.model.train()
 
     def call_eval(self, **batch: Any) -> Tensor:
-        """Return action logits for a batch of observations.
+        """Return action values for a batch of observations.
 
         Args:
           **batch: Must contain ``observation``.
 
         Returns:
-          logits: Unnormalized action scores, computed with a fresh state.
+          q_values: Value of each action, computed with a fresh state.
 
         """
         self.model.eval()
         try:
             with torch.no_grad():
-                logits, _ = self.model(batch["observation"])
+                values = self.model(batch["observation"])
         finally:
             self.model.train()
-        return logits
+        return values
 
     def on_epoch_end(self) -> None:
         """Nothing to flush: every update completes within one step."""
 
     def state_dict(self) -> dict[str, Any]:
         """Return model, optimizer, environment, state, and counters."""
+        hidden, cell = self._state
         return {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -437,7 +470,9 @@ class CraftaxRNNTrainStep:
             "generator": self._generator.get_state(),
             "global_step": self.global_step,
             "observation": self._observation,
-            "recurrent_state": self._state,
+            "hidden": hidden,
+            "cell": cell,
+            "previous_action": self._previous_action,
             "previous_done": self._previous_done,
             "episode_return": self._episode_return,
             "episode_length": self._episode_length,
@@ -452,12 +487,34 @@ class CraftaxRNNTrainStep:
         self.global_step = int(state_dict["global_step"])
         self.local_step = 0
         self._observation = _tensor(state_dict["observation"])
-        self._state = _tensor(state_dict["recurrent_state"])
+        self._state = (_tensor(state_dict["hidden"]), _tensor(state_dict["cell"]))
+        self._previous_action = _tensor(state_dict["previous_action"])
         self._previous_done = _tensor(state_dict["previous_done"])
         self._episode_return = _tensor(state_dict["episode_return"])
         self._episode_length = _tensor(state_dict["episode_length"])
 
-    def _optimize(self, rollout: RecurrentRollout) -> dict[str, Any]:
+    def _explore(self, q_values: Tensor, *, epsilon: float) -> Tensor:
+        """Take the greedy action, except at rate ``epsilon``.
+
+        This is the whole of the exploration: a Q-learner has no entropy
+        bonus, so a policy that stopped choosing randomly would stop
+        discovering anything it had not already valued.
+        """
+        greedy = q_values.argmax(dim=-1)
+        random = torch.randint(
+            0,
+            q_values.shape[-1],
+            greedy.shape,
+            generator=self._generator,
+            device=q_values.device,
+        )
+        explore = (
+            torch.rand(greedy.shape, generator=self._generator, device=q_values.device)
+            < epsilon
+        )
+        return torch.where(explore, random, greedy)
+
+    def _optimize(self, rollout: QRollout) -> dict[str, Any]:
         """Take every configured pass over the rollout."""
         metrics: dict[str, Any] = {}
         for _ in range(self.config.num_epochs):
@@ -465,7 +522,7 @@ class CraftaxRNNTrainStep:
                 count=self.config.num_minibatches,
                 generator=self._generator,
             ):
-                loss, logits, terms = self._loss(minibatch)
+                loss, values = self._loss(minibatch)
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -474,43 +531,28 @@ class CraftaxRNNTrainStep:
                 )
                 self.optimizer.step()
                 metrics = {
-                    "policy_loss": float(terms.policy.detach()),
-                    "value_loss": float(terms.value.detach()),
-                    "entropy": float(terms.entropy.detach()),
-                    "approx_kl": float(terms.approx_kl.detach()),
-                    "clip_fraction": float(terms.clip_fraction.detach()),
+                    "q_loss": float(loss.detach()),
+                    "q_mean": float(values.detach().mean()),
                     "grad_norm": float(grad_norm.detach()),
                     "learning_rate": self.optimizer.param_groups[0]["lr"],
                     "_loss_tensor": loss.detach(),
-                    "_logits": logits.detach(),
+                    "_values": values.detach(),
                 }
         return metrics
 
-    def _loss(self, minibatch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Any]:
-        """Evaluate the clipped objective over one set of trajectories."""
-        _, logits, value = self._sequence(
-            minibatch["initial_state"],
+    def _loss(self, minibatch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+        """Regress the taken actions' values toward their targets."""
+        _, q_values = self._sequence(
+            (minibatch["hidden"], minibatch["cell"]),
             minibatch["observation"],
+            minibatch["previous_action"],
             minibatch["previous_done"],
         )
-        log_probs = logits.log_softmax(-1)
-        chosen = log_probs.gather(-1, minibatch["action"][..., None].long())[..., 0]
-        terms = clipped_policy_loss(
-            log_probs=chosen.flatten(),
-            behavior_log_probs=minibatch["log_prob"].flatten(),
-            advantages=minibatch["advantage"].flatten(),
-            values=value.flatten(),
-            behavior_values=minibatch["value"].flatten(),
-            targets=minibatch["target"].flatten(),
-            entropy=categorical_entropy(log_probs).flatten(),
-            clip_epsilon=self.config.clip_epsilon,
-        )
-        loss = (
-            terms.policy
-            + self.config.value_coefficient * terms.value
-            - self.config.entropy_coefficient * terms.entropy
-        )
-        return loss, logits.flatten(0, 1), terms
+        chosen = q_values.gather(-1, minibatch["action"][..., None].long())[..., 0]
+        # Plain squared error: there is no policy ratio here to trust-region,
+        # so the clipping the PPO steps do would have nothing to clip.
+        loss = ((chosen - minibatch["target"]) ** 2).mean()
+        return loss, q_values.flatten(0, 1)
 
     def _set_learning_rate(self) -> None:
         """Anneal the rate linearly across the configured horizon."""
@@ -549,12 +591,8 @@ class CraftaxRNNTrainStep:
         return metrics
 
 
-def _compiled(function: _Callable, *, enabled: bool) -> _Callable:
+def _compiled(function: _StepFn, *, enabled: bool) -> _StepFn:
     """Compile one bound method, or return it untouched.
-
-    Compiling the recurrent entry points rather than the module is what keeps
-    the rollout on the compiled path: a rollout calls ``step``, never
-    ``forward``.
 
     Args:
       function: The bound method to compile.
