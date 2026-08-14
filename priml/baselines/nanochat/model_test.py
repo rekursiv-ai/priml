@@ -188,31 +188,27 @@ def test_flops_read_the_blocks_real_head_count() -> None:
     silently reports the wrong FLOPs for exactly the configs that need the
     estimate most.
     """
-    config = _config()
-    attention = config.block.attn
-    assert isinstance(attention, ValueGatedAttention.Config)
-    attention.heads = 4  # 4 * 8 = 32 wide, against 16 channels
-    torch.manual_seed(0)
-    wide = config.copy_tree().finalize().make()
 
-    narrow = _model()  # heads inferred: 16 // 8 = 2
-    attention_flops = wide.flops_per_token() - _matrix_flops(wide)
-    assert attention_flops == 2 * (narrow.flops_per_token() - _matrix_flops(narrow))
+    # Widening the heads moves BOTH terms -- bigger projections and a bigger
+    # attention span. They are separated by changing ONLY the span: halving
+    # every window leaves every parameter untouched, so the drop is purely
+    # attention, and its ABSOLUTE size is pinned against the closed form
+    # ``12 * inner * span`` rather than against a mirror of the source.
+    def span_drop(*, heads: int) -> int:
+        """FLOPs lost when layer 0's window halves; layer 1 is always full."""
+        built: list[int] = []
+        for pattern in ("L", "SL"):
+            variant = _config(window_pattern=pattern)
+            variant_attention = variant.block.attn
+            assert isinstance(variant_attention, ValueGatedAttention.Config)
+            variant_attention.heads = heads
+            torch.manual_seed(0)
+            built.append(variant.copy_tree().finalize().make().flops_per_token())
+        return built[0] - built[1]
 
-
-def _matrix_flops(model: NanoChatLM) -> int:
-    """The parameter-driven half of the estimate, for isolating attention."""
-    gathered = {
-        id(parameter)
-        for module in (model.embed, *model.value_embeds.values())
-        for parameter in module.parameters()
-    }
-    gathered |= {id(model.residual_scale), id(model.skip_scale)}
-    return 6 * sum(
-        parameter.numel()
-        for parameter in model.parameters()
-        if id(parameter) not in gathered
-    )
+    # One layer drops from SEQ to SEQ // 2 positions, at 12 * inner each.
+    assert span_drop(heads=2) == 12 * (2 * 8) * (SEQ - SEQ // 2)
+    assert span_drop(heads=4) == 12 * (4 * 8) * (SEQ - SEQ // 2)
 
 
 def test_flops_exclude_lookup_tables() -> None:

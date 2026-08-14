@@ -266,6 +266,19 @@ def test_state_round_trips_including_the_clock() -> None:
         assert torch.equal(a, b), name
 
 
+def test_a_checkpoint_without_the_warmup_gate_is_refused() -> None:
+    """A pre-fix checkpoint cannot say how much warmup it already spent.
+
+    Resuming it would restart the exclusion and grant uncharged training, so
+    the incompatibility is named rather than surfacing as a bare KeyError.
+    """
+    step = _step()
+    state = step.state_dict()
+    del state["local_step"]
+    with pytest.raises(ValueError, match="local_step"):
+        step.load_state_dict(state)
+
+
 def test_a_partial_accumulation_is_dropped_at_a_boundary() -> None:
     """Gradients must not mix across a pass over the data."""
     step = _step(tokens_per_optimizer_step=4 * SEQ)

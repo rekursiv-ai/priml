@@ -161,6 +161,66 @@ def test_a_byte_table_disagreeing_with_the_metadata_is_rejected(
         list(_data(dataset_dir).eval_dataloader())
 
 
+def test_data_is_verified_even_when_no_geometry_is_declared(
+    dataset_dir: Path,
+) -> None:
+    """A split must agree with its OWN metadata, caller or no caller.
+
+    The model's declaration is an extra check, not the only one: a loader used
+    without it -- a probe, a script, a test -- must still refuse arrays that
+    contradict the file sitting beside them.
+    """
+    rows = np.zeros((4, SEQ), dtype=np.uint16)  # one column short
+    np.save(dataset_dir / "val" / "all__tokens.npy", rows)
+    with pytest.raises(ValueError, match="max_seq_len"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def test_a_token_id_past_the_splits_own_vocabulary_is_rejected(
+    dataset_dir: Path,
+) -> None:
+    """Same rule for ids: checked against the split's own declaration."""
+    rows = np.zeros((4, SEQ + 1), dtype=np.uint16)
+    rows[0, 0] = VOCAB + 3
+    np.save(dataset_dir / "val" / "all__tokens.npy", rows)
+    with pytest.raises(ValueError, match="vocab_size"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def test_metadata_without_a_fingerprint_is_rejected(dataset_dir: Path) -> None:
+    """An optional check is no check: pre-fingerprint metadata cannot be read.
+
+    What such a split holds is exactly what cannot be established, so accepting
+    it would reintroduce the unidentifiable score the fingerprint exists to
+    prevent.
+    """
+    (dataset_dir / "val" / "dataset.json").write_text(
+        json.dumps({"vocab_size": VOCAB, "max_seq_len": SEQ}),
+    )
+    with pytest.raises(ValueError, match="token_bytes_sha256"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def test_a_malformed_token_array_names_the_file(dataset_dir: Path) -> None:
+    """A one-dimensional array must not surface as a bare IndexError."""
+    np.save(dataset_dir / "val" / "all__tokens.npy", np.zeros(16, dtype=np.uint16))
+    with pytest.raises(ValueError, match="two-dimensional"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def test_a_split_too_small_for_its_batch_is_rejected_at_construction(
+    dataset_dir: Path,
+) -> None:
+    """An empty stream must be named here, not where it finally shows up.
+
+    Too few rows yields no batches at all, which reaches training as a generic
+    epoch-reset failure and evaluation as a metric holding no samples -- two
+    distant symptoms of one misconfiguration.
+    """
+    with pytest.raises(ValueError, match="no batches"):
+        _data(dataset_dir, num_eval_rows=1).eval_dataloader()
+
+
 def test_data_narrower_than_the_model_is_rejected_at_load(dataset_dir: Path) -> None:
     """Prepared rows must be the context the model declares.
 
