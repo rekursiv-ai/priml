@@ -447,6 +447,11 @@ class NanoChatLM(nn.Module):
                         -self.value_embedding_stride,
                     ),
                 )
+                # Consumed, not kept: leaving it set would leave the finalized
+                # config in the very both-set state the check above calls a
+                # contradiction, and a reader could not tell a derived list
+                # from one someone wrote.
+                self.value_embedding_stride = 0
             if any(
                 not 0 <= layer < self.num_layers
                 for layer in self.value_embedding_layers

@@ -2301,6 +2301,76 @@ def test_set_loader_epoch_tolerates_loader_without_dataset() -> None:
     _set_loader_epoch(cast("DataLoader[Any]", _LoaderWithoutDataset()), epoch=3)
 
 
+def test_dataset_receives_the_step_before_the_first_batch() -> None:
+    """A generating dataset is bound to the step, and bound before iterating.
+
+    An on-policy dataset produces its batches by acting with the current
+    policy, so the binding must land before any batch is drawn -- otherwise
+    the first rollout has no model to act with.
+    """
+    config = TrainLoop.Config(
+        step=cast(Any, _WarmupStep.Config()),
+        dataset=_BindingDataset.Config(),
+    )
+    config.checkpointing = None
+    config.max_steps = 1
+    loop = config.make()
+    dataset = cast(_BindingDataset, loop.dataset)
+
+    assert dataset.bound is loop.step
+    assert dataset.batches_before_binding == 0
+
+    loop.train()
+    assert dataset.batches_drawn > 0
+
+
+def test_dataset_without_the_hook_is_left_alone() -> None:
+    """A dataset that reads a corpus must not be required to accept a step."""
+    config = TrainLoop.Config(
+        step=cast(Any, _WarmupStep.Config()),
+        dataset=_WarmupDataset.Config(),
+    )
+    config.checkpointing = None
+    config.max_steps = 0
+    assert config.make().dataset is not None
+
+
+class _BindingDataset:
+    """Dataset that records when it was handed the train step."""
+
+    class Config(Fig["_BindingDataset"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        self.bound: object = None
+        self.batches_drawn = 0
+        self.batches_before_binding = 0
+
+    def bind_step(self, step: object) -> None:
+        """Record the train step supplied by the loop."""
+        self.bound = step
+
+    def train_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return one batch, recording whether the step was bound first."""
+        if self.bound is None:
+            self.batches_before_binding += 1
+        self.batches_drawn += 1
+        return [{"media": torch.tensor([[1.0]]), "label": torch.tensor([1])}]
+
+    def eval_dataloader(self) -> list[dict[str, Tensor]]:
+        """Return one eval batch."""
+        return [{"media": torch.tensor([[1.0]]), "label": torch.tensor([1])}]
+
+    def state_dict(self) -> dict[str, Any]:
+        """Get dataset state for checkpointing."""
+        return {}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Load dataset state for checkpointing."""
+        del state_dict
+
+
 def _make_extras_publish_config() -> TrainLoop.Config:
     """Eval-publish config with a payload metric and a recording tracker."""
     config = TrainLoop.Config(

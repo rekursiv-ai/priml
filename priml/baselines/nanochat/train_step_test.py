@@ -192,6 +192,20 @@ def test_progress_drives_the_learning_rate() -> None:
     assert step.optimizer.param_groups[0]["lr"] < initial
 
 
+def test_every_optimizer_members_rate_is_reported() -> None:
+    """One ``lr`` would name whichever member the composite happens to list first.
+
+    The recipe runs two algorithms at rates an order of magnitude apart -- the
+    orthogonalizing member's is the one it is tuned on -- so a single number
+    reports one and hides the other.
+    """
+    step = _step()
+    metrics = step.train_step(**_batch()).get("metrics", {})
+    rates = {name: value for name, value in metrics.items() if name.startswith("lr_")}
+    assert set(rates) == {"lr_adamw", "lr_normuon"}
+    assert rates["lr_normuon"] != rates["lr_adamw"]
+
+
 def test_weight_decay_anneals_with_the_budget() -> None:
     """Decay outliving the learning rate shrinks the final weights for nothing.
 

@@ -139,6 +139,11 @@ def prepare(
             f"vocab_size must exceed the {len(RESERVED_TOKENS)} reserved "
             f"tokens; got {vocab_size}.",
         )
+    if vocab_size > _MAX_TOKEN_ID + 1:
+        raise ValueError(
+            f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
+            "packed uint16 rows can hold.",
+        )
     if max_seq_len < 2:
         raise ValueError(f"max_seq_len must be at least two; got {max_seq_len}.")
     if tokenizer_train_chars <= 0:
@@ -369,11 +374,9 @@ def _pack_split(
     # from numpy or -- on a version that wraps -- write ids decoding to the
     # wrong token entirely. Checked against the declared vocabulary rather than
     # the dtype's limit, so the message names the flag that caused it.
-    if vocab_size > _MAX_TOKEN_ID + 1:
-        raise ValueError(
-            f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
-            "packed uint16 rows can hold.",
-        )
+    # Bounded by ``prepare`` before any download; restated as an assert beside
+    # the cast it guards, since uint16 truncation would be silent.
+    assert vocab_size <= _MAX_TOKEN_ID + 1
     largest = max(stream)
     if largest >= vocab_size:
         raise ValueError(
@@ -406,6 +409,19 @@ def _token_bytes(encoding: tiktoken.Encoding, *, vocab_size: int) -> np.ndarray:
 
     The bits-per-byte score divides by these, so a reserved token contributing
     zero is what keeps document boundaries out of the denominator.
+
+    ``decode`` is deliberate, and NOT interchangeable with
+    ``decode_single_token_bytes``. The two disagree on tokens that are not
+    valid UTF-8 on their own -- a lone high byte decodes to U+FFFD, whose
+    re-encoding is three bytes rather than one -- so they are two different
+    denominators, and a score is comparable only against others using the same
+    one. This spelling is the accounting every recorded result was measured
+    under; the alternative was tried once and split a campaign's numbers into
+    two incomparable sets. Measured on a byte-level vocabulary, the table this
+    produces matches that accounting exactly (ratio 1.00000000).
+
+    Changing it is therefore a protocol change, not a bug fix: it needs a new
+    ``token_bytes_sha256``, which is what stops the two being confused.
     """
     reserved = set(RESERVED_TOKENS)
     lengths = [

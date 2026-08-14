@@ -79,6 +79,12 @@ class BitsPerByte:
         # marker would INDEX the byte table from the back and land on a real
         # length, so the padding would be scored rather than skipped.
         valid = int(batch.get("valid_count", labels.shape[0]))
+        if not 0 <= valid <= labels.shape[0]:
+            raise ValueError(
+                f"valid_count {valid} is outside the batch's {labels.shape[0]} "
+                "rows; the padding markers it excludes would otherwise index "
+                "the byte table from the back and be scored.",
+            )
         per_token = per_token[:valid]
         labels = labels[:valid]
         lengths = token_bytes[labels.reshape(-1)]
@@ -96,8 +102,9 @@ class BitsPerByte:
           ValueError: Nothing was scored. Returning a number here would return
             ZERO -- the best possible value -- so an eval that silently yielded
             no batches would win every comparison it entered instead of failing.
-            The usual cause is a row cap below one batch width, since a short
-            final batch is dropped rather than padded.
+            Evaluation pads and scores its short final batch, so reaching
+            this means no batch arrived at all -- an empty split, or every row
+            excluded as padding.
 
         """
         totals = torch.tensor([self.nats, float(self.bytes)], dtype=torch.float64)

@@ -23,6 +23,7 @@ from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop
 from priml.baselines.nanochat.metric import BitsPerByte
+from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
 
 
@@ -134,14 +135,39 @@ def test_every_experiments_eval_geometry_is_constructible(
     """
     config = factory()
     model = config.step.model
-    # A split matching what this experiment declares, so the geometry check
-    # passes and the EVAL GEOMETRY is what the test exercises.
-    _prepared(tmp_path, rows=64, vocab=model.vocab_size, seq=model.max_seq_len)
+    # Shrunk on every axis that costs time and none that bears on the question:
+    # the subject is EVAL BATCHING, so the context, width, depth, and vocabulary
+    # are cut to what a CPU runner can step in milliseconds.
+    model.channels = 32
+    model.num_layers = 1
+    model.max_seq_len = 16
+    model.vocab_size = 32
+    attention = model.block.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.channels_head = 32
+    config.step.device = "cpu"
+    config.step.dtype_autocast = None
+    config.step.compile = False
+
+    # A split matching what this experiment declares, at a PRIME row count so
+    # no experiment's eval batch divides it and every one exercises the padded
+    # tail. A count that divided every batch width would leave the padding path
+    # unreached by the very test that sits beside it.
+    _prepared(tmp_path, rows=67, vocab=model.vocab_size, seq=model.max_seq_len)
     config.base_dir = "/"
     config.dataset.working_dir = str(tmp_path)
     config.dataset.device = "cpu"
-    built = config.copy_tree().finalize().dataset.make()
-    assert list(built.eval_dataloader()), name
+
+    final = config.copy_tree().finalize()
+    built = final.dataset.make()
+    batches = list(built.eval_dataloader())
+    assert batches, name
+    # And RUN them: iterating proves the batches exist, not that the model can
+    # consume them. A padding marker the loss rejects passes the first check
+    # and fails the second.
+    step = final.step.make()
+    for batch in batches:
+        step.eval_loss(**step.preprocess_batch(batch))
 
 
 def _prepared(root: Path, *, rows: int, vocab: int, seq: int) -> None:

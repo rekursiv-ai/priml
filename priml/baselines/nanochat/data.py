@@ -46,11 +46,13 @@ from priml.runtime import get_device
 
 logger = logging.getLogger(__name__)
 
-_IGNORED_TARGET: Final = -1
-"""Target marking a padded evaluation row.
+IGNORED_TARGET: Final = -1
+"""Target marking a row that pads a short evaluation batch.
 
-Negative, so the metric's byte-table lookup cannot reach it and the row leaves
-both of the score's sums."""
+Not a class index, so the loss must be told to skip it (``ignore_index``) and
+the metric must truncate by ``valid_count``. It is NOT self-excluding: a
+negative index reads the byte table from the BACK and lands on a real length,
+which would score the padding rather than drop it."""
 
 
 class NanoChatData:
@@ -160,12 +162,24 @@ class NanoChatData:
         # ``num_eval_rows`` exists.
         self._splits: dict[str, _PreparedSplit] = {}
 
-    def _split(self, name: str) -> _PreparedSplit:
-        """The named split, verified once and retained."""
+    def _split(self, name: str, *, num_rows: int | None = None) -> _PreparedSplit:
+        """The named split, verified once and retained.
+
+        Args:
+          name: Split directory under the dataset root.
+          num_rows: Rows to keep; ``None`` keeps all of them. Applied at READ
+            time so a capped evaluation never holds rows it will not score --
+            slicing afterwards would produce a view and free nothing.
+
+        Returns:
+          split: The verified split, built once per name.
+
+        """
         if name not in self._splits:
             self._splits[name] = _PreparedSplit(
                 self.dataset_dir / name,
                 device=self.config.device,
+                num_rows=num_rows,
             )
         return self._splits[name]
 
@@ -181,7 +195,6 @@ class NanoChatData:
             batch_size=self.batch_size,
             shuffle=True,
             score_every_row=False,
-            num_rows=None,
             seed=self.config.seed,
             passes=self._passes,
             vocab_size=self.config.vocab_size,
@@ -197,12 +210,11 @@ class NanoChatData:
         shuffle would break.
         """
         return _TokenBatches(
-            prepared=self._split("val"),
+            prepared=self._split("val", num_rows=self.config.num_eval_rows),
             device=self.config.device,
             batch_size=self.eval_batch_size,
             shuffle=False,
             score_every_row=True,
-            num_rows=self.config.num_eval_rows,
             seed=self.config.seed,
             passes=0,
             vocab_size=self.config.vocab_size,
@@ -273,6 +285,7 @@ class _PreparedSplit:
         directory: Path,
         *,
         device: torch.device | str,
+        num_rows: int | None = None,
     ) -> None:
         if not (directory / "dataset.json").is_file():
             raise FileNotFoundError(
@@ -329,7 +342,8 @@ class _PreparedSplit:
         resolved = get_device(device)
         # Prepared as uint16, which torch cannot hold; int32 is the smallest
         # dtype spanning the vocabulary that still indexes an embedding.
-        self.rows: Tensor = torch.from_numpy(raw_rows.astype(np.int32)).to(resolved)
+        kept = raw_rows if num_rows is None else raw_rows[:num_rows]
+        self.rows: Tensor = torch.from_numpy(kept.astype(np.int32)).to(resolved)
         self.token_bytes: Tensor = torch.from_numpy(
             raw_token_bytes.astype(np.int32),
         ).to(resolved)
@@ -409,7 +423,6 @@ class _TokenBatches:
         batch_size: int,
         shuffle: bool,
         score_every_row: bool,
-        num_rows: int | None,
         seed: int,
         passes: int,
         vocab_size: int,
@@ -417,8 +430,7 @@ class _TokenBatches:
     ) -> None:
         prepared.agrees_with(vocab_size=vocab_size, max_seq_len=max_seq_len)
         self.device = get_device(device)
-        rows = prepared.rows
-        self.rows: Tensor = rows if num_rows is None else rows[:num_rows]
+        self.rows: Tensor = prepared.rows
         self.token_bytes = prepared.token_bytes
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -434,7 +446,7 @@ class _TokenBatches:
         if available < batch_size and not score_every_row:
             raise ValueError(
                 f"the {prepared.name!r} split yields no batches: {available} rows "
-                f"available (of {rows.shape[0]}) against a batch size of "
+                f"available against a batch size of "
                 f"{batch_size}. Lower the batch size, raise the row cap, or "
                 "prepare more data.",
             )
@@ -448,9 +460,10 @@ class _TokenBatches:
 
         Evaluation SCORES it. A dropped tail means the reported number covers
         fewer rows than the split holds -- silently, and by an amount set by
-        the batch width -- so the short batch is padded to full width and the
-        padding is marked with ``-1`` targets, which the metric's byte table
-        excludes from both of its sums.
+        the batch width -- so the short batch is padded to full width, marked
+        with :data:`IGNORED_TARGET`, and reported with ``valid_count``. Both
+        consumers must honour one of those: the loss skips the marker, and the
+        metric truncates by the count.
         """
         count = self.rows.shape[0]
         if self.shuffle:
@@ -467,15 +480,14 @@ class _TokenBatches:
             valid = int(rows.shape[0])
             if valid < self.batch_size:
                 # Padded with the FIRST row rather than zeros, so the model
-                # runs on a real context; the -1 targets are what remove it
-                # from the score.
+                # runs on a real context rather than a degenerate one.
                 pad = self.rows[:1].expand(self.batch_size - valid, -1)
                 rows = torch.cat([rows, pad])
             media = rows[:, :-1].long()
             label = rows[:, 1:].long()
             if valid < self.batch_size:
                 label = label.clone()
-                label[valid:] = _IGNORED_TARGET
+                label[valid:] = IGNORED_TARGET
             yield {
                 "media": media,
                 "label": label,
