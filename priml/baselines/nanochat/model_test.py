@@ -169,6 +169,41 @@ def test_a_layer_outside_the_stack_is_rejected() -> None:
         _config(value_embedding_layers=[5]).copy_tree().finalize()
 
 
+def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
+    """The value embeddings and rotary factors are shared across layers.
+
+    Both are built once, to layer 0's geometry, so a per-layer list declaring a
+    different head shape further down is a contradiction -- one that otherwise
+    survives construction and dies in the forward as a bare reshape failure
+    naming a tensor size rather than the layer.
+    """
+    config = _config()
+    template = config.block.attn
+    assert isinstance(template, ValueGatedAttention.Config)
+    template.heads = 2
+
+    blocks: list[Any] = []
+    for heads in (2, 4):  # 2 * 8 = 16 inner, against 4 * 8 = 32
+        block = config.block.copy_tree()
+        attention = block.attn
+        assert isinstance(attention, ValueGatedAttention.Config)
+        attention.heads = heads
+        blocks.append(block)
+    config.blocks = blocks
+    config.num_layers = len(blocks)
+
+    with pytest.raises(ValueError, match="same attention head geometry"):
+        config.copy_tree().finalize()
+
+
+def test_a_uniform_stack_of_explicit_blocks_still_builds() -> None:
+    """The check must not reject the ordinary per-layer list."""
+    config = _config()
+    config.blocks = [config.block.copy_tree() for _ in range(config.num_layers)]
+    torch.manual_seed(0)
+    assert config.copy_tree().finalize().make()(_tokens()).shape[-1] == VOCAB
+
+
 def test_window_sizes_always_end_long() -> None:
     """The last layer predicts the next token, so it must see everything."""
     windows = window_sizes(num_layers=5, max_seq_len=64, pattern="SSSL")
