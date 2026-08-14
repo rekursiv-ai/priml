@@ -230,16 +230,32 @@ class NanoChatTrainStep:
                     "tokens_per_optimizer_step must be positive; got "
                     f"{self.tokens_per_optimizer_step}.",
                 )
-            if self.gradient_clip_norm <= 0:
+            # NaN is excluded explicitly, not covered by ``<= 0``: every
+            # comparison against it is False, so a NaN here does not fail --
+            # it silently DISABLES the guard. ``math.isfinite`` is false for
+            # NaN, so clipping would be skipped; ``loss > NaN`` is false, so
+            # divergence would never be detected.
+            if math.isnan(self.gradient_clip_norm) or self.gradient_clip_norm <= 0:
                 raise ValueError(
                     f"gradient_clip_norm must be positive; got "
                     f"{self.gradient_clip_norm}. Infinite disables clipping.",
                 )
-            if self.divergence_threshold <= 0:
+            if math.isnan(self.divergence_threshold) or self.divergence_threshold <= 0:
                 raise ValueError(
                     "divergence_threshold must be positive; got "
                     f"{self.divergence_threshold}.",
                 )
+            for name, momentum in (
+                ("momentum_start", self.momentum_start),
+                ("momentum_end", self.momentum_end),
+            ):
+                # The schedule writes these straight into the optimizer's
+                # groups every step, past the constructor that would have
+                # rejected them.
+                if not 0.0 <= momentum < 1.0:
+                    raise ValueError(
+                        f"{name} must lie in [0, 1); got {momentum}.",
+                    )
             tokens_per_pass = self.rows_per_pass * self.model.max_seq_len
             if self.tokens_per_optimizer_step % tokens_per_pass:
                 raise ValueError(
@@ -389,10 +405,9 @@ class NanoChatTrainStep:
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        self.raw_model.load_state_dict(state_dict["model"])
-        self.optimizer.load_state_dict(state_dict["optimizer"])
-        self.global_step = int(state_dict["global_step"])
-        self.elapsed_sec = float(state_dict["elapsed_sec"])
+        # Checked BEFORE anything is assigned: a caller that catches this must
+        # not be left holding the checkpoint's weights and clock beside its own
+        # warmup counter, which is the uncharged-training state being refused.
         if "local_step" not in state_dict:
             raise ValueError(
                 "this checkpoint records no 'local_step', so it predates the "
@@ -400,6 +415,10 @@ class NanoChatTrainStep:
                 "reconstructed; resuming would grant uncharged training. "
                 "Start a fresh run.",
             )
+        self.raw_model.load_state_dict(state_dict["model"])
+        self.optimizer.load_state_dict(state_dict["optimizer"])
+        self.global_step = int(state_dict["global_step"])
+        self.elapsed_sec = float(state_dict["elapsed_sec"])
         self.local_step = int(state_dict["local_step"])
         self._pending_passes = 0
 

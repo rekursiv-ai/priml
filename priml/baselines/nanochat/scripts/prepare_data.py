@@ -1,7 +1,8 @@
 """Download the corpus, train a tokenizer, and pack it into token rows.
 
-Run once before the first experiment. Idempotent: a split already present is
-left alone, so re-running costs nothing.
+Run once before the first experiment. Re-running with the SAME flags costs
+nothing -- a split already present is left alone. Re-running with different
+ones raises rather than silently returning data prepared for another question.
 
 Three stages, in order, because each consumes the previous one's output:
 
@@ -128,6 +129,24 @@ def prepare(
       directory: Where the splits were written.
 
     """
+    if num_train_shards <= 0:
+        raise ValueError(f"num_train_shards must be positive; got {num_train_shards}.")
+    if vocab_size <= len(RESERVED_TOKENS):
+        raise ValueError(
+            f"vocab_size must exceed the {len(RESERVED_TOKENS)} reserved "
+            f"tokens; got {vocab_size}.",
+        )
+    if vocab_size > _MAX_TOKEN_ID + 1:
+        raise ValueError(
+            f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
+            "packed uint16 rows can hold.",
+        )
+    if max_seq_len < 2:
+        raise ValueError(f"max_seq_len must be at least two; got {max_seq_len}.")
+    if tokenizer_train_chars <= 0:
+        raise ValueError(
+            f"tokenizer_train_chars must be positive; got {tokenizer_train_chars}.",
+        )
     out = Path(directory) if directory is not None else default_directory()
     out.mkdir(parents=True, exist_ok=True)
     # Checked per split rather than only when BOTH exist: a partial directory
@@ -249,21 +268,32 @@ def _tokenizer(
     import tiktoken  # noqa: PLC0415 -- preparation-only dependency
 
     path = out / "tokenizer.pkl"
+    # The recipe that produced the tokenizer, recorded beside it. A vocabulary
+    # fitted on different text IS a different tokenizer even at the same size,
+    # so comparing only ``n_vocab`` would serve a stale one whose merges came
+    # from a corpus this run never saw -- and every token id would mean
+    # something else.
+    recipe = {
+        "vocab_size": vocab_size,
+        "train_chars": train_chars,
+        "shards": [shard.name for shard in shards],
+        "split_pattern": SPLIT_PATTERN,
+    }
+    recipe_path = out / "tokenizer_recipe.json"
     if path.is_file():
         with path.open("rb") as file:
             cached = pickle.load(file)  # noqa: S301 -- our own prepared artifact
         # A file at this path written by anything else would otherwise surface
         # as an AttributeError deep inside packing.
         assert isinstance(cached, tiktoken.Encoding), type(cached).__name__
-        # A cached tokenizer fitted for a DIFFERENT vocabulary is not a cache
-        # hit: the byte table would be built to the requested length over an
-        # encoding of another, padding it with entries for ids that cannot
-        # occur -- a silently wrong denominator rather than a failure.
-        if cached.n_vocab != vocab_size:
+        recorded = (
+            json.loads(recipe_path.read_text()) if recipe_path.is_file() else None
+        )
+        if recorded != recipe:
             raise ValueError(
-                f"{path} holds a tokenizer of {cached.n_vocab} tokens but "
-                f"{vocab_size} was requested; delete it to refit, or prepare "
-                "into a different --directory.",
+                f"{path} was fitted with {recorded}, but {recipe} was "
+                "requested; delete it to refit, or prepare into a different "
+                "--directory.",
             )
         return cached
 
@@ -287,6 +317,7 @@ def _tokenizer(
     with staging.open("wb") as file:
         pickle.dump(encoding, file)
     staging.replace(path)
+    recipe_path.write_text(json.dumps(recipe, sort_keys=True))
     return encoding
 
 
@@ -316,6 +347,15 @@ def _pack_split(
         raise ValueError(
             f"nanochat {split!r} tokenized to {len(stream)} tokens, fewer than "
             f"the {width} one row needs.",
+        )
+    # uint16 is the storage, so a vocabulary past its range would either raise
+    # from numpy or -- on a version that wraps -- write ids decoding to the
+    # wrong token entirely. Checked against the declared vocabulary rather than
+    # the dtype's limit, so the message names the flag that caused it.
+    if vocab_size > _MAX_TOKEN_ID + 1:
+        raise ValueError(
+            f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
+            "packed uint16 rows can hold.",
         )
     packed = np.array(stream[: rows * width], dtype=np.uint16).reshape(rows, width)
 
@@ -403,6 +443,9 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         help="characters the tokenizer is fitted on",
     )
 
+
+_MAX_TOKEN_ID: Final = 65_535
+"""Largest id the packed ``uint16`` rows can represent."""
 
 RESERVED_TOKENS: Final = tuple(f"<|reserved_{index}|>" for index in range(16))
 """Tokens appended after the byte-pair merges.

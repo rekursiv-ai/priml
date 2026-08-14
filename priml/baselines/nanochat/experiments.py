@@ -181,12 +181,10 @@ def exp002() -> NanoChatLoop.Config:
     """
     cfg = exp001()
     cfg.experiment_name = "exp002"
-    # Alternating layers, counting BACK from the last so the deepest one gets
-    # a table: that is where the residual stream is most processed and a path
-    # to the raw tokens is worth the most.
-    cfg.step.model.value_embedding_layers = sorted(
-        range(cfg.step.model.num_layers - 1, -1, -2),
-    )
+    # Alternating layers. A stride rather than the indices it implies, so a
+    # fork that changes the depth still gets alternating layers rather than
+    # indices computed against a stack that no longer exists.
+    cfg.step.model.value_embedding_stride = 2
     return cfg
 
 

@@ -49,6 +49,7 @@ def _data(dataset_dir: Path, **overrides: object) -> NanoChatData:
     config.working_dir = str(dataset_dir)
     config.device = "cpu"
     config.batch_size = 2
+    config.eval_batch_size = 2
     for name, value in overrides.items():
         setattr(config, name, value)
     return config.make()
@@ -201,6 +202,54 @@ def test_metadata_without_a_fingerprint_is_rejected(dataset_dir: Path) -> None:
         list(_data(dataset_dir).eval_dataloader())
 
 
+def test_a_negative_token_id_is_rejected(dataset_dir: Path) -> None:
+    """A negative id indexes the embedding from the BACK.
+
+    That is a silently wrong row rather than a failure, so both ends of the id
+    range are checked, not only the top.
+    """
+    rows = np.zeros((4, SEQ + 1), dtype=np.int32)
+    rows[0, 0] = -1
+    np.save(dataset_dir / "val" / "all__tokens.npy", rows)
+    with pytest.raises(ValueError, match="vocab_size"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def test_a_negative_byte_length_is_rejected(dataset_dir: Path) -> None:
+    """The metric's mask is ``lengths > 0``, so a negative length drops a token.
+
+    It would vanish from both sums -- excluded from the measurement rather than
+    rejected -- which is a quiet change to what the score covers.
+    """
+    lengths = np.ones(VOCAB, dtype=np.int32)
+    lengths[0] = 0
+    lengths[3] = -2
+    np.save(dataset_dir / "val" / "all__token_bytes.npy", lengths)
+    _refingerprint(dataset_dir / "val", lengths)
+    with pytest.raises(ValueError, match="negative byte length"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def test_a_two_dimensional_byte_table_is_rejected(dataset_dir: Path) -> None:
+    """The metric indexes it as one length per id."""
+    lengths = np.ones((VOCAB, 1), dtype=np.int32)
+    np.save(dataset_dir / "val" / "all__token_bytes.npy", lengths)
+    _refingerprint(dataset_dir / "val", lengths)
+    with pytest.raises(ValueError, match="one-dimensional"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
+def _refingerprint(directory: Path, table: np.ndarray) -> None:
+    """Rewrite the metadata so the fingerprint matches a replaced table.
+
+    Without this the fingerprint check fires first and the test proves only
+    that, never reaching the property it means to pin.
+    """
+    metadata = json.loads((directory / "dataset.json").read_text())
+    metadata["token_bytes_sha256"] = token_bytes_fingerprint(table)
+    (directory / "dataset.json").write_text(json.dumps(metadata))
+
+
 def test_a_malformed_token_array_names_the_file(dataset_dir: Path) -> None:
     """A one-dimensional array must not surface as a bare IndexError."""
     np.save(dataset_dir / "val" / "all__tokens.npy", np.zeros(16, dtype=np.uint16))
@@ -218,7 +267,7 @@ def test_a_split_too_small_for_its_batch_is_rejected_at_construction(
     distant symptoms of one misconfiguration.
     """
     with pytest.raises(ValueError, match="no batches"):
-        _data(dataset_dir, num_eval_rows=1).eval_dataloader()
+        _data(dataset_dir, eval_batch_size=8, num_eval_rows=8).eval_dataloader()
 
 
 def test_data_narrower_than_the_model_is_rejected_at_load(dataset_dir: Path) -> None:
@@ -265,20 +314,30 @@ def test_a_nonpositive_size_is_rejected_by_name(
 ) -> None:
     """Each bound names its own field, and none is silently absorbed.
 
-    ``eval_batch_size=0`` is the one that bites hardest: zero is FALSY, so an
-    ``or`` fallback would quietly evaluate at the training batch size and still
-    report a number. ``num_eval_rows=-1`` would silently mean "all but the last
-    row" rather than an invalid cap.
+    ``num_eval_rows=-1`` is the one that bites hardest: as a slice bound it
+    would silently mean "all but the last row" rather than an invalid cap.
     """
     with pytest.raises(ValueError, match=field):
         _data(dataset_dir, **{field: value})
 
 
-def test_an_omitted_eval_batch_size_still_reuses_the_train_one(
+def test_the_eval_batch_does_not_track_the_training_batch(
     dataset_dir: Path,
 ) -> None:
-    """``None`` is the sentinel; rejecting 0 must not break the real default."""
-    assert _data(dataset_dir, eval_batch_size=None).eval_batch_size == 2
+    """The scored row set must not move with a memory-tuning knob.
+
+    Training's batch size follows device memory, and a short final batch is
+    dropped -- so an eval batch tracking it would score a different subset of
+    the split on a smaller card and report it as the same metric.
+    """
+    default = NanoChatData.Config().eval_batch_size
+    for batch_size in (2, 8):
+        config = NanoChatData.Config()
+        config.base_dir = "/"
+        config.working_dir = str(dataset_dir)
+        config.device = "cpu"
+        config.batch_size = batch_size
+        assert config.make().eval_batch_size == default
 
 
 def test_missing_data_names_the_preparer(tmp_path: Path) -> None:
