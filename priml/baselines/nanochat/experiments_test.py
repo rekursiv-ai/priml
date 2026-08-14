@@ -49,15 +49,15 @@ def test_exp000_turns_both_mechanisms_off() -> None:
     """
     cfg = experiments.exp000()
     assert cfg.step.model.window_pattern == "L"
-    assert cfg.step.model.value_embedding_layers == []
+    assert cfg.step.model.value_embedding_stride == 0
 
 
 def test_exp001_changes_only_the_window() -> None:
     base, fork = experiments.exp000(), experiments.exp001()
     assert base.step.model.window_pattern == "L"
     assert fork.step.model.window_pattern == "SSSL"
-    assert fork.step.model.value_embedding_layers == (
-        base.step.model.value_embedding_layers
+    assert fork.step.model.value_embedding_stride == (
+        base.step.model.value_embedding_stride
     )
     assert fork.step.time_budget_sec == base.step.time_budget_sec
     assert fork.step.model.channels == base.step.model.channels
@@ -65,10 +65,23 @@ def test_exp001_changes_only_the_window() -> None:
 
 def test_exp002_changes_only_the_value_embeddings() -> None:
     base, fork = experiments.exp001(), experiments.exp002()
-    assert base.step.model.value_embedding_layers == []
-    assert fork.step.model.value_embedding_layers
+    assert base.step.model.value_embedding_stride == 0
+    assert fork.step.model.value_embedding_stride == 2
     assert fork.step.model.window_pattern == base.step.model.window_pattern
     assert fork.step.time_budget_sec == base.step.time_budget_sec
+
+
+def test_the_value_embedding_stride_follows_a_changed_depth() -> None:
+    """A stride survives a fork that changes the depth; indices would not.
+
+    Computing the layer list in the factory snapshots whatever ``num_layers``
+    was at that moment, so a fork narrowing the model carries indices for a
+    stack that no longer exists -- and the model rejects them.
+    """
+    cfg = experiments.exp002()
+    cfg.step.model.num_layers = 4
+    final = cfg.copy_tree().finalize()
+    assert final.step.model.value_embedding_layers == [1, 3]
 
 
 def test_the_budget_and_the_schedule_horizon_agree() -> None:

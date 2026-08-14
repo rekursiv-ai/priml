@@ -117,6 +117,13 @@ def test_a_token_batch_no_whole_number_of_passes_reaches_is_rejected() -> None:
         ("tokens_per_optimizer_step", -1),
         ("gradient_clip_norm", -1.0),
         ("divergence_threshold", 0.0),
+        # NaN does not fail a `<= 0` test -- every comparison against it is
+        # False -- so it slips through and DISABLES the guard it configures.
+        ("gradient_clip_norm", float("nan")),
+        ("divergence_threshold", float("nan")),
+        ("momentum_start", 1.0),
+        ("momentum_end", 1.5),
+        ("momentum_start", -0.1),
     ],
 )
 def test_an_invalid_geometry_is_rejected_by_name(field: str, value: float) -> None:

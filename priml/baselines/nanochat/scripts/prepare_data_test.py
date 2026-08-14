@@ -20,7 +20,7 @@ from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.scripts.prepare_data import prepare
 
 
-VOCAB = 16
+VOCAB = 64  # above the 16 reserved tokens
 SEQ = 8
 
 

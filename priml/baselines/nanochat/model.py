@@ -346,13 +346,22 @@ class NanoChatLM(nn.Module):
         The final layer is always long regardless of the pattern -- it is the
         one that has to see the whole sequence to predict the next token."""
 
-        value_embedding_layers: list[int] = field(default_factory=list[int])
-        """Layers reading a value embedding; empty gives none of them one.
+        value_embedding_stride: int = 0
+        """Every Nth layer reads a value embedding, counting BACK from the last.
 
-        Listed rather than derived from a stride, because which layers get one
-        is the experimental question: the embedding is a path from the raw
-        tokens to the output, so it is worth the most where the residual
-        stream is most processed and the answer is not a formula."""
+        0 gives none of them one. Counting back so the deepest layer always
+        gets a table: the embedding is a path from the raw tokens to the
+        output, worth the most where the residual stream is most processed.
+
+        A STRIDE rather than a list of indices, because indices computed
+        against one depth go stale the moment a fork changes ``num_layers`` --
+        the list is a snapshot, this is the rule that produced it. Set
+        ``value_embedding_layers`` directly to name specific layers."""
+
+        value_embedding_layers: list[int] = field(default_factory=list[int])
+        """Layers reading a value embedding; empty derives them from the stride.
+
+        Set this to override the stride with an explicit set."""
 
         embedding: Makeable[nn.Module] = field(default_factory=Embedding.Config)
         """Token embedding table."""
@@ -413,6 +422,23 @@ class NanoChatLM(nn.Module):
                     f"blocks names {len(self.blocks)} layers for "
                     f"num_layers={self.num_layers}.",
                 )
+            if self.value_embedding_stride < 0:
+                raise ValueError(
+                    "value_embedding_stride must be nonnegative; got "
+                    f"{self.value_embedding_stride}.",
+                )
+            # Derived HERE, where the depth is final: computing the indices in
+            # an experiment factory snapshots whatever num_layers was then, so
+            # a fork that changes the depth carries indices for a stack that no
+            # longer exists.
+            if not self.value_embedding_layers and self.value_embedding_stride:
+                self.value_embedding_layers = sorted(
+                    range(
+                        self.num_layers - 1,
+                        -1,
+                        -self.value_embedding_stride,
+                    ),
+                )
             if any(
                 not 0 <= layer < self.num_layers
                 for layer in self.value_embedding_layers
@@ -427,18 +453,23 @@ class NanoChatLM(nn.Module):
             for layer, block in enumerate(self.blocks):
                 propagate_attr(block, "channels_in", self.channels, protocol=ChannelsIn)
                 propagate_attr(block, "depth", layer)
-            # The value-embedding tables and the rotary factors are built ONCE,
-            # to layer 0's geometry, then handed to every layer -- so a stack
-            # whose layers disagree on head shape is a contradiction fixed at
-            # construction. Left to run time it surfaces as a reshape failure
-            # inside the forward, naming a size rather than the layer.
-            _reject_ragged_heads(self.blocks, channels=self.channels)
             propagate_attr(self.embedding, "channels_out", self.channels)
             propagate_attr(self.embedding, "num_embeddings", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels)
             propagate_attr(self.lm_head, "channels_out", self.vocab_size)
             self.rope.channels_head = head_width(self.blocks[0], self.channels)
-            return super().finalize()
+            finalized = super().finalize()
+            # AFTER the cascade: a block that left ``heads`` at its sentinel
+            # derives it in its own finalize, so checking earlier would compare
+            # a fallback rather than the width the layer will actually use.
+            #
+            # The value-embedding tables and the rotary factors are built ONCE,
+            # to layer 0's geometry, and handed to every layer -- so a stack
+            # disagreeing on head shape is a contradiction settled here. Left to
+            # run time it surfaces as a reshape failure naming a tensor size
+            # rather than the layer.
+            _reject_ragged_heads(finalized.blocks, channels=finalized.channels)
+            return finalized
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -548,9 +579,10 @@ class NanoChatLM(nn.Module):
         # the residual stream, so dividing would miscount every model where
         # they differ.
         inner = attention_width(self.config.blocks[0], self.config.channels)
-        attention = sum(
-            12 * inner * min(window, self.config.max_seq_len) for window in self.windows
-        )
+        # ``window_sizes`` returns only the full context or half of it, so no
+        # window can exceed ``max_seq_len`` and no clamp is needed here.
+        assert max(self.windows) <= self.config.max_seq_len
+        attention = sum(12 * inner * window for window in self.windows)
         return 6 * matrix + attention
 
 

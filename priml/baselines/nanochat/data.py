@@ -76,8 +76,14 @@ class NanoChatData:
         batch_size: int = 32
         """Rows per training batch."""
 
-        eval_batch_size: int | None = None
-        """Rows per evaluation batch; ``None`` reuses ``batch_size``."""
+        eval_batch_size: int = 16
+        """Rows per evaluation batch.
+
+        Fixed rather than tracking ``batch_size``: a short final batch is
+        dropped, so the batch width decides WHICH rows are scored. Training's
+        batch follows device memory, and a score whose row set moved with the
+        card it ran on would not be the comparison this baseline exists to
+        make."""
 
         device: str = "auto"
         """Device holding the resident arrays ("auto" picks the best)."""
@@ -115,7 +121,7 @@ class NanoChatData:
     def __init__(self, config: Config) -> None:
         if config.batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
-        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
+        if config.eval_batch_size <= 0:
             raise ValueError(
                 f"eval_batch_size must be positive; got {config.eval_batch_size}.",
             )
@@ -123,28 +129,41 @@ class NanoChatData:
             raise ValueError(
                 f"num_eval_rows must be positive; got {config.num_eval_rows}.",
             )
+        # A cap the batch width does not divide silently scores fewer rows than
+        # asked for, so the two are required to agree rather than the remainder
+        # being dropped without mention.
+        if (
+            config.num_eval_rows is not None
+            and config.num_eval_rows % config.eval_batch_size
+        ):
+            raise ValueError(
+                f"num_eval_rows {config.num_eval_rows} is not divisible by "
+                f"eval_batch_size {config.eval_batch_size}; the remainder "
+                "would be dropped and the score would cover fewer rows than "
+                "requested.",
+            )
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
-        # ``is None``, not ``or``: zero is falsy, so an ``or`` would absorb an
-        # explicit 0 into the training batch size and still report a score.
-        self.eval_batch_size = (
-            config.batch_size
-            if config.eval_batch_size is None
-            else config.eval_batch_size
-        )
+        self.eval_batch_size = config.eval_batch_size
         self._passes = 0
         self._live: _TokenBatches | None = None
         # A prepared split is immutable, and the loop builds a fresh eval
         # loader per evaluation. Re-reading would re-verify bytes that cannot
         # have changed: measured at 107 ms against the 46 ms the eval pass
         # itself takes, so the read costs more than twice the work it feeds.
-        self._splits: dict[str, PreparedSplit] = {}
+        #
+        # The cost is memory: each split stays resident on the training device
+        # for the whole run rather than only during an eval. Token ids are
+        # int32, so a 300k-row split at 2048 context is ~2.5 GiB -- material
+        # beside the weights and activations on a small card, and the reason
+        # ``num_eval_rows`` exists.
+        self._splits: dict[str, _PreparedSplit] = {}
 
-    def _split(self, name: str) -> PreparedSplit:
+    def _split(self, name: str) -> _PreparedSplit:
         """The named split, verified once and retained."""
         if name not in self._splits:
-            self._splits[name] = PreparedSplit(
+            self._splits[name] = _PreparedSplit(
                 self.dataset_dir / name,
                 device=self.config.device,
             )
@@ -158,7 +177,6 @@ class NanoChatData:
             self._passes = self._live.passes
         stream = _TokenBatches(
             prepared=self._split("train"),
-            name="train",
             device=self.config.device,
             batch_size=self.batch_size,
             shuffle=True,
@@ -179,7 +197,6 @@ class NanoChatData:
         """
         return _TokenBatches(
             prepared=self._split("val"),
-            name="val",
             device=self.config.device,
             batch_size=self.eval_batch_size,
             shuffle=False,
@@ -207,75 +224,28 @@ class NanoChatData:
                 self._live.passes = self._passes
 
 
-class _TokenBatches:
-    """One split, resident on device, iterated in fixed-size batches."""
+def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
+    """Return the identity of one byte-length table.
 
-    def __init__(
-        self,
-        *,
-        prepared: PreparedSplit,
-        name: str,
-        device: torch.device | str,
-        batch_size: int,
-        shuffle: bool,
-        num_rows: int | None,
-        seed: int,
-        passes: int,
-        vocab_size: int,
-        max_seq_len: int,
-    ) -> None:
-        prepared.agrees_with(vocab_size=vocab_size, max_seq_len=max_seq_len)
-        self.device = get_device(device)
-        rows = prepared.rows
-        self.rows: Tensor = rows if num_rows is None else rows[:num_rows]
-        self.token_bytes = prepared.token_bytes
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.seed = seed
-        self.passes = passes
-        # A short batch is dropped, so too few rows yields NOTHING -- and an
-        # empty stream is invisible until it surfaces far away: training as a
-        # generic epoch-reset error, evaluation as a metric with no samples.
-        # Both are the same misconfiguration, so it is named once, here, where
-        # the row count and the batch size are both in hand.
-        available = int(self.rows.shape[0])
-        if available < batch_size:
-            raise ValueError(
-                f"the {name!r} split yields no batches: {available} rows "
-                f"available (of {rows.shape[0]}) against a batch size of "
-                f"{batch_size}. Lower the batch size, raise the row cap, or "
-                "prepare more data.",
-            )
+    The table is the DENOMINATOR of every reported score, so two tables of the
+    same length are two different metrics wearing one name. Recording the
+    fingerprint beside the data is what lets a reader tell which accounting
+    produced a number -- a distinction worth roughly the size of a real
+    candidate effect, and invisible to any shape check.
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        """Yield every row once as an ``(input, target)`` pair.
+    Args:
+      token_bytes: Per-token-id byte lengths.
 
-        A short final batch is dropped rather than padded: every row is a full
-        context by construction, so a partial batch would be the only place in
-        the run where the token count per step changes.
-        """
-        count = self.rows.shape[0]
-        if self.shuffle:
-            generator = torch.Generator(device=self.device)
-            generator.manual_seed(self.seed + self.passes)
-            order = torch.randperm(count, device=self.device, generator=generator)
-        else:
-            order = torch.arange(count, device=self.device)
-        self.passes += 1
-        for start in range(0, count - self.batch_size + 1, self.batch_size):
-            rows = self.rows[order[start : start + self.batch_size]]
-            yield {
-                "media": rows[:, :-1].long(),
-                "label": rows[:, 1:].long(),
-                "token_bytes": self.token_bytes,
-            }
+    Returns:
+      fingerprint: Hex SHA-256 over the table's canonical int64 bytes.
 
-    def __len__(self) -> int:
-        """Whole batches per pass; a short final batch is dropped."""
-        return math.floor(self.rows.shape[0] / self.batch_size)
+    """
+    return hashlib.sha256(
+        np.ascontiguousarray(token_bytes, dtype=np.int64).tobytes(),
+    ).hexdigest()
 
 
-class PreparedSplit:
+class _PreparedSplit:
     """One split's arrays, verified against the metadata written beside them.
 
     Constructing this IS the guarantee. The alternative -- returning bare
@@ -316,10 +286,17 @@ class PreparedSplit:
                     "predates the current preparer, so what it holds cannot be "
                     "established. Re-prepare the split.",
                 )
+        self.name = directory.name
         self.vocab_size = int(metadata["vocab_size"])
         self.max_seq_len = int(metadata["max_seq_len"])
 
         raw_token_bytes = np.load(directory / "all__token_bytes.npy")
+        if raw_token_bytes.ndim != 1:
+            raise ValueError(
+                f"{directory}/all__token_bytes.npy has shape "
+                f"{raw_token_bytes.shape}; it must be one-dimensional, one "
+                "byte length per token id.",
+            )
         observed = token_bytes_fingerprint(raw_token_bytes)
         if metadata["token_bytes_sha256"] != observed:
             raise ValueError(
@@ -355,12 +332,24 @@ class PreparedSplit:
                 f"rows must hold {self.max_seq_len + 1} tokens; they hold "
                 f"{self.rows.shape[1]}.",
             )
+        # Both ends of the id range: a negative id indexes an embedding from
+        # the BACK, which is a silently wrong row rather than a failure.
         largest = int(self.rows.max()) if self.rows.numel() else 0
-        if largest >= self.vocab_size:
+        smallest = int(self.rows.min()) if self.rows.numel() else 0
+        if largest >= self.vocab_size or smallest < 0:
             raise ValueError(
-                f"{directory} holds token id {largest}, outside its own "
-                f"declared vocab_size {self.vocab_size}; it would index past "
-                "the embedding.",
+                f"{directory} holds token ids in [{smallest}, {largest}], "
+                f"outside its own declared vocab_size {self.vocab_size}; they "
+                "would index past the embedding or wrap to its end.",
+            )
+        # The metric's scoring mask is ``lengths > 0``, so a negative length
+        # drops that token from BOTH sums -- a token silently excluded from the
+        # score rather than a rejected table.
+        if int(self.token_bytes.min()) < 0:
+            raise ValueError(
+                f"{directory} holds a negative byte length; the score's "
+                "denominator counts bytes, and a negative one would silently "
+                "drop its token from the measurement.",
             )
         logger.info(
             "nanochat %r: %d rows of %d tokens",
@@ -396,22 +385,68 @@ class PreparedSplit:
             )
 
 
-def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
-    """Return the identity of one byte-length table.
+class _TokenBatches:
+    """One split, resident on device, iterated in fixed-size batches."""
 
-    The table is the DENOMINATOR of every reported score, so two tables of the
-    same length are two different metrics wearing one name. Recording the
-    fingerprint beside the data is what lets a reader tell which accounting
-    produced a number -- a distinction worth roughly the size of a real
-    candidate effect, and invisible to any shape check.
+    def __init__(
+        self,
+        *,
+        prepared: _PreparedSplit,
+        device: torch.device | str,
+        batch_size: int,
+        shuffle: bool,
+        num_rows: int | None,
+        seed: int,
+        passes: int,
+        vocab_size: int,
+        max_seq_len: int,
+    ) -> None:
+        prepared.agrees_with(vocab_size=vocab_size, max_seq_len=max_seq_len)
+        self.device = get_device(device)
+        rows = prepared.rows
+        self.rows: Tensor = rows if num_rows is None else rows[:num_rows]
+        self.token_bytes = prepared.token_bytes
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
+        self.passes = passes
+        # A short batch is dropped, so too few rows yields NOTHING -- and an
+        # empty stream is invisible until it surfaces far away: training as a
+        # generic epoch-reset error, evaluation as a metric with no samples.
+        # Both are the same misconfiguration, so it is named once, here, where
+        # the row count and the batch size are both in hand.
+        available = int(self.rows.shape[0])
+        if available < batch_size:
+            raise ValueError(
+                f"the {prepared.name!r} split yields no batches: {available} rows "
+                f"available (of {rows.shape[0]}) against a batch size of "
+                f"{batch_size}. Lower the batch size, raise the row cap, or "
+                "prepare more data.",
+            )
 
-    Args:
-      token_bytes: Per-token-id byte lengths.
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        """Yield every row once as an ``(input, target)`` pair.
 
-    Returns:
-      fingerprint: Hex SHA-256 over the table's canonical int64 bytes.
+        A short final batch is dropped rather than padded: every row is a full
+        context by construction, so a partial batch would be the only place in
+        the run where the token count per step changes.
+        """
+        count = self.rows.shape[0]
+        if self.shuffle:
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(self.seed + self.passes)
+            order = torch.randperm(count, device=self.device, generator=generator)
+        else:
+            order = torch.arange(count, device=self.device)
+        self.passes += 1
+        for start in range(0, count - self.batch_size + 1, self.batch_size):
+            rows = self.rows[order[start : start + self.batch_size]]
+            yield {
+                "media": rows[:, :-1].long(),
+                "label": rows[:, 1:].long(),
+                "token_bytes": self.token_bytes,
+            }
 
-    """
-    return hashlib.sha256(
-        np.ascontiguousarray(token_bytes, dtype=np.int64).tobytes(),
-    ).hexdigest()
+    def __len__(self) -> int:
+        """Whole batches per pass; a short final batch is dropped."""
+        return math.floor(self.rows.shape[0] / self.batch_size)
