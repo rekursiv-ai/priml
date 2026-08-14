@@ -266,20 +266,29 @@ def test_the_real_sprites_draw() -> None:
     assert len(np.unique(frame.reshape(-1, 3), axis=0)) > 16
 
 
-def test_constructing_a_renderer_opens_no_window() -> None:
+def test_constructing_a_renderer_opens_no_window(sprite_dir: Path) -> None:
     """A viewer object must not put a window on an operator's screen.
 
     SDL picks its video driver at the FIRST init and caches the choice, so this
     has to run in a fresh interpreter with a display available -- in-process,
     some earlier test has already bound the driver and the check is vacuous.
+
+    The probe is pointed at the generated sprites: it is asserting which
+    driver SDL bound, and downloading the real art to find that out would put
+    the network on the path of a windowing test.
     """
     source = (
-        "import os; os.environ.pop('SDL_VIDEODRIVER', None); "
-        "from MODULE import Renderer; "
-        "Renderer(block_pixels=8); "
-        "import pygame; "
-        "assert pygame.display.get_driver() == 'dummy', pygame.display.get_driver()"
-    ).replace("MODULE", Renderer.__module__)
+        (
+            "import os; os.environ.pop('SDL_VIDEODRIVER', None); "
+            "from pathlib import Path; "
+            "from MODULE import Renderer; "
+            "Renderer(block_pixels=8, asset_dir=Path(SPRITES)); "
+            "import pygame; "
+            "assert pygame.display.get_driver() == 'dummy', pygame.display.get_driver()"
+        )
+        .replace("MODULE", Renderer.__module__)
+        .replace("SPRITES", repr(str(sprite_dir)))
+    )
     package = __import__(Renderer.__module__.split(".", 1)[0])
     assert package.__file__ is not None
     probe = subprocess.run(  # noqa: S603 -- argv is this module's own import path.
