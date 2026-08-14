@@ -535,11 +535,11 @@ skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-
 package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
 override-dependencies = [
-    # Never install classic pygame; pygame-ce is its effective succsessor.
+    # Never install classic pygame; pygame-ce is its effective successor.
     # pygame-ce installs the SAME top-level `pygame` package, so anything that
-    # imports pygame  gets ce transparently. Classic pygame is dormant: last
-    # release 2.6.1 (2024-09-30) ships no cp314 wheel, its SDL source build
-    # fails on the headless GPU images, and upstream has not pushed since
+    # imports pygame gets ce transparently -- and letting both resolve makes
+    # install order decide which one wins, silently. Classic pygame is dormant:
+    # its last release is 2.6.1 (2024-09-30) and upstream has not pushed since
     # 2025-11. A false marker is the only way to drop a transitive dep
     # outright; uv overrides cannot redirect one package name to another.
     "pygame; sys_platform == 'never'",

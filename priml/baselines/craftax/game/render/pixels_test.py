@@ -1,19 +1,28 @@
 """Tests for the pixel viewer.
 
-Every test here draws real sprites, so the suite downloads them once into the
-user cache. That is deliberate: a viewer test against stub images would prove
-the blit arithmetic and nothing about whether the frame is the right game.
+These draw GENERATED sprites, not the real ones: a flat, distinctly-coloured
+square per file name. Every property asserted here -- which tile a thing lands
+on, what is hidden, what the shading does -- is about placement and masking,
+and a solid colour tests those more sharply than art does, because any leak
+shows up as an exact colour that should not be there.
+
+It also keeps the unit tier offline. Downloading 143 PNGs to assert that a
+distant mob is not drawn would make every run depend on GitHub being up.
+``test_the_real_sprites_draw`` covers the genuine assets and is marked
+``integration`` for that reason.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import hashlib
 import os
 import subprocess
 import sys
 
 import numpy as np
+import pygame
 import pytest
 import torch
 
@@ -29,9 +38,35 @@ TILE = 8
 
 
 @pytest.fixture(scope="module")
-def renderer() -> Renderer:
+def sprite_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Write one flat-coloured PNG per sprite the viewer can draw.
+
+    The colour is derived from the file name, so two different sprites are
+    always distinguishable and the same sprite is always identical -- which is
+    what the placement assertions actually depend on.
+    """
+    directory = tmp_path_factory.mktemp("sprites")
+    for name in sprites.every_sprite():
+        colour = _colour(name)
+        surface = pygame.Surface((TILE, TILE), flags=pygame.SRCALPHA)
+        surface.fill((*colour, 255))
+        pygame.image.save(surface, str(directory / name))
+    return directory
+
+
+@pytest.fixture(scope="module")
+def renderer(sprite_dir: Path) -> Renderer:
     """One renderer for the module; loading sprites is the expensive part."""
-    return Renderer(block_pixels=TILE)
+    return Renderer(block_pixels=TILE, asset_dir=sprite_dir)
+
+
+def _colour(name: str) -> tuple[int, int, int]:
+    """Return a stable, distinct colour for one sprite name."""
+    digest = hashlib.sha256(name.encode()).digest()
+    # Never black and never the out-of-bounds grey: both are drawn as flat
+    # fills by the viewer, so a sprite sharing one would make a real leak
+    # indistinguishable from correct output.
+    return (digest[0] | 0x40, digest[1] | 0x40, digest[2] | 0x41)
 
 
 def _state(num_envs: int = 1) -> EnvState:
@@ -135,11 +170,13 @@ def test_night_tints_the_surface_but_not_the_caves(renderer: Renderer) -> None:
 def test_a_blocked_ladder_looks_different_from_an_open_one(
     renderer: Renderer,
 ) -> None:
-    # The only cue that descending is not yet allowed.
+    # The only cue that descending is not yet allowed. Placed beside the
+    # player rather than under them: the player is drawn last, so a ladder on
+    # their own tile is covered and the two frames would match either way.
     blocked = _state()
-    blocked.item_map[:, 0, 20, 20] = int(ItemType.LADDER_DOWN)
+    blocked.item_map[:, 0, 20, 21] = int(ItemType.LADDER_DOWN)
     open_ladder = _state()
-    open_ladder.item_map[:, 0, 20, 20] = int(ItemType.LADDER_DOWN)
+    open_ladder.item_map[:, 0, 20, 21] = int(ItemType.LADDER_DOWN)
     open_ladder.monsters_killed[:, 0] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
     assert not np.array_equal(
         renderer.render(blocked),
@@ -202,9 +239,31 @@ def test_the_same_world_draws_the_same_frame(renderer: Renderer) -> None:
     assert np.array_equal(renderer.render(state), renderer.render(state))
 
 
-def test_a_degenerate_tile_size_is_refused() -> None:
+def test_a_degenerate_tile_size_is_refused(sprite_dir: Path) -> None:
     with pytest.raises(ValueError, match="positive"):
-        Renderer(block_pixels=0)
+        Renderer(block_pixels=0, asset_dir=sprite_dir)
+
+
+@pytest.mark.integration
+def test_the_real_sprites_draw() -> None:
+    """The genuine assets download, load, and produce a plausible frame.
+
+    Marked ``integration`` because it reaches GitHub. Everything above runs
+    offline against generated sprites; this is the one test that proves the
+    real ones exist at the pinned revision and decode.
+    """
+    rows, columns = constants.OBS_DIM
+    frame = Renderer(block_pixels=16).render(
+        world_gen.generate_world(
+            num_envs=1,
+            generator=torch.Generator().manual_seed(0),
+            device=torch.device("cpu"),
+        ),
+    )
+    assert frame.shape == (rows * 16, columns * 16, 3)
+    # Art, not a flat fill: a frame of one colour would mean every sprite
+    # failed to load and the viewer silently drew background.
+    assert len(np.unique(frame.reshape(-1, 3), axis=0)) > 16
 
 
 def test_constructing_a_renderer_opens_no_window() -> None:
