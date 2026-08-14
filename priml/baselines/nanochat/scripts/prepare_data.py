@@ -130,25 +130,29 @@ def prepare(
     """
     out = Path(directory) if directory is not None else default_directory()
     out.mkdir(parents=True, exist_ok=True)
+    # Checked per split rather than only when BOTH exist: a partial directory
+    # -- an interrupted run, a deleted split -- is exactly when the flags are
+    # most likely to have moved, and reusing one split at the old geometry
+    # beside a fresh one built at the new flags yields a pair disagreeing with
+    # itself, reported as "ready".
     prepared = [out / split / "dataset.json" for split in ("train", "val")]
+    asked = {"vocab_size": vocab_size, "max_seq_len": max_seq_len}
+    for path in prepared:
+        if not path.is_file():
+            continue
+        recorded = json.loads(path.read_text())
+        differing = {
+            key: (recorded.get(key), value)
+            for key, value in asked.items()
+            if recorded.get(key) != value
+        }
+        if differing:
+            raise ValueError(
+                f"{path.parent} was prepared with {differing} (recorded, "
+                "requested); prepare into a different --directory, or "
+                "delete this one to rebuild it.",
+            )
     if all(path.is_file() for path in prepared):
-        # Reusing a split prepared under DIFFERENT flags would hand back data
-        # that silently is not what was asked for, so the recorded geometry has
-        # to agree before the early return.
-        for path in prepared:
-            recorded = json.loads(path.read_text())
-            asked = {"vocab_size": vocab_size, "max_seq_len": max_seq_len}
-            differing = {
-                key: (recorded.get(key), value)
-                for key, value in asked.items()
-                if recorded.get(key) != value
-            }
-            if differing:
-                raise ValueError(
-                    f"{path.parent} was prepared with {differing} (recorded, "
-                    "requested); prepare into a different --directory, or "
-                    "delete this one to rebuild it.",
-                )
         logger.info("nanochat data already prepared at %s", out)
         return out
 
@@ -206,13 +210,13 @@ def _download(out: Path, *, count: int) -> list[Path]:
 
 
 def _shard_paths(source: Path, *, count: int) -> list[Path]:
-    """Return locally staged shards, newest naming scheme first.
+    """Return the first ``count`` locally staged shards, in name order.
 
     Raises:
       FileNotFoundError: Fewer shards are present than the split needs.
 
     """
-    paths = sorted(source.glob("shard_*"))[:count]
+    paths = sorted(source.glob("shard_*.parquet"))[:count]
     if len(paths) < count:
         raise FileNotFoundError(
             f"{source} holds {len(paths)} shards but the splits need {count}.",
@@ -251,6 +255,16 @@ def _tokenizer(
         # A file at this path written by anything else would otherwise surface
         # as an AttributeError deep inside packing.
         assert isinstance(cached, tiktoken.Encoding), type(cached).__name__
+        # A cached tokenizer fitted for a DIFFERENT vocabulary is not a cache
+        # hit: the byte table would be built to the requested length over an
+        # encoding of another, padding it with entries for ids that cannot
+        # occur -- a silently wrong denominator rather than a failure.
+        if cached.n_vocab != vocab_size:
+            raise ValueError(
+                f"{path} holds a tokenizer of {cached.n_vocab} tokens but "
+                f"{vocab_size} was requested; delete it to refit, or prepare "
+                "into a different --directory.",
+            )
         return cached
 
     logger.info("fitting a %d-token vocabulary", vocab_size)

@@ -393,6 +393,13 @@ class NanoChatTrainStep:
         self.optimizer.load_state_dict(state_dict["optimizer"])
         self.global_step = int(state_dict["global_step"])
         self.elapsed_sec = float(state_dict["elapsed_sec"])
+        if "local_step" not in state_dict:
+            raise ValueError(
+                "this checkpoint records no 'local_step', so it predates the "
+                "budget-clock fix and its warmup accounting cannot be "
+                "reconstructed; resuming would grant uncharged training. "
+                "Start a fresh run.",
+            )
         self.local_step = int(state_dict["local_step"])
         self._pending_passes = 0
 

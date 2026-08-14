@@ -224,6 +224,19 @@ class _TokenBatches:
         self.shuffle = shuffle
         self.seed = seed
         self.passes = passes
+        # A short batch is dropped, so too few rows yields NOTHING -- and an
+        # empty stream is invisible until it surfaces far away: training as a
+        # generic epoch-reset error, evaluation as a metric with no samples.
+        # Both are the same misconfiguration, so it is named once, here, where
+        # the row count and the batch size are both in hand.
+        available = int(self.rows.shape[0])
+        if available < batch_size:
+            raise ValueError(
+                f"the {split!r} split yields no batches: {available} rows "
+                f"available (of {rows.shape[0]}) against a batch size of "
+                f"{batch_size}. Lower the batch size, raise the row cap, or "
+                "prepare more data.",
+            )
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         """Yield every row once as an ``(input, target)`` pair.
@@ -313,49 +326,71 @@ def _load_split(
     logger.info("loading nanochat split %r from %s", split, path)
     resolved = get_device(device)
     raw_token_bytes = np.load(path / "all__token_bytes.npy")
-    recorded = metadata.get("token_bytes_sha256")
+
+    # The split's OWN metadata is checked unconditionally: a caller that never
+    # declares geometry still must not be handed arrays contradicting the file
+    # beside them. The caller's declaration, when given, is then checked
+    # against that verified metadata rather than against the arrays -- so every
+    # path through this function validates, and none of them only-sometimes.
+    for field in ("vocab_size", "max_seq_len", "token_bytes_sha256"):
+        if field not in metadata:
+            raise ValueError(
+                f"{path}/dataset.json declares no {field!r}; it predates the "
+                "current preparer, so what it holds cannot be established. "
+                "Re-prepare the split.",
+            )
     observed = token_bytes_fingerprint(raw_token_bytes)
-    if recorded is not None and recorded != observed:
+    if metadata["token_bytes_sha256"] != observed:
         raise ValueError(
-            f"{path} records byte-table fingerprint {recorded} but its table "
-            f"hashes to {observed}; the score's denominator changed, so a "
-            "number measured here is not comparable with one measured before. "
-            "Re-prepare the split.",
+            f"{path} records byte-table fingerprint "
+            f"{metadata['token_bytes_sha256']} but its table hashes to "
+            f"{observed}; the score's denominator changed, so a number measured "
+            "here is not comparable with one measured before. Re-prepare.",
         )
     # Prepared as uint16, which torch cannot hold; int32 is the smallest dtype
     # that represents the whole vocabulary and still indexes an embedding.
-    rows = torch.from_numpy(
-        np.load(path / "all__tokens.npy").astype(np.int32),
-    ).to(resolved)
-    token_bytes = torch.from_numpy(raw_token_bytes.astype(np.int32)).to(resolved)
-    if token_bytes.shape[0] != int(metadata["vocab_size"]):
+    raw_rows = np.load(path / "all__tokens.npy")
+    if raw_rows.ndim != 2 or raw_rows.shape[1] < 2:
         raise ValueError(
-            f"{path} declares vocab_size {metadata['vocab_size']} but its byte "
+            f"{path}/all__tokens.npy has shape {raw_rows.shape}; it must be "
+            "two-dimensional with at least two columns, since inputs and "
+            "targets are one row offset by one.",
+        )
+    rows = torch.from_numpy(raw_rows.astype(np.int32)).to(resolved)
+    token_bytes = torch.from_numpy(raw_token_bytes.astype(np.int32)).to(resolved)
+
+    declared_vocab = int(metadata["vocab_size"])
+    declared_seq = int(metadata["max_seq_len"])
+    if token_bytes.shape[0] != declared_vocab:
+        raise ValueError(
+            f"{path} declares vocab_size {declared_vocab} but its byte "
             f"table holds {token_bytes.shape[0]} entries.",
         )
-    # Verified here, at the boundary that owns the data: a config may not read
-    # the filesystem, so the model declares its geometry and this is where the
-    # two meet. Without it the disagreement surfaces inside the forward, naming
-    # only the model's side and never the directory the rows came from.
-    if max_seq_len > 0 and rows.shape[1] != max_seq_len + 1:
+    if rows.shape[1] != declared_seq + 1:
         raise ValueError(
-            f"{path} holds rows of {rows.shape[1] - 1} tokens but the model "
-            f"declares max_seq_len {max_seq_len}; prepare the data with "
-            f"--max-seq-len {max_seq_len}, or set the model to "
-            f"{rows.shape[1] - 1}.",
+            f"{path} declares max_seq_len {declared_seq}, so its rows must "
+            f"hold {declared_seq + 1} tokens; they hold {rows.shape[1]}.",
         )
-    if vocab_size > 0:
-        if token_bytes.shape[0] != vocab_size:
-            raise ValueError(
-                f"{path} was prepared for vocab_size "
-                f"{token_bytes.shape[0]} but the model declares {vocab_size}.",
-            )
-        largest = int(rows.max())
-        if largest >= vocab_size:
-            raise ValueError(
-                f"{path} holds token id {largest}, outside the model's "
-                f"vocab_size {vocab_size}; it would index past the embedding.",
-            )
+    largest = int(rows.max()) if rows.numel() else 0
+    if largest >= declared_vocab:
+        raise ValueError(
+            f"{path} holds token id {largest}, outside its own declared "
+            f"vocab_size {declared_vocab}; it would index past the embedding.",
+        )
+    # The caller's declaration, against the metadata just verified. Without it
+    # a disagreement surfaces inside the forward, naming only the model's side
+    # and never the directory the rows came from.
+    if max_seq_len > 0 and declared_seq != max_seq_len:
+        raise ValueError(
+            f"{path} holds rows of {declared_seq} tokens but the model "
+            f"declares max_seq_len {max_seq_len}; prepare the data with "
+            f"--max-seq-len {max_seq_len}, or set the model to {declared_seq}.",
+        )
+    if vocab_size > 0 and declared_vocab != vocab_size:
+        raise ValueError(
+            f"{path} was prepared for vocab_size {declared_vocab} but the "
+            f"model declares {vocab_size}.",
+        )
     logger.info(
         "nanochat %r: %d rows of %d tokens",
         split,
