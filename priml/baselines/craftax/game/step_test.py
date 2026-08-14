@@ -5,14 +5,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.craftax import constants, step, world_gen
-from priml.baselines.craftax.constants import (
+from priml.baselines.craftax.game import constants, step, world_gen
+from priml.baselines.craftax.game.constants import (
     Achievement,
     Action,
     BlockType,
     ItemType,
 )
-from priml.baselines.craftax.state import EnvState, empty_state
+from priml.baselines.craftax.game.state import EnvState, empty_state
 
 
 def _state(num_envs: int = 2) -> EnvState:

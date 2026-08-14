@@ -14,10 +14,10 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import constants
-from priml.baselines.craftax.constants import BlockType
-from priml.baselines.craftax.indexing import gather_tiles
-from priml.baselines.craftax.state import EnvState, Mobs
+from priml.baselines.craftax.game import constants
+from priml.baselines.craftax.game.constants import BlockType
+from priml.baselines.craftax.game.indexing import gather_tiles
+from priml.baselines.craftax.game.state import EnvState, Mobs
 
 
 def max_health(state: EnvState) -> Tensor:

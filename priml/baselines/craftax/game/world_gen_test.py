@@ -10,10 +10,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from priml.baselines.craftax import constants, world_config
 from priml.baselines.craftax.conftest import reference, requires_craftax
-from priml.baselines.craftax.constants import BlockType, ItemType
-from priml.baselines.craftax.world_gen import (
+from priml.baselines.craftax.game import constants, world_config
+from priml.baselines.craftax.game.constants import BlockType, ItemType
+from priml.baselines.craftax.game.world_gen import (
     daylight,
     generate_dungeon,
     generate_smooth_world,

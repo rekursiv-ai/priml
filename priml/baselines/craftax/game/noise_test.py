@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.craftax.noise import (
+from priml.baselines.craftax.game.noise import (
     _smoothstep,
     fractal_noise,
     perlin_noise,

@@ -9,9 +9,9 @@ import dataclasses
 import numpy as np
 import pytest
 
-from priml.baselines.craftax import world_config
 from priml.baselines.craftax.conftest import reference, requires_craftax
-from priml.baselines.craftax.constants import NUM_LEVELS
+from priml.baselines.craftax.game import world_config
+from priml.baselines.craftax.game.constants import NUM_LEVELS
 
 
 def test_every_floor_has_a_recipe() -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.craftax.indexing import (
+from priml.baselines.craftax.game.indexing import (
     gather_tiles,
     local_view,
     scatter_tiles,

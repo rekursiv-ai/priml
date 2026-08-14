@@ -22,10 +22,10 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.craftax.constants import Action
 from priml.baselines.craftax.env import CraftaxEnv
+from priml.baselines.craftax.game.constants import Action
+from priml.baselines.craftax.game.observation import OBSERVATION_SIZE
 from priml.baselines.craftax.model import ActorCritic
-from priml.baselines.craftax.renderer import OBSERVATION_SIZE
 from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
 from priml.math.advantage import explained_variance, generalized_advantage
 from priml.runtime import get_device

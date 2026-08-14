@@ -19,10 +19,10 @@ from torch.nn import functional
 
 import torch
 
-from priml.baselines.craftax import constants, mechanics
-from priml.baselines.craftax.constants import BlockType, ItemType
-from priml.baselines.craftax.indexing import local_view
-from priml.baselines.craftax.state import EnvState
+from priml.baselines.craftax.game import constants, mechanics
+from priml.baselines.craftax.game.constants import BlockType, ItemType
+from priml.baselines.craftax.game.indexing import local_view
+from priml.baselines.craftax.game.state import EnvState
 
 
 OBSERVATION_SIZE: int = (

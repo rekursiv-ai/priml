@@ -21,18 +21,18 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax import constants, mechanics
-from priml.baselines.craftax.constants import (
+from priml.baselines.craftax.game import constants, mechanics
+from priml.baselines.craftax.game.constants import (
     Achievement,
     Action,
     BlockType,
     ItemType,
 )
-from priml.baselines.craftax.indexing import (
+from priml.baselines.craftax.game.indexing import (
     gather_tiles,
     scatter_tiles_where,
 )
-from priml.baselines.craftax.state import EnvState
+from priml.baselines.craftax.game.state import EnvState
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
