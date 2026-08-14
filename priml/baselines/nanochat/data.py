@@ -210,16 +210,15 @@ class _TokenBatches:
         vocab_size: int,
         max_seq_len: int,
     ) -> None:
-        rows, token_bytes = _load_split(
-            dataset_dir,
-            split,
+        prepared = PreparedSplit(
+            Path(dataset_dir).expanduser() / split,
             device=device,
-            vocab_size=vocab_size,
-            max_seq_len=max_seq_len,
         )
+        prepared.agrees_with(vocab_size=vocab_size, max_seq_len=max_seq_len)
         self.device = get_device(device)
+        rows = prepared.rows
         self.rows: Tensor = rows if num_rows is None else rows[:num_rows]
-        self.token_bytes = token_bytes
+        self.token_bytes = prepared.token_bytes
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -266,6 +265,127 @@ class _TokenBatches:
         return math.floor(self.rows.shape[0] / self.batch_size)
 
 
+class PreparedSplit:
+    """One split's arrays, verified against the metadata written beside them.
+
+    Constructing this IS the guarantee. The alternative -- returning bare
+    tensors and checking them at each use -- is what this class replaces: those
+    checks accumulated as a list of conditionals inside the loader, each having
+    to re-decide when it applied, and every one of them was at some point
+    written to skip precisely the case it existed to catch.
+
+    So there are no optional checks here and nothing to opt into. A split that
+    disagrees with its own ``dataset.json`` cannot be built, and a caller
+    holding one of these need not ask whether it was validated.
+
+    Attributes:
+      rows: ``[n_rows, max_seq_len + 1]`` packed token ids.
+      token_bytes: ``[vocab_size]`` UTF-8 byte length per token id.
+      vocab_size: Vocabulary the split declares.
+      max_seq_len: Context length the split declares.
+
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        device: torch.device | str,
+    ) -> None:
+        if not (directory / "dataset.json").is_file():
+            raise FileNotFoundError(
+                f"no prepared nanochat data at {directory}; build it with "
+                "`uv --quiet run --frozen python -m "
+                "priml.baselines.nanochat.scripts.prepare_data`.",
+            )
+        metadata = json.loads((directory / "dataset.json").read_text())
+        for field in ("vocab_size", "max_seq_len", "token_bytes_sha256"):
+            if field not in metadata:
+                raise ValueError(
+                    f"{directory}/dataset.json declares no {field!r}; it "
+                    "predates the current preparer, so what it holds cannot be "
+                    "established. Re-prepare the split.",
+                )
+        self.vocab_size = int(metadata["vocab_size"])
+        self.max_seq_len = int(metadata["max_seq_len"])
+
+        raw_token_bytes = np.load(directory / "all__token_bytes.npy")
+        observed = token_bytes_fingerprint(raw_token_bytes)
+        if metadata["token_bytes_sha256"] != observed:
+            raise ValueError(
+                f"{directory} records byte-table fingerprint "
+                f"{metadata['token_bytes_sha256']} but its table hashes to "
+                f"{observed}; the score's denominator changed, so a number "
+                "measured here is not comparable with one measured before. "
+                "Re-prepare.",
+            )
+        raw_rows = np.load(directory / "all__tokens.npy")
+        if raw_rows.ndim != 2 or raw_rows.shape[1] < 2:
+            raise ValueError(
+                f"{directory}/all__tokens.npy has shape {raw_rows.shape}; it "
+                "must be two-dimensional with at least two columns, since "
+                "inputs and targets are one row offset by one.",
+            )
+        resolved = get_device(device)
+        # Prepared as uint16, which torch cannot hold; int32 is the smallest
+        # dtype spanning the vocabulary that still indexes an embedding.
+        self.rows: Tensor = torch.from_numpy(raw_rows.astype(np.int32)).to(resolved)
+        self.token_bytes: Tensor = torch.from_numpy(
+            raw_token_bytes.astype(np.int32),
+        ).to(resolved)
+
+        if self.token_bytes.shape[0] != self.vocab_size:
+            raise ValueError(
+                f"{directory} declares vocab_size {self.vocab_size} but its "
+                f"byte table holds {self.token_bytes.shape[0]} entries.",
+            )
+        if self.rows.shape[1] != self.max_seq_len + 1:
+            raise ValueError(
+                f"{directory} declares max_seq_len {self.max_seq_len}, so its "
+                f"rows must hold {self.max_seq_len + 1} tokens; they hold "
+                f"{self.rows.shape[1]}.",
+            )
+        largest = int(self.rows.max()) if self.rows.numel() else 0
+        if largest >= self.vocab_size:
+            raise ValueError(
+                f"{directory} holds token id {largest}, outside its own "
+                f"declared vocab_size {self.vocab_size}; it would index past "
+                "the embedding.",
+            )
+        logger.info(
+            "nanochat %r: %d rows of %d tokens",
+            directory.name,
+            self.rows.shape[0],
+            self.max_seq_len,
+        )
+
+    def agrees_with(self, *, vocab_size: int, max_seq_len: int) -> None:
+        """Raise unless a caller's declared geometry matches this split.
+
+        Args:
+          vocab_size: Vocabulary the caller declares; -1 declares nothing.
+          max_seq_len: Context the caller declares; -1 declares nothing.
+
+        Raises:
+          ValueError: The caller's declaration contradicts the split. Without
+            this the disagreement surfaces inside the forward, naming only the
+            caller's side and never the directory the rows came from.
+
+        """
+        if max_seq_len > 0 and self.max_seq_len != max_seq_len:
+            raise ValueError(
+                f"the split holds rows of {self.max_seq_len} tokens but the "
+                f"model declares max_seq_len {max_seq_len}; prepare the data "
+                f"with --max-seq-len {max_seq_len}, or set the model to "
+                f"{self.max_seq_len}.",
+            )
+        if vocab_size > 0 and self.vocab_size != vocab_size:
+            raise ValueError(
+                f"the split was prepared for vocab_size {self.vocab_size} but "
+                f"the model declares {vocab_size}.",
+            )
+
+
 def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
     """Return the identity of one byte-length table.
 
@@ -285,116 +405,3 @@ def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
     return hashlib.sha256(
         np.ascontiguousarray(token_bytes, dtype=np.int64).tobytes(),
     ).hexdigest()
-
-
-def _load_split(
-    dataset_dir: Path,
-    split: str,
-    *,
-    device: torch.device | str,
-    vocab_size: int = -1,
-    max_seq_len: int = -1,
-) -> tuple[Tensor, Tensor]:
-    """Read one prepared split onto ``device``, verifying its geometry.
-
-    Args:
-      dataset_dir: Dataset root holding ``train/`` and ``val/``.
-      split: Which one to read.
-      device: Where the resident arrays live.
-      vocab_size: Vocabulary the arrays must hold; -1 skips the check.
-      max_seq_len: Context the rows must carry; -1 skips the check.
-
-    Returns:
-      rows: ``[n_rows, max_seq_len + 1]`` packed token ids.
-      token_bytes: ``[vocab_size]`` UTF-8 byte length per token id.
-
-    Raises:
-      FileNotFoundError: If the split or its metadata is missing.
-      ValueError: If the arrays disagree with each other or with the declared
-        geometry.
-
-    """
-    path = Path(dataset_dir).expanduser() / split
-    metadata_path = path / "dataset.json"
-    if not metadata_path.is_file():
-        raise FileNotFoundError(
-            f"no prepared nanochat data at {path}; build it with "
-            "`uv --quiet run --frozen python -m "
-            "priml.baselines.nanochat.scripts.prepare_data`.",
-        )
-    metadata = json.loads(metadata_path.read_text())
-    logger.info("loading nanochat split %r from %s", split, path)
-    resolved = get_device(device)
-    raw_token_bytes = np.load(path / "all__token_bytes.npy")
-
-    # The split's OWN metadata is checked unconditionally: a caller that never
-    # declares geometry still must not be handed arrays contradicting the file
-    # beside them. The caller's declaration, when given, is then checked
-    # against that verified metadata rather than against the arrays -- so every
-    # path through this function validates, and none of them only-sometimes.
-    for field in ("vocab_size", "max_seq_len", "token_bytes_sha256"):
-        if field not in metadata:
-            raise ValueError(
-                f"{path}/dataset.json declares no {field!r}; it predates the "
-                "current preparer, so what it holds cannot be established. "
-                "Re-prepare the split.",
-            )
-    observed = token_bytes_fingerprint(raw_token_bytes)
-    if metadata["token_bytes_sha256"] != observed:
-        raise ValueError(
-            f"{path} records byte-table fingerprint "
-            f"{metadata['token_bytes_sha256']} but its table hashes to "
-            f"{observed}; the score's denominator changed, so a number measured "
-            "here is not comparable with one measured before. Re-prepare.",
-        )
-    # Prepared as uint16, which torch cannot hold; int32 is the smallest dtype
-    # that represents the whole vocabulary and still indexes an embedding.
-    raw_rows = np.load(path / "all__tokens.npy")
-    if raw_rows.ndim != 2 or raw_rows.shape[1] < 2:
-        raise ValueError(
-            f"{path}/all__tokens.npy has shape {raw_rows.shape}; it must be "
-            "two-dimensional with at least two columns, since inputs and "
-            "targets are one row offset by one.",
-        )
-    rows = torch.from_numpy(raw_rows.astype(np.int32)).to(resolved)
-    token_bytes = torch.from_numpy(raw_token_bytes.astype(np.int32)).to(resolved)
-
-    declared_vocab = int(metadata["vocab_size"])
-    declared_seq = int(metadata["max_seq_len"])
-    if token_bytes.shape[0] != declared_vocab:
-        raise ValueError(
-            f"{path} declares vocab_size {declared_vocab} but its byte "
-            f"table holds {token_bytes.shape[0]} entries.",
-        )
-    if rows.shape[1] != declared_seq + 1:
-        raise ValueError(
-            f"{path} declares max_seq_len {declared_seq}, so its rows must "
-            f"hold {declared_seq + 1} tokens; they hold {rows.shape[1]}.",
-        )
-    largest = int(rows.max()) if rows.numel() else 0
-    if largest >= declared_vocab:
-        raise ValueError(
-            f"{path} holds token id {largest}, outside its own declared "
-            f"vocab_size {declared_vocab}; it would index past the embedding.",
-        )
-    # The caller's declaration, against the metadata just verified. Without it
-    # a disagreement surfaces inside the forward, naming only the model's side
-    # and never the directory the rows came from.
-    if max_seq_len > 0 and declared_seq != max_seq_len:
-        raise ValueError(
-            f"{path} holds rows of {declared_seq} tokens but the model "
-            f"declares max_seq_len {max_seq_len}; prepare the data with "
-            f"--max-seq-len {max_seq_len}, or set the model to {declared_seq}.",
-        )
-    if vocab_size > 0 and declared_vocab != vocab_size:
-        raise ValueError(
-            f"{path} was prepared for vocab_size {declared_vocab} but the "
-            f"model declares {vocab_size}.",
-        )
-    logger.info(
-        "nanochat %r: %d rows of %d tokens",
-        split,
-        rows.shape[0],
-        rows.shape[1] - 1,
-    )
-    return rows, token_bytes
