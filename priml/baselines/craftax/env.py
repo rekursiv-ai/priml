@@ -73,6 +73,20 @@ class CraftaxEnv:
         action sampling, and sharing one stream would make the world depend
         on how many actions had been sampled."""
 
+        optimistic_reset_ratio: int = 16
+        """Workers served by each freshly generated world.
+
+        Generating a world is expensive and most steps end no episode, so
+        generating one per worker means throwing nearly all of them away. This
+        generates ``num_envs / ratio`` worlds instead and deals them to
+        whichever workers finished.
+
+        The cost is a correlation: with more terminal workers in one step than
+        worlds generated, two of them restart in the SAME world. At the
+        published ratio of 16 that is rare -- episodes run thousands of steps
+        and end at scattered times -- and the reference baseline accepts it in
+        exchange for the throughput. Set 1 to generate one world per worker."""
+
     def __init__(self, config: Config) -> None:
         """Prepare an unpopulated environment.
 
@@ -80,15 +94,18 @@ class CraftaxEnv:
           config: Batch size, device, and seed.
 
         Raises:
-          ValueError: The batch is empty.
+          ValueError: The batch is empty, or the reset ratio is invalid.
 
         """
         if config.num_envs <= 0:
             raise ValueError("num_envs must be positive")
+        if config.optimistic_reset_ratio <= 0:
+            raise ValueError("optimistic_reset_ratio must be positive")
         self.num_actions = len(constants.Action)
         self.observation_size = observation.OBSERVATION_SIZE
         self.reward_ceiling = constants.REWARD_CEILING
         self._num_envs = config.num_envs
+        self._reset_ratio = config.optimistic_reset_ratio
         self._device = get_device(config.device)
         self._generator = torch.Generator(device=self._device)
         self._generator.manual_seed(config.seed)
@@ -144,15 +161,7 @@ class CraftaxEnv:
         info = _achievement_info(state, done)
 
         if bool(done.any()):
-            # Only the finished workers restart. Generating a whole fresh
-            # batch and selecting rows keeps the operation shaped the same
-            # whether one worker ended or all of them did.
-            fresh = world_gen.generate_world(
-                num_envs=state.num_envs,
-                generator=self._generator,
-                device=self._device,
-            )
-            state = state.select(done, fresh)
+            state = self._restart(state, done)
 
         self._state = state
         return CraftaxStep(
@@ -161,6 +170,48 @@ class CraftaxEnv:
             done=done,
             info=info,
         )
+
+    def _restart(self, state: EnvState, done: Tensor) -> EnvState:
+        """Put every finished worker into a fresh world.
+
+        Only ``num_envs / ratio`` worlds are generated, because generating one
+        is the single most expensive thing this environment does and a step
+        that ends no episode would throw all of them away. The generated
+        worlds are dealt to the terminal workers in order and wrap around,
+        which is what the ratio buys and costs: fewer worlds generated, and a
+        chance that two workers finishing together share one.
+
+        Args:
+          state: The stepped world.
+          done: Which workers finished, ``[envs]``.
+
+        Returns:
+          state: The world with finished workers restarted.
+
+        """
+        # Generate exactly as many worlds as there are finished workers, up to
+        # the pool the ratio allows. Generation DOES scale with batch size --
+        # 25 ms for one world, 182 ms for sixty-four -- so a step that ended
+        # three episodes should not pay for sixteen.
+        #
+        # This is where an eager port beats the reference. JAX must pick one
+        # static shape and compile it, so the baseline approximates this with
+        # a fixed pool and a two-branch `lax.cond`; here the count is just an
+        # integer, and the exact-fit case is also the fast one.
+        pool = max(1, state.num_envs // self._reset_ratio)
+        wanted = min(int(done.sum()), pool)
+        fresh = world_gen.generate_world(
+            num_envs=wanted,
+            generator=self._generator,
+            device=self._device,
+        )
+        if wanted < state.num_envs:
+            # Deal the pool across the batch: the nth finished worker takes
+            # world n mod pool. Non-terminal rows index harmlessly, since
+            # ``select`` discards them.
+            rank = done.to(torch.int64).cumsum(0) - 1
+            fresh = fresh.take(rank.clamp_min(0) % wanted)
+        return state.select(done, fresh)
 
     def state_dict(self) -> dict[str, Any]:
         """Return the world and its generator, for checkpointing."""

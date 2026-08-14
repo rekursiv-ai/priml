@@ -23,15 +23,18 @@ from priml.baselines.craftax import experiments
 from priml.baselines.craftax.data import CraftaxRollouts
 from priml.baselines.craftax.experiments import (
     CraftaxGTrXLTrainLoop,
+    CraftaxRNNTrainLoop,
     CraftaxTrainLoop,
     exp000,
     exp001,
+    exp002,
     exp011,
     exp013,
     exp_smoke,
 )
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
 from priml.baselines.craftax.metric import CraftaxScore
+from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.train.train_loop import TrainLoop
 
@@ -41,17 +44,26 @@ class _Experiment(Protocol):
 
     __name__: str
 
-    def __call__(self) -> CraftaxTrainLoop | CraftaxGTrXLTrainLoop: ...
+    def __call__(
+        self,
+    ) -> CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop: ...
 
 
-ALL_EXPERIMENTS: list[_Experiment] = [exp000, exp001, exp011, exp013, exp_smoke]
+ALL_EXPERIMENTS: list[_Experiment] = [
+    exp000,
+    exp001,
+    exp002,
+    exp011,
+    exp013,
+    exp_smoke,
+]
 
-PUBLISHED_EXPERIMENTS: list[_Experiment] = [exp000, exp001, exp011, exp013]
+PUBLISHED_EXPERIMENTS: list[_Experiment] = [exp000, exp001, exp002, exp011, exp013]
 
 
 def shrink(
-    config: CraftaxTrainLoop | CraftaxGTrXLTrainLoop,
-) -> CraftaxTrainLoop | CraftaxGTrXLTrainLoop:
+    config: CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop,
+) -> CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop:
     """Narrow ``config`` to a size a CPU test can run, preserving its recipe.
 
     Only SIZE changes -- workers, rollout, widths, horizon. Objective,
@@ -61,6 +73,7 @@ def shrink(
     config.step.device = "cpu"
     config.step.env.device = "cpu"
     config.step.env.num_envs = 2
+    config.step.env.optimistic_reset_ratio = 1
     config.step.compile = False
     config.step.num_minibatches = 1
     config.step.num_epochs = 1
@@ -76,7 +89,10 @@ def shrink(
         config.step.model.num_layers = 1
         config.step.model.qkv_dim = 8
         config.step.model.memory_length = 2
-    else:
+    elif isinstance(config.step, CraftaxRNNTrainStep.Config):
+        # A GRU has no depth to shrink: its state is one vector.
+        config.step.rollout_steps = 2
+    elif isinstance(config.step, CraftaxTrainStep.Config):
         config.step.rollout_steps = 2
         config.step.model.num_layers = 1
 
@@ -149,6 +165,15 @@ def test_the_schedule_horizon_matches_the_step_budget(
 
 
 @pytest.mark.parametrize("factory", PUBLISHED_EXPERIMENTS, ids=lambda f: f.__name__)
+def test_every_published_experiment_resets_optimistically(
+    factory: _Experiment,
+) -> None:
+    # The reference baseline sets this on every run; it is a throughput
+    # treatment, so a fork that dropped it would be slower without saying so.
+    assert factory().step.env.optimistic_reset_ratio == 16
+
+
+@pytest.mark.parametrize("factory", PUBLISHED_EXPERIMENTS, ids=lambda f: f.__name__)
 def test_every_published_experiment_scores_identically(
     factory: _Experiment,
 ) -> None:
@@ -182,6 +207,7 @@ def test_exp000_pins_the_baseline_recipe() -> None:
     assert cfg.step.entropy_coefficient == 0.01
     assert cfg.step.value_coefficient == 0.5
     assert cfg.step.max_grad_norm == 1.0
+    assert cfg.step.env.optimistic_reset_ratio == 16
     assert cfg.step.model.hidden_size == 512
     assert cfg.step.model.num_layers == 3
     assert cfg.step.seed == cfg.step.env.seed == 42
@@ -205,6 +231,24 @@ def test_exp011_spends_one_hundred_million_interactions() -> None:
     cfg = exp011()
     spent = cfg.max_steps * cfg.step.env.num_envs * cfg.step.rollout_steps
     assert 99_000_000 <= spent <= 100_000_000
+
+
+def test_exp002_spends_one_billion_interactions() -> None:
+    cfg = exp002()
+    spent = cfg.max_steps * cfg.step.env.num_envs * cfg.step.rollout_steps
+    assert 999_000_000 <= spent <= 1_000_000_000
+
+
+def test_exp002_changes_only_the_policy_class() -> None:
+    # A GRU is the cheapest memory there is, so nothing else may move: any
+    # gain has to be attributable to remembering, not to a re-tune.
+    parent, child = exp001(), exp002()
+    assert child.step.env.num_envs == parent.step.env.num_envs
+    assert child.step.rollout_steps == parent.step.rollout_steps
+    assert child.step.learning_rate == parent.step.learning_rate
+    assert child.step.discount == parent.step.discount
+    assert child.step.entropy_coefficient == parent.step.entropy_coefficient
+    assert child.max_steps == parent.max_steps
 
 
 def test_exp013_spends_one_billion_interactions() -> None:
@@ -294,7 +338,12 @@ def test_module_docstring_lists_every_published_experiment() -> None:
 
 
 def test_each_fork_names_its_parent_in_the_first_line() -> None:
-    for child, parent in ((exp001, exp000), (exp011, exp001), (exp013, exp001)):
+    for child, parent in (
+        (exp001, exp000),
+        (exp002, exp001),
+        (exp011, exp001),
+        (exp013, exp001),
+    ):
         summary = (child.__doc__ or "").splitlines()[0]
         assert parent.__name__ in summary, child.__name__
 
@@ -307,7 +356,9 @@ def test_the_renamed_forks_record_what_they_dropped() -> None:
     A receipt that quietly omitted them would read as a like-for-like result.
     """
     for factory in (exp011, exp013):
-        assert "Dropped from the JAX" in (factory.__doc__ or ""), factory.__name__
+        assert "Not carried over from the JAX" in (factory.__doc__ or ""), (
+            factory.__name__
+        )
 
 
 def _deltas(parent: Any, child: Any) -> set[str]:

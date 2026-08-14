@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
-from priml.baselines.craftax.game import constants, observation
+from priml.baselines.craftax.game import constants, observation, world_gen
+from priml.baselines.craftax.game.state import EnvState
 from priml.data.environment import BatchedEnvironmentProtocol
 
 
-def _env(num_envs: int = 4, seed: int = 0) -> CraftaxEnv:
+def _env(num_envs: int = 4, seed: int = 0, reset_ratio: int = 1) -> CraftaxEnv:
     config = CraftaxEnv.Config()
     config.num_envs = num_envs
     config.device = "cpu"
     config.seed = seed
+    # One world per worker by default: most tests here assert on WHICH world a
+    # restarted worker got, and sharing would make that ambiguous.
+    config.optimistic_reset_ratio = reset_ratio
     return config.make()
 
 
@@ -173,6 +179,114 @@ def test_a_checkpoint_taken_before_reset_restores_cleanly() -> None:
     restored = _env()
     restored.load_state_dict(saved)
     assert restored.reset().shape == (4, observation.OBSERVATION_SIZE)
+
+
+def _worlds(env: CraftaxEnv) -> int:
+    """Count how many distinct worlds the batch currently holds."""
+    return len({tuple(env.state.map[i].flatten()[:32].tolist()) for i in range(4)})
+
+
+def test_optimistic_reset_shares_one_world_across_several_workers() -> None:
+    """The throughput treatment: generate few worlds, deal them to many.
+
+    Generating a world is the most expensive thing this environment does and
+    a step that ends no episode throws every generated world away. The ratio
+    is how many workers one fresh world serves.
+    """
+    env = _env(reset_ratio=4)
+    env.reset()
+    env.state.player_health[:] = 0.0
+    env.step(_actions(env, 4))
+    assert _worlds(env) == 1
+
+
+def test_a_ratio_of_one_gives_every_worker_its_own_world() -> None:
+    # The correlation the ratio buys is opt-out, not mandatory.
+    env = _env(reset_ratio=1)
+    env.reset()
+    env.state.player_health[:] = 0.0
+    env.step(_actions(env, 4))
+    assert _worlds(env) == 4
+
+
+def test_optimistic_reset_still_restarts_every_finished_worker() -> None:
+    # Sharing worlds must not mean skipping a restart: the point is cheapness,
+    # not fewer resets.
+    env = _env(reset_ratio=4)
+    env.reset()
+    env.state.timestep[:] = 40
+    env.state.player_health[:] = 0.0
+    env.step(_actions(env, 4))
+    assert env.state.timestep.tolist() == [0, 0, 0, 0]
+
+
+def test_optimistic_reset_leaves_living_workers_alone() -> None:
+    env = _env(reset_ratio=4)
+    env.reset()
+    survivor = env.state.map[0].clone()
+    env.state.player_health[1] = 0.0
+    transition = env.step(_actions(env, 4))
+    assert transition.done.tolist() == [False, True, False, False]
+    assert torch.equal(env.state.map[0], survivor)
+
+
+def test_only_as_many_worlds_are_generated_as_are_needed() -> None:
+    """One finished worker costs one world, not a whole pool.
+
+    Generation scales with batch size -- 25 ms for one world, 182 ms for
+    sixty-four -- so paying the pool's full price on a step that ended a
+    single episode is the waste this avoids. The reference must pick a static
+    shape and compile it; an eager port can just count.
+    """
+    env = _env(num_envs=4, reset_ratio=2)
+    env.reset()
+    generated: list[int] = []
+    original = world_gen.generate_world
+
+    def spy(
+        *,
+        num_envs: int,
+        generator: torch.Generator | None = None,
+        device: torch.device,
+    ) -> EnvState:
+        generated.append(num_envs)
+        return original(num_envs=num_envs, generator=generator, device=device)
+
+    env.state.player_health[:] = 9.0
+    env.state.player_health[0] = 0.0
+    with mock.patch.object(world_gen, "generate_world", spy):
+        env.step(_actions(env, 4))
+    assert generated == [1]
+
+
+def test_the_pool_caps_how_many_worlds_one_step_generates() -> None:
+    # The ratio is a ceiling: sixteen workers finishing together must not
+    # generate sixteen worlds when the ratio allows two.
+    env = _env(num_envs=4, reset_ratio=2)
+    env.reset()
+    generated: list[int] = []
+    original = world_gen.generate_world
+
+    def spy(
+        *,
+        num_envs: int,
+        generator: torch.Generator | None = None,
+        device: torch.device,
+    ) -> EnvState:
+        generated.append(num_envs)
+        return original(num_envs=num_envs, generator=generator, device=device)
+
+    env.state.player_health[:] = 0.0
+    with mock.patch.object(world_gen, "generate_world", spy):
+        env.step(_actions(env, 4))
+    assert generated == [2]
+
+
+def test_a_degenerate_reset_ratio_is_refused() -> None:
+    config = CraftaxEnv.Config()
+    config.optimistic_reset_ratio = 0
+    with pytest.raises(ValueError, match="positive"):
+        config.make()
 
 
 def test_an_empty_batch_is_refused() -> None:

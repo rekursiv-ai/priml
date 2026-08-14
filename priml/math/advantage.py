@@ -62,6 +62,68 @@ def generalized_advantage(
     return advantages, advantages + values
 
 
+def q_lambda_targets(
+    *,
+    rewards: Tensor,
+    q_values: Tensor,
+    dones: Tensor,
+    discount: float,
+    trace_decay: float,
+) -> Tensor:
+    """Build multi-step regression targets from a policy's own Q-values.
+
+    The value-based counterpart to :func:`generalized_advantage`, and the same
+    idea: walk the rollout backwards mixing a one-step bootstrap with the
+    return that follows it, so ``trace_decay`` trades bias for variance. What
+    differs is where the bootstrap comes from -- the greedy action's Q-value
+    rather than a separate critic, which is what lets a Q-learner train
+    without one.
+
+    A terminal step takes its reward alone. Not merely a zeroed bootstrap:
+    there is no next state to be greedy in, so anything carried across the
+    boundary would be a value from a world that ended.
+
+    Args:
+      rewards: Per-transition rewards, ``[time, envs]``.
+      q_values: Q-values at each state INCLUDING the bootstrap state after the
+        last transition, ``[time + 1, envs, actions]``.
+      dones: Terminal flags per transition, ``[time, envs]``.
+      discount: Reward discount factor, usually written gamma.
+      trace_decay: Multi-step mixing factor, usually written lambda.
+
+    Returns:
+      targets: Regression targets, ``[time, envs]``.
+
+    Raises:
+      ValueError: The sequence is empty, or the Q-values do not carry exactly
+        one more step than the rewards.
+
+    References:
+      https://arxiv.org/abs/2407.04811
+        Gallici et al. 2024. Simplifying deep temporal difference learning.
+
+    """
+    if rewards.shape[0] == 0:
+        raise ValueError("Q(lambda) sequence must be non-empty")
+    if q_values.shape[0] != rewards.shape[0] + 1:
+        raise ValueError("Q(lambda) requires one more Q-value step than rewards")
+
+    not_done = 1.0 - dones.to(rewards.dtype)
+    greedy = q_values.max(dim=-1).values
+    targets = torch.empty_like(rewards)
+
+    carried = rewards[-1] + discount * not_done[-1] * greedy[-1]
+    targets[-1] = carried
+    for step in range(rewards.shape[0] - 2, -1, -1):
+        bootstrap = rewards[step] + discount * not_done[step] * greedy[step + 1]
+        carried = bootstrap + discount * trace_decay * not_done[step] * (
+            carried - greedy[step + 1]
+        )
+        targets[step] = torch.where(dones[step].bool(), rewards[step], carried)
+        carried = targets[step]
+    return targets
+
+
 def explained_variance(predictions: Tensor, targets: Tensor) -> Tensor:
     """Measure the fraction of target variance the predictions account for.
 

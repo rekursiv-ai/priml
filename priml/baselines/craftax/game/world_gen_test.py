@@ -10,26 +10,26 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from priml.baselines.craftax.conftest import reference, requires_craftax
+from priml.baselines.craftax.conftest import (
+    generated_world,
+    reference,
+    requires_craftax,
+)
 from priml.baselines.craftax.game import constants, world_config
 from priml.baselines.craftax.game.constants import BlockType, ItemType
+from priml.baselines.craftax.game.state import EnvState
 from priml.baselines.craftax.game.world_gen import (
     daylight,
     generate_dungeon,
     generate_smooth_world,
-    generate_world,
 )
 
 
 _DEVICE = torch.device("cpu")
 
 
-def _world(num_envs: int = 2, seed: int = 0):
-    return generate_world(
-        num_envs=num_envs,
-        generator=torch.Generator().manual_seed(seed),
-        device=_DEVICE,
-    )
+def _world(num_envs: int = 2, seed: int = 0) -> EnvState:
+    return generated_world(num_envs=num_envs, seed=seed)
 
 
 def test_world_has_every_floor_at_the_declared_size() -> None:

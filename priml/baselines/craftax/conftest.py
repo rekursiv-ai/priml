@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+import copy
+import functools
 import importlib
 import importlib.util
 import os
@@ -19,6 +21,9 @@ import os
 import numpy as np
 import pytest
 import torch
+
+from priml.baselines.craftax.game import world_gen
+from priml.baselines.craftax.game.state import EnvState
 
 
 # The reference package is JAX, whose CUDA backend cannot be shared: under
@@ -28,6 +33,17 @@ import torch
 # a host with no GPU or a mismatched driver. ``setdefault`` leaves an
 # explicit ``JAX_PLATFORMS=cuda`` alone.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+# The viewer under game/render is the only thing in this repo that imports
+# pygame, and SDL resolves its video driver during the FIRST init of any
+# subsystem, caching that choice for the process. So a test reaching pygame on
+# a machine with a display opens a real window -- under xdist, one per worker,
+# flickering on the operator's screen. Set here rather than in game/render:
+# conftest runs at collection, before any test module imports pygame, and a
+# guard at the point of use is already too late once a fixture has called
+# ``pygame.init()``. ``setdefault`` leaves an explicit
+# ``SDL_VIDEODRIVER=x11`` alone, for a human who wants to watch.
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 HAS_CRAFTAX: Final = importlib.util.find_spec("craftax") is not None
 """Whether the reference implementation is installed."""
@@ -55,6 +71,36 @@ def reference(module: str) -> Any:
 
     """
     return importlib.import_module(f"craftax.{module}")
+
+
+@functools.cache
+def _generated(num_envs: int, seed: int) -> EnvState:
+    """Generate one world and keep it for the process."""
+    return world_gen.generate_world(
+        num_envs=num_envs,
+        generator=torch.Generator().manual_seed(seed),
+        device=torch.device("cpu"),
+    )
+
+
+def generated_world(*, num_envs: int = 1, seed: int = 0) -> EnvState:
+    """Return a freshly-copied generated world, generating each shape once.
+
+    Generating costs ~25 ms and does NOT get cheaper with fewer workers: it is
+    a thousand small tensor ops dispatched from Python, so the cost is flat in
+    the batch size. Copying one costs 0.85 ms. Memoizing by (workers, seed)
+    and handing out deep copies therefore removes almost all of the bill while
+    every caller still gets a world it may mutate freely.
+
+    Args:
+      num_envs: Parallel worlds in the batch.
+      seed: World seed.
+
+    Returns:
+      state: A private copy of the cached world.
+
+    """
+    return copy.deepcopy(_generated(num_envs, seed))
 
 
 def as_tensor(array: object) -> torch.Tensor:

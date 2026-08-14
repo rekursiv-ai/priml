@@ -294,6 +294,27 @@ class EnvState:
 
         return _map_state(choose, self, other)
 
+    def take(self, rows: Tensor) -> Self:
+        """Re-index the environment axis, repeating or dropping rows freely.
+
+        Lets a small batch be dealt across a larger one -- the optimistic
+        reset generates a handful of worlds and gives each to several finished
+        workers, which is this operation.
+
+        Args:
+          rows: Source row per output row, ``[out]``; values index this state.
+
+        Returns:
+          state: A new state whose environment axis follows ``rows``.
+
+        """
+
+        def gather(mine: Tensor, unused: Tensor) -> Tensor:
+            del unused
+            return mine[rows]
+
+        return _map_state(gather, self, self)
+
     def state_dict(self) -> dict[str, Any]:
         """Return every tensor by dotted name, for checkpointing."""
         flat: dict[str, Any] = {}

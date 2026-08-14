@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.math.advantage import explained_variance, generalized_advantage
+from priml.math.advantage import (
+    explained_variance,
+    generalized_advantage,
+    q_lambda_targets,
+)
 
 
 def test_matches_hand_computed_recursion() -> None:
@@ -102,6 +106,89 @@ def test_explained_variance_reports_fit_and_constant_targets() -> None:
     assert float(explained_variance(torch.full((3,), 2.0), values)) == pytest.approx(
         0.0
     )
+
+
+def test_q_lambda_bootstraps_from_the_greedy_action() -> None:
+    """The point of a Q-learner: the target needs no separate critic.
+
+    One step, no termination, so the target is exactly the reward plus the
+    discounted best Q-value available next.
+    """
+    targets = q_lambda_targets(
+        rewards=torch.tensor([[1.0]]),
+        q_values=torch.tensor([[[0.0, 0.0]], [[2.0, 7.0]]]),
+        dones=torch.tensor([[0.0]]),
+        discount=0.5,
+        trace_decay=0.9,
+    )
+    assert targets.tolist() == [[1.0 + 0.5 * 7.0]]
+
+
+def test_q_lambda_stops_at_a_terminal_step() -> None:
+    # Not merely a zeroed bootstrap: there is no next state to be greedy in,
+    # so the target is the reward and nothing else.
+    targets = q_lambda_targets(
+        rewards=torch.tensor([[3.0]]),
+        q_values=torch.tensor([[[0.0]], [[100.0]]]),
+        dones=torch.tensor([[1.0]]),
+        discount=0.99,
+        trace_decay=0.9,
+    )
+    assert targets.tolist() == [[3.0]]
+
+
+def test_q_lambda_at_zero_decay_is_the_one_step_target() -> None:
+    # The endpoints are what make the mixing factor meaningful, so both are
+    # pinned rather than assumed.
+    rewards = torch.tensor([[1.0], [2.0]])
+    q_values = torch.tensor([[[1.0]], [[3.0]], [[5.0]]])
+    dones = torch.zeros(2, 1)
+    targets = q_lambda_targets(
+        rewards=rewards,
+        q_values=q_values,
+        dones=dones,
+        discount=0.5,
+        trace_decay=0.0,
+    )
+    assert targets[0].tolist() == [1.0 + 0.5 * 3.0]
+
+
+def test_q_lambda_credit_does_not_cross_an_episode_boundary() -> None:
+    # A reward after a terminal step must not raise the target before it.
+    rewards = torch.tensor([[1.0], [50.0]])
+    q_values = torch.zeros(3, 1, 2)
+    ended = q_lambda_targets(
+        rewards=rewards,
+        q_values=q_values,
+        dones=torch.tensor([[1.0], [0.0]]),
+        discount=0.99,
+        trace_decay=1.0,
+    )
+    assert ended[0].tolist() == [1.0]
+
+
+def test_q_lambda_refuses_a_missing_bootstrap_step() -> None:
+    # Without the extra Q-value the last transition has nothing to bootstrap
+    # from, and silently truncating would bias every target in the rollout.
+    with pytest.raises(ValueError, match="one more Q-value"):
+        q_lambda_targets(
+            rewards=torch.zeros(3, 2),
+            q_values=torch.zeros(3, 2, 4),
+            dones=torch.zeros(3, 2),
+            discount=0.99,
+            trace_decay=0.9,
+        )
+
+
+def test_q_lambda_refuses_an_empty_sequence() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        q_lambda_targets(
+            rewards=torch.zeros(0, 2),
+            q_values=torch.zeros(1, 2, 4),
+            dones=torch.zeros(0, 2),
+            discount=0.99,
+            trace_decay=0.9,
+        )
 
 
 if __name__ == "__main__":

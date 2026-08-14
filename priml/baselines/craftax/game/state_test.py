@@ -103,6 +103,33 @@ def test_field_dtypes_match_their_meaning(field: str, dtype: torch.dtype) -> Non
     assert getattr(_state(), field).dtype == dtype
 
 
+def test_take_deals_one_batch_across_another() -> None:
+    """Re-index the environment axis, repeating rows freely.
+
+    This is what lets the optimistic reset generate two worlds and hand them
+    to four finished workers.
+    """
+    state = empty_state(num_envs=2, device=torch.device("cpu"))
+    state.timestep[:] = torch.tensor([7, 9], dtype=state.timestep.dtype)
+    state.player_position[:] = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+
+    dealt = state.take(torch.tensor([0, 1, 0, 1]))
+
+    assert dealt.num_envs == 4
+    assert dealt.timestep.tolist() == [7, 9, 7, 9]
+    assert dealt.player_position.tolist() == [[1, 2], [3, 4], [1, 2], [3, 4]]
+
+
+def test_take_returns_an_independent_state() -> None:
+    # Rows are repeated, so a shared storage would make one worker's move
+    # move its twin too.
+    state = empty_state(num_envs=1, device=torch.device("cpu"))
+    dealt = state.take(torch.tensor([0, 0]))
+    dealt.timestep[0] = 5
+    assert int(state.timestep[0]) == 0
+    assert int(dealt.timestep[1]) == 0
+
+
 if __name__ == "__main__":
     from priml.lib.testing import test_main
 
