@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from priml.baselines.craftax.game import constants, step, world_gen
+from priml.baselines.craftax.conftest import generated_world
+from priml.baselines.craftax.game import constants, step
 from priml.baselines.craftax.game.constants import (
     Achievement,
     Action,
@@ -169,26 +170,32 @@ def test_the_boss_countdown_runs_only_on_the_boss_floor() -> None:
     assert counted.boss_timesteps_to_spawn_this_round.tolist() == [4, 4]
 
 
-def test_a_generated_world_survives_a_long_random_rollout() -> None:
-    # The whole game, driven by every action, must not raise or leave the map.
+def test_a_generated_world_survives_every_action() -> None:
+    """The whole game, driven by every action, must not raise or leave the map.
+
+    Actions are DEALT rather than sampled: four workers taking consecutive
+    actions cover all 43 in eleven steps, where random draws needed hundreds
+    to reach the same coverage and left it to luck. What is being tested is
+    that no action breaks the world, so exercising each one exactly is both
+    faster and stricter than exercising most of them repeatedly.
+    """
     generator = _seed(3)
-    state = world_gen.generate_world(
-        num_envs=4,
-        generator=generator,
-        device=torch.device("cpu"),
-    )
+    state = generated_world(num_envs=4, seed=3)
     total = torch.zeros(4)
-    for _ in range(120):
-        action = torch.randint(
-            0,
-            len(constants.Action),
-            (4,),
-            generator=generator,
-        )
+    dealt = torch.arange(len(constants.Action))
+    # Padded to a whole number of steps, wrapping onto NOOP.
+    steps = -(-len(constants.Action) // 4)
+    dealt = torch.cat(
+        [dealt, torch.zeros(steps * 4 - dealt.numel(), dtype=dealt.dtype)]
+    )
+    seen: set[int] = set()
+    for action in dealt.reshape(steps, 4):
+        seen.update(int(value) for value in action)
         state, reward = step.step(state, action, generator=generator)
         total += reward
 
-    assert state.timestep.tolist() == [120] * 4
+    assert seen == {int(action) for action in constants.Action}
+    assert state.timestep.tolist() == [steps] * 4
     assert int(state.player_position.min()) >= 0
     assert int(state.player_position[:, 0].max()) < constants.MAP_SIZE[0]
     assert int(state.player_level.min()) >= 0

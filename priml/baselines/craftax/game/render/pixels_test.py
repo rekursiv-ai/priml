@@ -26,7 +26,8 @@ import pygame
 import pytest
 import torch
 
-from priml.baselines.craftax.game import constants, world_gen
+from priml.baselines.craftax.conftest import generated_world
+from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
 from priml.baselines.craftax.game.render import sprites
 from priml.baselines.craftax.game.render.pixels import Renderer
@@ -97,11 +98,7 @@ def test_a_frame_is_the_players_own_view(renderer: Renderer) -> None:
 
 
 def test_each_worker_draws_its_own_world(renderer: Renderer) -> None:
-    state = world_gen.generate_world(
-        num_envs=3,
-        generator=torch.Generator().manual_seed(0),
-        device=torch.device("cpu"),
-    )
+    state = generated_world(num_envs=3, seed=0)
     frames = [renderer.render(state, index=index) for index in range(3)]
     assert not np.array_equal(frames[0], frames[1])
     assert not np.array_equal(frames[1], frames[2])
@@ -224,11 +221,7 @@ def test_the_vulnerable_boss_looks_different(renderer: Renderer) -> None:
 
 
 def test_rendering_does_not_mutate_the_world(renderer: Renderer) -> None:
-    state = world_gen.generate_world(
-        num_envs=1,
-        generator=torch.Generator().manual_seed(1),
-        device=torch.device("cpu"),
-    )
+    state = generated_world(num_envs=1, seed=1)
     before = state.map.clone()
     renderer.render(state)
     assert torch.equal(before, state.map)
@@ -254,11 +247,7 @@ def test_the_real_sprites_draw() -> None:
     """
     rows, columns = constants.OBS_DIM
     frame = Renderer(block_pixels=16).render(
-        world_gen.generate_world(
-            num_envs=1,
-            generator=torch.Generator().manual_seed(0),
-            device=torch.device("cpu"),
-        ),
+        generated_world(num_envs=1, seed=0),
     )
     assert frame.shape == (rows * 16, columns * 16, 3)
     # Art, not a flat fill: a frame of one colour would mean every sprite

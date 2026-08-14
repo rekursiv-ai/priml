@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import torch
 
-from priml.baselines.craftax.conftest import reference, requires_craftax
-from priml.baselines.craftax.game import constants, observation, world_gen
+from priml.baselines.craftax.conftest import (
+    generated_world,
+    reference,
+    requires_craftax,
+)
+from priml.baselines.craftax.game import constants, observation
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
 from priml.baselines.craftax.game.state import EnvState, empty_state
 
@@ -145,11 +149,7 @@ def test_items_are_reported_alongside_blocks() -> None:
 
 
 def test_each_environment_renders_its_own_world() -> None:
-    state = world_gen.generate_world(
-        num_envs=3,
-        generator=torch.Generator().manual_seed(0),
-        device=torch.device("cpu"),
-    )
+    state = generated_world(num_envs=3, seed=0)
     rendered = observation.render(state)
     assert len({tuple(row.tolist()) for row in rendered}) == 3
 
