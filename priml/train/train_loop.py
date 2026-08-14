@@ -503,6 +503,7 @@ class TrainLoop:
                 )
             with self.phase_timer.phase("data_load"):
                 self.dataset = config.dataset.make()
+            _bind_dataset_step(self.dataset, self.step)
             logger.info("TrainLoop startup: dataset ready.")
 
             # Setup checkpointing. The checkpointer is driven against this
@@ -1320,6 +1321,30 @@ class _HasTimer(Protocol):
 @runtime_checkable
 class _SupportsSetEpoch(Protocol):
     def set_epoch(self, epoch: int) -> None: ...
+
+
+@runtime_checkable
+class _SupportsBindStep(Protocol):
+    def bind_step(self, step: TrainStepProtocol) -> None: ...
+
+
+def _bind_dataset_step(dataset: DatasetProtocol, step: TrainStepProtocol) -> None:
+    """Give a dataset that generates its own data the step that produces it.
+
+    A supervised dataset reads a corpus, so it needs nothing from the model.
+    An on-policy dataset IS the model acting: its next batch is a rollout of
+    the current policy, which lives on the train step. Binding here -- once,
+    before the first batch -- is what lets such a dataset satisfy the ordinary
+    ``train_dataloader`` contract instead of inverting the loop. A dataset
+    that does not implement ``bind_step`` is left alone.
+
+    Args:
+      dataset: The dataset just built from config.
+      step: The train step whose model the dataset may need to act with.
+
+    """
+    if isinstance(dataset, _SupportsBindStep):
+        dataset.bind_step(step)
 
 
 def _set_loader_epoch(loader: DataLoader[Any], epoch: int) -> None:

@@ -38,6 +38,7 @@ from torch.nn import functional
 
 import torch
 
+from priml.baselines.nanochat.data import IGNORED_TARGET
 from priml.baselines.nanochat.model import NanoChatLM
 from priml.baselines.nanochat.optimizer import NorMuon
 from priml.optimizers import CompositeOptimizer, apply_lr_scale
@@ -320,6 +321,12 @@ class NanoChatTrainStep:
 
         """
         config = self.config
+        # Drain first, THEN start the clock. Device work is asynchronous, so
+        # anything still queued -- an evaluation that just ran -- would be
+        # waited for inside this step's timing and charged to the budget as
+        # training. Measured: with evaluation on the cadence, the budget bought
+        # 422 steps against 836 with it off, for identical training work.
+        self._synchronize()
         started = time.perf_counter()
         self.model.train()
         with self._autocast():
@@ -349,6 +356,10 @@ class NanoChatTrainStep:
         # Charged after the update so a step's own optimizer time counts, and
         # only past warmup so compilation does not consume the budget.
         if self.local_step > config.budget_warmup_steps:
+            # Drain again before stopping: the backward and the optimizer are
+            # queued, not finished, so a CPU-side reading would charge this
+            # step for less than it used and the next one for the remainder.
+            self._synchronize()
             self.elapsed_sec += time.perf_counter() - started
         return {
             "loss": loss.detach().reshape(1),
@@ -364,11 +375,21 @@ class NanoChatTrainStep:
         return {"loss": per_token.mean().reshape(1), "model": per_token}
 
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
-        """Score one batch, returning the per-token loss the metric consumes."""
+        """Score one batch, returning the per-token loss the metric consumes.
+
+        The reported ``loss`` is the mean over REAL rows only. Padding a short
+        batch leaves ignored positions contributing zero, and the loop weights
+        this mean by ``valid_count`` -- so averaging over the padded width
+        would report a loss diluted by rows that are not data.
+        """
         self.model.eval()
         with torch.inference_mode(), self._autocast():
             per_token = self._per_token_loss(self.model, batch)
-        return {"loss": per_token.mean().reshape(1), "model": per_token}
+        valid = int(batch.get("valid_count", per_token.shape[0]))
+        return {
+            "loss": per_token[:valid].mean().reshape(1),
+            "model": per_token,
+        }
 
     def call_eval(self, **batch: Any) -> Tensor:
         """Return evaluation logits for one batch."""
@@ -444,13 +465,23 @@ class NanoChatTrainStep:
                 group["weight_decay"] = group["initial_weight_decay"] * (1 - progress)
         self.optimizer.step()
         self.raw_model.zero_grad(set_to_none=True)
-        metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+        # Per MEMBER, not ``param_groups[0]``: the recipe runs two optimizers
+        # at rates two orders of magnitude apart, and the first group belongs
+        # to whichever the composite lists first -- so a single ``lr`` reports
+        # one algorithm's rate while the other's is invisible.
+        for name, rate in _learning_rates(self.optimizer).items():
+            metrics[f"lr_{name}"] = rate
         metrics["progress"] = progress
         metrics["momentum"] = momentum
         return metrics
 
     def _per_token_loss(self, model: nn.Module, batch: dict[str, Any]) -> Tensor:
-        """Return ``[B, S]`` cross-entropy in nats, one entry per target."""
+        """Return ``[B, S]`` cross-entropy in nats, one entry per target.
+
+        Rows padding a short evaluation batch carry :data:`IGNORED_TARGET`,
+        which is not a class index -- so it is named here rather than left to
+        reach the logits, where it raises rather than scoring.
+        """
         media: Tensor = batch["media"]
         labels: Tensor = batch["label"]
         logits = model(media)
@@ -458,8 +489,14 @@ class NanoChatTrainStep:
         return functional.cross_entropy(
             logits.reshape(-1, logits.shape[-1]).float(),
             labels.reshape(-1).long(),
+            ignore_index=IGNORED_TARGET,
             reduction="none",
         ).reshape(labels.shape)
+
+    def _synchronize(self) -> None:
+        """Wait for queued device work, so the clock measures this step alone."""
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
 
     @contextmanager
     def _autocast(self) -> Generator[None]:
@@ -474,3 +511,26 @@ class NanoChatTrainStep:
             cache_enabled=False,
         ):
             yield
+
+
+def _learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    """Return one rate per optimizer member, keyed by its class name.
+
+    A composite holds every member's groups in one flat list, so the position
+    of a group says nothing about which algorithm owns it. Reading the member
+    directly keeps the reported rate attributable when a recipe runs two.
+
+    Args:
+      optimizer: The step's optimizer, composite or not.
+
+    Returns:
+      rates: Class name (lowercased) to that member's first group rate.
+
+    """
+    if not isinstance(optimizer, CompositeOptimizer):
+        return {"all": float(optimizer.param_groups[0]["lr"])}
+    return {
+        type(member).__name__.lower(): float(member.param_groups[0]["lr"])
+        for member in optimizer.optimizers
+        if member.param_groups
+    }

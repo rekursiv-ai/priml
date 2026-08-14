@@ -10,7 +10,11 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.nanochat.data import NanoChatData, token_bytes_fingerprint
+from priml.baselines.nanochat.data import (
+    IGNORED_TARGET,
+    NanoChatData,
+    token_bytes_fingerprint,
+)
 
 
 VOCAB = 16
@@ -283,8 +287,8 @@ def test_evaluation_scores_every_row_including_a_short_tail(
     batches = list(_data(dataset_dir, eval_batch_size=3).eval_dataloader())
     assert [b["valid_count"] for b in batches] == [3, 1]
     assert all(b["media"].shape[0] == 3 for b in batches)
-    # The padded rows carry a target the byte table cannot index.
-    assert int(batches[-1]["label"][1:].min()) < 0
+    # The padded rows carry the marker the loss is told to skip.
+    assert int(batches[-1]["label"][1:].min()) == IGNORED_TARGET
 
 
 def test_training_still_drops_a_short_batch(dataset_dir: Path) -> None:
