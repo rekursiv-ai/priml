@@ -11,12 +11,16 @@ ladder stays checkable on any machine.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
+import json
 import math
 
+import numpy as np
 import pytest
 
 from priml.baselines.nanochat import experiments
+from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop
 from priml.baselines.nanochat.metric import BitsPerByte
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
@@ -113,6 +117,54 @@ def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
     config = experiments.exp000()
     config.step.rows_per_pass = 8
     assert config.copy_tree().finalize().dataset.batch_size == 8
+
+
+@pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
+def test_every_experiments_eval_geometry_is_constructible(
+    name: str,
+    factory: Callable[[], NanoChatLoop.Config],
+    tmp_path: Path,
+) -> None:
+    """A shipped experiment must survive building its dataset, not just its config.
+
+    Finalizing proves the tree is coherent; it does not run the validation that
+    lives in ``__init__``. A cap that is not a whole number of eval batches, or
+    a batch wider than the split, therefore passes every config-only test and
+    fails the moment a run reaches for data.
+    """
+    config = factory()
+    model = config.step.model
+    # A split matching what this experiment declares, so the geometry check
+    # passes and the EVAL GEOMETRY is what the test exercises.
+    _prepared(tmp_path, rows=64, vocab=model.vocab_size, seq=model.max_seq_len)
+    config.base_dir = "/"
+    config.dataset.working_dir = str(tmp_path)
+    config.dataset.device = "cpu"
+    built = config.copy_tree().finalize().dataset.make()
+    assert list(built.eval_dataloader()), name
+
+
+def _prepared(root: Path, *, rows: int, vocab: int, seq: int) -> None:
+    """Write a split at the given geometry."""
+    for split in ("train", "val"):
+        directory = root / split
+        directory.mkdir(parents=True, exist_ok=True)
+        np.save(
+            directory / "all__tokens.npy",
+            np.zeros((rows, seq + 1), dtype=np.uint16),
+        )
+        lengths = np.ones(vocab, dtype=np.int32)
+        lengths[0] = 0
+        np.save(directory / "all__token_bytes.npy", lengths)
+        (directory / "dataset.json").write_text(
+            json.dumps(
+                {
+                    "vocab_size": vocab,
+                    "max_seq_len": seq,
+                    "token_bytes_sha256": token_bytes_fingerprint(lengths),
+                },
+            ),
+        )
 
 
 def test_the_dataset_inherits_the_models_geometry() -> None:

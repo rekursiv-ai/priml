@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Self, override
+from typing import Any, Final, Self, override
 
 import hashlib
 import json
@@ -45,6 +45,12 @@ from priml.runtime import get_device
 
 
 logger = logging.getLogger(__name__)
+
+_IGNORED_TARGET: Final = -1
+"""Target marking a padded evaluation row.
+
+Negative, so the metric's byte-table lookup cannot reach it and the row leaves
+both of the score's sums."""
 
 
 class NanoChatData:
@@ -129,19 +135,13 @@ class NanoChatData:
             raise ValueError(
                 f"num_eval_rows must be positive; got {config.num_eval_rows}.",
             )
-        # A cap the batch width does not divide silently scores fewer rows than
-        # asked for, so the two are required to agree rather than the remainder
-        # being dropped without mention.
-        if (
-            config.num_eval_rows is not None
-            and config.num_eval_rows % config.eval_batch_size
-        ):
-            raise ValueError(
-                f"num_eval_rows {config.num_eval_rows} is not divisible by "
-                f"eval_batch_size {config.eval_batch_size}; the remainder "
-                "would be dropped and the score would cover fewer rows than "
-                "requested.",
-            )
+        # Deliberately NOT a divisibility rule on the cap. An earlier revision
+        # required ``num_eval_rows % eval_batch_size == 0`` because the
+        # remainder would be dropped -- but the UNCAPPED pass drops the
+        # identical remainder, so the rule policed the proxy eval while waiving
+        # the number actually reported. The remainder is a property of the row
+        # count, not of the cap, so evaluation scores its tail instead (see
+        # ``_TokenBatches.__iter__``) and neither case silently loses rows.
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
@@ -180,6 +180,7 @@ class NanoChatData:
             device=self.config.device,
             batch_size=self.batch_size,
             shuffle=True,
+            score_every_row=False,
             num_rows=None,
             seed=self.config.seed,
             passes=self._passes,
@@ -200,6 +201,7 @@ class NanoChatData:
             device=self.config.device,
             batch_size=self.eval_batch_size,
             shuffle=False,
+            score_every_row=True,
             num_rows=self.config.num_eval_rows,
             seed=self.config.seed,
             passes=0,
@@ -297,6 +299,13 @@ class _PreparedSplit:
                 f"{raw_token_bytes.shape}; it must be one-dimensional, one "
                 "byte length per token id.",
             )
+        # Before the fingerprint too: it canonicalizes to int64, so a float
+        # table hashes identically to its own truncation and the identity check
+        # cannot tell the two apart.
+        _require_integers(
+            raw_token_bytes,
+            what=f"{directory}/all__token_bytes.npy",
+        )
         observed = token_bytes_fingerprint(raw_token_bytes)
         if metadata["token_bytes_sha256"] != observed:
             raise ValueError(
@@ -313,6 +322,10 @@ class _PreparedSplit:
                 "must be two-dimensional with at least two columns, since "
                 "inputs and targets are one row offset by one.",
             )
+        # Checked BEFORE the cast: ``astype(np.int32)`` truncates rather than
+        # refusing, so a float array would silently become different tokens --
+        # 1.9 read as token 1 -- and every range check below would then pass.
+        _require_integers(raw_rows, what=f"{directory}/all__tokens.npy")
         resolved = get_device(device)
         # Prepared as uint16, which torch cannot hold; int32 is the smallest
         # dtype spanning the vocabulary that still indexes an embedding.
@@ -395,6 +408,7 @@ class _TokenBatches:
         device: torch.device | str,
         batch_size: int,
         shuffle: bool,
+        score_every_row: bool,
         num_rows: int | None,
         seed: int,
         passes: int,
@@ -408,6 +422,7 @@ class _TokenBatches:
         self.token_bytes = prepared.token_bytes
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.score_every_row = score_every_row
         self.seed = seed
         self.passes = passes
         # A short batch is dropped, so too few rows yields NOTHING -- and an
@@ -416,7 +431,7 @@ class _TokenBatches:
         # Both are the same misconfiguration, so it is named once, here, where
         # the row count and the batch size are both in hand.
         available = int(self.rows.shape[0])
-        if available < batch_size:
+        if available < batch_size and not score_every_row:
             raise ValueError(
                 f"the {prepared.name!r} split yields no batches: {available} rows "
                 f"available (of {rows.shape[0]}) against a batch size of "
@@ -427,9 +442,15 @@ class _TokenBatches:
     def __iter__(self) -> Iterator[dict[str, Any]]:
         """Yield every row once as an ``(input, target)`` pair.
 
-        A short final batch is dropped rather than padded: every row is a full
-        context by construction, so a partial batch would be the only place in
-        the run where the token count per step changes.
+        Training DROPS a short final batch: the token count per optimizer step
+        is what the recipe is tuned against, and a narrower step would be the
+        one place in the run where it moves.
+
+        Evaluation SCORES it. A dropped tail means the reported number covers
+        fewer rows than the split holds -- silently, and by an amount set by
+        the batch width -- so the short batch is padded to full width and the
+        padding is marked with ``-1`` targets, which the metric's byte table
+        excludes from both of its sums.
         """
         count = self.rows.shape[0]
         if self.shuffle:
@@ -439,14 +460,53 @@ class _TokenBatches:
         else:
             order = torch.arange(count, device=self.device)
         self.passes += 1
-        for start in range(0, count - self.batch_size + 1, self.batch_size):
-            rows = self.rows[order[start : start + self.batch_size]]
+        last = count if self.score_every_row else count - self.batch_size + 1
+        for start in range(0, last, self.batch_size):
+            index = order[start : start + self.batch_size]
+            rows = self.rows[index]
+            valid = int(rows.shape[0])
+            if valid < self.batch_size:
+                # Padded with the FIRST row rather than zeros, so the model
+                # runs on a real context; the -1 targets are what remove it
+                # from the score.
+                pad = self.rows[:1].expand(self.batch_size - valid, -1)
+                rows = torch.cat([rows, pad])
+            media = rows[:, :-1].long()
+            label = rows[:, 1:].long()
+            if valid < self.batch_size:
+                label = label.clone()
+                label[valid:] = _IGNORED_TARGET
             yield {
-                "media": rows[:, :-1].long(),
-                "label": rows[:, 1:].long(),
+                "media": media,
+                "label": label,
                 "token_bytes": self.token_bytes,
+                "valid_count": valid,
             }
 
     def __len__(self) -> int:
-        """Whole batches per pass; a short final batch is dropped."""
-        return math.floor(self.rows.shape[0] / self.batch_size)
+        """Batches per pass, counting a padded final batch when scored."""
+        rows = self.rows.shape[0]
+        if self.score_every_row:
+            return math.ceil(rows / self.batch_size)
+        return math.floor(rows / self.batch_size)
+
+
+def _require_integers(array: np.ndarray, *, what: str) -> None:
+    """Raise unless the array holds integers.
+
+    Args:
+      array: Array loaded from a prepared split.
+      what: Path named in the message.
+
+    Raises:
+      ValueError: The dtype is not integral. Casting instead would TRUNCATE --
+        a token id of 1.9 becomes 1, a different token entirely -- and every
+        later range check would pass on the truncated values.
+
+    """
+    if not np.issubdtype(array.dtype, np.integer):
+        raise ValueError(
+            f"{what} has dtype {array.dtype}; it must hold integers, since "
+            "casting a fractional value would silently change which token it "
+            "names.",
+        )

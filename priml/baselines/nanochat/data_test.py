@@ -260,14 +260,42 @@ def test_a_malformed_token_array_names_the_file(dataset_dir: Path) -> None:
 def test_a_split_too_small_for_its_batch_is_rejected_at_construction(
     dataset_dir: Path,
 ) -> None:
-    """An empty stream must be named here, not where it finally shows up.
+    """An empty TRAINING stream must be named here, not where it shows up.
 
-    Too few rows yields no batches at all, which reaches training as a generic
-    epoch-reset failure and evaluation as a metric holding no samples -- two
-    distant symptoms of one misconfiguration.
+    Training drops a short batch, so too few rows yields nothing at all, which
+    reaches the loop as a generic epoch-reset failure far from its cause.
+    Evaluation is the opposite case -- it pads and scores the tail, so it has
+    no empty-stream condition to report.
     """
     with pytest.raises(ValueError, match="no batches"):
-        _data(dataset_dir, eval_batch_size=8, num_eval_rows=8).eval_dataloader()
+        _data(dataset_dir, batch_size=64).train_dataloader()
+
+
+def test_evaluation_scores_every_row_including_a_short_tail(
+    dataset_dir: Path,
+) -> None:
+    """A dropped tail is a score covering fewer rows than the split holds.
+
+    The fixture writes 4 rows; at a batch of 3 the old behavior scored 3 and
+    called it the full pass. The tail is padded instead, and the padding is
+    marked so the metric excludes it.
+    """
+    batches = list(_data(dataset_dir, eval_batch_size=3).eval_dataloader())
+    assert [b["valid_count"] for b in batches] == [3, 1]
+    assert all(b["media"].shape[0] == 3 for b in batches)
+    # The padded rows carry a target the byte table cannot index.
+    assert int(batches[-1]["label"][1:].min()) < 0
+
+
+def test_training_still_drops_a_short_batch(dataset_dir: Path) -> None:
+    """The token count per optimizer step is what the recipe is tuned against.
+
+    A narrower final step would be the one place in a run where it moves, so
+    training drops the tail that evaluation scores.
+    """
+    # The train split holds 6 rows, so a batch of 4 leaves a remainder of 2.
+    batches = list(_data(dataset_dir, batch_size=4).train_dataloader())
+    assert [b["media"].shape[0] for b in batches] == [4]
 
 
 def test_data_narrower_than_the_model_is_rejected_at_load(dataset_dir: Path) -> None:

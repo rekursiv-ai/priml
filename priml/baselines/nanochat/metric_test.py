@@ -86,6 +86,24 @@ def test_counts_accumulate_across_batches() -> None:
     assert metric.compute()["bpb"] == pytest.approx(7 / 5)
 
 
+def test_padding_rows_leave_both_sums() -> None:
+    """Rows squaring off a short final batch are not data.
+
+    Marking them with a negative target is NOT enough on its own: a negative
+    index reads the byte table from the back and lands on a real length, so
+    the padding would be scored. ``valid_count`` is what removes it.
+    """
+    metric = _metric()
+    metric.update(
+        torch.full((3, 2), math.log(2)),
+        label=torch.tensor([[1, 1], [1, 1], [-1, -1]]),
+        token_bytes=torch.tensor([0, 1]),
+        valid_count=2,
+    )
+    # Four scored tokens of one byte each, and the padded row absent.
+    assert metric.state_dict() == {"nats": pytest.approx(4 * math.log(2)), "bytes": 4}
+
+
 def test_a_shape_disagreement_is_rejected() -> None:
     """Silently broadcasting would pair each loss with another token's length."""
     metric = _metric()

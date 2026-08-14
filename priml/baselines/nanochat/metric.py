@@ -74,6 +74,13 @@ class BitsPerByte:
                 f"per-token loss has shape {tuple(per_token.shape)} but the "
                 f"targets have {tuple(labels.shape)}.",
             )
+        # Rows squaring off a short final batch are not data. Truncating by
+        # ``valid_count`` rather than masking on the target value: a negative
+        # marker would INDEX the byte table from the back and land on a real
+        # length, so the padding would be scored rather than skipped.
+        valid = int(batch.get("valid_count", labels.shape[0]))
+        per_token = per_token[:valid]
+        labels = labels[:valid]
         lengths = token_bytes[labels.reshape(-1)]
         counted = lengths > 0
         self.nats += float(per_token.reshape(-1)[counted].sum().item())
