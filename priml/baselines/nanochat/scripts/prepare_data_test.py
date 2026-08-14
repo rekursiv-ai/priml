@@ -24,7 +24,15 @@ VOCAB = 64  # above the 16 reserved tokens
 SEQ = 8
 
 
-def _split(root: Path, name: str, *, vocab_size: int, max_seq_len: int) -> None:
+def _split(
+    root: Path,
+    name: str,
+    *,
+    vocab_size: int,
+    max_seq_len: int,
+    num_train_shards: int = 1,
+    tokenizer_train_chars: int = 1_000,
+) -> None:
     """Write one prepared split in the on-disk layout."""
     directory = root / name
     directory.mkdir(parents=True, exist_ok=True)
@@ -40,6 +48,8 @@ def _split(root: Path, name: str, *, vocab_size: int, max_seq_len: int) -> None:
             {
                 "vocab_size": vocab_size,
                 "max_seq_len": max_seq_len,
+                "num_train_shards": num_train_shards,
+                "tokenizer_train_chars": tokenizer_train_chars,
                 "token_bytes_sha256": token_bytes_fingerprint(lengths),
             },
         ),
@@ -53,7 +63,13 @@ def test_reusing_a_split_prepared_under_other_flags_is_refused(
     for name in ("train", "val"):
         _split(tmp_path, name, vocab_size=VOCAB, max_seq_len=SEQ)
     with pytest.raises(ValueError, match="max_seq_len"):
-        prepare(tmp_path, vocab_size=VOCAB, max_seq_len=SEQ * 2)
+        prepare(
+            tmp_path,
+            vocab_size=VOCAB,
+            max_seq_len=SEQ * 2,
+            num_train_shards=1,
+            tokenizer_train_chars=1_000,
+        )
 
 
 def test_a_partial_directory_is_checked_too(tmp_path: Path) -> None:
@@ -64,14 +80,48 @@ def test_a_partial_directory_is_checked_too(tmp_path: Path) -> None:
     """
     _split(tmp_path, "train", vocab_size=VOCAB, max_seq_len=SEQ)
     with pytest.raises(ValueError, match="max_seq_len"):
-        prepare(tmp_path, vocab_size=VOCAB, max_seq_len=SEQ * 2)
+        prepare(
+            tmp_path,
+            vocab_size=VOCAB,
+            max_seq_len=SEQ * 2,
+            num_train_shards=1,
+            tokenizer_train_chars=1_000,
+        )
+
+
+def test_a_changed_non_geometry_flag_is_refused(tmp_path: Path) -> None:
+    """Reuse is decided on every flag that shapes what a split HOLDS.
+
+    Comparing only the geometry would return data built from a different
+    corpus, or against a differently-fitted vocabulary, as though it answered
+    the question just asked.
+    """
+    for name in ("train", "val"):
+        _split(tmp_path, name, vocab_size=VOCAB, max_seq_len=SEQ)
+    with pytest.raises(ValueError, match="num_train_shards"):
+        prepare(
+            tmp_path,
+            vocab_size=VOCAB,
+            max_seq_len=SEQ,
+            num_train_shards=4,
+            tokenizer_train_chars=1_000,
+        )
 
 
 def test_an_intact_directory_at_the_same_flags_is_reused(tmp_path: Path) -> None:
     """The check must not block the case it exists to make safe."""
     for name in ("train", "val"):
         _split(tmp_path, name, vocab_size=VOCAB, max_seq_len=SEQ)
-    assert prepare(tmp_path, vocab_size=VOCAB, max_seq_len=SEQ) == tmp_path
+    assert (
+        prepare(
+            tmp_path,
+            vocab_size=VOCAB,
+            max_seq_len=SEQ,
+            num_train_shards=1,
+            tokenizer_train_chars=1_000,
+        )
+        == tmp_path
+    )
 
 
 if __name__ == "__main__":

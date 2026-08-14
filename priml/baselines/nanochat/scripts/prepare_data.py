@@ -65,6 +65,9 @@ Fetched over plain HTTP rather than through a Hugging Face client: a handful of
 files, nothing a dependency would add. Keeping it stdlib means preparing data
 needs no optional extra."""
 
+_MAX_TOKEN_ID: Final = 65_535
+"""Largest id the packed ``uint16`` rows can represent."""
+
 SOURCE_REVISION: Final = "main"
 """Revision the shards are fetched at.
 
@@ -136,11 +139,6 @@ def prepare(
             f"vocab_size must exceed the {len(RESERVED_TOKENS)} reserved "
             f"tokens; got {vocab_size}.",
         )
-    if vocab_size > _MAX_TOKEN_ID + 1:
-        raise ValueError(
-            f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
-            "packed uint16 rows can hold.",
-        )
     if max_seq_len < 2:
         raise ValueError(f"max_seq_len must be at least two; got {max_seq_len}.")
     if tokenizer_train_chars <= 0:
@@ -155,7 +153,15 @@ def prepare(
     # beside a fresh one built at the new flags yields a pair disagreeing with
     # itself, reported as "ready".
     prepared = [out / split / "dataset.json" for split in ("train", "val")]
-    asked = {"vocab_size": vocab_size, "max_seq_len": max_seq_len}
+    # Every flag that shapes what a split HOLDS, not only its geometry: a
+    # reuse decision made on a subset silently returns data prepared from a
+    # different corpus or a differently-fitted vocabulary.
+    asked = {
+        "vocab_size": vocab_size,
+        "max_seq_len": max_seq_len,
+        "num_train_shards": num_train_shards,
+        "tokenizer_train_chars": tokenizer_train_chars,
+    }
     for path in prepared:
         if not path.is_file():
             continue
@@ -198,6 +204,7 @@ def prepare(
             encoding=encoding,
             max_seq_len=max_seq_len,
             vocab_size=vocab_size,
+            provenance=asked,
         )
     logger.info("nanochat data ready at %s", out)
     return out
@@ -286,9 +293,13 @@ def _tokenizer(
         # A file at this path written by anything else would otherwise surface
         # as an AttributeError deep inside packing.
         assert isinstance(cached, tiktoken.Encoding), type(cached).__name__
-        recorded = (
-            json.loads(recipe_path.read_text()) if recipe_path.is_file() else None
-        )
+        if not recipe_path.is_file():
+            raise ValueError(
+                f"{path} has no {recipe_path.name} beside it, so what it was "
+                "fitted on cannot be established; delete it to refit, or "
+                "prepare into a different --directory.",
+            )
+        recorded = json.loads(recipe_path.read_text())
         if recorded != recipe:
             raise ValueError(
                 f"{path} was fitted with {recorded}, but {recipe} was "
@@ -317,7 +328,12 @@ def _tokenizer(
     with staging.open("wb") as file:
         pickle.dump(encoding, file)
     staging.replace(path)
-    recipe_path.write_text(json.dumps(recipe, sort_keys=True))
+    # Staged like the tokenizer beside it: an interruption between the two
+    # would otherwise leave an encoding whose recipe is unknown, which the
+    # check above then refuses on the next run.
+    recipe_staging = recipe_path.with_suffix(".json.partial")
+    recipe_staging.write_text(json.dumps(recipe, sort_keys=True))
+    recipe_staging.replace(recipe_path)
     return encoding
 
 
@@ -329,6 +345,7 @@ def _pack_split(
     encoding: tiktoken.Encoding,
     max_seq_len: int,
     vocab_size: int,
+    provenance: dict[str, int],
 ) -> None:
     """Tokenize a split's shards and cut them into fixed-length rows."""
     destination = out / split
@@ -357,6 +374,13 @@ def _pack_split(
             f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
             "packed uint16 rows can hold.",
         )
+    largest = max(stream)
+    if largest >= vocab_size:
+        raise ValueError(
+            f"the tokenizer emitted id {largest}, outside the declared "
+            f"vocab_size {vocab_size}; writing it would leave a split the "
+            "loader refuses.",
+        )
     packed = np.array(stream[: rows * width], dtype=np.uint16).reshape(rows, width)
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -366,8 +390,7 @@ def _pack_split(
     (destination / "dataset.json").write_text(
         json.dumps(
             {
-                "vocab_size": vocab_size,
-                "max_seq_len": max_seq_len,
+                **provenance,
                 # The score's denominator, recorded so a later change to byte
                 # accounting is caught at load rather than silently repricing
                 # every number measured against this split.
@@ -443,9 +466,6 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         help="characters the tokenizer is fitted on",
     )
 
-
-_MAX_TOKEN_ID: Final = 65_535
-"""Largest id the packed ``uint16`` rows can represent."""
 
 RESERVED_TOKENS: Final = tuple(f"<|reserved_{index}|>" for index in range(16))
 """Tokens appended after the byte-pair merges.

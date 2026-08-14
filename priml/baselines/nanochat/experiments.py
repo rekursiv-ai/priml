@@ -118,7 +118,6 @@ def exp000() -> NanoChatLoop.Config:
     cfg.step.model.channels = 512
     cfg.step.model.num_layers = 8
     cfg.step.model.window_pattern = "L"
-    cfg.step.model.value_embedding_layers = []
 
     # The budget the schedules anneal over and the budget the loop stops on:
     # equal, or the learning rate lands short of zero or decays past the end.
@@ -214,5 +213,8 @@ def exp_smoke() -> NanoChatLoop.Config:
     cfg.max_time = cfg.step.time_budget_sec
     cfg.max_steps = 4
     cfg.num_steps_eval = 2
-    cfg.dataset.num_eval_rows = 4
+    # Both, together: the cap must be a whole number of eval batches, and the
+    # default batch is wider than a smoke run wants to score.
+    cfg.dataset.eval_batch_size = 4
+    cfg.dataset.num_eval_rows = 8
     return cfg

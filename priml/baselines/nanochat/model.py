@@ -427,11 +427,19 @@ class NanoChatLM(nn.Module):
                     "value_embedding_stride must be nonnegative; got "
                     f"{self.value_embedding_stride}.",
                 )
+            # Two ways to say one thing, so saying both is a contradiction
+            # rather than a precedence rule nobody can see in the print.
+            if self.value_embedding_layers and self.value_embedding_stride:
+                raise ValueError(
+                    "set value_embedding_stride or value_embedding_layers, not "
+                    f"both; got stride {self.value_embedding_stride} beside "
+                    f"{self.value_embedding_layers}.",
+                )
             # Derived HERE, where the depth is final: computing the indices in
             # an experiment factory snapshots whatever num_layers was then, so
             # a fork that changes the depth carries indices for a stack that no
             # longer exists.
-            if not self.value_embedding_layers and self.value_embedding_stride:
+            if self.value_embedding_stride:
                 self.value_embedding_layers = sorted(
                     range(
                         self.num_layers - 1,

@@ -251,7 +251,8 @@ class NanoChatTrainStep:
             ):
                 # The schedule writes these straight into the optimizer's
                 # groups every step, past the constructor that would have
-                # rejected them.
+                # rejected them. NaN needs no separate check here: it fails
+                # this comparison rather than slipping through it.
                 if not 0.0 <= momentum < 1.0:
                     raise ValueError(
                         f"{name} must lie in [0, 1); got {momentum}.",

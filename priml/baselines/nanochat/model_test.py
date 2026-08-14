@@ -163,6 +163,18 @@ def test_the_value_gate_starts_transparent() -> None:
         )
 
 
+def test_naming_both_a_stride_and_a_layer_list_is_rejected() -> None:
+    """Two ways to say one thing, said at once, is a contradiction.
+
+    Silently preferring the list would leave a stride in the printed config
+    that had no effect on the model it describes.
+    """
+    config = _config(value_embedding_layers=[0])
+    config.value_embedding_stride = 2
+    with pytest.raises(ValueError, match=r"value_embedding_stride"):
+        config.copy_tree().finalize()
+
+
 def test_a_layer_outside_the_stack_is_rejected() -> None:
     """Naming layer 5 of a 2-layer model builds a table nothing ever reads."""
     with pytest.raises(ValueError, match="outside the"):
