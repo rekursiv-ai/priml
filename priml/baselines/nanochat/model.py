@@ -537,11 +537,13 @@ class NanoChatLM(nn.Module):
             for parameter in self.parameters()
             if id(parameter) not in gathered
         )
-        width = head_width(self.config.blocks[0], self.config.channels)
-        heads = self.config.channels // width
+        # ``heads * channels_head``, read from the block rather than derived
+        # from the model width: the attention's inner width is decoupled from
+        # the residual stream, so dividing would miscount every model where
+        # they differ.
+        inner = attention_width(self.config.blocks[0], self.config.channels)
         attention = sum(
-            12 * heads * width * min(window, self.config.max_seq_len)
-            for window in self.windows
+            12 * inner * min(window, self.config.max_seq_len) for window in self.windows
         )
         return 6 * matrix + attention
 

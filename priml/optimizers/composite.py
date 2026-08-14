@@ -301,7 +301,6 @@ class CompositeOptimizer(Optimizer):
         )
 
     @override
-    @override
     def __repr__(self) -> str:
         members = ", ".join(type(o).__name__ for o in self.optimizers)
         return f"{type(self).__name__}({members})"

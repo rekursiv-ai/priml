@@ -180,6 +180,41 @@ def test_head_width_falls_back_to_the_model_width() -> None:
     assert head_width(RMSNorm.Config(), 128) == 128
 
 
+def test_flops_read_the_blocks_real_head_count() -> None:
+    """Heads are their own field, not ``channels // channels_head``.
+
+    A model whose attention is wider than its residual stream is legal -- the
+    two widths are decoupled -- so deriving the head count from the model width
+    silently reports the wrong FLOPs for exactly the configs that need the
+    estimate most.
+    """
+    config = _config()
+    attention = config.block.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.heads = 4  # 4 * 8 = 32 wide, against 16 channels
+    torch.manual_seed(0)
+    wide = config.copy_tree().finalize().make()
+
+    narrow = _model()  # heads inferred: 16 // 8 = 2
+    attention_flops = wide.flops_per_token() - _matrix_flops(wide)
+    assert attention_flops == 2 * (narrow.flops_per_token() - _matrix_flops(narrow))
+
+
+def _matrix_flops(model: NanoChatLM) -> int:
+    """The parameter-driven half of the estimate, for isolating attention."""
+    gathered = {
+        id(parameter)
+        for module in (model.embed, *model.value_embeds.values())
+        for parameter in module.parameters()
+    }
+    gathered |= {id(model.residual_scale), id(model.skip_scale)}
+    return 6 * sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if id(parameter) not in gathered
+    )
+
+
 def test_flops_exclude_lookup_tables() -> None:
     """A gather does no arithmetic, so a bigger vocabulary is not more FLOPs."""
     small = _model().flops_per_token()

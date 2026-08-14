@@ -5,7 +5,7 @@ left alone, so re-running costs nothing.
 
 Three stages, in order, because each consumes the previous one's output:
 
-1. **Download.** Text shards, at a pinned revision, verified by digest.
+1. **Download.** Parquet text shards, fetched once and reused.
 2. **Train the tokenizer.** A byte-pair vocabulary fitted on a prefix of the
    training text. The vocabulary is part of the recipe -- it decides what a
    token IS -- so it is built here and frozen, never refitted per run.
@@ -14,8 +14,9 @@ Three stages, in order, because each consumes the previous one's output:
    mask. A document longer than a row spans several; one shorter shares a row
    with its neighbours, separated by the document-start token.
 
-The build is deterministic: one seeded generator drives the shard order and the
-tokenizer's sampling, so the same flags produce byte-identical arrays.
+The build is deterministic: the shard order is fixed and the tokenizer's
+training text is a prefix, so the same flags over the same shards produce
+byte-identical arrays.
 
 The tokenizer libraries are imported HERE and nowhere else. Preparation happens
 once, on a machine with a network; training reads flat arrays, so a published
@@ -44,7 +45,7 @@ import urllib.request
 
 import numpy as np
 
-from priml.baselines.nanochat.data import NanoChatData
+from priml.baselines.nanochat.data import NanoChatData, token_bytes_fingerprint
 from priml.train.train_loop import TrainLoop
 
 
@@ -60,15 +61,18 @@ SOURCE_URL: Final = (
 """Base URL of the source shards.
 
 Fetched over plain HTTP rather than through a Hugging Face client: a handful of
-files at a pinned revision, verified by digest -- nothing a dependency would
-add. Keeping it stdlib means preparing data needs no optional extra."""
+files, nothing a dependency would add. Keeping it stdlib means preparing data
+needs no optional extra."""
 
 SOURCE_REVISION: Final = "main"
 """Revision the shards are fetched at.
 
-Unlike a small dataset this cannot be digest-pinned per file without listing
-every shard, so a run records the shard count it consumed in ``dataset.json``
-and a mismatch there is what surfaces a moved upstream."""
+NOT a pin: this tracks the branch, so a corpus that moves upstream produces
+different shards under the same name. What IS pinned is the artifact those
+shards become -- ``dataset.json`` records the tokenizer's byte-length table by
+digest, so a score measured against one preparation cannot be silently compared
+with a score measured against another. Digest-pinning the shards themselves
+would mean listing every one of them here."""
 
 
 def main() -> int:
@@ -116,8 +120,9 @@ def prepare(
       vocab_size: Tokenizer vocabulary, including the reserved tokens.
       max_seq_len: Tokens per packed row.
       tokenizer_train_chars: Characters the tokenizer is fitted on.
-      text_directory: Local ``shard_*.txt`` files to read instead of
-        downloading. Lets a test build the pipeline hermetically.
+      text_directory: Local ``shard_*.parquet`` files to read instead of
+        downloading, each carrying a ``text`` column. Lets a test build the
+        pipeline hermetically.
 
     Returns:
       directory: Where the splits were written.
@@ -125,9 +130,25 @@ def prepare(
     """
     out = Path(directory) if directory is not None else default_directory()
     out.mkdir(parents=True, exist_ok=True)
-    if (out / "val" / "dataset.json").is_file() and (
-        out / "train" / "dataset.json"
-    ).is_file():
+    prepared = [out / split / "dataset.json" for split in ("train", "val")]
+    if all(path.is_file() for path in prepared):
+        # Reusing a split prepared under DIFFERENT flags would hand back data
+        # that silently is not what was asked for, so the recorded geometry has
+        # to agree before the early return.
+        for path in prepared:
+            recorded = json.loads(path.read_text())
+            asked = {"vocab_size": vocab_size, "max_seq_len": max_seq_len}
+            differing = {
+                key: (recorded.get(key), value)
+                for key, value in asked.items()
+                if recorded.get(key) != value
+            }
+            if differing:
+                raise ValueError(
+                    f"{path.parent} was prepared with {differing} (recorded, "
+                    "requested); prepare into a different --directory, or "
+                    "delete this one to rebuild it.",
+                )
         logger.info("nanochat data already prepared at %s", out)
         return out
 
@@ -285,13 +306,20 @@ def _pack_split(
     packed = np.array(stream[: rows * width], dtype=np.uint16).reshape(rows, width)
 
     destination.mkdir(parents=True, exist_ok=True)
+    token_bytes = _token_bytes(encoding, vocab_size=vocab_size)
     np.save(destination / "all__tokens.npy", packed)
-    np.save(
-        destination / "all__token_bytes.npy",
-        _token_bytes(encoding, vocab_size=vocab_size),
-    )
+    np.save(destination / "all__token_bytes.npy", token_bytes)
     (destination / "dataset.json").write_text(
-        json.dumps({"vocab_size": vocab_size, "max_seq_len": max_seq_len}),
+        json.dumps(
+            {
+                "vocab_size": vocab_size,
+                "max_seq_len": max_seq_len,
+                # The score's denominator, recorded so a later change to byte
+                # accounting is caught at load rather than silently repricing
+                # every number measured against this split.
+                "token_bytes_sha256": token_bytes_fingerprint(token_bytes),
+            },
+        ),
     )
     logger.info("nanochat %r: %d rows of %d tokens", split, rows, max_seq_len)
 

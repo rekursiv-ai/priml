@@ -1,11 +1,11 @@
 """Packed token rows, served from device memory.
 
-The prepared dataset is one array per split plus the metadata a bits-per-byte
-score needs::
+The prepared dataset is one directory per split, each holding the arrays and
+the metadata a bits-per-byte score needs::
 
-    all__tokens.npy      [n_rows, max_seq_len + 1] packed token ids
-    all__token_bytes.npy [vocab_size] UTF-8 byte length of each token
-    dataset.json         {"vocab_size": int, "max_seq_len": int}
+    <split>/all__tokens.npy      [n_rows, max_seq_len + 1] packed token ids
+    <split>/all__token_bytes.npy [vocab_size] UTF-8 byte length of each token
+    <split>/dataset.json         geometry + the byte table's fingerprint
 
 Each row is a full context with no padding: documents are packed end to end
 during preparation, so every position carries a real target and the loss needs
@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Self, override
 
+import hashlib
 import json
 import logging
 import math
@@ -91,6 +92,21 @@ class NanoChatData:
         reads a fixed prefix as a proxy and the reported number comes from an
         uncapped final pass. The two populations are not comparable."""
 
+        vocab_size: int = -1
+        """Token vocabulary the prepared arrays must hold; -1 skips the check.
+
+        Declared rather than read from disk: a config must build without
+        touching the filesystem. The model pushes its own value down, and
+        ``__init__`` verifies the arrays against it -- so a prepared directory
+        that disagrees fails at load, naming both numbers, instead of surfacing
+        later as an out-of-range embedding index."""
+
+        max_seq_len: int = -1
+        """Context length the prepared rows must carry; -1 skips the check.
+
+        A row holds ``max_seq_len + 1`` tokens, since the inputs and targets
+        are the row offset by one."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
@@ -99,17 +115,26 @@ class NanoChatData:
     def __init__(self, config: Config) -> None:
         if config.batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
+        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
+            raise ValueError(
+                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
+            )
+        if config.num_eval_rows is not None and config.num_eval_rows <= 0:
+            raise ValueError(
+                f"num_eval_rows must be positive; got {config.num_eval_rows}.",
+            )
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
-        self.eval_batch_size = config.eval_batch_size or config.batch_size
+        # ``is None``, not ``or``: zero is falsy, so an ``or`` would absorb an
+        # explicit 0 into the training batch size and still report a score.
+        self.eval_batch_size = (
+            config.batch_size
+            if config.eval_batch_size is None
+            else config.eval_batch_size
+        )
         self._passes = 0
         self._live: _TokenBatches | None = None
-
-    @property
-    def token_bytes(self) -> Tensor:
-        """UTF-8 byte length of every token id, for the bits-per-byte score."""
-        return _load_split(self.dataset_dir, "val", device=self.config.device)[1]
 
     def train_dataloader(self) -> _TokenBatches:
         """Build the re-iterable training stream."""
@@ -126,6 +151,8 @@ class NanoChatData:
             num_rows=None,
             seed=self.config.seed,
             passes=self._passes,
+            vocab_size=self.config.vocab_size,
+            max_seq_len=self.config.max_seq_len,
         )
         self._live = stream
         return stream
@@ -145,6 +172,8 @@ class NanoChatData:
             num_rows=self.config.num_eval_rows,
             seed=self.config.seed,
             passes=0,
+            vocab_size=self.config.vocab_size,
+            max_seq_len=self.config.max_seq_len,
         )
 
     def state_dict(self) -> dict[str, Any]:
@@ -178,8 +207,16 @@ class _TokenBatches:
         num_rows: int | None,
         seed: int,
         passes: int,
+        vocab_size: int,
+        max_seq_len: int,
     ) -> None:
-        rows, token_bytes = _load_split(dataset_dir, split, device=device)
+        rows, token_bytes = _load_split(
+            dataset_dir,
+            split,
+            device=device,
+            vocab_size=vocab_size,
+            max_seq_len=max_seq_len,
+        )
         self.device = get_device(device)
         self.rows: Tensor = rows if num_rows is None else rows[:num_rows]
         self.token_bytes = token_bytes
@@ -216,18 +253,43 @@ class _TokenBatches:
         return math.floor(self.rows.shape[0] / self.batch_size)
 
 
+def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
+    """Return the identity of one byte-length table.
+
+    The table is the DENOMINATOR of every reported score, so two tables of the
+    same length are two different metrics wearing one name. Recording the
+    fingerprint beside the data is what lets a reader tell which accounting
+    produced a number -- a distinction worth roughly the size of a real
+    candidate effect, and invisible to any shape check.
+
+    Args:
+      token_bytes: Per-token-id byte lengths.
+
+    Returns:
+      fingerprint: Hex SHA-256 over the table's canonical int64 bytes.
+
+    """
+    return hashlib.sha256(
+        np.ascontiguousarray(token_bytes, dtype=np.int64).tobytes(),
+    ).hexdigest()
+
+
 def _load_split(
     dataset_dir: Path,
     split: str,
     *,
     device: torch.device | str,
+    vocab_size: int = -1,
+    max_seq_len: int = -1,
 ) -> tuple[Tensor, Tensor]:
-    """Read one prepared split onto ``device``.
+    """Read one prepared split onto ``device``, verifying its geometry.
 
     Args:
       dataset_dir: Dataset root holding ``train/`` and ``val/``.
       split: Which one to read.
       device: Where the resident arrays live.
+      vocab_size: Vocabulary the arrays must hold; -1 skips the check.
+      max_seq_len: Context the rows must carry; -1 skips the check.
 
     Returns:
       rows: ``[n_rows, max_seq_len + 1]`` packed token ids.
@@ -235,6 +297,8 @@ def _load_split(
 
     Raises:
       FileNotFoundError: If the split or its metadata is missing.
+      ValueError: If the arrays disagree with each other or with the declared
+        geometry.
 
     """
     path = Path(dataset_dir).expanduser() / split
@@ -248,19 +312,50 @@ def _load_split(
     metadata = json.loads(metadata_path.read_text())
     logger.info("loading nanochat split %r from %s", split, path)
     resolved = get_device(device)
+    raw_token_bytes = np.load(path / "all__token_bytes.npy")
+    recorded = metadata.get("token_bytes_sha256")
+    observed = token_bytes_fingerprint(raw_token_bytes)
+    if recorded is not None and recorded != observed:
+        raise ValueError(
+            f"{path} records byte-table fingerprint {recorded} but its table "
+            f"hashes to {observed}; the score's denominator changed, so a "
+            "number measured here is not comparable with one measured before. "
+            "Re-prepare the split.",
+        )
     # Prepared as uint16, which torch cannot hold; int32 is the smallest dtype
     # that represents the whole vocabulary and still indexes an embedding.
     rows = torch.from_numpy(
         np.load(path / "all__tokens.npy").astype(np.int32),
     ).to(resolved)
-    token_bytes = torch.from_numpy(
-        np.load(path / "all__token_bytes.npy").astype(np.int32),
-    ).to(resolved)
+    token_bytes = torch.from_numpy(raw_token_bytes.astype(np.int32)).to(resolved)
     if token_bytes.shape[0] != int(metadata["vocab_size"]):
         raise ValueError(
             f"{path} declares vocab_size {metadata['vocab_size']} but its byte "
             f"table holds {token_bytes.shape[0]} entries.",
         )
+    # Verified here, at the boundary that owns the data: a config may not read
+    # the filesystem, so the model declares its geometry and this is where the
+    # two meet. Without it the disagreement surfaces inside the forward, naming
+    # only the model's side and never the directory the rows came from.
+    if max_seq_len > 0 and rows.shape[1] != max_seq_len + 1:
+        raise ValueError(
+            f"{path} holds rows of {rows.shape[1] - 1} tokens but the model "
+            f"declares max_seq_len {max_seq_len}; prepare the data with "
+            f"--max-seq-len {max_seq_len}, or set the model to "
+            f"{rows.shape[1] - 1}.",
+        )
+    if vocab_size > 0:
+        if token_bytes.shape[0] != vocab_size:
+            raise ValueError(
+                f"{path} was prepared for vocab_size "
+                f"{token_bytes.shape[0]} but the model declares {vocab_size}.",
+            )
+        largest = int(rows.max())
+        if largest >= vocab_size:
+            raise ValueError(
+                f"{path} holds token id {largest}, outside the model's "
+                f"vocab_size {vocab_size}; it would index past the embedding.",
+            )
     logger.info(
         "nanochat %r: %d rows of %d tokens",
         split,
