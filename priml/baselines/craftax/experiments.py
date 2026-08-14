@@ -8,6 +8,7 @@ settings.
     exp000  PPO, 1M interactions, 256 envs x 16 steps
       +-- exp001  the published 1B recipe: 1024 envs x 64 steps, lr 2e-4
             +-- exp002  a policy with memory, cheaply: a GRU at 1B
+            +-- exp003  no policy at all: Q-learning with an LSTM at 1B
             +-- exp011  the 1B geometry at 100M, as a screening budget
                   +-- exp013  a policy with memory, expensively: GTrXL at 1B
 
@@ -37,6 +38,7 @@ from configgle import Makes
 from priml.baselines.craftax.data import CraftaxRollouts
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
 from priml.baselines.craftax.metric import CraftaxScore
+from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.runtime import SingleProcess
@@ -65,6 +67,18 @@ class CraftaxRNNTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
         default_factory=CraftaxRNNTrainStep.Config,
     )
     """Recurrent model, environment, and PPO settings."""
+
+    dataset: CraftaxRollouts.Config = field(default_factory=CraftaxRollouts.Config)
+    """The loop's cadence; the data lives in the step's environment."""
+
+
+class CraftaxPQNTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+    """The same loop with the Q-learning step, whose config is its own type."""
+
+    step: CraftaxPQNTrainStep.Config = field(
+        default_factory=CraftaxPQNTrainStep.Config,
+    )
+    """Recurrent Q-network, environment, and Q-learning settings."""
 
     dataset: CraftaxRollouts.Config = field(default_factory=CraftaxRollouts.Config)
     """The loop's cadence; the data lives in the step's environment."""
@@ -235,6 +249,69 @@ def exp002() -> CraftaxRNNTrainLoop:
     cfg.step.entropy_coefficient = 0.01
     cfg.step.value_coefficient = 0.5
     cfg.step.max_grad_norm = 1.0
+    cfg.step.seed = 42
+    cfg.step.model.hidden_size = 512
+
+    cfg.max_steps = cfg.step.total_train_steps = _updates(
+        interactions=1_000_000_000,
+        num_envs=cfg.step.env.num_envs,
+        rollout_steps=cfg.step.rollout_steps,
+    )
+    cfg.dataset.updates_per_epoch = int(cfg.max_steps)
+    cfg.num_steps_eval = cfg.max_steps
+    cfg.metrics = dict(parent.metrics)
+    cfg.runtime = parent.runtime
+    return cfg
+
+
+def exp003() -> CraftaxPQNTrainLoop:
+    """exp001 with no policy network at all: recurrent Q-learning.
+
+    The only experiment here that is not PPO. It learns action VALUES and
+    acts greedily on them, exploring by a decaying random-action rate rather
+    than by an entropy bonus -- and it does so without the two structures deep
+    Q-learning normally requires, a replay buffer and a target network.
+
+    Hypothesis:
+      At a thousand parallel workers the buffer is redundant, because the
+      batch is already decorrelated; and batch renormalization plus a
+      multi-step Q(lambda) target keeps the regression stable enough to drop
+      the target network. If that holds, a value method reaches PPO-RNN's
+      score, which would say the policy gradient was never the essential part.
+
+    Not carried over from the JAX exp003:
+      Nothing architectural. Its 128-step rollouts, 4 minibatches, RAdam, and
+      epsilon schedule are all here.
+
+    References:
+      https://arxiv.org/abs/2407.04811
+      Gallici et al. 2024. Simplifying deep temporal difference learning.
+      https://github.com/mttga/purejaxql
+
+    Results:
+      TBD. The JAX study never ran this at 1B: its canary projected 36
+      H100-hours. The public baseline reports about 16.0 normalized return.
+
+    """
+    parent = exp001()
+    cfg = CraftaxPQNTrainLoop()
+    cfg.study_name = parent.study_name
+    cfg.experiment_name = "exp003"
+
+    cfg.step.env.num_envs = 1_024
+    cfg.step.env.seed = 42
+    cfg.step.env.optimistic_reset_ratio = 16
+    cfg.step.rollout_steps = 128
+    cfg.step.num_epochs = 4
+    cfg.step.num_minibatches = 4
+    cfg.step.learning_rate = 3e-4
+    cfg.step.anneal_learning_rate = True
+    cfg.step.discount = 0.99
+    cfg.step.trace_decay = 0.5
+    cfg.step.epsilon_start = 1.0
+    cfg.step.epsilon_finish = 0.005
+    cfg.step.epsilon_decay_fraction = 0.1
+    cfg.step.max_grad_norm = 0.5
     cfg.step.seed = 42
     cfg.step.model.hidden_size = 512
 
