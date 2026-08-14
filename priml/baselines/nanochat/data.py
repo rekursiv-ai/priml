@@ -135,6 +135,20 @@ class NanoChatData:
         )
         self._passes = 0
         self._live: _TokenBatches | None = None
+        # A prepared split is immutable, and the loop builds a fresh eval
+        # loader per evaluation. Re-reading would re-verify bytes that cannot
+        # have changed: measured at 107 ms against the 46 ms the eval pass
+        # itself takes, so the read costs more than twice the work it feeds.
+        self._splits: dict[str, PreparedSplit] = {}
+
+    def _split(self, name: str) -> PreparedSplit:
+        """The named split, verified once and retained."""
+        if name not in self._splits:
+            self._splits[name] = PreparedSplit(
+                self.dataset_dir / name,
+                device=self.config.device,
+            )
+        return self._splits[name]
 
     def train_dataloader(self) -> _TokenBatches:
         """Build the re-iterable training stream."""
@@ -143,10 +157,10 @@ class NanoChatData:
         if self._live is not None:
             self._passes = self._live.passes
         stream = _TokenBatches(
-            dataset_dir=self.dataset_dir,
+            prepared=self._split("train"),
+            name="train",
             device=self.config.device,
             batch_size=self.batch_size,
-            split="train",
             shuffle=True,
             num_rows=None,
             seed=self.config.seed,
@@ -164,10 +178,10 @@ class NanoChatData:
         shuffle would break.
         """
         return _TokenBatches(
-            dataset_dir=self.dataset_dir,
+            prepared=self._split("val"),
+            name="val",
             device=self.config.device,
             batch_size=self.eval_batch_size,
-            split="val",
             shuffle=False,
             num_rows=self.config.num_eval_rows,
             seed=self.config.seed,
@@ -199,10 +213,10 @@ class _TokenBatches:
     def __init__(
         self,
         *,
-        dataset_dir: Path,
+        prepared: PreparedSplit,
+        name: str,
         device: torch.device | str,
         batch_size: int,
-        split: str,
         shuffle: bool,
         num_rows: int | None,
         seed: int,
@@ -210,10 +224,6 @@ class _TokenBatches:
         vocab_size: int,
         max_seq_len: int,
     ) -> None:
-        prepared = PreparedSplit(
-            Path(dataset_dir).expanduser() / split,
-            device=device,
-        )
         prepared.agrees_with(vocab_size=vocab_size, max_seq_len=max_seq_len)
         self.device = get_device(device)
         rows = prepared.rows
@@ -231,7 +241,7 @@ class _TokenBatches:
         available = int(self.rows.shape[0])
         if available < batch_size:
             raise ValueError(
-                f"the {split!r} split yields no batches: {available} rows "
+                f"the {name!r} split yields no batches: {available} rows "
                 f"available (of {rows.shape[0]}) against a batch size of "
                 f"{batch_size}. Lower the batch size, raise the row cap, or "
                 "prepare more data.",

@@ -427,6 +427,12 @@ class NanoChatLM(nn.Module):
             for layer, block in enumerate(self.blocks):
                 propagate_attr(block, "channels_in", self.channels, protocol=ChannelsIn)
                 propagate_attr(block, "depth", layer)
+            # The value-embedding tables and the rotary factors are built ONCE,
+            # to layer 0's geometry, then handed to every layer -- so a stack
+            # whose layers disagree on head shape is a contradiction fixed at
+            # construction. Left to run time it surfaces as a reshape failure
+            # inside the forward, naming a size rather than the layer.
+            _reject_ragged_heads(self.blocks, channels=self.channels)
             propagate_attr(self.embedding, "channels_out", self.channels)
             propagate_attr(self.embedding, "num_embeddings", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels)
@@ -608,6 +614,35 @@ def attention_width(block: Makeable[nn.Module], channels: int) -> int:
     heads = getattr(attention, "heads", None)
     width = head_width(block, channels)
     return heads * width if isinstance(heads, int) and heads > 0 else channels
+
+
+def _reject_ragged_heads(
+    blocks: list[Makeable[nn.Module]],
+    *,
+    channels: int,
+) -> None:
+    """Raise unless every block agrees on its attention's head geometry.
+
+    Args:
+      blocks: The per-layer block configs.
+      channels: Model width, the fallback for a block declaring no heads.
+
+    Raises:
+      ValueError: Two layers declare different head shapes. The model sizes its
+        shared tensors from layer 0, so the disagreement is unbuildable -- and
+        naming it here beats a reshape error deep inside the forward.
+
+    """
+    shapes = {
+        (head_width(block, channels), attention_width(block, channels))
+        for block in blocks
+    }
+    if len(shapes) > 1:
+        raise ValueError(
+            "every block must declare the same attention head geometry, since "
+            "the value embeddings and rotary factors are shared across layers; "
+            f"got (channels_head, heads * channels_head) of {sorted(shapes)}.",
+        )
 
 
 def _window_mask(length: int, *, window: int, device: torch.device) -> Tensor | None:
