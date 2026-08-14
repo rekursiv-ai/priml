@@ -54,6 +54,15 @@ hub = [
     "transformers>=4.57.0",
 ]
 
+# Corpus preparation for the nanochat baseline (BPE fitting, parquet reads).
+# Opt-in: training reads flat arrays, so an install that only trains needs
+# none of these. Install via `pip install priml[data-prep]`.
+data-prep = [
+    "pyarrow",
+    "rustbpe",
+    "tiktoken",
+]
+
 [dependency-groups]
 # uv sync --all-groups
 
@@ -77,9 +86,8 @@ test = [
 typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.60",
-    # safetensors is TYPE_CHECKING-imported in hub.py; install it (py.typed) so
-    # the type gate resolves it without shipping it as a core dep.
     "safetensors",
+    "tiktoken",
 ]
 "pre-commit" = [
     {include-group = "lint"},

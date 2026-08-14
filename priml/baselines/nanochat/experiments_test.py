@@ -1,0 +1,122 @@
+"""Tests for the nanochat experiment ladder.
+
+Each test asserts the DELTA a fork applies, which is what enforces one change
+per experiment: a fork that quietly moved a second knob fails here rather than
+producing a result nobody can attribute.
+
+Every test builds configs only -- no data, no device, no training -- so the
+ladder stays checkable on any machine.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import pytest
+
+from priml.baselines.nanochat import experiments
+from priml.baselines.nanochat.experiments import NanoChatLoop
+from priml.baselines.nanochat.metric import BitsPerByte
+from priml.baselines.nanochat.train_step import NanoChatTrainStep
+
+
+LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
+    ("exp000", experiments.exp000),
+    ("exp001", experiments.exp001),
+    ("exp002", experiments.exp002),
+    ("exp_smoke", experiments.exp_smoke),
+]
+
+
+@pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
+def test_every_experiment_finalizes(
+    name: str,
+    factory: Callable[[], NanoChatLoop.Config],
+) -> None:
+    """A config must build without a dataset or a GPU."""
+    config = factory().copy_tree().finalize()
+    assert config.experiment_name == name
+    assert config.study_name == "nanochat"
+
+
+def test_exp000_turns_both_mechanisms_off() -> None:
+    """The baseline must be the bar, not a third variant.
+
+    If exp000 already windowed its attention, exp001 would measure nothing and
+    the ladder's comparison would be against an unstated recipe.
+    """
+    cfg = experiments.exp000()
+    assert cfg.step.model.window_pattern == "L"
+    assert cfg.step.model.value_embedding_layers == []
+
+
+def test_exp001_changes_only_the_window() -> None:
+    base, fork = experiments.exp000(), experiments.exp001()
+    assert base.step.model.window_pattern == "L"
+    assert fork.step.model.window_pattern == "SSSL"
+    assert fork.step.model.value_embedding_layers == (
+        base.step.model.value_embedding_layers
+    )
+    assert fork.step.time_budget_sec == base.step.time_budget_sec
+    assert fork.step.model.channels == base.step.model.channels
+
+
+def test_exp002_changes_only_the_value_embeddings() -> None:
+    base, fork = experiments.exp001(), experiments.exp002()
+    assert base.step.model.value_embedding_layers == []
+    assert fork.step.model.value_embedding_layers
+    assert fork.step.model.window_pattern == base.step.model.window_pattern
+    assert fork.step.time_budget_sec == base.step.time_budget_sec
+
+
+def test_the_budget_and_the_schedule_horizon_agree() -> None:
+    """A schedule annealing past the stop wastes the tail; short of it, the
+    run trains its last steps at a rate the recipe never intended.
+    """
+    for name, factory in LADDER:
+        config = factory()
+        assert config.max_time == config.step.time_budget_sec, name
+        assert config.max_time_kind == "train", name
+
+
+def test_the_loop_reads_the_steps_budget_clock() -> None:
+    """Stop condition, reported time, and schedules must share one clock.
+
+    ``TrainLoop`` rebases after one step; this baseline excludes a configured
+    warmup. If the loop kept its own clock the run would anneal against one
+    budget and stop on another, differing by the whole warmup.
+    """
+    loop = NanoChatLoop.__new__(NanoChatLoop)
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.elapsed_sec = 12.5
+    loop.step = step
+    assert loop._train_elapsed() == 12.5
+
+
+def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
+    """Two places naming the same number silently disagree; one propagates."""
+    config = experiments.exp000()
+    config.step.rows_per_pass = 8
+    assert config.copy_tree().finalize().dataset.batch_size == 8
+
+
+def test_the_score_is_bits_per_byte() -> None:
+    """A per-token score would rank a coarser tokenizer better for free."""
+    assert isinstance(experiments.exp000().metrics["val"], BitsPerByte.Config)
+
+
+def test_smoke_is_small_on_every_costly_axis() -> None:
+    """It answers "does this run", so anything not bearing on that is cut."""
+    smoke, base = experiments.exp_smoke(), experiments.exp000()
+    assert smoke.step.time_budget_sec < base.step.time_budget_sec
+    assert smoke.step.model.channels < base.step.model.channels
+    assert smoke.step.model.num_layers < base.step.model.num_layers
+    assert smoke.step.model.max_seq_len < base.step.model.max_seq_len
+    assert not smoke.step.compile
+    assert smoke.max_steps < base.max_steps
+
+
+if __name__ == "__main__":
+    from priml.lib.testing import test_main
+
+    test_main(__file__)

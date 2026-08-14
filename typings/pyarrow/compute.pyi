@@ -1,0 +1,3 @@
+from typing import Any
+
+def equal(left: Any, right: Any) -> Any: ...

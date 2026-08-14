@@ -42,7 +42,7 @@ def test_get_cache_dir() -> None:
     """get_cache_dir returns the XDG per-user models cache."""
     with patch("pathlib.Path.mkdir"):
         models_dir = get_cache_dir()
-    assert models_dir == cache_dir("rekursiv-ai") / "models"
+    assert models_dir == cache_dir() / "rekursiv-ai" / "models"
 
 
 def test_get_cache_dir_creates_directory():
