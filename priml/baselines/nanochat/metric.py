@@ -80,7 +80,19 @@ class BitsPerByte:
         self.bytes += int(lengths[counted].sum().item())
 
     def compute(self) -> dict[str, float]:
-        """Return bits per byte, summed across ranks first."""
+        """Return bits per byte, summed across ranks first.
+
+        Returns:
+          metrics: ``{"bpb": <bits per byte>}``; lower is better.
+
+        Raises:
+          ValueError: Nothing was scored. Returning a number here would return
+            ZERO -- the best possible value -- so an eval that silently yielded
+            no batches would win every comparison it entered instead of failing.
+            The usual cause is a row cap below one batch width, since a short
+            final batch is dropped rather than padded.
+
+        """
         totals = torch.tensor([self.nats, float(self.bytes)], dtype=torch.float64)
         if dist.is_available() and dist.is_initialized():
             # NCCL reduces only CUDA tensors; gloo only CPU ones. Move for the
@@ -90,7 +102,12 @@ class BitsPerByte:
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
             totals = totals.cpu()
         nats, counted = totals.tolist()
-        return {"bpb": nats / (math.log(2) * counted) if counted else 0.0}
+        if counted <= 0:
+            raise ValueError(
+                "bits per byte has no scored tokens: the evaluation produced "
+                "no batches carrying byte-bearing targets.",
+            )
+        return {"bpb": nats / (math.log(2) * counted)}
 
     def state_dict(self) -> dict[str, Any]:
         """Return the accumulated sums."""

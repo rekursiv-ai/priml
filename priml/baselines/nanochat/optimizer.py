@@ -227,7 +227,7 @@ class NorMuon(Optimizer):
             )
         stacked_grads = torch.stack([_gradient(p) for p in params])
         stacked_params = torch.stack(list(params))
-        _norvmuon_update(
+        _normuon_update(
             stacked_grads,
             stacked_params,
             state["momentum_buffer"],
@@ -262,7 +262,7 @@ def _gradient(parameter: Tensor) -> Tensor:
     return grad
 
 
-def _norvmuon_update(
+def _normuon_update(
     stacked_grads: Tensor,
     stacked_params: Tensor,
     momentum_buffer: Tensor,

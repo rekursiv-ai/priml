@@ -67,6 +67,12 @@ class NanoChatLoop(TrainLoop):
             # follows device memory -- so the dataset takes its batch size from
             # there rather than the two being set to agree by hand.
             self.dataset.batch_size = self.step.rows_per_pass
+            # Geometry is declared ONCE, on the model, and pushed here so the
+            # dataset can verify the prepared arrays against it at load. Two
+            # independently-typed copies would agree only by coincidence, and
+            # disagree deep inside a forward pass.
+            self.dataset.vocab_size = self.step.model.vocab_size
+            self.dataset.max_seq_len = self.step.model.max_seq_len
             return super().finalize()
 
     @override

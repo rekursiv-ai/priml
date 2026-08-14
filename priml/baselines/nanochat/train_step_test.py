@@ -108,6 +108,33 @@ def test_a_token_batch_no_whole_number_of_passes_reaches_is_rejected() -> None:
         config.copy_tree().finalize()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rows_per_pass", 0),
+        ("rows_per_pass", -1),
+        ("tokens_per_optimizer_step", 0),
+        ("tokens_per_optimizer_step", -1),
+        ("gradient_clip_norm", -1.0),
+        ("divergence_threshold", 0.0),
+    ],
+)
+def test_an_invalid_geometry_is_rejected_by_name(field: str, value: float) -> None:
+    """Every bound states its own field, at config time.
+
+    ``tokens_per_optimizer_step=0`` is the sharp one: it passes a divisibility
+    check, then makes ``accumulate_passes`` zero, so the run divides the loss
+    by zero rather than ever stepping. ``rows_per_pass=0`` reaches a modulo by
+    zero inside ``finalize``, which also runs from ``pprint`` -- so a bare
+    ZeroDivisionError there hides the whole config a reader was inspecting.
+    """
+    config = NanoChatTrainStep.Config()
+    config.model.max_seq_len = 8
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=field):
+        config.copy_tree().finalize()
+
+
 def test_the_budget_clock_excludes_warmup_steps() -> None:
     """Compilation must not consume the budget it is supposed to precede."""
     step = _step(budget_warmup_steps=2)
@@ -117,6 +144,27 @@ def test_the_budget_clock_excludes_warmup_steps() -> None:
     assert step.elapsed_sec == 0.0
     step.train_step(**batch)
     assert step.elapsed_sec > 0.0
+
+
+def test_resuming_does_not_rerun_the_budget_warmup() -> None:
+    """A resumed run must not get free, uncharged training.
+
+    The warmup exclusion is gated on ``local_step``, so a resume that reset it
+    would grant ``budget_warmup_steps`` more steps that cost no budget -- and a
+    run resumed often enough would train unboundedly on a fixed budget, which
+    is exactly the comparison this baseline exists to make.
+    """
+    step = _step(budget_warmup_steps=2)
+    batch = _batch()
+    for _ in range(4):  # two warmup, two charged
+        step.train_step(**batch)
+    charged = step.elapsed_sec
+    assert charged > 0.0
+
+    resumed = _step(budget_warmup_steps=2)
+    resumed.load_state_dict(step.state_dict())
+    resumed.train_step(**batch)
+    assert resumed.elapsed_sec > charged
 
 
 def test_progress_drives_the_learning_rate() -> None:
@@ -166,6 +214,24 @@ def test_divergence_raises_rather_than_burning_the_budget() -> None:
     step = _step(divergence_threshold=1e-6)
     with pytest.raises(RuntimeError, match="diverged"):
         step.train_step(**_batch())
+
+
+def test_divergence_clears_the_pending_accumulation() -> None:
+    """A caught divergence must not leave half a token batch behind.
+
+    The guard zeroes the gradients, so the passes already accumulated are gone;
+    leaving their COUNT would make the next update fire early, on a token batch
+    smaller than the one the recipe is tuned against -- the invariant the
+    divisibility check in ``finalize`` exists to hold.
+    """
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update
+    step.train_step(**_batch())
+    assert step._pending_passes == 1
+
+    step.config.divergence_threshold = 1e-6
+    with pytest.raises(RuntimeError, match="diverged"):
+        step.train_step(**_batch())
+    assert step._pending_passes == 0
 
 
 def test_eval_returns_per_token_loss_for_the_metric() -> None:

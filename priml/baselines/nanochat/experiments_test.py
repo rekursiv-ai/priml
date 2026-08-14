@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import math
+
 import pytest
 
 from priml.baselines.nanochat import experiments
@@ -100,6 +102,18 @@ def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
     assert config.copy_tree().finalize().dataset.batch_size == 8
 
 
+def test_the_dataset_inherits_the_models_geometry() -> None:
+    """The model declares the geometry; the dataset verifies data against it.
+
+    Without the push the two are independent copies agreeing only by coincident
+    defaults, so ``exp_smoke`` -- which narrows the model -- would load rows of
+    a width nothing checked.
+    """
+    config = experiments.exp_smoke().copy_tree().finalize()
+    assert config.dataset.max_seq_len == config.step.model.max_seq_len
+    assert config.dataset.vocab_size == config.step.model.vocab_size
+
+
 def test_the_score_is_bits_per_byte() -> None:
     """A per-token score would rank a coarser tokenizer better for free."""
     assert isinstance(experiments.exp000().metrics["val"], BitsPerByte.Config)
@@ -113,7 +127,10 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     assert smoke.step.model.num_layers < base.step.model.num_layers
     assert smoke.step.model.max_seq_len < base.step.model.max_seq_len
     assert not smoke.step.compile
-    assert smoke.max_steps < base.max_steps
+    # A finite bound: exp000 stops on its time budget and leaves max_steps at
+    # infinity, against which any value would compare smaller.
+    assert smoke.max_steps < 100
+    assert math.isinf(base.max_steps)
 
 
 if __name__ == "__main__":

@@ -221,6 +221,25 @@ class NanoChatTrainStep:
                     "momentum_warmup_steps must be positive; got "
                     f"{self.momentum_warmup_steps}.",
                 )
+            if self.rows_per_pass <= 0:
+                raise ValueError(
+                    f"rows_per_pass must be positive; got {self.rows_per_pass}.",
+                )
+            if self.tokens_per_optimizer_step <= 0:
+                raise ValueError(
+                    "tokens_per_optimizer_step must be positive; got "
+                    f"{self.tokens_per_optimizer_step}.",
+                )
+            if self.gradient_clip_norm <= 0:
+                raise ValueError(
+                    f"gradient_clip_norm must be positive; got "
+                    f"{self.gradient_clip_norm}. Infinite disables clipping.",
+                )
+            if self.divergence_threshold <= 0:
+                raise ValueError(
+                    "divergence_threshold must be positive; got "
+                    f"{self.divergence_threshold}.",
+                )
             tokens_per_pass = self.rows_per_pass * self.model.max_seq_len
             if self.tokens_per_optimizer_step % tokens_per_pass:
                 raise ValueError(
@@ -295,6 +314,10 @@ class NanoChatTrainStep:
         loss_value = float(loss.detach())
         if not math.isfinite(loss_value) or loss_value > config.divergence_threshold:
             self.raw_model.zero_grad(set_to_none=True)
+            # The gradients this count refers to were just discarded, so the
+            # count goes with them: a caller that caught this and continued
+            # would otherwise step on a short token batch.
+            self._pending_passes = 0
             raise RuntimeError(
                 f"training diverged at step {self.global_step}: loss={loss_value}.",
             )
@@ -350,11 +373,17 @@ class NanoChatTrainStep:
         The elapsed clock is checkpointed because it drives every schedule: a
         resumed run that restarted it would re-anneal the learning rate from
         the top and undo the decay it had already applied.
+
+        ``local_step`` travels with it because it GATES that clock: the warmup
+        exclusion is "the first N steps of the process", and a resume that
+        reset the counter would grant N more steps costing no budget, so a
+        frequently-resumed run would train unboundedly on a fixed budget.
         """
         return {
             "model": self.raw_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "global_step": self.global_step,
+            "local_step": self.local_step,
             "elapsed_sec": self.elapsed_sec,
         }
 
@@ -364,7 +393,7 @@ class NanoChatTrainStep:
         self.optimizer.load_state_dict(state_dict["optimizer"])
         self.global_step = int(state_dict["global_step"])
         self.elapsed_sec = float(state_dict["elapsed_sec"])
-        self.local_step = 0
+        self.local_step = int(state_dict["local_step"])
         self._pending_passes = 0
 
     def _apply_update(self) -> dict[str, float | Tensor]:

@@ -97,8 +97,15 @@ def test_a_shape_disagreement_is_rejected() -> None:
         )
 
 
-def test_empty_metric_reports_zero_not_a_division_error() -> None:
-    assert _metric().compute() == {"bpb": 0.0}
+def test_an_empty_eval_refuses_rather_than_scoring_zero() -> None:
+    """Zero is the BEST possible score, so an empty eval must not report it.
+
+    Lower is better here, so a run whose eval loader yielded nothing -- a cap
+    below one batch, a misconfigured split -- would otherwise win every
+    comparison it entered, and look like a result rather than a failure.
+    """
+    with pytest.raises(ValueError, match="no scored tokens"):
+        _metric().compute()
 
 
 def test_state_round_trips() -> None:
@@ -114,6 +121,7 @@ def test_state_round_trips() -> None:
 
 
 def test_reset_clears_both_sums() -> None:
+    """After a reset the metric holds nothing, so it refuses to score."""
     metric = _metric()
     metric.update(
         torch.full((1, 2), math.log(2)),
@@ -121,7 +129,9 @@ def test_reset_clears_both_sums() -> None:
         token_bytes=torch.tensor([0, 1]),
     )
     metric.reset()
-    assert metric.compute() == {"bpb": 0.0}
+    assert metric.state_dict() == {"nats": 0.0, "bytes": 0}
+    with pytest.raises(ValueError, match="no scored tokens"):
+        metric.compute()
 
 
 if __name__ == "__main__":

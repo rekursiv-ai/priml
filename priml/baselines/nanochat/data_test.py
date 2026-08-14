@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.nanochat.data import NanoChatData
+from priml.baselines.nanochat.data import NanoChatData, token_bytes_fingerprint
 
 
 VOCAB = 16
@@ -32,7 +32,13 @@ def dataset_dir(tmp_path: Path) -> Path:
         lengths[0] = 0
         np.save(directory / "all__token_bytes.npy", lengths)
         (directory / "dataset.json").write_text(
-            json.dumps({"vocab_size": VOCAB, "max_seq_len": SEQ}),
+            json.dumps(
+                {
+                    "vocab_size": VOCAB,
+                    "max_seq_len": SEQ,
+                    "token_bytes_sha256": token_bytes_fingerprint(lengths),
+                },
+            ),
         )
     return tmp_path
 
@@ -121,16 +127,98 @@ def test_evaluation_rows_can_be_capped(dataset_dir: Path) -> None:
     assert sum(b["media"].shape[0] for b in batches) == 2
 
 
+def test_a_byte_table_that_does_not_match_its_fingerprint_is_rejected(
+    dataset_dir: Path,
+) -> None:
+    """The byte table IS the score's denominator, so its identity is recorded.
+
+    Two tables of equal length silently reprice every token: a change to byte
+    accounting shifts BPB by roughly a real candidate effect while every shape
+    check still passes, and two runs become incomparable with nothing on disk
+    to tell them apart.
+    """
+    lengths = np.ones(VOCAB, dtype=np.int32)
+    lengths[0] = 0
+    lengths[3] = 7  # same shape, different accounting
+    np.save(dataset_dir / "val" / "all__token_bytes.npy", lengths)
+    with pytest.raises(ValueError, match="fingerprint"):
+        list(_data(dataset_dir).eval_dataloader())
+
+
 def test_a_byte_table_disagreeing_with_the_metadata_is_rejected(
     dataset_dir: Path,
 ) -> None:
-    """A stale table would silently misprice every token in the score."""
+    """A stale table would silently misprice every token in the score.
+
+    A wrong-LENGTH table trips the fingerprint first, since the identity check
+    runs before the shape one; either way it never reaches the score.
+    """
     np.save(
         dataset_dir / "val" / "all__token_bytes.npy",
         np.ones(VOCAB + 1, dtype=np.int32),
     )
-    with pytest.raises(ValueError, match="byte table"):
+    with pytest.raises(ValueError, match=r"fingerprint|byte table"):
         list(_data(dataset_dir).eval_dataloader())
+
+
+def test_data_narrower_than_the_model_is_rejected_at_load(dataset_dir: Path) -> None:
+    """Prepared rows must be the context the model declares.
+
+    Otherwise the mismatch surfaces deep in the forward as "Input length 2048
+    exceeds max_seq_len=128", naming only the model's side and never the
+    directory that produced the rows.
+    """
+    with pytest.raises(ValueError, match="max_seq_len"):
+        list(_data(dataset_dir, max_seq_len=SEQ * 2).train_dataloader())
+
+
+def test_a_token_id_outside_the_vocabulary_is_rejected_at_load(
+    dataset_dir: Path,
+) -> None:
+    """A row indexing past the embedding must fail here, not in a matmul."""
+    with pytest.raises(ValueError, match="vocab_size"):
+        list(_data(dataset_dir, vocab_size=VOCAB // 2).train_dataloader())
+
+
+def test_declared_geometry_matching_the_data_loads(dataset_dir: Path) -> None:
+    """The check must accept the agreeing case, or it blocks every real run."""
+    data = _data(dataset_dir, vocab_size=VOCAB, max_seq_len=SEQ)
+    batch = next(iter(data.train_dataloader()))
+    assert batch["media"].shape == (2, SEQ)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("batch_size", 0),
+        ("batch_size", -1),
+        ("eval_batch_size", 0),
+        ("eval_batch_size", -1),
+        ("num_eval_rows", 0),
+        ("num_eval_rows", -1),
+    ],
+)
+def test_a_nonpositive_size_is_rejected_by_name(
+    dataset_dir: Path,
+    field: str,
+    value: int,
+) -> None:
+    """Each bound names its own field, and none is silently absorbed.
+
+    ``eval_batch_size=0`` is the one that bites hardest: zero is FALSY, so an
+    ``or`` fallback would quietly evaluate at the training batch size and still
+    report a number. ``num_eval_rows=-1`` would silently mean "all but the last
+    row" rather than an invalid cap.
+    """
+    with pytest.raises(ValueError, match=field):
+        _data(dataset_dir, **{field: value})
+
+
+def test_an_omitted_eval_batch_size_still_reuses_the_train_one(
+    dataset_dir: Path,
+) -> None:
+    """``None`` is the sentinel; rejecting 0 must not break the real default."""
+    assert _data(dataset_dir, eval_batch_size=None).eval_batch_size == 2
 
 
 def test_missing_data_names_the_preparer(tmp_path: Path) -> None:
