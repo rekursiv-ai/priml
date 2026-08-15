@@ -41,7 +41,6 @@ import torch
 from priml.baselines.nanochat.data import IGNORED_TARGET
 from priml.baselines.nanochat.model import NanoChatLM
 from priml.baselines.nanochat.optimizer import NorMuon
-from priml.model.custom_types import propagate_attr
 from priml.optimizers import CompositeOptimizer, FusedAdamW, apply_lr_scale
 from priml.optimizers.composite import Selector, excluding, matching
 from priml.runtime import get_device
@@ -286,13 +285,14 @@ class NanoChatTrainStep:
         """Autocast dtype; ``None`` trains in full precision."""
 
         compile: bool = True
-        """Compile the model with ``torch.compile``.
+        """Compile the MODEL with ``torch.compile``.
 
-        Reaches the OPTIMIZER's kernels too, pushed down at finalize. Their
-        compile is charged to the first step that steps them -- measured at
-        10.9s for the orthogonalizing member -- so a run declaring itself
-        uncompiled and then paying that anyway spends a short budget entirely
-        on compilation and anneals every later step to lr=0."""
+        The optimizer's kernels are not covered by this and must not be: a
+        compiled step and an eager one differ numerically (measured, 2.9e-2 on
+        one update), so the reference's compiled kernel is part of the recipe
+        rather than a speed switch. Each optimizer member carries its own
+        ``compiled`` field for that reason -- turning this off to skip the
+        model's compile would otherwise silently change the arithmetic."""
 
         adam_lr_tuned_at_channels: int = 768
         """Width the Adam rates in ``optimizer`` were fitted at.
@@ -373,24 +373,13 @@ class NanoChatTrainStep:
             # field is then set to the model's width, so a second finalize is a
             # no-op rather than a second rescale.
             if isinstance(self.optimizer, CompositeOptimizer.Config):
-                # One switch, pushed rather than restated per member: an
-                # optimizer's compile is charged to the first step that steps
-                # it, so a config saying "do not compile" while a member does
-                # anyway spends a short budget on compilation. A PartialConfig
-                # holds kwargs rather than fields, so setting an attribute on
-                # it would be silently dropped -- it takes the keyword instead.
-                for member in self.optimizer.optimizers:
-                    if isinstance(member, PartialConfig):
-                        member.compiled = self.compile
-                    else:
-                        propagate_attr(member, "compiled", self.compile)
                 for member in self.optimizer.optimizers:
                     if not isinstance(member, PartialConfig):
                         continue
                     # Popped, not read: the flag tells THIS method whether the
                     # rate scales, and the optimizer it is attached to would
                     # reject it as an unexpected keyword.
-                    kwargs = member._kwargs  # noqa: SLF001
+                    kwargs = member._kwargs  # noqa: SLF001 -- PartialConfig exposes no accessor for its keywords
                     scales = kwargs.pop("width_scaled", False)
                     rate = kwargs.get("lr")
                     # An exempt member steps a per-layer scalar rather than a

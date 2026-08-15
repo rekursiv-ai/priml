@@ -27,6 +27,7 @@ from priml.baselines.nanochat.experiments import NanoChatLoop
 from priml.baselines.nanochat.flash3 import Flash3Attention
 from priml.baselines.nanochat.metric import BitsPerByte
 from priml.baselines.nanochat.model import ValueGatedAttention
+from priml.baselines.nanochat.optimizer import NorMuon
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
 from priml.optimizers import CompositeOptimizer
 
@@ -308,28 +309,23 @@ def test_smoke_differs_from_exp001_only_in_size() -> None:
     assert type(smoke_attn.kernel) is type(base_attn.kernel)
 
 
-def test_the_optimizers_compile_follows_the_steps() -> None:
-    """A member compiling anyway spends a short run's whole budget on it.
+def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
+    """A compiled optimizer step and an eager one are different arithmetic.
 
-    Both members' kernels compile lazily, inside the timed window, and the
-    orthogonalizing one costs ~10.9s -- so ``exp_smoke``, which declares no
-    warmup and a ten-second budget, would reach step two with the budget gone
-    and every later step annealed to lr=0.
+    ``exp_smoke`` turns the model's compile off to start quickly. If that
+    reached the optimizer, the rung would stop reproducing the reference --
+    whose kernels are compiled -- and the goldens minted over it would freeze
+    numbers no shipped experiment computes.
     """
-    for factory, expected in (
-        (experiments.exp_smoke, False),
-        (experiments.exp001, True),
-    ):
-        config = factory().copy_tree().finalize()
-        optimizer = config.step.optimizer
+    for factory in (experiments.exp_smoke, experiments.exp001):
+        optimizer = factory().copy_tree().finalize().step.optimizer
         assert isinstance(optimizer, CompositeOptimizer.Config)
         for member in optimizer.optimizers:
-            got = (
-                member._kwargs.get("compiled")
-                if isinstance(member, PartialConfig)
-                else getattr(member, "compiled", None)
-            )
-            assert got is expected, (factory.__name__, member)
+            if isinstance(member, PartialConfig):
+                assert member._kwargs.get("compile", True) is True, factory.__name__
+            else:
+                assert isinstance(member, NorMuon.Config)
+                assert member.compile is True, factory.__name__
 
 
 if __name__ == "__main__":

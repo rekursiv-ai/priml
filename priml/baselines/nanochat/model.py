@@ -245,7 +245,12 @@ class ValueGatedAttention(nn.Module):
         """Per-head width."""
 
         gate_channels: int = 32
-        """Input channels feeding the value gate, clamped to the model width."""
+        """Input channels feeding the value gate; -1 reads the whole stream.
+
+        A fixed slice rather than the model width, so the gate costs the same
+        few weights at any size. It must therefore fit: a value wider than the
+        model is rejected instead of clamped, since clamping would silently
+        build a gate of a shape the recipe never specified."""
 
         norm_qk: Makeable[TensorModule] = field(
             default_factory=lambda: RMSNorm.Config(elementwise_affine=False),
@@ -296,7 +301,14 @@ class ValueGatedAttention(nn.Module):
                         f"channels_head={self.channels_head}; set heads.",
                     )
                 self.heads = self.channels_in // self.channels_head
-            self.gate_channels = min(self.gate_channels, self.channels_in)
+            if self.gate_channels == -1:
+                self.gate_channels = self.channels_in
+            if not 0 < self.gate_channels <= self.channels_in:
+                raise ValueError(
+                    f"gate_channels={self.gate_channels} must be positive and "
+                    f"at most channels_in={self.channels_in}; the gate reads "
+                    "that many leading channels of the layer input.",
+                )
             # The norm sees one HEAD, not the residual stream, so it takes the
             # head width rather than the model width the block propagated.
             propagate_attr(
