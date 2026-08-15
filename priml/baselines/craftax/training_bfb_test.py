@@ -124,10 +124,18 @@ def _build_trace() -> nn.Module:
     config.num_minibatches = 2
     config.total_train_steps = 8
     config.learning_rate = 3e-3
-    # Two hidden units: the observation is 8,268 wide, so the first layer's
-    # weights dominate the golden's size on disk. The width does not change
-    # what is covered -- every op in the update still runs -- and keeps the
-    # committed fixture small.
+    # TWO hidden units, and not one. A width-1 axis broadcasts against
+    # anything, so a transposed or mis-ordered tensor still lines up and the
+    # golden records the wrong arithmetic as correct; two is the narrowest
+    # width at which a shape error is a shape error.
+    #
+    # That width is also what the committed file costs. The observation is
+    # 8,268 wide, so the first layer is 8,268 floats per unit per tower,
+    # stored twice (pre- and post-update) -- and ``randomize_parameters``
+    # fills every weight with noise, so there is nothing for compression to
+    # find. Narrowing the INPUT would shrink it further and is refused: the
+    # golden would stop pinning the geometry the environment actually
+    # renders.
     config.model.hidden_size = 2
     config.model.num_layers = 1
     # Pinned, not defaulted: compiling changes which random numbers are drawn,
@@ -151,9 +159,11 @@ def test_a_whole_ppo_update_matches_the_golden(device: str) -> None:
 
 def test_the_golden_is_small_enough_to_keep_in_git() -> None:
     # Goldens live in the repository, so one that grew to a model checkpoint
-    # would be a payload, not a fixture.
+    # would be a payload, not a fixture. The bound sits just above the actual
+    # size, which is almost entirely first-layer weights, so a widening that
+    # doubles it has to be deliberate.
     golden = _GOLDEN_DIR / "craftax_ppo_training_v1.pt"
-    assert golden.stat().st_size < 400_000
+    assert golden.stat().st_size < 300_000
 
 
 def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:
