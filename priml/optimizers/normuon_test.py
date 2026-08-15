@@ -7,7 +7,7 @@ from collections.abc import Callable
 import pytest
 import torch
 
-from priml.baselines.nanochat.optimizer import NorMuon
+from priml.optimizers import NorMuon
 
 
 def _parameters(*shapes: tuple[int, ...]) -> list[torch.nn.Parameter]:

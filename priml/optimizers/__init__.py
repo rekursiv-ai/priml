@@ -22,6 +22,7 @@ from priml.optimizers.composite import (
 from priml.optimizers.fused_adamw import FusedAdamW
 from priml.optimizers.muon import Muon
 from priml.optimizers.newton import Newton
+from priml.optimizers.normuon import NorMuon
 from priml.optimizers.sign_sgd import SignSGD
 
 
@@ -31,6 +32,7 @@ __all__ = [
     "FusedAdamW",
     "Muon",
     "Newton",
+    "NorMuon",
     "Selector",
     "SignSGD",
     "apply_lr_scale",

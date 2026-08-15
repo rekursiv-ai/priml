@@ -38,9 +38,9 @@ import torch
 
 from priml.baselines.nanochat.data import NanoChatData
 from priml.baselines.nanochat.flash3 import Flash3Attention
-from priml.baselines.nanochat.metric import BitsPerByte
 from priml.baselines.nanochat.model import ValueGatedAttention, sdpa_attention
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
+from priml.metrics import BitsPerByte
 from priml.model.norm import RMSNorm
 from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop

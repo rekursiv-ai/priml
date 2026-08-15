@@ -25,14 +25,13 @@ from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop
 from priml.baselines.nanochat.flash3 import Flash3Attention
-from priml.baselines.nanochat.metric import BitsPerByte
 from priml.baselines.nanochat.model import ValueGatedAttention
-from priml.baselines.nanochat.optimizer import NorMuon
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     nanochat_optimizer,
 )
-from priml.optimizers import CompositeOptimizer
+from priml.metrics import BitsPerByte
+from priml.optimizers import CompositeOptimizer, NorMuon
 
 
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [

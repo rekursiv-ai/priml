@@ -40,8 +40,12 @@ import torch
 
 from priml.baselines.nanochat.data import IGNORED_TARGET
 from priml.baselines.nanochat.model import NanoChatLM
-from priml.baselines.nanochat.optimizer import NorMuon
-from priml.optimizers import CompositeOptimizer, FusedAdamW, apply_lr_scale
+from priml.optimizers import (
+    CompositeOptimizer,
+    FusedAdamW,
+    NorMuon,
+    apply_lr_scale,
+)
 from priml.optimizers.composite import Selector, excluding, matching
 from priml.runtime import get_device
 from priml.train.custom_types import TrainStepOutput

@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-from priml.baselines.nanochat.metric import BitsPerByte
+from priml.metrics import BitsPerByte
 
 
 def _metric() -> BitsPerByte:
