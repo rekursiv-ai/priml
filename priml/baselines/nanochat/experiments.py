@@ -209,11 +209,12 @@ def exp001() -> NanoChatLoop.Config:
     has to refuse a machine that cannot reproduce it, which is the wrong
     behaviour for everything except that one job.
 
-    The kernels are not interchangeable at the bit level: FA3 takes the window
-    as an argument, while the portable path expresses it as a mask, and a mask
-    disqualifies every flash backend -- so three layers in four fall to the
-    memory-efficient kernel and reduce in a different order. Scores from the
-    two rungs are comparable; they are not identical.
+    ``exp000`` is the faithful reproduction and is untestable off a Hopper
+    card, so this rung is where the reproduction is actually PROVEN: the
+    reference implementation is given this same portable kernel and stepped
+    beside it, and ``scripts/karpathy_parity.py`` reports whether every
+    parameter and gradient agrees. The kernel is then common to both sides,
+    so what the comparison measures is the recipe rather than the backend.
 
     Hypothesis:
       The recipe's score comes from its architecture and its optimizer rather

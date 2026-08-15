@@ -116,7 +116,7 @@ def test_a_window_hides_distant_positions() -> None:
     config.channels_head = 8
     config.gate_channels = 4
     torch.manual_seed(0)
-    attention = config.copy_tree().finalize().make()
+    attention = config.make()
     randomize_parameters(attention, seed=1, std=0.5)
 
     x = torch.randn(2, SEQ, 16)
@@ -214,7 +214,7 @@ def test_a_uniform_stack_of_explicit_blocks_still_builds() -> None:
     config = _config()
     config.blocks = [config.block.copy_tree() for _ in range(config.num_layers)]
     torch.manual_seed(0)
-    assert config.copy_tree().finalize().make()(_tokens()).shape[-1] == VOCAB
+    assert config.make()(_tokens()).shape[-1] == VOCAB
 
 
 def test_window_sizes_always_end_long() -> None:
@@ -251,7 +251,7 @@ def test_flops_read_the_blocks_real_head_count() -> None:
             assert isinstance(variant_attention, ValueGatedAttention.Config)
             variant_attention.heads = heads
             torch.manual_seed(0)
-            built.append(variant.copy_tree().finalize().make().flops_per_token())
+            built.append(variant.make().flops_per_token())
         return built[0] - built[1]
 
     # One layer drops from SEQ to SEQ // 2 positions, at 12 * inner each.
@@ -315,10 +315,10 @@ def test_the_shipped_experiments_forward_bfb() -> None:
     """
 
     def _model() -> Any:
-        return experiments.exp_smoke().copy_tree().finalize().step.model
+        return experiments.exp_smoke().step.model
 
     def build() -> nn.Module:
-        built = _model().copy_tree().make()
+        built = _model().make()
         assert isinstance(built, NanoChatLM)
         return built
 
