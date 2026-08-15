@@ -18,7 +18,7 @@ from priml import runtime
 from priml.optimizers import lr_scale
 from priml.optimizers.muon import Muon
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- autouse fixture; imported for pytest collection
 )
 
 
@@ -238,7 +238,7 @@ def _muon_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
             (result_path / f"rank_{rank}").write_text(f"FAIL:maxdiff={max_abs:.4f}")
         else:
             (result_path / f"rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- worker subprocess; any failure must reach the parent as a file
         (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None

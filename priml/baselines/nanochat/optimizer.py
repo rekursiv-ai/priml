@@ -108,7 +108,7 @@ class NorMuon(Optimizer):
         weight_decay: float = 0.2
         """Decoupled decay, applied only where it agrees with the update."""
 
-        compiled: bool = True
+        compile: bool = True
         """Fuse the step into one compiled graph.
 
         On by default because the reference's is (``train.py:314``) and the two
@@ -118,12 +118,8 @@ class NorMuon(Optimizer):
         the compiled graph, so this is part of the recipe rather than a
         performance switch.
 
-        Off is for a run that cannot afford the compile. Measured at 10.9s on
-        first use -- which is the whole of ``exp_smoke``'s ten-second budget,
-        and is charged to it, so a short run leaves every later step at lr=0.
-
-        Spelled as the adjective, not ``compile``: as a constructor argument
-        the verb shadows the builtin."""
+        Off is for a run that cannot afford the compile -- measured at 10.9s on
+        first use, charged to the first step that steps it."""
 
         coefficients: tuple[tuple[float, float, float], ...] = (
             (8.156554524902461, -22.48329292557795, 15.878769915207462),
@@ -154,7 +150,7 @@ class NorMuon(Optimizer):
                 beta2=final.beta2,
                 ns_steps=final.ns_steps,
                 weight_decay=final.weight_decay,
-                compiled=final.compiled,
+                compile=final.compile,
                 coefficients=final.coefficients,
             )
 
@@ -167,7 +163,7 @@ class NorMuon(Optimizer):
         beta2: float = 0.95,
         ns_steps: int = 5,
         weight_decay: float = 0.2,
-        compiled: bool = True,
+        compile: bool = True,
         coefficients: tuple[tuple[float, float, float], ...] = (
             (8.156554524902461, -22.48329292557795, 15.878769915207462),
             (4.042929935166739, -2.808917465908714, 0.5000178451051316),
@@ -211,7 +207,7 @@ class NorMuon(Optimizer):
             for name in ("momentum", "lr", "weight_decay", "beta2")
         }
         self._update: Callable[..., None] = (
-            _compiled_update() if compiled else _normuon_update
+            _compiled_update() if compile else _normuon_update
         )
 
     @overload

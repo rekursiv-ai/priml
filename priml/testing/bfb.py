@@ -98,7 +98,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, cast, overload, override
+from typing import Any, Final, NotRequired, TypedDict, cast, overload, override
 
 import os
 
@@ -706,6 +706,21 @@ def regenerate_golden(
             os.environ[_ENV_REGENERATE] = prior
 
 
+class _Golden(TypedDict):
+    """What a golden file stores.
+
+    ``post_state_dict`` is absent when the run mutated nothing, which the
+    replay reads as "equal to ``state_dict``".
+    """
+
+    state_dict: dict[str, Tensor]
+    input: Tensor | dict[str, Tensor] | tuple[Tensor, ...] | list[Tensor]
+    output: Tensor
+    seed: int
+    sdpa_backend: dict[str, bool | str]
+    post_state_dict: NotRequired[dict[str, Tensor]]
+
+
 def _write_golden(
     *,
     golden_path: Path,
@@ -727,16 +742,29 @@ def _write_golden(
     with host_agnostic_numerics():
         output = run(module, inp)
     post_state = _cpu_state_dict(module.state_dict())
-    torch.save(
-        {
-            "state_dict": pre_state,
-            "post_state_dict": post_state,
-            "input": _to_cpu(inp),
-            "output": output.detach().cpu(),
-            "seed": seed,
-            "sdpa_backend": _sdpa_fingerprint(_module_device(module)),
-        },
-        golden_path,
+    payload: _Golden = {
+        "state_dict": pre_state,
+        "input": _to_cpu(inp),
+        "output": output.detach().cpu(),
+        "seed": seed,
+        "sdpa_backend": _sdpa_fingerprint(_module_device(module)),
+    }
+    # Absence means "unchanged", which the replay asserts against the pre-run
+    # copy -- so omitting it is not a weaker check.
+    if _state_differs(pre_state, post_state):
+        payload["post_state_dict"] = post_state
+    torch.save(payload, golden_path)
+
+
+def _state_differs(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Whether any stored tensor changed across the run."""
+    if before.keys() != after.keys():
+        return True
+    return any(
+        not torch.equal(value, after[key])
+        if isinstance(value, Tensor)
+        else value != after[key]
+        for key, value in before.items()
     )
 
 
@@ -754,15 +782,15 @@ def _replay_golden(
     device = _module_device(module)
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
-    payload: dict[str, Any] = torch.load(
-        golden_path, weights_only=False, map_location="cpu"
-    )
+    payload: _Golden = torch.load(golden_path, weights_only=False, map_location="cpu")
     _assert_sdpa_backend_match(payload.get("sdpa_backend"), device=device)
     module.load_state_dict(payload["state_dict"])
     inp = move_to_device(payload["input"], device)
     with host_agnostic_numerics():
         output = run(module, inp)
-    _assert_state_match(module, payload["post_state_dict"])
+    # Absent means the run did not mutate its state, so the pre-run copy IS
+    # the expectation -- a mutation introduced later then fails against it.
+    _assert_state_match(module, payload.get("post_state_dict", payload["state_dict"]))
     _assert_equal(output, payload["output"], label="output")
 
 

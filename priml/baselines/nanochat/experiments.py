@@ -298,28 +298,24 @@ def exp_smoke() -> NanoChatLoop.Config:
     cut: a few seconds of budget, and a network narrow enough to finish in
     them. The score will be poor, which is expected.
 
-    Every DELTA from ``exp001`` is a size or a budget. Nothing about the
-    architecture, the optimizer partition, the schedules, or the precision is
-    touched, which is what lets the goldens minted over this rung guard the
-    real one: a change to any of those reaches this config too. That is also
-    why it is small enough to freeze -- the state dict is tens of kilobytes
-    rather than the reference rung's 192 MiB.
+    Every delta from ``exp001`` is a size or a budget, so the goldens minted
+    over this rung guard the real one: a change to the architecture, the
+    optimizer partition, the schedules, or the precision reaches this config
+    too.
     """
     cfg = exp001()
     cfg.experiment_name = "exp_smoke"
-    cfg.step.model.vocab_size = 32
+    cfg.step.model.vocab_size = 16
+    # The value gate reads a fixed 32 channels of its input, so a model
+    # narrower than 32 has a gate of a different shape than the reference's.
     cfg.step.model.channels = 32
     cfg.step.model.num_layers = 2
-    cfg.step.model.max_seq_len = 16
-    # The head width is not derived from the model width, so narrowing one
-    # without the other leaves a model that cannot be built at all.
+    cfg.step.model.max_seq_len = 8
+    # Half the width, so there are two heads: at one head every head-axis
+    # reshape is the identity and a split on the wrong axis still agrees.
     attention = cfg.step.model.block.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.channels_head = 16
-    # Off, and it reaches the OPTIMIZER's kernels as well as the model's. The
-    # orthogonalizing member's compile costs ~10.9s on first use and is charged
-    # to the budget below, so leaving it on would spend the whole budget in
-    # step one and anneal every later step to lr=0.
     cfg.step.compile = False
     cfg.step.rows_per_pass = 2
     cfg.step.tokens_per_optimizer_step = 32

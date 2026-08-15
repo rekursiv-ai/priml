@@ -127,16 +127,14 @@ class FusedAdamW(Optimizer):
         weight_decay: float = 0.0
         """Decoupled decay coefficient."""
 
-        compiled: bool = True
+        compile: bool = True
         """Fuse the step into one compiled graph.
 
-        The point of this optimizer, so on by default. Off is for a run too
-        short to amortize the compile, which is charged to the first step that
-        uses it -- a budgeted run with no warmup would spend the budget there
-        and anneal every later step to zero.
-
-        Spelled as the adjective, not ``compile``: as a constructor argument
-        the verb shadows the builtin."""
+        The point of this optimizer, so on by default. Turning it off is NOT
+        free: a compiled step and an eager one differ in the last bits, so a
+        run with this off is not bit-comparable with one that has it on. It
+        exists for a run too short to amortize the compile, which is charged to
+        the first step that uses it."""
 
         @override
         def make(self) -> Callable[..., FusedAdamW]:
@@ -152,7 +150,7 @@ class FusedAdamW(Optimizer):
                 betas=final.betas,
                 eps=final.eps,
                 weight_decay=final.weight_decay,
-                compiled=final.compiled,
+                compile=final.compile,
             )
 
     def __init__(
@@ -163,7 +161,7 @@ class FusedAdamW(Optimizer):
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
-        compiled: bool = True,
+        compile: bool = True,
     ) -> None:
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}.")
@@ -186,7 +184,7 @@ class FusedAdamW(Optimizer):
             for name in ("step", "lr", "beta1", "beta2", "eps", "weight_decay")
         }
         self._update: Callable[..., None] = (
-            _compiled_update() if compiled else _adamw_update
+            _compiled_update() if compile else _adamw_update
         )
 
     @overload
