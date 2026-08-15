@@ -36,11 +36,11 @@ from __future__ import annotations
 
 from dataclasses import field
 from functools import partial
-from typing import Any, Self, override
+from typing import Any, Protocol, Self, override, runtime_checkable
 
 import math
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -53,6 +53,86 @@ from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.rope import RoPE
 from priml.model.transformer import TransformerBlock
+
+
+@runtime_checkable
+class AttentionKernel(Protocol):
+    """Windowed causal attention over ``[B, S, heads, channels_head]``."""
+
+    def __call__(self, q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor: ...
+
+
+def sdpa_attention(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
+    """Windowed causal attention through torch's dispatcher.
+
+    Runs anywhere, which is what makes it the default. The cost is that a
+    windowed layer has to say so with an explicit mask, and the flash backend
+    refuses a mask -- so windowed layers land on the memory-efficient kernel
+    while global ones reach flash. ``Flash3Attention`` expresses the same
+    window as a kernel argument and keeps every layer on one kernel.
+
+    Args:
+      q: ``[B, S, heads, channels_head]`` queries.
+      k: Keys, same shape.
+      v: Values, same shape.
+      window: Positions each query may look back over, itself included.
+
+    Returns:
+      out: Attention output, same shape as ``q``.
+
+    """
+    # SDPA wants [..., heads, S, channels_head].
+    q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
+    length = q.shape[-2]
+    if window >= length:
+        out = functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+    else:
+        offset = torch.arange(length, device=q.device)
+        offset = offset[:, None] - offset[None, :]
+        # ``<=``, not ``<``: a fused kernel's ``window_size=(w, 0)`` admits w
+        # tokens of history IN ADDITION to the query's own position, so the
+        # exclusive form attends to one key fewer per row and is a different
+        # model -- not a rounding difference.
+        out = functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=(offset >= 0) & (offset <= window),
+        )
+    return out.movedim(-3, -2)
+
+
+def apply_rotary(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
+    """Rotate the channel pairs of ``x`` by the angles ``cos``/``sin`` encode.
+
+    Spelled here rather than delegating to
+    :meth:`~priml.model.rope.RoPE.rotate`, for two reasons that are both
+    numerics rather than taste:
+
+    * **Direction.** priml's rotation is HuggingFace's ``+theta``; this recipe's
+      is ``-theta`` (the sine enters the second half negated). The two are the
+      same model under a channel permutation and DIFFERENT tensors, so a
+      reproduction has to pick the one the weights were trained under.
+    * **Precision.** priml's rotation upcasts to float32, accumulates there, and
+      rounds once. This one accumulates in whatever precision the factors and
+      the input arrive in -- half, under autocast -- which is what the fused
+      reference kernel does, and differs from the upcast form in the last bits.
+
+    Args:
+      x: ``[..., S, heads, channels_head]`` queries or keys.
+      cos: Cosine factors, broadcastable over ``x``'s first half.
+      sin: Sine factors, same shape as ``cos``.
+
+    Returns:
+      rotated: ``x`` with each ``(i, i + half)`` channel pair rotated.
+
+    """
+    half = x.shape[-1] // 2
+    first, second = x[..., :half], x[..., half:]
+    return torch.cat(
+        [first * cos + second * sin, first * (-sin) + second * cos],
+        dim=-1,
+    )
 
 
 def unit_fan_in_uniform(w: Tensor, *, depth: int = -1) -> None:
@@ -144,10 +224,12 @@ class ValueGatedAttention(nn.Module):
       the layer's own input, so a head decides per token how much to consult
       the raw token identity rather than the processed stream.
 
-    The gate exists on every layer even though only some receive a value
-    embedding: it is ``heads * gate_channels`` parameters, and making its
-    presence conditional would put a layer-index policy inside a module that
-    does not otherwise know where it sits.
+    Whether a layer HAS a gate is declared by ``gated``, which the model sets
+    from its value-embedding layer set. A gate on a layer that receives no
+    embedding is never read, so it would sit in the optimizer's matrix group
+    collecting weight decay and contributing nothing -- the parameter count and
+    the partition would both differ from a recipe that omits it, which is a
+    difference a reproduction cannot carry.
     """
 
     class Config(Fig["ValueGatedAttention"]):
@@ -176,6 +258,26 @@ class ValueGatedAttention(nn.Module):
 
         init_weight: InitFn = unit_fan_in_uniform
         """Initialization for the query, key, and value projections."""
+
+        kernel: Makeable[AttentionKernel] = field(
+            default_factory=lambda: PartialConfig(sdpa_attention),
+        )
+        """The attention kernel itself, injected rather than selected.
+
+        A kernel is a different VALUE in this slot, not a mode flag: the
+        reference recipe measured its score on FlashAttention-3, and a fused
+        kernel reduces in a different order than a masked SDPA, so reproducing
+        that number means issuing that kernel. The default runs anywhere; a
+        rung reproducing a published result pins the one it was published
+        with, and inherits its hardware requirement along with it."""
+
+        gated: bool = True
+        """Whether this layer builds the value gate at all.
+
+        Set by the model from its value-embedding layer set: a layer that
+        receives no embedding never reads the gate, so building one would add a
+        parameter that trains on nothing and shifts the optimizer's partition
+        away from the recipe being reproduced."""
 
         depth: int = -1
         """Block depth index, accepted for the priml block contract."""
@@ -232,20 +334,29 @@ class ValueGatedAttention(nn.Module):
         ).make()
         # Zero-initialized: ``2 * sigmoid(0)`` is exactly 1, so a fresh gate
         # admits the value embedding unchanged and must learn to attenuate it.
-        self.value_gate = Linear.Config(
-            channels_in=config.gate_channels,
-            channels_out=config.heads,
-            bias=False,
-            init_weight=nn.init.zeros_,
-        ).make()
+        self.value_gate = (
+            Linear.Config(
+                channels_in=config.gate_channels,
+                channels_out=config.heads,
+                bias=False,
+                init_weight=nn.init.zeros_,
+            ).make()
+            if config.gated
+            else None
+        )
         self.norm_q = config.norm_qk.make()
         self.norm_k = config.norm_qk.make()
+        # Resolved once, here: a pinned kernel validates a built artifact and
+        # the device it will run on, and doing that per layer per step would
+        # pay for the check every forward.
+        self.attention = config.kernel.make()
 
     def reset_parameters(self) -> None:
         """Re-initialize every projection."""
         for module in (self.proj_q, self.proj_k, self.proj_v, self.proj_out):
             module.reset_parameters()
-        self.value_gate.reset_parameters()
+        if self.value_gate is not None:
+            self.value_gate.reset_parameters()
 
     @override
     def forward(
@@ -280,22 +391,27 @@ class ValueGatedAttention(nn.Module):
         k = self.proj_k(x).view(shape)
         v = self.proj_v(x).view(shape)
         if value_embedding is not None:
+            # A layer handed an embedding must have been built with a gate; the
+            # model derives both from one layer set, so the absence of one is a
+            # wiring error rather than a case to fall back from.
+            assert self.value_gate is not None
             gate = 2 * torch.sigmoid(self.value_gate(x[..., : config.gate_channels]))
             v = v + gate.unsqueeze(-1) * value_embedding.view(shape)
         cos, sin = cos_sin
-        q, k = RoPE.rotate(q, k, cos, sin)
+        q = apply_rotary(q, cos=cos, sin=sin)
+        k = apply_rotary(k, cos=cos, sin=sin)
         q, k = self.norm_q(q), self.norm_k(k)
-        # SDPA wants [..., heads, S, channels_head].
-        q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
-        mask = _window_mask(q.shape[-2], window=window, device=q.device)
-        out = functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=mask,
-            is_causal=mask is None,
-        )
-        return self.proj_out(out.movedim(-3, -2).flatten(-2))
+        # Left in [B, S, heads, channels_head]: that is what the pinned kernel
+        # takes, and the portable one transposes internally. Transposing here
+        # instead would make the fused path pay to undo it.
+        out = self.attention(q, k, v, window=window if window > 0 else q.shape[-3])
+        # Made contiguous before the head axes are merged. A portable kernel
+        # returns a transposed view, and flattening that directly hands the
+        # projection a strided tensor -- the matmul then reduces in a different
+        # order than it does over a packed one, and the difference reaches this
+        # layer's gradient. Copying once here costs a layer and buys an
+        # ordering that does not depend on which kernel produced the input.
+        return self.proj_out(out.contiguous().flatten(-2))
 
 
 class NanoChatLM(nn.Module):
@@ -377,11 +493,33 @@ class NanoChatLM(nn.Module):
         )
         """Output projection to vocabulary logits."""
 
-        rope: RoPE.Config = field(default_factory=RoPE.Config)
+        rope: RoPE.Config = field(
+            # The reference builds its frequencies as ``1 / base**(i / d)`` over
+            # an integer range. priml's default spells the same function as an
+            # exponentiated float64 linspace, which is more accurate and NOT the
+            # same bits -- so the reproduction takes the reference's spelling.
+            default_factory=lambda: RoPE.Config(hf_inv_freq=True),
+        )
         """Rotary position embedding driving every layer's queries and keys.
 
         Its width is pushed down from the block's attention at finalize, since
         the model builds the factors and the heads consume them."""
+
+        rotary_dtype: torch.dtype | None = None
+        """Dtype the rotary factors are rounded to before the rotation.
+
+        Not a memory choice -- the table is two vectors -- but an arithmetic
+        one: rounding the factors makes every product inside the rotation
+        accumulate at that width, where leaving them in float32 promotes the
+        whole rotation and rounds once at the end. The two differ in the last
+        bits of every query and key, so a reproduction has to hold the factors
+        at the width the reference held them -- ``exp000`` sets bfloat16.
+
+        ``None`` by default, with :attr:`embedding_dtype`: the two are one
+        decision, and a model narrowed by default cannot run outside autocast
+        at all (a bfloat16 stream meets a float32 projection and the matmul
+        refuses), so the default has to be the portable one and the recipe has
+        to say what it narrowed."""
 
         logit_softcap: float = 15.0
         """Logit bound: ``cap * tanh(logits / cap)``."""
@@ -391,6 +529,21 @@ class NanoChatLM(nn.Module):
 
         skip_init: float = 0.1
         """Initial per-layer weight on the original token embedding."""
+
+        embedding_dtype: torch.dtype | None = None
+        """Dtype the token and value-embedding tables are held in.
+
+        A lookup is a gather, not an arithmetic reduction, so half precision
+        costs a table nothing it was using -- while halving the largest tensors
+        in the model and the traffic to read them. ``exp000`` sets bfloat16
+        because the recipe does.
+
+        ``None`` by default rather than bfloat16, even though every budgeted
+        run narrows it: a narrowed table makes the model runnable ONLY under
+        autocast, since the half-precision stream it emits meets a float32
+        projection one layer later. That is a property of the recipe's training
+        loop, not of the architecture, so it belongs in the experiment that
+        declares the loop."""
 
         @override
         def finalize(self) -> Self:
@@ -463,9 +616,18 @@ class NanoChatLM(nn.Module):
             # The template stays a field, so the cascade finalizes it too: it
             # needs the width even though the copies are what get built.
             propagate_attr(self.block, "channels_in", self.channels)
+            gated = set(self.value_embedding_layers)
             for layer, block in enumerate(self.blocks):
                 propagate_attr(block, "channels_in", self.channels, protocol=ChannelsIn)
                 propagate_attr(block, "depth", layer)
+                # The gate is built only where a table will feed it. Decided
+                # HERE because the layer set lives on the model: an attention
+                # module does not know where in the stack it sits, and a
+                # parameter that no forward reads would still take an optimizer
+                # group and a share of the weight decay.
+                attention = getattr(block, "attn", None)
+                if isinstance(attention, ValueGatedAttention.Config):
+                    attention.gated = layer in gated
             propagate_attr(self.embedding, "channels_out", self.channels)
             propagate_attr(self.embedding, "num_embeddings", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels)
@@ -516,6 +678,13 @@ class NanoChatLM(nn.Module):
         )
         for table in self.value_embeds.values():
             unit_fan_in_uniform(_weight(table))
+        # Cast AFTER initialization so the draws themselves happen in full
+        # precision: sampling straight into bfloat16 would quantize every value
+        # to its ~3 significant digits and change the table's spread.
+        if config.embedding_dtype is not None:
+            self.embed.to(dtype=config.embedding_dtype)
+            for table in self.value_embeds.values():
+                table.to(dtype=config.embedding_dtype)
         self.residual_scale = nn.Parameter(
             torch.full((config.num_layers,), config.residual_init),
         )
@@ -544,6 +713,18 @@ class NanoChatLM(nn.Module):
                 f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}.",
             )
         cos_sin = self.rope(torch.arange(length, device=tokens.device))
+        if self.config.rotary_dtype is not None:
+            cos_sin = (
+                cos_sin[0].to(self.config.rotary_dtype),
+                cos_sin[1].to(self.config.rotary_dtype),
+            )
+        # The table's OWN dtype carries the stream, and the per-layer scalars
+        # ride along by 0-dim type promotion: a scalar tensor does not widen
+        # the tensor it multiplies, so a float32 lambda against a bfloat16
+        # stream stays bfloat16 without a cast. Writing the cast out
+        # (``lambda.to(x.dtype)``) gives the same forward and a DIFFERENT
+        # backward -- the cast is its own autograd node, and the gradient
+        # accumulating through it rounds at each layer rather than once.
         x = _rms_norm(self.embed(tokens))
         skip = x
         for layer, block in enumerate(self.blocks):
@@ -688,19 +869,6 @@ def _reject_ragged_heads(
             "the value embeddings and rotary factors are shared across layers; "
             f"got (channels_head, heads * channels_head) of {sorted(shapes)}.",
         )
-
-
-def _window_mask(length: int, *, window: int, device: torch.device) -> Tensor | None:
-    """A causal mask restricted to ``window`` positions of history.
-
-    Returns ``None`` for a window covering the whole sequence, so the caller's
-    ``is_causal`` fast path applies instead of a materialized mask.
-    """
-    if window < 0 or window >= length - 1:
-        return None
-    offset = torch.arange(length, device=device)
-    offset = offset[:, None] - offset[None, :]
-    return (offset >= 0) & (offset <= window)
 
 
 def _rms_norm(x: Tensor) -> Tensor:

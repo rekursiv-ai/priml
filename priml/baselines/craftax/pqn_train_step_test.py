@@ -18,6 +18,9 @@ def _config(**overrides: object) -> CraftaxPQNTrainStep.Config:
     config.env.device = "cpu"
     config.env.num_envs = 4
     config.env.optimistic_reset_ratio = 1
+    # A 3x3 view, not the benchmark's 9x11: these test the UPDATE, and a
+    # 8,268-wide observation makes the first layer dominate every one.
+    config.env.view = (3, 3)
     config.rollout_steps = 4
     config.num_epochs = 2
     config.num_minibatches = 2

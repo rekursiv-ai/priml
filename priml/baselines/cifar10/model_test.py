@@ -161,11 +161,17 @@ def test_speednet_bfb() -> None:
     # smaller pools away to nothing. ``init_whiten`` is deliberately not called
     # -- the harness overwrites every parameter, the whitening kernel included,
     # so the golden pins the forward arithmetic rather than the PCA fit.
+    #
+    # ONE image, because that 32x32 floor makes the input the largest thing in
+    # the file. A second row would double it while re-checking arithmetic the
+    # first row already covers -- there is no cross-batch interaction here to
+    # catch, since BatchNorm runs with ``affine=False`` and the harness never
+    # reaches training mode.
     assert_bfb_against_golden(
         golden_dir=_GOLDEN_DIR,
         golden_name="speednet_min_cpu",
         build_module=lambda: tiny_speednet().make(),
-        build_input=lambda: torch.randn(2, 3, 32, 32),
+        build_input=lambda: torch.randn(1, 3, 32, 32),
         seed=0,
     )
 

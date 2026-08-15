@@ -91,6 +91,44 @@ class excluding:  # noqa: N801 -- reads as a combinator at the call site
         return f"excluding({_name(self.select)}, {names})"
 
 
+class matching:  # noqa: N801 -- reads as a combinator at the call site
+    """Select parameters whose name contains any of the given fragments.
+
+    The positive counterpart to :class:`excluding`, and what a recipe needs to
+    put ONE class of parameter on its own rate: a partition built only from
+    exclusions can carve a remainder but cannot name a part.
+
+    A comparable object rather than a closure, for the reason
+    :class:`excluding` documents.
+
+    Args:
+      fragments: Name fragments to accept, e.g. ``"embed"``.
+
+    """
+
+    __slots__ = ("fragments",)
+
+    def __init__(self, *fragments: str) -> None:
+        self.fragments = fragments
+
+    def __call__(self, name: str, parameter: Parameter) -> bool:
+        """Whether this parameter's name carries one of the fragments."""
+        del parameter
+        return any(fragment in name for fragment in self.fragments)
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, matching) and self.fragments == other.fragments
+
+    @override
+    def __hash__(self) -> int:
+        return hash((type(self), self.fragments))
+
+    @override
+    def __repr__(self) -> str:
+        return f"matching({', '.join(repr(f) for f in self.fragments)})"
+
+
 class complement:  # noqa: N801 -- reads as a combinator at the call site
     """Select exactly what ``select`` does not, so a pair partitions the model.
 
@@ -165,6 +203,15 @@ class CompositeOptimizer(Optimizer):
         require_total: bool = True
         """Reject a recipe that leaves a trainable parameter unclaimed."""
 
+        drop_empty: bool = False
+        """Drop a member whose selector claims nothing, instead of raising.
+
+        Off by default because an empty selector is normally a misspelled name
+        fragment, and silently training nothing with that member is the worst
+        possible response. Turn it on for a recipe that names a class the model
+        MAY not instantiate -- an ablation that switches a mechanism off still
+        wants the rates its siblings use."""
+
         @override
         def make(self) -> Callable[..., CompositeOptimizer]:
             """Return a builder awaiting the model whose parameters to split.
@@ -192,10 +239,17 @@ class CompositeOptimizer(Optimizer):
             members = [member.make() for member in final.optimizers]
             selectors = final.select or [everything] * len(members)
             require_total = final.require_total
+            drop_empty = final.drop_empty
 
             def compose(model: nn.Module) -> CompositeOptimizer:
                 return CompositeOptimizer(
-                    _route(model, members, selectors, require_total=require_total),
+                    _route(
+                        model,
+                        members,
+                        selectors,
+                        require_total=require_total,
+                        drop_empty=drop_empty,
+                    ),
                 )
 
             return partial(compose)
@@ -312,6 +366,7 @@ def _route(
     selectors: Sequence[Selector],
     *,
     require_total: bool,
+    drop_empty: bool = False,
 ) -> list[Optimizer]:
     """Build each member over the trainable parameters its selector claims.
 
@@ -320,18 +375,22 @@ def _route(
       members: Optimizer constructors, one per selector.
       selectors: Predicates deciding ownership, tried in order.
       require_total: Reject a partition that leaves a parameter unclaimed.
+      drop_empty: Skip a member whose selector claims nothing rather than
+        raising, for a recipe naming a class the model may not instantiate.
 
     Returns:
-      optimizers: One built optimizer per member, in the given order.
+      optimizers: One built optimizer per non-empty member, in the given order.
 
     Raises:
-      ValueError: If a selector claims nothing, if two claim the same
-        parameter, or if ``require_total`` and a parameter is unclaimed.
+      ValueError: If a selector claims nothing and ``drop_empty`` is false, if
+        two claim the same parameter, or if ``require_total`` and a parameter
+        is unclaimed.
 
     """
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     claimed: dict[int, str] = {}
     groups: list[list[Parameter]] = []
+    kept: list[Callable[..., Optimizer]] = []
     for index, select in enumerate(selectors):
         group: list[Parameter] = []
         for name, parameter in named:
@@ -346,8 +405,12 @@ def _route(
             claimed[id(parameter)] = str(index)
             group.append(parameter)
         if not group:
+            if drop_empty:
+                continue
             raise ValueError(f"Selector {index} claimed no parameters.")
         groups.append(group)
+        kept.append(members[index])
+    members = kept
     if require_total:
         unclaimed = [n for n, p in named if id(p) not in claimed]
         if unclaimed:

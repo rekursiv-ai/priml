@@ -25,36 +25,59 @@ from priml.baselines.craftax.game.indexing import local_view
 from priml.baselines.craftax.game.state import EnvState
 
 
-OBSERVATION_SIZE: int = (
-    constants.OBS_DIM[0]
-    * constants.OBS_DIM[1]
-    * (
-        len(BlockType)
-        + len(ItemType)
-        + 5 * 8  # five creature classes, eight species each
-        + 1  # whether the tile is lit
-    )
-    + constants.INVENTORY_OBS_SIZE
+CHANNELS_PER_TILE: int = (
+    len(BlockType)
+    + len(ItemType)
+    + 5 * 8  # five creature classes, eight species each
+    + 1  # whether the tile is lit
 )
-"""Width of one flattened observation."""
+"""Planes each visible tile contributes.
+
+Fixed by the game's vocabularies, not by the viewer: changing it would mean
+changing how many kinds of block or creature exist, which is a different
+game rather than a smaller view of this one.
+"""
 
 
-def render(state: EnvState) -> Tensor:
+def observation_size(view: tuple[int, int] = (9, 11)) -> int:
+    """Return the width of one flattened observation.
+
+    Args:
+      view: Tiles visible around the player, ``(rows, columns)``. The
+        benchmark's own 9x11.
+
+    Returns:
+      width: Floats in one observation row.
+
+    """
+    return view[0] * view[1] * CHANNELS_PER_TILE + constants.INVENTORY_OBS_SIZE
+
+
+def render(
+    state: EnvState,
+    *,
+    view: tuple[int, int] = (9, 11),
+) -> Tensor:
     """Encode the world as the agent sees it.
 
     Args:
       state: The current world.
+      view: Tiles visible around the player, ``(rows, columns)``. The
+        published benchmark uses 9x11; a smaller window is a cheaper game to
+        train on, and one whose scores are not comparable to it.
 
     Returns:
-      observation: One row per environment, ``[envs, OBSERVATION_SIZE]``.
+      observation: One row per environment, ``[envs, observation_size(view)]``.
 
     """
-    return torch.cat((_render_view(state), _render_player(state)), dim=-1)
+    return torch.cat(
+        (_render_view(state, view=view), _render_player(state)),
+        dim=-1,
+    )
 
 
-def _render_view(state: EnvState) -> Tensor:
+def _render_view(state: EnvState, *, view: tuple[int, int]) -> Tensor:
     """Encode the lit window around the player as one-hot planes."""
-    view = constants.OBS_DIM
     blocks = local_view(
         mechanics.current_map(state),
         state.player_position,
@@ -71,7 +94,7 @@ def _render_view(state: EnvState) -> Tensor:
         (
             functional.one_hot(blocks.long(), len(BlockType)).float(),
             functional.one_hot(items.long(), len(ItemType)).float(),
-            _render_mobs(state),
+            _render_mobs(state, view=view),
         ),
         dim=-1,
     )
@@ -91,9 +114,9 @@ def _render_view(state: EnvState) -> Tensor:
     return torch.cat((planes, lit[..., None]), dim=-1).flatten(1)
 
 
-def _render_mobs(state: EnvState) -> Tensor:
+def _render_mobs(state: EnvState, *, view: tuple[int, int]) -> Tensor:
     """Mark each visible creature on the plane for its class and species."""
-    rows, columns = constants.OBS_DIM
+    rows, columns = view
     planes = torch.zeros(
         (state.num_envs, rows, columns, 5 * 8),
         device=state.device,

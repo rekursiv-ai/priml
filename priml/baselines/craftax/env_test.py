@@ -43,20 +43,20 @@ def test_it_declares_the_published_geometry() -> None:
 def test_reset_returns_one_observation_per_worker() -> None:
     env = _env()
     rendered = env.reset()
-    assert rendered.shape == (4, observation.OBSERVATION_SIZE)
+    assert rendered.shape == (4, observation.observation_size())
     assert bool(torch.isfinite(rendered).all())
 
 
 def test_reset_can_change_the_batch_size() -> None:
     env = _env()
-    assert env.reset(7).shape == (7, observation.OBSERVATION_SIZE)
+    assert env.reset(7).shape == (7, observation.observation_size())
 
 
 def test_stepping_returns_a_full_transition() -> None:
     env = _env()
     env.reset()
     transition = env.step(_actions(env, 4))
-    assert transition.observation.shape == (4, observation.OBSERVATION_SIZE)
+    assert transition.observation.shape == (4, observation.observation_size())
     assert transition.reward.shape == (4,)
     assert transition.done.shape == (4,)
     assert transition.done.dtype == torch.bool
@@ -145,7 +145,7 @@ def test_a_long_rollout_stays_finite_and_rectangular() -> None:
     env.reset()
     for index in range(60):
         transition = env.step(_actions(env, 4, index))
-        assert transition.observation.shape == (4, observation.OBSERVATION_SIZE)
+        assert transition.observation.shape == (4, observation.observation_size())
         assert bool(torch.isfinite(transition.observation).all())
         assert bool(torch.isfinite(transition.reward).all())
 
@@ -178,7 +178,7 @@ def test_a_checkpoint_taken_before_reset_restores_cleanly() -> None:
     saved = env.state_dict()
     restored = _env()
     restored.load_state_dict(saved)
-    assert restored.reset().shape == (4, observation.OBSERVATION_SIZE)
+    assert restored.reset().shape == (4, observation.observation_size())
 
 
 def _worlds(env: CraftaxEnv) -> int:

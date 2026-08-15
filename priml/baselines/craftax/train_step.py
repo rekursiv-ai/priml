@@ -24,7 +24,7 @@ import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game.constants import Action
-from priml.baselines.craftax.game.observation import OBSERVATION_SIZE
+from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.model import ActorCritic
 from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
 from priml.math.advantage import explained_variance, generalized_advantage
@@ -190,7 +190,7 @@ class CraftaxTrainStep:
             # names the actions it scores, so the two must agree. Deriving the
             # geometry here means an experiment that changes the environment
             # cannot forget to resize the network.
-            self.model.observation_size = OBSERVATION_SIZE
+            self.model.observation_size = observation_size(self.env.view)
             self.model.num_actions = len(Action)
             return super().finalize()
 

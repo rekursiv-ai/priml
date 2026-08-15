@@ -26,7 +26,7 @@ import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game.constants import Action
-from priml.baselines.craftax.game.observation import OBSERVATION_SIZE
+from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.rnn import ActorCriticRNN
 from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
 from priml.math.advantage import explained_variance, generalized_advantage
@@ -193,7 +193,7 @@ class CraftaxRNNTrainStep:
         def finalize(self) -> Self:
             # The environment renders the observations and names the actions,
             # so an experiment that changes it cannot forget to resize the net.
-            self.model.observation_size = OBSERVATION_SIZE
+            self.model.observation_size = observation_size(self.env.view)
             self.model.num_actions = len(Action)
             return super().finalize()
 

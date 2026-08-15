@@ -16,23 +16,33 @@ from pathlib import Path
 import json
 import math
 
+from configgle import PartialConfig
+
 import numpy as np
 import pytest
 
 from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop
+from priml.baselines.nanochat.flash3 import Flash3Attention
 from priml.baselines.nanochat.metric import BitsPerByte
 from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
+from priml.optimizers import CompositeOptimizer
 
 
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
     ("exp000", experiments.exp000),
     ("exp001", experiments.exp001),
     ("exp002", experiments.exp002),
+    ("exp003", experiments.exp003),
     ("exp_smoke", experiments.exp_smoke),
 ]
+
+# exp000 pins a kernel that builds only for SM90, so anything CONSTRUCTING a
+# model excludes it: the rung is unbuildable on a laptop and on most CI, which
+# is the point of exp001 existing. Its config-level fields are still checked.
+PORTABLE: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = LADDER[1:]
 
 
 @pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
@@ -46,33 +56,63 @@ def test_every_experiment_finalizes(
     assert config.study_name == "nanochat"
 
 
-def test_exp000_turns_both_mechanisms_off() -> None:
-    """The baseline must be the bar, not a third variant.
+def test_exp000_pins_the_reference_kernel() -> None:
+    """The reproduction rung must issue the kernel the reference measured on.
 
-    If exp000 already windowed its attention, exp001 would measure nothing and
-    the ladder's comparison would be against an unstated recipe.
+    A fused attention reduces in a different order than a masked SDPA, so a
+    rung matching every hyperparameter and swapping the kernel produces a
+    different number -- and could not settle whether the port is faithful,
+    which is the only question exp000 exists to answer.
     """
-    cfg = experiments.exp000()
-    assert cfg.step.model.window_pattern == "L"
-    assert cfg.step.model.value_embedding_stride == 0
+    attn = experiments.exp000().step.model.block.attn
+    assert isinstance(attn, ValueGatedAttention.Config)
+    assert isinstance(attn.kernel, Flash3Attention.Config)
 
 
-def test_exp001_changes_only_the_window() -> None:
+def test_exp001_changes_only_the_kernel() -> None:
+    """The portable rung is the reference recipe, kernel aside."""
     base, fork = experiments.exp000(), experiments.exp001()
-    assert base.step.model.window_pattern == "L"
-    assert fork.step.model.window_pattern == "SSSL"
+    base_attn, fork_attn = base.step.model.block.attn, fork.step.model.block.attn
+    assert isinstance(base_attn, ValueGatedAttention.Config)
+    assert isinstance(fork_attn, ValueGatedAttention.Config)
+    assert isinstance(base_attn.kernel, Flash3Attention.Config)
+    assert not isinstance(fork_attn.kernel, Flash3Attention.Config)
+    assert fork.step.model.window_pattern == base.step.model.window_pattern
     assert fork.step.model.value_embedding_stride == (
         base.step.model.value_embedding_stride
     )
     assert fork.step.time_budget_sec == base.step.time_budget_sec
+    assert fork.seed == base.seed
+
+
+def test_exp000_turns_both_mechanisms_on() -> None:
+    """The baseline is the recipe to reproduce, not the plain control.
+
+    Both mechanisms belong here because the forks REMOVE them one at a time;
+    if exp000 shipped either one off, the rung meant to price it would be
+    measuring against an unstated recipe instead.
+    """
+    cfg = experiments.exp000()
+    assert cfg.step.model.window_pattern == "SSSL"
+    assert cfg.step.model.value_embedding_stride == 2
+
+
+def test_exp002_removes_only_the_value_embeddings() -> None:
+    base, fork = experiments.exp001(), experiments.exp002()
+    assert base.step.model.value_embedding_stride == 2
+    assert fork.step.model.value_embedding_stride == 0
+    assert fork.step.model.window_pattern == base.step.model.window_pattern
+    assert fork.step.time_budget_sec == base.step.time_budget_sec
     assert fork.step.model.channels == base.step.model.channels
 
 
-def test_exp002_changes_only_the_value_embeddings() -> None:
-    base, fork = experiments.exp001(), experiments.exp002()
-    assert base.step.model.value_embedding_stride == 0
-    assert fork.step.model.value_embedding_stride == 2
-    assert fork.step.model.window_pattern == base.step.model.window_pattern
+def test_exp003_removes_the_window_too() -> None:
+    base, fork = experiments.exp002(), experiments.exp003()
+    assert base.step.model.window_pattern == "SSSL"
+    assert fork.step.model.window_pattern == "L"
+    assert fork.step.model.value_embedding_stride == (
+        base.step.model.value_embedding_stride
+    )
     assert fork.step.time_budget_sec == base.step.time_budget_sec
 
 
@@ -83,7 +123,7 @@ def test_the_value_embedding_stride_follows_a_changed_depth() -> None:
     was at that moment, so a fork narrowing the model carries indices for a
     stack that no longer exists -- and the model rejects them.
     """
-    cfg = experiments.exp002()
+    cfg = experiments.exp000()
     cfg.step.model.num_layers = 4
     final = cfg.copy_tree().finalize()
     assert final.step.model.value_embedding_layers == [1, 3]
@@ -120,7 +160,7 @@ def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
     assert config.copy_tree().finalize().dataset.batch_size == 8
 
 
-@pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
+@pytest.mark.parametrize(("name", "factory"), PORTABLE, ids=[n for n, _ in PORTABLE])
 def test_every_experiments_eval_geometry_is_constructible(
     name: str,
     factory: Callable[[], NanoChatLoop.Config],
@@ -132,6 +172,11 @@ def test_every_experiments_eval_geometry_is_constructible(
     lives in ``__init__``. A cap that is not a whole number of eval batches, or
     a batch wider than the split, therefore passes every config-only test and
     fails the moment a run reaches for data.
+
+    ``exp000`` is excluded because it CONSTRUCTS a model: its pinned kernel
+    builds only for SM90, so this would assert the runner's hardware rather
+    than the experiment's geometry. It shares every geometry field with
+    ``exp001``, which is covered here.
     """
     config = factory()
     model = config.step.model
@@ -148,6 +193,14 @@ def test_every_experiments_eval_geometry_is_constructible(
     config.step.device = "cpu"
     config.step.dtype_autocast = None
     config.step.compile = False
+    # Autocast is off above, so the narrow tables the recipe declares would
+    # hand a half-precision stream to a float32 projection and the matmul would
+    # refuse -- a dtype error rather than an answer about eval batching. Widened
+    # HERE, beside the autocast it pairs with, rather than defaulted away on the
+    # model: the pairing is the invariant, and hiding half of it makes the other
+    # half look arbitrary.
+    model.embedding_dtype = None
+    model.rotary_dtype = None
 
     # A split matching what this experiment declares, at a PRIME row count so
     # no experiment's eval batch divides it and every one exercises the padded
@@ -222,6 +275,61 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     # infinity, against which any value would compare smaller.
     assert smoke.max_steps < 100
     assert math.isinf(base.max_steps)
+
+
+def test_smoke_differs_from_exp001_only_in_size() -> None:
+    """The goldens are minted over smoke and guard exp001; that rests on this.
+
+    Everything a golden could catch -- the windowing, the value embeddings, the
+    optimizer partition, the precision -- must be the SAME object in both, or
+    the goldens freeze a model the ladder does not run. Only sizes and budgets
+    may differ.
+    """
+    smoke, base = experiments.exp_smoke(), experiments.exp001()
+    smoke_model, base_model = smoke.step.model, base.step.model
+    assert smoke_model.window_pattern == base_model.window_pattern
+    assert smoke_model.value_embedding_stride == base_model.value_embedding_stride
+    assert smoke_model.embedding_dtype == base_model.embedding_dtype
+    assert smoke_model.rotary_dtype == base_model.rotary_dtype
+    assert smoke_model.logit_softcap == base_model.logit_softcap
+    # Compared by ``repr``, not by ``==``: a PartialConfig raises on
+    # ``parent_class`` when equality reaches it, and both of these slots hold
+    # one. ``repr`` is declared on object, so it also needs no narrowing of the
+    # ``Makeable`` the field is typed as -- which ``pprint`` would.
+    # Taken BEFORE finalize, since finalize rescales the Adam rates by the
+    # model width and the two rungs are deliberately different widths.
+    assert repr(smoke.step.optimizer) == repr(base.step.optimizer)
+    assert repr(smoke.step.schedule) == repr(base.step.schedule)
+    assert smoke.step.dtype_autocast == base.step.dtype_autocast
+    smoke_attn, base_attn = smoke_model.block.attn, base_model.block.attn
+    assert isinstance(smoke_attn, ValueGatedAttention.Config)
+    assert isinstance(base_attn, ValueGatedAttention.Config)
+    assert smoke_attn.norm_qk == base_attn.norm_qk
+    assert type(smoke_attn.kernel) is type(base_attn.kernel)
+
+
+def test_the_optimizers_compile_follows_the_steps() -> None:
+    """A member compiling anyway spends a short run's whole budget on it.
+
+    Both members' kernels compile lazily, inside the timed window, and the
+    orthogonalizing one costs ~10.9s -- so ``exp_smoke``, which declares no
+    warmup and a ten-second budget, would reach step two with the budget gone
+    and every later step annealed to lr=0.
+    """
+    for factory, expected in (
+        (experiments.exp_smoke, False),
+        (experiments.exp001, True),
+    ):
+        config = factory().copy_tree().finalize()
+        optimizer = config.step.optimizer
+        assert isinstance(optimizer, CompositeOptimizer.Config)
+        for member in optimizer.optimizers:
+            got = (
+                member._kwargs.get("compiled")
+                if isinstance(member, PartialConfig)
+                else getattr(member, "compiled", None)
+            )
+            assert got is expected, (factory.__name__, member)
 
 
 if __name__ == "__main__":

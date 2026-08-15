@@ -32,7 +32,7 @@ def _state(num_envs: int = 2) -> EnvState:
 def test_the_observation_has_the_published_width() -> None:
     # This width is part of the benchmark's contract, not an implementation
     # detail: a model trained against a different one is not comparable.
-    assert observation.OBSERVATION_SIZE == 8_268
+    assert observation.observation_size() == 8_268
     assert observation.render(_state()).shape == (2, 8_268)
 
 
@@ -62,7 +62,7 @@ def test_darkness_hides_the_world() -> None:
     assert not torch.equal(observation.render(lit), observation.render(dark))
     # With the whole floor dark, only the light channel and the player's own
     # scalars carry information.
-    view_width = observation.OBSERVATION_SIZE - constants.INVENTORY_OBS_SIZE
+    view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
     assert float(observation.render(dark)[:, :view_width].sum()) == 0.0
 
 
@@ -109,7 +109,7 @@ def test_a_distant_creature_is_not_visible() -> None:
     shields the boss, and that is reported among the player's scalars, so
     comparing whole observations would conflate the two.
     """
-    view_width = observation.OBSERVATION_SIZE - constants.INVENTORY_OBS_SIZE
+    view_width = observation.observation_size() - constants.INVENTORY_OBS_SIZE
     plain = observation.render(_state())
     distant = _state()
     distant.melee_mobs.mask[:, 0, 0] = True
@@ -159,7 +159,7 @@ def test_the_width_matches_the_reference_environment() -> None:
     upstream = reference("craftax.envs.craftax_symbolic_env")
     assert (
         upstream.get_flat_map_obs_shape() + upstream.get_inventory_obs_shape()
-        == observation.OBSERVATION_SIZE
+        == observation.observation_size()
     )
 
 

@@ -29,7 +29,7 @@ import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game.constants import Action
-from priml.baselines.craftax.game.observation import OBSERVATION_SIZE
+from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.pqn import RecurrentQNetwork, epsilon_at
 from priml.math.advantage import explained_variance, q_lambda_targets
 from priml.runtime import get_device
@@ -198,7 +198,7 @@ class CraftaxPQNTrainStep:
         def finalize(self) -> Self:
             # The environment renders the observations and names the actions,
             # so an experiment that changes it cannot forget to resize the net.
-            self.model.observation_size = OBSERVATION_SIZE
+            self.model.observation_size = observation_size(self.env.view)
             self.model.num_actions = len(Action)
             return super().finalize()
 

@@ -6,9 +6,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-import importlib
 import sys
-import warnings
 
 import pytest
 
@@ -54,15 +52,10 @@ def torch_compiler_isolation() -> Generator[None]:
     and clears Inductor's caches, so nothing downstream reuses the block's
     guards or codegen. Blocks that never import Dynamo skip the reset entirely.
 
-    Entry also warms one upstream import; see
-    ``_warm_inductor_mkldnn_import`` for why that is load-bearing under
-    warnings-as-errors.
-
     Yields:
       None: Control returns to the wrapped block.
 
     """
-    _warm_inductor_mkldnn_import()
     try:
         yield
     finally:
@@ -118,36 +111,3 @@ def _reclaim_cuda() -> None:
     if torch is not None and torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-
-
-def _warm_inductor_mkldnn_import() -> None:
-    """Import the module Inductor loads lazily, before warnings turn fatal.
-
-    Inductor's pre-grad pass imports ``torch.utils.mkldnn``, whose module body
-    calls the deprecated ``torch.jit.script_method`` on Python 3.14
-    (pytorch/pytorch#127283). Under the suite's warnings-as-errors that import
-    raises, unwinds itself back out of ``sys.modules``, and so raises again on
-    every later compile or ``torch._dynamo.reset()``. Importing it once here,
-    successfully, means the warning is never raised again in this process --
-    so wrapped blocks run with warnings-as-errors fully armed rather than
-    inside a suppression window.
-
-    Costs ~4ms on the first call, then ~0.1us. Remove once torch drops the
-    ``script_method`` call from that module.
-    """
-    # Callers warm on every wrapped block, so short-circuit once the module is
-    # resident: re-entering ``catch_warnings`` bumps the global filter version
-    # and invalidates every module's warning registry, ~2.4us a call.
-    if torch is None or "torch.utils.mkldnn" in sys.modules:
-        return
-    # ``import torch.utils.mkldnn`` would bind the top-level name ``torch``,
-    # turning the sentinel checked above into a local (UnboundLocalError). The
-    # ``from`` form avoids that but needs F401 plus PLC0415 for a name we never
-    # use, so import for the side effect alone and bind nothing.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*torch\.jit\.script_method.*",
-            category=DeprecationWarning,
-        )
-        importlib.import_module("torch.utils.mkldnn")
