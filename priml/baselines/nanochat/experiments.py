@@ -70,7 +70,9 @@ class NanoChatLoop(TrainLoop):
         )
         """Model, optimization, and the budget the schedules anneal over."""
 
-        dataset: NanoChatData.Config = field(default_factory=NanoChatData.Config)
+        dataset: NanoChatData.Config = field(
+            default_factory=NanoChatData.Config,
+        )
         """Prepared token rows, served from device memory."""
 
         @override

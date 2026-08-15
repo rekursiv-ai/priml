@@ -42,8 +42,13 @@ class RMSNorm(nn.RMSNorm):
 
         _: KW_ONLY
 
-        eps: float = 1e-6
-        """Epsilon for numerical stability."""
+        eps: float | None = 1e-6
+        """Epsilon for numerical stability; None takes the dtype's own.
+
+        ``None`` is not "no epsilon" -- torch substitutes ``finfo(dtype).eps``,
+        which is ~1.19e-7 in float32 and 7.8e-3 in bfloat16. That is what a
+        bare ``functional.rms_norm`` call uses, so a port reproducing one has
+        to say ``None`` rather than any fixed number."""
 
         elementwise_affine: bool = False
         """Learn per-channel scale parameters."""

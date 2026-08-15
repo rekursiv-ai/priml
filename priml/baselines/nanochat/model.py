@@ -488,6 +488,11 @@ class NanoChatLM(nn.Module):
         embedding: Makeable[nn.Module] = field(default_factory=Embedding.Config)
         """Token embedding table."""
 
+        norm: Makeable[TensorModule] = field(
+            default_factory=lambda: RMSNorm.Config(eps=None),
+        )
+        """Normalization on the embedding and before the output projection."""
+
         lm_head: Makeable[TensorModule] = field(
             default_factory=lambda: Linear.Config(
                 bias=False,
@@ -638,6 +643,7 @@ class NanoChatLM(nn.Module):
             propagate_attr(self.embedding, "num_embeddings", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels)
             propagate_attr(self.lm_head, "channels_out", self.vocab_size)
+            propagate_attr(self.norm, "channels_in", self.channels, protocol=ChannelsIn)
             self.rope.channels_head = head_width(self.blocks[0], self.channels)
             finalized = super().finalize()
             # AFTER the cascade: a block that left ``heads`` at its sentinel
@@ -691,6 +697,8 @@ class NanoChatLM(nn.Module):
             self.embed.to(dtype=config.embedding_dtype)
             for table in self.value_embeds.values():
                 table.to(dtype=config.embedding_dtype)
+        self.norm_embed = config.norm.make()
+        self.norm_out = config.norm.make()
         self.residual_scale = nn.Parameter(
             torch.full((config.num_layers,), config.residual_init),
         )
@@ -731,7 +739,7 @@ class NanoChatLM(nn.Module):
         # (``lambda.to(x.dtype)``) gives the same forward and a DIFFERENT
         # backward -- the cast is its own autograd node, and the gradient
         # accumulating through it rounds at each layer rather than once.
-        x = _rms_norm(self.embed(tokens))
+        x = self.norm_embed(self.embed(tokens))
         skip = x
         for layer, block in enumerate(self.blocks):
             x = self.residual_scale[layer] * x + self.skip_scale[layer] * skip
@@ -748,7 +756,7 @@ class NanoChatLM(nn.Module):
             assert isinstance(out, Tensor)
             x = out
         cap = self.config.logit_softcap
-        logits = self.lm_head(_rms_norm(x)).float()
+        logits = self.lm_head(self.norm_out(x)).float()
         return cap * torch.tanh(logits / cap)
 
     def flops_per_token(self) -> int:
@@ -875,11 +883,6 @@ def _reject_ragged_heads(
             "the value embeddings and rotary factors are shared across layers; "
             f"got (channels_head, heads * channels_head) of {sorted(shapes)}.",
         )
-
-
-def _rms_norm(x: Tensor) -> Tensor:
-    """Parameter-free RMS normalization over the final dimension."""
-    return functional.rms_norm(x, (x.shape[-1],))
 
 
 def _weight(module: nn.Module) -> Tensor:
