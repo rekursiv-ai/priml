@@ -70,13 +70,13 @@ class Renderer:
             os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         if not pygame.get_init():
             pygame.init()
-        # ``convert_alpha`` needs a pixel format to convert TO, which normally
-        # comes from the display. A dummy 1x1 surface supplies one without
-        # opening a window, and converting matters: an unconverted surface
-        # blits through a per-pixel format check on every draw.
-        if pygame.display.get_surface() is None:
-            pygame.display.init()
-            pygame.display.set_mode((1, 1))
+        # No ``set_mode``. It would MAP a window -- instantly on a local
+        # display, and over a forwarded X connection slowly enough to dominate
+        # a test suite. Sprites are therefore kept unconverted: ``convert`` and
+        # ``convert_alpha`` need a display's pixel format, and the blit-time
+        # cost of going without is nothing beside opening a window nobody
+        # asked for. ``play`` calls ``set_mode`` itself, and its sprites are
+        # converted from that surface as a side effect of being blitted to it.
         self.block_pixels = block_pixels
         self._directory = asset_dir
         self._cache: dict[str, pygame.Surface] = {}
@@ -306,7 +306,9 @@ class Renderer:
         if cached is not None:
             return cached
         path = assets.fetch(name, directory=self._directory)
-        surface = pygame.image.load(str(path)).convert_alpha()
+        # Loaded unconverted: ``convert_alpha`` requires a display surface,
+        # and creating one to satisfy it would open a window.
+        surface = pygame.image.load(str(path))
         surface = pygame.transform.scale(
             surface,
             (self.block_pixels, self.block_pixels),

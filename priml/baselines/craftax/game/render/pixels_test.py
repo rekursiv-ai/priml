@@ -259,58 +259,20 @@ def test_the_real_sprites_draw() -> None:
     assert len(np.unique(frame.reshape(-1, 3), axis=0)) > 16
 
 
-def _has_windowing() -> bool:
-    """Whether a real windowing system is reachable from this process.
-
-    Probed by asking SDL to open one in a throwaway interpreter, not by
-    reading ``DISPLAY``: a headless GPU worker often HAS the variable set with
-    nothing listening on it, and SDL only discovers that when it tries to
-    connect (``xcb_connection_has_error() returned true``).
-    """
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import pygame; pygame.display.init(); "
-                "pygame.display.set_mode((1, 1)); "
-                "print(pygame.display.get_driver())"
-            ),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={k: v for k, v in os.environ.items() if k != "SDL_VIDEODRIVER"},
-    )
-    if probe.returncode != 0:
-        return False
-    # A zero exit is not enough. With nothing reachable, SDL quietly settles
-    # on "dummy" or "offscreen" -- which draw nowhere, and are the very
-    # outcomes this test asserts. Treating those as a windowing system would
-    # let the test pass while proving nothing.
-    return probe.stdout.strip().splitlines()[-1] not in {"dummy", "offscreen"}
-
-
-@pytest.mark.skipif(
-    not _has_windowing(),
-    reason="no reachable windowing system: nothing to open an unwanted window ON",
-)
 def test_constructing_a_renderer_opens_no_window(sprite_dir: Path) -> None:
     """A viewer object must not put a window on an operator's screen.
 
-    SDL picks its video driver at the FIRST init and caches the choice, so this
-    has to run in a fresh interpreter -- in-process, some earlier test has
-    already bound the driver and the check is vacuous.
+    Run in a fresh interpreter because SDL picks its video driver at the FIRST
+    init and caches the choice for the process: in-process, some earlier test
+    has already bound one and the check is vacuous.
 
-    The probe inherits the caller's environment rather than forcing
-    ``DISPLAY=:0``. A headless host has no X server there, so forcing it makes
-    SDL abort and reports a broken machine as a broken viewer. Paired with the
-    capability skip above, this test now asks the only question it can answer:
-    given that a window COULD be opened, does the viewer decline to open one.
-
-    The probe is pointed at the generated sprites: it is asserting which
-    driver SDL bound, and downloading the real art to find that out would put
-    the network on the path of a windowing test.
+    The child is given the caller's ``DISPLAY`` with only the driver REQUEST
+    removed, which is the situation that matters -- a display is reachable and
+    the viewer must decline it anyway. Nothing here probes whether that display
+    really works: asking costs an X round trip, which over a forwarded SSH
+    connection is seconds, and the answer would not change the assertion. If
+    the viewer is correct it binds ``dummy`` and never contacts X at all, so
+    this test is fast exactly when it passes.
     """
     source = (
         (
@@ -332,8 +294,6 @@ def test_constructing_a_renderer_opens_no_window(sprite_dir: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
-        # Only the driver request is dropped; the rest of the environment is
-        # the caller's, which the capability skip proved can open a window.
         env={k: v for k, v in os.environ.items() if k != "SDL_VIDEODRIVER"},
     )
     assert probe.returncode == 0, probe.stderr
