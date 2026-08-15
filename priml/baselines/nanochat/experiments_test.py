@@ -15,23 +15,29 @@ from pathlib import Path
 
 import json
 import math
+import pickle
 
 from configgle import PartialConfig
+from pyarrow import parquet
 
 import numpy as np
+import pyarrow as pa
 import pytest
+import tiktoken
 
 from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.data import token_bytes_fingerprint
 from priml.baselines.nanochat.experiments import NanoChatLoop
 from priml.baselines.nanochat.flash3 import Flash3Attention
-from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     nanochat_optimizer,
 )
-from priml.metrics import BitsPerByte
-from priml.optimizers import CompositeOptimizer, NorMuon
+from priml.metrics.bits_per_byte import BitsPerByte
+from priml.model.narrow_embedding import NarrowEmbedding
+from priml.model.value_gated_attention import ValueGatedAttention
+from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.normuon import NorMuon
 
 
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
@@ -46,6 +52,13 @@ LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
 # model excludes it: the rung is unbuildable on a laptop and on most CI, which
 # is the point of exp001 existing. Its config-level fields are still checked.
 PORTABLE: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = LADDER[1:]
+
+
+def _pattern(cfg: NanoChatLoop.Config) -> str:
+    """The window pattern the stack's attention layers carry."""
+    attention = cfg.step.model.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    return attention.window_pattern
 
 
 @pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
@@ -67,7 +80,7 @@ def test_exp000_pins_the_reference_kernel() -> None:
     different number -- and could not settle whether the port is faithful,
     which is the only question exp000 exists to answer.
     """
-    attn = experiments.exp000().step.model.block.attn
+    attn = experiments.exp000().step.model.template.attn
     assert isinstance(attn, ValueGatedAttention.Config)
     assert isinstance(attn.kernel, Flash3Attention.Config)
 
@@ -75,12 +88,12 @@ def test_exp000_pins_the_reference_kernel() -> None:
 def test_exp001_changes_only_the_kernel() -> None:
     """The portable rung is the reference recipe, kernel aside."""
     base, fork = experiments.exp000(), experiments.exp001()
-    base_attn, fork_attn = base.step.model.block.attn, fork.step.model.block.attn
+    base_attn, fork_attn = base.step.model.template.attn, fork.step.model.template.attn
     assert isinstance(base_attn, ValueGatedAttention.Config)
     assert isinstance(fork_attn, ValueGatedAttention.Config)
     assert isinstance(base_attn.kernel, Flash3Attention.Config)
     assert not isinstance(fork_attn.kernel, Flash3Attention.Config)
-    assert fork.step.model.window_pattern == base.step.model.window_pattern
+    assert _pattern(fork) == _pattern(base)
     assert fork.step.model.value_embedding_stride == (
         base.step.model.value_embedding_stride
     )
@@ -96,7 +109,7 @@ def test_exp000_turns_both_mechanisms_on() -> None:
     measuring against an unstated recipe instead.
     """
     cfg = experiments.exp000()
-    assert cfg.step.model.window_pattern == "SSSL"
+    assert _pattern(cfg) == "SSSL"
     assert cfg.step.model.value_embedding_stride == 2
 
 
@@ -104,15 +117,15 @@ def test_exp002_removes_only_the_value_embeddings() -> None:
     base, fork = experiments.exp001(), experiments.exp002()
     assert base.step.model.value_embedding_stride == 2
     assert fork.step.model.value_embedding_stride == 0
-    assert fork.step.model.window_pattern == base.step.model.window_pattern
+    assert _pattern(fork) == _pattern(base)
     assert fork.step.time_budget_sec == base.step.time_budget_sec
-    assert fork.step.model.channels == base.step.model.channels
+    assert fork.step.model.channels_in == base.step.model.channels_in
 
 
 def test_exp003_removes_the_window_too() -> None:
     base, fork = experiments.exp002(), experiments.exp003()
-    assert base.step.model.window_pattern == "SSSL"
-    assert fork.step.model.window_pattern == "L"
+    assert _pattern(base) == "SSSL"
+    assert _pattern(fork) == "L"
     assert fork.step.model.value_embedding_stride == (
         base.step.model.value_embedding_stride
     )
@@ -186,11 +199,11 @@ def test_every_experiments_eval_geometry_is_constructible(
     # Shrunk on every axis that costs time and none that bears on the question:
     # the subject is EVAL BATCHING, so the context, width, depth, and vocabulary
     # are cut to what a CPU runner can step in milliseconds.
-    model.channels = 32
+    model.channels_in = 32
     model.num_layers = 1
     model.max_seq_len = 16
     model.vocab_size = 32
-    attention = model.block.attn
+    attention = model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.channels_head = 32
     config.step.device = "cpu"
@@ -206,50 +219,86 @@ def test_every_experiments_eval_geometry_is_constructible(
     # HERE, beside the autocast it pairs with, rather than defaulted away on the
     # model: the pairing is the invariant, and hiding half of it makes the other
     # half look arbitrary.
-    model.embedding_dtype = None
-    model.rotary_dtype = None
+    embedding = model.embedding
+    assert isinstance(embedding, NarrowEmbedding.Config)
+    embedding.dtype = None
+    model.rope.dtype = None
 
-    # A split matching what this experiment declares, at a PRIME row count so
-    # no experiment's eval batch divides it and every one exercises the padded
-    # tail. A count that divided every batch width would leave the padding path
-    # unreached by the very test that sits beside it.
-    _prepared(tmp_path, rows=67, vocab=model.vocab_size, seq=model.max_seq_len)
+    # A corpus at the vocabulary this experiment declares. Two shards, since
+    # the validation one is pinned and excluded from training.
+    _prepared(tmp_path, vocab=model.vocab_size)
     config.base_dir = "/"
     config.dataset.working_dir = str(tmp_path)
     config.dataset.device = "cpu"
+    config.dataset.num_train_shards = 1
+    config.dataset.val_shard = 1
+    # Two batches, so the stream's extent is exercised without the recipe's
+    # 20.97M tokens. The width is left as the experiment declares it, since
+    # that is the field under test.
+    config.dataset.eval_tokens = 2 * config.dataset.eval_batch_size * model.max_seq_len
 
     final = config.copy_tree().finalize()
     built = final.dataset.make()
-    batches = list(built.eval_dataloader())
-    assert batches, name
-    # And RUN them: iterating proves the batches exist, not that the model can
-    # consume them. A padding marker the loss rejects passes the first check
-    # and fails the second.
     step = final.step.make()
-    for batch in batches:
+    # Consumed one at a time, NOT collected into a list first: the stream yields
+    # views of one reused buffer, so a list of them holds the same tensor twice
+    # and every assertion after it would read the last batch. Each is stepped
+    # where it is drawn, which is also how the training loop takes them.
+    drawn = 0
+    for batch in built.eval_dataloader():
+        # RUN it: drawing proves the batch exists, not that the model can
+        # consume it. A token id the embedding rejects passes the first check
+        # and fails the second.
         step.eval_loss(**step.preprocess_batch(batch))
+        drawn += 1
+    assert drawn == 2, name
 
 
-def _prepared(root: Path, *, rows: int, vocab: int, seq: int) -> None:
-    """Write a split at the given geometry."""
-    for split in ("train", "val"):
-        directory = root / split
-        directory.mkdir(parents=True, exist_ok=True)
-        np.save(
-            directory / "all__tokens.npy",
-            np.zeros((rows, seq + 1), dtype=np.uint16),
-        )
-        lengths = np.ones(vocab, dtype=np.int32)
-        lengths[0] = 0
-        np.save(directory / "all__token_bytes.npy", lengths)
-        (directory / "dataset.json").write_text(
-            json.dumps(
-                {
-                    "vocab_size": vocab,
-                    "max_seq_len": seq,
-                    "token_bytes_sha256": token_bytes_fingerprint(lengths),
-                },
-            ),
+def _prepared(root: Path, *, vocab: int) -> None:
+    """Write a corpus and a vocabulary of exactly ``vocab`` tokens.
+
+    Single-character merges so a document's token count is its length, which is
+    what lets the packer fill a row out of a handful of short documents.
+    """
+    reserved = tuple(f"<|reserved_{index}|>" for index in range(16))
+    merges = vocab - len(reserved)
+    assert merges > 0, "the vocabulary must exceed its reserved tokens"
+    alphabet = [bytes([ord("a") + index]) for index in range(merges)]
+    encoding = tiktoken.Encoding(
+        name="test",
+        pat_str=r".",
+        mergeable_ranks={token: rank for rank, token in enumerate(alphabet)},
+        special_tokens={name: merges + index for index, name in enumerate(reserved)},
+    )
+    directory = root / "tokenizer"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "tokenizer.pkl").open("wb") as file:
+        pickle.dump(encoding, file)
+    special = set(reserved)
+    lengths = np.array(
+        [
+            0 if (text := encoding.decode([token])) in special else len(text.encode())
+            for token in range(vocab)
+        ],
+        dtype=np.int32,
+    )
+    np.save(directory / "token_bytes.npy", lengths)
+    (directory / "tokenizer_recipe.json").write_text(
+        json.dumps(
+            {
+                "bos_token": reserved[0],
+                "token_bytes_sha256": token_bytes_fingerprint(lengths),
+            },
+        ),
+    )
+    documents = [
+        bytes(alphabet[index % merges][0] for _ in range(index + 1)).decode()
+        for index in range(8)
+    ]
+    for shard in range(2):
+        parquet.write_table(
+            pa.table({"text": documents}),
+            root / f"shard_{shard:05d}.parquet",
         )
 
 
@@ -274,7 +323,7 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     """It answers "does this run", so anything not bearing on that is cut."""
     smoke, base = experiments.exp_smoke(), experiments.exp000()
     assert smoke.step.time_budget_sec < base.step.time_budget_sec
-    assert smoke.step.model.channels < base.step.model.channels
+    assert smoke.step.model.channels_in < base.step.model.channels_in
     assert smoke.step.model.num_layers < base.step.model.num_layers
     assert smoke.step.model.max_seq_len < base.step.model.max_seq_len
     assert not smoke.step.compile
@@ -294,11 +343,10 @@ def test_smoke_differs_from_exp001_only_in_size() -> None:
     """
     smoke, base = experiments.exp_smoke(), experiments.exp001()
     smoke_model, base_model = smoke.step.model, base.step.model
-    assert smoke_model.window_pattern == base_model.window_pattern
     assert smoke_model.value_embedding_stride == base_model.value_embedding_stride
-    assert smoke_model.embedding_dtype == base_model.embedding_dtype
-    assert smoke_model.rotary_dtype == base_model.rotary_dtype
-    assert smoke_model.logit_softcap == base_model.logit_softcap
+    assert repr(smoke_model.embedding) == repr(base_model.embedding)
+    assert smoke_model.rope.dtype == base_model.rope.dtype
+    assert repr(smoke_model.lm_head) == repr(base_model.lm_head)
     # Compared by ``repr``, not by ``==``: a PartialConfig raises on
     # ``parent_class`` when equality reaches it, and both of these slots hold
     # one. ``repr`` is declared on object, so it also needs no narrowing of the
@@ -308,9 +356,10 @@ def test_smoke_differs_from_exp001_only_in_size() -> None:
     assert repr(smoke.step.optimizer) == repr(base.step.optimizer)
     assert repr(smoke.step.schedule) == repr(base.step.schedule)
     assert smoke.step.dtype_autocast == base.step.dtype_autocast
-    smoke_attn, base_attn = smoke_model.block.attn, base_model.block.attn
+    smoke_attn, base_attn = smoke_model.template.attn, base_model.template.attn
     assert isinstance(smoke_attn, ValueGatedAttention.Config)
     assert isinstance(base_attn, ValueGatedAttention.Config)
+    assert smoke_attn.window_pattern == base_attn.window_pattern
     assert smoke_attn.norm_qk == base_attn.norm_qk
     assert type(smoke_attn.kernel) is type(base_attn.kernel)
 

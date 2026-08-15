@@ -2,7 +2,7 @@
 
 Used by DeepSeek-V2/V3 and Kimi-K2. Compresses KV through a low-rank
 ``kv_lora_rank`` latent, applies RoPE only on a decoupled
-``qk_rope_head_dim`` slice, and uses a separate ``v_head_dim`` for the
+``channels_qk_rope_head`` slice, and uses a separate ``channels_v_head`` for the
 value path.
 
 Q has an optional LoRA decomposition (``q_lora_rank``): DeepSeek-V3 uses
@@ -19,7 +19,7 @@ Forward shape map (B=batch, S=seq, n=num_heads)::
 
     At attention time, kv_b_proj expands c_kv -> (k_nope, v) per head.
 
-Output: ``[B, S, n, v_head_dim]`` → ``o_proj`` → ``[B, S, hidden]``.
+Output: ``[B, S, n, channels_v_head]`` → ``o_proj`` → ``[B, S, hidden]``.
 
 **Cache layout.** Only ``(c_kv, k_pe)`` are cached — not the expanded
 K/V. For Kimi-K2 (n=64, qk_nope+v=256, kv_lora_rank=512, qk_rope=64)
@@ -81,13 +81,13 @@ class MultiHeadLatentAttention(nn.Module):
         heads: int = -1
         """Number of attention heads (shared by Q, K, V)."""
 
-        qk_nope_head_dim: int = 128
+        channels_qk_nope_head: int = 128
         """Non-RoPE portion of the Q/K head dim."""
 
-        qk_rope_head_dim: int = 64
+        channels_qk_rope_head: int = 64
         """RoPE portion of the Q/K head dim (shared key for all heads)."""
 
-        v_head_dim: int = 128
+        channels_v_head: int = 128
         """Value head dim (independent of Q/K head dim)."""
 
         q_lora_rank: int | None = None
@@ -136,8 +136,17 @@ class MultiHeadLatentAttention(nn.Module):
             return self.channels_in
 
         @property
-        def qk_head_dim(self) -> int:
-            return self.qk_nope_head_dim + self.qk_rope_head_dim
+        def channels_qk_head(self) -> int:
+            return self.channels_qk_nope_head + self.channels_qk_rope_head
+
+        @property
+        def channels_head(self) -> int:
+            """The Q/K head width, which is what rotary factors are sized to.
+
+            NOT ``channels_v_head``: MLA's value path is independently sized, and
+            only the query/key width participates in the rotation.
+            """
+            return self.channels_qk_head
 
         @override
         def finalize(self) -> Self:
@@ -156,16 +165,18 @@ class MultiHeadLatentAttention(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.heads = config.heads
-        self.qk_nope_head_dim = config.qk_nope_head_dim
-        self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
-        self.v_head_dim = config.v_head_dim
+        self.channels_qk_nope_head = config.channels_qk_nope_head
+        self.channels_qk_rope_head = config.channels_qk_rope_head
+        self.channels_qk_head = (
+            config.channels_qk_nope_head + config.channels_qk_rope_head
+        )
+        self.channels_v_head = config.channels_v_head
         self.q_lora_rank = config.q_lora_rank
         self.kv_lora_rank = config.kv_lora_rank
         self.dropout = config.dropout
         self.causal = config.causal
         self.depth = config.depth
-        self.softmax_scale = config.softmax_scale or self.qk_head_dim**-0.5
+        self.softmax_scale = config.softmax_scale or self.channels_qk_head**-0.5
         self.shard = config.shard
 
         c = config.channels_in
@@ -183,7 +194,7 @@ class MultiHeadLatentAttention(nn.Module):
         if config.q_lora_rank is None:
             self.q_proj = Linear.Config(
                 channels_in=c,
-                channels_out=config.heads * self.qk_head_dim,
+                channels_out=config.heads * self.channels_qk_head,
                 bias=config.bias,
                 depth=config.depth,
                 init_weight=config.init_weight,
@@ -207,7 +218,7 @@ class MultiHeadLatentAttention(nn.Module):
             ).make()
             self.q_b_proj = Linear.Config(
                 channels_in=config.q_lora_rank,
-                channels_out=config.heads * self.qk_head_dim,
+                channels_out=config.heads * self.channels_qk_head,
                 bias=config.bias,
                 depth=config.depth,
                 init_weight=config.init_weight,
@@ -216,7 +227,7 @@ class MultiHeadLatentAttention(nn.Module):
         # KV path: compressed_kv is split into (c_kv, k_pe).
         self.kv_a_proj = Linear.Config(
             channels_in=c,
-            channels_out=config.kv_lora_rank + config.qk_rope_head_dim,
+            channels_out=config.kv_lora_rank + config.channels_qk_rope_head,
             bias=config.bias,
             depth=config.depth,
             init_weight=config.init_weight,
@@ -226,16 +237,17 @@ class MultiHeadLatentAttention(nn.Module):
             eps=config.rms_norm_eps,
             elementwise_affine=True,
         ).make()
-        # kv_b expands c_kv into (n_heads * (qk_nope + v_head_dim)).
+        # kv_b expands c_kv into (n_heads * (qk_nope + channels_v_head)).
         self.kv_b_proj = Linear.Config(
             channels_in=config.kv_lora_rank,
-            channels_out=config.heads * (config.qk_nope_head_dim + config.v_head_dim),
+            channels_out=config.heads
+            * (config.channels_qk_nope_head + config.channels_v_head),
             bias=config.bias,
             depth=config.depth,
             init_weight=config.init_weight,
         ).make()
         self.o_proj = Linear.Config(
-            channels_in=config.heads * config.v_head_dim,
+            channels_in=config.heads * config.channels_v_head,
             channels_out=c,
             bias=config.bias,
             depth=config.depth,
@@ -277,7 +289,7 @@ class MultiHeadLatentAttention(nn.Module):
             heads=1,
             max_seq=max_seq,
             channels_head=self.kv_lora_rank,
-            channels_head_v=self.qk_rope_head_dim,
+            channels_v_head=self.channels_qk_rope_head,
             device=device,
             dtype=dtype,
         )
@@ -296,8 +308,8 @@ class MultiHeadLatentAttention(nn.Module):
         S = x.shape[-2]
 
         q = self._project_q(x)
-        q_nope = q[..., : self.qk_nope_head_dim]
-        q_pe = q[..., self.qk_nope_head_dim :]
+        q_nope = q[..., : self.channels_qk_nope_head]
+        q_pe = q[..., self.channels_qk_nope_head :]
 
         compressed = self.kv_a_proj(x)
         c_kv_new = self.kv_a_layernorm(compressed[..., : self.kv_lora_rank])
@@ -336,7 +348,7 @@ class MultiHeadLatentAttention(nn.Module):
         return out, cache
 
     def _project_q(self, x: Tensor) -> Tensor:
-        """Return Q as ``[..., S, heads_local, qk_head_dim]``.
+        """Return Q as ``[..., S, heads_local, channels_qk_head]``.
 
         Under tensor parallelism the q-path is colwise-sharded over the head
         dim, so ``q_proj``/``q_b_proj`` emit only this rank's
@@ -351,7 +363,7 @@ class MultiHeadLatentAttention(nn.Module):
             assert self.q_b_proj is not None
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
         assert isinstance(q, Tensor)
-        return q.view(*q.shape[:-1], self._heads_local, self.qk_head_dim)
+        return q.view(*q.shape[:-1], self._heads_local, self.channels_qk_head)
 
     def _absorb_attention(
         self,
@@ -379,8 +391,8 @@ class MultiHeadLatentAttention(nn.Module):
         """
         h_local = self._heads_local
         L = self.kv_lora_rank
-        qk_nope = self.qk_nope_head_dim
-        v_dim = self.v_head_dim
+        qk_nope = self.channels_qk_nope_head
+        v_dim = self.channels_v_head
 
         # nn.Linear.weight is [out, in]. Out is head-major (each head's
         # (qk_nope + v) features contiguous), so view reshapes cleanly. Slice

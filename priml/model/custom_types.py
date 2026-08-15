@@ -12,9 +12,14 @@ from priml.math.custom_types import TensorFn
 
 __all__ = [
     "ActivationFn",
+    "AttentionBlock",
+    "AttentionKernel",
     "ChannelsIn",
     "ChannelsInOut",
     "ChannelsOut",
+    "HasDepth",
+    "HeadGeometry",
+    "LookupTable",
     "ShardableConfig",
     "TensorModule",
     "propagate_attr",
@@ -41,6 +46,95 @@ class TensorModule(Protocol):
 
     def __call__(self, x: Tensor, /, *args: Any, **kwargs: Any) -> Tensor: ...
     def reset_parameters(self) -> None: ...
+
+
+@runtime_checkable
+class AttentionKernel(Protocol):
+    """Windowed causal attention over ``[..., S, heads, channels_head]``.
+
+    The layout is the one every priml projection emits and the one a fused
+    kernel wants, so a kernel needing SDPA's ``[..., heads, S, ...]`` transposes
+    internally -- a stride view, not a copy. The window is an argument rather
+    than a mask because a mask disqualifies every flash backend; a kernel that
+    cannot express one builds the mask itself.
+    """
+
+    def __call__(self, q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor: ...
+
+
+@runtime_checkable
+class LookupTable(Protocol):
+    """A table mapping integer ids to rows, whose rows are readable.
+
+    Wider than :class:`TensorModule` in the two ways a wrapper needs: the
+    weight, because an init the recipe states applies to the table itself, and
+    ``to``, because holding a table at a narrower width is a move rather than a
+    computation.
+    """
+
+    weight: Tensor
+
+    def __call__(self, tokens: Tensor, /, *args: Any, **kwargs: Any) -> Tensor: ...
+    def reset_parameters(self) -> None: ...
+    def to(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class AttentionBlock(Makeable[nn.Module], Protocol):
+    """A block config a stack can reach the attention of.
+
+    ``Makeable`` already says it builds a module; this adds the one thing a
+    STACK needs beyond that -- the attention, to push what follows from DEPTH
+    (how far back this layer attends, whether a table feeds its gate) and to
+    size the tensors the heads consume.
+
+    Declared as a shape rather than as a block CLASS, so a wrapper or a
+    replacement qualifies by exposing an attention instead of by inheriting.
+    """
+
+    attn: Makeable[nn.Module]
+    """The attention sublayer; the stack narrows it to the one it requires."""
+
+
+@runtime_checkable
+class HeadGeometry(Protocol):
+    """Answers for the head geometry of whatever attention it composes.
+
+    A model that owns a tensor the heads consume -- rotary factors, sized per
+    head; a value embedding, added to the VALUES and so spanning every head --
+    has to ask the block, because the two widths are decoupled: an attention
+    wider than the residual stream is legal, so dividing the model width would
+    misreport every model where they differ.
+
+    Answered BY THE BLOCK rather than read off ``block.attn``, because where
+    the attention sits is the block's business: a wrapper (an output gate, an
+    adapter, a router) composes one without being one, and a reader reaching
+    for a fixed attribute silently gets the wrong answer from every wrapper
+    ever written.
+    """
+
+    @property
+    def heads(self) -> int:
+        """Attention heads the block's queries are split into."""
+        ...
+
+    @property
+    def channels_head(self) -> int:
+        """Channels per head."""
+        ...
+
+
+@runtime_checkable
+class HasDepth(Protocol):
+    """Carries its INDEX in the stack, for anything that scales with position.
+
+    Not a count: ``depth`` says which layer, so a depth-scaled init divides by
+    it and an attention reads its reach off a pattern at it. Only blocks whose
+    behavior varies with position declare it, which is why a parent pushing one
+    gates on this rather than setting it blind.
+    """
+
+    depth: int
 
 
 @runtime_checkable

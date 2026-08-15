@@ -28,6 +28,7 @@ from priml.model.attention import MultiStreamAttention
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
+    HeadGeometry,
     propagate_attr,
 )
 from priml.model.linear import Linear
@@ -122,6 +123,18 @@ class MMDiTBlock(nn.Module):
 
         depth: int = -1
         """Block depth for depth-scaled init (-1 = no scaling)."""
+
+        @property
+        def heads(self) -> int:
+            """Attention heads, from the joint attention this block composes."""
+            return self.attn.heads if isinstance(self.attn, HeadGeometry) else 1
+
+        @property
+        def channels_head(self) -> int:
+            """Channels per head, from the joint attention this block composes."""
+            if isinstance(self.attn, HeadGeometry):
+                return self.attn.channels_head
+            return self.channels_in
 
         @override
         def finalize(self) -> Self:

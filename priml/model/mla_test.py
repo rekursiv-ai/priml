@@ -13,9 +13,9 @@ def _tiny(q_lora_rank: int | None = None) -> MultiHeadLatentAttention:
     return MultiHeadLatentAttention.Config(
         channels_in=128,
         heads=4,
-        qk_nope_head_dim=16,
-        qk_rope_head_dim=8,
-        v_head_dim=16,
+        channels_qk_nope_head=16,
+        channels_qk_rope_head=8,
+        channels_v_head=16,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=32,
         rope=RoPE.Config(channels_head=8, base=50_000),
@@ -112,9 +112,9 @@ def test_softmax_scale_override():
     m = MultiHeadLatentAttention.Config(
         channels_in=64,
         heads=2,
-        qk_nope_head_dim=8,
-        qk_rope_head_dim=8,
-        v_head_dim=8,
+        channels_qk_nope_head=8,
+        channels_qk_rope_head=8,
+        channels_v_head=8,
         kv_lora_rank=16,
         softmax_scale=0.25,
     ).make()

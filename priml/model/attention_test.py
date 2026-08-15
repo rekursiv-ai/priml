@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
 import pytest
 import torch
 
@@ -11,6 +13,8 @@ from priml.model.attention import (
     SdpaFused,
     SdpaNaive,
     SelfAttention,
+    window_mask,
+    window_sizes,
 )
 from priml.model.kvcache import (
     KVCache,  # used in preallocated cache test
@@ -633,6 +637,80 @@ def test_output_gate_finalize_propagates():
     ).finalize()
     assert isinstance(cfg.inner, SelfAttention.Config)
     assert cfg.inner.channels_in == 128
+
+
+def test_window_sizes_always_end_long() -> None:
+    """The last layer predicts the next token, so it must see everything."""
+    assert window_sizes(num_layers=5, max_seq_len=64, pattern="SSSL") == [
+        32,
+        32,
+        32,
+        64,
+        64,
+    ]
+
+
+def test_window_sizes_rejects_an_unknown_symbol() -> None:
+    """A typo would otherwise cycle silently into a KeyError per layer."""
+    with pytest.raises(ValueError, match="only S and L"):
+        window_sizes(num_layers=2, max_seq_len=8, pattern="SX")
+
+
+def test_a_window_admits_its_own_position_and_w_before_it() -> None:
+    """``<=``, not ``<``.
+
+    A fused kernel's ``window_size=(w, 0)`` admits w keys of history IN
+    ADDITION to the query's own, so the exclusive form attends to one key fewer
+    per row -- a different model rather than a rounding difference.
+    """
+    q = k = torch.zeros(1, 8, 1, 4)
+    mask = window_mask(q, k, window=2)
+    assert mask is not None
+    admitted = torch.isfinite(mask)
+    assert admitted[5].tolist() == [False, False, False, True, True, True, False, False]
+
+
+def test_a_window_reaching_the_context_needs_no_mask() -> None:
+    """Masking there costs a kernel dispatch and admits exactly the same keys."""
+    q = k = torch.zeros(1, 8, 1, 4)
+    assert window_mask(q, k, window=8) is None
+    assert window_mask(q, k, window=-1) is None
+
+
+def test_a_window_and_is_causal_together_are_accepted() -> None:
+    """SDPA refuses a mask beside ``is_causal``, and the window IS a mask.
+
+    Every windowed caller passes both -- the window is the recipe, the causal
+    flag is the model -- so a kernel forwarding them unchanged raises
+    ``Explicit attn_mask should not be set when is_causal=True``.
+
+    Pinned to the MATH backend, which is the only one that refuses: flash
+    accepts both and silently ignores the flag, so a test at free dispatch
+    passes on a kernel that is broken for every caller pinning MATH -- the bfb
+    harness among them.
+    """
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 8, 2, 4) for _ in range(3))
+    with sdpa_kernel(SDPBackend.MATH):
+        windowed = SdpaFused()(q, k, v, is_causal=True, window=3)
+        # The mask is causal by construction, so the flag adds nothing.
+        torch.testing.assert_close(
+            windowed,
+            SdpaFused()(q, k, v, is_causal=False, window=3),
+            rtol=0,
+            atol=0,
+        )
+
+
+def test_the_kernels_agree_on_a_windowed_forward() -> None:
+    """The fused and manual kernels are one algorithm, so a window cannot
+    change only one of them.
+    """
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(2, 16, 4, 8) for _ in range(3))
+    fused = SdpaFused()(q, k, v, is_causal=True, window=3)
+    naive = SdpaNaive()(q, k, v, is_causal=True, window=3)
+    torch.testing.assert_close(fused, naive, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,14 @@
 
 DeepSeek-V3 / Kimi-K2 aren't in stable transformers, so we build the
 MLA reference forward from scratch here, matching the published math
-(decoupled RoPE, per-head kv_b expansion, v_head_dim on the value
+(decoupled RoPE, per-head kv_b expansion, channels_v_head on the value
 path). Our fused ``MultiHeadLatentAttention`` must produce the same
 output on the same weights.
 
 Covers:
   - Q-LoRA ON and OFF (DSV3 vs. Kimi-K2).
   - KV compression + decode via cache.
-  - Asymmetric qk_head_dim vs. v_head_dim.
+  - Asymmetric channels_qk_head vs. channels_v_head.
 
 Integration-marked (heavier forward).
 """
@@ -40,10 +40,10 @@ def _reference_mla_forward(
     """
     S = x.shape[-2]
     heads = m.heads
-    qk_nope = m.qk_nope_head_dim
-    qk_rope = m.qk_rope_head_dim
-    v_dim = m.v_head_dim
-    qk_head = m.qk_head_dim
+    qk_nope = m.channels_qk_nope_head
+    qk_rope = m.channels_qk_rope_head
+    v_dim = m.channels_v_head
+    qk_head = m.channels_qk_head
 
     # Q path.
     if m.q_proj is not None:
@@ -93,9 +93,9 @@ def test_mla_matches_reference(q_lora_rank: int | None):
     m = MultiHeadLatentAttention.Config(
         channels_in=128,
         heads=4,
-        qk_nope_head_dim=16,
-        qk_rope_head_dim=8,
-        v_head_dim=16,
+        channels_qk_nope_head=16,
+        channels_qk_rope_head=8,
+        channels_v_head=16,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=24,
         rope=RoPE.Config(channels_head=8, base=50_000),
@@ -117,9 +117,9 @@ def test_mla_decode_matches_reference():
     m = MultiHeadLatentAttention.Config(
         channels_in=64,
         heads=4,
-        qk_nope_head_dim=8,
-        qk_rope_head_dim=8,
-        v_head_dim=8,
+        channels_qk_nope_head=8,
+        channels_qk_rope_head=8,
+        channels_v_head=8,
         kv_lora_rank=16,
         rope=RoPE.Config(channels_head=8, base=50_000),
     ).make()

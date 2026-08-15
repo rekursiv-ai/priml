@@ -18,6 +18,7 @@ from priml.model.init import (
     mup_output,
     normal,
     truncated_normal,
+    unit_fan_in_uniform,
     xavier_normal,
     xavier_uniform,
 )
@@ -39,11 +40,13 @@ from priml.model.norm import (
 )
 from priml.model.patchify import Patchify, Unpatchify
 from priml.model.qwen3 import Qwen3
+from priml.model.relu_squared import ReluSquared
 from priml.model.rope import RoPE, RoPEMixed
 from priml.model.sequential import Sequential
 from priml.model.special import Identity, Skip
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import TransformerBlock
+from priml.model.value_gated_attention import ValueGatedAttention
 
 
 __all__ = [
@@ -73,6 +76,7 @@ __all__ = [
     "Patchify",
     "Qwen3",
     "RMSNorm",
+    "ReluSquared",
     "RoPE",
     "RoPEMixed",
     "Router",
@@ -84,6 +88,7 @@ __all__ = [
     "SwiGLU",
     "TransformerBlock",
     "Unpatchify",
+    "ValueGatedAttention",
     "call_init",
     "generate",
     "kaiming_normal",
@@ -91,6 +96,7 @@ __all__ = [
     "mup_output",
     "normal",
     "truncated_normal",
+    "unit_fan_in_uniform",
     "xavier_normal",
     "xavier_uniform",
 ]

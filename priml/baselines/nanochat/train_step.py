@@ -82,7 +82,7 @@ def matrix_parameters() -> Selector:
     return excluding(NorMuon.eligible_tensor, "embed", "lm_head")
 
 
-def width_scaled_lr(rate: float, *, channels: int, tuned_at: int = 768) -> float:
+def width_scaled_lr(rate: float, *, channels_in: int, tuned_at: int = 768) -> float:
     """Scale a learning rate by ``1/sqrt(width)`` away from where it was tuned.
 
     The Adam rates in this recipe were fitted on a 768-wide model. A wider one
@@ -95,8 +95,8 @@ def width_scaled_lr(rate: float, *, channels: int, tuned_at: int = 768) -> float
     and not to the matrices.
 
     Args:
-      rate: Rate as tuned at ``tuned_at`` channels.
-      channels: This model's width.
+      rate: Rate as tuned at ``tuned_at`` channels_in.
+      channels_in: This model's width.
       tuned_at: Width the rate was fitted at.
 
     Returns:
@@ -106,7 +106,7 @@ def width_scaled_lr(rate: float, *, channels: int, tuned_at: int = 768) -> float
     # ``math.sqrt`` rather than ``** 0.5``: the operator types as ``Any``
     # because a fractional power of a negative base is complex, and widths are
     # positive by construction.
-    return rate / math.sqrt(channels / tuned_at)
+    return rate / math.sqrt(channels_in / tuned_at)
 
 
 def nanochat_optimizer(*, compile: bool = True) -> CompositeOptimizer.Config:
@@ -125,7 +125,7 @@ def nanochat_optimizer(*, compile: bool = True) -> CompositeOptimizer.Config:
     nominal hyperparameters -- which is exactly the kind of difference a
     reproduction is supposed to exclude.
 
-    The Adam rates are stated AS TUNED, at 768 channels; the step's
+    The Adam rates are stated AS TUNED, at 768 channels_in; the step's
     ``finalize`` rescales them to the model's actual width. Baking a width in
     here would make the default silently wrong for every model that is not
     768 wide.
@@ -191,8 +191,8 @@ def nanochat_optimizer(*, compile: bool = True) -> CompositeOptimizer.Config:
         matching("lm_head"),
         excluding(matching("embed"), "value_embeds"),
         matching("value_embeds"),
-        matching("residual_scale"),
-        matching("skip_scale"),
+        matching("mix.running"),
+        matching("mix.original"),
         on_matrices,
     ]
     # The value-embedding member is dropped when the model has no such tables.
@@ -312,7 +312,7 @@ class NanoChatTrainStep:
         smaller steps per unit of loss, so carrying one number across widths
         trains a different recipe under the same nominal hyperparameters.
         ``finalize`` therefore rescales every Adam member by
-        ``sqrt(tuned_at / channels)``.
+        ``sqrt(tuned_at / channels_in)``.
 
         Set it to the model's own width to disable the rescale -- which is
         what a caller supplying already-scaled rates wants."""
@@ -380,7 +380,7 @@ class NanoChatTrainStep:
                 )
             # Rescaled here, not in the factory: the factory runs before the
             # caller has chosen a width, so a rate baked there is right for one
-            # model and wrong for every fork that changes ``channels``. The
+            # model and wrong for every fork that changes ``channels_in``. The
             # field is then set to the model's width, so a second finalize is a
             # no-op rather than a second rescale.
             if isinstance(self.optimizer, CompositeOptimizer.Config):
@@ -400,10 +400,10 @@ class NanoChatTrainStep:
                         continue
                     member.lr = width_scaled_lr(
                         rate,
-                        channels=self.model.channels,
+                        channels_in=self.model.channels_in,
                         tuned_at=self.adam_lr_tuned_at_channels,
                     )
-            self.adam_lr_tuned_at_channels = self.model.channels
+            self.adam_lr_tuned_at_channels = self.model.channels_in
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

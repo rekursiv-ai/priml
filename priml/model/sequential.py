@@ -3,25 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Protocol, Self, cast, override, runtime_checkable
+from typing import Any, Self, cast, override
 
 import copy
 
 from configgle import Fig, Makeable, Maker
 from torch import Tensor, nn
 
-
-@runtime_checkable
-class _HasDepth(Protocol):
-    """A config element carrying a ``depth`` index (e.g. a depth-scaled block).
-
-    Not every ``Sequential`` element declares ``depth`` -- only those whose init
-    scales with block depth. This Protocol lets the repeat/propagation paths
-    narrow to the ones that do, instead of an ``hasattr`` guard the checker
-    cannot follow.
-    """
-
-    depth: int
+from priml.model.custom_types import HasDepth
 
 
 class Sequential(nn.Sequential):
@@ -78,9 +67,9 @@ class Sequential(nn.Sequential):
             for i in range(self.repeat):
                 for element in base:
                     e = copy.copy(element)
-                    if self.repeat > 1 and isinstance(e, _HasDepth):
+                    if self.repeat > 1 and isinstance(e, HasDepth):
                         e.depth = i
-                    elif isinstance(e, _HasDepth) and self.depth != -1:
+                    elif isinstance(e, HasDepth) and self.depth != -1:
                         e.depth = self.depth
                     expanded.append(e)
             self.elements = expanded

@@ -323,7 +323,7 @@ wheels = [
 [[package]]
 name = "configgle"
 version = "1.3.7"
-source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#13fac9d8de19fc10f362a82a1cf559966fe644ea" }
+source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#31f4d19ee3d7392a94223fc58efef1e57596e88c" }
 dependencies = [
     { name = "typing-extensions" },
 ]
@@ -1444,9 +1444,12 @@ dependencies = [
     { name = "jaxtyping" },
     { name = "lpips" },
     { name = "numpy" },
+    { name = "pyarrow" },
     { name = "pygame-ce" },
     { name = "pyturbojpeg" },
+    { name = "rustbpe" },
     { name = "scipy" },
+    { name = "tiktoken" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
     { name = "torchao", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
@@ -1461,11 +1464,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-data-prep = [
-    { name = "pyarrow" },
-    { name = "rustbpe" },
-    { name = "tiktoken" },
-]
 hub = [
     { name = "accelerate" },
     { name = "hf-transfer" },
@@ -1499,7 +1497,6 @@ dev = [
     { name = "ruff" },
     { name = "safetensors" },
     { name = "scipy-stubs" },
-    { name = "tiktoken" },
     { name = "tqdm" },
     { name = "ty" },
 ]
@@ -1522,7 +1519,6 @@ pre-commit = [
     { name = "ruff" },
     { name = "safetensors" },
     { name = "scipy-stubs" },
-    { name = "tiktoken" },
     { name = "ty" },
 ]
 stubs = [
@@ -1540,7 +1536,6 @@ typecheck = [
     { name = "basedpyright" },
     { name = "imageio", extra = ["ffmpeg"] },
     { name = "safetensors" },
-    { name = "tiktoken" },
     { name = "ty" },
 ]
 
@@ -1557,13 +1552,13 @@ requires-dist = [
     { name = "jaxtyping" },
     { name = "lpips" },
     { name = "numpy", specifier = ">=2.1" },
-    { name = "pyarrow", marker = "extra == 'data-prep'" },
+    { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pygame-ce", specifier = ">=2.5.8" },
     { name = "pyturbojpeg", specifier = ">=1.8.2,<2" },
-    { name = "rustbpe", marker = "extra == 'data-prep'" },
+    { name = "rustbpe", specifier = ">=0.1.0" },
     { name = "safetensors", marker = "extra == 'hub'" },
     { name = "scipy" },
-    { name = "tiktoken", marker = "extra == 'data-prep'" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "torch", marker = "sys_platform != 'linux'", specifier = "==2.11.0" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchao", marker = "sys_platform != 'linux'", specifier = "==0.17.0" },
@@ -1577,7 +1572,7 @@ requires-dist = [
     { name = "webp", specifier = ">=0.4.0" },
     { name = "wrapt" },
 ]
-provides-extras = ["hub", "data-prep", "render"]
+provides-extras = ["hub", "render"]
 
 [package.metadata.requires-dev]
 debug = [
@@ -1601,7 +1596,6 @@ dev = [
     { name = "ruff" },
     { name = "safetensors" },
     { name = "scipy-stubs" },
-    { name = "tiktoken" },
     { name = "tqdm" },
     { name = "ty", specifier = ">=0.0.60" },
 ]
@@ -1624,7 +1618,6 @@ pre-commit = [
     { name = "ruff" },
     { name = "safetensors" },
     { name = "scipy-stubs" },
-    { name = "tiktoken" },
     { name = "ty", specifier = ">=0.0.60" },
 ]
 stubs = [{ name = "scipy-stubs" }]
@@ -1640,7 +1633,6 @@ typecheck = [
     { name = "basedpyright", specifier = ">=1.10" },
     { name = "imageio", extras = ["ffmpeg"] },
     { name = "safetensors" },
-    { name = "tiktoken" },
     { name = "ty", specifier = ">=0.0.60" },
 ]
 

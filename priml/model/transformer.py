@@ -15,6 +15,8 @@ from priml.model.attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
+    HasDepth,
+    HeadGeometry,
     ShardableConfig,
     TensorModule,
     propagate_attr,
@@ -58,13 +60,36 @@ class TransformerBlock(nn.Module):
         depth: int = -1
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
+        @property
+        def channels_out(self) -> int:
+            """Same as ``channels_in``: a residual block preserves its width.
+
+            Derived rather than stored, because a block whose sublayers summed
+            into a stream of a DIFFERENT width could not add them. A parent
+            pushing ``channels_out`` therefore reads back what it pushed, and a
+            disagreement is a contradiction rather than a resize.
+            """
+            return self.channels_in
+
+        @property
+        def heads(self) -> int:
+            """Attention heads, from the sublayer that owns them."""
+            return self.attn.heads if isinstance(self.attn, HeadGeometry) else 1
+
+        @property
+        def channels_head(self) -> int:
+            """Channels per head, from the sublayer that owns them."""
+            if isinstance(self.attn, HeadGeometry):
+                return self.attn.channels_head
+            return self.channels_in
+
         @override
         def finalize(self) -> Self:
             c = self.channels_in
             for cfg in (self.attn, self.ffn, self.norm1, self.norm2):
                 propagate_attr(cfg, "channels_in", c, protocol=ChannelsIn)
                 propagate_attr(cfg, "channels_out", c, protocol=ChannelsOut)
-                propagate_attr(cfg, "depth", self.depth)
+                propagate_attr(cfg, "depth", self.depth, protocol=HasDepth)
             # Tensor parallelism: the FFN shards over the tp dim (its block-
             # internal style handles the fused-gate split alignment). The
             # attention block's children self-declare their styles.

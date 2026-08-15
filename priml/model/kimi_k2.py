@@ -13,9 +13,9 @@ Architecture (from Kimi-K2-Instruct ``config.json``)::
     hidden_size          : 7168
     num_hidden_layers    : 61
     num_attention_heads  : 64
-    qk_nope_head_dim     : 128
-    qk_rope_head_dim     : 64
-    v_head_dim           : 128
+    channels_qk_nope_head     : 128
+    channels_qk_rope_head     : 64
+    channels_v_head           : 128
     q_lora_rank          : null       (Kimi-K2; DSV3 uses 1536)
     kv_lora_rank         : 512
     n_routed_experts     : 384
@@ -78,9 +78,9 @@ class KimiK2(CausalLM):
         num_hidden_layers: int = -1
         num_attention_heads: int = -1
 
-        qk_nope_head_dim: int = 128
-        qk_rope_head_dim: int = 64
-        v_head_dim: int = 128
+        channels_qk_nope_head: int = 128
+        channels_qk_rope_head: int = 64
+        channels_v_head: int = 128
         q_lora_rank: int | None = None
         kv_lora_rank: int = 512
 
@@ -126,9 +126,9 @@ class KimiK2(CausalLM):
                 hidden_size=int(config["hidden_size"]),
                 num_hidden_layers=int(config["num_hidden_layers"]),
                 num_attention_heads=int(config["num_attention_heads"]),
-                qk_nope_head_dim=int(config.get("qk_nope_head_dim", 128)),
-                qk_rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
-                v_head_dim=int(config.get("v_head_dim", 128)),
+                channels_qk_nope_head=int(config.get("channels_qk_nope_head", 128)),
+                channels_qk_rope_head=int(config.get("channels_qk_rope_head", 64)),
+                channels_v_head=int(config.get("channels_v_head", 128)),
                 q_lora_rank=(
                     int(config["q_lora_rank"])
                     if config.get("q_lora_rank") is not None
@@ -181,15 +181,15 @@ class KimiK2(CausalLM):
             return MultiHeadLatentAttention.Config(
                 channels_in=self.hidden_size,
                 heads=self.num_attention_heads,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
+                channels_qk_nope_head=self.channels_qk_nope_head,
+                channels_qk_rope_head=self.channels_qk_rope_head,
+                channels_v_head=self.channels_v_head,
                 q_lora_rank=self.q_lora_rank,
                 kv_lora_rank=self.kv_lora_rank,
                 bias=False,
                 causal=True,
                 rope=RoPE.Config(
-                    channels_head=self.qk_rope_head_dim,
+                    channels_head=self.channels_qk_rope_head,
                     base=self.rope_theta,
                     yarn=self.yarn,
                 ),
