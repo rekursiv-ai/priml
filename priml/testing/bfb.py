@@ -220,8 +220,20 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
 }
 
 
-def _has_f32(value: object) -> bool:
-    """True if value is a float32 tensor or a list/tuple containing one.
+def _is_narrow_float(dtype: torch.dtype) -> bool:
+    """Whether a dtype reduces in a host-dependent order.
+
+    Every float format narrower than float64 does: the kernel accumulates in an
+    order set by the CPU's vector width and thread count. bfloat16 and float16
+    count because a mixed-precision recipe COMPUTES in them -- an autocast
+    forward, or an optimizer that orthogonalizes in half precision -- so a
+    golden that left them native would be minted to one machine.
+    """
+    return dtype.is_floating_point and dtype != torch.float64
+
+
+def _narrow_dtypes(value: object) -> set[torch.dtype]:
+    """The narrow float dtypes appearing in a tensor / list / tuple.
 
     ``_foreach_*`` ops (e.g. ``_foreach_norm`` behind ``clip_grad_norm_``)
     receive a ``list[Tensor]`` rather than a bare tensor, so a direct
@@ -229,41 +241,61 @@ def _has_f32(value: object) -> bool:
     not apply.
     """
     if isinstance(value, Tensor):
-        return value.dtype == torch.float32
+        return {value.dtype} if _is_narrow_float(value.dtype) else set()
     if isinstance(value, (list, tuple)):
-        return any(_has_f32(v) for v in cast("list[Any] | tuple[Any, ...]", value))
-    return False
+        found: set[torch.dtype] = set()
+        for item in cast("list[Any] | tuple[Any, ...]", value):
+            found |= _narrow_dtypes(item)
+        return found
+    return set()
 
 
-def _upcast_f32(value: object) -> object:
-    if isinstance(value, Tensor) and value.dtype == torch.float32:
+def _result_dtype(dtypes: set[torch.dtype]) -> torch.dtype:
+    """The dtype the op would have produced natively.
+
+    Torch promotes mixed inputs, so a bfloat16 tensor meeting a float32 one
+    yields float32. Reproducing that promotion here is what lets the result be
+    narrowed back to the width the unwrapped computation would have held --
+    narrowing everything to float32 instead would silently widen a half
+    precision graph and change every value downstream of it.
+    """
+    ordered = sorted(dtypes, key=str)
+    result = ordered[0]
+    for dtype in ordered[1:]:
+        result = torch.promote_types(result, dtype)
+    return result
+
+
+def _upcast(value: object) -> object:
+    if isinstance(value, Tensor) and _is_narrow_float(value.dtype):
         return value.double()
     if isinstance(value, list):
-        return [_upcast_f32(v) for v in cast("list[Any]", value)]
+        return [_upcast(v) for v in cast("list[Any]", value)]
     if isinstance(value, tuple):
-        return tuple(_upcast_f32(v) for v in cast("tuple[Any, ...]", value))
+        return tuple(_upcast(v) for v in cast("tuple[Any, ...]", value))
     return value
 
 
-def _downcast_f64(value: object) -> object:
+def _downcast_f64(value: object, target: torch.dtype = torch.float32) -> object:
     if isinstance(value, Tensor) and value.dtype == torch.float64:
-        return value.float()
+        return value.to(target)
     if isinstance(value, list):
-        return [_downcast_f64(v) for v in cast("list[Any]", value)]
+        return [_downcast_f64(v, target) for v in cast("list[Any]", value)]
     if isinstance(value, tuple):
-        return tuple(_downcast_f64(v) for v in cast("tuple[Any, ...]", value))
+        return tuple(_downcast_f64(v, target) for v in cast("tuple[Any, ...]", value))
     return value
 
 
 def _copy_back(original: object, computed: object) -> None:
-    """Narrow ``computed`` (float64) into ``original`` (float32) in place.
+    """Narrow ``computed`` (float64) into ``original`` in place.
 
-    Recurses into lists/tuples for ``_foreach_*`` write targets. A non-float32
-    original was never upcast, so the op already wrote it -- skip. The
-    float64->float32 ``copy_`` is IEEE-correctly-rounded, hence host-independent.
+    Recurses into lists/tuples for ``_foreach_*`` write targets. A tensor that
+    was never upcast -- one whose dtype is not a narrow float -- was written by
+    the op itself, so it is skipped. The narrowing ``copy_`` is
+    IEEE-correctly-rounded, hence host-independent.
     """
     if isinstance(original, Tensor):
-        if original.dtype == torch.float32 and isinstance(computed, Tensor):
+        if _is_narrow_float(original.dtype) and isinstance(computed, Tensor):
             original.copy_(computed)
         return
     if isinstance(original, (list, tuple)) and isinstance(computed, (list, tuple)):
@@ -283,6 +315,7 @@ def _write_back(
     up_kwargs: dict[str, Any],
     *,
     result: object,
+    target: torch.dtype,
 ) -> object:
     """Restore an in-place / ``out=`` / foreach op's mutation onto the originals.
 
@@ -321,7 +354,7 @@ def _write_back(
         for computed, original in upcast_to_original:
             if element is computed:
                 return original
-        return _downcast_f64(element)
+        return _downcast_f64(element, target)
 
     if result is None:
         return None
@@ -358,23 +391,35 @@ class _Float64Compute(TorchDispatchMode):
     ) -> Any:
         kwargs = kwargs or {}
         exact = func.overloadpacket.__name__ in _EXACT_F32_OPS
-        f32_args = any(_has_f32(a) for a in args) or any(
-            _has_f32(v) for v in kwargs.values()
-        )
-        if exact or not f32_args:
+        narrow: set[torch.dtype] = set()
+        for value in (*args, *kwargs.values()):
+            narrow |= _narrow_dtypes(value)
+        if exact or not narrow:
             return func(*args, **kwargs)
-        up_args = tuple(_upcast_f32(a) for a in args)
-        up_kwargs = {k: _upcast_f32(v) for k, v in kwargs.items()}
+        # The width the op would natively have produced, so the float64 result
+        # narrows back to it. Blindly narrowing to float32 would widen a
+        # half-precision graph and change everything downstream.
+        target = _result_dtype(narrow)
+        up_args = tuple(_upcast(a) for a in args)
+        up_kwargs = {k: _upcast(v) for k, v in kwargs.items()}
         result = func(*up_args, **up_kwargs)
         if any(
             arg.alias_info is not None and arg.alias_info.is_write
             for arg in func._schema.arguments  # noqa: SLF001 -- schema is OpOverload's only write-arg source
         ):
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
-            # the caller's float32 originals. Narrow each back and return the
-            # originals in the op's own return shape.
-            return _write_back(func, args, kwargs, up_args, up_kwargs, result=result)
-        return _downcast_f64(result)
+            # the caller's originals. Narrow each back and return the originals
+            # in the op's own return shape.
+            return _write_back(
+                func,
+                args,
+                kwargs,
+                up_args,
+                up_kwargs,
+                result=result,
+                target=target,
+            )
+        return _downcast_f64(result, target)
 
 
 @contextmanager

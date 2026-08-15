@@ -336,7 +336,7 @@ def _smoke_step() -> NanoChatTrainStep:
     The EXPERIMENT's config, not a hand-built one: a golden over a config
     assembled here would freeze whatever this file happens to say, and the
     ladder could then change underneath it without the golden noticing. Only
-    the device is pinned, because a golden is CPU-only by construction.
+    the device is pinned, because the harness is CPU-only.
     """
     config = experiments.exp_smoke().copy_tree().finalize().step
     config.device = "cpu"
@@ -356,46 +356,6 @@ def _smoke_batch(step: NanoChatTrainStep) -> dict[str, Any]:
         (step.config.rows_per_pass, model.max_seq_len + 1),
     )
     return {"media": rows[:, :-1], "label": rows[:, 1:]}
-
-
-def test_five_steps_bfb() -> None:
-    """Freeze five optimizer steps of the recipe, end to end.
-
-    The forward goldens in ``model_test`` freeze one pass. This freezes what
-    that pass FEEDS: the backward, both optimizer members, the accumulated
-    moment buffers, and the schedules -- the half of the recipe a forward
-    golden cannot reach. It is minted over ``exp_smoke``, which differs from
-    ``exp001`` only in size, so a change to any shared mechanism lands here.
-
-    The budget clock is written before each step rather than left to run.
-    Every schedule reads ``elapsed_sec / time_budget_sec`` and that clock is a
-    ``perf_counter`` reading (train_step.py:450, 483), so a golden that let it
-    run would freeze how fast this machine was -- and fail on a slower one for
-    no reason a reader could act on. Fixing it makes the learning rate a
-    function of the step index, which is what a golden can hold.
-
-    The readings span the WHOLE budget rather than its first fraction. The
-    trapezoid holds flat over the first half, so five closely-spaced readings
-    all land at multiplier 1.0 and the golden freezes a schedule it never
-    exercised -- measured: flattening ``trapezoid`` to a constant left that
-    version of this test green. Spread to 0, 25, 50, 75, and 100 percent, the
-    last three are in the decay and the mutation is caught.
-    """
-    budget = experiments.exp_smoke().step.time_budget_sec
-    clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
-
-    def run(module: nn.Module, batch: Any) -> torch.Tensor:
-        assert isinstance(module, _SmokeSteps)
-        return module(batch, clock)
-
-    assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="five_steps_min_cpu",
-        build_module=_SmokeSteps,
-        build_input=lambda: _smoke_batch(_smoke_step()),
-        seed=0,
-        run=run,
-    )
 
 
 class _SmokeSteps(nn.Module):
@@ -418,10 +378,42 @@ class _SmokeSteps(nn.Module):
         """Run one step per clock reading; return the losses."""
         losses: list[torch.Tensor] = []
         for elapsed in clock:
-            # Written, not accumulated: see ``test_five_steps_bfb``.
             self.step.elapsed_sec = elapsed
             losses.append(self.step.train_step(**batch)["loss"].reshape(1))
         return torch.cat(losses)
+
+
+def test_five_steps_bfb() -> None:
+    """Freeze five optimizer steps of the recipe, end to end.
+
+    The forward goldens in ``model_test`` freeze one pass. This freezes what
+    that pass FEEDS: the backward, both optimizer members, the accumulated
+    moment buffers, and the schedules. Minted over ``exp_smoke``, which differs
+    from ``exp001`` only in size, so a change to any shared mechanism lands
+    here.
+
+    The budget clock is written before each step rather than left to run: every
+    schedule reads ``elapsed_sec / time_budget_sec``, and that clock is a
+    ``perf_counter`` reading (train_step.py:450, 483), so letting it run would
+    freeze how fast this machine is. The readings span the whole budget because
+    the trapezoid holds flat over the first half -- five closely-spaced ones all
+    land at multiplier 1.0 and never exercise the decay.
+    """
+    budget = experiments.exp_smoke().step.time_budget_sec
+    clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
+
+    def run(module: nn.Module, batch: Any) -> torch.Tensor:
+        assert isinstance(module, _SmokeSteps)
+        return module(batch, clock)
+
+    assert_bfb_against_golden(
+        golden_dir=_GOLDEN_DIR,
+        golden_name="five_steps_min_cpu",
+        build_module=_SmokeSteps,
+        build_input=lambda: _smoke_batch(_smoke_step()),
+        seed=0,
+        run=run,
+    )
 
 
 if __name__ == "__main__":
