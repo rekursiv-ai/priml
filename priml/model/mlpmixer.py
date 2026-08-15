@@ -8,7 +8,12 @@ from typing import Any, Self, override
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
-from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    TensorModule,
+    propagate_attr,
+)
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 
@@ -25,16 +30,16 @@ class MLPMixerBlock(nn.Module):
         seq_len: int = -1
         """Sequence length (used as input dim for the token mixer)."""
 
-        token_mixer: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
+        token_mixer: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
         """Module that mixes across the sequence (token) dimension."""
 
-        channel_mixer: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
+        channel_mixer: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
         """Module that mixes across the channel dimension."""
 
-        norm_token: Makeable[nn.Module] = field(default_factory=RMSNorm.Config)
+        norm_token: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
         """Normalization applied before/after token mixing."""
 
-        norm_channel: Makeable[nn.Module] = field(default_factory=RMSNorm.Config)
+        norm_channel: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
         """Normalization applied before/after channel mixing."""
 
         prenorm: bool = True

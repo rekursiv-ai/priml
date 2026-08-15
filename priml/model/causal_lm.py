@@ -63,7 +63,7 @@ class CausalLM(nn.Module):
         """Block template (broadcast ``num_layers`` times) or explicit
         per-layer list (length must equal ``num_layers``)."""
 
-        final_norm: Makeable[nn.Module] = field(default_factory=RMSNorm.Config)
+        final_norm: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
         """Normalization applied to the final hidden state."""
 
         tie_embeddings: bool = False

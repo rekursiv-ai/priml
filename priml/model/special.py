@@ -8,6 +8,8 @@ from typing import Any, Self, override
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
+from priml.model.custom_types import TensorModule
+
 
 class Identity(nn.Identity):
     """Identity that returns only the first positional argument."""
@@ -42,7 +44,7 @@ class Skip(nn.Module):
     """Residual connection: output = x + inner(x, ...)."""
 
     class Config(Fig["Skip"], kw_only=False):
-        inner: Makeable[nn.Module] | None = None
+        inner: Makeable[TensorModule] | None = None
         """Submodule to wrap with a residual connection."""
 
     def __init__(self, config: Config) -> None:

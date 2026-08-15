@@ -25,7 +25,11 @@ from torch import Tensor, nn
 
 from priml.math.basic import broadcast_sequences
 from priml.model.attention import MultiStreamAttention
-from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    propagate_attr,
+)
 from priml.model.linear import Linear
 from priml.model.swiglu import SwiGLU
 
