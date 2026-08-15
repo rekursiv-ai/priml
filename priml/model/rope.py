@@ -159,19 +159,13 @@ class RoPE(nn.Module):
         c, base = broadcast_sequences(c, base)
         self.channels_head = tuple(int(d) for d in c)
         self.base = tuple(float(b) for b in base)
-        self._inv_freqs: list[Tensor] = [torch.empty(0) for _ in self.channels_head]
+        self._hf_inv_freq = config.hf_inv_freq
+        self._yarn = config.yarn
         # YaRN mscale applied as a scalar multiplier on cos/sin outputs.
         # When YaRN is off, this stays 1.0 and the math is a no-op.
         self._mscale = 1.0
-        for i, (b, c) in enumerate(zip(self.base, self.channels_head, strict=True)):
-            if c == 0:
-                continue
-            self._validate_c(c)
-            inv_freq = self._make_inv_freqs(b, c, hf=config.hf_inv_freq)
-            if config.yarn is not None:
-                inv_freq, m = _yarn_apply(inv_freq, b, c, config.yarn)
-                self._mscale = m
-            self._inv_freqs[i] = inv_freq.unsqueeze(-2)
+        self._inv_freqs: list[Tensor] = []
+        self._build_inv_freqs(torch.device("cpu"))
         if all(not f.numel() for f in self._inv_freqs):
             raise ValueError(
                 f"At least one dim must be nonzero, got {self.channels_head}.",
@@ -201,9 +195,10 @@ class RoPE(nn.Module):
         if positions.ndim == 1:
             positions = positions.unsqueeze(-1)
         pos = positions.to(dtype=torch.float32).split(1, dim=-1)
+        frequencies = self._inv_freqs
         parts = [
             p.unsqueeze(-1) * f.to(dtype=torch.float32, device=p.device)
-            for p, f in zip(pos, self._inv_freqs, strict=True)
+            for p, f in zip(pos, frequencies, strict=True)
             if f.numel()
         ]
         if self.reduction_mode == "cat":
@@ -377,13 +372,51 @@ class RoPE(nn.Module):
             out = torch.cat([x0 * cos - x1 * sin, x1 * cos + x0 * sin], dim=-1)
         return out.to(dtype)
 
+    @override
+    def _apply(self, fn: Callable[..., Any], recurse: bool = True) -> Self:
+        super()._apply(fn, recurse)
+        self._build_inv_freqs(self._dtype.device)
+        return self
+
+    def _build_inv_freqs(self, device: torch.device) -> None:
+        """Build the inverse frequencies on ``device``.
+
+        Rebuilt on a move rather than copied there: ``base ** x`` is a
+        transcendental whose last bit differs between CPU and CUDA (measured, 4
+        of 64 frequencies at head_dim 128), so a reference that constructs its
+        table on the accelerator cannot be matched by moving a CPU-built one.
+        """
+        self._inv_freqs = [torch.empty(0, device=device) for _ in self.channels_head]
+        for i, (b, c) in enumerate(zip(self.base, self.channels_head, strict=True)):
+            if c == 0:
+                continue
+            self._validate_c(c)
+            inv_freq = self._make_inv_freqs(b, c, hf=self._hf_inv_freq, device=device)
+            if self._yarn is not None:
+                inv_freq, self._mscale = _yarn_apply(inv_freq, b, c, self._yarn)
+            self._inv_freqs[i] = inv_freq.unsqueeze(-2)
+
     @classmethod
-    def _make_inv_freqs(cls, b: float, c: int, *, hf: bool = False) -> Tensor:
+    def _make_inv_freqs(
+        cls,
+        b: float,
+        c: int,
+        *,
+        hf: bool = False,
+        device: torch.device | None = None,
+    ) -> Tensor:
         """Inverse frequencies: b^linspace(0, -1+2/c, c//2)."""
         if hf:
-            return 1.0 / (b ** (torch.arange(0, c, 2, dtype=torch.int64).float() / c))
+            channels = torch.arange(0, c, 2, dtype=torch.int64, device=device).float()
+            return 1.0 / (b ** (channels / c))
         return (
-            torch.linspace(0, math.log(b) * (-1 + 2 / c), c // 2, dtype=torch.float64)
+            torch.linspace(
+                0,
+                math.log(b) * (-1 + 2 / c),
+                c // 2,
+                dtype=torch.float64,
+                device=device,
+            )
             .exp()
             .float()
         )
@@ -476,7 +509,7 @@ def _yarn_apply(
     if high_f == low_f:
         # beta_fast == beta_slow collapses the ramp to a step function.
         high_f = low_f + 1e-3
-    ramp = torch.arange(dim // 2, dtype=torch.float32)
+    ramp = torch.arange(dim // 2, dtype=torch.float32, device=inv_freq.device)
     ramp = ((ramp - low_f) / (high_f - low_f)).clamp(0.0, 1.0)
     # HF's ``inv_freq_mask = 1 - ramp``; so at low index (high freq,
     # ramp=0, mask=1) we use original (extrapolation), and at high

@@ -52,7 +52,16 @@ def test_one_step_matches_the_longhand_arithmetic() -> None:
 
     parameter = initial.clone().requires_grad_(True)
     parameter.grad = gradient.clone()
-    FusedAdamW([parameter], lr=0.6, betas=(0.8, 0.95), eps=1e-10).step()
+    # Eager: this asserts the arithmetic, which is the same either way, and
+    # Dynamo traces the step on first use for 10s that is never cached. What
+    # compiling changes is the last bits, which the goldens pin.
+    FusedAdamW(
+        [parameter],
+        lr=0.6,
+        betas=(0.8, 0.95),
+        eps=1e-10,
+        compile=False,
+    ).step()
 
     expected = _reference(
         initial,
@@ -83,7 +92,7 @@ def test_the_bias_correction_divides_before_the_root() -> None:
 
     ours = initial.clone().requires_grad_(True)
     ours.grad = gradient.clone()
-    FusedAdamW([ours], lr=0.6, betas=(0.8, 0.95), eps=1e-10).step()
+    FusedAdamW([ours], lr=0.6, betas=(0.8, 0.95), eps=1e-10, compile=False).step()
 
     theirs = initial.clone().requires_grad_(True)
     theirs.grad = gradient.clone()
@@ -105,7 +114,7 @@ def test_decoupled_decay_shrinks_a_parameter_with_no_gradient() -> None:
     """Decay multiplies the weight, so it applies even at zero gradient."""
     parameter = torch.full((4,), 2.0, requires_grad=True)
     parameter.grad = torch.zeros(4)
-    FusedAdamW([parameter], lr=0.1, weight_decay=0.5).step()
+    FusedAdamW([parameter], lr=0.1, weight_decay=0.5, compile=False).step()
     # 2 * (1 - 0.1 * 0.5); the update itself is zero because the gradient is.
     assert torch.allclose(parameter.detach(), torch.full((4,), 1.9))
 
@@ -119,7 +128,7 @@ def test_the_schedule_can_move_the_rate_between_steps() -> None:
     """
     torch.manual_seed(0)
     parameter = torch.randn(4, requires_grad=True)
-    optimizer = FusedAdamW([parameter], lr=0.1)
+    optimizer = FusedAdamW([parameter], lr=0.1, compile=False)
     parameter.grad = torch.ones(4)
     optimizer.step()
 
@@ -156,6 +165,7 @@ def test_invalid_hyperparameters_are_refused(
 def test_the_config_builds_a_constructor_awaiting_parameters() -> None:
     """``make()`` yields a constructor: a config tree has no parameters."""
     config = FusedAdamW.Config()
+    config.compile = False
     config.lr = 0.02
     config.betas = (0.8, 0.95)
     build = config.make()

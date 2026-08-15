@@ -28,7 +28,10 @@ from priml.baselines.nanochat.flash3 import Flash3Attention
 from priml.baselines.nanochat.metric import BitsPerByte
 from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.optimizer import NorMuon
-from priml.baselines.nanochat.train_step import NanoChatTrainStep
+from priml.baselines.nanochat.train_step import (
+    NanoChatTrainStep,
+    nanochat_optimizer,
+)
 from priml.optimizers import CompositeOptimizer
 
 
@@ -194,6 +197,10 @@ def test_every_experiments_eval_geometry_is_constructible(
     config.step.device = "cpu"
     config.step.dtype_autocast = None
     config.step.compile = False
+    # The optimizers are constructed and never stepped -- this asks about eval
+    # batching. Leaving them compiled charges the test ``torch.compile``'s own
+    # import of inductor, 1.4 of its 1.5 seconds, for a kernel it never issues.
+    config.step.optimizer = nanochat_optimizer(compile=False)
     # Autocast is off above, so the narrow tables the recipe declares would
     # hand a half-precision stream to a float32 projection and the matmul would
     # refuse -- a dtype error rather than an answer about eval batching. Widened

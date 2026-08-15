@@ -417,12 +417,6 @@ class ValueGatedAttention(nn.Module):
         # takes, and the portable one transposes internally. Transposing here
         # instead would make the fused path pay to undo it.
         out = self.attention(q, k, v, window=window if window > 0 else q.shape[-3])
-        # Made contiguous before the head axes are merged. A portable kernel
-        # returns a transposed view, and flattening that directly hands the
-        # projection a strided tensor -- the matmul then reduces in a different
-        # order than it does over a packed one, and the difference reaches this
-        # layer's gradient. Copying once here costs a layer and buys an
-        # ordering that does not depend on which kernel produced the input.
         return self.proj_out(out.contiguous().flatten(-2))
 
 

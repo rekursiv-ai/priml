@@ -29,7 +29,9 @@ def test_the_update_is_approximately_orthogonal() -> None:
     """
     params = _parameters((16, 16))
     before = params[0].detach().clone()
-    NorMuon(params, lr=1.0, momentum=0.0, weight_decay=0.0).step()
+    # Eager: these assertions are about the update's algebra, which holds at
+    # either, and tracing the step costs 11s per process and is never cached.
+    NorMuon(params, lr=1.0, momentum=0.0, weight_decay=0.0, compile=False).step()
     update = before - params[0].detach()
     singular = torch.linalg.svdvals(update)
     assert float(singular.min()) > 0.7
@@ -57,7 +59,7 @@ def test_it_is_invariant_to_the_gradient_scale() -> None:
         assert params[0].grad is not None
         params[0].grad *= scale
         before = params[0].detach().clone()
-        NorMuon(params, lr=0.1, momentum=0.0, weight_decay=0.0).step()
+        NorMuon(params, lr=0.1, momentum=0.0, weight_decay=0.0, compile=False).step()
         steps.append(before - params[0].detach())
     # Relative to the step's own size: an optimizer that passed the scale
     # through would differ by 1000x, not by a rounding error.
@@ -73,7 +75,7 @@ def test_same_shape_parameters_step_together() -> None:
     """
     params = _parameters((8, 8), (8, 8), (4, 16))
     before = [p.detach().clone() for p in params]
-    NorMuon(params, lr=0.1, momentum=0.0, weight_decay=0.0).step()
+    NorMuon(params, lr=0.1, momentum=0.0, weight_decay=0.0, compile=False).step()
     for original, updated in zip(before, params, strict=True):
         assert not torch.equal(original, updated.detach())
 
@@ -93,7 +95,13 @@ def test_weight_decay_is_cautious() -> None:
         with torch.no_grad():
             params[0].copy_(torch.ones(8, 8))
         before = params[0].detach().clone()
-        NorMuon(params, lr=0.1, momentum=0.0, weight_decay=weight_decay).step()
+        NorMuon(
+            params,
+            lr=0.1,
+            momentum=0.0,
+            weight_decay=weight_decay,
+            compile=False,
+        ).step()
         return before - params[0].detach()
 
     without = step(weight_decay=0.0)
@@ -123,7 +131,13 @@ def test_row_rescaling_redistributes_without_resizing() -> None:
     def update(*, skew: bool) -> torch.Tensor:
         params = _parameters((16, 16))
         before = params[0].detach().clone()
-        optimizer = NorMuon(params, lr=1.0, momentum=0.0, weight_decay=0.0)
+        optimizer = NorMuon(
+            params,
+            lr=1.0,
+            momentum=0.0,
+            weight_decay=0.0,
+            compile=False,
+        )
         optimizer.step()
         if skew:
             state = optimizer.state[params[0]]
@@ -145,7 +159,7 @@ def test_a_vector_is_rejected() -> None:
     """
     params = _parameters((8,))
     with pytest.raises(ValueError, match="ndim >= 2"):
-        NorMuon(params, lr=0.1).step()
+        NorMuon(params, lr=0.1, compile=False).step()
 
 
 def test_eligibility_names_the_rank_rule() -> None:
@@ -183,7 +197,7 @@ def test_invalid_hyperparameters_are_rejected(
 
 def test_config_builds_a_constructor_awaiting_parameters() -> None:
     """A config tree has no parameters, so ``make`` cannot return an optimizer."""
-    build = NorMuon.Config(lr=0.5).make()
+    build = NorMuon.Config(lr=0.5, compile=False).make()
     optimizer = build(_parameters((4, 4)))
     assert isinstance(optimizer, NorMuon)
     assert optimizer.param_groups[0]["lr"] == 0.5
@@ -205,6 +219,7 @@ def test_a_prefix_of_the_coefficients_is_a_shorter_iteration() -> None:
             momentum=0.0,
             weight_decay=0.0,
             ns_steps=ns_steps,
+            compile=False,
         ).step()
         updates.append(before - params[0].detach())
     coarse = torch.linalg.svdvals(updates[0])
