@@ -105,7 +105,7 @@ def width_scaled_lr(rate: float, *, channels: int, tuned_at: int = 768) -> float
     return rate / math.sqrt(channels / tuned_at)
 
 
-def _default_optimizer() -> CompositeOptimizer.Config:
+def nanochat_optimizer(*, compile: bool = True) -> CompositeOptimizer.Config:
     """NorMuon on the reasoning matrices, AdamW on everything else, by class.
 
     Orthogonalizing an update suits the square-ish matrices inside the blocks
@@ -125,6 +125,12 @@ def _default_optimizer() -> CompositeOptimizer.Config:
     ``finalize`` rescales them to the model's actual width. Baking a width in
     here would make the default silently wrong for every model that is not
     768 wide.
+
+    Args:
+      compile: Whether each member fuses its step into one compiled graph. On
+        for the recipe, whose kernels are compiled and whose arithmetic they
+        change. Off is for a caller that steps a handful of times and would
+        otherwise pay Dynamo's tracing, which is never cached, for every one.
 
     Returns:
       config: The optimizer recipe: five AdamW members and one NorMuon.
@@ -147,6 +153,7 @@ def _default_optimizer() -> CompositeOptimizer.Config:
             # that simply omitted it would have to be handled by a default
             # that silently applies to typos as well.
             width_scaled=True,
+            compile=compile,
         )
         for _ in range(5)
     )
@@ -172,7 +179,7 @@ def _default_optimizer() -> CompositeOptimizer.Config:
         value_embedding,
         residual,
         skip,
-        NorMuon.Config(),
+        NorMuon.Config(compile=compile),
     ]
     # Ordered most specific first: ``value_embeds`` also contains ``embed``, so
     # the token table's selector must exclude it rather than claim it.
@@ -212,7 +219,7 @@ class NanoChatTrainStep:
         ``isinstance`` in each factory."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
-            default_factory=_default_optimizer,
+            default_factory=nanochat_optimizer,
         )
         """Builds the optimizer from the model.
 

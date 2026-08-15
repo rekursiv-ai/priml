@@ -15,6 +15,7 @@ from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     matrix_parameters,
+    nanochat_optimizer,
     trapezoid,
 )
 from priml.testing.bfb import assert_bfb_against_golden
@@ -31,6 +32,11 @@ def _step(**overrides: Any) -> NanoChatTrainStep:
     config.device = "cpu"
     config.dtype_autocast = None
     config.compile = False
+    # The recipe's own optimizer, stepping eagerly. Dynamo traces each member's
+    # kernel on first use and never caches it -- 9 of these tests' 9.5 seconds
+    # -- and what the compiled graph changes is the update's last bits, which
+    # the goldens and the parity script measure and none of these assert.
+    config.optimizer = nanochat_optimizer(compile=False)
     config.model.vocab_size = VOCAB
     config.model.max_seq_len = SEQ
     config.model.channels = 16
