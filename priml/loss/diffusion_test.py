@@ -17,7 +17,7 @@ from priml.math.diffusion.target import target_eps, target_v, target_x
 def test_diffusion_loss_default_config() -> None:
     """Test DiffusionLoss with default configuration."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     # Check defaults were set
     assert loss_fn.logsnr_fn is not None
@@ -28,7 +28,7 @@ def test_diffusion_loss_default_config() -> None:
 def test_diffusion_loss_forward_basic() -> None:
     """Test basic forward pass."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     # Simple denoiser that returns zeros
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
@@ -54,7 +54,7 @@ def test_diffusion_loss_forward_basic() -> None:
 def test_diffusion_loss_forward_2d() -> None:
     """Test forward pass with 2D images."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -72,7 +72,7 @@ def test_diffusion_loss_forward_2d() -> None:
 def test_diffusion_loss_forward_1d() -> None:
     """Test forward pass with 1D signals."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -92,7 +92,7 @@ def test_diffusion_loss_custom_logsnr() -> None:
     cfg = DiffusionLoss.Config()
     cfg.logsnr_fn = lambda log_t: log_snr_from_log_time_per_logtan(log_t, shift=0)
 
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -109,7 +109,7 @@ def test_diffusion_loss_custom_target() -> None:
     cfg = DiffusionLoss.Config()
     cfg.target_fn = target_x
 
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -126,7 +126,7 @@ def test_diffusion_loss_custom_corruption() -> None:
     cfg = DiffusionLoss.Config()
     cfg.corruption_fn = log_sigma_from_log_snr_per_variance_preserving
 
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -144,7 +144,7 @@ def test_diffusion_loss_variance_preserving() -> None:
     cfg.corruption_fn = log_sigma_from_log_snr_per_variance_preserving
     cfg.target_fn = target_v
 
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -162,7 +162,7 @@ def test_diffusion_loss_eps_prediction() -> None:
     cfg = DiffusionLoss.Config()
     cfg.target_fn = target_eps
 
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -177,7 +177,7 @@ def test_diffusion_loss_eps_prediction() -> None:
 def test_diffusion_loss_deterministic() -> None:
     """Test that same seed produces same results."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -198,7 +198,7 @@ def test_diffusion_loss_deterministic() -> None:
 def test_diffusion_loss_batch_independence() -> None:
     """Test that batch samples are independent."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -215,7 +215,7 @@ def test_diffusion_loss_batch_independence() -> None:
 def test_diffusion_loss_perfect_denoiser() -> None:
     """Test that perfect denoiser has finite and non-negative loss."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def perfect_denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         # This would require knowing the noise, so we can't make it perfect
@@ -234,7 +234,7 @@ def test_diffusion_loss_perfect_denoiser() -> None:
 def test_diffusion_loss_gradient_flow() -> None:
     """Test that gradients flow through the loss."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     # Simple learnable denoiser
     class LearnableDenoiser(torch.nn.Module):
@@ -262,7 +262,7 @@ def test_diffusion_loss_gradient_flow() -> None:
 def test_diffusion_loss_large_batch() -> None:
     """Test with larger batch size."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma
@@ -279,7 +279,7 @@ def test_diffusion_loss_large_batch() -> None:
 def test_diffusion_loss_different_dtypes() -> None:
     """Test with different data types."""
     cfg = DiffusionLoss.Config()
-    loss_fn = cfg.finalize().make()
+    loss_fn = cfg.make()
 
     def denoiser(x: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
         del sigma

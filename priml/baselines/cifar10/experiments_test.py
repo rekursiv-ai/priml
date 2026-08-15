@@ -183,7 +183,7 @@ def test_exp000_pins_the_baseline_recipe() -> None:
     assert cfg.step.translate_pad == 4
     assert cfg.step.use_tta is False
     assert cfg.step.cutout_size == 0
-    step = cfg.step.copy_tree().finalize().make()
+    step = cfg.step.make()
     assert isinstance(step.optimizer, CompositeOptimizer)
     assert [type(o) for o in step.optimizer.optimizers] == [torch.optim.AdamW]
     assert step.optimizer.param_groups[0]["initial_lr"] == 1e-3

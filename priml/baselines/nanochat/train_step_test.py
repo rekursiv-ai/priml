@@ -338,10 +338,10 @@ def _smoke_step() -> NanoChatTrainStep:
     ladder could then change underneath it without the golden noticing. Only
     the device is pinned, because the harness is CPU-only.
     """
-    config = experiments.exp_smoke().copy_tree().finalize().step
+    config = experiments.exp_smoke().step
     config.device = "cpu"
     torch.manual_seed(0)
-    built = config.copy_tree().make()
+    built = config.make()
     assert isinstance(built, NanoChatTrainStep)
     return built
 
