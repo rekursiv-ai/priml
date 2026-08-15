@@ -30,6 +30,14 @@ _GOLDEN_DIR = Path(__file__).parent / "goldens"
 def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config:
     config = SudokuNet.Config(hidden_size=16, num_layers=1)
     config.embedding = GridEmbedding.Config()
+    # The FFN width has to be shrunk EXPLICITLY. ``SwiGLU`` infers it as
+    # ``channels_in * 8/3`` rounded up to ``round_to``, which defaults to 256 --
+    # so a 16-channel model still builds a 512-wide gated hidden layer, and one
+    # tensor ends up thirty times the size of everything else in the golden.
+    config.block = TransformerBlock.Config(
+        prenorm=False,
+        ffn=SwiGLU.Config(round_to=16),
+    )
     if mixer:
         config.block = MLPMixerBlock.Config(
             seq_len=81,

@@ -17,7 +17,9 @@ from priml.optimizers.composite import (
     complement,
     everything,
     excluding,
+    matching,
 )
+from priml.optimizers.fused_adamw import FusedAdamW
 from priml.optimizers.muon import Muon
 from priml.optimizers.newton import Newton
 from priml.optimizers.sign_sgd import SignSGD
@@ -26,6 +28,7 @@ from priml.optimizers.sign_sgd import SignSGD
 __all__ = [
     "AdamATan2",
     "CompositeOptimizer",
+    "FusedAdamW",
     "Muon",
     "Newton",
     "Selector",
@@ -36,6 +39,7 @@ __all__ = [
     "everything",
     "excluding",
     "lr_scale",
+    "matching",
     "remember_initial_lrs",
     "step_optimizers",
     "zero_optimizers",

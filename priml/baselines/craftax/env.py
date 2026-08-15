@@ -73,6 +73,15 @@ class CraftaxEnv:
         action sampling, and sharing one stream would make the world depend
         on how many actions had been sampled."""
 
+        view: tuple[int, int] = (9, 11)
+        """Tiles the player can see, ``(rows, columns)``.
+
+        The benchmark's own 9x11, and changing it changes the game: a policy
+        trained on a smaller window sees less and its score is not comparable
+        to a published one. It is a field rather than a constant because a
+        test that only needs the encoding to RUN should not have to pay for
+        8,268 floats per observation."""
+
         optimistic_reset_ratio: int = 16
         """Workers served by each freshly generated world.
 
@@ -101,8 +110,11 @@ class CraftaxEnv:
             raise ValueError("num_envs must be positive")
         if config.optimistic_reset_ratio <= 0:
             raise ValueError("optimistic_reset_ratio must be positive")
+        if min(config.view) <= 0:
+            raise ValueError("view must be positive in both dimensions")
         self.num_actions = len(constants.Action)
-        self.observation_size = observation.OBSERVATION_SIZE
+        self._view = config.view
+        self.observation_size = observation.observation_size(config.view)
         self.reward_ceiling = constants.REWARD_CEILING
         self._num_envs = config.num_envs
         self._reset_ratio = config.optimistic_reset_ratio
@@ -140,7 +152,7 @@ class CraftaxEnv:
             generator=self._generator,
             device=self._device,
         )
-        return observation.render(self._state)
+        return observation.render(self._state, view=self._view)
 
     def step(self, actions: Tensor) -> CraftaxStep:
         """Advance every worker one action, restarting those that finished.
@@ -165,7 +177,7 @@ class CraftaxEnv:
 
         self._state = state
         return CraftaxStep(
-            observation=observation.render(state),
+            observation=observation.render(state, view=self._view),
             reward=reward,
             done=done,
             info=info,

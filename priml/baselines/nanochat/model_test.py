@@ -10,6 +10,7 @@ from torch import nn
 import pytest
 import torch
 
+from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.model import (
     NanoChatLM,
     ValueGatedAttention,
@@ -295,6 +296,47 @@ def test_value_embedding_forward_bfb() -> None:
         build_module=lambda: _config(value_embedding_layers=[0, 1]).make(),
         build_input=_tokens,
         seed=0,
+    )
+
+
+def test_the_shipped_experiments_forward_bfb() -> None:
+    """Freeze the model the LADDER builds, not one this file assembles.
+
+    The two goldens above are minted over a config written here, so a change to
+    ``exp001`` -- a different norm epsilon, a dropped bf16 knob, another window
+    pattern -- leaves them green while every shipped rung moves. This one is
+    built from ``exp_smoke``, which differs from ``exp001`` only in size, so a
+    change to any shared field lands here.
+
+    Run under autocast because the recipe declares narrow tables: outside it a
+    bfloat16 stream reaches a float32 projection and the matmul refuses. That
+    pairing IS the recipe, so the golden freezes it rather than widening it
+    away.
+    """
+
+    def build() -> nn.Module:
+        model = experiments.exp_smoke().copy_tree().finalize().step.model
+        built = model.copy_tree().make()
+        assert isinstance(built, NanoChatLM)
+        return built
+
+    def run(module: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
+        with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
+            out = module(tokens)
+        assert isinstance(out, torch.Tensor)
+        return out
+
+    def build_input() -> torch.Tensor:
+        model = experiments.exp_smoke().copy_tree().finalize().step.model
+        return torch.randint(0, model.vocab_size, (2, model.max_seq_len))
+
+    assert_bfb_against_golden(
+        golden_dir=_GOLDEN_DIR,
+        golden_name="exp_smoke_forward_min_cpu",
+        build_module=build,
+        build_input=build_input,
+        seed=0,
+        run=run,
     )
 
 

@@ -38,7 +38,7 @@ References:
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, overload, override
 
 from configgle import Fig
@@ -108,6 +108,23 @@ class NorMuon(Optimizer):
         weight_decay: float = 0.2
         """Decoupled decay, applied only where it agrees with the update."""
 
+        compiled: bool = True
+        """Fuse the step into one compiled graph.
+
+        On by default because the reference's is (``train.py:314``) and the two
+        do NOT agree numerically: inductor fuses the orthogonalization's adds
+        and matmuls differently than eager evaluation, a measured 2.9e-2 shift
+        in the update on identical inputs. Reproducing the recipe means issuing
+        the compiled graph, so this is part of the recipe rather than a
+        performance switch.
+
+        Off is for a run that cannot afford the compile. Measured at 10.9s on
+        first use -- which is the whole of ``exp_smoke``'s ten-second budget,
+        and is charged to it, so a short run leaves every later step at lr=0.
+
+        Spelled as the adjective, not ``compile``: as a constructor argument
+        the verb shadows the builtin."""
+
         coefficients: tuple[tuple[float, float, float], ...] = (
             (8.156554524902461, -22.48329292557795, 15.878769915207462),
             (4.042929935166739, -2.808917465908714, 0.5000178451051316),
@@ -137,6 +154,7 @@ class NorMuon(Optimizer):
                 beta2=final.beta2,
                 ns_steps=final.ns_steps,
                 weight_decay=final.weight_decay,
+                compiled=final.compiled,
                 coefficients=final.coefficients,
             )
 
@@ -149,6 +167,7 @@ class NorMuon(Optimizer):
         beta2: float = 0.95,
         ns_steps: int = 5,
         weight_decay: float = 0.2,
+        compiled: bool = True,
         coefficients: tuple[tuple[float, float, float], ...] = (
             (8.156554524902461, -22.48329292557795, 15.878769915207462),
             (4.042929935166739, -2.808917465908714, 0.5000178451051316),
@@ -179,6 +198,20 @@ class NorMuon(Optimizer):
                 "weight_decay": weight_decay,
                 "coefficients": coefficients,
             },
+        )
+        # One set of 0-D CPU tensors, reused by every group and every step.
+        # NOT a convenience: a Python float reaching a compiled kernel is a
+        # compile-time CONSTANT, so inductor folds it into the fused expression
+        # and reassociates the arithmetic around it -- a measured 2.9e-2 shift
+        # in the update against the same kernel taking tensors. It also forces
+        # a recompilation on the first step a schedule moves the rate, which a
+        # budgeted run does every step.
+        self._scalars: dict[str, Tensor] = {
+            name: torch.zeros((), dtype=torch.float32)
+            for name in ("momentum", "lr", "weight_decay", "beta2")
+        }
+        self._update: Callable[..., None] = (
+            _compiled_update() if compiled else _normuon_update
         )
 
     @overload
@@ -227,32 +260,47 @@ class NorMuon(Optimizer):
             )
         stacked_grads = torch.stack([_gradient(p) for p in params])
         stacked_params = torch.stack(list(params))
-        _normuon_update(
+        for name, value in (
+            ("momentum", group["momentum"]),
+            # A tall matrix's orthogonal update has more rows than it has
+            # independent directions, so its step is scaled to match a square
+            # one's per-element magnitude.
+            ("lr", group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5),
+            ("weight_decay", group["weight_decay"]),
+            ("beta2", group["beta2"]),
+        ):
+            self._scalars[name].fill_(value)
+        self._update(
             stacked_grads,
             stacked_params,
             state["momentum_buffer"],
             state["second_moment"],
-            momentum=group["momentum"],
-            # A tall matrix's orthogonal update has more rows than it has
-            # independent directions, so its step is scaled to match a square
-            # one's per-element magnitude.
-            lr=group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5,
-            weight_decay=group["weight_decay"],
-            beta2=group["beta2"],
+            **self._scalars,
             ns_steps=group["ns_steps"],
+            # Decided HERE, from the shape, rather than inside the kernel: the
+            # kernel is compiled, and an axis index read off a tensor there
+            # becomes a guard on the size rather than a constant in the graph.
+            reduce_dim=-1 if shape[-2] >= shape[-1] else -2,
             coefficients=group["coefficients"],
         )
         torch._foreach_copy_(list(params), list(stacked_params.unbind(0)))
 
 
 def _by_shape(params: list[Tensor]) -> list[list[Tensor]]:
-    """Bucket parameters by shape, in first-appearance order."""
+    """Bucket parameters by shape, buckets ordered by the shape itself.
+
+    Members keep their given order within a bucket -- a stacked update writes
+    back positionally, so reordering them would apply one parameter's step to
+    another. The BUCKETS are sorted by shape rather than by first appearance so
+    the sequence of updates depends only on the shapes present, not on the
+    order the model happened to register its modules in.
+    """
     buckets: dict[tuple[int, ...], list[Tensor]] = {}
     for parameter in params:
         if parameter.grad is None:
             continue
         buckets.setdefault(tuple(parameter.shape), []).append(parameter)
-    return list(buckets.values())
+    return [buckets[shape] for shape in sorted(buckets)]
 
 
 def _gradient(parameter: Tensor) -> Tensor:
@@ -268,11 +316,12 @@ def _normuon_update(
     momentum_buffer: Tensor,
     second_moment: Tensor,
     *,
-    momentum: float,
-    lr: float,
-    weight_decay: float,
-    beta2: float,
+    momentum: Tensor,
+    lr: Tensor,
+    weight_decay: Tensor,
+    beta2: Tensor,
     ns_steps: int,
+    reduce_dim: int,
     coefficients: tuple[tuple[float, float, float], ...],
 ) -> None:
     """Apply momentum, orthogonalize, rescale rows, and decay, in place.
@@ -282,36 +331,52 @@ def _normuon_update(
       stacked_params: ``[N, R, C]`` weights, updated in place.
       momentum_buffer: ``[N, R, C]`` running gradient average.
       second_moment: ``[N, R, 1]`` or ``[N, 1, C]`` running row energy.
-      momentum: Coefficient on the momentum buffer.
-      lr: Step size, already corrected for a tall matrix.
-      weight_decay: Decoupled decay, applied only where it agrees.
-      beta2: Decay of the second moment.
+      momentum: Coefficient on the momentum buffer, as a 0-D tensor.
+      lr: Step size, already corrected for a tall matrix, as a 0-D tensor.
+      weight_decay: Decoupled decay applied only where it agrees, 0-D.
+      beta2: Decay of the second moment, as a 0-D tensor.
       ns_steps: Polynomial iterations to run.
+      reduce_dim: Axis the row-energy mean collapses, -1 when tall.
       coefficients: Polynomial iteration coefficients.
 
     """
-    momentum_buffer.lerp_(stacked_grads, 1 - momentum)
-    update = stacked_grads.lerp_(momentum_buffer, momentum)
+    # Cast to the gradient's own dtype, not left as the float32 the caller
+    # holds: ``lerp_`` with a scalar of a WIDER dtype computes the blend at
+    # that width and rounds once at the end, while a same-dtype weight keeps it
+    # narrow throughout. The two differ in the last bits of every element, and
+    # the buffer feeds the next step, so the gap compounds.
+    weight = momentum.to(stacked_grads.dtype)
+    momentum_buffer.lerp_(stacked_grads, 1 - weight)
+    update = stacked_grads.lerp_(momentum_buffer, weight)
 
     # Orthogonalization runs in bfloat16: the iteration is self-correcting, so
     # its intermediate precision does not reach the result, and the matmuls
     # dominate the step's cost.
     x = update.bfloat16()
     x = x / (x.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
+    # The polynomial is built into its own tensor before the final matmul,
+    # rather than inlined into the expression. The two are the same algebra and
+    # NOT the same arithmetic: inlining lets the compiler associate the adds
+    # and the matmul differently, and the iteration is run in bfloat16 where
+    # that reassociation is visible in the result.
     if x.size(-2) > x.size(-1):
         for a, b, c in coefficients[:ns_steps]:
             gram = x.mT @ x
-            x = a * x + x @ (b * gram + c * (gram @ gram))
+            polynomial = b * gram + c * (gram @ gram)
+            x = a * x + x @ polynomial
     else:
         for a, b, c in coefficients[:ns_steps]:
             gram = x @ x.mT
-            x = a * x + (b * gram + c * (gram @ gram)) @ x
+            polynomial = b * gram + c * (gram @ gram)
+            x = a * x + polynomial @ x
 
-    reduce_dim = -1 if x.size(-2) >= x.size(-1) else -2
     row_energy = x.float().square().mean(dim=reduce_dim, keepdim=True)
     width = x.size(reduce_dim)
     before = (row_energy.sum(dim=(-2, -1), keepdim=True) * width).sqrt()
-    second_moment.lerp_(row_energy.to(second_moment.dtype), 1 - beta2)
+    # Cast for the same reason as ``momentum`` above: a wider weight blends at
+    # that width, a same-dtype one does not.
+    decay = beta2.to(x.dtype)
+    second_moment.lerp_(row_energy.to(second_moment.dtype), 1 - decay)
     scale = second_moment.clamp_min(1e-10).rsqrt()
     after = (
         ((row_energy * width) * scale.float().square())
@@ -322,5 +387,25 @@ def _normuon_update(
     # meant to REDISTRIBUTE the step, not to resize it.
     x = x * (scale * (before / after.clamp_min(1e-10))).to(x.dtype)
 
+    # Cast for the same reason as the two blend weights above: a wider scalar
+    # promotes the product, and this one lands directly in the parameter.
+    rate = lr.to(x.dtype)
+    decoupled = weight_decay.to(x.dtype)
     agrees = (x * stacked_params) >= 0
-    stacked_params.sub_(lr * x + lr * weight_decay * stacked_params * agrees)
+    stacked_params.sub_(rate * x + rate * decoupled * stacked_params * agrees)
+
+
+@cache
+def _compiled_update() -> Callable[..., None]:
+    """Compile the step once, on first use.
+
+    Compiled rather than run eagerly because the reference is (``train.py:314``)
+    and the two do not agree: inductor fuses the orthogonalization's adds and
+    matmuls differently than eager evaluation does, a measured 2.9e-2 shift in
+    the update on the same inputs. Reproducing the recipe therefore means
+    issuing the compiled graph, not merely the same arithmetic.
+
+    Deferred rather than decorated at module scope: compiling at import makes
+    every importer pay for a kernel it may never step.
+    """
+    return torch.compile(_normuon_update, dynamic=False)

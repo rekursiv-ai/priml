@@ -41,8 +41,9 @@ import torch
 from priml.baselines.nanochat.data import IGNORED_TARGET
 from priml.baselines.nanochat.model import NanoChatLM
 from priml.baselines.nanochat.optimizer import NorMuon
-from priml.optimizers import CompositeOptimizer, apply_lr_scale
-from priml.optimizers.composite import Selector, complement, excluding
+from priml.model.custom_types import propagate_attr
+from priml.optimizers import CompositeOptimizer, FusedAdamW, apply_lr_scale
+from priml.optimizers.composite import Selector, excluding, matching
 from priml.runtime import get_device
 from priml.train.custom_types import TrainStepOutput
 
@@ -78,35 +79,117 @@ def matrix_parameters() -> Selector:
     return excluding(NorMuon.eligible_tensor, "embed", "lm_head")
 
 
+def width_scaled_lr(rate: float, *, channels: int, tuned_at: int = 768) -> float:
+    """Scale a learning rate by ``1/sqrt(width)`` away from where it was tuned.
+
+    The Adam rates in this recipe were fitted on a 768-wide model. A wider one
+    takes smaller steps per unit of loss, so carrying the same number to
+    another width silently trains a different recipe -- the rate is a property
+    of the pair, not of the optimizer.
+
+    Only the Adam rates scale. NorMuon's step is orthogonalized and therefore
+    already scale-free, which is why the reference applies this to four groups
+    and not to the matrices.
+
+    Args:
+      rate: Rate as tuned at ``tuned_at`` channels.
+      channels: This model's width.
+      tuned_at: Width the rate was fitted at.
+
+    Returns:
+      scaled: The rate this width should use.
+
+    """
+    # ``math.sqrt`` rather than ``** 0.5``: the operator types as ``Any``
+    # because a fractional power of a negative base is complex, and widths are
+    # positive by construction.
+    return rate / math.sqrt(channels / tuned_at)
+
+
 def _default_optimizer() -> CompositeOptimizer.Config:
-    """NorMuon on the reasoning matrices, AdamW on the tables and the head.
+    """NorMuon on the reasoning matrices, AdamW on everything else, by class.
 
     Orthogonalizing an update suits the square-ish matrices inside the blocks
     and not a lookup table, whose rows are independent and mostly untouched by
-    any one batch -- so the model is partitioned by name and the two selectors
+    any one batch -- so the model is partitioned by name and the selectors
     cover it exactly, which ``CompositeOptimizer`` verifies.
 
-    The learning rates differ by two orders of magnitude because the two
-    algorithms normalize differently: NorMuon's step is scale-free, while
-    AdamW's is in units of the parameter itself.
+    The AdamW side is FIVE members rather than one because the classes it
+    holds want rates two orders of magnitude apart: a token table is read once
+    per occurrence and needs a large step, an unembedding projection sees every
+    position and needs a small one, and the per-layer scalars sit between them.
+    Collapsing them to a single rate trains a different model at the same
+    nominal hyperparameters -- which is exactly the kind of difference a
+    reproduction is supposed to exclude.
+
+    The Adam rates are stated AS TUNED, at 768 channels; the step's
+    ``finalize`` rescales them to the model's actual width. Baking a width in
+    here would make the default silently wrong for every model that is not
+    768 wide.
 
     Returns:
-      config: The default two-member optimizer recipe.
+      config: The optimizer recipe: five AdamW members and one NorMuon.
 
     """
     on_matrices = matrix_parameters()
     config = CompositeOptimizer.Config()
-    config.optimizers = [
+    unembedding, embedding, value_embedding, residual, skip = (
         PartialConfig(
-            torch.optim.AdamW,
-            lr=0.004,
+            # The fused kernel, not torch's: the two are the same algorithm and
+            # round differently, so a score measured under one is not
+            # comparable with a score measured under the other. This is the one
+            # the reference recipe was measured with.
+            FusedAdamW,
             betas=(0.8, 0.95),
             eps=1e-10,
             weight_decay=0.0,
-        ),
+            # Declared on every member, not only the exempt ones: the step's
+            # finalize reads it to decide whether to rescale, and a member
+            # that simply omitted it would have to be handled by a default
+            # that silently applies to typos as well.
+            width_scaled=True,
+        )
+        for _ in range(5)
+    )
+    unembedding.lr = 0.004
+    embedding.lr = 0.6
+    value_embedding.lr = 0.6
+    # A hundredth of the scalar rate: this one multiplies the residual stream
+    # itself, so it moves the whole stack's scale rather than one path's.
+    #
+    # Neither scalar group scales with width, so both are marked exempt: they
+    # step a per-layer number rather than a projection, and the 1/sqrt(width)
+    # rule follows from a matrix's fan-in.
+    residual.lr = 0.5 * 0.01
+    residual.width_scaled = False
+    skip.lr = 0.5
+    skip.width_scaled = False
+    # Beta1 raised only here: the skip weights start at 0.1 and must travel,
+    # and a longer memory keeps that trip from being driven by one batch.
+    skip.betas = (0.96, 0.95)
+    config.optimizers = [
+        unembedding,
+        embedding,
+        value_embedding,
+        residual,
+        skip,
         NorMuon.Config(),
     ]
-    config.select = [complement(on_matrices), on_matrices]
+    # Ordered most specific first: ``value_embeds`` also contains ``embed``, so
+    # the token table's selector must exclude it rather than claim it.
+    config.select = [
+        matching("lm_head"),
+        excluding(matching("embed"), "value_embeds"),
+        matching("value_embeds"),
+        matching("residual_scale"),
+        matching("skip_scale"),
+        on_matrices,
+    ]
+    # The value-embedding member is dropped when the model has no such tables.
+    # A selector claiming nothing is REJECTED, which is the right default -- it
+    # catches a misspelled fragment -- but a rung that switches the mechanism
+    # off is not a typo, and it would otherwise be unable to use this recipe.
+    config.drop_empty = True
     return config
 
 
@@ -203,7 +286,25 @@ class NanoChatTrainStep:
         """Autocast dtype; ``None`` trains in full precision."""
 
         compile: bool = True
-        """Compile the model with ``torch.compile``."""
+        """Compile the model with ``torch.compile``.
+
+        Reaches the OPTIMIZER's kernels too, pushed down at finalize. Their
+        compile is charged to the first step that steps them -- measured at
+        10.9s for the orthogonalizing member -- so a run declaring itself
+        uncompiled and then paying that anyway spends a short budget entirely
+        on compilation and anneals every later step to lr=0."""
+
+        adam_lr_tuned_at_channels: int = 768
+        """Width the Adam rates in ``optimizer`` were fitted at.
+
+        A rate is a property of the (rate, width) pair: a wider model takes
+        smaller steps per unit of loss, so carrying one number across widths
+        trains a different recipe under the same nominal hyperparameters.
+        ``finalize`` therefore rescales every Adam member by
+        ``sqrt(tuned_at / channels)``.
+
+        Set it to the model's own width to disable the rescale -- which is
+        what a caller supplying already-scaled rates wants."""
 
         @override
         def finalize(self) -> Self:
@@ -266,6 +367,43 @@ class NanoChatTrainStep:
                     f"{tokens_per_pass}, so no whole number of passes reaches "
                     "the token batch.",
                 )
+            # Rescaled here, not in the factory: the factory runs before the
+            # caller has chosen a width, so a rate baked there is right for one
+            # model and wrong for every fork that changes ``channels``. The
+            # field is then set to the model's width, so a second finalize is a
+            # no-op rather than a second rescale.
+            if isinstance(self.optimizer, CompositeOptimizer.Config):
+                # One switch, pushed rather than restated per member: an
+                # optimizer's compile is charged to the first step that steps
+                # it, so a config saying "do not compile" while a member does
+                # anyway spends a short budget on compilation. A PartialConfig
+                # holds kwargs rather than fields, so setting an attribute on
+                # it would be silently dropped -- it takes the keyword instead.
+                for member in self.optimizer.optimizers:
+                    if isinstance(member, PartialConfig):
+                        member.compiled = self.compile
+                    else:
+                        propagate_attr(member, "compiled", self.compile)
+                for member in self.optimizer.optimizers:
+                    if not isinstance(member, PartialConfig):
+                        continue
+                    # Popped, not read: the flag tells THIS method whether the
+                    # rate scales, and the optimizer it is attached to would
+                    # reject it as an unexpected keyword.
+                    kwargs = member._kwargs  # noqa: SLF001
+                    scales = kwargs.pop("width_scaled", False)
+                    rate = kwargs.get("lr")
+                    # An exempt member steps a per-layer scalar rather than a
+                    # projection, and the 1/sqrt(width) rule follows from
+                    # fan-in, which a scalar does not have.
+                    if not isinstance(rate, float) or not scales:
+                        continue
+                    member.lr = width_scaled_lr(
+                        rate,
+                        channels=self.model.channels,
+                        tuned_at=self.adam_lr_tuned_at_channels,
+                    )
+            self.adam_lr_tuned_at_channels = self.model.channels
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

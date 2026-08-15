@@ -124,18 +124,19 @@ def _build_trace() -> nn.Module:
     config.num_minibatches = 2
     config.total_train_steps = 8
     config.learning_rate = 3e-3
+    # A 3x3 view rather than the benchmark's 9x11. The observation is one
+    # one-hot vector per visible tile, so the window is what sets the input
+    # width -- 798 floats here against 8,268 -- and the first layer's weights
+    # are almost the whole committed file. The encoding is identical either
+    # way: same channels, same order, same arithmetic, fewer tiles.
+    #
+    # What the golden gives up is pinning the published geometry, and it never
+    # was the thing pinning it: ``observation_test`` checks the real width
+    # against the reference implementation directly.
+    config.env.view = (3, 3)
     # TWO hidden units, and not one. A width-1 axis broadcasts against
     # anything, so a transposed or mis-ordered tensor still lines up and the
-    # golden records the wrong arithmetic as correct; two is the narrowest
-    # width at which a shape error is a shape error.
-    #
-    # That width is also what the committed file costs. The observation is
-    # 8,268 wide, so the first layer is 8,268 floats per unit per tower,
-    # stored twice (pre- and post-update) -- and ``randomize_parameters``
-    # fills every weight with noise, so there is nothing for compression to
-    # find. Narrowing the INPUT would shrink it further and is refused: the
-    # golden would stop pinning the geometry the environment actually
-    # renders.
+    # golden would record the wrong arithmetic as correct.
     config.model.hidden_size = 2
     config.model.num_layers = 1
     # Pinned, not defaulted: compiling changes which random numbers are drawn,
@@ -163,7 +164,7 @@ def test_the_golden_is_small_enough_to_keep_in_git() -> None:
     # size, which is almost entirely first-layer weights, so a widening that
     # doubles it has to be deliberate.
     golden = _GOLDEN_DIR / "craftax_ppo_training_v1.pt"
-    assert golden.stat().st_size < 300_000
+    assert golden.stat().st_size < 40_000
 
 
 def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:

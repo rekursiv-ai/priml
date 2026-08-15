@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, override
+
+from torch import nn
 
 import pytest
 import torch
 
+from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     matrix_parameters,
     trapezoid,
 )
+from priml.testing.bfb import assert_bfb_against_golden
 
+
+_GOLDEN_DIR = Path(__file__).parent / "goldens"
 
 VOCAB = 32
 SEQ = 8
@@ -202,8 +209,8 @@ def test_every_optimizer_members_rate_is_reported() -> None:
     step = _step()
     metrics = step.train_step(**_batch()).get("metrics", {})
     rates = {name: value for name, value in metrics.items() if name.startswith("lr_")}
-    assert set(rates) == {"lr_adamw", "lr_normuon"}
-    assert rates["lr_normuon"] != rates["lr_adamw"]
+    assert set(rates) == {"lr_fusedadamw", "lr_normuon"}
+    assert rates["lr_normuon"] != rates["lr_fusedadamw"]
 
 
 def test_weight_decay_anneals_with_the_budget() -> None:
@@ -321,6 +328,100 @@ def test_the_selector_is_comparable_not_a_closure() -> None:
     equals its parent and every experiment diff shows a change.
     """
     assert matrix_parameters() == matrix_parameters()
+
+
+def _smoke_step() -> NanoChatTrainStep:
+    """``exp_smoke``'s step, built for a golden.
+
+    The EXPERIMENT's config, not a hand-built one: a golden over a config
+    assembled here would freeze whatever this file happens to say, and the
+    ladder could then change underneath it without the golden noticing. Only
+    the device is pinned, because a golden is CPU-only by construction.
+    """
+    config = experiments.exp_smoke().copy_tree().finalize().step
+    config.device = "cpu"
+    torch.manual_seed(0)
+    built = config.copy_tree().make()
+    assert isinstance(built, NanoChatTrainStep)
+    return built
+
+
+def _smoke_batch(step: NanoChatTrainStep) -> dict[str, Any]:
+    """One batch at the step's own geometry."""
+    model = step.config.model
+    torch.manual_seed(1)
+    rows = torch.randint(
+        0,
+        model.vocab_size,
+        (step.config.rows_per_pass, model.max_seq_len + 1),
+    )
+    return {"media": rows[:, :-1], "label": rows[:, 1:]}
+
+
+def test_five_steps_bfb() -> None:
+    """Freeze five optimizer steps of the recipe, end to end.
+
+    The forward goldens in ``model_test`` freeze one pass. This freezes what
+    that pass FEEDS: the backward, both optimizer members, the accumulated
+    moment buffers, and the schedules -- the half of the recipe a forward
+    golden cannot reach. It is minted over ``exp_smoke``, which differs from
+    ``exp001`` only in size, so a change to any shared mechanism lands here.
+
+    The budget clock is written before each step rather than left to run.
+    Every schedule reads ``elapsed_sec / time_budget_sec`` and that clock is a
+    ``perf_counter`` reading (train_step.py:450, 483), so a golden that let it
+    run would freeze how fast this machine was -- and fail on a slower one for
+    no reason a reader could act on. Fixing it makes the learning rate a
+    function of the step index, which is what a golden can hold.
+
+    The readings span the WHOLE budget rather than its first fraction. The
+    trapezoid holds flat over the first half, so five closely-spaced readings
+    all land at multiplier 1.0 and the golden freezes a schedule it never
+    exercised -- measured: flattening ``trapezoid`` to a constant left that
+    version of this test green. Spread to 0, 25, 50, 75, and 100 percent, the
+    last three are in the decay and the mutation is caught.
+    """
+    budget = experiments.exp_smoke().step.time_budget_sec
+    clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
+
+    def run(module: nn.Module, batch: Any) -> torch.Tensor:
+        assert isinstance(module, _SmokeSteps)
+        return module(batch, clock)
+
+    assert_bfb_against_golden(
+        golden_dir=_GOLDEN_DIR,
+        golden_name="five_steps_min_cpu",
+        build_module=_SmokeSteps,
+        build_input=lambda: _smoke_batch(_smoke_step()),
+        seed=0,
+        run=run,
+    )
+
+
+class _SmokeSteps(nn.Module):
+    """A module wrapper so the bfb harness can drive five training steps.
+
+    The harness randomizes ``parameters()`` and snapshots ``state_dict()``, so
+    the thing it is handed has to BE the model. Wrapping rather than passing
+    the model directly is what lets the optimizer -- whose moments are half of
+    what this golden exists to freeze -- be constructed after that
+    randomization and against those same tensors.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.step = _smoke_step()
+        self.model = self.step.raw_model
+
+    @override
+    def forward(self, batch: dict[str, Any], clock: list[float]) -> torch.Tensor:
+        """Run one step per clock reading; return the losses."""
+        losses: list[torch.Tensor] = []
+        for elapsed in clock:
+            # Written, not accumulated: see ``test_five_steps_bfb``.
+            self.step.elapsed_sec = elapsed
+            losses.append(self.step.train_step(**batch)["loss"].reshape(1))
+        return torch.cat(losses)
 
 
 if __name__ == "__main__":
