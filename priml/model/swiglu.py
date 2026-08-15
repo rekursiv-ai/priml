@@ -18,7 +18,7 @@ from torch.distributed.tensor.parallel import (
 import torch
 
 from priml.math.basic import ceil_multiple
-from priml.model.custom_types import ChannelsIn
+from priml.model.custom_types import ChannelsIn, TensorModule
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.linear import Linear
 
@@ -70,7 +70,7 @@ class SwiGLU(nn.Module):
         where matching HF's operation order avoids small floating-point drift.
         """
 
-        norm: Makeable[nn.Module] | None = None
+        norm: Makeable[TensorModule] | None = None
         """Optional norm applied inside the gate branch."""
 
         depth: int = -1
