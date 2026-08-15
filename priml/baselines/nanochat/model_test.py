@@ -314,9 +314,11 @@ def test_the_shipped_experiments_forward_bfb() -> None:
     away.
     """
 
+    def _model() -> Any:
+        return experiments.exp_smoke().copy_tree().finalize().step.model
+
     def build() -> nn.Module:
-        model = experiments.exp_smoke().copy_tree().finalize().step.model
-        built = model.copy_tree().make()
+        built = _model().copy_tree().make()
         assert isinstance(built, NanoChatLM)
         return built
 
@@ -327,8 +329,7 @@ def test_the_shipped_experiments_forward_bfb() -> None:
         return out
 
     def build_input() -> torch.Tensor:
-        model = experiments.exp_smoke().copy_tree().finalize().step.model
-        return torch.randint(0, model.vocab_size, (2, model.max_seq_len))
+        return torch.randint(0, _model().vocab_size, (2, _model().max_seq_len))
 
     assert_bfb_against_golden(
         golden_dir=_GOLDEN_DIR,
