@@ -11,13 +11,13 @@ import pytest
 import torch
 
 from priml.baselines.nanochat import experiments
-from priml.baselines.nanochat.model import ValueGatedAttention
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     matrix_parameters,
     nanochat_optimizer,
     trapezoid,
 )
+from priml.model.value_gated_attention import ValueGatedAttention
 from priml.testing.bfb import assert_bfb_against_golden
 
 
@@ -39,11 +39,11 @@ def _step(**overrides: Any) -> NanoChatTrainStep:
     config.optimizer = nanochat_optimizer(compile=False)
     config.model.vocab_size = VOCAB
     config.model.max_seq_len = SEQ
-    config.model.channels = 16
+    config.model.channels_in = 16
     config.model.num_layers = 1
-    config.model.window_pattern = "L"
-    attention = config.model.block.attn
+    attention = config.model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
+    attention.window_pattern = "L"
     attention.channels_head = 8
     attention.gate_channels = 4
     config.rows_per_pass = 2

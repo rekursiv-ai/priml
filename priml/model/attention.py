@@ -13,15 +13,105 @@ from torch.nn import functional as f
 
 import torch
 
-from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    HeadGeometry,
+    propagate_attr,
+)
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.kvcache import KVCache
 from priml.model.linear import EnsembleLinear, Linear
 from priml.model.rope import RoPE
 
 
+def layer_window(*, depth: int, max_seq_len: int, pattern: str) -> int:
+    """One layer's attention window, from a cycled short/long pattern.
+
+    Everything a LAYER needs to know: the pattern cycles over depth, so a
+    module holding its own index can answer without asking the stack.
+
+    Args:
+      depth: This layer's index in the stack.
+      max_seq_len: Full context length, and the long window.
+      pattern: Cycled ``S`` (half context) and ``L`` (full context) symbols.
+
+    Returns:
+      window: Keys this layer's queries may look back over, itself included.
+
+    Raises:
+      ValueError: ``pattern`` is empty or holds a symbol other than S and L.
+
+    """
+    pattern = pattern.upper()
+    if not pattern or set(pattern) - set("SL"):
+        raise ValueError(f"pattern must hold only S and L; got {pattern!r}.")
+    return max_seq_len if pattern[depth % len(pattern)] == "L" else max_seq_len // 2
+
+
+def window_sizes(*, num_layers: int, max_seq_len: int, pattern: str) -> list[int]:
+    """Return every layer's attention window from a cycled short/long pattern.
+
+    Args:
+      num_layers: Blocks in the stack.
+      max_seq_len: Full context length, and the long window.
+      pattern: Cycled ``S`` (half context) and ``L`` (full context) symbols.
+
+    Returns:
+      windows: One window per layer; the last is always the full context, since
+        it is the layer that has to see the whole sequence to predict the next
+        token -- which is the one thing here a LAYER cannot decide, since it
+        turns on being last.
+
+    Raises:
+      ValueError: ``pattern`` is empty or holds a symbol other than S and L.
+
+    """
+    windows = [
+        layer_window(depth=layer, max_seq_len=max_seq_len, pattern=pattern)
+        for layer in range(num_layers)
+    ]
+    windows[-1] = max_seq_len
+    return windows
+
+
+def window_mask(q: Tensor, k: Tensor, *, window: int) -> Tensor | None:
+    """Additive mask admitting the last ``window`` keys, causally.
+
+    Args:
+      q: ``[..., S, heads, channels_head]`` queries.
+      k: Keys, same layout.
+      window: Keys each query may look back over, ITSELF INCLUDED. -1, or a
+        value reaching the whole context, needs no mask.
+
+    Returns:
+      mask: Additive ``[S, T]`` mask, or None when every key is admissible.
+
+    """
+    s, t = q.shape[-3], k.shape[-3]
+    if window < 0 or window >= t:
+        return None
+    offset = torch.arange(t, device=q.device)
+    offset = offset[t - s :, None] - offset[None, :]
+    # ``<=``, not ``<``: a fused kernel's ``window_size=(w, 0)`` admits w keys
+    # of history IN ADDITION to the query's own position, so the exclusive form
+    # attends to one key fewer per row and is a different model.
+    admissible = (offset >= 0) & (offset <= window)
+    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
+        ~admissible,
+        float("-inf"),
+    )
+
+
 class SdpaFused(nn.Module):
-    """Wraps F.scaled_dot_product_attention."""
+    """Wraps F.scaled_dot_product_attention.
+
+    Takes ``[..., S, heads, channels_head]`` -- the layout every priml
+    projection emits and the one a fused kernel wants -- and transposes to
+    SDPA's ``[..., heads, S, channels_head]`` internally. The transpose is a
+    stride view rather than a copy, so a kernel that needs the other layout
+    (FlashAttention-3) is a drop-in value in the same slot and pays nothing.
+    """
 
     class Config(Fig["SdpaFused"]):
         pass
@@ -40,17 +130,23 @@ class SdpaFused(nn.Module):
         dropout_p: float = 0.0,
         is_causal: bool = False,
         attn_mask: Tensor | None = None,
+        window: int = -1,
         **kwargs: Any,
     ) -> Tensor:
         del kwargs
-        return f.scaled_dot_product_attention(
+        if attn_mask is None:
+            attn_mask = window_mask(q, k, window=window)
+        q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
+        out = f.scaled_dot_product_attention(
             q,
             k,
             v,
             attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=is_causal,
+            # The window mask is already causal, and SDPA REFUSES both at once.
+            is_causal=is_causal and attn_mask is None,
         )
+        return out.movedim(-3, -2)
 
 
 class SdpaNaive(nn.Module):
@@ -73,9 +169,13 @@ class SdpaNaive(nn.Module):
         dropout_p: float = 0.0,
         is_causal: bool = False,
         attn_mask: Tensor | None = None,
+        window: int = -1,
         **kwargs: Any,
     ) -> Tensor:
         del kwargs
+        if attn_mask is None:
+            attn_mask = window_mask(q, k, window=window)
+        q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
         scale = q.shape[-1] ** -0.5
         attn = torch.matmul(q, k.transpose(-2, -1)) * scale
         if is_causal:
@@ -89,7 +189,7 @@ class SdpaNaive(nn.Module):
         attn = attn.softmax(dim=-1, dtype=torch.float32).to(q.dtype)
         if dropout_p > 0.0:
             attn = f.dropout(attn, p=dropout_p)
-        return torch.matmul(attn, v)
+        return torch.matmul(attn, v).movedim(-3, -2)
 
 
 class SelfAttention(nn.Module):
@@ -325,9 +425,8 @@ class SelfAttention(nn.Module):
             cos, sin = self.rope(positions)
             q, k = RoPE.rotate(q, k, cos, sin)
 
-        # [..., S, H, D] -> [..., H, S, D] for SDPA
+        # The cache stores [..., H, S, D]; the kernels take [..., S, H, D].
         q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
-
         if cache is not None:
             k, v = cache.update(k, v)
         else:
@@ -336,18 +435,19 @@ class SelfAttention(nn.Module):
         if self.kv_groups > 1:
             k = k.repeat_interleave(self.kv_groups, dim=-3)
             v = v.repeat_interleave(self.kv_groups, dim=-3)
+        q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
 
         out = self.attn_kernel(
             q,
             k,
             v,
             dropout_p=self.dropout if self.training else 0.0,
-            is_causal=self.causal and k.shape[-2] == S,
+            is_causal=self.causal and k.shape[-3] == S,
             attn_mask=_causal_chunk_mask(q, k) if self.causal else None,
         )
 
-        # [..., H, S, D] -> [..., S, H*D]
-        out = out.movedim(-3, -2).flatten(-2)
+        # [..., S, H, D] -> [..., S, H*D]
+        out = out.flatten(-2)
         if self.norm_out is not None:
             out = self.norm_out(out)
         out = self.proj_out(out)
@@ -418,7 +518,7 @@ def _causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     ``T - S + i``) attends to keys ``0..T - S + i`` -- never to later
     tokens in the same chunk.
     """
-    s, t = q.shape[-2], k.shape[-2]
+    s, t = q.shape[-3], k.shape[-3]
     if s == t:
         return None
     allowed = torch.ones(s, t, dtype=torch.bool, device=q.device).tril(diagonal=t - s)
@@ -716,9 +816,8 @@ class MultiStreamAttention(nn.Module):
                 cos, sin = self.ropes[si](p)
                 q, k = RoPE.rotate(q, k, cos, sin)
 
-            # [..., S, H, hd] → [..., H, S, hd] for SDPA.
+            # The cache stores [..., H, S, hd]; the kernels take [..., S, H, hd].
             q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
-
             c_i = cache_list[i]
             if c_i is not None:
                 k, v = c_i.update(k, v)
@@ -739,21 +838,21 @@ class MultiStreamAttention(nn.Module):
             v_cat = v_cat.repeat_interleave(self.kv_groups, dim=-3)
 
         total_kv = k_cat.shape[-2]
+        k_cat, v_cat = (t.movedim(-3, -2) for t in (k_cat, v_cat))
         results: list[Tensor] = []
         for i in range(N):
-            S_i = all_q[i].shape[-2]
+            q_i = all_q[i].movedim(-3, -2)
+            S_i = q_i.shape[-3]
             out = self.attn_kernel(
-                all_q[i],
+                q_i,
                 k_cat,
                 v_cat,
                 dropout_p=self.dropout if self.training else 0.0,
                 is_causal=self.causal and total_kv == S_i,
-                attn_mask=(
-                    _causal_chunk_mask(all_q[i], k_cat) if self.causal else None
-                ),
+                attn_mask=(_causal_chunk_mask(q_i, k_cat) if self.causal else None),
             )
-            # [..., H, S, hd] → [..., S, H*hd].
-            out = out.movedim(-3, -2).flatten(-2)
+            # [..., S, H, hd] → [..., S, H*hd].
+            out = out.flatten(-2)
             if self.norm_out is not None:
                 out = self.norm_out(out)
             out = self.proj_outs[i](out)
@@ -791,6 +890,23 @@ class OutputGate(nn.Module):
 
         @property
         def channels_out(self) -> int:
+            return self.channels_in
+
+        @property
+        def heads(self) -> int:
+            """Attention heads, from the module this gate wraps."""
+            return self.inner.heads if isinstance(self.inner, HeadGeometry) else 1
+
+        @property
+        def channels_head(self) -> int:
+            """Channels per head, from the module this gate wraps.
+
+            Forwarded rather than declared: gating scales an output, it does
+            not reshape one, so the geometry is the wrapped module's and a gate
+            answering for itself would report a model built to another shape.
+            """
+            if isinstance(self.inner, HeadGeometry):
+                return self.inner.channels_head
             return self.channels_in
 
         @override

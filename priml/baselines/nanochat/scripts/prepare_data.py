@@ -1,31 +1,34 @@
-"""Download the corpus, train a tokenizer, and pack it into token rows.
+"""Download the corpus and fit the vocabulary it is read through.
 
-Run once before the first experiment. Re-running with the SAME flags costs
-nothing -- a split already present is left alone. Re-running with different
-ones raises rather than silently returning data prepared for another question.
+Run once before the first experiment. Re-running costs nothing: a shard already
+present is left alone, and a vocabulary already fitted is verified against the
+recipe recorded beside it rather than refitted.
 
-Three stages, in order, because each consumes the previous one's output:
+Two stages, in order:
 
-1. **Download.** Parquet text shards, fetched once and reused.
-2. **Train the tokenizer.** A byte-pair vocabulary fitted on a prefix of the
+1. **Download.** Parquet text shards, fetched once and reused. The last one is
+   the validation shard, so every candidate is scored on text no run trained on.
+2. **Fit the vocabulary.** A byte-pair vocabulary fitted on a prefix of the
    training text. The vocabulary is part of the recipe -- it decides what a
-   token IS -- so it is built here and frozen, never refitted per run.
-3. **Pack.** Documents are concatenated end to end and cut into fixed-length
-   rows, so every position carries a real target and training needs no padding
-   mask. A document longer than a row spans several; one shorter shares a row
-   with its neighbours, separated by the document-start token.
+   token IS, and therefore what the score's denominator counts -- so it is built
+   here and frozen, never refitted per run.
 
-The build is deterministic: the shard order is fixed and the tokenizer's
-training text is a prefix, so the same flags over the same shards produce
-byte-identical arrays.
+Rows are NOT packed here. The reference packs at read time out of a document
+buffer, and that packing is what
+:mod:`priml.baselines.nanochat.data` reproduces; writing rows to disk would
+freeze one arrangement of the tokens and call it the data.
 
-The tokenizer libraries are imported HERE and nowhere else. Preparation happens
-once, on a machine with a network; training reads flat arrays, so a published
-install needs neither.
+The tokenizer trainer is imported HERE and nowhere else. Preparation happens
+once, on a machine with a network; training reads shards and a pickled encoding,
+so a published install needs no BPE trainer.
 
 Examples:
   uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data
   uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --directory /datasets/my-nanochat
+
+References:
+    https://github.com/karpathy/autoresearch
+      ``prepare.py``, commit b11d6f283f866eb7e10fb776a4b8553fef873fd5.
 
 """
 
@@ -39,7 +42,6 @@ import argparse
 import json
 import logging
 import os
-import pickle
 import shutil
 import tempfile
 import urllib.request
@@ -65,22 +67,19 @@ Fetched over plain HTTP rather than through a Hugging Face client: a handful of
 files, nothing a dependency would add. Keeping it stdlib means preparing data
 needs no optional extra."""
 
-_MAX_TOKEN_ID: Final = 65_535
-"""Largest id the packed ``uint16`` rows can represent."""
-
 SOURCE_REVISION: Final = "main"
 """Revision the shards are fetched at.
 
 NOT a pin: this tracks the branch, so a corpus that moves upstream produces
-different shards under the same name. What IS pinned is the artifact those
-shards become -- ``dataset.json`` records the tokenizer's byte-length table by
+different shards under the same name. What IS pinned is the vocabulary those
+shards produce -- ``tokenizer_recipe.json`` records the byte-length table by
 digest, so a score measured against one preparation cannot be silently compared
 with a score measured against another. Digest-pinning the shards themselves
 would mean listing every one of them here."""
 
 
 def main() -> int:
-    """Prepare the dataset; return the process exit code."""
+    """Prepare the corpus and vocabulary; return the process exit code."""
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").strip(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -92,14 +91,14 @@ def main() -> int:
         args.directory,
         num_train_shards=args.num_train_shards,
         vocab_size=args.vocab_size,
-        max_seq_len=args.max_seq_len,
         tokenizer_train_chars=args.tokenizer_train_chars,
+        tokenizer_doc_cap=args.tokenizer_doc_cap,
     )
     return 0
 
 
 def default_directory() -> Path:
-    """Return the dataset directory a default ``TrainLoop`` would resolve."""
+    """Return the corpus directory a default ``TrainLoop`` would resolve."""
     config = NanoChatData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)
@@ -110,123 +109,67 @@ def prepare(
     *,
     num_train_shards: int = 7,
     vocab_size: int = 8_192,
-    max_seq_len: int = 2_048,
-    tokenizer_train_chars: int = 200_000_000,
-    text_directory: Path | str | None = None,
+    tokenizer_train_chars: int = 2_000_000_000,
+    tokenizer_doc_cap: int = 10_000,
+    download: bool = True,
 ) -> Path:
-    """Build both splits under ``directory`` if they are not already there.
+    """Fetch the shards and fit the vocabulary if they are not already there.
 
     Args:
       directory: Destination; ``None`` uses :func:`default_directory`.
-      num_train_shards: Source shards forming the training split. The shard
-        after them is the validation split, so every candidate is scored on
-        text no run trained on.
-      vocab_size: Tokenizer vocabulary, including the reserved tokens.
-      max_seq_len: Tokens per packed row.
-      tokenizer_train_chars: Characters the tokenizer is fitted on.
-      text_directory: Local ``shard_*.parquet`` files to read instead of
-        downloading, each carrying a ``text`` column. Lets a test build the
-        pipeline hermetically.
+      num_train_shards: Shards forming the training split. The shard after them
+        is the validation split.
+      vocab_size: Vocabulary size, including the reserved tokens.
+      tokenizer_train_chars: Characters the vocabulary is fitted on.
+      tokenizer_doc_cap: Characters one document may contribute to that fit.
+        Capped so a handful of long documents cannot dominate the merges.
+      download: Fetch missing shards. False expects them staged already, which
+        is what lets a test build the pipeline hermetically.
 
     Returns:
-      directory: Where the splits were written.
+      directory: Where the corpus and vocabulary live.
 
     """
     if num_train_shards <= 0:
         raise ValueError(f"num_train_shards must be positive; got {num_train_shards}.")
     if vocab_size <= len(RESERVED_TOKENS):
         raise ValueError(
-            f"vocab_size must exceed the {len(RESERVED_TOKENS)} reserved "
-            f"tokens; got {vocab_size}.",
+            f"vocab_size must exceed the {len(RESERVED_TOKENS)} reserved tokens; "
+            f"got {vocab_size}.",
         )
-    if vocab_size > _MAX_TOKEN_ID + 1:
+    if tokenizer_train_chars <= 0 or tokenizer_doc_cap <= 0:
         raise ValueError(
-            f"vocab_size {vocab_size} exceeds the {_MAX_TOKEN_ID + 1} ids the "
-            "packed uint16 rows can hold.",
-        )
-    if max_seq_len < 2:
-        raise ValueError(f"max_seq_len must be at least two; got {max_seq_len}.")
-    if tokenizer_train_chars <= 0:
-        raise ValueError(
-            f"tokenizer_train_chars must be positive; got {tokenizer_train_chars}.",
+            "tokenizer_train_chars and tokenizer_doc_cap must be positive; got "
+            f"{tokenizer_train_chars} and {tokenizer_doc_cap}.",
         )
     out = Path(directory) if directory is not None else default_directory()
     out.mkdir(parents=True, exist_ok=True)
-    # Checked per split rather than only when BOTH exist: a partial directory
-    # -- an interrupted run, a deleted split -- is exactly when the flags are
-    # most likely to have moved, and reusing one split at the old geometry
-    # beside a fresh one built at the new flags yields a pair disagreeing with
-    # itself, reported as "ready".
-    prepared = [out / split / "dataset.json" for split in ("train", "val")]
-    # Every flag that shapes what a split HOLDS, not only its geometry: a
-    # reuse decision made on a subset silently returns data prepared from a
-    # different corpus or a differently-fitted vocabulary.
-    asked = {
-        "vocab_size": vocab_size,
-        "max_seq_len": max_seq_len,
-        "num_train_shards": num_train_shards,
-        "tokenizer_train_chars": tokenizer_train_chars,
-    }
-    for path in prepared:
-        if not path.is_file():
-            continue
-        recorded = json.loads(path.read_text())
-        differing = {
-            key: (recorded.get(key), value)
-            for key, value in asked.items()
-            if recorded.get(key) != value
-        }
-        if differing:
-            raise ValueError(
-                f"{path.parent} was prepared with {differing} (recorded, "
-                "requested); prepare into a different --directory, or "
-                "delete this one to rebuild it.",
-            )
-    if all(path.is_file() for path in prepared):
-        logger.info("nanochat data already prepared at %s", out)
-        return out
-
-    source = Path(text_directory) if text_directory is not None else out / "source"
     shards = (
-        _shard_paths(source, count=num_train_shards + 1)
-        if text_directory is not None
-        else _download(out, count=num_train_shards + 1)
+        _download(out, count=num_train_shards + 1)
+        if download
+        else _staged(out, count=num_train_shards + 1)
     )
-    encoding = _tokenizer(
+    _fit_vocabulary(
         shards[:num_train_shards],
-        out=out,
+        out=out / "tokenizer",
         vocab_size=vocab_size,
         train_chars=tokenizer_train_chars,
+        doc_cap=tokenizer_doc_cap,
     )
-    for split, split_shards in (
-        ("train", shards[:num_train_shards]),
-        ("val", shards[num_train_shards:]),
-    ):
-        _pack_split(
-            split,
-            shards=split_shards,
-            out=out,
-            encoding=encoding,
-            max_seq_len=max_seq_len,
-            vocab_size=vocab_size,
-            provenance=asked,
-        )
-    logger.info("nanochat data ready at %s", out)
+    logger.info("nanochat corpus ready at %s", out)
     return out
 
 
 def _download(out: Path, *, count: int) -> list[Path]:
     """Fetch the source shards, skipping any already present."""
-    source = out / "source"
-    source.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for index in range(count):
         name = f"shard_{index:05d}.parquet"
-        path = source / name
+        path = out / name
         if not path.is_file():
             url = f"{SOURCE_URL}/{SOURCE_REVISION}/{name}"
             logger.info("downloading %s", url)
-            handle, staged = tempfile.mkstemp(dir=source, prefix=f".{name}.")
+            handle, staged = tempfile.mkstemp(dir=out, prefix=f".{name}.")
             os.close(handle)
             staging = Path(staged)
             # Stream rather than read whole: a shard is hundreds of MB.
@@ -240,185 +183,134 @@ def _download(out: Path, *, count: int) -> list[Path]:
     return paths
 
 
-def _shard_paths(source: Path, *, count: int) -> list[Path]:
-    """Return the first ``count`` locally staged shards, in name order.
+def _staged(out: Path, *, count: int) -> list[Path]:
+    """Return shards already present, refusing a short corpus.
 
     Raises:
-      FileNotFoundError: Fewer shards are present than the split needs.
+      FileNotFoundError: Fewer shards are staged than the splits need.
 
     """
-    paths = sorted(source.glob("shard_*.parquet"))[:count]
-    if len(paths) < count:
-        raise FileNotFoundError(
-            f"{source} holds {len(paths)} shards but the splits need {count}.",
-        )
+    paths = [out / f"shard_{index:05d}.parquet" for index in range(count)]
+    missing = [path.name for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"{out} is missing {missing}.")
     return paths
 
 
-def _tokenizer(
+def _fit_vocabulary(
     shards: list[Path],
     *,
     out: Path,
     vocab_size: int,
     train_chars: int,
-) -> tiktoken.Encoding:
-    """Fit a byte-pair vocabulary, or load the one already fitted.
+    doc_cap: int,
+) -> None:
+    """Fit a byte-pair vocabulary, or verify the one already fitted.
 
     Args:
       shards: Training shards supplying the text.
-      out: Dataset root; the encoding is cached at ``tokenizer.pkl``.
+      out: Directory receiving ``tokenizer.pkl`` and its byte table.
       vocab_size: Vocabulary size, including the reserved tokens.
       train_chars: Characters to fit on.
-
-    Returns:
-      encoding: The fitted tokenizer.
+      doc_cap: Characters one document may contribute.
 
     """
-    # Imported here, not at module scope: training reads flat arrays, so a
-    # published install must not need a BPE trainer to import this package.
+    # Imported here, not at module scope: training reads a pickled encoding, so
+    # a published install must not need a BPE trainer to import this package.
     import rustbpe  # noqa: PLC0415 -- preparation-only dependency
     import tiktoken  # noqa: PLC0415 -- preparation-only dependency
 
-    path = out / "tokenizer.pkl"
-    # The recipe that produced the tokenizer, recorded beside it. A vocabulary
+    out.mkdir(parents=True, exist_ok=True)
+    pickled = out / "tokenizer.pkl"
+    recipe_path = out / "tokenizer_recipe.json"
+    # The recipe that produced the vocabulary, recorded beside it. A vocabulary
     # fitted on different text IS a different tokenizer even at the same size,
-    # so comparing only ``n_vocab`` would serve a stale one whose merges came
+    # so comparing only its length would serve a stale one whose merges came
     # from a corpus this run never saw -- and every token id would mean
     # something else.
-    recipe = {
+    recipe: dict[str, Any] = {
         "vocab_size": vocab_size,
         "train_chars": train_chars,
+        "doc_cap": doc_cap,
         "shards": [shard.name for shard in shards],
         "split_pattern": SPLIT_PATTERN,
+        "bos_token": BOS_TOKEN,
     }
-    recipe_path = out / "tokenizer_recipe.json"
-    if path.is_file():
-        with path.open("rb") as file:
-            cached = pickle.load(file)  # noqa: S301 -- our own prepared artifact
-        # A file at this path written by anything else would otherwise surface
-        # as an AttributeError deep inside packing.
-        assert isinstance(cached, tiktoken.Encoding), type(cached).__name__
+    if pickled.is_file():
         if not recipe_path.is_file():
             raise ValueError(
-                f"{path} has no {recipe_path.name} beside it, so what it was "
-                "fitted on cannot be established; delete it to refit, or "
-                "prepare into a different --directory.",
+                f"{pickled} has no {recipe_path.name} beside it, so what it was "
+                "fitted on cannot be established; delete it to refit, or prepare "
+                "into a different --directory.",
             )
         recorded = json.loads(recipe_path.read_text())
-        if recorded != recipe:
+        differing = {
+            key: (recorded.get(key), value)
+            for key, value in recipe.items()
+            if recorded.get(key) != value
+        }
+        if differing:
             raise ValueError(
-                f"{path} was fitted with {recorded}, but {recipe} was "
-                "requested; delete it to refit, or prepare into a different "
-                "--directory.",
+                f"{pickled} was fitted with {differing} (recorded, requested); "
+                "delete it to refit, or prepare into a different --directory.",
             )
-        return cached
+        logger.info("nanochat vocabulary already fitted at %s", out)
+        return
 
     logger.info("fitting a %d-token vocabulary", vocab_size)
     trainer = rustbpe.Tokenizer()
     trainer.train_from_iterator(
-        _documents(shards, max_chars=train_chars),
+        _documents(shards, max_chars=train_chars, doc_cap=doc_cap),
         vocab_size - len(RESERVED_TOKENS),
         pattern=SPLIT_PATTERN,
     )
     ranks = {bytes(token): rank for token, rank in trainer.get_mergeable_ranks()}
     encoding = tiktoken.Encoding(
-        name="nanochat",
+        name="rustbpe",
         pat_str=trainer.get_pattern(),
         mergeable_ranks=ranks,
         special_tokens={
             name: len(ranks) + index for index, name in enumerate(RESERVED_TOKENS)
         },
     )
-    staging = path.with_suffix(".pkl.partial")
+    probe = "Hello world! Numbers: 123. Unicode: 你好"
+    if encoding.decode(encoding.encode_ordinary(probe)) != probe:
+        raise RuntimeError(
+            "the fitted vocabulary does not round-trip its own probe text, so "
+            "it cannot be trusted to encode the corpus.",
+        )
+
+    token_bytes = _token_bytes(encoding)
+    np.save(out / "token_bytes.npy", token_bytes)
+    # Written LAST, and staged: the loader reads the recipe to decide whether
+    # the artifact is usable, so an interruption must not leave one that claims
+    # a byte table it does not have.
+    import pickle  # noqa: PLC0415 -- serialization for the prepared artifact
+
+    staging = pickled.with_suffix(".pkl.partial")
     with staging.open("wb") as file:
         pickle.dump(encoding, file)
-    staging.replace(path)
-    # Staged like the tokenizer beside it: an interruption between the two
-    # would otherwise leave an encoding whose recipe is unknown, which the
-    # check above then refuses on the next run.
+    staging.replace(pickled)
+    recipe["token_bytes_sha256"] = token_bytes_fingerprint(token_bytes)
     recipe_staging = recipe_path.with_suffix(".json.partial")
     recipe_staging.write_text(json.dumps(recipe, sort_keys=True))
     recipe_staging.replace(recipe_path)
-    return encoding
+    logger.info("nanochat vocabulary fitted: %d tokens", encoding.n_vocab)
 
 
-def _pack_split(
-    split: str,
-    *,
-    shards: list[Path],
-    out: Path,
-    encoding: tiktoken.Encoding,
-    max_seq_len: int,
-    vocab_size: int,
-    provenance: dict[str, int],
-) -> None:
-    """Tokenize a split's shards and cut them into fixed-length rows."""
-    destination = out / split
-    if (destination / "dataset.json").is_file():
-        logger.info("nanochat %r already prepared; skipping", split)
-        return
-    stream: list[int] = []
-    for document in _documents(shards, max_chars=None):
-        stream.append(encoding.encode_single_token(BOS_TOKEN))
-        stream.extend(encoding.encode_ordinary(document))
-    # A row holds one extra token: the inputs are the row without its last
-    # token and the targets the row without its first.
-    width = max_seq_len + 1
-    rows = len(stream) // width
-    if not rows:
-        raise ValueError(
-            f"nanochat {split!r} tokenized to {len(stream)} tokens, fewer than "
-            f"the {width} one row needs.",
-        )
-    # uint16 is the storage, so a vocabulary past its range would either raise
-    # from numpy or -- on a version that wraps -- write ids decoding to the
-    # wrong token entirely. Checked against the declared vocabulary rather than
-    # the dtype's limit, so the message names the flag that caused it.
-    # Bounded by ``prepare`` before any download; restated as an assert beside
-    # the cast it guards, since uint16 truncation would be silent.
-    assert vocab_size <= _MAX_TOKEN_ID + 1
-    largest = max(stream)
-    if largest >= vocab_size:
-        raise ValueError(
-            f"the tokenizer emitted id {largest}, outside the declared "
-            f"vocab_size {vocab_size}; writing it would leave a split the "
-            "loader refuses.",
-        )
-    packed = np.array(stream[: rows * width], dtype=np.uint16).reshape(rows, width)
-
-    destination.mkdir(parents=True, exist_ok=True)
-    token_bytes = _token_bytes(encoding, vocab_size=vocab_size)
-    np.save(destination / "all__tokens.npy", packed)
-    np.save(destination / "all__token_bytes.npy", token_bytes)
-    (destination / "dataset.json").write_text(
-        json.dumps(
-            {
-                **provenance,
-                # The score's denominator, recorded so a later change to byte
-                # accounting is caught at load rather than silently repricing
-                # every number measured against this split.
-                "token_bytes_sha256": token_bytes_fingerprint(token_bytes),
-            },
-        ),
-    )
-    logger.info("nanochat %r: %d rows of %d tokens", split, rows, max_seq_len)
-
-
-def _token_bytes(encoding: tiktoken.Encoding, *, vocab_size: int) -> np.ndarray:
+def _token_bytes(encoding: tiktoken.Encoding) -> np.ndarray:
     """UTF-8 byte length of every token id; reserved tokens count as zero.
 
     The bits-per-byte score divides by these, so a reserved token contributing
     zero is what keeps document boundaries out of the denominator.
 
     ``decode`` is deliberate, and NOT interchangeable with
-    ``decode_single_token_bytes``. The two disagree on tokens that are not
-    valid UTF-8 on their own -- a lone high byte decodes to U+FFFD, whose
-    re-encoding is three bytes rather than one -- so they are two different
-    denominators, and a score is comparable only against others using the same
-    one. This spelling is the accounting every recorded result was measured
-    under; the alternative was tried once and split a campaign's numbers into
-    two incomparable sets. Measured on a byte-level vocabulary, the table this
-    produces matches that accounting exactly (ratio 1.00000000).
+    ``decode_single_token_bytes``. The two disagree on tokens that are not valid
+    UTF-8 on their own -- a lone high byte decodes to U+FFFD, whose re-encoding
+    is three bytes rather than one -- so they are two different denominators,
+    and a score is comparable only against others using the same one. This
+    spelling is the reference's, and every recorded result was measured under
+    it.
 
     Changing it is therefore a protocol change, not a bug fix: it needs a new
     ``token_bytes_sha256``, which is what stops the two being confused.
@@ -426,15 +318,24 @@ def _token_bytes(encoding: tiktoken.Encoding, *, vocab_size: int) -> np.ndarray:
     reserved = set(RESERVED_TOKENS)
     lengths = [
         0 if (text := encoding.decode([token])) in reserved else len(text.encode())
-        for token in range(vocab_size)
+        for token in range(encoding.n_vocab)
     ]
     return np.array(lengths, dtype=np.int32)
 
 
-def _documents(shards: list[Path], *, max_chars: int | None) -> Iterator[str]:
-    """Yield documents from parquet shards, stopping after ``max_chars``."""
-    # Imported here for the same reason as the tokenizer: parquet is a
-    # preparation format, and training never reads one.
+def _documents(
+    shards: list[Path],
+    *,
+    max_chars: int,
+    doc_cap: int,
+) -> Iterator[str]:
+    """Yield capped documents from parquet shards, stopping after ``max_chars``.
+
+    Each document is truncated to ``doc_cap`` BEFORE it is counted, so the
+    budget is spent on many documents rather than on a few long ones -- which is
+    what keeps the merges representative of the corpus rather than of its
+    outliers.
+    """
     from pyarrow import parquet  # noqa: PLC0415 -- preparation-only dependency
 
     seen = 0
@@ -443,10 +344,10 @@ def _documents(shards: list[Path], *, max_chars: int | None) -> Iterator[str]:
         for group in range(shard.num_row_groups):
             column: list[Any] = shard.read_row_group(group).column("text").to_pylist()
             for document in column:
-                text = str(document)
-                yield text
+                text = str(document)[:doc_cap]
                 seen += len(text)
-                if max_chars is not None and seen >= max_chars:
+                yield text
+                if seen >= max_chars:
                     return
 
 
@@ -461,25 +362,25 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         "--num-train-shards",
         type=int,
         default=7,
-        help="source shards forming the training split",
+        help="shards forming the training split",
     )
     parser.add_argument(
         "--vocab-size",
         type=int,
         default=8_192,
-        help="tokenizer vocabulary, including reserved tokens",
-    )
-    parser.add_argument(
-        "--max-seq-len",
-        type=int,
-        default=2_048,
-        help="tokens per packed row",
+        help="vocabulary size, including reserved tokens",
     )
     parser.add_argument(
         "--tokenizer-train-chars",
         type=int,
-        default=200_000_000,
-        help="characters the tokenizer is fitted on",
+        default=2_000_000_000,
+        help="characters the vocabulary is fitted on",
+    )
+    parser.add_argument(
+        "--tokenizer-doc-cap",
+        type=int,
+        default=10_000,
+        help="characters one document may contribute to the fit",
     )
 
 
@@ -491,7 +392,7 @@ without renumbering every id: a later task needing a turn separator or a tool
 marker takes one of these instead of invalidating every checkpoint."""
 
 BOS_TOKEN: Final = RESERVED_TOKENS[0]
-"""Marks a document's start; every packed row's first document begins with it."""
+"""Marks a document's start; every packed row and every document begins with it."""
 
 SPLIT_PATTERN: Final = (
     r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}"""

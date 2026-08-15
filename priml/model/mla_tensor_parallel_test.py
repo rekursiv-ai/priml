@@ -48,9 +48,9 @@ def _mla(*, q_lora_rank: int | None = None) -> tuple[nn.Module, torch.Tensor]:
     mla = MultiHeadLatentAttention.Config(
         channels_in=16,
         heads=2,
-        qk_nope_head_dim=4,
-        qk_rope_head_dim=4,
-        v_head_dim=4,
+        channels_qk_nope_head=4,
+        channels_qk_rope_head=4,
+        channels_v_head=4,
         kv_lora_rank=8,
         q_lora_rank=q_lora_rank,
         rope=RoPE.Config(channels_head=4, base=10_000),
@@ -102,9 +102,9 @@ def _record_indivisible_guard(result_dir: Path, rank: int, mesh: DeviceMesh) -> 
         mla = MultiHeadLatentAttention.Config(
             channels_in=16,
             heads=3,
-            qk_nope_head_dim=4,
-            qk_rope_head_dim=4,
-            v_head_dim=4,
+            channels_qk_nope_head=4,
+            channels_qk_rope_head=4,
+            channels_v_head=4,
             kv_lora_rank=8,
             shard="colwise",
         ).make()

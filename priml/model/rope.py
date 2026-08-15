@@ -143,6 +143,17 @@ class RoPE(nn.Module):
         HF transformers exactly.
         """
 
+        dtype: torch.dtype | None = None
+        """Width the cos/sin factors are rounded to; None keeps float32.
+
+        Not a memory choice -- the table is two vectors -- but an arithmetic
+        one: rounding the factors makes every product inside the rotation
+        accumulate at that width, where float32 factors promote the whole
+        rotation and round once at the end. The two differ in the last bits of
+        every query and key, so a port has to hold the factors at the width the
+        reference held them.
+        """
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         c = config.channels_head
@@ -170,7 +181,10 @@ class RoPE(nn.Module):
             raise ValueError(
                 f"At least one dim must be nonzero, got {self.channels_head}.",
             )
-        self._dtype = nn.Buffer(torch.empty(0), persistent=False)
+        self._dtype = nn.Buffer(
+            torch.empty(0, dtype=config.dtype),
+            persistent=False,
+        )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -448,6 +462,38 @@ class RoPE(nn.Module):
         for i in range(remainder // 2):
             dims[i] += 2
         return dims
+
+
+def rotate_conjugate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
+    """Rotate ``x``'s channel pairs by ``-theta``, at the input's own precision.
+
+    Two deliberate differences from :meth:`RoPE.rotate`, both numerics rather
+    than taste:
+
+    * **Direction.** ``RoPE.rotate`` is HuggingFace's ``+theta``; this is its
+      conjugate, with the sine entering the second half negated. The two are
+      the same model under a channel permutation and DIFFERENT tensors, so a
+      port has to pick the one its weights were trained under.
+    * **Precision.** ``RoPE.rotate`` upcasts to float32, accumulates there, and
+      rounds once. This accumulates at whatever width the factors and the input
+      arrive in -- half, under autocast -- which is what a fused kernel does,
+      and differs from the upcast form in the last bits.
+
+    Args:
+      x: ``[..., S, heads, channels_head]`` queries or keys.
+      cos: Cosine factors, broadcastable over ``x``'s first half.
+      sin: Sine factors, same shape as ``cos``.
+
+    Returns:
+      rotated: ``x`` with each ``(i, i + half)`` channel pair rotated.
+
+    """
+    half = x.shape[-1] // 2
+    first, second = x[..., :half], x[..., half:]
+    return torch.cat(
+        [first * cos + second * sin, first * (-sin) + second * cos],
+        dim=-1,
+    )
 
 
 def _yarn_mscale(scale: float, mscale: float) -> float:

@@ -51,7 +51,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch
 
 from priml.baselines.nanochat.experiments import exp001
-from priml.baselines.nanochat.model import sdpa_attention
+from priml.model.value_gated_attention import sdpa_attention
 
 
 class _StopModuleScopeError(Exception):
@@ -274,10 +274,10 @@ def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
 
     """
     mapping: dict[str, str] = {
-        "embed.weight": "transformer.wte.weight",
-        "lm_head.weight": "lm_head.weight",
-        "residual_scale": "resid_lambdas",
-        "skip_scale": "x0_lambdas",
+        "embed.inner.weight": "transformer.wte.weight",
+        "lm_head.inner.weight": "lm_head.weight",
+        "mix.running": "resid_lambdas",
+        "mix.original": "x0_lambdas",
     }
     # ``torch.compile`` wraps the module, so its parameters answer to an
     # ``_orig_mod.`` prefix. Read off the model rather than assumed, since the
@@ -305,14 +305,79 @@ def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
     for name, _ in theirs.named_parameters():
         bare = name.removeprefix(prefix)
         if bare.startswith("value_embeds."):
-            mapping[bare] = name
+            # Ours narrows its tables, so the parameter sits under the wrapper.
+            layer = bare.split(".")[1]
+            mapping[f"value_embeds.{layer}.inner.weight"] = name
         elif bare.endswith("attn.ve_gate.weight"):
             mapping[f"blocks.{bare.split('.')[2]}.attn.value_gate.weight"] = name
     return mapping
 
 
+def compare_init(
+    theirs: nn.Module,
+    ours: nn.Module,
+    mapping: dict[str, str],
+) -> list[str]:
+    """Compare the two INITIALIZATIONS, before either is overwritten.
+
+    This has to run before :func:`copy_weights`, which writes their draws into
+    ours so every later step compares the recipe rather than the RNG. That copy
+    also makes the rest of this script structurally blind to an init bug: it
+    erased a token table drawn 1/sqrt(2) too narrow, and five steps of
+    bit-identical output said nothing about it.
+
+    Draws are random, so this compares DISTRIBUTIONS rather than values: the
+    per-tensor standard deviation, at a tolerance loose enough for sampling
+    noise on the smallest tensor here and far tighter than any real init
+    mistake, which lands at a ratio like 0.707 or 0.88 rather than 1.001.
+    A tensor both sides initialize to a constant is compared exactly, since
+    there is nothing random about it.
+
+    Args:
+      theirs: The reference model, freshly initialized.
+      ours: This package's model, freshly initialized.
+      mapping: Our parameter names to theirs.
+
+    Returns:
+      problems: One description per tensor whose spread disagrees.
+
+    """
+    src = dict(theirs.named_parameters())
+    dst = dict(ours.named_parameters())
+    problems: list[str] = []
+    for our_name, their_name in mapping.items():
+        a = src[their_name].detach().float()
+        b = dst[our_name].detach().float()
+        if a.shape != b.shape:
+            problems.append(
+                f"init {our_name}: SHAPE {tuple(a.shape)} vs {tuple(b.shape)}"
+            )
+            continue
+        # A constant tensor (the per-layer scalars, a zeroed projection) has no
+        # spread to compare, and its std is 0 on both sides -- which every
+        # ratio test passes vacuously. Compared by value instead.
+        if not a.std() and not b.std():
+            if not torch.equal(a, b):
+                problems.append(
+                    f"init {our_name}: CONSTANT {a.flatten()[0]:.6g} vs "
+                    f"{b.flatten()[0]:.6g}",
+                )
+            continue
+        ratio = float(b.std() / a.std()) if a.std() else float("inf")
+        if abs(ratio - 1.0) > 0.05:
+            problems.append(
+                f"init {our_name}: STD {float(a.std()):.6g} vs "
+                f"{float(b.std()):.6g} (ours/theirs = {ratio:.4f})",
+            )
+    return problems
+
+
 def copy_weights(theirs: nn.Module, ours: nn.Module, mapping: dict[str, str]) -> None:
     """Write the reference's initialization into ours.
+
+    Every later comparison then measures the recipe rather than two RNG
+    streams. It also destroys our own draws, so :func:`compare_init` must have
+    run first -- an init bug is invisible from here onward.
 
     Args:
       theirs: The reference model.
@@ -458,14 +523,26 @@ def main() -> int:
         vocab_size=model.vocab_size,
     )
     mapping = name_map(theirs, layers=model.num_layers)
+
+    # BEFORE the copy: it overwrites our draws with theirs, so this is the only
+    # point at which our initialization still exists to be checked.
+    init_problems = compare_init(theirs, ours.raw_model, mapping)
+    print(f"\n[0] init distributions: {len(init_problems)} differ")
+    for line in init_problems:
+        print(f"    {line}")
+
     copy_weights(theirs, ours.raw_model, mapping)
 
     problems = compare_all(theirs, ours.raw_model, mapping, grads=False, tag="init")
-    print(f"\n[0] init weights: {len(problems)} differ")
-    for line in problems:
+    problems = init_problems + problems
+    print(f"[0] init weights copied: {len(problems) - len(init_problems)} differ")
+    for line in problems[len(init_problems) :]:
         print(f"    {line}")
+    # Read off the built ATTENTIONS: each layer carries its own window, so this
+    # reports what the stack will actually attend over rather than the pattern
+    # it was asked for.
     print(
-        f"    windows ours={ours.raw_model.windows} "
+        f"    windows ours={[b.attn.config.window for b in ours.raw_model.blocks]} "
         f"theirs={[w[0] for w in theirs.window_sizes]}",
     )
 

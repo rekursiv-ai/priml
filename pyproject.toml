@@ -30,9 +30,14 @@ dependencies = [
     "pygame-ce>=2.5.8",
     "pyturbojpeg>=1.8.2,<2",
     "webp>=0.4.0",
+    # data
+    "pyarrow>=21.0.0",
     # analysis
     "numpy>=2.1",
     "scipy",
+    # nlp
+    "rustbpe>=0.1.0",
+    "tiktoken>=0.12.0",
     # typing
     "jaxtyping",
     "typeguard",
@@ -59,15 +64,6 @@ hub = [
     "huggingface-hub",
     "safetensors",
     "transformers>=4.57.0",
-]
-
-# Corpus preparation for the nanochat baseline (BPE fitting, parquet reads).
-# Opt-in: training reads flat arrays, so an install that only trains needs
-# none of these. Install via `pip install priml[data-prep]`.
-data-prep = [
-    "pyarrow",
-    "rustbpe",
-    "tiktoken",
 ]
 
 # Watching a policy play the Craftax game: sprite compositing and video.
@@ -105,7 +101,6 @@ typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.60",
     "safetensors",
-    "tiktoken",
     # The craftax viewer's modules are type-checked and tested like any
     # other, so the checkers need the imports to resolve even though a
     # training install never pulls them.

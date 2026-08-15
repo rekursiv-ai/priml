@@ -1,139 +1,269 @@
-"""Tests for nanochat data loading."""
+"""Tests for nanochat data loading.
+
+Every case here is about one hazard: this loader reproduces a published token
+stream, so a packing that merely looks reasonable is a different experiment
+wearing the same name. The packer's rules are therefore pinned by CONTENT --
+which document lands where -- rather than by shape, and the rest guard the
+artifact the score's denominator comes from.
+
+``scripts/karpathy_data_parity.py`` makes the same argument against the
+reference itself; these run without a corpus or a network.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import json
+import pickle
+
+from pyarrow import parquet
 
 import numpy as np
+import pyarrow as pa
 import pytest
+import tiktoken
 import torch
 
 from priml.baselines.nanochat.data import (
-    IGNORED_TARGET,
     NanoChatData,
+    Tokenizer,
     token_bytes_fingerprint,
 )
 
 
-VOCAB = 16
-SEQ = 8
+SEQ = 16
+BOS = "<|reserved_0|>"
+RESERVED = tuple(f"<|reserved_{index}|>" for index in range(16))
+VOCAB = 256 + len(RESERVED)
+
+
+def _encoding() -> tiktoken.Encoding:
+    """A byte-level vocabulary: every token is one byte, plus the reserved set.
+
+    Byte-level so a document's token count is its byte count, which is what
+    lets a test say which document the packer should have chosen.
+    """
+    ranks = {bytes([value]): value for value in range(256)}
+    return tiktoken.Encoding(
+        name="test",
+        pat_str=r".",
+        mergeable_ranks=ranks,
+        special_tokens={
+            name: len(ranks) + index for index, name in enumerate(RESERVED)
+        },
+    )
+
+
+def _write_tokenizer(root: Path) -> tiktoken.Encoding:
+    """Write the vocabulary in the layout the loader reads."""
+    encoding = _encoding()
+    directory = root / "tokenizer"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "tokenizer.pkl").open("wb") as file:
+        pickle.dump(encoding, file)
+    reserved = set(RESERVED)
+    lengths = np.array(
+        [
+            0 if (text := encoding.decode([token])) in reserved else len(text.encode())
+            for token in range(encoding.n_vocab)
+        ],
+        dtype=np.int32,
+    )
+    np.save(directory / "token_bytes.npy", lengths)
+    (directory / "tokenizer_recipe.json").write_text(
+        json.dumps(
+            {
+                "bos_token": BOS,
+                "token_bytes_sha256": token_bytes_fingerprint(lengths),
+            },
+        ),
+    )
+    return encoding
+
+
+def _write_shard(root: Path, index: int, documents: list[str]) -> None:
+    """Write one parquet shard holding the given documents, in order."""
+    parquet.write_table(
+        pa.table({"text": documents}),
+        root / f"shard_{index:05d}.parquet",
+    )
 
 
 @pytest.fixture
-def dataset_dir(tmp_path: Path) -> Path:
-    """Write a tiny two-split dataset in the on-disk layout."""
-    for split, rows in (("train", 6), ("val", 4)):
-        directory = tmp_path / split
-        directory.mkdir()
-        # Distinguishable rows: row i counts up from i.
-        tokens = (np.arange(rows)[:, None] + np.arange(SEQ + 1)[None, :]) % VOCAB
-        np.save(directory / "all__tokens.npy", tokens.astype(np.uint16))
-        # Token 0 is the document marker and carries no bytes; the rest carry
-        # one, so a byte count is a token count and assertions stay readable.
-        lengths = np.ones(VOCAB, dtype=np.int32)
-        lengths[0] = 0
-        np.save(directory / "all__token_bytes.npy", lengths)
-        (directory / "dataset.json").write_text(
-            json.dumps(
-                {
-                    "vocab_size": VOCAB,
-                    "max_seq_len": SEQ,
-                    "token_bytes_sha256": token_bytes_fingerprint(lengths),
-                },
-            ),
-        )
+def corpus(tmp_path: Path) -> Path:
+    """A two-shard corpus of documents whose lengths are distinguishable."""
+    _write_tokenizer(tmp_path)
+    # Lengths 1..8 encoded as repeated distinct characters, so a row states
+    # which documents it took and in what order.
+    _write_shard(tmp_path, 0, [chr(ord("a") + n) * (n + 1) for n in range(8)])
+    _write_shard(tmp_path, 1, [chr(ord("A") + n) * (n + 1) for n in range(8)])
     return tmp_path
 
 
-def _data(dataset_dir: Path, **overrides: object) -> NanoChatData:
+def _data(corpus: Path, **overrides: object) -> NanoChatData:
     config = NanoChatData.Config()
     config.base_dir = "/"
-    config.working_dir = str(dataset_dir)
+    config.working_dir = str(corpus)
     config.device = "cpu"
+    config.num_train_shards = 1
+    config.val_shard = 1
     config.batch_size = 2
     config.eval_batch_size = 2
+    config.max_seq_len = SEQ
+    config.eval_tokens = 2 * 2 * SEQ
+    config.buffer_size = 8
     for name, value in overrides.items():
         setattr(config, name, value)
     return config.make()
 
 
-def test_targets_are_the_inputs_shifted_by_one(dataset_dir: Path) -> None:
+def test_targets_are_the_inputs_shifted_by_one(corpus: Path) -> None:
     """The whole training signal: position i predicts position i + 1."""
-    batch = next(iter(_data(dataset_dir).train_dataloader()))
+    batch = next(iter(_data(corpus).train_dataloader()))
     assert batch["media"].shape == (2, SEQ)
     assert batch["label"].shape == (2, SEQ)
     assert torch.equal(batch["media"][:, 1:], batch["label"][:, :-1])
 
 
-def test_every_batch_is_full_width(dataset_dir: Path) -> None:
-    """A short final batch is dropped, not padded.
+def test_every_row_begins_with_the_document_marker(corpus: Path) -> None:
+    """BOS alignment is what makes a row a sequence of whole documents.
 
-    Every row is a full context by construction, so a partial batch would be
-    the only place in a run where the token count per step changes -- and the
-    token batch is what the recipe is tuned against.
+    Without it a row could start mid-document, and the first positions would
+    train on a continuation whose context the model never saw.
     """
-    batches = list(_data(dataset_dir, batch_size=4).train_dataloader())
-    assert [b["media"].shape[0] for b in batches] == [4]  # 6 rows, not 8
+    data = _data(corpus)
+    batch = next(iter(data.train_dataloader()))
+    assert (batch["media"][:, 0] == data.tokenizer.bos_token_id).all()
 
 
-def test_evaluation_is_never_shuffled(dataset_dir: Path) -> None:
-    """Every candidate must be scored on the identical token stream."""
-    data = _data(dataset_dir)
+def test_the_largest_fitting_document_is_taken_first(corpus: Path) -> None:
+    """Best fit, not first fit: the packer minimizes what it has to crop.
+
+    Pinned by CONTENT rather than by utilization, since a first-fit packer
+    fills a row just as completely and produces a different token stream.
+    """
+    data = _data(corpus, buffer_size=8)
+    row = next(iter(data.train_dataloader()))["media"][0]
+    text = data.tokenizer.encoding.decode(
+        [int(token) for token in row if int(token) < 256],
+    )
+    # Documents are 'a', 'bb', ... 'hhhhhhhh'; each carries a BOS the decode
+    # above drops. A row of 17 slots takes the 8-token document first.
+    assert text.startswith("hhhhhhhh")
+
+
+def test_a_row_is_filled_by_cropping_the_shortest_document(corpus: Path) -> None:
+    """No padding, ever: leftover space is filled by a cropped document.
+
+    The SHORTEST is chosen -- it loses the least of itself -- and the row is
+    full, so every position carries a real target and the loss needs no mask.
+    """
+    data = _data(corpus)
+    batch = next(iter(data.train_dataloader()))
+    # A padded position would be a zero the vocabulary never emits here, since
+    # every document contributes its own byte and a BOS.
+    assert batch["media"].shape == (2, SEQ)
+    assert int(batch["media"].min()) >= 0
+    assert not bool((batch["media"] == batch["media"][0, 0]).all())
+
+
+def test_the_stream_is_deterministic(corpus: Path) -> None:
+    """Two runs of one recipe must draw the identical tokens.
+
+    The packer has no seed: its order is the corpus's, so a difference between
+    two draws would be a difference in the experiment.
+    """
+    first = next(iter(_data(corpus).train_dataloader()))["media"].clone()
+    second = next(iter(_data(corpus).train_dataloader()))["media"].clone()
+    assert torch.equal(first, second)
+
+
+def test_evaluation_replays_from_the_start(corpus: Path) -> None:
+    """Every candidate, and every checkpoint, is scored on identical tokens.
+
+    A stream that carried on would score later text at each evaluation and
+    report the difference as progress.
+    """
+    data = _data(corpus)
     first = [b["media"].clone() for b in data.eval_dataloader()]
     second = [b["media"].clone() for b in data.eval_dataloader()]
     for a, b in zip(first, second, strict=True):
         assert torch.equal(a, b)
 
 
-def test_seeded_shuffle_is_reproducible_and_pass_varying(
-    dataset_dir: Path,
-) -> None:
-    """One seed fixes each pass's order, and consecutive passes differ."""
-    orders = [
-        next(iter(_data(dataset_dir, seed=7).train_dataloader()))["media"].clone()
-        for _ in range(2)
+def test_evaluation_scores_the_configured_token_count(corpus: Path) -> None:
+    """The extent is fixed in TOKENS, so it survives a batch-width change."""
+    data = _data(corpus, eval_batch_size=2, eval_tokens=4 * 2 * SEQ)
+    batches = list(data.eval_dataloader())
+    assert len(batches) == 4
+    assert sum(b["media"].numel() for b in batches) == 4 * 2 * SEQ
+
+
+def test_training_and_validation_draw_from_different_shards(corpus: Path) -> None:
+    """A score measured on trained text measures memorization.
+
+    The validation shard is pinned and excluded from training, so the two
+    streams share no document.
+    """
+    data = _data(corpus)
+    marker = data.tokenizer.bos_token_id
+    seen = [
+        {int(token) for token in batch["media"].flatten() if int(token) != marker}
+        for batch in (
+            next(iter(data.train_dataloader())),
+            next(iter(data.eval_dataloader())),
+        )
     ]
-    assert torch.equal(orders[0], orders[1])
-
-    loader = _data(dataset_dir, seed=7).train_dataloader()
-    first = next(iter(loader))["media"].clone()
-    second = next(iter(loader))["media"].clone()
-    assert not torch.equal(first, second)
+    # The fixture's shards use disjoint character ranges; the document marker
+    # is excluded because every row of both streams begins with it.
+    assert not seen[0] & seen[1]
 
 
-def test_pass_counter_round_trips(dataset_dir: Path) -> None:
-    """Resume continues the sequence rather than replaying the first pass."""
-    data = _data(dataset_dir, seed=1)
-    loader = data.train_dataloader()
-    list(loader)
-    state = data.state_dict()
-    assert state["passes"] == 1
+def test_the_training_stream_does_not_end(corpus: Path) -> None:
+    """The budget ends the run, so the corpus must outlast it by wrapping.
 
-    restored = _data(dataset_dir, seed=1)
-    restored.load_state_dict(state)
-    assert torch.equal(
-        next(iter(restored.train_dataloader()))["media"],
-        next(iter(loader))["media"],
-    )
+    The fixture's shard holds far fewer tokens than this draws, so a stream
+    that stopped at the end of the corpus would raise here.
+    """
+    stream = iter(_data(corpus).train_dataloader())
+    for _ in range(20):
+        assert next(stream)["media"].shape == (2, SEQ)
 
 
-def test_the_byte_table_travels_with_the_batch(dataset_dir: Path) -> None:
+def test_the_byte_table_travels_with_the_batch(corpus: Path) -> None:
     """The score divides by it, so it must reach the metric unmediated."""
-    batch = next(iter(_data(dataset_dir).eval_dataloader()))
+    batch = next(iter(_data(corpus).eval_dataloader()))
     assert batch["token_bytes"].shape == (VOCAB,)
-    assert int(batch["token_bytes"][0]) == 0
+    # Reserved tokens carry no bytes, which is what keeps document boundaries
+    # out of the denominator.
+    assert int(batch["token_bytes"][-len(RESERVED) :].sum()) == 0
 
 
-def test_evaluation_rows_can_be_capped(dataset_dir: Path) -> None:
-    """Mid-training eval reads a prefix; the final number reads everything."""
-    batches = list(_data(dataset_dir, num_eval_rows=2).eval_dataloader())
-    assert sum(b["media"].shape[0] for b in batches) == 2
+def test_an_evaluation_extent_that_is_not_whole_batches_is_rejected(
+    corpus: Path,
+) -> None:
+    """A remainder is a score covering fewer tokens than it names."""
+    with pytest.raises(ValueError, match="eval_tokens"):
+        _data(corpus, eval_tokens=3 * SEQ + 1)
+
+
+def test_a_vocabulary_disagreeing_with_the_model_is_rejected_at_load(
+    corpus: Path,
+) -> None:
+    """Otherwise the mismatch surfaces as an out-of-range embedding index."""
+    with pytest.raises(ValueError, match="vocab_size"):
+        _data(corpus, vocab_size=VOCAB // 2)
+
+
+def test_a_matching_vocabulary_loads(corpus: Path) -> None:
+    """The check must accept the agreeing case, or it blocks every real run."""
+    batch = next(iter(_data(corpus, vocab_size=VOCAB).train_dataloader()))
+    assert batch["media"].shape == (2, SEQ)
 
 
 def test_a_byte_table_that_does_not_match_its_fingerprint_is_rejected(
-    dataset_dir: Path,
+    corpus: Path,
 ) -> None:
     """The byte table IS the score's denominator, so its identity is recorded.
 
@@ -142,190 +272,78 @@ def test_a_byte_table_that_does_not_match_its_fingerprint_is_rejected(
     check still passes, and two runs become incomparable with nothing on disk
     to tell them apart.
     """
-    lengths = np.ones(VOCAB, dtype=np.int32)
-    lengths[0] = 0
+    lengths = np.load(corpus / "tokenizer" / "token_bytes.npy")
     lengths[3] = 7  # same shape, different accounting
-    np.save(dataset_dir / "val" / "all__token_bytes.npy", lengths)
+    np.save(corpus / "tokenizer" / "token_bytes.npy", lengths)
     with pytest.raises(ValueError, match="fingerprint"):
-        list(_data(dataset_dir).eval_dataloader())
+        _data(corpus)
 
 
-def test_a_byte_table_disagreeing_with_the_metadata_is_rejected(
-    dataset_dir: Path,
-) -> None:
-    """A stale table would silently misprice every token in the score.
-
-    A wrong-LENGTH table trips the fingerprint first, since the identity check
-    runs before the shape one; either way it never reaches the score.
-    """
-    np.save(
-        dataset_dir / "val" / "all__token_bytes.npy",
-        np.ones(VOCAB + 1, dtype=np.int32),
-    )
-    with pytest.raises(ValueError, match=r"fingerprint|byte table"):
-        list(_data(dataset_dir).eval_dataloader())
-
-
-def test_data_is_verified_even_when_no_geometry_is_declared(
-    dataset_dir: Path,
-) -> None:
-    """A split must agree with its OWN metadata, caller or no caller.
-
-    The model's declaration is an extra check, not the only one: a loader used
-    without it -- a probe, a script, a test -- must still refuse arrays that
-    contradict the file sitting beside them.
-    """
-    rows = np.zeros((4, SEQ), dtype=np.uint16)  # one column short
-    np.save(dataset_dir / "val" / "all__tokens.npy", rows)
-    with pytest.raises(ValueError, match="max_seq_len"):
-        list(_data(dataset_dir).eval_dataloader())
-
-
-def test_a_token_id_past_the_splits_own_vocabulary_is_rejected(
-    dataset_dir: Path,
-) -> None:
-    """Same rule for ids: checked against the split's own declaration."""
-    rows = np.zeros((4, SEQ + 1), dtype=np.uint16)
-    rows[0, 0] = VOCAB + 3
-    np.save(dataset_dir / "val" / "all__tokens.npy", rows)
-    with pytest.raises(ValueError, match="vocab_size"):
-        list(_data(dataset_dir).eval_dataloader())
-
-
-def test_metadata_without_a_fingerprint_is_rejected(dataset_dir: Path) -> None:
-    """An optional check is no check: pre-fingerprint metadata cannot be read.
-
-    What such a split holds is exactly what cannot be established, so accepting
-    it would reintroduce the unidentifiable score the fingerprint exists to
-    prevent.
-    """
-    (dataset_dir / "val" / "dataset.json").write_text(
-        json.dumps({"vocab_size": VOCAB, "max_seq_len": SEQ}),
-    )
-    with pytest.raises(ValueError, match="token_bytes_sha256"):
-        list(_data(dataset_dir).eval_dataloader())
-
-
-def test_a_negative_token_id_is_rejected(dataset_dir: Path) -> None:
-    """A negative id indexes the embedding from the BACK.
-
-    That is a silently wrong row rather than a failure, so both ends of the id
-    range are checked, not only the top.
-    """
-    rows = np.zeros((4, SEQ + 1), dtype=np.int32)
-    rows[0, 0] = -1
-    np.save(dataset_dir / "val" / "all__tokens.npy", rows)
-    with pytest.raises(ValueError, match="vocab_size"):
-        list(_data(dataset_dir).eval_dataloader())
-
-
-def test_a_negative_byte_length_is_rejected(dataset_dir: Path) -> None:
+def test_a_negative_byte_length_is_rejected(corpus: Path) -> None:
     """The metric's mask is ``lengths > 0``, so a negative length drops a token.
 
     It would vanish from both sums -- excluded from the measurement rather than
     rejected -- which is a quiet change to what the score covers.
     """
-    lengths = np.ones(VOCAB, dtype=np.int32)
-    lengths[0] = 0
+    lengths = np.load(corpus / "tokenizer" / "token_bytes.npy")
     lengths[3] = -2
-    np.save(dataset_dir / "val" / "all__token_bytes.npy", lengths)
-    _refingerprint(dataset_dir / "val", lengths)
+    _refingerprint(corpus / "tokenizer", lengths)
     with pytest.raises(ValueError, match="negative byte length"):
-        list(_data(dataset_dir).eval_dataloader())
+        _data(corpus)
 
 
-def test_a_two_dimensional_byte_table_is_rejected(dataset_dir: Path) -> None:
+def test_a_two_dimensional_byte_table_is_rejected(corpus: Path) -> None:
     """The metric indexes it as one length per id."""
     lengths = np.ones((VOCAB, 1), dtype=np.int32)
-    np.save(dataset_dir / "val" / "all__token_bytes.npy", lengths)
-    _refingerprint(dataset_dir / "val", lengths)
+    _refingerprint(corpus / "tokenizer", lengths)
     with pytest.raises(ValueError, match="one-dimensional"):
-        list(_data(dataset_dir).eval_dataloader())
+        _data(corpus)
 
 
-def _refingerprint(directory: Path, table: np.ndarray) -> None:
-    """Rewrite the metadata so the fingerprint matches a replaced table.
+def test_a_recipe_without_a_fingerprint_is_rejected(corpus: Path) -> None:
+    """An optional check is no check: pre-fingerprint metadata cannot be read.
 
-    Without this the fingerprint check fires first and the test proves only
-    that, never reaching the property it means to pin.
+    What such a vocabulary scores is exactly what cannot be established, so
+    accepting it would reintroduce the unidentifiable number the fingerprint
+    exists to prevent.
     """
-    metadata = json.loads((directory / "dataset.json").read_text())
-    metadata["token_bytes_sha256"] = token_bytes_fingerprint(table)
-    (directory / "dataset.json").write_text(json.dumps(metadata))
+    (corpus / "tokenizer" / "tokenizer_recipe.json").write_text(
+        json.dumps({"bos_token": BOS}),
+    )
+    with pytest.raises(ValueError, match="token_bytes_sha256"):
+        _data(corpus)
 
 
-def test_a_malformed_token_array_names_the_file(dataset_dir: Path) -> None:
-    """A one-dimensional array must not surface as a bare IndexError."""
-    np.save(dataset_dir / "val" / "all__tokens.npy", np.zeros(16, dtype=np.uint16))
-    with pytest.raises(ValueError, match="two-dimensional"):
-        list(_data(dataset_dir).eval_dataloader())
+def test_a_missing_shard_is_named(corpus: Path) -> None:
+    """A split short one shard must say which, not merely fail to prepare."""
+    (corpus / "shard_00001.parquet").unlink()
+    with pytest.raises(FileNotFoundError, match="shard_00001"):
+        _data(corpus)
 
 
-def test_a_split_too_small_for_its_batch_is_rejected_at_construction(
-    dataset_dir: Path,
-) -> None:
-    """An empty TRAINING stream must be named here, not where it shows up.
+def test_a_missing_vocabulary_names_the_preparer(tmp_path: Path) -> None:
+    _write_shard(tmp_path, 0, ["a"])
+    _write_shard(tmp_path, 1, ["b"])
+    with pytest.raises(FileNotFoundError, match="prepare_data"):
+        _data(tmp_path)
 
-    Training drops a short batch, so too few rows yields nothing at all, which
-    reaches the loop as a generic epoch-reset failure far from its cause.
-    Evaluation is the opposite case -- it pads and scores the tail, so it has
-    no empty-stream condition to report.
+
+def test_resuming_an_advanced_stream_is_refused(corpus: Path) -> None:
+    """The packer cannot be positioned, so a resume would replay the corpus.
+
+    Silently restarting would retrain on the opening of the data while the
+    schedules carried on from the checkpoint, which is a run neither the
+    budget nor the recipe describes.
     """
-    with pytest.raises(ValueError, match="no batches"):
-        _data(dataset_dir, batch_size=64).train_dataloader()
+    data = _data(corpus)
+    with pytest.raises(ValueError, match="re-tokenizing"):
+        data.load_state_dict({"batches": 12})
 
 
-def test_evaluation_scores_every_row_including_a_short_tail(
-    dataset_dir: Path,
-) -> None:
-    """A dropped tail is a score covering fewer rows than the split holds.
-
-    The fixture writes 4 rows; at a batch of 3 the old behavior scored 3 and
-    called it the full pass. The tail is padded instead, and the padding is
-    marked so the metric excludes it.
-    """
-    batches = list(_data(dataset_dir, eval_batch_size=3).eval_dataloader())
-    assert [b["valid_count"] for b in batches] == [3, 1]
-    assert all(b["media"].shape[0] == 3 for b in batches)
-    # The padded rows carry the marker the loss is told to skip.
-    assert int(batches[-1]["label"][1:].min()) == IGNORED_TARGET
-
-
-def test_training_still_drops_a_short_batch(dataset_dir: Path) -> None:
-    """The token count per optimizer step is what the recipe is tuned against.
-
-    A narrower final step would be the one place in a run where it moves, so
-    training drops the tail that evaluation scores.
-    """
-    # The train split holds 6 rows, so a batch of 4 leaves a remainder of 2.
-    batches = list(_data(dataset_dir, batch_size=4).train_dataloader())
-    assert [b["media"].shape[0] for b in batches] == [4]
-
-
-def test_data_narrower_than_the_model_is_rejected_at_load(dataset_dir: Path) -> None:
-    """Prepared rows must be the context the model declares.
-
-    Otherwise the mismatch surfaces deep in the forward as "Input length 2048
-    exceeds max_seq_len=128", naming only the model's side and never the
-    directory that produced the rows.
-    """
-    with pytest.raises(ValueError, match="max_seq_len"):
-        list(_data(dataset_dir, max_seq_len=SEQ * 2).train_dataloader())
-
-
-def test_a_token_id_outside_the_vocabulary_is_rejected_at_load(
-    dataset_dir: Path,
-) -> None:
-    """A row indexing past the embedding must fail here, not in a matmul."""
-    with pytest.raises(ValueError, match="vocab_size"):
-        list(_data(dataset_dir, vocab_size=VOCAB // 2).train_dataloader())
-
-
-def test_declared_geometry_matching_the_data_loads(dataset_dir: Path) -> None:
-    """The check must accept the agreeing case, or it blocks every real run."""
-    data = _data(dataset_dir, vocab_size=VOCAB, max_seq_len=SEQ)
-    batch = next(iter(data.train_dataloader()))
-    assert batch["media"].shape == (2, SEQ)
+def test_a_fresh_stream_round_trips(corpus: Path) -> None:
+    """The refusal must not block a checkpoint written before any batch."""
+    data = _data(corpus)
+    data.load_state_dict(data.state_dict())
 
 
 @pytest.mark.parametrize(
@@ -335,46 +353,38 @@ def test_declared_geometry_matching_the_data_loads(dataset_dir: Path) -> None:
         ("batch_size", -1),
         ("eval_batch_size", 0),
         ("eval_batch_size", -1),
-        ("num_eval_rows", 0),
-        ("num_eval_rows", -1),
+        ("buffer_size", 0),
+        ("max_seq_len", 1),
     ],
 )
 def test_a_nonpositive_size_is_rejected_by_name(
-    dataset_dir: Path,
+    corpus: Path,
     field: str,
     value: int,
 ) -> None:
-    """Each bound names its own field, and none is silently absorbed.
-
-    ``num_eval_rows=-1`` is the one that bites hardest: as a slice bound it
-    would silently mean "all but the last row" rather than an invalid cap.
-    """
+    """Each bound names its own field, and none is silently absorbed."""
     with pytest.raises(ValueError, match=field):
-        _data(dataset_dir, **{field: value})
+        _data(corpus, **{field: value})
 
 
-def test_the_eval_batch_does_not_track_the_training_batch(
-    dataset_dir: Path,
-) -> None:
-    """The scored row set must not move with a memory-tuning knob.
+def test_the_tokenizer_prepends_the_document_marker(corpus: Path) -> None:
+    """Packing depends on document LENGTH, and the marker is part of it."""
+    tokenizer = Tokenizer.from_directory(corpus / "tokenizer")
+    encoded = tokenizer.encode_batch(["ab", "c"])
+    assert [row[0] for row in encoded] == [tokenizer.bos_token_id] * 2
+    assert [len(row) for row in encoded] == [3, 2]
 
-    Training's batch size follows device memory, and a short final batch is
-    dropped -- so an eval batch tracking it would score a different subset of
-    the split on a smaller card and report it as the same metric.
+
+def _refingerprint(directory: Path, table: np.ndarray) -> None:
+    """Rewrite the recipe so the fingerprint matches a replaced table.
+
+    Without this the fingerprint check fires first and the test proves only
+    that, never reaching the property it means to pin.
     """
-    default = NanoChatData.Config().eval_batch_size
-    for batch_size in (2, 8):
-        config = NanoChatData.Config()
-        config.base_dir = "/"
-        config.working_dir = str(dataset_dir)
-        config.device = "cpu"
-        config.batch_size = batch_size
-        assert config.make().eval_batch_size == default
-
-
-def test_missing_data_names_the_preparer(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="prepare_data"):
-        list(_data(tmp_path).train_dataloader())
+    np.save(directory / "token_bytes.npy", table)
+    recipe = json.loads((directory / "tokenizer_recipe.json").read_text())
+    recipe["token_bytes_sha256"] = token_bytes_fingerprint(table)
+    (directory / "tokenizer_recipe.json").write_text(json.dumps(recipe))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-from priml.metrics import BitsPerByte
+from priml.metrics.bits_per_byte import BitsPerByte
 
 
 def _metric() -> BitsPerByte:

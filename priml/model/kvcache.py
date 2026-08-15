@@ -39,19 +39,19 @@ class KVCache:
         heads: int,
         max_seq: int,
         channels_head: int,
-        channels_head_v: int | None = None,
+        channels_v_head: int | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> KVCache:
         """Pre-allocate an empty cache.
 
-        ``channels_head_v`` defaults to ``channels_head`` (symmetric K/V,
+        ``channels_v_head`` defaults to ``channels_head`` (symmetric K/V,
         standard MHA/GQA). MLA needs independent dims (K concatenates
-        qk_nope + qk_rope; V uses a separate v_head_dim).
+        qk_nope + qk_rope; V uses a separate channels_v_head).
         """
         if isinstance(batch, int):
             batch = (batch,)
-        v_dim = channels_head if channels_head_v is None else channels_head_v
+        v_dim = channels_head if channels_v_head is None else channels_v_head
         k_shape = (*batch, heads, max_seq, channels_head)
         v_shape = (*batch, heads, max_seq, v_dim)
         return cls(

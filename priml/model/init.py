@@ -108,6 +108,22 @@ def truncated_normal(
     _depth_scale(w, depth)
 
 
+def unit_fan_in_uniform(w: Tensor, *, depth: int = -1) -> None:
+    """Uniform on ``+-sqrt(3 / fan_in)``, realizing a ``1/sqrt(fan_in)`` std.
+
+    Depth-independent, unlike every other initializer here: ``depth`` is
+    accepted for the :data:`InitFn` protocol and discarded.
+
+    Args:
+      w: Tensor to initialize in place.
+      depth: Ignored.
+
+    """
+    del depth
+    bound = 3**0.5 * w.shape[-1] ** -0.5
+    nn.init.uniform_(w, -bound, bound)
+
+
 def mup_output(w: Tensor, *, depth: int = 1) -> None:
     """MuP output projection init: 1/fan_in, scaled by 1/sqrt(depth)."""
     fan_in = w.shape[1] if w.ndim >= 2 else w.shape[0]

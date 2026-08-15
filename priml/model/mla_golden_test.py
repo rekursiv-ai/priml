@@ -44,9 +44,9 @@ def test_mla_bfb(device: str) -> None:
             MultiHeadLatentAttention.Config(
                 channels_in=16,
                 heads=2,
-                qk_nope_head_dim=8,
-                qk_rope_head_dim=4,
-                v_head_dim=8,
+                channels_qk_nope_head=8,
+                channels_qk_rope_head=4,
+                channels_v_head=8,
                 kv_lora_rank=8,
                 rope=RoPE.Config(channels_head=4, base=10_000),
             )

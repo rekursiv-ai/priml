@@ -38,10 +38,14 @@ import torch
 
 from priml.baselines.nanochat.data import NanoChatData
 from priml.baselines.nanochat.flash3 import Flash3Attention
-from priml.baselines.nanochat.model import ValueGatedAttention, sdpa_attention
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
-from priml.metrics import BitsPerByte
+from priml.metrics.bits_per_byte import BitsPerByte
+from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
+from priml.model.value_gated_attention import (
+    ValueGatedAttention,
+    sdpa_attention,
+)
 from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop
 
@@ -73,7 +77,7 @@ class NanoChatLoop(TrainLoop):
         dataset: NanoChatData.Config = field(
             default_factory=NanoChatData.Config,
         )
-        """Prepared token rows, served from device memory."""
+        """The corpus, packed into rows as the reference packs them."""
 
         @override
         def finalize(self) -> Self:
@@ -82,7 +86,7 @@ class NanoChatLoop(TrainLoop):
             # there rather than the two being set to agree by hand.
             self.dataset.batch_size = self.step.rows_per_pass
             # Geometry is declared ONCE, on the model, and pushed here so the
-            # dataset can verify the prepared arrays against it at load. Two
+            # dataset can verify the fitted vocabulary against it at load. Two
             # independently-typed copies would agree only by coincidence, and
             # disagree deep inside a forward pass.
             self.dataset.vocab_size = self.step.model.vocab_size
@@ -143,7 +147,7 @@ def exp000() -> NanoChatLoop.Config:
     # rather than inherited from a portable rung, because it is part of the
     # recipe being reproduced rather than a deviation from one: exp000 is the
     # statement, and every other rung is a diff against it.
-    block = cfg.step.model.block
+    block = cfg.step.model.template
     attention = block.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.kernel = Flash3Attention.Config()
@@ -164,12 +168,14 @@ def exp000() -> NanoChatLoop.Config:
     # rather than defaulted on the model, because a narrowed table makes the
     # model runnable only under autocast -- which this recipe's loop supplies
     # and a bare ``model(tokens)`` does not.
-    cfg.step.model.embedding_dtype = torch.bfloat16
-    cfg.step.model.rotary_dtype = torch.bfloat16
+    embedding = cfg.step.model.embedding
+    assert isinstance(embedding, NarrowEmbedding.Config)
+    embedding.dtype = torch.bfloat16
+    cfg.step.model.rope.dtype = torch.bfloat16
 
-    cfg.step.model.channels = 512
+    cfg.step.model.channels_in = 512
     cfg.step.model.num_layers = 8
-    cfg.step.model.window_pattern = "SSSL"
+    attention.window_pattern = "SSSL"
     # Alternating layers. A stride rather than the indices it implies, so a
     # fork that changes the depth still gets alternating layers rather than
     # indices computed against a stack that no longer exists.
@@ -189,10 +195,10 @@ def exp000() -> NanoChatLoop.Config:
     cfg.eval_every_epoch = False
     # Pinned, not left to the loop's ``None`` default, which draws from OS
     # entropy: two runs of this factory would then differ in initialization
-    # and shuffle before any code changed, and a comparison between them
-    # would measure the draw rather than the recipe.
+    # before any code changed, and a comparison between them would measure the
+    # draw rather than the recipe. It seeds initialization alone -- the data
+    # order is the corpus's own, packed deterministically and never shuffled.
     cfg.seed = 42
-    cfg.dataset.seed = cfg.seed
     cfg.runtime = SingleProcess.Config()
     # TF32 matmuls. The reference recipe's throughput assumes them, and a
     # run left at torch's default reduces in a different order, so a score
@@ -229,7 +235,7 @@ def exp001() -> NanoChatLoop.Config:
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
-    attention = cfg.step.model.block.attn
+    attention = cfg.step.model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.kernel = PartialConfig(sdpa_attention)
     return cfg
@@ -285,7 +291,9 @@ def exp003() -> NanoChatLoop.Config:
     """
     cfg = exp002()
     cfg.experiment_name = "exp003"
-    cfg.step.model.window_pattern = "L"
+    window_attn = cfg.step.model.template.attn
+    assert isinstance(window_attn, ValueGatedAttention.Config)
+    window_attn.window_pattern = "L"
     return cfg
 
 
@@ -309,14 +317,14 @@ def exp_smoke() -> NanoChatLoop.Config:
     cfg = exp001()
     cfg.experiment_name = "exp_smoke"
     cfg.step.model.vocab_size = 16
-    # The value gate reads a fixed 32 channels of its input, so a model
+    # The value gate reads a fixed 32 channels_in of its input, so a model
     # narrower than 32 has a gate of a different shape than the reference's.
-    cfg.step.model.channels = 32
+    cfg.step.model.channels_in = 32
     cfg.step.model.num_layers = 2
     cfg.step.model.max_seq_len = 8
     # Half the width, so there are two heads: at one head every head-axis
     # reshape is the identity and a split on the wrong axis still agrees.
-    attention = cfg.step.model.block.attn
+    attention = cfg.step.model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.channels_head = 16
     cfg.step.compile = False
@@ -327,8 +335,9 @@ def exp_smoke() -> NanoChatLoop.Config:
     cfg.max_time = cfg.step.time_budget_sec
     cfg.max_steps = 4
     cfg.num_steps_eval = 2
-    # Both, together: the cap must be a whole number of eval batches, and the
-    # default batch is wider than a smoke run wants to score.
+    # Both, together: the scored token count must be a whole number of eval
+    # batches, and the recipe's 20.97M tokens is a full evaluation rather than
+    # the two batches a smoke run wants.
     cfg.dataset.eval_batch_size = 4
-    cfg.dataset.num_eval_rows = 8
+    cfg.dataset.eval_tokens = 2 * 4 * cfg.step.model.max_seq_len
     return cfg
