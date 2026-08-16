@@ -22,9 +22,17 @@ Cross-architecture portability (the whole point):
   is correct.
 
   ``host_agnostic_numerics`` removes this by computing every float32 *arithmetic*
-  op in float64 and downcasting the result back to float32. Float64 polynomials
-  and reductions agree across hosts to far more than float32 precision, so the
-  downcast lands on the same float32 bit everywhere. Only pure data-movement ops
+  op in float64 and downcasting the result back to float32. The DOWNCAST is the
+  mechanism, not a formality: a float64 kernel is itself an approximation and
+  hosts disagree there too (measured, torch 2.11: ``sigmoid`` lands 2 float64
+  ULP from the exact answer, ``tanh`` and ``rsqrt`` 1). Two float64 ULP is
+  ~2**-51, about 2**-28 of ONE float32 ULP, so rounding to float32 absorbs the
+  disagreement and every host lands on the same float32 bit -- measured 0 of
+  4096 wrong for every op probed. It follows that a golden's comparand must BE
+  float32; ``_assert_portable_output_dtype`` refuses anything else, because a
+  runner returning the float64 scratch keeps that host's own libm error (one
+  did, off by 1 ULP between an Intel laptop and an AMD server). Only pure
+  data-movement ops
   (views, reshapes, gathers) and correctly-rounded elementwise ops -- whose
   float32 result is already host-independent -- stay in float32; they are the
   ``_EXACT_F32_OPS`` allowlist. Every other float32 op is upcast by default, so
@@ -33,12 +41,13 @@ Cross-architecture portability (the whole point):
   correctly-rounded; views do no arithmetic) and guarded by a unit test that
   proves each entry is genuinely host-independent.
 
-  Because matmul is upcast like everything else (float64 GEMM is both
-  vector-width- and thread-count-invariant), the golden needs no MKL BLAS pin
-  and no host-class gating of its own -- x86 (any width), ARM, Apple silicon,
-  and OpenBLAS builds all reproduce. (The repo-root conftest still sets
-  ``MKL_CBWR`` for the benefit of other, non-bfb numeric-parity tests; bfb no
-  longer depends on it.)
+  Because matmul is upcast like everything else, the golden needs no MKL BLAS
+  pin and no host-class gating of its own -- x86 (any width), ARM, Apple
+  silicon, and OpenBLAS builds all reproduce, PROVIDED the comparand is float32
+  (measured across Intel and AMD, and across 1/2/4/8/64 math threads: identical
+  bits). Float64 GEMM is not itself invariant; it is the rounding that makes
+  the result so. (The repo-root conftest still sets ``MKL_CBWR`` for the
+  benefit of other, non-bfb numeric-parity tests; bfb no longer depends on it.)
 
 Determinism is required: the harness enables deterministic Torch algorithms
 and seeds the CPU default generator before any tensor allocation.
@@ -221,13 +230,18 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
 
 
 def _is_narrow_float(dtype: torch.dtype) -> bool:
-    """Whether a dtype reduces in a host-dependent order.
+    """Whether a dtype should be widened before the op runs.
 
-    Every float format narrower than float64 does: the kernel accumulates in an
-    order set by the CPU's vector width and thread count. bfloat16 and float16
-    count because a mixed-precision recipe COMPUTES in them -- an autocast
-    forward, or an optimizer that orthogonalizes in half precision -- so a
-    golden that left them native would be minted to one machine.
+    Named for the upcast's question -- "is this narrower than the scratch
+    width" -- so float64 is False here because it IS the scratch, not because
+    it is host-independent (it is not; see the module docstring). A caller
+    asking whether a dtype is portable wants
+    :func:`_assert_portable_output_dtype`, which admits float32 alone.
+
+    bfloat16 and float16 count because a mixed-precision recipe COMPUTES in
+    them -- an autocast forward, or an optimizer that orthogonalizes in half
+    precision -- so a golden that left them native would be minted to one
+    machine.
     """
     return dtype.is_floating_point and dtype != torch.float64
 
@@ -429,8 +443,13 @@ def host_agnostic_numerics() -> Generator[None]:
     Every float32 arithmetic op -- transcendental, reduction, matmul, forward or
     backward -- runs in float64 and downcasts to float32, except the
     ``_EXACT_F32_OPS`` allowlist of already-host-independent ops. A forward,
-    backward, or full optimizer step is then bit-identical across hosts of any
-    vector width or thread count under ``torch.equal``.
+    backward, or full optimizer step is then bit-identical under
+    ``torch.equal`` across hosts of any vector width, thread count, or vendor.
+
+    That guarantee covers the float32 RESULT and nothing wider: the float64
+    values inside carry each host's own libm error and are not comparable
+    across machines. A caller that keeps one -- by returning it from a golden
+    runner -- keeps the error too.
 
     Caveat for third-party interop: this intercepts ops at the aten-dispatch
     layer, so it upcasts everything torch itself dispatches -- but it does NOT
@@ -741,6 +760,7 @@ def _write_golden(
     pre_state = _cpu_state_dict(module.state_dict())
     with host_agnostic_numerics():
         output = run(module, inp)
+    _assert_portable_output_dtype(output)
     post_state = _cpu_state_dict(module.state_dict())
     payload: _Golden = {
         "state_dict": pre_state,
@@ -754,6 +774,45 @@ def _write_golden(
     if _state_differs(pre_state, post_state):
         payload["post_state_dict"] = post_state
     torch.save(payload, golden_path)
+
+
+def _assert_portable_output_dtype(output: Tensor) -> None:
+    """Refuse a golden whose comparand is a float the harness computes in.
+
+    ``host_agnostic_numerics`` computes in float64 and rounds ONCE to float32.
+    The rounding is the mechanism, not a detail: a float64 kernel is itself an
+    approximation -- measured on torch 2.11, ``sigmoid`` misses the correctly
+    rounded float64 answer on 1316 of 4096 inputs, ``rsqrt`` on 1133, because
+    each vendor's libm picks a different polynomial. Rounding to float32
+    discards ~29 bits, which is far more than that error, so every host lands
+    on the same float32 bit (measured: 0 of 4096 wrong, every op).
+
+    A runner that returns the scratch skips that rounding, so the stored value
+    carries the vendor's own approximation error and the golden only replays on
+    the host that minted it -- as one did, off by 1 ULP between an Intel laptop
+    and an AMD server.
+
+    Every dtype :func:`_is_narrow_float` covers is refused, not float64 alone:
+    bfloat16 and float16 are compute dtypes the harness upcasts too, so
+    returning one skips the same rounding. Integers carry no rounding at all
+    and pass.
+
+    Args:
+      output: What the runner returned, and what the golden compares.
+
+    Raises:
+      TypeError: The output is a narrow float rather than float32.
+
+    """
+    if not output.dtype.is_floating_point or output.dtype == torch.float32:
+        return
+    raise TypeError(
+        f"bfb golden output is {output.dtype}, which is not portable across "
+        "hosts; it must be float32. host_agnostic_numerics computes in "
+        "float64 and the ROUND BACK to float32 is what makes the result "
+        "host-independent; returning the unrounded value stores this host's "
+        "libm error. Narrow in the runner: `return value.float()`.",
+    )
 
 
 def _state_differs(before: dict[str, Any], after: dict[str, Any]) -> bool:
@@ -788,6 +847,10 @@ def _replay_golden(
     inp = move_to_device(payload["input"], device)
     with host_agnostic_numerics():
         output = run(module, inp)
+    # Checked on replay too, not only at mint: a golden written before this
+    # gate exists still carries a float64 comparand, and reporting WHY it is
+    # unportable beats an opaque one-ULP mismatch on someone else's host.
+    _assert_portable_output_dtype(output)
     # Absent means the run did not mutate its state, so the pre-run copy IS
     # the expectation -- a mutation introduced later then fails against it.
     _assert_state_match(module, payload.get("post_state_dict", payload["state_dict"]))
@@ -904,7 +967,54 @@ def _assert_equal(a: Any, b: Any, *, label: str) -> None:
     if a.dtype != b.dtype:
         raise AssertionError(f"{label}: dtype mismatch {a.dtype} vs {b.dtype}")
     if not torch.equal(a, b):
-        d = (a.float() - b.float()).abs().max().item()
+        # Differenced in the tensors' OWN width, never via float32: a float64
+        # mismatch below float32 resolution then reports 0.000e+00, which reads
+        # as a passing comparison that somehow failed. Integers subtract in
+        # their own width too -- an RNG-state or token-id golden is a real
+        # comparand, and reporting nothing for it is the same defect.
+        d = float((a - b).abs().max().item())
         raise AssertionError(
-            f"{label}: torch.equal failed (max_abs_diff={d:.3e})",
+            f"{label}: torch.equal failed "
+            f"(max_abs_diff={d:.3e}, max_ulp_diff={_max_ulp_diff(a, b)})",
         )
+
+
+def _max_ulp_diff(a: Tensor, b: Tensor) -> int | str:
+    """Largest gap in representable steps, or why it could not be measured.
+
+    The unit a bit-for-bit failure is actually measured in: 1 says the hosts
+    round differently, a large count says the computation changed, and an
+    absolute difference says neither on its own (1 ULP is 1e-7 near one and
+    1e-45 near zero).
+
+    Bit patterns are ordered only WITHIN a sign -- the negative half is stored
+    sign-magnitude, counting away from zero -- so they are mapped to one
+    monotone line first. Subtracting raw patterns instead reports ~2**31 for
+    two neighbours straddling zero, which is the magnitude a total regression
+    produces, from the case where the values are closest.
+    """
+    kind = {torch.float64: torch.int64, torch.float32: torch.int32}.get(a.dtype)
+    if kind is None:
+        return "n/a"
+    # NaN has no distance to anything: every comparison against it is false, so
+    # a pattern subtraction returns a number that reads as real drift.
+    if bool(a.isnan().any() or b.isnan().any()):
+        return "nan"
+    return int((_ordered(a, kind) - _ordered(b, kind)).abs().max())
+
+
+def _ordered(value: Tensor, kind: torch.dtype) -> Tensor:
+    """Reinterpret floats as integers that increase with the float's value.
+
+    A negative float's pattern grows as the number falls, so the negative half
+    is reflected. The result orders the whole line, which is what makes a
+    subtraction count representable steps.
+
+    Reflected about the float's OWN signed minimum, not int64's: the pattern is
+    widened for the arithmetic, and reflecting about the wide minimum would
+    offset the negative half by the difference between the two widths.
+    """
+    bits = value.detach().contiguous().view(kind)
+    floor = torch.iinfo(bits.dtype).min
+    wide = bits.to(torch.int64)
+    return torch.where(wide < 0, floor - wide, wide)

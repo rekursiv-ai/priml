@@ -210,7 +210,7 @@ nothing else does:
   it worse.
 
 Promote on a guess and the code carries its origin's assumptions in a default,
-where its position in `priml/` presents them as general.
+which its position in `priml/` presents as general.
 
 **Check the slots before reaching for a new module.** Three cases, and only the
 third is a promotion:
@@ -224,9 +224,8 @@ third is a promotion:
 Two baselines are the same layer, so one may import another whenever it is in
 the first case: the borrowed piece stays where it lives and the borrower writes
 only what names its own problem. A second baseline reusing a solver at a
-different grid size and vocabulary has nothing to promote -- the difference was
-already values, and moving code to express it buys nothing while churning a
-directory that was working.
+different grid size has nothing to promote -- the difference was already
+values.
 
 What gets promoted is a CONFIGGLEABLE CLASS, never a function carrying keyword
 arguments.
@@ -247,15 +246,13 @@ A function's keyword arguments are not nodes in the tree. They do not print, so
 `matrix_excludes=("head",)` never appears in `pprint` and the run stops being
 reproducible from its config; they cannot be reached by `--override`, mutated by
 a fork, or diffed against a parent. The default also asserts that every model
-names its classifier `head` -- one model's recipe under `baselines/cifar10/`,
-a library-wide requirement under `priml/optimizers/`.
+names its classifier `head`.
 
 A `Config` fixes both: its fields are nodes, so they print and diff, and each is
 a slot a caller can fill. Promotion then also cuts THROUGH the original
 function: routing is general (`composite.py`'s `Selector`, `excluding`,
 `complement`), `ndim >= 2` is Muon's own claim (`Muon.eligible_tensor`), and
-`excluding(Muon.eligible_tensor, "head")` names a layer, so it stays in the
-experiment.
+`excluding(Muon.eligible_tensor, "head")` names a layer, so it stays put.
 
 **`math/` is the one deliberately anti-configgle layer**, so the rule inverts
 there. Keyword arguments are expected (`dim=-1`, `eps=5e-4`, `whiten=True`):
@@ -423,9 +420,9 @@ propagate_attr(self.block, "depth", self.depth)  # protocol=None: best effort
 ```
 
 The Protocol is load-bearing: a child implementing `ChannelsIn` MUST accept the
-value, so a typo raises instead of building with the `-1` sentinel and no
-diagnostic, while a child that does not implement it opts out. Never
-`getattr(cfg, "f", None)` -- it bypasses the checker and hides the contract.
+value, so a typo raises instead of building with the `-1` sentinel, while a
+child that does not implement it opts out. Never `getattr(cfg, "f", None)` --
+it bypasses the checker and hides the contract.
 
 A repeated sub-module is a template or a list (`model/causal_lm.py`,
 `model/sequential.py`, `baselines/cifar10/model.py`):
@@ -488,29 +485,26 @@ The first form NaNs because `where` evaluates BOTH branches and the dead one's
 gradient still flows: at `x=1.0` the unused branch reaches `1e30`, squared in
 backward to `inf`, and `inf * 0` is `NaN` (measured
 `grad=[nan, -0.053, 0.347]`). The double-where is the general fix -- mask the
-ARGUMENT, not the result -- and broadcasting a scalar rather than `zeros_like`
-preserves dtype.
+ARGUMENT, not the result.
 
-The remaining three forms all came from moving to the log domain:
+The remaining three forms all came from moving to the log domain, which is
+worth trying before optimizing a branch:
 
 1. **Sub-structure becomes recognizable.** `log(s(x))` is `sign(x) log1p(|x|)`,
-   the log-modulus transform of John & Draper (1980). In the linear domain it
-   was a nameless two-branch expression.
+   the log-modulus transform of John & Draper (1980).
 2. **Fusion opportunities appear.** Once each term is a log, normalizing is
    `logsumexp` -- so the whole thing is `log_softmax`, one fused primitive
    replacing a divide and a sum.
 3. **Numerics improve for free.** `log1p` is accurate near zero where `log(1+z)`
    cancels, and `log_softmax` subtracts the row max exactly where the
    `s`-then-divide form overflowed.
-4. **The branch disappears.** In logs the halves differ only by sign, so
-   hoisting it removes the `where`. `where` does not short-circuit on vector
-   hardware, so both branches execute.
+4. **The branch disappears.** In logs the halves differ only by sign. `where`
+   does not short-circuit on vector hardware, so both branches execute.
 
-Try the log domain before optimizing a branch. And when an expression survives
-three rounds of tuning, search for its published name: that brings a citation, a
-stated domain, and the edge cases its authors already found. Put it in
-`math/numeric.py` beside its relatives. Any implementation that is not the
-literal definition carries a `Derivation:` block.
+When an expression survives three rounds of tuning, search for its published
+name: that brings a citation, a stated domain, and the edge cases its authors
+already found. Put it in `math/numeric.py` beside its relatives. Any
+implementation that is not the literal definition carries a `Derivation:` block.
 
 Never auto-cast:
 
@@ -619,10 +613,12 @@ Goldens (`priml/testing/bfb.py`) make `exp000` frozen in practice rather than by
 convention: one per model (`state_dict` after init, plus the forward output) and
 one per optimizer stack (a few train steps, so loss, augmentation draws,
 schedule, and optimizer all reach the compared post-state). Mint and replay
-inside `host_agnostic_numerics()` -- it upcasts fp32 to fp64, so AVX2 and
-AVX-512 agree. Assert `torch.equal`, never `allclose`. Verify a golden BITES
-before trusting it: perturb a constant and confirm the failure. Regenerating one
-means the recipe changed.
+inside `host_agnostic_numerics()`, and return `.float()` from the runner: it
+computes in fp64 and the round BACK to fp32 is what makes the bits
+host-independent, since an fp64 kernel is itself approximate. Assert
+`torch.equal`, never `allclose`. Verify a golden BITES before trusting it:
+perturb a constant and confirm the failure. Regenerating one means the recipe
+changed.
 
 Experiment tests assert the DELTA -- exactly which fields each fork changes --
 which is what enforces "one change per experiment". That construction reads no

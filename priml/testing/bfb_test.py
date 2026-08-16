@@ -22,7 +22,10 @@ from priml.model.transformer import TransformerBlock
 from priml.testing.bfb import (
     _ENV_REGENERATE,
     _EXACT_F32_OPS,
+    _assert_equal,
+    _assert_portable_output_dtype,
     _assert_sdpa_backend_match,
+    _max_ulp_diff,
     assert_bfb_against_golden,
     bfb_devices,
     host_agnostic_numerics,
@@ -1124,6 +1127,133 @@ def test_inplace_arith_matches_functional_recompute(name: str) -> None:
     f64 = a.double()
     getattr(f64, name)(b.double())
     assert torch.equal(f32, f64.float())
+
+
+def _f64_output_runner(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+    """Return the float64 scratch, skipping the round back to float32."""
+    return cast("torch.Tensor", module(inp)).double()
+
+
+def test_bfb_rejects_a_float64_golden_output(tmp_path: Path) -> None:
+    """A runner returning float64 is refused, at mint AND at replay.
+
+    ``host_agnostic_numerics`` computes in float64 and the round back to
+    float32 is what makes a value host-independent: a float64 kernel is itself
+    approximate (torch 2.11 ``sigmoid`` misses the correctly rounded float64
+    answer on 1316 of 4096 inputs), and only discarding ~29 bits swamps that.
+    A golden that stores the float64 scratch therefore pins itself to the host
+    that minted it -- one did, off by 1 ULP between Intel and AMD -- so the
+    harness refuses it rather than letting the mismatch surface on someone
+    else's machine as an opaque last-bit failure.
+    """
+    with pytest.raises(TypeError, match="float64"):
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="f64_output",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            seed=0,
+            run=_f64_output_runner,
+        )
+
+
+def test_bfb_rejects_a_float64_golden_on_replay(tmp_path: Path) -> None:
+    """A golden written BEFORE the gate still reports why it is unportable.
+
+    Minting is not the only entry point: the committed goldens predate this
+    check, so the replay path must name the cause too rather than failing on a
+    one-ULP comparison the reader cannot attribute.
+    """
+    assert_bfb_against_golden(
+        golden_dir=tmp_path,
+        golden_name="legacy_f64",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+        seed=0,
+    )
+    path = tmp_path / "legacy_f64.pt"
+    payload = torch.load(path, weights_only=False, map_location="cpu")
+    payload["output"] = payload["output"].double()
+    torch.save(payload, path)
+    with pytest.raises(TypeError, match="float64"):
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="legacy_f64",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            seed=0,
+            run=_f64_output_runner,
+        )
+
+
+def test_ulp_diff_counts_steps_across_zero() -> None:
+    """Two neighbours straddling zero are 2 steps apart, not 2 billion.
+
+    Floats are ordered by bit pattern only WITHIN a sign; the negative half is
+    stored sign-magnitude, so subtracting raw patterns across zero yields
+    ~2**31. That is the magnitude a catastrophic regression produces, so the
+    one number meant to separate host drift from a real break reports the
+    opposite of the truth exactly where the values are closest.
+    """
+    negative = torch.tensor([-1.4012984643248171e-45], dtype=torch.float32)
+    positive = torch.tensor([1.4012984643248171e-45], dtype=torch.float32)
+    assert _max_ulp_diff(negative, positive) == 2
+
+
+def test_ulp_diff_counts_steps_within_the_negative_half() -> None:
+    """The fix must not break the ordinary same-sign case it already handled."""
+    value = torch.tensor([-1.0], dtype=torch.float32)
+    neighbour = torch.nextafter(value, torch.tensor([-2.0]))
+    assert _max_ulp_diff(value, neighbour) == 1
+
+
+def test_ulp_diff_names_nan_rather_than_counting_it() -> None:
+    """A NaN mismatch reports NaN, not a bit-pattern distance.
+
+    NaN is the most common real regression and has no meaningful ULP distance
+    from a number; printing one (measured: 1077936128) reads as a huge but
+    genuine drift and hides what actually happened.
+    """
+    nan = torch.tensor([float("nan")], dtype=torch.float32)
+    one = torch.tensor([1.0], dtype=torch.float32)
+    assert _max_ulp_diff(nan, one) == "nan"
+
+
+def test_assert_equal_reports_an_integer_difference() -> None:
+    """An integer mismatch reports its real magnitude.
+
+    Integer arrays are goldens too -- RNG state, sampled actions, token ids --
+    and a report of ``0.000e+00`` on a failing comparison reads as a passing
+    one that somehow raised.
+    """
+    with pytest.raises(AssertionError, match=r"max_abs_diff=7\.000e\+00"):
+        _assert_equal(
+            torch.tensor([1, 2], dtype=torch.int64),
+            torch.tensor([1, 9], dtype=torch.int64),
+            label="output",
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float64])
+def test_bfb_rejects_every_non_float32_golden_output(dtype: torch.dtype) -> None:
+    """Any narrow-float comparand is refused, not float64 alone.
+
+    ``_is_narrow_float`` treats bfloat16 and float16 as compute dtypes the
+    harness upcasts, so a runner returning either skipped the same round back
+    to float32 and stores this host's libm error just as a float64 one does.
+    """
+    with pytest.raises(TypeError, match="float32"):
+        _assert_portable_output_dtype(torch.zeros(2, dtype=dtype))
+
+
+def test_bfb_accepts_a_float32_golden_output() -> None:
+    """The dtype the whole mechanism produces is the one that passes."""
+    _assert_portable_output_dtype(torch.zeros(2, dtype=torch.float32))
+
+
+def test_bfb_accepts_an_integer_golden_output() -> None:
+    """An integer comparand carries no rounding, so it needs no narrowing."""
+    _assert_portable_output_dtype(torch.zeros(2, dtype=torch.int64))
 
 
 def test_regenerate_golden_preserves_existing_regenerate_env(
