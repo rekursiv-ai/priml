@@ -93,6 +93,12 @@ def shrink(config: _AnyLoop) -> _AnyLoop:
     config.step.env.device = "cpu"
     config.step.env.num_envs = 2
     config.step.env.optimistic_reset_ratio = 1
+    # A 3x3 view, not the benchmark's 9x11. The observation is one one-hot
+    # vector per visible tile, so the window sets the input width -- 798 floats
+    # against 8,268 -- and every layer, gradient, and optimizer moment scales
+    # with it. What is under test is that the RECIPE runs end to end, which a
+    # smaller window exercises identically.
+    config.step.env.view = (3, 3)
     config.step.compile = False
     config.step.num_minibatches = 1
     config.step.num_epochs = 1
@@ -130,6 +136,10 @@ def shrink(config: _AnyLoop) -> _AnyLoop:
     score.num_envs = 2
     score.steps = 2
     score.device = "cpu"
+    # The metric plays its own episodes, so its window has to match the one
+    # the policy trained on -- a different width is an input the network
+    # cannot read.
+    score.view = config.step.env.view
     return config
 
 

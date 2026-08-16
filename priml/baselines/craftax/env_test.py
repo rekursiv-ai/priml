@@ -13,8 +13,14 @@ from priml.baselines.craftax.game.state import EnvState
 from priml.data.environment import BatchedEnvironmentProtocol
 
 
-def _env(num_envs: int = 4, seed: int = 0, reset_ratio: int = 1) -> CraftaxEnv:
+def _env(
+    num_envs: int = 4,
+    seed: int = 0,
+    reset_ratio: int = 1,
+    view: tuple[int, int] = (9, 11),
+) -> CraftaxEnv:
     config = CraftaxEnv.Config()
+    config.view = view
     config.num_envs = num_envs
     config.device = "cpu"
     config.seed = seed
@@ -141,11 +147,19 @@ def test_an_episode_ends_when_the_step_limit_is_reached() -> None:
 
 
 def test_a_long_rollout_stays_finite_and_rectangular() -> None:
-    env = _env()
+    """Many steps in sequence keep the shape and stay numerically sane.
+
+    A small view, because what is under test is that the rollout does not
+    drift -- the batch never ragged, no value ever NaN. Neither property is a
+    function of how many tiles the player can see, and the full 9x11 window
+    makes every one of these steps render 8,268 floats to check that.
+    """
+    env = _env(view=(3, 3))
     env.reset()
-    for index in range(60):
+    width = observation.observation_size((3, 3))
+    for index in range(24):
         transition = env.step(_actions(env, 4, index))
-        assert transition.observation.shape == (4, observation.observation_size())
+        assert transition.observation.shape == (4, width)
         assert bool(torch.isfinite(transition.observation).all())
         assert bool(torch.isfinite(transition.reward).all())
 

@@ -55,6 +55,7 @@ requires_craftax: Final = pytest.mark.skipif(
 """Skip a parity test when the reference package is absent."""
 
 
+@functools.cache
 def reference(module: str) -> Any:
     """Import a module of the reference implementation by name.
 
@@ -62,9 +63,15 @@ def reference(module: str) -> Any:
     without the optional dependency can still collect these tests and skip
     them, instead of failing at import.
 
+    Cached because the first import builds JAX's world-generation tables and
+    costs seconds, while every later one is a dict lookup. Uncached, pytest
+    charges that whole cost to whichever parity test happened to run first,
+    which reads as a slow test rather than a slow import -- and under xdist
+    every worker pays it again.
+
     Args:
       module: Dotted path beneath the reference package, for example
-        ``"craftax.constants"``.
+        ``"constants"``.
 
     Returns:
       module: The imported reference module.

@@ -29,7 +29,6 @@ from priml.baselines.craftax.game.constants import (
     ItemType,
 )
 from priml.baselines.craftax.game.indexing import (
-    gather_tiles,
     scatter_tiles_where,
 )
 from priml.baselines.craftax.game.state import EnvState
@@ -340,24 +339,39 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
         placing,
     )
 
+    # The 9x9 glow is written in ONE scatter, not eighty-one. Iterating the
+    # patch in Python cost 162 tensor dispatches for a tile nobody usually
+    # places, and this step runs a few thousand dispatches already.
+    #
+    # A torch brightens a tile, never dims one already brighter, so the write
+    # takes a maximum against what is there -- and because two patch cells
+    # never address the same tile, the maxima do not need sequencing.
     glow = constants.TORCH_LIGHT_MAP.to(state.device)
     offsets = torch.arange(9, device=state.device) - 4
     light = state.light_map[rows, level]
-    for row in range(9):
-        for column in range(9):
-            tile = target + torch.stack((offsets[row], offsets[column])).expand(
-                state.num_envs,
-                2,
-            )
-            lit = glow[row, column].expand(state.num_envs)
-            # A torch brightens a tile, never dims one already brighter.
-            current = gather_tiles(light, tile)
-            light = scatter_tiles_where(
-                light,
-                tile,
-                torch.maximum(current, lit),
-                placing,
-            )
+
+    patch_rows = (target[:, 0, None, None] + offsets[None, :, None]).clamp(
+        0,
+        light.shape[-2] - 1,
+    )
+    patch_columns = (target[:, 1, None, None] + offsets[None, None, :]).clamp(
+        0,
+        light.shape[-1] - 1,
+    )
+    inside = (
+        (target[:, 0, None, None] + offsets[None, :, None] >= 0)
+        & (target[:, 0, None, None] + offsets[None, :, None] < light.shape[-2])
+        & (target[:, 1, None, None] + offsets[None, None, :] >= 0)
+        & (target[:, 1, None, None] + offsets[None, None, :] < light.shape[-1])
+    )
+    env = rows[:, None, None].expand_as(patch_rows)
+    brightened = torch.maximum(light[env, patch_rows, patch_columns], glow)
+    light = light.clone()
+    light[env, patch_rows, patch_columns] = torch.where(
+        placing[:, None, None] & inside,
+        brightened,
+        light[env, patch_rows, patch_columns],
+    )
     state.light_map[rows, level] = light
     state.achievements = mechanics.unlock_achievement(
         state,

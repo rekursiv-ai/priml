@@ -23,9 +23,24 @@ environment axis.
 
 from __future__ import annotations
 
+import functools
+
 from torch import Tensor
 
 import torch
+
+
+@functools.cache
+def _rows(envs: int, device: torch.device) -> Tensor:
+    """Return ``arange(envs)``, built once per batch size and device.
+
+    Every gather and scatter needs this to address the environment axis, and
+    the game step performs a few hundred of them on four-element tensors --
+    where allocating the index costs more than the indexing does. Cached
+    because it is a constant: the same batch size always wants the same
+    tensor, and callers only ever read it.
+    """
+    return torch.arange(envs, device=device)
 
 
 def gather_tiles(grid: Tensor, positions: Tensor) -> Tensor:
@@ -40,7 +55,7 @@ def gather_tiles(grid: Tensor, positions: Tensor) -> Tensor:
 
     """
     rows, columns = _clamped(positions, grid.shape[-2], grid.shape[-1])
-    return grid[torch.arange(grid.shape[0], device=grid.device), rows, columns]
+    return grid[_rows(grid.shape[0], grid.device), rows, columns]
 
 
 def scatter_tiles(grid: Tensor, positions: Tensor, values: Tensor) -> Tensor:
@@ -61,7 +76,7 @@ def scatter_tiles(grid: Tensor, positions: Tensor, values: Tensor) -> Tensor:
     """
     envs, height, width = grid.shape[0], grid.shape[-2], grid.shape[-1]
     rows, columns = _clamped(positions, height, width)
-    index = torch.arange(envs, device=grid.device)
+    index = _rows(envs, grid.device)
     updated = grid.clone()
     updated[index, rows, columns] = torch.where(
         _inside(positions, height, width),
@@ -94,9 +109,12 @@ def scatter_tiles_where(
     """
     height, width = grid.shape[-2], grid.shape[-1]
     rows, columns = _clamped(positions, height, width)
-    index = torch.arange(grid.shape[0], device=grid.device)
-    current = grid[index, rows, columns]
+    index = _rows(grid.shape[0], grid.device)
     updated = grid.clone()
+    # Read from the CLONE, not the source: the value already there is what an
+    # unselected environment keeps, and reading it twice costs a second
+    # advanced-index gather for a tensor that is about to be written anyway.
+    current = updated[index, rows, columns]
     updated[index, rows, columns] = torch.where(
         apply & _inside(positions, height, width),
         values.to(grid.dtype),
@@ -149,12 +167,19 @@ def local_view(
 
 
 def _clamped(positions: Tensor, height: int, width: int) -> tuple[Tensor, Tensor]:
-    """Return usable row and column indices: negatives wrap, overflow clamps."""
-    rows, columns = positions[..., 0].long(), positions[..., 1].long()
-    return (
-        torch.where(rows < 0, rows + height, rows).clamp(0, height - 1),
-        torch.where(columns < 0, columns + width, columns).clamp(0, width - 1),
-    )
+    """Return usable row and column indices: negatives wrap, overflow clamps.
+
+    Written as arithmetic rather than ``torch.where``: a comparison plus a
+    select is three kernel launches per axis, and this runs a few hundred
+    times per game step on tensors of four elements, where launch overhead is
+    the entire cost. ``+ height * (rows < 0)`` adds the wrap exactly where the
+    select would have chosen it.
+    """
+    rows = positions[..., 0].long()
+    columns = positions[..., 1].long()
+    rows = (rows + height * (rows < 0)).clamp_(0, height - 1)
+    columns = (columns + width * (columns < 0)).clamp_(0, width - 1)
+    return rows, columns
 
 
 def _inside(positions: Tensor, height: int, width: int) -> Tensor:

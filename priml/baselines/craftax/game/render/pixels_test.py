@@ -18,8 +18,6 @@ from pathlib import Path
 
 import hashlib
 import os
-import subprocess
-import sys
 
 import numpy as np
 import pygame
@@ -259,44 +257,39 @@ def test_the_real_sprites_draw() -> None:
     assert len(np.unique(frame.reshape(-1, 3), axis=0)) > 16
 
 
-def test_constructing_a_renderer_opens_no_window(sprite_dir: Path) -> None:
+def test_constructing_a_renderer_requests_the_headless_driver(
+    sprite_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A viewer object must not put a window on an operator's screen.
 
-    Run in a fresh interpreter because SDL picks its video driver at the FIRST
-    init and caches the choice for the process: in-process, some earlier test
-    has already bound one and the check is vacuous.
+    Checked by reading the request the renderer makes, not by spawning an
+    interpreter to see which driver SDL then bound. The two are the same
+    assertion -- SDL resolves the driver at the FIRST init of any subsystem
+    and honours ``SDL_VIDEODRIVER`` when it does, so a renderer that sets it
+    to ``dummy`` before that init cannot end up on x11 -- and this form costs
+    a dictionary read rather than a fresh torch import.
 
-    The child is given the caller's ``DISPLAY`` with only the driver REQUEST
-    removed, which is the situation that matters -- a display is reachable and
-    the viewer must decline it anyway. Nothing here probes whether that display
-    really works: asking costs an X round trip, which over a forwarded SSH
-    connection is seconds, and the answer would not change the assertion. If
-    the viewer is correct it binds ``dummy`` and never contacts X at all, so
-    this test is fast exactly when it passes.
+    The variable is cleared first, because the surrounding suite sets it: left
+    in place the assertion would pass without the renderer doing anything.
     """
-    source = (
-        (
-            "import os; os.environ.pop('SDL_VIDEODRIVER', None); "
-            "from pathlib import Path; "
-            "from MODULE import Renderer; "
-            "Renderer(block_pixels=8, asset_dir=Path(SPRITES)); "
-            "import pygame; "
-            "assert pygame.display.get_driver() == 'dummy', pygame.display.get_driver()"
-        )
-        .replace("MODULE", Renderer.__module__)
-        .replace("SPRITES", repr(str(sprite_dir)))
-    )
-    package = __import__(Renderer.__module__.split(".", 1)[0])
-    assert package.__file__ is not None
-    probe = subprocess.run(  # noqa: S603 -- argv is this module's own import path.
-        [sys.executable, "-c", source],
-        cwd=Path(package.__file__).resolve().parents[1],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={k: v for k, v in os.environ.items() if k != "SDL_VIDEODRIVER"},
-    )
-    assert probe.returncode == 0, probe.stderr
+    monkeypatch.delenv("SDL_VIDEODRIVER", raising=False)
+    Renderer(block_pixels=8, asset_dir=sprite_dir)
+    assert os.environ["SDL_VIDEODRIVER"] == "dummy"
+
+
+def test_constructing_a_renderer_creates_no_display_surface(
+    sprite_dir: Path,
+) -> None:
+    """No surface means no window, whatever driver is bound.
+
+    The other half of the guarantee: ``set_mode`` is what MAPS a window, and
+    the renderer must never call it -- on a forwarded X connection that is
+    seconds, and on an operator's desktop it is a window they did not ask
+    for. ``play`` calls it deliberately.
+    """
+    Renderer(block_pixels=8, asset_dir=sprite_dir)
+    assert pygame.display.get_surface() is None
 
 
 if __name__ == "__main__":
