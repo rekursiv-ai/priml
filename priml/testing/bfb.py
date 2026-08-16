@@ -46,7 +46,10 @@ Cross-architecture portability (the whole point):
   silicon, and OpenBLAS builds all reproduce, PROVIDED the comparand is float32
   (measured across Intel and AMD, and across 1/2/4/8/64 math threads: identical
   bits). Float64 GEMM is not itself invariant; it is the rounding that makes
-  the result so.
+  the result so -- and the rounding absorbs a float64 difference only until the
+  exact value sits near a float32 boundary, which is why the priml conftest
+  still pins ``MKL_CBWR``. Removing that pin was measured inert on AMD, where
+  MKL takes a generic path, and broke goldens on Intel.
 
 Determinism is required: the harness enables deterministic Torch algorithms
 and seeds the CPU default generator before any tensor allocation.

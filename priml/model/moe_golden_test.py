@@ -5,10 +5,10 @@ Regenerate (after an intentional numeric change)::
     BFB_REGENERATE=1 uv --quiet run --frozen pytest \
         priml/model/moe_golden_test.py
 
-Run through ``pytest``: the priml ``conftest.py`` caps the math threads before
-torch imports, and the harness computes in float64 and rounds once to float32,
-which is what makes the golden reproduce across hosts. Minting from a bare
-``python`` process skips that setup.
+Run through ``pytest``: the priml ``conftest.py`` sets ``MKL_CBWR`` and caps
+the math threads before torch imports, both preconditions for the golden to
+reproduce. Minting from a bare ``python`` process skips that setup and pins the
+golden to the mint host.
 """
 
 from __future__ import annotations
