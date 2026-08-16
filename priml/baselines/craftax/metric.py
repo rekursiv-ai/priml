@@ -46,6 +46,13 @@ class CraftaxScore:
         seed: int = 42
         """Seed for the evaluation worlds and the action sampling."""
 
+        view: tuple[int, int] = (9, 11)
+        """Tiles the evaluated policy can see, ``(rows, columns)``.
+
+        Must match the view the policy TRAINED on: the observation is one
+        one-hot vector per visible tile, so a different window is a different
+        input width and the network cannot read it at all."""
+
         device: str = "auto"
         """Device the evaluation runs on."""
 
@@ -135,6 +142,7 @@ class CraftaxScore:
         config.num_envs = self.config.num_envs
         config.device = self.config.device
         config.seed = self.config.seed
+        config.view = self.config.view
         env = config.make()
 
         observation = env.reset()
