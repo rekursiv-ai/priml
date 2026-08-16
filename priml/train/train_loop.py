@@ -134,7 +134,12 @@ def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]
     Python beat cannot observe. The beat re-arms the watchdog, so the dump
     never fires against a RUNNING interpreter, where walking mutating frames
     without the GIL read garbage and then segfaulted a healthy eval.
+
+    An infinite ``interval_s`` disables both and emits nothing.
     """
+    if interval_s == math.inf:
+        yield
+        return
     rank = _current_rank()
     done = threading.Event()
     start = time.perf_counter()
@@ -159,8 +164,6 @@ def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]
     # faulthandler watchdog: dumps ALL thread stacks (C + Python) to stderr if
     # the beat thread stalls for 2*interval_s (a GIL-holding native hang the
     # Python beat cannot observe). ``repeat=True`` keeps a long wedge emitting.
-    sys.stderr.write(f"[rank {rank}] >>> ENTER PHASE {label!r}\n")
-    sys.stderr.flush()
     faulthandler.dump_traceback_later(
         2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
     )
@@ -306,6 +309,13 @@ class TrainLoop:
         num_steps_log: int = 10
         early_train_log_steps: int = 100
         """Log every optimizer step up to this step for startup diagnostics."""
+        phase_heartbeat_sec: float = 20.0
+        """Seconds a phase may run before every rank reports where it is.
+
+        Names the phase and rank so a distributed eval stall says WHICH rank is
+        stuck WHERE, and arms a ``faulthandler`` dump at twice this for a
+        GIL-holding native hang. ``inf`` disables both -- right for a
+        single-process run, which has no collective to deadlock on."""
         eval_every_epoch: bool = True
         """Run eval at epoch boundaries. Disable to save time."""
         eval_extras_every_eval: bool = False
@@ -519,6 +529,7 @@ class TrainLoop:
             self.restore_rng_state = config.restore_rng_state
             self.num_steps_log = config.num_steps_log
             self.early_train_log_steps = config.early_train_log_steps
+            self.phase_heartbeat_sec = config.phase_heartbeat_sec
             self.num_steps_garbage_collect = config.num_steps_garbage_collect
             self._start_time = time.perf_counter()
             # Pure-train clock base: ``train/elapsed`` (and the
@@ -842,36 +853,37 @@ class TrainLoop:
             self.train_iter = iter(self.train_loader)
         for _ in range(2):
             try:
-                if self.local_step < self.early_train_log_steps:
-                    logger.info(
-                        "TrainLoop step %d: fetching raw train batch.",
-                        self.step.global_step + 1,
-                    )
+                # DEBUG, and unconditional: these bracket the phases a wedged
+                # run can be stuck in, so they are worth nothing on a healthy
+                # run and everything on a hung one -- which is when the level
+                # is raised. Gating them by step instead put four lines per
+                # MICROBATCH on the default console.
+                logger.debug(
+                    "TrainLoop step %d: fetching raw train batch.",
+                    self.step.global_step + 1,
+                )
                 batch = next(self.train_iter)
                 batch_time = time.perf_counter() - batch_start
-                if self.local_step < self.early_train_log_steps:
-                    logger.info(
-                        "TrainLoop step %d: raw train batch ready (batch_time=%.3fs).",
-                        self.step.global_step + 1,
-                        batch_time,
-                    )
+                logger.debug(
+                    "TrainLoop step %d: raw train batch ready (batch_time=%.3fs).",
+                    self.step.global_step + 1,
+                    batch_time,
+                )
                 if self.tracker:
                     self.tracker.log_metrics(
                         {"batch_time": batch_time},
                         self.step.global_step,
                         prefix="train/",
                     )
-                if self.local_step < self.early_train_log_steps:
-                    logger.info(
-                        "TrainLoop step %d: preprocessing train batch.",
-                        self.step.global_step + 1,
-                    )
+                logger.debug(
+                    "TrainLoop step %d: preprocessing train batch.",
+                    self.step.global_step + 1,
+                )
                 batch = self.step.preprocess_batch(batch)
-                if self.local_step < self.early_train_log_steps:
-                    logger.info(
-                        "TrainLoop step %d: train batch preprocessed.",
-                        self.step.global_step + 1,
-                    )
+                logger.debug(
+                    "TrainLoop step %d: train batch preprocessed.",
+                    self.step.global_step + 1,
+                )
                 return batch
             except StopIteration:
                 # The loader ran out, which is the only signal a pass ended.
@@ -905,19 +917,19 @@ class TrainLoop:
             self.profiling.on_step_start(self.step.global_step)
 
         next_step = self.step.global_step + 1
-        if is_rank_zero() and self.local_step < self.early_train_log_steps:
-            elapsed = time.perf_counter() - self._start_time
-            logger.info(
+        if is_rank_zero():
+            logger.debug(
                 "Entering train step %d/%s (elapsed=%.0fs)",
                 next_step,
                 self.max_steps,
-                elapsed,
+                time.perf_counter() - self._start_time,
             )
 
         step_start = time.perf_counter()
         # The first train step compiles the backward graph and can block for
         # minutes with no output (looks like a hang). Wrap the early steps in a
         # heartbeat so a slow compile is distinguishable from a wedged process.
+        before = self.step.global_step
         if self.local_step < self.early_train_log_steps:
             with _compile_heartbeat(f"train step {next_step}"):
                 step_results = self.step.train_step(**batch)
@@ -943,7 +955,12 @@ class TrainLoop:
         # emitting train metrics every step floods the tracker's history stream
         # (hundreds of keys/step at sub-second cadence), whose server-side
         # ingestion then lags the live run by tens of thousands of steps.
-        log_step = (
+        #
+        # This method runs once per MICROBATCH, so the cadences below -- which
+        # all read the optimizer-update count -- would otherwise fire once per
+        # accumulation pass and report the same step N times, the last of them
+        # alone carrying the update's metrics.
+        log_step = self.step.global_step != before and (
             self.step.global_step == 1
             or self.local_step <= self.early_train_log_steps
             or self.step.global_step <= self.early_train_log_steps
@@ -1204,7 +1221,10 @@ class TrainLoop:
             # (compiled forward / ACT loop vs a downstream metric all-gather)
             # without an external py-spy. eval_loss is the per-rank compute phase;
             # metric.update below is the cross-rank gather phase.
-            with _phase_heartbeat(f"eval batch {num_batches + 1} eval_loss"):
+            with _phase_heartbeat(
+                f"eval batch {num_batches + 1} eval_loss",
+                interval_s=self.phase_heartbeat_sec,
+            ):
                 step_results = self.step.eval_loss(**batch)
             loss = step_results["loss"]
             model_output = step_results["model"]
@@ -1235,7 +1255,8 @@ class TrainLoop:
                 # eval_loss, the collective never completes. The heartbeat names
                 # the metric + batch so the stuck phase is attributable.
                 with _phase_heartbeat(
-                    f"eval batch {num_batches} metric[{name}].update"
+                    f"eval batch {num_batches} metric[{name}].update",
+                    interval_s=self.phase_heartbeat_sec,
                 ):
                     metric.update(model_output, **batch)
                     # Extra candidates (e.g. WTA's K heads) are fed as additional
