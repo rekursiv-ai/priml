@@ -62,9 +62,9 @@ def _build_hf_model(q_lora_rank: int | None) -> Any:
     config.hidden_size = 32
     config.num_hidden_layers = 3
     config.num_attention_heads = 4
-    config.channels_qk_nope_head = 8
-    config.channels_qk_rope_head = 8
-    config.channels_v_head = 8
+    config.qk_nope_head_dim = 8
+    config.qk_rope_head_dim = 8
+    config.v_head_dim = 8
     config.kv_lora_rank = 16
     config.intermediate_size = 64
     config.moe_intermediate_size = 32
