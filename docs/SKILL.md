@@ -376,10 +376,52 @@ discards whatever a caller set on the child, so the idiomatic edit --
 and the `pprint` shows the parent's value. The parent has taken ownership of a
 field it does not implement.
 
-The test is mechanical: if the only use of a field is passing it to a child's
-constructor, delete it and set the child. Porting a foreign schema (an HF
-`config.json`) is not an exception -- `from_hf` parses the foreign names into
-the CHILD configs; it does not mirror them onto the parent.
+The test is not "does it reach a child" -- almost every field does. It is
+whether the parent RENAMES one quantity or DERIVES a different one:
+
+| Forward | Verdict |
+|---|---|
+| `rms_norm_eps` -> `RMSNorm.eps` | Violation: same number, second name. |
+| `num_key_value_heads` -> `SelfAttention.num_heads_kv` | Violation: priml disagreeing with itself. |
+| `vocab_size` -> `Embedding.num_embeddings`, `Linear.channels_out` | Fine: one value, two ROLES. |
+| `q_lora_rank` -> `Linear.channels_in`, `RMSNorm.channels_in` | Fine: a rank sizes several tensors. |
+
+A derivation earns the parent field: the value means something the children's
+names do not say, and it appears in more than one child under more than one
+role. A rename earns nothing -- delete it and set the child.
+
+Porting a foreign schema (an HF `config.json`) is not an exception. `from_hf`
+parses the foreign names into the CHILD configs; it does not mirror them onto
+the parent.
+
+### A scalar configuring a child's internals is a MISSING SLOT
+
+The rename is a symptom; check what the parent builds before renaming anything.
+
+```python
+# Bad -- the field exists only to reach inside a norm the caller cannot see.
+rms_norm_eps: float = 1e-6
+...
+self.kv_a_layernorm = RMSNorm.Config(  # hardcoded in __init__
+    channels_in=config.kv_lora_rank,
+    eps=config.rms_norm_eps,
+    elementwise_affine=True,
+).make()
+
+# Good -- the norm is the node. The scalar disappears with it.
+norm_kv_lora: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
+```
+
+Renaming `rms_norm_eps` to `eps` fixes the word and keeps the defect: the norm
+is still unswappable, and a caller wanting `CenteredRMSNorm`, a different
+epsilon, or no norm at all still cannot say so. Deleting the field is only
+possible once the child is a slot -- there is otherwise no child to set.
+
+The blessed nouns reserve the names for this (`norm`, `norm_qk`, `norm_out`:
+"normalization slots, named for their position"), and every peer already
+complies -- `TransformerBlock.norm1/norm2`, `SelfAttention.norm_qk/norm_out`,
+`MLPMixerBlock.norm_token/norm_channel`, `SwiGLU.norm`. A module that builds a
+child while exposing NO `Makeable` slot has flattened its own subtree.
 
 Constants that are facts, not tunables, take `Final`:
 `NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset; a batch size
