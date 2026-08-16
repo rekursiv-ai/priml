@@ -515,6 +515,10 @@ class TrainLoop:
 
             # Store training hyperparameters
             self.local_step = 0
+            # The last optimizer step whose cadences fired. Guards the
+            # checkpoint and eval cadences against a loop body that runs once
+            # per MICROBATCH while they count updates.
+            self._last_cadence_step = -1
             self.max_epochs = config.max_epochs
             self.max_steps = config.max_steps
             self.max_time = config.max_time
@@ -640,9 +644,18 @@ class TrainLoop:
                 # A resumed loop may start exactly on a checkpoint/eval cadence
                 # step. Do not re-save or re-score that restored state before
                 # this process has advanced training at least once.
-                if self.local_step > 0 and self.checkpointing is not None:
-                    self.checkpointing.maybe_save(self, self.step.global_step)
-                if self.local_step > 0:
+                #
+                # ``stepped`` is what keeps a cadence from firing once per
+                # MICROBATCH: this body runs per pass, but both cadences below
+                # count optimizer updates, so under accumulation every pass of
+                # one step is "due". Measured before the guard: an eval costing
+                # 23s ran eight times at step 200, spending three minutes of a
+                # five-minute budget re-scoring identical weights.
+                stepped = self.step.global_step != self._last_cadence_step
+                if self.local_step > 0 and stepped:
+                    self._last_cadence_step = self.step.global_step
+                    if self.checkpointing is not None:
+                        self.checkpointing.maybe_save(self, self.step.global_step)
                     self._maybe_eval()
                 self._do_train_step(batch)
                 trained_any = True

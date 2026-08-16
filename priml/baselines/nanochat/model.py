@@ -273,6 +273,14 @@ class NanoChatLM(nn.Module):
         self.norm_out = config.norm.make()
         self.mix = config.mix.make()
         self.rope = config.rope.make()
+        # The rotation table depends on the sequence length and nothing else,
+        # so a forward that rebuilds it pays an outer product, a cosine, a
+        # sine, and two casts for a tensor it already had. Measured on a 5090:
+        # 12.5 of the 13.1 ms/step this recipe stood above its reference.
+        #
+        # Built lazily rather than here: the module is constructed on meta and
+        # materialized later, and a table built on meta holds no values.
+        self._rotation: tuple[Tensor, Tensor] | None = None
 
     @staticmethod
     def _value_table(config: Config, *, width: int) -> nn.Module:
@@ -313,6 +321,11 @@ class NanoChatLM(nn.Module):
             *self.value_embeds.values(),
         ):
             module.reset_parameters()
+        # The rotation table is derived from the rope's frequencies, which a
+        # device move rebuilds (rope.py:390-393) because the transcendental
+        # differs by a bit between CPU and CUDA. Dropping it here keeps a
+        # materialized model from reading factors its rope no longer holds.
+        self._rotation = None
 
     @override
     def forward(self, tokens: Tensor, *args: Any, **kwargs: Any) -> Tensor:
@@ -333,7 +346,7 @@ class NanoChatLM(nn.Module):
             raise ValueError(
                 f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}.",
             )
-        cos_sin = self.rope(torch.arange(length, device=tokens.device))
+        cos_sin = self._rotation_table(length, device=tokens.device)
         x = self.norm_embed(self.embed(tokens))
         original = x
         for layer, block in enumerate(self.blocks):
@@ -350,6 +363,31 @@ class NanoChatLM(nn.Module):
             assert isinstance(out, Tensor)
             x = out
         return self.lm_head(self.norm_out(x))
+
+    def _rotation_table(
+        self,
+        length: int,
+        *,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor]:
+        """The rotation factors for ``length`` positions, built once.
+
+        Held for ``max_seq_len`` and SLICED, so a short batch reads a prefix of
+        the same table rather than minting another. That is the reference's own
+        arrangement (train.py:143-145, 269) and it matters for more than speed:
+        the factors come from a transcendental, so a table built at one length
+        and one built at another need not agree bit for bit in their common
+        prefix.
+        """
+        if self._rotation is None or self._rotation[0].device != device:
+            # REBUILT on a device change, never moved there: the factors come
+            # from a transcendental whose last bit differs between CPU and CUDA
+            # (rope.py:395-401), so a moved table is not the table that device
+            # would have produced.
+            positions = torch.arange(self.config.max_seq_len, device=device)
+            self._rotation = self.rope(positions)
+        cos, sin = self._rotation
+        return cos[:length], sin[:length]
 
     def flops_per_token(self) -> int:
         """Estimated forward-plus-backward FLOPs for one token.

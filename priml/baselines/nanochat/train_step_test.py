@@ -167,6 +167,26 @@ def test_the_budget_clock_excludes_warmup_steps() -> None:
     assert step.elapsed_sec > 0.0
 
 
+def test_the_warmup_is_counted_in_steps_not_passes() -> None:
+    """Otherwise accumulation silently shortens it by its own factor.
+
+    The reference excludes ten of its own steps (``train.py:576``). Counting
+    passes here would exclude ``budget_warmup_steps / accumulate_passes`` --
+    1.25 steps at the shipped geometry against the reference's ten -- so the
+    budget would pay for the compilation the exclusion exists to skip.
+    """
+    step = _step(tokens_per_optimizer_step=4 * SEQ, budget_warmup_steps=1)
+    assert step.accumulate_passes == 2
+    batch = _batch()
+    for _ in range(2):  # one whole optimizer step: the warmup
+        step.train_step(**batch)
+    assert step.global_step == 1
+    assert step.elapsed_sec == 0.0
+    for _ in range(2):
+        step.train_step(**batch)
+    assert step.elapsed_sec > 0.0
+
+
 def test_resuming_does_not_rerun_the_budget_warmup() -> None:
     """A resumed run must not get free, uncharged training.
 
@@ -249,6 +269,22 @@ def test_divergence_raises_rather_than_burning_the_budget() -> None:
     step = _step(divergence_threshold=1e-6)
     with pytest.raises(RuntimeError, match="diverged"):
         step.train_step(**_batch())
+
+
+def test_a_diverged_pass_is_caught_at_the_batch_it_belongs_to() -> None:
+    """The guard reads once per UPDATE, so a mid-batch pass must still abort.
+
+    Its loss is reduced on device and read at the boundary. A pass that
+    diverged and then recovered would otherwise reach the optimizer, since the
+    last pass alone says nothing about the ones behind it.
+    """
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update
+    step.config.divergence_threshold = 1e-6
+    step.train_step(**_batch())  # the diverged pass, mid-batch
+    assert step.global_step == 0
+    with pytest.raises(RuntimeError, match="diverged"):
+        step.train_step(**_batch())
+    assert step.global_step == 0
 
 
 def test_divergence_clears_the_pending_accumulation() -> None:
