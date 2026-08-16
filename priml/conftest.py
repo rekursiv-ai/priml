@@ -48,10 +48,11 @@ def cap_math_threads() -> None:
     at import and pins its ATen intra-op pool to match. Conftest import is early
     enough; ``addopts`` is not.
 
-    ``MKL_CBWR`` pins a CPU-independent GEMM kernel so float32 matmul is
-    bit-identical across x86 hosts (Intel AVX-512 vs AMD EPYC), which
-    numeric-parity tests compare under tight tolerances. MKL reads it only at
-    its first GEMM, so it too must be set before any matmul runs.
+    Scheduling only -- no numeric pin belongs here. An ``MKL_CBWR`` was carried
+    to make float32 GEMM bit-identical across x86 vendors; the bfb harness now
+    computes matmul in float64 and rounds once, which does that job for every
+    BLAS. Measured with the pin defeated: the arcagi1 golden still replays, and
+    priml, baselines, and the integration-marked parity tests are unchanged.
 
     Every variable uses ``setdefault``, so an explicit
     ``OMP_NUM_THREADS=8 pytest`` always wins.
@@ -65,7 +66,6 @@ def cap_math_threads() -> None:
         "BLIS_NUM_THREADS",
     ):
         os.environ.setdefault(name, "1")
-    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")
 
 
 cap_math_threads()

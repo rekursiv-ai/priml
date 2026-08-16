@@ -46,8 +46,7 @@ Cross-architecture portability (the whole point):
   silicon, and OpenBLAS builds all reproduce, PROVIDED the comparand is float32
   (measured across Intel and AMD, and across 1/2/4/8/64 math threads: identical
   bits). Float64 GEMM is not itself invariant; it is the rounding that makes
-  the result so. (The repo-root conftest still sets ``MKL_CBWR`` for the
-  benefit of other, non-bfb numeric-parity tests; bfb no longer depends on it.)
+  the result so.
 
 Determinism is required: the harness enables deterministic Torch algorithms
 and seeds the CPU default generator before any tensor allocation.

@@ -5,10 +5,10 @@ Regenerate (after an intentional numeric change)::
     BFB_REGENERATE=1 uv --quiet run --frozen pytest \
         priml/model/transformer_golden_test.py
 
-Run through ``pytest``: the repo-root ``conftest.py`` sets
-``MKL_CBWR=COMPATIBLE`` before torch imports, the precondition for the
-golden to reproduce across x86 hosts. Minting from a bare ``python``
-process pins it to the mint host and fails elsewhere.
+Run through ``pytest``: the priml ``conftest.py`` caps the math threads before
+torch imports, and the harness computes in float64 and rounds once to float32,
+which is what makes the golden reproduce across hosts. Minting from a bare
+``python`` process skips that setup.
 """
 
 from __future__ import annotations
