@@ -61,6 +61,7 @@ from priml.runtime import (
     is_rank_zero,
     runtime_initialized,
 )
+from priml.timer import CheckpointableStepTimer
 from priml.train.checkpointing import Checkpointer
 from priml.train.custom_types import (
     CheckpointingProtocol,
@@ -123,34 +124,16 @@ def _current_rank() -> int:
 def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]:
     """Log, on EVERY rank, which phase this rank is in while a block runs.
 
-    Unlike :func:`_compile_heartbeat` (rank-0 only), this beats on all ranks so a
-    distributed stall is self-diagnosing: a hang where ranks sit in DIFFERENT
-    phases (e.g. one rank in the compiled core, another already waiting in a
-    metric all-gather) shows each rank's last phase in its own torchrun-captured
-    log, pinpointing the divergence WITHOUT an external py-spy. The label should
-    name the phase AND the batch (e.g. ``"eval batch 54 eval_loss"``).
+    All ranks, unlike rank-0's :func:`_compile_heartbeat`, so a distributed
+    stall reports which rank is where without an external py-spy. Label names
+    the phase AND the batch (``"eval batch 54 eval_loss"``).
 
-    Two complementary signals:
-
-    * a daemon thread logs ``STILL IN PHASE`` every ``interval_s`` -- catches a
-      stall whose main thread still releases the GIL (e.g. waiting on a Python
-      ``Event`` or a collective that periodically yields);
-    * a :mod:`faulthandler` watchdog (``dump_traceback_later``) dumps EVERY
-      thread's stack -- including the C frames of a wedged CUDA/NCCL kernel --
-      to ``stderr``. This is the part that survives a GIL-HOLDING native hang,
-      where the daemon thread can never run: it printed nothing in a real eval
-      wedge (rank spinning in a hung CUDA kernel held the GIL), so the Python
-      beat alone is insufficient. The beat thread pushes the watchdog deadline
-      forward on every beat, so the dump fires ONLY when the beat thread has
-      been starved for ``2 * interval_s`` -- exactly the GIL-holding wedge it
-      diagnoses, whose frame stacks are static and safe to walk. It must never
-      fire against a RUNNING interpreter: ``dump_traceback_later`` walks every
-      thread's frames from a C thread WITHOUT the GIL, and doing that against
-      mutating frames read garbage (``<invalid frame>``) and finally
-      segfaulted a healthy full-set eval whose batches merely outlived the
-      timeout (exp9010 r1: SIGSEGV mid-dump number 67).
-
-    Always cancelled/joined on exit; near-zero cost once the block returns.
+    Two signals: a daemon thread beats every ``interval_s``, and a
+    :mod:`faulthandler` watchdog dumps every thread's C frames when that
+    thread is starved for twice as long -- the GIL-holding native hang the
+    Python beat cannot observe. The beat re-arms the watchdog, so the dump
+    never fires against a RUNNING interpreter, where walking mutating frames
+    without the GIL read garbage and then segfaulted a healthy eval.
     """
     rank = _current_rank()
     done = threading.Event()
@@ -218,26 +201,16 @@ class EvalTimeLimitError(RuntimeError):
 
 
 class TrainLoop:
-    """Step-based training loop orchestration.
+    """Step-based training loop: step + dataset + metrics + checkpointing.
 
-    Bundles TrainStep + dataset + metrics + validation + checkpointing.
+    Three counters, each owned elsewhere:
 
-    Features:
-    - Step-based training with validation
-    - Metric tracking and logging
-    - Configurable validation frequency
-    - Checkpointing and profiling support
-
-    Counters:
-    - ``self.step.global_step`` is the authoritative optimizer-step counter
-      (drives ``max_steps``, eval/checkpoint cadence, logging). It survives
-      resume via the step's own state_dict.
-    - ``self.current_epoch`` counts completed dataset passes; it increments
-      lazily on each dataloader ``StopIteration`` (see ``_get_next_batch``)
-      and drives ``max_epochs`` + epoch-boundary eval. It is checkpointed
-      separately under the ``"epoch"`` key.
-    - ``self.local_step`` counts steps since process start / last resume
-      (used only for the manual GC cadence), and is NOT a checkpoint anchor.
+    - ``step.global_step`` -- optimizer updates, the authority for
+      ``max_steps`` and every cadence. Survives resume via the step.
+    - ``current_epoch`` -- the DATASET's timer, ticked here on each
+      ``StopIteration``, since only the loader knows when the data ran out.
+    - ``local_step`` -- steps since process start, for the GC cadence alone.
+      NOT a checkpoint anchor.
 
     Example:
       cfg = TrainLoop.Config(
@@ -304,7 +277,7 @@ class TrainLoop:
         """Optimizer-step limit. Defaults to no cap, uniform with the other stop
         conditions (``max_epochs``/``max_time``); every experiment is expected to
         set an explicit bound. The LR schedule horizon is separate
-        (``step.total_train_steps``), so this does not affect LR defaults."""
+        (``step.train_budget_steps``), so this does not affect LR defaults."""
         max_epochs: float = math.inf
         max_time: float = math.inf
         """Time limit in seconds (clock chosen by ``max_time_kind``). Training
@@ -502,8 +475,24 @@ class TrainLoop:
                     ),
                 )
             with self.phase_timer.phase("data_load"):
-                self.dataset = config.dataset.make()
+                # Declared, not merely assigned: the config slot is a TypeVar
+                # defaulting to ``Any``, so ``make()`` returns ``Any`` and every
+                # read below -- the epoch timer, the loaders -- would be
+                # unchecked without this.
+                self.dataset: DatasetProtocol = config.dataset.make()
             _bind_dataset_step(self.dataset, self.step)
+            # One timer, two holders: only the loader knows when the data ran
+            # out, so it owns the count and checkpoints it, while a step
+            # annealing against passes reads the same object rather than a
+            # copy that could drift from it. A step that anneals against steps
+            # or seconds alone implements no such method and is left alone.
+            #
+            # Bound to a local first: narrowing ``self.step`` here would narrow
+            # it for the whole method, and every later read of ``global_step``
+            # would then be against the epoch-timer shape.
+            step = self.step
+            if isinstance(step, _SupportsBindEpochTimer):
+                step.bind_epoch_timer(self.dataset.timer_epoch)
             logger.info("TrainLoop startup: dataset ready.")
 
             # Setup checkpointing. The checkpointer is driven against this
@@ -515,7 +504,6 @@ class TrainLoop:
             logger.info("TrainLoop startup: checkpointer ready.")
 
             # Store training hyperparameters
-            self.current_epoch = 0
             self.local_step = 0
             self.max_epochs = config.max_epochs
             self.max_steps = config.max_steps
@@ -677,6 +665,16 @@ class TrainLoop:
         finally:
             self.phase_timer.log_summary()
             self._cleanup()
+
+    @property
+    def current_epoch(self) -> int:
+        """Completed passes over the training data.
+
+        The dataset's count, since only the loader knows when the data ran
+        out -- and reading it rather than keeping a copy is what stops the two
+        from drifting across a resume.
+        """
+        return self.dataset.timer_epoch.global_count
 
     def _time_limit_reached(self) -> bool:
         """Whether the ``max_time`` cap has elapsed, agreed by all ranks.
@@ -876,7 +874,11 @@ class TrainLoop:
                     )
                 return batch
             except StopIteration:
-                self.current_epoch += 1
+                # The loader ran out, which is the only signal a pass ended.
+                # Ticked on the DATASET's timer, so the count the step anneals
+                # against and the count the checkpoint holds are one number.
+                self.dataset.timer_epoch.global_count += 1
+                self.dataset.timer_epoch.local_count += 1
                 logger.info(
                     "TrainLoop step %d: train iterator exhausted; "
                     "advancing to epoch %d.",
@@ -1294,7 +1296,6 @@ class TrainLoop:
             "metrics": {
                 name: metric.state_dict() for name, metric in self.metrics.items()
             },
-            "epoch": self.current_epoch,
             "rng": get_rng_state(),
         }
         return state
@@ -1306,7 +1307,7 @@ class TrainLoop:
         for name, metric_state in state_dict["metrics"].items():
             if name in self.metrics:
                 self.metrics[name].load_state_dict(metric_state)
-        self.current_epoch = state_dict["epoch"]
+        # No epoch to restore here: it rode the dataset's own state above.
         self.local_step = 0
 
         # Restore RNG states
@@ -1345,6 +1346,19 @@ def _bind_dataset_step(dataset: DatasetProtocol, step: TrainStepProtocol) -> Non
     """
     if isinstance(dataset, _SupportsBindStep):
         dataset.bind_step(step)
+
+
+@runtime_checkable
+class _SupportsBindEpochTimer(Protocol):
+    """A step that can anneal against passes over the data.
+
+    Optional, because a step budgeted in steps or seconds has no use for the
+    count -- and one written from scratch against ``TrainStepProtocol``,
+    rather than by extending ``TrainStep``, should not have to declare a
+    method it never reads.
+    """
+
+    def bind_epoch_timer(self, timer: CheckpointableStepTimer) -> None: ...
 
 
 def _set_loader_epoch(loader: DataLoader[Any], epoch: int) -> None:

@@ -83,11 +83,16 @@ class _Step:
         self.model = torch.nn.Linear(1, 1)
 
 
-def test_it_carries_no_resumable_state() -> None:
-    # The environment holds everything a resume needs, so a checkpoint here
-    # would be a second, conflicting copy.
+def test_it_carries_only_the_pass_count() -> None:
+    # The environment holds everything else a resume needs, so a second copy
+    # here would be a conflicting one. The pass count is this object's own:
+    # it sets the cadence, so only it can say when a pass ended.
     rollouts = _rollouts()
-    assert rollouts.state_dict() == {}
+    rollouts.timer_epoch.global_count = 2
+    restored = _rollouts()
+    restored.load_state_dict(rollouts.state_dict())
+    assert set(rollouts.state_dict()) == {"timer_epoch"}
+    assert restored.timer_epoch.global_count == 2
     rollouts.load_state_dict({"anything": 1})
 
 

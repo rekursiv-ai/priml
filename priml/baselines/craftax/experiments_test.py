@@ -39,6 +39,7 @@ from priml.baselines.craftax.metric import CraftaxScore
 from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
+from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
 
@@ -89,7 +90,7 @@ def shrink(config: _AnyLoop) -> _AnyLoop:
     coefficients, and schedule stay exactly as the experiment set them, so
     what runs here is the published recipe at minimum scale.
     """
-    config.step.device = "cpu"
+    config.step.parallelism = NoParallel.Config(device="cpu")
     config.step.env.device = "cpu"
     config.step.env.num_envs = 2
     config.step.env.optimistic_reset_ratio = 1
@@ -99,7 +100,7 @@ def shrink(config: _AnyLoop) -> _AnyLoop:
     # with it. What is under test is that the RECIPE runs end to end, which a
     # smaller window exercises identically.
     config.step.env.view = (3, 3)
-    config.step.compile = False
+    config.step.compile = None
     config.step.num_minibatches = 1
     config.step.num_epochs = 1
     config.step.total_train_steps = 2

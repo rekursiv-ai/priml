@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import copy
 import math
 
@@ -10,11 +12,12 @@ import torch
 
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
+from priml.train.parallelism import NoParallel
 
 
 def _config(**overrides: object) -> CraftaxGTrXLTrainStep.Config:
     config = CraftaxGTrXLTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
     config.env.num_envs = 4
     config.rollout_steps = 8
@@ -38,7 +41,7 @@ def _config(**overrides: object) -> CraftaxGTrXLTrainStep.Config:
 
 
 def _step() -> CraftaxGTrXLTrainStep:
-    return _config().make()
+    return cast("CraftaxGTrXLTrainStep", _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
 
 
 def test_it_satisfies_the_training_step_protocol() -> None:

@@ -25,8 +25,8 @@ our own hyperparameters into their ``setup_optimizer`` would prove only that
 two copies of the same numbers agree.
 
 Examples:
-  sh karpathy_parity.py
-  sh karpathy_parity.py --steps 10 --device cuda
+  karpathy_parity.py
+  karpathy_parity.py --steps 10 --device cuda
 
 '''
 # fmt: on
@@ -52,6 +52,7 @@ import torch
 
 from priml.baselines.nanochat.experiments import exp001
 from priml.model.value_gated_attention import sdpa_attention
+from priml.train.parallelism import NoParallel
 
 
 class _StopModuleScopeError(Exception):
@@ -258,7 +259,7 @@ def build_ours(*, device: str) -> Any:
 
     """
     config = exp001().step
-    config.device = device
+    config.parallelism = NoParallel.Config(device=device)
     return config.make()
 
 
@@ -486,7 +487,7 @@ def compare_state(
         "momentum_buffer": "momentum_buffer",
     }
     src = dict(theirs.named_parameters())
-    dst = dict(ours.raw_model.named_parameters())
+    dst = dict(ours.model.named_parameters())
     problems: list[str] = []
     for our_name, their_name in mapping.items():
         mine: dict[str, Any] = {}
@@ -526,14 +527,14 @@ def main() -> int:
 
     # BEFORE the copy: it overwrites our draws with theirs, so this is the only
     # point at which our initialization still exists to be checked.
-    init_problems = compare_init(theirs, ours.raw_model, mapping)
+    init_problems = compare_init(theirs, ours.model, mapping)
     print(f"\n[0] init distributions: {len(init_problems)} differ")
     for line in init_problems:
         print(f"    {line}")
 
-    copy_weights(theirs, ours.raw_model, mapping)
+    copy_weights(theirs, ours.model, mapping)
 
-    problems = compare_all(theirs, ours.raw_model, mapping, grads=False, tag="init")
+    problems = compare_all(theirs, ours.model, mapping, grads=False, tag="init")
     problems = init_problems + problems
     print(f"[0] init weights copied: {len(problems) - len(init_problems)} differ")
     for line in problems[len(init_problems) :]:
@@ -542,13 +543,13 @@ def main() -> int:
     # reports what the stack will actually attend over rather than the pattern
     # it was asked for.
     print(
-        f"    windows ours={[b.attn.config.window for b in ours.raw_model.blocks]} "
+        f"    windows ours={[b.attn.config.window for b in ours.model.blocks]} "
         f"theirs={[w[0] for w in theirs.window_sizes]}",
     )
 
     autocast = torch.amp.autocast(device_type=args.device, dtype=torch.bfloat16)
     theirs.train()
-    ours.raw_model.train()
+    ours.model.train()
     # The recipe expresses its window as a MASK, which disqualifies every
     # flash backend and lands on the memory-efficient one -- whose backward
     # torch documents as non-deterministic, and which measurably is: repeated
@@ -580,7 +581,7 @@ def main() -> int:
         with autocast:
             their_loss = theirs(tokens, targets)
         with autocast:
-            logits = ours.raw_model(tokens)
+            logits = ours.model(tokens)
         # Their forward folds the loss in; ours returns logits, so the same
         # cross-entropy is spelled here rather than compared through a
         # different reduction.
@@ -595,7 +596,7 @@ def main() -> int:
         our_loss.backward()
         grad_problems = compare_all(
             theirs,
-            ours.raw_model,
+            ours.model,
             mapping,
             grads=True,
             tag="grad",
@@ -619,14 +620,18 @@ def main() -> int:
                 group["weight_decay"] = upstream.get_weight_decay(progress)
         their_optimizer.step()
 
-        ours.elapsed_sec = progress * ours.config.time_budget_sec
-        ours.global_step = index - 1
+        ours.elapsed_sec = progress * ours.config.train_budget_sec
+        # Written through the timer: ``global_step`` reads it and is read-only,
+        # since a caller able to assign it could move the run's position out
+        # from under the schedule. The momentum ramp is step-indexed, so the
+        # count still has to be pinned to match theirs.
+        ours.timer_step.global_count = index - 1
         ours._apply_update()  # noqa: SLF001 -- the schedules live here, and the loop that calls it also owns the clock
         theirs.zero_grad(set_to_none=True)
         state_problems = compare_state(theirs, their_optimizer, ours, mapping)
         weight_problems = compare_all(
             theirs,
-            ours.raw_model,
+            ours.model,
             mapping,
             grads=False,
             tag="weight",
@@ -739,7 +744,10 @@ def _module_from_traceback(stop: _StopModuleScopeError) -> types.ModuleType:
 
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--clone",
         type=Path,
@@ -764,3 +772,4 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

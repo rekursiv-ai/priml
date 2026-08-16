@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from configgle import Fig
 
-import torch
+from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
@@ -67,6 +67,9 @@ class CraftaxRollouts:
         if config.updates_per_epoch <= 0 or config.eval_batches <= 0:
             raise ValueError("Rollout cadence must be positive")
         self.config = config
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the cadence; ticked by the loop when it runs out."""
+
         self._step: TrainStepProtocol | None = None
 
     def bind_step(self, step: TrainStepProtocol) -> None:
@@ -82,7 +85,7 @@ class CraftaxRollouts:
 
     def train_dataloader(self) -> Iterator[dict[str, Any]]:
         """Yield one tick per update in an epoch."""
-        return iter([_TICK] * self.config.updates_per_epoch)
+        return iter([{"valid_count": 1} for _ in range(self.config.updates_per_epoch)])
 
     def eval_dataloader(self) -> Iterator[dict[str, Any]]:
         """Yield one tick per evaluation pass, carrying the live policy.
@@ -91,24 +94,16 @@ class CraftaxRollouts:
         transitions, so the network itself travels in the batch and the metric
         plays its own episodes with it.
         """
-        batch = dict(_TICK)
+        batch: dict[str, Any] = {"valid_count": 1}
         if isinstance(self._step, _SupportsPolicy):
             batch["policy"] = self._step.model
-        return iter([batch] * self.config.eval_batches)
+        return iter([dict(batch) for _ in range(self.config.eval_batches)])
 
     def state_dict(self) -> dict[str, Any]:
-        """Return nothing: the environment carries the resumable state."""
-        return {}
+        """Return the pass count; the ENVIRONMENT carries the resumable state."""
+        return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Accept a checkpoint; there is no dataset position to restore."""
-        del state_dict
-
-
-_TICK: dict[str, Any] = {"valid_count": 1, "tick": torch.zeros(1)}
-"""The empty batch handed to each step.
-
-It carries a tensor so the loop's device-movement and weighting paths see the
-shape they expect, and a unit weight so an evaluation averages over passes
-rather than over environments.
-"""
+        """Restore the pass count; there is no dataset position to restore."""
+        if "timer_epoch" in state_dict:
+            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])

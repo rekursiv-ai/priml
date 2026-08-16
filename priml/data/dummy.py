@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import torch
 
+from priml.timer import CheckpointableStepTimer
+
 
 class DummyDataset:
     """Dummy dataset returning random tensors.
@@ -38,6 +40,8 @@ class DummyDataset:
 
         """
         self.config = config
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the data; ticked by the loop when the loader runs out."""
 
         # Seed a dedicated generator so the synthetic data is reproducible and
         # independent of the global torch RNG state.
@@ -73,12 +77,13 @@ class DummyDataset:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Get dataset state for checkpointing."""
-        return {}
+        """Return the pass count, the only state this dataset carries."""
+        return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load dataset state from checkpoint."""
-        del state_dict  # DummyDataset has no state to load
+        """Restore the pass count."""
+        if "timer_epoch" in state_dict:
+            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 
     def _collate_fn(self, batch: list[tuple[Tensor, ...]]) -> dict[str, Tensor]:
         """Collate batch into dict format.

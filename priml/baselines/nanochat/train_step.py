@@ -1,25 +1,12 @@
 """Training step for a budgeted language-model run.
 
-Two things distinguish it from an ordinary supervised step, and both follow
-from training to a wall-clock BUDGET rather than to a step count.
-
-**Progress, not steps, drives every schedule.** The step measures its own
-elapsed training seconds and divides by the budget; the learning rate, the
-optimizer's momentum, and its weight decay are all functions of that fraction.
-A change that makes a step cheaper therefore buys more steps at the same
-schedule shape, which is the comparison the budget exists to make. Step count
-is not known in advance, so a step-indexed schedule could not be written.
-
-**The clock excludes warmup.** The first steps compile kernels and touch cold
-caches, so charging them to the budget would let compile time decide how much
-training a run gets. ``budget_warmup_steps`` are excluded, after which the
-clock accumulates only the time spent inside :meth:`train_step` -- never
-evaluation, never data preparation.
-
-Gradient accumulation is priml's, configured to reach a fixed TOKEN count per
-optimizer step: the token batch is the quantity a language-model recipe is
-tuned against, so it stays constant while the per-pass row count follows
-whatever fits in memory.
+Trains to a wall-clock BUDGET, not a step count, so every schedule reads
+elapsed training seconds over the budget rather than a step index -- a cheaper
+step buys more steps at the same schedule shape, which is the comparison the
+budget exists to make. The clock excludes ``budget_warmup_steps`` and
+everything outside :meth:`train_step`, so compile time cannot decide how much
+training a run gets. Gradient accumulation targets a fixed TOKEN count, the
+quantity the recipe is tuned against.
 """
 
 from __future__ import annotations
@@ -27,49 +14,69 @@ from __future__ import annotations
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Any, Self, override
+from typing import Any, Self, cast, override
 
 import math
 import time
 
-from configgle import Fig, Makeable, PartialConfig
+from configgle import Fig, Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch.nn import functional
 
 import torch
 
-from priml.baselines.nanochat.data import IGNORED_TARGET
 from priml.baselines.nanochat.model import NanoChatLM
+from priml.loss.custom_types import LossOutput
+from priml.math.schedules import Schedule, trapezoidal
 from priml.optimizers import (
     CompositeOptimizer,
     FusedAdamW,
+    HasParamGroups,
     NorMuon,
     apply_lr_scale,
 )
 from priml.optimizers.composite import Selector, excluding, matching
-from priml.runtime import get_device
 from priml.train.custom_types import TrainStepOutput
+from priml.train.train_step import TrainStep
 
 
-def trapezoid(progress: float, *, flat_fraction: float = 0.5) -> float:
-    """Hold the learning rate flat, then decay it linearly to zero.
+class TokenCrossEntropy:
+    """Per-token cross-entropy over ``[B, S, V]`` logits, unreduced."""
 
-    A budgeted run cannot warm up on a step index it does not know, and the
-    flat-then-decay shape spends most of the budget at the full rate while
-    still landing at zero -- which is what makes the final weights an average
-    over a low-noise tail rather than a snapshot mid-oscillation.
+    class Config(Fig["TokenCrossEntropy"]):
+        """Which target value marks a position that is not data."""
 
-    Args:
-      progress: Fraction of the budget spent, in ``[0, 1]``.
-      flat_fraction: Share of the budget held at the full rate.
+        ignore_index: int = -1
+        """Target marking a padded position; excluded from the loss.
 
-    Returns:
-      multiplier: Learning-rate multiplier in ``[0, 1]``.
+        The value :data:`~priml.baselines.nanochat.data.IGNORED_TARGET`
+        pads a short batch with."""
 
-    """
-    if progress < flat_fraction:
-        return 1.0
-    return max(0.0, (1.0 - progress) / (1.0 - flat_fraction))
+    def __init__(self, config: Config) -> None:
+        self.ignore_index = config.ignore_index
+
+    def __call__(self, prediction: Tensor, **batch: Any) -> LossOutput:
+        """Score every target position.
+
+        Args:
+          prediction: Logits, ``[B, S, V]``.
+          **batch: Must contain ``label``, ``[B, S]``.
+
+        Returns:
+          result: ``loss``, ``[B, S]`` cross-entropy in nats.
+
+        """
+        label: Tensor = batch["label"]
+        # Upcast: the caller's reduction runs over thousands of terms, and the
+        # reference measured this loss in fp32.
+        return {
+            "loss": functional.cross_entropy(
+                prediction.reshape(-1, prediction.shape[-1]).float(),
+                label.reshape(-1).long(),
+                ignore_index=self.ignore_index,
+                reduction="none",
+            ).reshape(label.shape),
+        }
 
 
 def matrix_parameters() -> Selector:
@@ -82,59 +89,18 @@ def matrix_parameters() -> Selector:
     return excluding(NorMuon.eligible_tensor, "embed", "lm_head")
 
 
-def width_scaled_lr(rate: float, *, channels_in: int, tuned_at: int = 768) -> float:
-    """Scale a learning rate by ``1/sqrt(width)`` away from where it was tuned.
-
-    The Adam rates in this recipe were fitted on a 768-wide model. A wider one
-    takes smaller steps per unit of loss, so carrying the same number to
-    another width silently trains a different recipe -- the rate is a property
-    of the pair, not of the optimizer.
-
-    Only the Adam rates scale. NorMuon's step is orthogonalized and therefore
-    already scale-free, which is why the reference applies this to four groups
-    and not to the matrices.
-
-    Args:
-      rate: Rate as tuned at ``tuned_at`` channels_in.
-      channels_in: This model's width.
-      tuned_at: Width the rate was fitted at.
-
-    Returns:
-      scaled: The rate this width should use.
-
-    """
-    # ``math.sqrt`` rather than ``** 0.5``: the operator types as ``Any``
-    # because a fractional power of a negative base is complex, and widths are
-    # positive by construction.
-    return rate / math.sqrt(channels_in / tuned_at)
-
-
 def nanochat_optimizer(*, compile: bool = True) -> CompositeOptimizer.Config:
     """NorMuon on the reasoning matrices, AdamW on everything else, by class.
 
-    Orthogonalizing an update suits the square-ish matrices inside the blocks
-    and not a lookup table, whose rows are independent and mostly untouched by
-    any one batch -- so the model is partitioned by name and the selectors
-    cover it exactly, which ``CompositeOptimizer`` verifies.
-
-    The AdamW side is FIVE members rather than one because the classes it
-    holds want rates two orders of magnitude apart: a token table is read once
-    per occurrence and needs a large step, an unembedding projection sees every
-    position and needs a small one, and the per-layer scalars sit between them.
-    Collapsing them to a single rate trains a different model at the same
-    nominal hyperparameters -- which is exactly the kind of difference a
-    reproduction is supposed to exclude.
-
-    The Adam rates are stated AS TUNED, at 768 channels_in; the step's
-    ``finalize`` rescales them to the model's actual width. Baking a width in
-    here would make the default silently wrong for every model that is not
-    768 wide.
+    Five AdamW members rather than one: the classes want rates two orders of
+    magnitude apart, and collapsing them trains a different model at the same
+    nominal hyperparameters. Rates are stated AS TUNED at 768 channels_in; the
+    step's ``finalize`` rescales them to the model's actual width.
 
     Args:
-      compile: Whether each member fuses its step into one compiled graph. On
-        for the recipe, whose kernels are compiled and whose arithmetic they
-        change. Off is for a caller that steps a handful of times and would
-        otherwise pay Dynamo's tracing, which is never cached, for every one.
+      compile: Whether each member fuses its step into one compiled graph. Off
+        is for a caller that steps a handful of times and would otherwise pay
+        Dynamo's tracing, which is never cached, for every one.
 
     Returns:
       config: The optimizer recipe: five AdamW members and one NorMuon.
@@ -203,49 +169,64 @@ def nanochat_optimizer(*, compile: bool = True) -> CompositeOptimizer.Config:
     return config
 
 
-class NanoChatTrainStep:
+class NanoChatTrainStep(TrainStep):
     """Model plus optimization for one budgeted language-model experiment.
 
-    Implements ``TrainStepProtocol``: the training loop calls
-    :meth:`train_step` per batch and :meth:`eval_loss` per evaluation, and
-    persists everything through :meth:`state_dict`.
+    Takes the model, optimizer, loss, and device placement from
+    :class:`~priml.train.train_step.TrainStep`. What stays here is the
+    budgeted recipe: accumulation to a fixed TOKEN count, a clock excluding
+    warmup, and momentum and weight decay annealed against that clock.
     """
 
-    class Config(Fig["NanoChatTrainStep"]):
+    class Config(Makes["NanoChatTrainStep"], TrainStep.Config, kw_only=False):
         """Model, optimization, the budget, and the schedules it drives."""
 
-        model: NanoChatLM.Config = field(default_factory=NanoChatLM.Config)
-        """Network to train.
+        # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        Narrowed to the concrete config rather than ``Makeable[nn.Module]``:
-        every experiment in this directory trains this model and reaches its
-        fields directly, so the narrow belongs here once instead of as an
-        ``isinstance`` in each factory."""
+        model: NanoChatLM.Config = field(default_factory=NanoChatLM.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        """Network to train."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
             default_factory=nanochat_optimizer,
         )
-        """Builds the optimizer from the model.
+        """Builds the optimizer from the model."""
 
-        Injected, not selected from a fixed set: a new optimizer is a config a
-        caller supplies. A split recipe routes parameters with
-        ``CompositeOptimizer.Config.select`` and still presents as one."""
+        loss: Makeable[Callable[..., LossOutput]] = field(
+            default_factory=TokenCrossEntropy.Config,
+        )
+        """Maps logits and the batch to an unreduced per-token loss."""
 
-        schedule: Makeable[Callable[[float], float]] = field(
-            default_factory=lambda: PartialConfig(trapezoid),
+        train_budget_sec: float = 300.0
+        """Training seconds the schedules anneal over.
+
+        The base's field, on this baseline's own CLOCK: warmup and everything
+        outside :meth:`train_step` are excluded. The loop's ``max_time`` stops
+        the run and is set alongside it."""
+
+        dtype_autocast: torch.dtype | None = torch.bfloat16
+        """Autocast dtype; ``None`` trains in full precision."""
+
+        compile: Makeable[Callable[[Callable[..., Any]], Callable[..., Any]]] | None = (
+            field(default_factory=lambda: PartialConfig(torch.compile))
+        )
+        """Compile the MODEL with ``torch.compile``; ``None`` runs it eagerly.
+
+        Bare, without the base's ``fullgraph=True``, which this graph does not
+        compile under. Covers the model only -- each optimizer member carries
+        its own ``compile``, since a compiled step and an eager one differ
+        numerically (measured, 2.9e-2 on one update)."""
+
+        # ---- This recipe's own. ----
+
+        schedule: Makeable[Schedule[float]] = field(
+            default_factory=lambda: PartialConfig(trapezoidal, flat=0.5),
         )
         """Maps budget progress in ``[0, 1]`` to a learning-rate multiplier.
 
-        Takes PROGRESS rather than ``(step, total_steps)`` like priml's
-        schedules: a budgeted run does not know its step count in advance, so
-        there is no horizon to divide by."""
-
-        time_budget_sec: float = 300.0
-        """Training seconds the schedules anneal over.
-
-        The loop's own ``max_time`` stops the run; this is the horizon the
-        schedules use, and the two are set together for the same reason a
-        step-based run matches ``total_train_steps`` to ``max_steps``."""
+        The reference's flat-then-decay shape, verified equal to
+        ``trapezoidal`` at every one of 100,001 sampled progresses. Read
+        instead of the base's ``learning_rate_scheduler``, since this recipe
+        drives the update itself rather than through ``TrainStep.step``."""
 
         budget_warmup_steps: int = 10
         """Leading steps excluded from the clock (compilation, cold caches)."""
@@ -253,8 +234,7 @@ class NanoChatTrainStep:
         tokens_per_optimizer_step: int = 524_288
         """Tokens per optimizer step, reached by gradient accumulation.
 
-        The quantity the recipe is tuned against, held fixed while
-        ``rows_per_pass`` follows whatever fits in memory."""
+        Held fixed while ``rows_per_pass`` follows whatever fits in memory."""
 
         rows_per_pass: int = 32
         """Rows per forward/backward pass. Reduce on out-of-memory."""
@@ -263,66 +243,31 @@ class NanoChatTrainStep:
         """Orthogonalizing member's momentum at the first step."""
 
         momentum_end: float = 0.95
-        """Momentum it reaches after ``momentum_warmup_steps``.
-
-        Ramped rather than fixed: momentum averages over past gradients, and
-        early ones come from a model changing fast enough that averaging them
-        is averaging over different models."""
+        """Momentum it reaches after ``momentum_warmup_steps``."""
 
         momentum_warmup_steps: int = 300
         """Steps over which momentum ramps. Indexed by STEP, not progress: it
         corrects a transient of early training, which is a step-count effect."""
 
         decay_to_zero: bool = True
-        """Anneal weight decay to zero over the budget.
-
-        Decay pulls toward the origin at a rate the loss no longer balances
-        once the learning rate has decayed, so holding it fixed shrinks the
-        final weights for no reason."""
-
-        gradient_clip_norm: float = math.inf
-        """Global gradient-norm cap; infinite disables clipping."""
+        """Anneal weight decay to zero over the budget."""
 
         divergence_threshold: float = 100.0
-        """Loss above which the run raises rather than continues.
-
-        A diverged language-model run does not recover, and a budgeted one
-        would otherwise spend its whole budget proving it."""
-
-        device: str = "auto"
-        """Device to train on ("auto" picks the best available)."""
-
-        dtype_autocast: torch.dtype | None = torch.bfloat16
-        """Autocast dtype; ``None`` trains in full precision."""
-
-        compile: bool = True
-        """Compile the MODEL with ``torch.compile``.
-
-        The optimizer's kernels are not covered by this and must not be: a
-        compiled step and an eager one differ numerically (measured, 2.9e-2 on
-        one update), so the reference's compiled kernel is part of the recipe
-        rather than a speed switch. Each optimizer member carries its own
-        ``compiled`` field for that reason -- turning this off to skip the
-        model's compile would otherwise silently change the arithmetic."""
+        """Loss above which the run raises rather than continues."""
 
         adam_lr_tuned_at_channels: int = 768
         """Width the Adam rates in ``optimizer`` were fitted at.
 
-        A rate is a property of the (rate, width) pair: a wider model takes
-        smaller steps per unit of loss, so carrying one number across widths
-        trains a different recipe under the same nominal hyperparameters.
-        ``finalize`` therefore rescales every Adam member by
-        ``sqrt(tuned_at / channels_in)``.
-
-        Set it to the model's own width to disable the rescale -- which is
-        what a caller supplying already-scaled rates wants."""
+        ``finalize`` rescales every Adam member by
+        ``sqrt(tuned_at / channels_in)``; set this to the model's own width to
+        disable that."""
 
         @override
         def finalize(self) -> Self:
-            if self.time_budget_sec <= 0 or not math.isfinite(self.time_budget_sec):
+            if self.train_budget_sec <= 0 or not math.isfinite(self.train_budget_sec):
                 raise ValueError(
-                    "time_budget_sec must be finite and positive; got "
-                    f"{self.time_budget_sec}.",
+                    "train_budget_sec must be finite and positive; got "
+                    f"{self.train_budget_sec}.",
                 )
             if self.budget_warmup_steps < 0:
                 raise ValueError(
@@ -398,19 +343,19 @@ class NanoChatTrainStep:
                     # fan-in, which a scalar does not have.
                     if not isinstance(rate, float) or not scales:
                         continue
-                    member.lr = width_scaled_lr(
-                        rate,
-                        channels_in=self.model.channels_in,
-                        tuned_at=self.adam_lr_tuned_at_channels,
+                    # Divide by ``sqrt(width / tuned_at)``, never multiply by
+                    # ``sqrt(tuned_at / width)``: the two round differently
+                    # (0.6 at width 512 gives ...9535 against ...9533), and
+                    # this is the spelling the rates were measured under.
+                    member.lr = rate / math.sqrt(
+                        self.model.channels_in / self.adam_lr_tuned_at_channels
                     )
             self.adam_lr_tuned_at_channels = self.model.channels_in
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        self.config = config
-        self.device = get_device(config.device)
-        self.global_step: int = 0
-        self.local_step: int = 0
+        super().__init__(config)
+        self.config: NanoChatTrainStep.Config = config
         self.accumulate_passes = config.tokens_per_optimizer_step // (
             config.rows_per_pass * config.model.max_seq_len
         )
@@ -418,22 +363,34 @@ class NanoChatTrainStep:
         # Budget-counted seconds, excluding warmup and everything outside
         # train_step. The loop reads it through NanoChatTrainLoop.
         self.elapsed_sec = 0.0
-        model: nn.Module = config.model.make()
-        self.raw_model = model.to(self.device)
-        self.model: nn.Module = (
-            torch.compile(self.raw_model) if config.compile else self.raw_model
-        )
-        self.optimizer: torch.optim.Optimizer = config.optimizer.make()(self.raw_model)
+        # Passes, not optimizer steps: the warmup exclusion is stated in
+        # passes, and accumulation makes those differ by accumulate_passes.
+        self._passes_this_process = 0
+        # ``model`` stays the UNCOMPILED module, as the base assumes: it is what
+        # the optimizer partition routed over and what the checkpoint holds.
+        # Only :attr:`forward_model` sees the wrapper, whose ``state_dict``
+        # prefixes every key with ``_orig_mod``.
+        if self._compile_fn is not None:
+            self._compiled_model = self._compile_fn(self.model)
         for group in self.optimizer.param_groups:
-            group.setdefault("initial_lr", group["lr"])
             group.setdefault("initial_weight_decay", group.get("weight_decay", 0.0))
         self.schedule = config.schedule.make()
 
     @property
-    def progress(self) -> float:
-        """Fraction of the budget spent, clamped to ``[0, 1]``."""
-        return min(1.0, self.elapsed_sec / self.config.time_budget_sec)
+    def forward_model(self) -> nn.Module:
+        """The compiled wrapper when compiling, else the module itself."""
+        if self._compiled_model is None:
+            return self.model
+        return cast("nn.Module", self._compiled_model)
 
+    @property
+    @override
+    def progress_learning_schedule(self) -> float:
+        """Fraction of the budget spent, clamped to ``[0, 1]``."""
+        spent = self.elapsed_sec / float(self.config.train_budget_sec)
+        return min(spent, 1.0)
+
+    @override
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Move a batch to the training device."""
         return {
@@ -443,6 +400,7 @@ class NanoChatTrainStep:
             for key, value in batch.items()
         }
 
+    @override
     def train_step(self, **batch: Any) -> TrainStepOutput:
         """Forward, backward, and step the optimizer once the batch is full.
 
@@ -459,26 +417,23 @@ class NanoChatTrainStep:
 
         """
         config = self.config
-        # Drain first, THEN start the clock. Device work is asynchronous, so
-        # anything still queued -- an evaluation that just ran -- would be
-        # waited for inside this step's timing and charged to the budget as
-        # training. Measured: with evaluation on the cadence, the budget bought
-        # 422 steps against 836 with it off, for identical training work.
+        # Drain first, THEN start the clock: queued device work from an
+        # evaluation would otherwise be waited for inside this step's timing
+        # and charged to the budget. Measured: 422 steps against 836.
         self._synchronize()
         started = time.perf_counter()
         self.model.train()
         with self._autocast():
-            per_token = self._per_token_loss(self.model, batch)
+            per_token = self._per_token_loss(self.forward_model, batch)
             loss = per_token.mean()
         # Each pass contributes its share, so the accumulated gradient is the
         # mean over the whole token batch rather than over the last pass.
         (loss / self.accumulate_passes).backward()
         loss_value = float(loss.detach())
         if not math.isfinite(loss_value) or loss_value > config.divergence_threshold:
-            self.raw_model.zero_grad(set_to_none=True)
-            # The gradients this count refers to were just discarded, so the
-            # count goes with them: a caller that caught this and continued
-            # would otherwise step on a short token batch.
+            self.model.zero_grad(set_to_none=True)
+            # The gradients this count refers to were just discarded, so a
+            # caller that caught this would otherwise step a short token batch.
             self._pending_passes = 0
             raise RuntimeError(
                 f"training diverged at step {self.global_step}: loss={loss_value}.",
@@ -487,16 +442,18 @@ class NanoChatTrainStep:
         self._pending_passes += 1
         metrics: dict[str, float | Tensor] = {}
         if self._pending_passes >= self.accumulate_passes:
-            metrics = self._apply_update()
+            # The step timer brackets the update, so ``global_step`` advances
+            # as it does for every other recipe; ``elapsed_sec`` below stays
+            # the clock this baseline's schedules read.
+            with self.timer_step:
+                metrics = self._apply_update()
             self._pending_passes = 0
-            self.global_step += 1
-        self.local_step += 1
+        self._passes_this_process += 1
         # Charged after the update so a step's own optimizer time counts, and
         # only past warmup so compilation does not consume the budget.
-        if self.local_step > config.budget_warmup_steps:
-            # Drain again before stopping: the backward and the optimizer are
-            # queued, not finished, so a CPU-side reading would charge this
-            # step for less than it used and the next one for the remainder.
+        if self._passes_this_process > config.budget_warmup_steps:
+            # Drain again: the backward and the optimizer are queued, not
+            # finished, so a CPU-side reading would undercharge this step.
             self._synchronize()
             self.elapsed_sec += time.perf_counter() - started
         return {
@@ -505,69 +462,65 @@ class NanoChatTrainStep:
             "metrics": metrics,
         }
 
+    @override
     def train_loss(self, **batch: Any) -> TrainStepOutput:
         """Compute the training loss without a backward pass."""
         self.model.train()
         with torch.no_grad(), self._autocast():
-            per_token = self._per_token_loss(self.model, batch)
+            per_token = self._per_token_loss(self.forward_model, batch)
         return {"loss": per_token.mean().reshape(1), "model": per_token}
 
+    @override
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
         """Score one batch, returning the per-token loss the metric consumes.
 
-        The reported ``loss`` is the mean over REAL rows only. Padding a short
-        batch leaves ignored positions contributing zero, and the loop weights
-        this mean by ``valid_count`` -- so averaging over the padded width
-        would report a loss diluted by rows that are not data.
+        The reported ``loss`` is the mean over REAL rows only: the loop weights
+        it by ``valid_count``, so averaging over the padded width would report
+        a loss diluted by rows that are not data.
         """
         self.model.eval()
         with torch.inference_mode(), self._autocast():
-            per_token = self._per_token_loss(self.model, batch)
+            per_token = self._per_token_loss(self.forward_model, batch)
         valid = int(batch.get("valid_count", per_token.shape[0]))
         return {
             "loss": per_token[:valid].mean().reshape(1),
             "model": per_token,
         }
 
+    @override
     def call_eval(self, **batch: Any) -> Tensor:
         """Return evaluation logits for one batch."""
         self.model.eval()
         with torch.inference_mode(), self._autocast():
-            logits = self.model(batch["media"])
+            logits = self.forward_model(batch["media"])
         assert isinstance(logits, Tensor)
         return logits
 
+    @override
     def on_epoch_end(self) -> None:
         """Discard a partial accumulation so gradients never cross a pass."""
         if self._pending_passes:
-            self.raw_model.zero_grad(set_to_none=True)
+            self.model.zero_grad(set_to_none=True)
             self._pending_passes = 0
 
+    @override
     def state_dict(self) -> dict[str, Any]:
-        """Return model, optimizer, and budget state.
+        """Extend the base state with this baseline's own budget clock.
 
-        The elapsed clock is checkpointed because it drives every schedule: a
-        resumed run that restarted it would re-anneal the learning rate from
-        the top and undo the decay it had already applied.
-
-        ``local_step`` travels with it because it GATES that clock: the warmup
-        exclusion is "the first N steps of the process", and a resume that
-        reset the counter would grant N more steps costing no budget, so a
-        frequently-resumed run would train unboundedly on a fixed budget.
+        The clock drives every schedule and the pass count gates it, so a
+        resume that dropped either would re-anneal from the top or grant
+        another warmup costing no budget.
         """
-        return {
-            "model": self.raw_model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "global_step": self.global_step,
-            "local_step": self.local_step,
-            "elapsed_sec": self.elapsed_sec,
-        }
+        state = super().state_dict()
+        state["elapsed_sec"] = self.elapsed_sec
+        state["local_step"] = self._passes_this_process
+        return state
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    @override
+    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        # Checked BEFORE anything is assigned: a caller that catches this must
-        # not be left holding the checkpoint's weights and clock beside its own
-        # warmup counter, which is the uncharged-training state being refused.
+        # Checked BEFORE anything is assigned, so a caller that catches this is
+        # not left holding the checkpoint's clock beside its own pass counter.
         if "local_step" not in state_dict:
             raise ValueError(
                 "this checkpoint records no 'local_step', so it predates the "
@@ -575,11 +528,9 @@ class NanoChatTrainStep:
                 "reconstructed; resuming would grant uncharged training. "
                 "Start a fresh run.",
             )
-        self.raw_model.load_state_dict(state_dict["model"])
-        self.optimizer.load_state_dict(state_dict["optimizer"])
-        self.global_step = int(state_dict["global_step"])
+        super().load_state_dict(state_dict, **kwargs)
         self.elapsed_sec = float(state_dict["elapsed_sec"])
-        self.local_step = int(state_dict["local_step"])
+        self._passes_this_process = int(state_dict["local_step"])
         self._pending_passes = 0
 
     def _apply_update(self) -> dict[str, float | Tensor]:
@@ -588,10 +539,10 @@ class NanoChatTrainStep:
         metrics: dict[str, float | Tensor] = {}
         if math.isfinite(config.gradient_clip_norm):
             metrics["grad_norm"] = nn.utils.clip_grad_norm_(
-                self.raw_model.parameters(),
+                self.model.parameters(),
                 config.gradient_clip_norm,
             ).detach()
-        progress = self.progress
+        progress = self.progress_learning_schedule
         multiplier = self.schedule(progress)
         apply_lr_scale([self.optimizer], multiplier)
         share = min(self.global_step / config.momentum_warmup_steps, 1.0)
@@ -602,7 +553,7 @@ class NanoChatTrainStep:
             if config.decay_to_zero and "weight_decay" in group:
                 group["weight_decay"] = group["initial_weight_decay"] * (1 - progress)
         self.optimizer.step()
-        self.raw_model.zero_grad(set_to_none=True)
+        self.model.zero_grad(set_to_none=True)
         # Per MEMBER, not ``param_groups[0]``: the recipe runs two optimizers
         # at rates two orders of magnitude apart, and the first group belongs
         # to whichever the composite lists first -- so a single ``lr`` reports
@@ -614,22 +565,10 @@ class NanoChatTrainStep:
         return metrics
 
     def _per_token_loss(self, model: nn.Module, batch: dict[str, Any]) -> Tensor:
-        """Return ``[B, S]`` cross-entropy in nats, one entry per target.
-
-        Rows padding a short evaluation batch carry :data:`IGNORED_TARGET`,
-        which is not a class index -- so it is named here rather than left to
-        reach the logits, where it raises rather than scoring.
-        """
-        media: Tensor = batch["media"]
-        labels: Tensor = batch["label"]
-        logits = model(media)
+        """Forward one batch and score it with the configured loss."""
+        logits = model(batch["media"])
         assert isinstance(logits, Tensor)
-        return functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]).float(),
-            labels.reshape(-1).long(),
-            ignore_index=IGNORED_TARGET,
-            reduction="none",
-        ).reshape(labels.shape)
+        return self.loss(logits, **batch)["loss"]
 
     def _synchronize(self) -> None:
         """Wait for queued device work, so the clock measures this step alone."""
@@ -651,12 +590,11 @@ class NanoChatTrainStep:
             yield
 
 
-def _learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
     """Return one rate per optimizer member, keyed by its class name.
 
-    A composite holds every member's groups in one flat list, so the position
-    of a group says nothing about which algorithm owns it. Reading the member
-    directly keeps the reported rate attributable when a recipe runs two.
+    A composite holds every member's groups in one flat list, so a group's
+    position says nothing about which algorithm owns it.
 
     Args:
       optimizer: The step's optimizer, composite or not.

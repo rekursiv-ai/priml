@@ -71,7 +71,7 @@ class Newton(Optimizer):
 
     Requires a closure to recompute the loss with a fresh graph;
     ``TrainStep.train_step`` builds and forwards one automatically (via
-    ``Learnable.step`` -> ``optimizer.step(closure)``), so Newton trains
+    ``TrainStep.step`` -> ``optimizer.step(closure)``), so Newton trains
     through the normal path with no hand-rolled loop.
 
     Memory requirements: O(n^2) where n is number of parameters.

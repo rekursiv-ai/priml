@@ -24,11 +24,11 @@ from __future__ import annotations
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Any, Self, override
+from typing import Any, Self, cast, override
 
 import math
 
-from configgle import Fig, Makeable, PartialConfig
+from configgle import Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -39,9 +39,9 @@ from priml.baselines.sudoku.model import SudokuNet
 from priml.optimizers import CompositeOptimizer, apply_lr_scale, lr_scale
 from priml.optimizers.composite import complement, excluding
 from priml.optimizers.muon import Muon
-from priml.runtime import get_device
 from priml.train.custom_types import TrainStepOutput
 from priml.train.ema import EMA, NoEMA
+from priml.train.train_step import TrainStep
 
 
 def _prefix_kwargs(batch: dict[str, Any]) -> dict[str, Any]:
@@ -84,34 +84,32 @@ def _default_optimizer() -> CompositeOptimizer.Config:
     return config
 
 
-class SudokuTrainStep:
+class SudokuTrainStep(TrainStep):
     """Model plus optimization for one puzzle experiment.
 
-    Implements ``TrainStepProtocol``: the training loop calls
-    :meth:`train_step` per batch and :meth:`eval_loss` per evaluation, and
-    persists everything through :meth:`state_dict`.
+    Takes the model, optimizer, and device placement from
+    :class:`~priml.train.train_step.TrainStep`. What stays here is the
+    ACT pool, the halt-aware loss, a name-keyed EMA evaluated under its own
+    swap, and a rate set by ``lr_scale`` rather than a curve of progress.
     """
 
-    class Config(Fig["SudokuTrainStep"]):
+    class Config(Makes["SudokuTrainStep"], TrainStep.Config, kw_only=False):
         """Model, optimization, schedule, loss, and the optional ACT pool."""
 
-        model: SudokuNet.Config = field(default_factory=SudokuNet.Config)
-        """Network to train.
+        # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        Narrowed to the concrete config rather than ``Makeable[SudokuNet]``:
-        every experiment in this directory trains this model and reaches its
-        fields directly, so the narrow belongs here once instead of as an
-        ``isinstance`` in each factory. A different network is a different
-        baseline, not a different value here."""
+        model: SudokuNet.Config = field(default_factory=SudokuNet.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        """Network to train."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
             default_factory=_default_optimizer,
         )
-        """Builds the optimizer from the model.
+        """Builds the optimizer from the model."""
 
-        Injected, not selected from a fixed set: a new optimizer is a config a
-        caller supplies. A split recipe routes parameters with
-        ``CompositeOptimizer.Config.select`` and still presents as one."""
+        dtype_autocast: torch.dtype | None = torch.bfloat16
+        """Autocast dtype; ``None`` trains in full precision."""
+
+        # ---- This recipe's own. ----
 
         total_train_steps: int = 19_500
         """Schedule horizon. Set it to the run's step budget, or the learning
@@ -128,19 +126,13 @@ class SudokuTrainStep:
 
         Every knob that only means something under ACT -- pool width, step cap,
         halt exploration -- lives on this piece, so a plain run's config does
-        not carry them.
-
-        Narrowed to the concrete config for the same reason as ``model``:
-        experiments in this directory reach its fields directly."""
+        not carry them."""
 
         label_smoothing: float = 0.0
         """Cross-entropy label smoothing."""
 
         ignore_label_id: int = -100
         """Label value excluded from the loss and from halt correctness."""
-
-        gradient_clip_norm: float = 1.0
-        """Global gradient-norm cap; infinite disables clipping."""
 
         use_ema: bool = True
         """Track an exponential moving average of the weights for evaluation."""
@@ -150,12 +142,6 @@ class SudokuTrainStep:
 
         ema_warmup_steps: int = 0
         """Steps before EMA tracking begins; live weights seed the shadow."""
-
-        device: str = "auto"
-        """Device to train on ("auto" picks the best available)."""
-
-        dtype_autocast: torch.dtype | None = torch.bfloat16
-        """Autocast dtype; ``None`` trains in full precision."""
 
         @override
         def finalize(self) -> Self:
@@ -173,46 +159,59 @@ class SudokuTrainStep:
             raise ValueError(
                 f"total_train_steps must be positive; got {config.total_train_steps}.",
             )
-        self.config = config
-        self.device = get_device(config.device)
-        self.global_step: int = 0
-        self.local_step: int = 0
-        self.model: SudokuNet = config.model.make()
-        self.model.to(self.device)
-        self.optimizer: torch.optim.Optimizer = config.optimizer.make()(self.model)
-        for group in self.optimizer.param_groups:
-            group["initial_lr"] = group["lr"]
-        self.act: ActPool | None = config.act.make() if config.act is not None else None
-        if self.act is not None:
-            self.act.to(self.device)
-        self._ema: EMA | NoEMA
-        if config.use_ema:
-            self._ema = EMA.Config(
+        # The EMA this recipe wants, built from ITS three fields, put into the
+        # base's slot before the base reads it -- so there is one averager
+        # rather than an inherited one beside a private second copy. The
+        # shadow is a name-keyed param dict, which is what ``ema_shadow``
+        # publishes and what the checkpoint carries.
+        config.ema = (
+            EMA.Config(
                 decay=config.ema_decay,
                 update_after_step=config.ema_warmup_steps,
                 warmup_seed=True,
                 track_buffers=False,
                 shadow_kind="param_dict",
-            ).make()
-        else:
-            self._ema = NoEMA()
+            )
+            if config.use_ema
+            else NoEMA.Config()
+        )
+        super().__init__(config)
+        self.config: SudokuTrainStep.Config = config
+        self.act: ActPool | None = config.act.make() if config.act is not None else None
+        if self.act is not None:
+            self.act.to(self.device)
+
+    @property
+    def net(self) -> SudokuNet:
+        """The model under its concrete type.
+
+        A read-only view rather than a narrowed ``model`` attribute: a mutable
+        attribute is invariant, so redeclaring the base's ``nn.Module`` as
+        ``SudokuNet`` is rejected outright.
+        """
+        return cast("SudokuNet", self.model)
+
+    @property
+    def _ema(self) -> EMA | NoEMA:
+        """The averager, under the name this recipe's own methods use."""
+        return cast("EMA | NoEMA", self.ema)
+
+    @property
+    @override
+    def progress_learning_schedule(self) -> float:
+        """Fraction of ``total_train_steps`` spent, in ``[0, 1]``."""
+        spent = self.global_step / self.config.total_train_steps
+        return 1.0 if spent > 1.0 else float(spent)
 
     @property
     def ema_shadow(self) -> dict[str, Tensor] | None:
         """Name-keyed EMA weights, or None when EMA is disabled."""
-        if isinstance(self._ema, NoEMA):
+        ema = self._ema
+        if isinstance(ema, NoEMA):
             return None
-        return self._ema.shadow_params
+        return ema.shadow_params
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Move a batch to the training device."""
-        return {
-            key: value.to(self.device, non_blocking=True)
-            if isinstance(value, Tensor)
-            else value
-            for key, value in batch.items()
-        }
-
+    @override
     def train_step(self, **batch: Any) -> TrainStepOutput:
         """Forward, backward, and step the optimizer.
 
@@ -231,7 +230,7 @@ class SudokuTrainStep:
         self.model.train()
         media, labels, active = self._ingest(batch)
         with self._autocast():
-            out = self.model(media, *self._carry(), **_prefix_kwargs(batch))
+            out = self.net(media, *self._carry(), **_prefix_kwargs(batch))
             loss, metrics = self._loss(
                 out.logits, labels=labels, halt=out.halt, active=active
             )
@@ -243,17 +242,25 @@ class SudokuTrainStep:
                 self.config.gradient_clip_norm,
             )
             metrics["grad_norm"] = grad_norm.detach()
-        scale = lr_scale(
-            self.global_step,
-            self.config.total_train_steps,
-            self.config.warmup_steps,
-            self.config.lr_min_ratio,
-        )
-        apply_lr_scale([self.optimizer], scale)
-        metrics["lr"] = self.optimizer.param_groups[0]["lr"]
-        self.optimizer.step()
-        self.model.zero_grad(set_to_none=True)
-        self._ema(self.model)
+        # Not the inherited ``step``: the clip above is conditional and already
+        # done, and the rate comes from ``lr_scale`` rather than a curve of
+        # progress -- its cosine runs over warmup-SHIFTED progress, and
+        # expressing that as a schedule of raw progress reorders the division
+        # and moves the last bit (measured, 2.2e-16), which the goldens freeze.
+        # The timer still brackets the update, so ``global_step`` and the
+        # budget clock advance exactly as they do for every other recipe.
+        with self.timer_step:
+            scale = lr_scale(
+                self.global_step,
+                self.config.total_train_steps,
+                self.config.warmup_steps,
+                self.config.lr_min_ratio,
+            )
+            apply_lr_scale([self.optimizer], scale)
+            metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+            self.optimizer.step()
+            self.model.zero_grad(set_to_none=True)
+            self._ema(self.model)
         if self.act is not None:
             self.act.advance(
                 out.z_slow,
@@ -263,27 +270,27 @@ class SudokuTrainStep:
                 media=media,
             )
 
-        self.global_step += 1
-        self.local_step += 1
         return {
             "loss": loss.detach().reshape(1),
             "model": out.logits[:1, :1].detach(),
             "metrics": metrics,
         }
 
+    @override
     def train_loss(self, **batch: Any) -> TrainStepOutput:
         """Compute the training loss without a backward pass."""
         self.model.train()
         media: Tensor = batch["media"]
         labels: Tensor = batch["label"]
         with torch.no_grad(), self._autocast():
-            out = self.model(media, **_prefix_kwargs(batch))
+            out = self.net(media, **_prefix_kwargs(batch))
             active = torch.ones(media.shape[0], dtype=torch.bool, device=media.device)
             loss, metrics = self._loss(
                 out.logits, labels=labels, halt=out.halt, active=active
             )
         return {"loss": loss, "model": out.logits, "metrics": metrics}
 
+    @override
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
         """Score one batch, packing predictions for the accuracy metric.
 
@@ -311,6 +318,7 @@ class SudokuTrainStep:
         )
         return {"loss": loss.detach().reshape(1), "model": packed, "metrics": metrics}
 
+    @override
     def call_eval(self, **batch: Any) -> Tensor:
         """Return evaluation logits under the EMA weights."""
         media: Tensor = batch["media"]
@@ -320,21 +328,24 @@ class SudokuTrainStep:
                 logits, _ = self._eval_rollout(media, _prefix_kwargs(batch))
         return logits
 
+    @override
     def on_epoch_end(self) -> None:
-        """Do nothing: this step holds no partial state across epochs."""
+        """Do nothing: this step accumulates nothing across a boundary."""
 
+    @override
     def state_dict(self) -> dict[str, Any]:
-        """Return model, optimizer, EMA, and progress state.
+        """Extend the base state with the EMA shadow and the ACT pool.
 
-        The ACT pool is deliberately excluded: it is in-flight state bound to
-        the specific puzzles being solved, and a resumed run continues with the
-        next batch rather than replaying interrupted ones.
+        The EMA is written as a bare name-keyed dict rather than the base's
+        nested form, because that is the shape ``ema_shadow`` publishes and
+        the shape every checkpoint of this baseline already holds.
+
+        The ACT pool is deliberately excluded from the pool's own perspective:
+        it is in-flight state bound to the specific puzzles being solved, and
+        a resumed run continues with the next batch rather than replaying
+        interrupted ones -- but its halt bookkeeping is carried.
         """
-        state: dict[str, Any] = {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "global_step": self.global_step,
-        }
+        state = super().state_dict()
         shadow = self.ema_shadow
         if shadow is not None:
             state["ema"] = dict(shadow)
@@ -342,17 +353,34 @@ class SudokuTrainStep:
             state["act"] = self.act.state_dict()
         return state
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    @override
+    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        self.model.load_state_dict(state_dict["model"])
-        self.optimizer.load_state_dict(state_dict["optimizer"])
-        self.global_step = int(state_dict["global_step"])
-        self.local_step = 0
-        if not isinstance(self._ema, NoEMA) and "ema" in state_dict:
+        # The EMA is restored here from this baseline's flat shape, so the
+        # base is told to leave it alone -- it would otherwise look for its
+        # own nested form and find a dict of parameter names.
+        ema_state = state_dict.pop("ema", None)
+        # A checkpoint predating the shared step timer records the count as a
+        # bare ``global_step``; the base reads it off ``timer_step``. Named
+        # rather than silently starting from zero, which would re-anneal the
+        # learning rate from the top of a schedule the run had half spent.
+        if "timer_step" not in state_dict and "global_step" in state_dict:
+            raise ValueError(
+                "this checkpoint records a bare 'global_step' and no "
+                "'timer_step', so it predates the shared step timer; resuming "
+                "would restart the schedule's clock at zero and re-apply decay "
+                "the run had already spent. Start a fresh run.",
+            )
+        try:
+            super().load_state_dict(state_dict, **kwargs)
+        finally:
+            if ema_state is not None:
+                state_dict["ema"] = ema_state
+        if ema_state is not None and not isinstance(self._ema, NoEMA):
             self._ema.global_step = self.global_step
             self._ema.load_state_dict(
                 {
-                    "shadow_params": dict(state_dict["ema"]),
+                    "shadow_params": dict(ema_state),
                     "global_step": self.global_step,
                 },
             )
@@ -387,9 +415,9 @@ class SudokuTrainStep:
     ) -> tuple[Tensor, Tensor]:
         """Run the model to its full depth, carrying latents when ACT is on."""
         if self.act is None:
-            out = self.model(media, **prefix_kwargs)
+            out = self.net(media, **prefix_kwargs)
             return out.logits, out.halt
-        return self.act.rollout(self.model, media=media, prefix_kwargs=prefix_kwargs)
+        return self.act.rollout(self.net, media=media, prefix_kwargs=prefix_kwargs)
 
     def _loss(
         self,

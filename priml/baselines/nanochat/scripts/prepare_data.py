@@ -1,8 +1,14 @@
-"""Download the corpus and fit the vocabulary it is read through.
+#!/bin/sh
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Download the corpus and fit the vocabulary it is read through.
 
 Run once before the first experiment. Re-running costs nothing: a shard already
-present is left alone, and a vocabulary already fitted is verified against the
-recipe recorded beside it rather than refitted.
+present is left alone, and a vocabulary whose recorded recipe matches the
+request is reused. One that cannot be matched is refitted, since these
+artifacts are derived and this is what derives them.
 
 Two stages, in order:
 
@@ -23,14 +29,15 @@ once, on a machine with a network; training reads shards and a pickled encoding,
 so a published install needs no BPE trainer.
 
 Examples:
-  uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data
-  uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data --directory /datasets/my-nanochat
+  prepare_data.py
+  prepare_data.py --directory /datasets/my-nanochat
 
 References:
     https://github.com/karpathy/autoresearch
       ``prepare.py``, commit b11d6f283f866eb7e10fb776a4b8553fef873fd5.
 
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -81,7 +88,7 @@ would mean listing every one of them here."""
 def main() -> int:
     """Prepare the corpus and vocabulary; return the process exit code."""
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),
+        description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -236,26 +243,38 @@ def _fit_vocabulary(
         "split_pattern": SPLIT_PATTERN,
         "bos_token": BOS_TOKEN,
     }
-    if pickled.is_file():
-        if not recipe_path.is_file():
-            raise ValueError(
-                f"{pickled} has no {recipe_path.name} beside it, so what it was "
-                "fitted on cannot be established; delete it to refit, or prepare "
-                "into a different --directory.",
-            )
-        recorded = json.loads(recipe_path.read_text())
-        differing = {
-            key: (recorded.get(key), value)
-            for key, value in recipe.items()
-            if recorded.get(key) != value
-        }
-        if differing:
-            raise ValueError(
-                f"{pickled} was fitted with {differing} (recorded, requested); "
-                "delete it to refit, or prepare into a different --directory.",
-            )
+    # A vocabulary is REUSED only when it can prove it matches this request:
+    # one fitted on different text is a different tokenizer at the same size,
+    # so every token id would mean something else. Anything unprovable is
+    # refitted rather than refused -- the artifacts are derived, this function
+    # is how they are derived, and stopping to make a caller delete a file by
+    # hand serves nobody. Only what THIS function writes is replaced; the
+    # downloaded shards beside it are never touched.
+    recorded = (
+        json.loads(recipe_path.read_text())
+        if pickled.is_file() and recipe_path.is_file()
+        else None
+    )
+    # Compared on the REQUESTED keys only: the written recipe also carries the
+    # byte table's fingerprint, which no request states.
+    if (
+        recorded is not None
+        and not _differing(recorded, recipe)
+        and (out / "token_bytes.npy").is_file()
+    ):
         logger.info("nanochat vocabulary already fitted at %s", out)
         return
+    if pickled.is_file():
+        logger.info(
+            "refitting the nanochat vocabulary at %s: %s",
+            out,
+            "no recipe recorded beside it"
+            if recorded is None
+            else f"recipe differs {_differing(recorded, recipe)}",
+        )
+        for stale in out.iterdir():
+            if stale.is_file():
+                stale.unlink()
 
     logger.info("fitting a %d-token vocabulary", vocab_size)
     trainer = rustbpe.Tokenizer()
@@ -296,6 +315,18 @@ def _fit_vocabulary(
     recipe_staging.write_text(json.dumps(recipe, sort_keys=True))
     recipe_staging.replace(recipe_path)
     logger.info("nanochat vocabulary fitted: %d tokens", encoding.n_vocab)
+
+
+def _differing(
+    recorded: dict[str, Any],
+    requested: dict[str, Any],
+) -> dict[str, tuple[Any, Any]]:
+    """Requested keys whose recorded value differs, as ``(recorded, wanted)``."""
+    return {
+        key: (recorded.get(key), value)
+        for key, value in requested.items()
+        if recorded.get(key) != value
+    }
 
 
 def _token_bytes(encoding: tiktoken.Encoding) -> np.ndarray:
@@ -406,3 +437,4 @@ which bound how much the vocabulary spends on rare literals."""
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

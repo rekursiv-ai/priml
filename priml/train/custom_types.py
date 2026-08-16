@@ -10,6 +10,7 @@ from typing import (
     NotRequired,
     Protocol,
     TypedDict,
+    overload,
     runtime_checkable,
 )
 
@@ -28,8 +29,6 @@ __all__ = [
     "CheckpointingProtocol",
     "CudaEventProtocol",
     "EMAProtocol",
-    "LearnableProtocol",
-    "LearningRateSchedulerProtocol",
     "LossFn",
     "ModelOutput",
     "ModelQuantizationProtocol",
@@ -91,11 +90,31 @@ if TYPE_CHECKING:
 class OptimizerProtocol(CheckpointableProtocol, Protocol):
     """Protocol for optimizers."""
 
+    param_groups: list[dict[str, Any]]
+    """Parameter groups, each carrying its own ``lr``.
+
+    Part of the protocol because the learning rate is set by WRITING here: a
+    schedule returns a multiplier and the caller scales each group's
+    ``initial_lr`` by it. Every torch optimizer exposes this, which is what
+    lets one schedule drive all of them with no adapter."""
+
+    @overload
+    def step(self, closure: None = None) -> None: ...
+
+    @overload
+    def step(self, closure: Callable[[], Tensor | float]) -> Tensor | float: ...
+
     def step(
         self,
         closure: Callable[[], Tensor | float] | None = None,
     ) -> Tensor | float | None:
         """Perform single optimization step.
+
+        Overloaded to mirror ``torch.optim.Optimizer.step`` exactly. A single
+        signature here reads as incompatible with torch's overloaded one, so
+        every torch optimizer failed this protocol structurally while
+        satisfying it at runtime -- and each site that hit that wrote the same
+        suppression rather than the protocol being widened once.
 
         Args:
           closure: Loss-recomputing closure. The training loop forwards it
@@ -117,19 +136,6 @@ class OptimizerProtocol(CheckpointableProtocol, Protocol):
           set_to_none: Set gradients to None instead of zero.
 
         """
-        ...
-
-
-@runtime_checkable
-class LearningRateSchedulerProtocol(CheckpointableProtocol, Protocol):
-    """Protocol for LR schedulers."""
-
-    def step(self) -> None:
-        """Update learning rate."""
-        ...
-
-    def get_last_lr(self) -> list[float]:
-        """Get last computed learning rate."""
         ...
 
 
@@ -196,34 +202,6 @@ class EMAProtocol(CheckpointableProtocol, Protocol):
           context: Context manager whose body sees shadow weights in ``model``.
 
         """
-        ...
-
-
-@runtime_checkable
-class LearnableProtocol(CheckpointableProtocol, Protocol):
-    """Protocol for learnable models (model + optimizer + scheduler + optional EMA).
-
-    Provides training forward, evaluation forward, and optimization steps.
-    """
-
-    model: nn.Module
-    global_step: int
-    local_step: int
-    last_grad_norm: Tensor | None
-    ema: EMAProtocol
-    optimizer: OptimizerProtocol
-    learning_rate_scheduler: LearningRateSchedulerProtocol
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Training forward pass (sets train mode, applies autocast, optionally compiles)."""
-        ...
-
-    def call_eval(self, *args: Any, **kwargs: Any) -> Any:
-        """Evaluation forward pass (uses EMA if available, applies inference_mode and autocast)."""
-        ...
-
-    def step(self) -> None:
-        """Optimization step (clip grads, optimizer.step, scheduler.step, EMA)."""
         ...
 
 
@@ -444,8 +422,15 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
     Defines interface for models with training logic.
     """
 
-    global_step: int
-    local_step: int
+    @property
+    def global_step(self) -> int:
+        """Optimizer updates across the whole run, resumes included.
+
+        Read-only: an implementation derives it from whatever it counts, and a
+        caller that could assign it would be able to move the run's position
+        out from under the schedule and the stop condition alike.
+        """
+        ...
 
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Preprocess batch (move tensors to device, etc.)."""

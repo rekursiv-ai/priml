@@ -35,6 +35,7 @@ import torch
 
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.train.parallelism import NoParallel
 
 
 _GOLDEN_DIR = Path(__file__).parent.resolve() / "goldens"
@@ -115,7 +116,7 @@ class _PPOTrace(nn.Module):
 def _build_trace() -> nn.Module:
     """Build the pinned training configuration."""
     config = CraftaxTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
     config.env.num_envs = 4
     config.env.seed = 7
@@ -141,7 +142,7 @@ def _build_trace() -> nn.Module:
     config.model.num_layers = 1
     # Pinned, not defaulted: compiling changes which random numbers are drawn,
     # so a golden minted uncompiled cannot be replayed compiled.
-    config.compile = False
+    config.compile = None
     config.seed = 7
     return _PPOTrace(config.make())
 

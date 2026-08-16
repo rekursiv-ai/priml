@@ -166,9 +166,17 @@ the assert belongs once, on the class.
 
 `CompositeOptimizer` is the adapter even for one member: the slot is called with
 the MODEL, so something must route parameters to optimizers -- a bare
-`PartialConfig` raises `'ResNet' object is not iterable`. `max_steps` and
-`total_train_steps` move together because a schedule whose horizon differs from
-the budget anneals past the end of training or short of it.
+`PartialConfig` raises `'ResNet' object is not iterable`. `max_steps` and the
+step's schedule horizon move together because a schedule whose horizon differs
+from the budget anneals past the end of training or short of it.
+
+A schedule reads `step.progress_learning_schedule` -- one fraction in `[0, 1]`
+-- and never learns WHAT was counted to produce it. That is what lets one curve
+serve a run bounded by steps (`train_budget_steps`), by seconds
+(`train_budget_sec`), or by passes over the data (`train_budget_epochs`); a
+learnable anneals against whichever binds first. An epoch budget additionally
+needs the loader's own count, which the loop hands over via `bind_epoch_timer`
+-- only the loader knows when the data ran out.
 
 Bind a local only to shorten a long path (`adamw`, `topk`), never to rename a
 short one. Set only what differs from the default: `cfg.x = <default>` is noise
@@ -401,7 +409,8 @@ words. Use these; do not invent a synonym.
 | `device` / `dtype` / `dtype_autocast` | Placement and precision. |
 | `base_dir` / `working_dir` | Resource root and the logical path resolved beneath it. |
 | `study_name` / `experiment_name` | Run identity; they build `working_dir`. |
-| `max_steps` / `total_train_steps` / `num_steps_eval` | Budget, schedule horizon, eval period. |
+| `max_steps` / `num_steps_eval` | Loop stop condition, eval period. |
+| `train_budget_steps` / `train_budget_sec` / `train_budget_epochs` | Schedule horizons: the axis progress is measured against. |
 | `seed` | `None` unless the experiment is about seed variance. |
 | `shard` | Tensor-parallel style for a block. |
 

@@ -17,9 +17,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, override
+from typing import TYPE_CHECKING, Any, Self, cast, override
 
-from configgle import Fig
+from configgle import Makes, PartialConfig
 from torch import Tensor
 
 import torch
@@ -30,8 +30,9 @@ from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.rnn import ActorCriticRNN
 from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
 from priml.math.advantage import explained_variance, generalized_advantage
-from priml.runtime import get_device
+from priml.math.schedules import linear
 from priml.train.custom_types import TrainStepOutput
+from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
@@ -132,14 +133,18 @@ class RecurrentRollout:
             yield minibatch
 
 
-class CraftaxRNNTrainStep:
+class CraftaxRNNTrainStep(TrainStep):
     """Model, environment, and optimizer for one recurrent PPO experiment."""
 
-    class Config(Fig["CraftaxRNNTrainStep"]):
+    class Config(Makes["CraftaxRNNTrainStep"], TrainStep.Config, kw_only=False):
         """Model, environment, and the PPO hyperparameters."""
 
-        model: ActorCriticRNN.Config = field(default_factory=ActorCriticRNN.Config)
+        # ---- Inherited slots, re-defaulted for this recipe. ----
+
+        model: ActorCriticRNN.Config = field(default_factory=ActorCriticRNN.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
         """Recurrent policy and value network."""
+
+        # ---- This recipe's own. ----
 
         env: CraftaxEnv.Config = field(default_factory=CraftaxEnv.Config)
         """Environment the rollout is collected from."""
@@ -180,11 +185,11 @@ class CraftaxRNNTrainStep:
         max_grad_norm: float = 1.0
         """Global gradient-norm clip."""
 
-        device: str = "auto"
-        """Device to train on; ``"auto"`` picks the best available."""
+        compile_recurrent_steps: bool = False
+        """Compile the recurrent entry points with ``torch.compile``.
 
-        compile: bool = False
-        """Compile the recurrent entry points with ``torch.compile``."""
+        Distinct from the base's ``compile``, which wraps ``forward``: a
+        rollout never calls ``forward``."""
 
         seed: int = 0
         """Seed for action sampling and minibatch shuffling."""
@@ -220,28 +225,31 @@ class CraftaxRNNTrainStep:
         if config.clip_epsilon <= 0.0:
             raise ValueError("clip_epsilon must be positive")
 
-        self.config = config
-        self.device = get_device(config.device)
-        self.global_step: int = 0
-        self.local_step: int = 0
-        self.env = config.env.make()
+        # The recipe's own optimizer, into the base's slot before the
+        # base reads it, so there is one optimizer rather than an
+        # inherited AdamW discarded for this one.
+        config.optimizer = PartialConfig(
+            torch.optim.Adam, lr=config.learning_rate, eps=1e-5
+        )
+        # Weight initialization draws from the global stream, so the seed has
+        # to reach it for a run to be reproducible from its config alone. The
+        # BASE's build is what gets bracketed: rebuilding after it would leave
+        # the optimizer holding the parameters of a discarded model.
         saved_rng = torch.get_rng_state()
         torch.manual_seed(config.seed)
         try:
-            model = config.model.make()
-            model.to(self.device)
+            super().__init__(config)
         finally:
             torch.set_rng_state(saved_rng)
-        self.model = model
+        self.config: CraftaxRNNTrainStep.Config = config
+        self.env = config.env.make()
+        model = self.model
         # The compiled handles wrap the two RECURRENT entry points, not
         # ``forward``: a rollout never calls ``forward``, so compiling the
         # module would leave the hot path interpreted.
-        self._step = _compiled(model.step, enabled=config.compile)
-        self._sequence = _compiled(model.sequence, enabled=config.compile)
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=config.learning_rate,
-            eps=1e-5,
+        self._step = _compiled(model.step, enabled=config.compile_recurrent_steps)
+        self._sequence = _compiled(
+            model.sequence, enabled=config.compile_recurrent_steps
         )
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(config.seed)
@@ -268,12 +276,22 @@ class CraftaxRNNTrainStep:
     @property
     def steps_per_update(self) -> int:
         """Environment interactions consumed by one update."""
-        return int(self._observation.shape[0]) * self.config.rollout_steps
+        workers = int(self._observation.shape[0])
+        return workers * int(self.config.rollout_steps)
 
+    @property
+    @override
+    def progress_learning_schedule(self) -> float:
+        """Fraction of ``total_train_steps`` spent, in ``[0, 1]``."""
+        spent = self.global_step / self.config.total_train_steps
+        return 1.0 if spent > 1.0 else float(spent)
+
+    @override
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Pass the loop's batch through untouched."""
+        """Pass the loop's batch through: the rollout is collected here."""
         return batch
 
+    @override
     def train_step(self, **batch: Any) -> TrainStepOutput:
         """Collect a rollout and optimize on it.
 
@@ -288,10 +306,12 @@ class CraftaxRNNTrainStep:
         del batch
         rollout = self.collect()
         self._set_learning_rate()
-        metrics = self._optimize(rollout)
+        # The timer brackets the update, so ``global_step`` and the budget
+        # clock advance exactly as they do for every other recipe -- one
+        # tick per PPO update, however many optimizer calls it makes.
+        with self.timer_step:
+            metrics = self._optimize(rollout)
 
-        self.global_step += 1
-        self.local_step += 1
         metrics.update(self._episode_metrics())
         metrics["explained_variance"] = float(
             explained_variance(rollout.value.flatten(), rollout.target.flatten()),
@@ -375,6 +395,7 @@ class CraftaxRNNTrainStep:
             target=target,
         )
 
+    @override
     def train_loss(self, **batch: Any) -> TrainStepOutput:
         """Score a rollout without optimizing.
 
@@ -391,6 +412,7 @@ class CraftaxRNNTrainStep:
         loss, logits, _ = self._loss(minibatch)
         return {"loss": loss.detach(), "model": logits.detach()}
 
+    @override
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
         """Score a rollout in evaluation mode.
 
@@ -407,6 +429,7 @@ class CraftaxRNNTrainStep:
         finally:
             self.model.train()
 
+    @override
     def call_eval(self, **batch: Any) -> Tensor:
         """Return action logits for a batch of observations.
 
@@ -423,19 +446,18 @@ class CraftaxRNNTrainStep:
                 logits, _ = self.model(batch["observation"])
         finally:
             self.model.train()
-        return logits
+        return cast("Tensor", logits)
 
+    @override
     def on_epoch_end(self) -> None:
         """Nothing to flush: every update completes within one step."""
 
+    @override
     def state_dict(self) -> dict[str, Any]:
         """Return model, optimizer, environment, state, and counters."""
-        return {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
+        return super().state_dict() | {
             "env": self.env.state_dict(),
             "generator": self._generator.get_state(),
-            "global_step": self.global_step,
             "observation": self._observation,
             "recurrent_state": self._state,
             "previous_done": self._previous_done,
@@ -443,14 +465,12 @@ class CraftaxRNNTrainStep:
             "episode_length": self._episode_length,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    @override
+    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
         """Restore everything :meth:`state_dict` saved."""
-        self.model.load_state_dict(state_dict["model"])
-        self.optimizer.load_state_dict(state_dict["optimizer"])
+        super().load_state_dict(state_dict, **kwargs)
         self.env.load_state_dict(state_dict["env"])
         self._generator.set_state(state_dict["generator"])
-        self.global_step = int(state_dict["global_step"])
-        self.local_step = 0
         self._observation = _tensor(state_dict["observation"])
         self._state = _tensor(state_dict["recurrent_state"])
         self._previous_done = _tensor(state_dict["previous_done"])
@@ -516,9 +536,9 @@ class CraftaxRNNTrainStep:
         """Anneal the rate linearly across the configured horizon."""
         if not self.config.anneal_learning_rate:
             return
-        remaining = 1.0 - self.global_step / self.config.total_train_steps
+        multiplier = linear(self.progress_learning_schedule)
         for group in self.optimizer.param_groups:
-            group["lr"] = self.config.learning_rate * max(remaining, 0.0)
+            group["lr"] = self.config.learning_rate * multiplier
 
     def _record_episodes(self, reward: Tensor, done: Tensor) -> None:
         """Accumulate per-worker returns and bank the finished ones."""
