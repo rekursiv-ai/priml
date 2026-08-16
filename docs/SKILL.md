@@ -357,6 +357,30 @@ redundant, since the list's length IS the count. (A count is right when the slot
 holds one template to broadcast -- `blocks_per_stage` beside a single `block`.)
 Declare what a slot must DO, not what it must BE.
 
+### A field the parent only forwards belongs to the child
+
+```python
+# Bad -- KimiK2.Config redeclares what Router.Config already owns, then
+# copies each value down when it builds the router.
+scoring_func: Literal["softmax", "sigmoid"] = "sigmoid"
+routed_scaling_factor: float = 1.0
+n_group: int = 1
+
+# Good -- the slot carries them, and the router owns its own vocabulary.
+router: Makeable[TokenRouter] = field(default_factory=Router.Config)
+```
+
+Not merely duplication. A `finalize` that REBUILDS the child from these fields
+discards whatever a caller set on the child, so the idiomatic edit --
+`cfg.block[1].ffn.router.routed_scaling_factor = 2.5` -- silently does nothing
+and the `pprint` shows the parent's value. The parent has taken ownership of a
+field it does not implement.
+
+The test is mechanical: if the only use of a field is passing it to a child's
+constructor, delete it and set the child. Porting a foreign schema (an HF
+`config.json`) is not an exception -- `from_hf` parses the foreign names into
+the CHILD configs; it does not mirror them onto the parent.
+
 Constants that are facts, not tunables, take `Final`:
 `NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset; a batch size
 is a tunable and belongs on the config, as `check-globals` enforces.
@@ -417,6 +441,13 @@ words. Use these; do not invent a synonym.
 Batches are keyed `media` and `label`; a train step returns `loss` and `model`
 (`TrainStepOutput`). A name ending `_fn` is a callable slot; `_dir` is a path;
 `num_*` is a count; `*_kind` or `*_algorithm` is the enum smell above.
+
+Read the table in BOTH directions. Picking a name is the easy one; the one that
+gets missed is checking an existing field against it, because a rename reads as
+a normal field until compared. `rms_norm_eps` is `eps` with an owner prefix;
+`head_dim` is `channels_head`; `num_key_value_heads` is a `heads` count. A
+qualified spelling of a blessed noun is the previous rule's symptom -- the
+prefix names the CHILD the field belongs to.
 
 ## 5. Writing a module
 
