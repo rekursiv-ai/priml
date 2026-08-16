@@ -34,11 +34,8 @@ import torch
 def _rows(envs: int, device: torch.device) -> Tensor:
     """Return ``arange(envs)``, built once per batch size and device.
 
-    Every gather and scatter needs this to address the environment axis, and
-    the game step performs a few hundred of them on four-element tensors --
-    where allocating the index costs more than the indexing does. Cached
-    because it is a constant: the same batch size always wants the same
-    tensor, and callers only ever read it.
+    Cached because a game step does a few hundred of these on four-element
+    tensors, where allocating the index costs more than the indexing.
     """
     return torch.arange(envs, device=device)
 
@@ -169,11 +166,9 @@ def local_view(
 def _clamped(positions: Tensor, height: int, width: int) -> tuple[Tensor, Tensor]:
     """Return usable row and column indices: negatives wrap, overflow clamps.
 
-    Written as arithmetic rather than ``torch.where``: a comparison plus a
-    select is three kernel launches per axis, and this runs a few hundred
-    times per game step on tensors of four elements, where launch overhead is
-    the entire cost. ``+ height * (rows < 0)`` adds the wrap exactly where the
-    select would have chosen it.
+    Arithmetic rather than ``torch.where``: a compare-plus-select is three
+    kernel launches per axis, and launch overhead is the entire cost on the
+    four-element tensors this runs on a few hundred times per game step.
     """
     rows = positions[..., 0].long()
     columns = positions[..., 1].long()

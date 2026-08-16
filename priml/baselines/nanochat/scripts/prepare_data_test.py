@@ -117,19 +117,40 @@ def test_the_validation_shard_is_excluded_from_the_fit(corpus: Path) -> None:
     assert "shard_00001.parquet" not in recipe["shards"]
 
 
-def test_a_vocabulary_fitted_under_other_flags_is_refused(corpus: Path) -> None:
-    """Returning it would hand back a tokenizer that is not the one asked for."""
+def test_a_vocabulary_fitted_under_other_flags_is_refitted(corpus: Path) -> None:
+    """Reusing it would hand back a tokenizer that is not the one asked for.
+
+    Refitted rather than refused: these artifacts are derived and this
+    function is how they are derived, so a caller asking for a different
+    vocabulary gets one instead of an instruction to delete a file.
+    """
     _prepare(corpus)
-    with pytest.raises(ValueError, match="train_chars"):
-        _prepare(corpus, tokenizer_train_chars=2_000)
+    before = json.loads(
+        (corpus / "tokenizer" / "tokenizer_recipe.json").read_text(),
+    )
+    _prepare(corpus, tokenizer_train_chars=2_000)
+    after = json.loads((corpus / "tokenizer" / "tokenizer_recipe.json").read_text())
+    assert before["train_chars"] != after["train_chars"]
+    assert after["train_chars"] == 2_000
 
 
-def test_a_vocabulary_without_its_recipe_is_refused(corpus: Path) -> None:
-    """What it was fitted on is exactly what cannot then be established."""
+def test_a_vocabulary_without_its_recipe_is_refitted(corpus: Path) -> None:
+    """What it was fitted on cannot be established, so it is fitted again."""
     _prepare(corpus)
     (corpus / "tokenizer" / "tokenizer_recipe.json").unlink()
-    with pytest.raises(ValueError, match="fitted on cannot be established"):
-        _prepare(corpus)
+    _prepare(corpus)
+    assert (corpus / "tokenizer" / "tokenizer_recipe.json").is_file()
+    assert (corpus / "tokenizer" / "token_bytes.npy").is_file()
+
+
+def test_refitting_leaves_the_downloaded_shards_alone(corpus: Path) -> None:
+    """Only the tokenizer directory is rewritten; the corpus is expensive."""
+    _prepare(corpus)
+    (corpus / "tokenizer" / "tokenizer_recipe.json").unlink()
+    shards = sorted(corpus.glob("shard_*.parquet"))
+    before = [path.read_bytes() for path in shards]
+    _prepare(corpus)
+    assert [path.read_bytes() for path in shards] == before
 
 
 def test_an_intact_vocabulary_at_the_same_flags_is_reused(corpus: Path) -> None:

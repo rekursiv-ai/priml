@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import copy
 import math
+
+from configgle import PartialConfig
 
 import pytest
 import torch
@@ -11,11 +15,12 @@ import torch
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.testing.fixtures import torch_compiler_isolation
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
+from priml.train.parallelism import NoParallel
 
 
 def _config(**overrides: object) -> CraftaxTrainStep.Config:
     config = CraftaxTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
     config.env.num_envs = 4
     config.rollout_steps = 4
@@ -34,7 +39,7 @@ def _config(**overrides: object) -> CraftaxTrainStep.Config:
 
 
 def _step() -> CraftaxTrainStep:
-    return _config().make()
+    return cast("CraftaxTrainStep", _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
 
 
 def test_it_satisfies_the_training_step_protocol() -> None:
@@ -214,8 +219,9 @@ def test_compiling_agrees_with_eager_to_float32_rounding() -> None:
     """
 
     def loss(*, compiled: bool) -> float:
+        setting = PartialConfig(torch.compile, fullgraph=True) if compiled else None
         with torch_compiler_isolation():
-            return float(_config(seed=5, compile=compiled).make().train_step()["loss"])
+            return float(_config(seed=5, compile=setting).make().train_step()["loss"])
 
     eager = loss(compiled=False)
     assert loss(compiled=True) == pytest.approx(eager, abs=1e-6)

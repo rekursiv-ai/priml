@@ -38,6 +38,7 @@ from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.value_gated_attention import ValueGatedAttention
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
+from priml.train.parallelism import NoParallel
 
 
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
@@ -97,7 +98,7 @@ def test_exp001_changes_only_the_kernel() -> None:
     assert fork.step.model.value_embedding_stride == (
         base.step.model.value_embedding_stride
     )
-    assert fork.step.time_budget_sec == base.step.time_budget_sec
+    assert fork.step.train_budget_sec == base.step.train_budget_sec
     assert fork.seed == base.seed
 
 
@@ -118,7 +119,7 @@ def test_exp002_removes_only_the_value_embeddings() -> None:
     assert base.step.model.value_embedding_stride == 2
     assert fork.step.model.value_embedding_stride == 0
     assert _pattern(fork) == _pattern(base)
-    assert fork.step.time_budget_sec == base.step.time_budget_sec
+    assert fork.step.train_budget_sec == base.step.train_budget_sec
     assert fork.step.model.channels_in == base.step.model.channels_in
 
 
@@ -129,7 +130,7 @@ def test_exp003_removes_the_window_too() -> None:
     assert fork.step.model.value_embedding_stride == (
         base.step.model.value_embedding_stride
     )
-    assert fork.step.time_budget_sec == base.step.time_budget_sec
+    assert fork.step.train_budget_sec == base.step.train_budget_sec
 
 
 def test_the_value_embedding_stride_follows_a_changed_depth() -> None:
@@ -151,7 +152,7 @@ def test_the_budget_and_the_schedule_horizon_agree() -> None:
     """
     for name, factory in LADDER:
         config = factory()
-        assert config.max_time == config.step.time_budget_sec, name
+        assert config.max_time == config.step.train_budget_sec, name
         assert config.max_time_kind == "train", name
 
 
@@ -206,9 +207,9 @@ def test_every_experiments_eval_geometry_is_constructible(
     attention = model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.channels_head = 32
-    config.step.device = "cpu"
+    config.step.parallelism = NoParallel.Config(device="cpu")
     config.step.dtype_autocast = None
-    config.step.compile = False
+    config.step.compile = None
     # The optimizers are constructed and never stepped -- this asks about eval
     # batching. Leaving them compiled charges the test ``torch.compile``'s own
     # import of inductor, 1.4 of its 1.5 seconds, for a kernel it never issues.
@@ -322,7 +323,7 @@ def test_the_score_is_bits_per_byte() -> None:
 def test_smoke_is_small_on_every_costly_axis() -> None:
     """It answers "does this run", so anything not bearing on that is cut."""
     smoke, base = experiments.exp_smoke(), experiments.exp000()
-    assert smoke.step.time_budget_sec < base.step.time_budget_sec
+    assert smoke.step.train_budget_sec < base.step.train_budget_sec
     assert smoke.step.model.channels_in < base.step.model.channels_in
     assert smoke.step.model.num_layers < base.step.model.num_layers
     assert smoke.step.model.max_seq_len < base.step.model.max_seq_len

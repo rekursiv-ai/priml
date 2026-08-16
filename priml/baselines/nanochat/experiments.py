@@ -183,8 +183,8 @@ def exp000() -> NanoChatLoop.Config:
 
     # The budget the schedules anneal over and the budget the loop stops on:
     # equal, or the learning rate lands short of zero or decays past the end.
-    cfg.step.time_budget_sec = 300.0
-    cfg.max_time = cfg.step.time_budget_sec
+    cfg.step.train_budget_sec = 300.0
+    cfg.max_time = cfg.step.train_budget_sec
     cfg.max_time_kind = "train"
 
     cfg.metrics["val"] = BitsPerByte.Config()
@@ -327,12 +327,12 @@ def exp_smoke() -> NanoChatLoop.Config:
     attention = cfg.step.model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     attention.channels_head = 16
-    cfg.step.compile = False
+    cfg.step.compile = None
     cfg.step.rows_per_pass = 2
     cfg.step.tokens_per_optimizer_step = 32
     cfg.step.budget_warmup_steps = 0
-    cfg.step.time_budget_sec = 10.0
-    cfg.max_time = cfg.step.time_budget_sec
+    cfg.step.train_budget_sec = 10.0
+    cfg.max_time = cfg.step.train_budget_sec
     cfg.max_steps = 4
     cfg.num_steps_eval = 2
     # Both, together: the scored token count must be a whole number of eval

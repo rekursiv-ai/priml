@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import copy
 import math
 
@@ -10,11 +12,12 @@ import torch
 
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
+from priml.train.parallelism import NoParallel
 
 
 def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
     config = CraftaxRNNTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
     config.env.num_envs = 4
     config.env.optimistic_reset_ratio = 1
@@ -34,7 +37,7 @@ def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
 
 
 def _step() -> CraftaxRNNTrainStep:
-    return _config().make()
+    return cast("CraftaxRNNTrainStep", _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
 
 
 def _metrics(result: TrainStepOutput) -> dict[str, float | torch.Tensor]:

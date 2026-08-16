@@ -521,24 +521,16 @@ def _module_device(module: nn.Module) -> str:
 def _sdpa_fingerprint(device: str) -> dict[str, bool | str]:
     """Capture the attention-kernel fingerprint for the golden's device.
 
-    A CPU golden computes entirely on CPU; ``F.scaled_dot_product_attention``
-    dispatches to the device-independent CPU math kernel, so the result does
-    not depend on whether the host has a GPU. The CPU fingerprint is therefore
-    just ``{"device": "cpu"}`` -- it never consults ``torch.cuda``, so a CPU
-    golden is portable to every host regardless of GPU presence, absence, or a
-    wedged driver.
-
-    A CUDA golden's result does depend on which attention backend
-    ``enable_determinism`` selected (flash vs mem-efficient vs math sum in
-    different reduction orders), so its fingerprint records those flags and a
-    replay under a different backend is caught.
+    CPU records only its name and never consults ``torch.cuda``, so a CPU
+    golden replays on a host with no GPU or a wedged driver. CUDA records the
+    backend flags, since flash, mem-efficient, and math reduce in different
+    orders.
 
     Args:
-      device: The golden's compute device type (``"cpu"`` or ``"cuda"``).
+      device: The golden's compute device type.
 
     Returns:
-      fingerprint: ``{"device": "cpu"}`` for CPU; the CUDA backend flags for
-        CUDA.
+      fingerprint: The device name, plus the CUDA backend flags on CUDA.
 
     """
     if device != "cuda":
@@ -779,31 +771,17 @@ def _write_golden(
 
 
 def _assert_portable_output_dtype(output: Tensor) -> None:
-    """Refuse a golden whose comparand is a float the harness computes in.
+    """Refuse a golden comparand that skipped the round back to float32.
 
-    ``host_agnostic_numerics`` computes in float64 and rounds ONCE to float32.
-    The rounding is the mechanism, not a detail: a float64 kernel is itself an
-    approximation -- measured on torch 2.11, ``sigmoid`` misses the correctly
-    rounded float64 answer on 1316 of 4096 inputs, ``rsqrt`` on 1133, because
-    each vendor's libm picks a different polynomial. Rounding to float32
-    discards ~29 bits, which is far more than that error, so every host lands
-    on the same float32 bit (measured: 0 of 4096 wrong, every op).
-
-    A runner that returns the scratch skips that rounding, so the stored value
-    carries the vendor's own approximation error and the golden only replays on
-    the host that minted it -- as one did, off by 1 ULP between an Intel laptop
-    and an AMD server.
-
-    Every dtype :func:`_is_narrow_float` covers is refused, not float64 alone:
-    bfloat16 and float16 are compute dtypes the harness upcasts too, so
-    returning one skips the same rounding. Integers carry no rounding at all
-    and pass.
+    bfloat16 and float16 are refused too, not float64 alone: the harness
+    computes in all three and only the rounding makes a value portable (see
+    the module docstring). Integers carry no rounding and pass.
 
     Args:
       output: What the runner returned, and what the golden compares.
 
     Raises:
-      TypeError: The output is a narrow float rather than float32.
+      TypeError: The output is a float other than float32.
 
     """
     if not output.dtype.is_floating_point or output.dtype == torch.float32:
@@ -872,28 +850,17 @@ def _assert_sdpa_backend_match(
 ) -> None:
     """Skip or fail when the replay SDPA backend differs from the golden's.
 
-    A None fingerprint means a pre-fingerprint golden; skip the check so
-    legacy goldens still load (they are caught by the output assertion).
-
-    A CPU golden replayed on CPU is always reproducible -- the CPU attention
-    kernel is device-independent and does not consult ``torch.cuda`` -- so a
-    CPU golden never skips. It runs and compares on any host regardless of GPU
-    presence, absence, or a wedged driver.
-
-    A differing ``device`` means the golden's kernel cannot be reproduced on
-    this run's device class (e.g. a CUDA golden replayed on CPU), so the
-    bit-for-bit comparison is meaningless here -- skip rather than fail. A
-    same-device CUDA sub-backend mismatch is drift within one device class,
-    which IS reproducible and fixable on this host, so keep failing loudly.
+    A differing DEVICE CLASS skips: the golden's kernel cannot be reproduced
+    here, so the comparison is meaningless. A same-class sub-backend mismatch
+    fails, since that drift is fixable on this host. ``None`` is a legacy
+    golden, caught instead by the output assertion.
 
     Args:
-      golden: The fingerprint recorded in the golden, or None for legacy
-        goldens.
-      device: This run's compute device type (``"cpu"`` or ``"cuda"``).
+      golden: The fingerprint in the golden, or None for a legacy one.
+      device: This run's compute device type.
 
     Raises:
-      AssertionError: If the CUDA backend differs within the same device
-        class, which would otherwise surface as an opaque last-bit mismatch.
+      AssertionError: The CUDA backend differs within one device class.
 
     """
     if golden is None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, override
 
+from configgle import PartialConfig
 from torch import nn
 
 import pytest
@@ -15,10 +16,10 @@ from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     matrix_parameters,
     nanochat_optimizer,
-    trapezoid,
 )
 from priml.model.value_gated_attention import ValueGatedAttention
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.train.parallelism import NoParallel
 
 
 _GOLDEN_DIR = Path(__file__).parent / "goldens"
@@ -29,9 +30,9 @@ SEQ = 8
 
 def _step(**overrides: Any) -> NanoChatTrainStep:
     config = NanoChatTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
     config.dtype_autocast = None
-    config.compile = False
+    config.compile = None
     # The recipe's own optimizer, stepping eagerly. Dynamo traces each member's
     # kernel on first use and never caches it -- 9 of these tests' 9.5 seconds
     # -- and what the compiled graph changes is the update's last bits, which
@@ -81,7 +82,7 @@ def test_the_optimizer_partitions_the_model() -> None:
     verifies; this pins WHICH, since the split is the recipe.
     """
     step = _step()
-    named = {id(p): n for n, p in step.raw_model.named_parameters()}
+    named = {id(p): n for n, p in step.model.named_parameters()}
     assigned = [
         {named[id(p)] for p in group["params"]} for group in step.optimizer.param_groups
     ]
@@ -194,7 +195,7 @@ def test_progress_drives_the_learning_rate() -> None:
     schedule could not be written -- and one that crept in would anneal
     against a horizon that does not exist.
     """
-    step = _step(time_budget_sec=100.0)
+    step = _step(train_budget_sec=100.0)
     initial = step.optimizer.param_groups[0]["initial_lr"]
     step.train_step(**_batch())
     assert step.optimizer.param_groups[0]["lr"] == pytest.approx(initial)
@@ -226,7 +227,7 @@ def test_weight_decay_anneals_with_the_budget() -> None:
     recipe, since the tables it owns are mostly untouched by any one batch --
     so the annealing is asserted where there is something to anneal.
     """
-    step = _step(time_budget_sec=100.0)
+    step = _step(train_budget_sec=100.0)
     decayed = [
         group
         for group in step.optimizer.param_groups
@@ -293,8 +294,32 @@ def test_state_round_trips_including_the_clock() -> None:
     assert restored.global_step == step.global_step
     assert restored.elapsed_sec == 42.0
     for (name, a), (_, b) in zip(
-        step.raw_model.named_parameters(),
-        restored.raw_model.named_parameters(),
+        step.model.named_parameters(),
+        restored.model.named_parameters(),
+        strict=True,
+    ):
+        assert torch.equal(a, b), name
+
+
+def test_a_compiled_run_checkpoints_in_the_form_it_reloads() -> None:
+    """Compiling must not change what a checkpoint's keys are named.
+
+    ``torch.compile`` returns a wrapper whose ``state_dict`` prefixes every key
+    with ``_orig_mod``. Saving through one form and loading through the other
+    fails on every parameter, which is a whole run lost at its first resume --
+    and every other test here pins ``compile=None``, so nothing else sees it.
+    """
+    compiling = PartialConfig(torch.compile, backend="eager")
+    step = _step(compile=compiling)
+    step.train_step(**_batch())
+    state = step.state_dict()
+    assert not any(name.startswith("_orig_mod") for name in state["model"])
+
+    restored = _step(compile=compiling)
+    restored.load_state_dict(state)
+    for (name, a), (_, b) in zip(
+        step.model.named_parameters(),
+        restored.model.named_parameters(),
         strict=True,
     ):
         assert torch.equal(a, b), name
@@ -318,15 +343,20 @@ def test_a_partial_accumulation_is_dropped_at_a_boundary() -> None:
     step = _step(tokens_per_optimizer_step=4 * SEQ)
     step.train_step(**_batch())
     step.on_epoch_end()
-    assert all(p.grad is None for p in step.raw_model.parameters())
+    assert all(p.grad is None for p in step.model.parameters())
 
 
-def test_the_trapezoid_holds_then_decays_to_zero() -> None:
-    """Flat while there is budget left, zero exactly at the end."""
-    assert trapezoid(0.0) == 1.0
-    assert trapezoid(0.25) == 1.0
-    assert trapezoid(0.75) == pytest.approx(0.5)
-    assert trapezoid(1.0) == 0.0
+def test_the_recipes_schedule_holds_then_decays_to_zero() -> None:
+    """Flat while there is budget left, zero exactly at the end.
+
+    Pinned against the CURVE the config injects, so a change of default shape
+    fails here rather than silently retuning the recipe.
+    """
+    schedule = NanoChatTrainStep.Config().schedule.make()
+    assert schedule(0.0) == 1.0
+    assert schedule(0.25) == 1.0
+    assert schedule(0.75) == pytest.approx(0.5)
+    assert schedule(1.0) == 0.0
 
 
 def test_the_selector_is_comparable_not_a_closure() -> None:
@@ -345,7 +375,7 @@ def _smoke_step() -> NanoChatTrainStep:
     the device is pinned, because the harness is CPU-only.
     """
     config = experiments.exp_smoke().step
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
     torch.manual_seed(0)
     built = config.make()
     assert isinstance(built, NanoChatTrainStep)
@@ -377,7 +407,7 @@ class _SmokeSteps(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.step = _smoke_step()
-        self.model = self.step.raw_model
+        self.model = self.step.model
 
     @override
     def forward(self, batch: dict[str, Any], clock: list[float]) -> torch.Tensor:
@@ -399,13 +429,13 @@ def test_five_steps_bfb() -> None:
     here.
 
     The budget clock is written before each step rather than left to run: every
-    schedule reads ``elapsed_sec / time_budget_sec``, and that clock is a
+    schedule reads ``elapsed_sec / train_budget_sec``, and that clock is a
     ``perf_counter`` reading (train_step.py:450, 483), so letting it run would
     freeze how fast this machine is. The readings span the whole budget because
     the trapezoid holds flat over the first half -- five closely-spaced ones all
     land at multiplier 1.0 and never exercise the decay.
     """
-    budget = experiments.exp_smoke().step.time_budget_sec
+    budget = experiments.exp_smoke().step.train_budget_sec
     clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
 
     def run(module: nn.Module, batch: Any) -> torch.Tensor:

@@ -1,4 +1,9 @@
-"""Download CIFAR-10 and cache it as normalized tensors.
+#!/bin/sh
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Download CIFAR-10 and cache it as normalized tensors.
 
 Run once before the first experiment. Idempotent: a split already present is
 left alone, so re-running costs nothing.
@@ -9,10 +14,11 @@ path. Point both elsewhere with ``--directory`` here and
 ``--override dataset.working_dir=...`` at launch.
 
 Examples:
-  uv --quiet run --frozen python -m priml.baselines.cifar10.scripts.prepare_data
-  uv --quiet run --frozen python -m priml.baselines.cifar10.scripts.prepare_data --directory /datasets/my-cifar10
+  prepare_data.py
+  prepare_data.py --directory /datasets/my-cifar10
 
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -28,7 +34,7 @@ from priml.train.train_loop import TrainLoop
 def main() -> int:
     """Prepare the dataset; return the process exit code."""
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),
+        description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -62,3 +68,4 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

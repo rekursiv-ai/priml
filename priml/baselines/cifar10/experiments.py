@@ -46,6 +46,7 @@ import torch
 from priml.baselines.cifar10.data import Cifar10Data
 from priml.baselines.cifar10.model import ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep
+from priml.math.schedules import polynomial
 from priml.metrics.topk import TopK
 from priml.model.init import dirac
 from priml.optimizers import (
@@ -55,7 +56,6 @@ from priml.optimizers import (
     excluding,
 )
 from priml.runtime import SingleProcess
-from priml.train.schedules import polynomial
 from priml.train.train_loop import TrainLoop
 
 

@@ -43,6 +43,7 @@ import torch
 
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
+from priml.timer import CheckpointableStepTimer
 
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,13 @@ class SudokuData:
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
         self.eval_batch_size = config.eval_batch_size or config.batch_size
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the training split; ticked by the loop, read by the step.
+
+        The same count as ``_epochs`` below, kept separately because that one
+        is an INPUT -- it seeds the shuffle -- while this is the record a
+        budget and a schedule read."""
+
         # Completed epochs, persisted across resume so a restored run continues
         # the shuffle sequence instead of replaying epoch 0.
         self._epochs = 0
@@ -230,16 +238,21 @@ class SudokuData:
     def state_dict(self) -> dict[str, Any]:
         """Snapshot the completed-epoch count.
 
-        The live stream's counter advances when an epoch BEGINS, so a
-        mid-epoch checkpoint resumes with the next epoch's shuffle rather than
-        replaying the interrupted one.
+        One key, because there is one number: the count that seeds the next
+        epoch's shuffle and the count a budget reads are the same at every
+        boundary a checkpoint can land on. The stream advances its own copy
+        when an epoch BEGINS and the loop ticks the timer when the data runs
+        OUT, which is the same instant from opposite sides.
         """
-        return {"epochs": self._live.epoch if self._live is not None else self._epochs}
+        return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        if "epochs" in state_dict:
-            self._epochs = int(state_dict["epochs"])
+        if "timer_epoch" in state_dict:
+            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
+            # The shuffle is seeded ``seed + epoch``, so a restored run
+            # continues the sequence rather than replaying epoch 0.
+            self._epochs = self.timer_epoch.global_count
             if self._live is not None:
                 self._live.epoch = self._epochs
 

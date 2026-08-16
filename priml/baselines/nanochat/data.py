@@ -54,6 +54,7 @@ import torch
 
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
+from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
@@ -186,6 +187,13 @@ class NanoChatData:
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
         self.eval_batch_size = config.eval_batch_size
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the corpus; ticked by the loop when the shards wrap.
+
+        A budgeted run rarely reaches one -- the stream wraps rather than
+        ending, and the recipe stops on time long before the corpus is
+        exhausted."""
+
         self.train_paths = _shard_paths(
             self.dataset_dir,
             indices=range(config.num_train_shards),
@@ -258,7 +266,10 @@ class NanoChatData:
 
     def state_dict(self) -> dict[str, Any]:
         """Snapshot how far the training stream has advanced."""
-        return {"batches": self._live.served if self._live is not None else 0}
+        return {
+            "batches": self._live.served if self._live is not None else 0,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Refuse to resume a stream that cannot be positioned.

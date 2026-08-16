@@ -15,6 +15,7 @@ from torch import Tensor
 import torch
 
 from priml.loss.gan import AdversarialLoss
+from priml.math.schedules import staircase
 from priml.model.special import Identity
 from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
@@ -34,14 +35,13 @@ class GANTrainStep:
                 model=Identity.Config(),  # Replace with actual generator
                 optimizer=PartialConfig(
                     torch.optim.Adam,
-                    lr=0.0002,
+                    lr=2e-4,
                     betas=(0.5, 0.999),
                 ),
-                learning_rate_scheduler=PartialConfig(
-                    torch.optim.lr_scheduler.StepLR,
-                    step_size=100,
-                    gamma=0.5,
-                ),
+                # A schedule of PROGRESS needs a horizon: left unset, progress
+                # is pinned at zero and the rate below never moves.
+                train_budget_steps=400,
+                learning_rate_scheduler=PartialConfig(staircase, gamma=0.5),
                 loss=AdversarialLoss.Config(),
             ),
         )
@@ -51,14 +51,13 @@ class GANTrainStep:
                 model=Identity.Config(),  # Replace with actual discriminator
                 optimizer=PartialConfig(
                     torch.optim.Adam,
-                    lr=0.0002,
+                    lr=2e-4,
                     betas=(0.5, 0.999),
                 ),
-                learning_rate_scheduler=PartialConfig(
-                    torch.optim.lr_scheduler.StepLR,
-                    step_size=100,
-                    gamma=0.5,
-                ),
+                # Matches the generator's: annealing the two on different
+                # horizons is a different recipe, not a different setting.
+                train_budget_steps=400,
+                learning_rate_scheduler=PartialConfig(staircase, gamma=0.5),
             ),
         )
         """Discriminator TrainStep configuration."""

@@ -116,12 +116,16 @@ def test_working_dir_resolves_beneath_base_dir() -> None:
     assert Path(resolved.working_dir) == Path("/opt/scratch/datasets/cifar10")
 
 
-def test_state_dict_round_trips_empty(tmp_path: Path) -> None:
-    # Batch order derives from the loop's RNG, which the loop checkpoints
-    # itself, so the dataset deliberately carries no state of its own.
+def test_state_dict_carries_the_pass_count_and_nothing_else(tmp_path: Path) -> None:
+    # Batch ORDER derives from the loop's RNG, which the loop checkpoints
+    # itself. The pass count is the loader's own: only it knows when the data
+    # ran out, and a schedule annealing against epochs reads it.
     data = tiny_dataset(tmp_path).make()
-    data.load_state_dict(data.state_dict())
-    assert data.state_dict() == {}
+    data.timer_epoch.global_count = 3
+    restored = tiny_dataset(tmp_path).make()
+    restored.load_state_dict(data.state_dict())
+    assert set(data.state_dict()) == {"timer_epoch"}
+    assert restored.timer_epoch.global_count == 3
 
 
 def test_prepare_normalizes_and_writes_both_splits(

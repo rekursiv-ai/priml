@@ -47,6 +47,7 @@ import torch
 
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
+from priml.timer import CheckpointableStepTimer
 
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,13 @@ class ArcData:
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
         self.eval_batch_size = config.eval_batch_size or config.batch_size
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the training split; ticked by the loop, read by the step.
+
+        The same count as ``_passes`` below, kept separately because that one
+        is an INPUT -- it seeds the sampling sequence -- while this is the
+        record a budget and a schedule read."""
+
         # Completed passes, persisted across resume so a restored run continues
         # the sampling sequence instead of replaying the first pass.
         self._passes = 0
@@ -158,7 +166,10 @@ class ArcData:
 
     def state_dict(self) -> dict[str, Any]:
         """Snapshot the completed-pass count."""
-        return {"passes": self._live.passes if self._live is not None else self._passes}
+        return {
+            "passes": self._live.passes if self._live is not None else self._passes,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Restore state produced by :meth:`state_dict`."""
@@ -166,6 +177,8 @@ class ArcData:
             self._passes = int(state_dict["passes"])
             if self._live is not None:
                 self._live.passes = self._passes
+        if "timer_epoch" in state_dict:
+            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 
 
 class _ArcBatches:

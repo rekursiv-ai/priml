@@ -36,6 +36,7 @@ from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep
 from priml.metrics.topk import TopK
 from priml.optimizers import CompositeOptimizer
+from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
 
@@ -65,8 +66,8 @@ def shrink(config: Cifar10TrainLoop, *, directory: Path) -> Cifar10TrainLoop:
     runs here is the published recipe at minimum scale.
     """
     config.step.total_train_steps = 2
-    config.step.device = "cpu"
-    config.step.compile = False
+    config.step.parallelism = NoParallel.Config(device="cpu")
+    config.step.compile = None
     config.step.translate_pad = 1
     config.step.whiten_num_images = 4
 

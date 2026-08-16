@@ -33,6 +33,7 @@ from priml.data.dummy import DummyDataset
 from priml.loss.custom_types import LossOutput
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.runtime import SingleProcess, runtime_initialized
+from priml.timer import CheckpointableStepTimer
 from priml.train import train_loop
 from priml.train.checkpointing import Checkpointer, _agreed_across_ranks
 from priml.train.custom_types import TrainStepOutput
@@ -124,6 +125,7 @@ class _WarmupDataset:
 
     def __init__(self, config: Config) -> None:
         del config
+        self.timer_epoch = CheckpointableStepTimer()
 
     def train_dataloader(self) -> list[dict[str, Tensor]]:
         """Return an unused train loader."""
@@ -153,6 +155,7 @@ class _ScopedEvalDataset:
 
     def __init__(self, config: Config) -> None:
         del config
+        self.timer_epoch = CheckpointableStepTimer()
         self.eval_scopes: list[str] = []
 
     def train_dataloader(self) -> list[dict[str, Tensor]]:
@@ -192,6 +195,7 @@ class _WeightedEvalDataset:
 
     def __init__(self, config: Config) -> None:
         del config
+        self.timer_epoch = CheckpointableStepTimer()
 
     def train_dataloader(self) -> list[dict[str, Tensor]]:
         """Return an unused train loader."""
@@ -206,11 +210,11 @@ class _WeightedEvalDataset:
 
     def state_dict(self) -> dict[str, Any]:
         """Get dataset state for checkpointing."""
-        return {}
+        return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Load dataset state for checkpointing."""
-        del state_dict
+        self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 
 
 class _WeightedEvalStep:
@@ -503,6 +507,7 @@ class _BinaryDataset:
 
     def __init__(self):
         torch.manual_seed(42)
+        self.timer_epoch = CheckpointableStepTimer()
         n_samples = 100
         n_features = 2
 
@@ -1486,7 +1491,9 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
 
     def _with_metrics(**batch: Any) -> dict[str, Any]:
         del batch
-        loop.step.global_step += 1
+        # Advance the step counter the way the real step does -- by charging
+        # the timer global_step reads -- since it is a read-only property.
+        cast(TrainStep, loop.step).timer_step.global_count += 1
         return {
             "loss": torch.tensor([1.0]),
             "model": torch.zeros(1, 2),
@@ -2343,6 +2350,7 @@ class _BindingDataset:
 
     def __init__(self, config: Config) -> None:
         del config
+        self.timer_epoch = CheckpointableStepTimer()
         self.bound: object = None
         self.batches_drawn = 0
         self.batches_before_binding = 0
@@ -2456,9 +2464,10 @@ def test_load_state_dict_can_skip_rng_restore(
     loop.load_state_dict(
         {
             "step": {"global_step": 12},
-            "dataset": {},
+            # The pass count rides the DATASET's own state, not a second copy
+            # on the loop: only the loader knows when the data ran out.
+            "dataset": {"timer_epoch": {"global_count": 3, "global_sec": 0.0}},
             "metrics": {},
-            "epoch": 3,
             "rng": {"cuda": object()},
         },
     )

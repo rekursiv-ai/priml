@@ -17,8 +17,8 @@ from __future__ import annotations
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Self, cast, override
 
-from configgle import Fig
-from torch import Tensor, nn
+from configgle import Makes, PartialConfig
+from torch import Tensor
 
 import torch
 
@@ -28,8 +28,9 @@ from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.model import ActorCritic
 from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
 from priml.math.advantage import explained_variance, generalized_advantage
-from priml.runtime import get_device
+from priml.math.schedules import linear
 from priml.train.custom_types import TrainStepOutput
+from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
@@ -112,29 +113,21 @@ class Rollout:
             yield {name: value[chunk] for name, value in flat.items()}
 
 
-class CraftaxTrainStep:
-    """Model, environment, and optimizer for one PPO experiment.
+class CraftaxTrainStep(TrainStep):
+    """Model, environment, and optimizer for one PPO experiment."""
 
-    Implements the training-step protocol the loop drives: each call to
-    :meth:`train_step` performs one complete PPO update.
-    """
-
-    class Config(Fig["CraftaxTrainStep"]):
+    class Config(Makes["CraftaxTrainStep"], TrainStep.Config, kw_only=False):
         """Model, environment, and the PPO hyperparameters."""
 
-        model: ActorCritic.Config = field(default_factory=ActorCritic.Config)
-        """Policy and value network.
+        # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        Narrowed to the concrete config rather than a ``Makeable``: every
-        experiment here trains this network and reaches its fields directly,
-        so the narrow belongs here once instead of in each factory."""
+        model: ActorCritic.Config = field(default_factory=ActorCritic.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        """Policy and value network."""
+
+        # ---- This recipe's own. ----
 
         env: CraftaxEnv.Config = field(default_factory=CraftaxEnv.Config)
-        """Environment the rollout is collected from.
-
-        Narrowed to the concrete config for the same reason the model is:
-        every experiment here trains on this environment and reaches its
-        worker count and seed directly."""
+        """Environment the rollout is collected from."""
 
         rollout_steps: int = 16
         """Environment steps per worker in one update."""
@@ -152,10 +145,7 @@ class CraftaxTrainStep:
         """Decay the rate linearly to zero across the run."""
 
         total_train_steps: int = 244
-        """Updates in the run; the schedule horizon.
-
-        Set it to the run's step budget, or the learning rate anneals past
-        the end of training or short of it."""
+        """Updates in the run; the schedule horizon."""
 
         discount: float = 0.99
         """Reward discount factor."""
@@ -174,12 +164,6 @@ class CraftaxTrainStep:
 
         max_grad_norm: float = 1.0
         """Global gradient-norm clip."""
-
-        device: str = "auto"
-        """Device to train on; ``"auto"`` picks the best available."""
-
-        compile: bool = False
-        """Compile the model with ``torch.compile``."""
 
         seed: int = 0
         """Seed for action sampling and minibatch shuffling."""
@@ -217,26 +201,28 @@ class CraftaxTrainStep:
         if config.clip_epsilon <= 0.0:
             raise ValueError("clip_epsilon must be positive")
 
-        self.config = config
-        self.device = get_device(config.device)
-        self.global_step: int = 0
-        self.local_step: int = 0
-        self.env = config.env.make()
-        # Weight initialization draws from the global stream, so the seed has
-        # to reach it for a run to be reproducible from its config alone.
-        # The stream is restored afterwards, leaving whatever the caller had.
-        saved_rng = torch.get_rng_state()
-        torch.manual_seed(config.seed)
-        try:
-            model = config.model.make().to(self.device)
-        finally:
-            torch.set_rng_state(saved_rng)
-        self.model: nn.Module = torch.compile(model) if config.compile else model
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
+        # The recipe's own optimizer, put into the base's slot before the base
+        # reads it, so there is one optimizer rather than an inherited AdamW
+        # discarded for this one. ``learning_rate`` stays the field an
+        # experiment sets; the base records it as each group's ``initial_lr``.
+        config.optimizer = PartialConfig(
+            torch.optim.Adam,
             lr=config.learning_rate,
             eps=1e-5,
         )
+        # Weight initialization draws from the global stream, so the seed has
+        # to reach it for a run to be reproducible from its config alone. The
+        # stream is restored afterwards, leaving whatever the caller had --
+        # which is why the base's build is bracketed rather than followed by a
+        # second, seeded one.
+        saved_rng = torch.get_rng_state()
+        torch.manual_seed(config.seed)
+        try:
+            super().__init__(config)
+        finally:
+            torch.set_rng_state(saved_rng)
+        self.config: CraftaxTrainStep.Config = config
+        self.env = config.env.make()
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(config.seed)
         self._observation = self.env.reset()
@@ -260,16 +246,22 @@ class CraftaxTrainStep:
     @property
     def steps_per_update(self) -> int:
         """Environment interactions consumed by one update."""
-        return int(self._observation.shape[0]) * self.config.rollout_steps
+        workers = int(self._observation.shape[0])
+        return workers * int(self.config.rollout_steps)
 
+    @property
+    @override
+    def progress_learning_schedule(self) -> float:
+        """Fraction of ``total_train_steps`` spent, in ``[0, 1]``."""
+        spent = self.global_step / self.config.total_train_steps
+        return 1.0 if spent > 1.0 else float(spent)
+
+    @override
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Pass the loop's batch through untouched.
-
-        The rollout is collected here rather than supplied, so the incoming
-        batch carries nothing but the loop's cadence.
-        """
+        """Pass the loop's batch through: the rollout is collected here."""
         return batch
 
+    @override
     def train_step(self, **batch: Any) -> TrainStepOutput:
         """Collect a rollout and optimize on it.
 
@@ -284,10 +276,12 @@ class CraftaxTrainStep:
         del batch
         rollout = self.collect()
         self._set_learning_rate()
-        metrics = self._optimize(rollout)
+        # The timer brackets the update, so ``global_step`` and the budget
+        # clock advance exactly as they do for every other recipe -- one
+        # tick per PPO update, however many optimizer calls it makes.
+        with self.timer_step:
+            metrics = self._optimize(rollout)
 
-        self.global_step += 1
-        self.local_step += 1
         metrics.update(self._episode_metrics())
         metrics["explained_variance"] = float(
             explained_variance(rollout.value.flatten(), rollout.target.flatten()),
@@ -361,6 +355,7 @@ class CraftaxTrainStep:
             target=target,
         )
 
+    @override
     def train_loss(self, **batch: Any) -> TrainStepOutput:
         """Score a rollout without optimizing.
 
@@ -377,6 +372,7 @@ class CraftaxTrainStep:
         loss, logits, _ = self._loss(minibatch)
         return {"loss": loss.detach(), "model": logits.detach()}
 
+    @override
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
         """Score a rollout in evaluation mode.
 
@@ -393,6 +389,7 @@ class CraftaxTrainStep:
         finally:
             self.model.train()
 
+    @override
     def call_eval(self, **batch: Any) -> Tensor:
         """Return action logits for a batch of observations.
 
@@ -411,30 +408,27 @@ class CraftaxTrainStep:
             self.model.train()
         return cast("Tensor", logits)
 
+    @override
     def on_epoch_end(self) -> None:
         """Nothing to flush: every update completes within one step."""
 
+    @override
     def state_dict(self) -> dict[str, Any]:
         """Return model, optimizer, environment, and counters."""
-        return {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
+        return super().state_dict() | {
             "env": self.env.state_dict(),
             "generator": self._generator.get_state(),
-            "global_step": self.global_step,
             "observation": self._observation,
             "episode_return": self._episode_return,
             "episode_length": self._episode_length,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    @override
+    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
         """Restore everything :meth:`state_dict` saved."""
-        self.model.load_state_dict(state_dict["model"])
-        self.optimizer.load_state_dict(state_dict["optimizer"])
+        super().load_state_dict(state_dict, **kwargs)
         self.env.load_state_dict(state_dict["env"])
         self._generator.set_state(state_dict["generator"])
-        self.global_step = int(state_dict["global_step"])
-        self.local_step = 0
         self._observation = state_dict["observation"]
         self._episode_return = state_dict["episode_return"]
         self._episode_length = state_dict["episode_length"]
@@ -494,9 +488,9 @@ class CraftaxTrainStep:
         """Anneal the rate linearly across the configured horizon."""
         if not self.config.anneal_learning_rate:
             return
-        remaining = 1.0 - self.global_step / self.config.total_train_steps
+        multiplier = linear(self.progress_learning_schedule)
         for group in self.optimizer.param_groups:
-            group["lr"] = self.config.learning_rate * max(remaining, 0.0)
+            group["lr"] = self.config.learning_rate * multiplier
 
     def _record_episodes(self, reward: Tensor, done: Tensor) -> None:
         """Accumulate per-worker returns and bank the finished ones."""

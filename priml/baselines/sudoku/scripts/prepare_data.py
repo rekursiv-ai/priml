@@ -1,4 +1,9 @@
-"""Download Sudoku-Extreme and cache it as the flat arrays training reads.
+#!/bin/sh
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Download Sudoku-Extreme and cache it as the flat arrays training reads.
 
 Run once before the first experiment. Idempotent: a split already present is
 left alone, so re-running costs nothing.
@@ -19,10 +24,11 @@ default ``TrainLoop``, so preparing and training agree without either naming a
 path.
 
 Examples:
-  uv --quiet run --frozen python -m priml.baselines.sudoku.scripts.prepare_data
-  uv --quiet run --frozen python -m priml.baselines.sudoku.scripts.prepare_data --directory /datasets/my-sudoku
+  prepare_data.py
+  prepare_data.py --directory /datasets/my-sudoku
 
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -76,7 +82,7 @@ BOX: Final = 3
 def main() -> int:
     """Prepare the dataset; return the process exit code."""
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),
+        description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
@@ -344,3 +350,4 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

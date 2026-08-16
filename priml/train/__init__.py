@@ -16,7 +16,6 @@ from priml.train.custom_types import (
     ParallelStrategyProtocol,
 )
 from priml.train.ema import EMA, NoEMA
-from priml.train.learnable import Learnable
 from priml.train.parallelism import (
     DataParallel,
     FullySharded,
@@ -49,7 +48,6 @@ __all__ = [
     "GANTrainStep",
     "HybridSharded",
     "LayerActivationCheckpointing",
-    "Learnable",
     "ModelQuantizationProtocol",
     "Newton",
     "NoEMA",

@@ -19,8 +19,8 @@ from priml.train.activation import (
     QuantizedModuleActivationStorage,
     SelectiveActivationCheckpointing,
 )
-from priml.train.learnable import Learnable
 from priml.train.parallelism import NoParallel
+from priml.train.train_step import TrainStep
 
 
 class SimpleModule(nn.Module):
@@ -453,7 +453,7 @@ def test_quantized_activation_storage_min_size_boundary():
 
 
 def test_quantized_activation_storage_with_learnable():
-    """Verify quantization works end-to-end with Learnable."""
+    """Verify quantization works end-to-end with TrainStep."""
 
     class TinyModel(nn.Module):
         def __init__(self):
@@ -469,7 +469,7 @@ def test_quantized_activation_storage_with_learnable():
             def make(self) -> TinyModel:
                 return TinyModel()
 
-    config = Learnable.Config()
+    config = TrainStep.Config()
     config.model = TinyModel.Config()
     config.activation_memoization = QuantizedActivationStorage.Config()
     config.activation_memoization.min_size = 10

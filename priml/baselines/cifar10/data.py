@@ -27,6 +27,7 @@ import torch
 
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
+from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
@@ -88,6 +89,9 @@ class Cifar10Data:
                 f"{config.batch_size} and {config.eval_batch_size}.",
             )
         self.config = config
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the data; ticked by the loop when the loader runs out."""
+
         device = get_device(config.device)
         directory = Path(config.working_dir)
         self.train_media, self.train_label = _load_split(
@@ -122,12 +126,13 @@ class Cifar10Data:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Return an empty state: batch order derives from the loop's RNG."""
-        return {}
+        """Return the pass count; batch ORDER derives from the loop's RNG."""
+        return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Accept and ignore checkpoint state (see :meth:`state_dict`)."""
-        del state_dict
+        """Restore the pass count (see :meth:`state_dict`)."""
+        if "timer_epoch" in state_dict:
+            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 
 
 def prepare(

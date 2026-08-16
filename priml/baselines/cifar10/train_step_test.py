@@ -16,6 +16,7 @@ import torch
 
 from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep
+from priml.math.schedules import cosine, polynomial
 from priml.optimizers import (
     CompositeOptimizer,
     Muon,
@@ -23,7 +24,7 @@ from priml.optimizers import (
     excluding,
 )
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.train.schedules import cosine, polynomial
+from priml.train.parallelism import NoParallel
 
 
 _GOLDEN_DIR = Path(__file__).parent.resolve() / "goldens"
@@ -47,15 +48,16 @@ def tiny_step(
         block.num_convs = 1
         config.model = speed
     config.total_train_steps = 4
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
     config.translate_pad = 1
     config.whiten_num_images = 4
     return config
 
 
-def _constant_half(step: int, total_steps: int) -> float:
+def _constant_half(progress: float) -> float:
     """A schedule holding the learning rate at half its peak."""
-    del step, total_steps
+    del progress
     return 0.5
 
 
@@ -236,9 +238,12 @@ def test_derandomized_flip_alternates_with_the_step() -> None:
     step = config.make()
     media = tiny_batch()["media"]
 
-    step.global_step = 0
+    # Driven through the step timer, which is what ``global_step`` reads: the
+    # counter is derived, so a test that could assign it would be pinning the
+    # flip against a position training cannot actually reach.
+    assert step.global_step == 0
     assert torch.equal(step._augment(media), media)
-    step.global_step = 1
+    step.timer_step.global_count = 1
     assert torch.equal(step._augment(media), media.flip(-1))
 
 

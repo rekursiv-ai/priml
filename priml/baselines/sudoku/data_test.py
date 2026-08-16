@@ -85,15 +85,23 @@ def test_seeded_shuffle_is_reproducible_and_epoch_varying(
 
 
 def test_epoch_counter_round_trips(dataset_dir: Path) -> None:
-    """Resume continues the shuffle sequence rather than replaying epoch 0."""
+    """Resume continues the shuffle sequence rather than replaying epoch 0.
+
+    The pass count is carried by ONE key: the shuffle seed and the number a
+    budget reads are the same at every boundary a checkpoint lands on, so a
+    second copy could only ever disagree with it.
+    """
     data = _data(dataset_dir, augment=False, seed=1)
     loader = data.train_dataloader()
     list(loader)
+    # What the training loop does when the loader runs out.
+    data.timer_epoch.global_count += 1
     state = data.state_dict()
-    assert state["epochs"] == 1
+    assert set(state) == {"timer_epoch"}
 
     restored = _data(dataset_dir, augment=False, seed=1)
     restored.load_state_dict(state)
+    assert restored.timer_epoch.global_count == 1
     assert torch.equal(
         next(iter(restored.train_dataloader()))["media"],
         next(iter(loader))["media"],

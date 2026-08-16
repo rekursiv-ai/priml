@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any, Protocol, runtime_checkable
 
 import math
 
@@ -30,6 +31,7 @@ __all__ = [
     "AdamATan2",
     "CompositeOptimizer",
     "FusedAdamW",
+    "HasParamGroups",
     "Muon",
     "Newton",
     "NorMuon",
@@ -46,6 +48,18 @@ __all__ = [
     "step_optimizers",
     "zero_optimizers",
 ]
+
+
+@runtime_checkable
+class HasParamGroups(Protocol):
+    """An optimizer whose per-group learning rates can be rewritten.
+
+    The whole contract the rate helpers below need. Stated as a shape rather
+    than as ``torch.optim.Optimizer`` so a composite or a wrapper that never
+    inherits that class is still accepted.
+    """
+
+    param_groups: list[dict[str, Any]]
 
 
 def lr_scale(
@@ -75,7 +89,7 @@ def lr_scale(
     return min_ratio + (1 - min_ratio) * cosine
 
 
-def remember_initial_lrs(optimizers: Iterable[torch.optim.Optimizer]) -> None:
+def remember_initial_lrs(optimizers: Iterable[HasParamGroups]) -> None:
     """Store each optimizer group's original learning rate.
 
     Args:
@@ -89,10 +103,16 @@ def remember_initial_lrs(optimizers: Iterable[torch.optim.Optimizer]) -> None:
 
 
 def apply_lr_scale(
-    optimizers: Iterable[torch.optim.Optimizer],
+    optimizers: Iterable[HasParamGroups],
     scale: float,
 ) -> None:
     """Apply an LR multiplier to optimizer groups.
+
+    Takes the narrowest shape it uses rather than ``torch.optim.Optimizer``:
+    only ``param_groups`` is read, so a wrapper or a composite that never
+    inherits torch's class still qualifies. Declared here rather than imported
+    from ``train`` because dependencies point down, and this layer sits below
+    it.
 
     Args:
       optimizers: Optimizers whose parameter-group ``lr`` values should be

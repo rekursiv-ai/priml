@@ -22,8 +22,8 @@ is the one on disk, and their ``evaluate_bpb`` is read for the token count it
 scores rather than retyped.
 
 Examples:
-  sh karpathy_data_parity.py
-  sh karpathy_data_parity.py --batches 20 --rows 8
+  karpathy_data_parity.py
+  karpathy_data_parity.py --batches 20 --rows 8
 
 '''
 # fmt: on
@@ -44,6 +44,7 @@ from torch import Tensor
 import torch
 
 from priml.baselines.nanochat.data import NanoChatData
+from priml.baselines.nanochat.scripts.prepare_data import prepare
 
 
 def clone_upstream(
@@ -122,7 +123,7 @@ def build_ours(
     device: str,
     num_train_shards: int,
 ) -> NanoChatData:
-    """Build this package's dataset over the same corpus.
+    """Prepare the corpus if needed, then build this package's dataset over it.
 
     Only the corpus location, the batch width, and the device are set: the
     packer's buffer size, its refill granularity, the split rule, and the
@@ -139,6 +140,11 @@ def build_ours(
       data: The built dataset.
 
     """
+    # Prepared first: the comparison needs a corpus and a vocabulary, and
+    # ``prepare`` skips whatever is already staged -- so this costs a directory
+    # listing on a ready corpus and rebuilds a stale or absent one rather than
+    # failing with an instruction the caller then has to run by hand.
+    prepare(corpus, num_train_shards=num_train_shards)
     config = NanoChatData.Config()
     config.base_dir = "/"
     config.working_dir = str(corpus)
@@ -295,7 +301,10 @@ def _git(root: Path, *arguments: str) -> str:
 
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--clone",
         type=Path,
@@ -327,3 +336,4 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

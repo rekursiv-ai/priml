@@ -11,11 +11,13 @@ from priml.baselines.sudoku.act import ActPool
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.train.parallelism import NoParallel
 
 
 def _step(*, act: bool = False) -> SudokuTrainStep:
     config = SudokuTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
     config.dtype_autocast = None
     config.total_train_steps = 8
     config.model.hidden_size = 16
@@ -140,7 +142,8 @@ def test_act_pool_is_not_checkpointed() -> None:
 def test_feedback_reaches_the_channel() -> None:
     """The pool hands the decoded grid to whichever channel consumes it."""
     config = SudokuTrainStep.Config()
-    config.device = "cpu"
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
     config.dtype_autocast = None
     config.model.hidden_size = 16
     config.model.num_layers = 1

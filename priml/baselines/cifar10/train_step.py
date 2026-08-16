@@ -22,7 +22,7 @@ from typing import Any, Self, cast, override
 
 import math
 
-from configgle import Fig, Makeable, PartialConfig
+from configgle import Makeable, Makes, PartialConfig
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -30,27 +30,26 @@ import torch
 
 from priml.baselines.cifar10.model import ResNet
 from priml.data.augmentation_gpu import pad_crop_flip
+from priml.math.schedules import Schedule, cosine
 from priml.math.stats import PcaDecompose, pca_eigh
-from priml.optimizers import (
-    CompositeOptimizer,
-    apply_lr_scale,
-    remember_initial_lrs,
-)
-from priml.runtime import get_device
+from priml.optimizers import CompositeOptimizer, apply_lr_scale
 from priml.train.custom_types import TrainStepOutput
-from priml.train.schedules import Schedule, cosine
+from priml.train.train_step import TrainStep
 
 
-class Cifar10TrainStep:
+class Cifar10TrainStep(TrainStep):
     """Model plus optimization for one CIFAR-10 experiment.
 
-    Implements ``TrainStepProtocol``: the training loop calls
-    :meth:`train_step` per batch and :meth:`eval_loss` per evaluation, and
-    persists the whole thing through :meth:`state_dict`.
+    Takes the model, optimizer, and device placement from
+    :class:`~priml.train.train_step.TrainStep`. What stays here is the
+    augmentation policy, the smoothed loss, the fitted whitening layer, and a
+    warmup counted in whole steps.
     """
 
-    class Config(Fig["Cifar10TrainStep"]):
+    class Config(Makes["Cifar10TrainStep"], TrainStep.Config, kw_only=False):
         """Model, optimization, schedule, and augmentation for one run."""
+
+        # ---- Inherited slots, re-defaulted for this recipe. ----
 
         model: Makeable[nn.Module] = field(default_factory=ResNet.Config)
         """Network to train."""
@@ -67,33 +66,26 @@ class Cifar10TrainStep:
                 ],
             ),
         )
-        """Builds the optimizer from the model.
+        """Builds the optimizer from the model."""
 
-        Injected, not selected from a fixed set: a new optimizer is a config a
-        caller supplies, never a branch added here. A split recipe routes
-        parameters with ``CompositeOptimizer.Config.select`` and still presents
-        as one optimizer."""
+        # ---- This recipe's own. ----
 
         total_train_steps: int = 4_000
         """Schedule horizon. Set it to the run's step budget."""
 
-        schedule: Makeable[Schedule] = field(
+        schedule: Makeable[Schedule[float]] = field(
             default_factory=lambda: PartialConfig(cosine),
         )
-        """Maps ``(step, total_steps)`` to a learning-rate multiplier.
+        """Maps progress in ``[0, 1]`` to a learning-rate multiplier.
 
-        Any callable of that shape works, so a caller supplies a schedule
-        rather than choosing from an enumeration -- see
-        :mod:`priml.train.schedules` for the built-in shapes."""
+        Read instead of the base's ``learning_rate_scheduler``, since
+        ``_apply_schedule`` drives the rate itself."""
 
         warmup_fraction: float = 0.02
         """Fraction of the horizon spent ramping the learning rate up."""
 
         label_smoothing: float = 0.1
         """Cross-entropy label smoothing."""
-
-        gradient_clip_norm: float = math.inf
-        """Global gradient-norm cap; infinite disables clipping."""
 
         translate_pad: int = 4
         """Reflect padding before the random crop, in pixels."""
@@ -106,15 +98,6 @@ class Cifar10TrainStep:
 
         use_tta: bool = False
         """Average logits over mirrored and shifted crops at evaluation."""
-
-        device: str = "auto"
-        """Device to train on ("auto" picks the best available)."""
-
-        dtype_autocast: torch.dtype | None = None
-        """Autocast dtype; ``None`` trains in full precision."""
-
-        compile: bool = False
-        """Compile the model with ``torch.compile``."""
 
         whiten_num_images: int = 5_000
         """Images used to fit a whitening layer, when the model has one."""
@@ -142,32 +125,19 @@ class Cifar10TrainStep:
             raise ValueError(
                 f"total_train_steps must be positive; got {config.total_train_steps}.",
             )
-        self.config = config
-        self.device = get_device(config.device)
-        self.global_step: int = 0
-        self.local_step: int = 0
-        self.model: nn.Module = config.model.make()
-        self.model.to(self.device)
+        super().__init__(config)
+        self.config: Cifar10TrainStep.Config = config
         if self.device.type != "mps":
+            # cuDNN's convolutions want this layout; MPS rejects the format on
+            # some torch releases. Applied after the parallel strategy placed
+            # the module, so it is the placed one that gets re-laid-out.
             self.model.to(memory_format=torch.channels_last)
-        if config.compile:
-            self.model = torch.compile(self.model)
-        self.schedule: Schedule = config.schedule.make()
-        self.optimizer: torch.optim.Optimizer = config.optimizer.make()(self.model)
-        remember_initial_lrs([self.optimizer])
+        self.schedule: Schedule[float] = config.schedule.make()
         # A whitening layer is fitted from data, so it cannot be initialized in
         # the constructor -- the first training batch supplies the images.
         self._whitened = not hasattr(self.model, "init_whiten")
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Move a batch to the training device."""
-        return {
-            key: value.to(self.device, non_blocking=True)
-            if isinstance(value, Tensor)
-            else value
-            for key, value in batch.items()
-        }
-
+    @override
     def train_step(self, **batch: Any) -> TrainStepOutput:
         """Augment, forward, backward, and step the optimizers.
 
@@ -189,19 +159,23 @@ class Cifar10TrainStep:
             loss = self._loss(logits, label)
         loss.sum().backward()
 
+        # Not the inherited ``step``: the rate is scaled from a schedule this
+        # recipe owns (a step-indexed warmup the goldens freeze), the clip is
+        # unconditional there and gated here, and the counters advance on the
+        # step timer either way.
         if math.isfinite(self.config.gradient_clip_norm):
             _ = nn.utils.clip_grad_norm_(
                 self.model.parameters(),
                 self.config.gradient_clip_norm,
             )
-        self._apply_schedule()
-        self.optimizer.step()
-        self.model.zero_grad(set_to_none=True)
+        with self.timer_step:
+            self._apply_schedule()
+            self.optimizer.step()
+            self.model.zero_grad(set_to_none=True)
 
-        self.global_step += 1
-        self.local_step += 1
         return {"loss": loss.detach(), "model": logits.detach()}
 
+    @override
     def train_loss(self, **batch: Any) -> TrainStepOutput:
         """Compute the training loss without a backward pass."""
         media: Tensor = batch["media"]
@@ -212,6 +186,7 @@ class Cifar10TrainStep:
             loss = self._loss(logits, label)
         return {"loss": loss, "model": logits}
 
+    @override
     def eval_loss(self, **batch: Any) -> TrainStepOutput:
         """Compute the evaluation loss and logits."""
         media: Tensor = batch["media"]
@@ -219,6 +194,7 @@ class Cifar10TrainStep:
         logits = self.call_eval(media=media)
         return {"loss": self._loss(logits, label), "model": logits}
 
+    @override
     def call_eval(self, **batch: Any) -> Tensor:
         """Return evaluation logits, optionally averaged over augmentations."""
         media: Tensor = batch["media"]
@@ -230,32 +206,46 @@ class Cifar10TrainStep:
             assert isinstance(logits, Tensor)
             return logits
 
+    @override
     def on_epoch_end(self) -> None:
-        """Do nothing: this step holds no state across epoch boundaries."""
+        """Do nothing: this step accumulates nothing across a boundary."""
 
+    @override
     def state_dict(self) -> dict[str, Any]:
-        """Return model, optimizer, and progress state for checkpointing."""
-        return {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "global_step": self.global_step,
-            "whitened": self._whitened,
-        }
+        """Extend the base state with whether the whitening layer was fitted.
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        Fitting happens once, from the first batch seen, so a resume that
+        forgot it would re-fit against a model whose weights had already moved.
+        """
+        state = super().state_dict()
+        state["whitened"] = self._whitened
+        return state
+
+    @override
+    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        self.model.load_state_dict(state_dict["model"])
-        self.optimizer.load_state_dict(state_dict["optimizer"])
-        self.global_step = state_dict["global_step"]
-        self.local_step = 0
+        super().load_state_dict(state_dict, **kwargs)
         self._whitened = state_dict["whitened"]
 
+    @property
+    @override
+    def progress_learning_schedule(self) -> float:
+        """Fraction of ``total_train_steps`` spent, in ``[0, 1]``."""
+        spent = self.global_step / self.config.total_train_steps
+        return 1.0 if spent > 1.0 else float(spent)
+
     def _apply_schedule(self) -> None:
-        """Scale every parameter group's learning rate for the current step."""
+        """Scale every parameter group's learning rate for the current step.
+
+        The ramp stays indexed by STEP rather than composed as a
+        :func:`~priml.math.schedules.warmup` factor: it counts
+        ``int(warmup_fraction * total)`` whole steps and reads one step ahead,
+        which is not the same number as a fraction of progress -- and the
+        goldens freeze the rate this produces.
+        """
         config = self.config
-        total = config.total_train_steps
-        multiplier = self.schedule(self.global_step, total)
-        warmup_steps = int(config.warmup_fraction * total)
+        multiplier = self.schedule(self.progress_learning_schedule)
+        warmup_steps = int(config.warmup_fraction * config.total_train_steps)
         if warmup_steps and self.global_step < warmup_steps:
             multiplier *= (self.global_step + 1) / warmup_steps
         apply_lr_scale([self.optimizer], multiplier)
