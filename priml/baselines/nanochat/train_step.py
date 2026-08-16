@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Any, Self, cast, override
+from typing import Any, Self, override
 
 import math
 import time
@@ -209,10 +209,18 @@ class NanoChatTrainStep(TrainStep):
         compile: Makeable[Callable[[Callable[..., Any]], Callable[..., Any]]] | None = (
             field(default_factory=lambda: PartialConfig(torch.compile))
         )
-        """Compile the MODEL with ``torch.compile``; ``None`` runs it eagerly.
+        """Compile the model AND the loss with ``torch.compile``; ``None`` runs
+        them eagerly.
+
+        Both together, not the model alone: the loss reads the ``[B, S, V]``
+        logits and upcasts them to float32, so a boundary between the two
+        materializes that tensor -- 2 GiB at this recipe's geometry -- and runs
+        the reduction and its backward unfused. Inside one graph inductor fuses
+        them into the head and never writes it. Measured against the reference
+        on a 5090: +7.2% per step with the boundary, +0.6% without.
 
         Bare, without the base's ``fullgraph=True``, which this graph does not
-        compile under. Covers the model only -- each optimizer member carries
+        compile under. Covers the forward only -- each optimizer member carries
         its own ``compile``, since a compiled step and an eager one differ
         numerically (measured, 2.9e-2 on one update)."""
 
@@ -229,7 +237,13 @@ class NanoChatTrainStep(TrainStep):
         drives the update itself rather than through ``TrainStep.step``."""
 
         budget_warmup_steps: int = 10
-        """Leading steps excluded from the clock (compilation, cold caches)."""
+        """Leading optimizer STEPS excluded from the clock.
+
+        Not passes: the reference excludes ten of its own steps
+        (``train.py:576``), and each of those is a whole accumulation. Counting
+        passes here would hand this recipe ``10 / accumulate_passes`` steps of
+        warmup against the reference's ten -- 1.25 at the default geometry --
+        and charge the budget for compilation the comparison excludes."""
 
         tokens_per_optimizer_step: int = 524_288
         """Tokens per optimizer step, reached by gradient accumulation.
@@ -360,28 +374,47 @@ class NanoChatTrainStep(TrainStep):
             config.rows_per_pass * config.model.max_seq_len
         )
         self._pending_passes = 0
+        # The worst loss of the passes accumulated so far, held on DEVICE so
+        # the guard costs no synchronization until the batch is whole.
+        self._pending_worst: Tensor | None = None
         # Budget-counted seconds, excluding warmup and everything outside
         # train_step. The loop reads it through NanoChatTrainLoop.
         self.elapsed_sec = 0.0
-        # Passes, not optimizer steps: the warmup exclusion is stated in
-        # passes, and accumulation makes those differ by accumulate_passes.
-        self._passes_this_process = 0
+        # Optimizer steps this PROCESS has completed, restored across a resume
+        # so a restarted run does not spend the warmup twice. Not the timer's
+        # ``local_step``, which a fresh process zeroes.
+        self._steps_this_process = 0
         # ``model`` stays the UNCOMPILED module, as the base assumes: it is what
-        # the optimizer partition routed over and what the checkpoint holds.
-        # Only :attr:`forward_model` sees the wrapper, whose ``state_dict``
-        # prefixes every key with ``_orig_mod``.
+        # the optimizer partition routed over and what the checkpoint holds,
+        # and a compiled wrapper prefixes every ``state_dict`` key with
+        # ``_orig_mod``. What is compiled is the forward BELOW, model and loss
+        # together.
         if self._compile_fn is not None:
-            self._compiled_model = self._compile_fn(self.model)
+            self._compiled_model = self._compile_fn(self._forward)
         for group in self.optimizer.param_groups:
             group.setdefault("initial_weight_decay", group.get("weight_decay", 0.0))
         self.schedule = config.schedule.make()
 
-    @property
-    def forward_model(self) -> nn.Module:
-        """The compiled wrapper when compiling, else the module itself."""
-        if self._compiled_model is None:
-            return self.model
-        return cast("nn.Module", self._compiled_model)
+    def _forward(self, media: Tensor, label: Tensor) -> Tensor:
+        """Score one batch, returning the per-token loss.
+
+        Model and loss in ONE function so the two compile together; see
+        :attr:`Config.compile`. Unreduced because the metric weights each token
+        by its byte length, and measured to fuse exactly as well as a reduced
+        one (54.44 against 54.49 ms/pass).
+        """
+        logits = self.model(media)
+        assert isinstance(logits, Tensor)
+        return self.loss(logits, media=media, label=label)["loss"]
+
+    def _per_token_loss(self, batch: dict[str, Any]) -> Tensor:
+        """Score one batch through the compiled forward when there is one."""
+        forward = self._compiled_model if self._compiled_model is not None else None
+        if forward is None:
+            return self._forward(batch["media"], batch["label"])
+        result = forward(batch["media"], batch["label"])
+        assert isinstance(result, Tensor)
+        return result
 
     @property
     @override
@@ -420,41 +453,66 @@ class NanoChatTrainStep(TrainStep):
         # Drain first, THEN start the clock: queued device work from an
         # evaluation would otherwise be waited for inside this step's timing
         # and charged to the budget. Measured: 422 steps against 836.
-        self._synchronize()
+        #
+        # Only at an accumulation BOUNDARY, which is where the reference drains
+        # too (train.py:542). Draining mid-accumulation stops the CPU running
+        # ahead of a queue it is about to extend, and buys nothing: the clock
+        # charges whole optimizer steps, so what happens between the passes of
+        # one is already inside the bracket. Measured on a 5090 at 32 passes,
+        # 1786 against 1770 ms/step -- and 1770 with no drain at all, so this
+        # cadence gives up none of the accuracy.
+        if self._pending_passes == 0:
+            self._synchronize()
         started = time.perf_counter()
         self.model.train()
         with self._autocast():
-            per_token = self._per_token_loss(self.forward_model, batch)
+            per_token = self._per_token_loss(batch)
             loss = per_token.mean()
         # Each pass contributes its share, so the accumulated gradient is the
         # mean over the whole token batch rather than over the last pass.
         (loss / self.accumulate_passes).backward()
-        loss_value = float(loss.detach())
-        if not math.isfinite(loss_value) or loss_value > config.divergence_threshold:
-            self.model.zero_grad(set_to_none=True)
-            # The gradients this count refers to were just discarded, so a
-            # caller that caught this would otherwise step a short token batch.
-            self._pending_passes = 0
-            raise RuntimeError(
-                f"training diverged at step {self.global_step}: loss={loss_value}.",
-            )
+        # Kept ON DEVICE and reduced with the passes before it. Reading it here
+        # instead would stall the CPU on the forward before the backward could
+        # be enqueued, draining the pipeline once per PASS: measured at 85.5
+        # against 58.6 ms/pass on a 5090 at eight rows, a third of the step.
+        # ``maximum`` rather than a sum because the threshold is stated per
+        # pass, and it propagates NaN, which is the other half of the guard.
+        worst = loss.detach()
+        if self._pending_worst is not None:
+            worst = torch.maximum(worst, self._pending_worst)
+        self._pending_worst = worst
 
         self._pending_passes += 1
         metrics: dict[str, float | Tensor] = {}
         if self._pending_passes >= self.accumulate_passes:
+            # Read ONCE, at the boundary, and before the update: a diverged
+            # batch must not reach the optimizer, and every pass of this token
+            # batch has now been seen.
+            self._assert_not_diverged()
             # The step timer brackets the update, so ``global_step`` advances
             # as it does for every other recipe; ``elapsed_sec`` below stays
             # the clock this baseline's schedules read.
             with self.timer_step:
                 metrics = self._apply_update()
             self._pending_passes = 0
-        self._passes_this_process += 1
+            self._steps_this_process += 1
         # Charged after the update so a step's own optimizer time counts, and
-        # only past warmup so compilation does not consume the budget.
-        if self._passes_this_process > config.budget_warmup_steps:
-            # Drain again: the backward and the optimizer are queued, not
-            # finished, so a CPU-side reading would undercharge this step.
-            self._synchronize()
+        # only past warmup so compilation does not consume the budget. Counted
+        # in optimizer STEPS, matching the reference (train.py:576): in passes
+        # the exclusion would be ``budget_warmup_steps / accumulate_passes``
+        # steps -- 1.25 at the default geometry against the reference's ten --
+        # and the budget would pay for the compilation it excludes.
+        if self._steps_this_process > config.budget_warmup_steps:
+            # Drain again, at the same boundary: the backward and the optimizer
+            # are queued, not finished, so a CPU-side reading would undercharge
+            # the step. ``_pending_passes`` is zeroed by the update above, so
+            # this fires on the pass that completed one -- and the two drains
+            # together bracket the whole accumulation, since each pass starts
+            # where the last ended. What each individual pass is charged is
+            # then enqueue time, but their SUM is the work, and the budget is
+            # spent in optimizer steps.
+            if self._pending_passes == 0:
+                self._synchronize()
             self.elapsed_sec += time.perf_counter() - started
         return {
             "loss": loss.detach().reshape(1),
@@ -467,7 +525,7 @@ class NanoChatTrainStep(TrainStep):
         """Compute the training loss without a backward pass."""
         self.model.train()
         with torch.no_grad(), self._autocast():
-            per_token = self._per_token_loss(self.forward_model, batch)
+            per_token = self._per_token_loss(batch)
         return {"loss": per_token.mean().reshape(1), "model": per_token}
 
     @override
@@ -480,7 +538,7 @@ class NanoChatTrainStep(TrainStep):
         """
         self.model.eval()
         with torch.inference_mode(), self._autocast():
-            per_token = self._per_token_loss(self.forward_model, batch)
+            per_token = self._per_token_loss(batch)
         valid = int(batch.get("valid_count", per_token.shape[0]))
         return {
             "loss": per_token[:valid].mean().reshape(1),
@@ -489,10 +547,15 @@ class NanoChatTrainStep(TrainStep):
 
     @override
     def call_eval(self, **batch: Any) -> Tensor:
-        """Return evaluation logits for one batch."""
+        """Return evaluation logits for one batch.
+
+        Eager: the compiled forward returns a per-token LOSS, having fused the
+        logits away, and materializing them again is the whole cost that
+        fusion removes. Callers wanting a score use :meth:`eval_loss`.
+        """
         self.model.eval()
         with torch.inference_mode(), self._autocast():
-            logits = self.forward_model(batch["media"])
+            logits = self.model(batch["media"])
         assert isinstance(logits, Tensor)
         return logits
 
@@ -502,25 +565,28 @@ class NanoChatTrainStep(TrainStep):
         if self._pending_passes:
             self.model.zero_grad(set_to_none=True)
             self._pending_passes = 0
+            # The losses those gradients came from go with them: carried into
+            # the next batch, a discarded pass could abort a healthy one.
+            self._pending_worst = None
 
     @override
     def state_dict(self) -> dict[str, Any]:
         """Extend the base state with this baseline's own budget clock.
 
-        The clock drives every schedule and the pass count gates it, so a
+        The clock drives every schedule and the step count gates it, so a
         resume that dropped either would re-anneal from the top or grant
         another warmup costing no budget.
         """
         state = super().state_dict()
         state["elapsed_sec"] = self.elapsed_sec
-        state["local_step"] = self._passes_this_process
+        state["local_step"] = self._steps_this_process
         return state
 
     @override
     def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
         """Restore state produced by :meth:`state_dict`."""
         # Checked BEFORE anything is assigned, so a caller that catches this is
-        # not left holding the checkpoint's clock beside its own pass counter.
+        # not left holding the checkpoint's clock beside its own step counter.
         if "local_step" not in state_dict:
             raise ValueError(
                 "this checkpoint records no 'local_step', so it predates the "
@@ -530,8 +596,32 @@ class NanoChatTrainStep(TrainStep):
             )
         super().load_state_dict(state_dict, **kwargs)
         self.elapsed_sec = float(state_dict["elapsed_sec"])
-        self._passes_this_process = int(state_dict["local_step"])
+        self._steps_this_process = int(state_dict["local_step"])
         self._pending_passes = 0
+        self._pending_worst = None
+
+    def _assert_not_diverged(self) -> None:
+        """Refuse a token batch whose worst pass diverged, discarding it.
+
+        Raises:
+          RuntimeError: A pass was non-finite or above ``divergence_threshold``.
+            The gradients are zeroed first, so the passes accumulated behind it
+            are gone -- leaving their COUNT would make the next update fire on
+            a short token batch, which is the one thing accumulation exists to
+            prevent.
+
+        """
+        if self._pending_worst is None:
+            return
+        worst = float(self._pending_worst)
+        self._pending_worst = None
+        if math.isfinite(worst) and worst <= self.config.divergence_threshold:
+            return
+        self.model.zero_grad(set_to_none=True)
+        self._pending_passes = 0
+        raise RuntimeError(
+            f"training diverged at step {self.global_step}: loss={worst}.",
+        )
 
     def _apply_update(self) -> dict[str, float | Tensor]:
         """Set every schedule for this step, then step the optimizer."""
@@ -563,12 +653,6 @@ class NanoChatTrainStep(TrainStep):
         metrics["progress"] = progress
         metrics["momentum"] = momentum
         return metrics
-
-    def _per_token_loss(self, model: nn.Module, batch: dict[str, Any]) -> Tensor:
-        """Forward one batch and score it with the configured loss."""
-        logits = model(batch["media"])
-        assert isinstance(logits, Tensor)
-        return self.loss(logits, **batch)["loss"]
 
     def _synchronize(self) -> None:
         """Wait for queued device work, so the clock measures this step alone."""

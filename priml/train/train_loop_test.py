@@ -2002,6 +2002,45 @@ def test_accumulation_logs_once_per_update_not_once_per_microbatch() -> None:
     assert train_steps == [1, 2, 3]
 
 
+def test_accumulation_evaluates_once_per_update_not_once_per_microbatch() -> None:
+    """The eval cadence counts updates; the loop body runs per microbatch.
+
+    Measured before the guard on a five-minute budget: an eval costing 23
+    seconds ran eight times at one step -- once per accumulation pass -- and
+    spent three of those five minutes re-scoring identical weights.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(
+            tmp,
+            dataset=DummyDataset.Config(
+                input_shape=(2,),
+                num_classes=2,
+                num_samples=64,
+                batch_size=4,
+                device="cpu",
+            ),
+        )
+        config.checkpointing = None
+        config.step.accumulate_grad_batches = 4
+        config.max_steps = 4
+        config.num_steps_eval = 2
+        loop = config.make()
+
+        evaluated: list[int] = []
+        inner = loop.eval
+
+        def spy() -> dict[str, Any]:
+            evaluated.append(loop.step.global_step)
+            return inner()
+
+        loop.eval = spy  # ty: ignore[invalid-assignment] -- test spy patches a bound method
+        loop.train()
+
+    # Step 2 on the cadence, then the final eval. The while-loop exits once
+    # ``max_steps`` is reached, so step 4's cadence eval never comes due.
+    assert evaluated == [2, 4]
+
+
 def test_train_tracker_logs_every_startup_step_then_cadence() -> None:
     """Startup diagnostics log every early step before falling back to cadence."""
     with tempfile.TemporaryDirectory() as tmp:

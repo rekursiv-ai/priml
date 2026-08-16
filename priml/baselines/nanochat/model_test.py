@@ -356,6 +356,36 @@ def test_the_output_projection_is_drawn_near_zero() -> None:
     assert abs(float(weight.std()) / 0.001 - 1.0) < 0.05
 
 
+def test_the_cached_rotation_table_is_the_one_a_fresh_build_produces() -> None:
+    """The table is built once for ``max_seq_len`` and sliced per batch.
+
+    Rebuilding it per forward cost 12.5 of the 13.1 ms/step this recipe stood
+    above its reference. Caching is sound only if the slice is bit-identical to
+    what the rope returns for those positions -- the factors are a
+    transcendental, so this is a measurement rather than an algebraic identity.
+    """
+    model = _model()
+    length = SEQ // 2
+    cached_cos, cached_sin = model._rotation_table(length, device=torch.device("cpu"))
+    fresh_cos, fresh_sin = model.rope(torch.arange(SEQ))
+    assert torch.equal(cached_cos, fresh_cos[:length])
+    assert torch.equal(cached_sin, fresh_sin[:length])
+
+
+def test_the_rotation_table_is_rebuilt_when_the_frequencies_are() -> None:
+    """``reset_parameters`` re-derives the rope, so a stale table cannot survive.
+
+    Meta-device materialization drives init through it, and a move rebuilds the
+    frequencies because the transcendental differs by a bit across devices --
+    so a table cached before that would be one no device would have produced.
+    """
+    model = _model()
+    model(torch.randint(0, VOCAB, (2, SEQ)))
+    assert model._rotation is not None
+    model.reset_parameters()
+    assert model._rotation is None
+
+
 def test_forward_bfb() -> None:
     """Freeze exp000's architecture: same weights in, same logits out.
 
