@@ -45,7 +45,34 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 # ``SDL_VIDEODRIVER=x11`` alone, for a human who wants to watch.
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-HAS_CRAFTAX: Final = importlib.util.find_spec("craftax") is not None
+_REFERENCE_PROBES: Final = (
+    "craftax.craftax.constants",
+    "craftax.craftax_classic.envs.craftax_state",
+)
+"""One real module per reference root the parity tests import.
+
+Submodules, not the bare ``craftax`` package: an interrupted uninstall leaves
+the package directory behind with its contents gone, and a root probe calls
+that installed. The tests then run and fail at import instead of skipping.
+"""
+
+
+def _reference_is_installed() -> bool:
+    """Whether every reference root the parity tests read is importable.
+
+    ``find_spec`` returns ``None`` for a missing leaf but RAISES
+    ``ModuleNotFoundError`` when an intermediate parent is gone -- which is the
+    wholly-absent case this guard exists to answer, so it cannot propagate.
+    """
+    try:
+        return all(
+            importlib.util.find_spec(name) is not None for name in _REFERENCE_PROBES
+        )
+    except ModuleNotFoundError:
+        return False
+
+
+HAS_CRAFTAX: Final = _reference_is_installed()
 """Whether the reference implementation is installed."""
 
 requires_craftax: Final = pytest.mark.skipif(

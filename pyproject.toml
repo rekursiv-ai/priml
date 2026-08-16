@@ -161,9 +161,9 @@ timeout = 60
 # Using filterwarnings instead of addopts so we can add exceptions.
 filterwarnings = [
     "error",
+    "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
     "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable (e.g. under -n parallel workers); CPU-only tests probe CUDA during backward and torch warns benignly.
-    "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:.*invalid escape sequence:SyntaxWarning",  # torchao 0.17.0 FqnToConfig docstring.
     "ignore:.*torch\\.jit\\.script_method.*:DeprecationWarning",
     "ignore:.*should not be instantiated.*:DeprecationWarning:torch._dynamo.side_effects",
@@ -326,7 +326,7 @@ exclude = [
 #
 # Refresh workflow after a `pyright --createstub` regen (verified to keep
 # `ty check .` and `basedpyright .` clean).
-#    loop/tools/ruff_check_extra_autofix.py --select PYI002,PYI036,PYI051 typings
+#    tools/ruff_check_extra_autofix.py --select PYI002,PYI036,PYI051 typings
 #    uv --quiet run --frozen ruff check typings --fix --unsafe-fixes
 #    uv --quiet run --frozen ruff format typings
 "typings/**" = [
@@ -380,7 +380,7 @@ exclude = [
     # === INTENTIONALLY VIOLATE: fixable in principle, kept by choice. ===
     # Deleting a "locally unused" private is unsafe: it may be re-exported and
     # consumed by another stub (e.g. `_size as _size`), and a stub must be correct
-    # independent of its consumers. loop/tools/ruff_check_extra_autofix.py can fix
+    # independent of its consumers. tools/ruff_check_extra_autofix.py can fix
     # these with a `# noqa` escape hatch, but we leave them rather than risk it.
     "PYI046",   #     4 -- unused-private-protocol -- may be re-exported cross-stub.
     "PYI047",   #    45 -- unused-private-type-alias -- may be re-exported cross-stub.
@@ -459,16 +459,12 @@ ignore = [
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"
-reportAny = false                          # `Any` propagation is pervasive in PyTorch.
+reportAny = false                          # `Any` propagation is pervasive in third-party deps.
 reportExplicitAny = false                  # Explicit `Any` annotations are intentional.
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
 reportInvalidCast = false                  # All cast() calls are intentional.
 reportPrivateUsage = false                 # Redundant with ruff SLF001.
 reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
-reportUnknownMemberType = false
-reportUnknownVariableType = false
-reportUnknownArgumentType = false
-reportMissingTypeStubs = false             # scipy-stubs not installed in the export env.
 reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
 reportUnusedImport = false                 # Redundant with ruff F401.
 # Extra suppressions.
@@ -477,7 +473,12 @@ reportIncompatibleMethodOverride = false   # Subclasses may rename parameters.
 reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
 reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
+# reportConstantRedefinition = false       # Uppercase locals treated as constants (math). [Violates PEP8]
 reportMissingModuleSource = false
+reportMissingTypeStubs = false             # scipy-stubs not installed in the export env.
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
 reportUnnecessaryTypeIgnoreComment = false
 
 [[tool.basedpyright.executionEnvironments]]
