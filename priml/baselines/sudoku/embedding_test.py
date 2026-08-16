@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from configgle import Makeable
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
@@ -13,6 +13,10 @@ from priml.baselines.sudoku.embedding import (
     GridEmbedding,
     PredictionFeedback,
 )
+
+
+if TYPE_CHECKING:
+    from configgle import Makeable
 
 
 def _embedding(*channels: Makeable[GridChannel]) -> GridEmbedding:

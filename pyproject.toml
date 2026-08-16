@@ -77,13 +77,11 @@ render = [
 # uv sync --all-groups
 
 debug = [
-    "ipykernel",
     "ipython",
     "tqdm",
 ]
 lint = [
     "codespell>=2.2.4",
-    "pre-commit>=4.6",
     "ruff",
 ]
 stubs = [
@@ -91,6 +89,7 @@ stubs = [
 ]
 test = [
     "hypothesis>=6.155.1",
+    "nodejs-wheel-binaries>=24.16.0",
     "pytest-cov",
     "pytest-testmon>=2.1",
     "pytest-timeout>=2.4.0",
@@ -101,12 +100,10 @@ typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.60",
     "safetensors",
-    # The craftax viewer's modules are type-checked and tested like any
-    # other, so the checkers need the imports to resolve even though a
-    # training install never pulls them.
     "imageio[ffmpeg]",
 ]
 "pre-commit" = [
+    "pre-commit>=4.6",
     {include-group = "lint"},
     {include-group = "stubs"},
     {include-group = "test"},
@@ -150,7 +147,6 @@ exclude = ["**/*_test.py", "**/conftest.py"]
 exclude = [".github/**", ".codespell-ignore"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
 python_files = ["*_test.py", "test_*.py"]
 markers = [
     "ci_smoke: slower package/CLI smoke tests run explicitly in CI",
@@ -170,6 +166,7 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:.*invalid escape sequence:SyntaxWarning",  # torchao 0.17.0 FqnToConfig docstring.
     "ignore:.*torch\\.jit\\.script_method.*:DeprecationWarning",
+    "ignore:.*should not be instantiated.*:DeprecationWarning:torch._dynamo.side_effects",
 ]
 norecursedirs = [
     "*.egg-info",
@@ -273,7 +270,6 @@ ignore = [
     "TD003",   # Missing TODO link.
     "TRY003",  # Raise vanilla args.
     "TRY300",  # Try consider else.
-    "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
 
     # Additional style relaxations.
     # "DJ",    # Django.
@@ -301,6 +297,9 @@ ignore = [
     "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...` or `# TODO @<author_name>: ...`
     "TD004",   # Missing colon in TODO
     "TD005",   # Missing issue description after `TODO`
+
+    # Exclusions due to public export.
+    "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
 ]
 exclude = [
     "**/typings/**",
@@ -400,10 +399,11 @@ exclude = [
     "S301",    # Pickle usage.
     "T201",    # Print found.
 ]
-"{**/docs/**}" = [
+"{**/docs/**,**/scripts/**}" = [
     "INP001",  # Standalone example scripts.
     "T201",    # Print found. (Eval scripts use print for output.)
 ]
+# NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
 [tool.ruff.lint.isort]
 case-sensitive = false
@@ -529,13 +529,16 @@ skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-
 
 [tool.uv]
 package = true
-environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
+environments = [
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin'",
+]
 override-dependencies = [
     # Never install classic pygame; pygame-ce is its effective successor.
     # pygame-ce installs the SAME top-level `pygame` package, so anything that
-    # imports pygame gets ce transparently -- and letting both resolve makes
-    # install order decide which one wins, silently. Classic pygame is dormant:
-    # its last release is 2.6.1 (2024-09-30) and upstream has not pushed since
+    # imports pygame gets ce transparently. Classic pygame is dormant: last
+    # release 2.6.1 (2024-09-30) ships no cp314 wheel, its SDL source build
+    # fails on the headless GPU images, and upstream has not pushed since
     # 2025-11. A false marker is the only way to drop a transitive dep
     # outright; uv overrides cannot redirect one package name to another.
     "pygame; sys_platform == 'never'",
@@ -565,10 +568,10 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-# Match the monorepo: pin CUDA wheels to cu128 on Linux (Together.AI drivers
-# <580), leave macOS on the default CPU build. See the root pyproject for the
-# full rationale on why an explicit index pin (not torch-backend=auto) is the
-# only viable option across the fleet.
+# We pin at cu128 because some providers don't keep their drivers up-to-date
+# (Together.AI drivers are <580).
+# To test that it installed correctly,
+#   uv --quiet run python -c "import torch; print(f'PyTorch CUDA: {torch.version.cuda}'); print(f'cuDNN: {torch.backends.cudnn.version()}'); print(f'Device: {torch.cuda.get_device_name(0)}')"
 torch = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 torchao = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
 torchvision = [{index = "pytorch-cu128", marker = "sys_platform == 'linux'"}]
