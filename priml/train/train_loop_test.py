@@ -1412,11 +1412,15 @@ def test_startup_logs_before_entering_train_step(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup diagnostics emit before the first train_step call."""
+    """Startup diagnostics emit before the first train_step call.
+
+    At DEBUG: they name the phase a wedged run is stuck in, so they cost
+    nothing on a healthy console and are turned on when one hangs.
+    """
     monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: True)
     loop = _make_step_logging_loop_config().make()
 
-    with caplog.at_level(logging.INFO, logger="priml.train.train_loop"):
+    with caplog.at_level(logging.DEBUG, logger="priml.train.train_loop"):
         loop.train()
 
     messages = [r.message for r in caplog.records]
@@ -1955,6 +1959,47 @@ def test_train_tracker_logging_respects_num_steps_log_cadence() -> None:
         if "train/total_loss" in metrics
     )
     assert train_steps == [1, 5, 10]
+
+
+def test_accumulation_logs_once_per_update_not_once_per_microbatch() -> None:
+    """Logging runs per microbatch; the cadences count optimizer updates.
+
+    Without the gate every pass of an accumulation reports the same step, the
+    last of them alone carrying that update's metrics -- four identical console
+    lines per step here, eight in the nanochat recipe.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # Sized so one pass holds whole accumulations: the epoch boundary drops
+        # a partial one, so a shorter pass would reset the count every time and
+        # never complete an update.
+        config = _make_simple_loop_config(
+            tmp,
+            dataset=DummyDataset.Config(
+                input_shape=(2,),
+                num_classes=2,
+                num_samples=64,
+                batch_size=4,
+                device="cpu",
+            ),
+        )
+        config.checkpointing = None
+        config.tracker = _RecordingTracker.Config()
+        config.step.accumulate_grad_batches = 4
+        config.max_steps = 3
+        config.num_steps_eval = math.inf
+        config.num_steps_log = 1
+        config.early_train_log_steps = 100
+        loop = config.make()
+        tracker = cast(_RecordingTracker, loop.tracker)
+
+        loop.train()
+
+    train_steps = sorted(
+        step
+        for metrics, step in tracker.metrics_by_step
+        if "train/total_loss" in metrics
+    )
+    assert train_steps == [1, 2, 3]
 
 
 def test_train_tracker_logs_every_startup_step_then_cadence() -> None:
