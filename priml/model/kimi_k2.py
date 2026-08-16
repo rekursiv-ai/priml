@@ -13,9 +13,9 @@ Architecture (from Kimi-K2-Instruct ``config.json``)::
     hidden_size          : 7168
     num_hidden_layers    : 61
     num_attention_heads  : 64
-    qk_nope_head_dim     : 128
-    qk_rope_head_dim     : 64
-    v_head_dim           : 128
+    qk_nope_head_dim     : 128    -> channels_qk_nope_head
+    qk_rope_head_dim     : 64     -> channels_qk_rope_head
+    v_head_dim           : 128    -> channels_v_head
     q_lora_rank          : null       (Kimi-K2; DSV3 uses 1536)
     kv_lora_rank         : 512
     n_routed_experts     : 384
@@ -126,7 +126,7 @@ class KimiK2(CausalLM):
                 hidden_size=int(config["hidden_size"]),
                 num_hidden_layers=int(config["num_hidden_layers"]),
                 num_attention_heads=int(config["num_attention_heads"]),
-                # HF's schema; our fields are renamed, the input keys are not.
+                # Quoted keys are HF's JSON schema, not priml names.
                 channels_qk_nope_head=int(config.get("qk_nope_head_dim", 128)),
                 channels_qk_rope_head=int(config.get("qk_rope_head_dim", 64)),
                 channels_v_head=int(config.get("v_head_dim", 128)),
