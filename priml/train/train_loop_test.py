@@ -1395,6 +1395,51 @@ def _make_step_logging_loop_config() -> TrainLoop.Config:
     return config
 
 
+def test_result_line_accounts_for_every_second(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RESULT decomposes wall time, so no clock can be moved unseen.
+
+    A budget the run reports itself is only auditable when the parts add up:
+    training seconds charged, seconds excluded from the charge, evaluation,
+    and everything else must reconstruct the wall clock.
+    """
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: True)
+    config = _make_step_logging_loop_config()
+    config.num_steps_eval = 1
+    loop = config.make()
+    # A measurable eval: at zero seconds every term is zero and the sum holds
+    # however the parts are counted, so the invariant would not bite.
+    inner_eval = loop.eval
+
+    def slow_eval() -> dict[str, Any]:
+        time.sleep(0.05)
+        return inner_eval()
+
+    monkeypatch.setattr(loop, "eval", slow_eval)
+
+    with caplog.at_level(logging.INFO, logger="priml.train.train_loop"):
+        loop.train()
+
+    result = next(r.message for r in caplog.records if r.message.startswith("RESULT:"))
+    parts = dict(
+        field.split("=", 1) for field in result.removeprefix("RESULT:").split(" | ")
+    )
+    seconds = {
+        key: float(parts[key].removesuffix("s"))
+        for key in ("train_sec", "train_unbilled_sec", "eval_sec", "other_sec", "time")
+    }
+    assert seconds["eval_sec"] >= 0.1  # two evals, 0.05s each
+    accounted = (
+        seconds["train_sec"]
+        + seconds["train_unbilled_sec"]
+        + seconds["eval_sec"]
+        + seconds["other_sec"]
+    )
+    assert accounted == pytest.approx(seconds["time"], abs=0.05)
+
+
 def test_per_step_loss_logged_on_rank_zero(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

@@ -241,9 +241,22 @@ class MMDiTBlock(nn.Module):
         """
         N = self.num_streams
 
+        if self.adalns is not None and c is None:
+            # Skipping AdaLN would add both sublayers UNGATED, which is not the
+            # identity-at-init this block documents. Zeros give that identity.
+            raise ValueError(
+                "conditioning is required when cond_dim > 0; pass a tensor "
+                "per stream, or one to broadcast.",
+            )
+
         (cs,) = broadcast_sequences(c if c is not None else [None] * N)
         if len(cs) == 1:
             cs = cs * N
+        if len(cs) != N:
+            raise ValueError(
+                f"Got {len(cs)} conditioning tensors for {N} streams; supply "
+                "one per stream, or a single tensor to broadcast.",
+            )
 
         mods: list[AdaLNZero.Output | None] = [None] * N
         if self.adalns is not None:

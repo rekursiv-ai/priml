@@ -237,7 +237,7 @@ def trapezoidal(
       ValueError: ``flat`` is outside ``[0, 1)``, leaving no tail to decay over.
 
     """
-    if not 0.0 <= flat < 1.0:
+    if flat < 0.0 or flat >= 1.0:
         raise ValueError(f"flat must lie in [0, 1); got {flat}.")
     spent = _clamped(progress)
     if spent < flat:
@@ -272,7 +272,7 @@ def one_cycle(
       ValueError: ``warmup_fraction`` is outside ``[0, 1)``.
 
     """
-    if not 0.0 <= warmup_fraction < 1.0:
+    if warmup_fraction < 0.0 or warmup_fraction >= 1.0:
         raise ValueError(
             f"warmup_fraction must lie in [0, 1); got {warmup_fraction}.",
         )

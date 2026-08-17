@@ -51,8 +51,8 @@ class Linear(nn.Linear):
         init_bias: InitFn = nn.init.zeros_
         """Bias initialization function."""
 
-        shard: ShardStyle = None
-        """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
+        shard: ShardStyle | None = None
+        """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
         @override
         def finalize(self) -> Self:
@@ -115,8 +115,8 @@ class EnsembleLinear(nn.Module):
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function (applied per ensemble member)."""
 
-        shard: ShardStyle = None
-        """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
+        shard: ShardStyle | None = None
+        """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()

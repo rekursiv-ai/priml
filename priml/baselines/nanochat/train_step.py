@@ -236,14 +236,10 @@ class NanoChatTrainStep(TrainStep):
         instead of the base's ``learning_rate_scheduler``, since this recipe
         drives the update itself rather than through ``TrainStep.step``."""
 
-        budget_warmup_steps: int = 10
+        budget_warmup_steps: int = 11
         """Leading optimizer STEPS excluded from the clock.
 
-        Not passes: the reference excludes ten of its own steps
-        (``train.py:576``), and each of those is a whole accumulation. Counting
-        passes here would hand this recipe ``10 / accumulate_passes`` steps of
-        warmup against the reference's ten -- 1.25 at the default geometry --
-        and charge the budget for compilation the comparison excludes."""
+        Using 11 to match the Karpathy baseline."""
 
         tokens_per_optimizer_step: int = 524_288
         """Tokens per optimizer step, reached by gradient accumulation.
@@ -323,9 +319,8 @@ class NanoChatTrainStep(TrainStep):
             ):
                 # The schedule writes these straight into the optimizer's
                 # groups every step, past the constructor that would have
-                # rejected them. NaN needs no separate check here: it fails
-                # this comparison rather than slipping through it.
-                if not 0.0 <= momentum < 1.0:
+                # rejected them.
+                if math.isnan(momentum) or momentum < 0.0 or momentum >= 1.0:
                     raise ValueError(
                         f"{name} must lie in [0, 1); got {momentum}.",
                     )
@@ -494,10 +489,10 @@ class NanoChatTrainStep(TrainStep):
             self._steps_this_process += 1
         # Charged after the update so a step's own optimizer time counts, and
         # only past warmup so compilation does not consume the budget. Counted
-        # in optimizer STEPS, matching the reference (train.py:576): in passes
-        # the exclusion would be ``budget_warmup_steps / accumulate_passes``
-        # steps -- 1.25 at the default geometry against the reference's ten --
-        # and the budget would pay for the compilation it excludes.
+        # in optimizer STEPS, matching the reference (train.py:576). The
+        # counter is incremented above, so this reads one higher than the
+        # reference's does at the same update -- see ``budget_warmup_steps``,
+        # whose default absorbs the difference.
         if self._steps_this_process > config.budget_warmup_steps:
             # Drain again, at the same boundary: the backward and the optimizer
             # are queued, not finished, so a CPU-side reading would undercharge

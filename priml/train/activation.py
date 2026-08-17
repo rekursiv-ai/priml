@@ -152,7 +152,7 @@ class SelectiveActivationCheckpointing:
         self.checkpoint_fraction = config.checkpoint_fraction
         self.reentrant = config.reentrant
 
-        if not 0 <= self.checkpoint_fraction <= 1:
+        if self.checkpoint_fraction < 0 or self.checkpoint_fraction > 1:
             raise ValueError(
                 f"checkpoint_fraction must be in [0, 1], got {self.checkpoint_fraction}",
             )

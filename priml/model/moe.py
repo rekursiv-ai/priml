@@ -142,7 +142,7 @@ class Router(nn.Module):
                 raise ValueError(
                     f"topk_group={self.topk_group} > n_group={self.n_group}.",
                 )
-            if not 1 <= self.top_k <= self.num_experts:
+            if self.top_k < 1 or self.top_k > self.num_experts:
                 raise ValueError(
                     f"top_k={self.top_k} must satisfy 1 <= top_k <= "
                     f"num_experts={self.num_experts}.",

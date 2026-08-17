@@ -641,7 +641,7 @@ def main() -> int:
         step_problems += weight_problems + state_problems
         failures += len(step_problems)
         print(
-            f"[{index}] loss {'identical' if not loss_problem else 'DIFFERS'} | "
+            f"[{index}] loss {'DIFFERS' if loss_problem else 'identical'} | "
             f"grads {len(grad_problems)} differ | "
             f"weights {len(weight_problems)} differ | "
             f"state {len(state_problems)} differ",
@@ -649,7 +649,7 @@ def main() -> int:
         for line in step_problems[:8]:
             print(f"    {line}")
 
-    verdict = "BIT-IDENTICAL" if not failures else f"{failures} DIFFERENCE(S)"
+    verdict = f"{failures} DIFFERENCE(S)" if failures else "BIT-IDENTICAL"
     print(f"\n{args.steps} steps, FA3->FA2 only: {verdict}")
     return 1 if failures else 0
 

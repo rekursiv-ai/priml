@@ -58,7 +58,7 @@ class ShardAware(Protocol):
     """A module that declares how it shards under tensor parallelism."""
 
     @property
-    def shard(self) -> ShardStyle:
+    def shard(self) -> ShardStyle | None:
         """The declared style, or ``None`` to stay replicated.
 
         Read-only, so a module may hold it at a narrower type: MLA admits only
@@ -181,17 +181,21 @@ def _shard_style(module: nn.Module) -> ParallelStyle | None:
         return module.tensor_parallel_style()
     if not isinstance(module, ShardAware):
         return None
-    # Exhaustive over ``ShardStyle``: a new style is a type error here rather
-    # than a runtime one, so no fallback arm is reachable to write.
-    match module.shard:
-        case None:
-            return None
-        case "colwise":
-            return ColwiseParallel()
-        case "rowwise":
-            return RowwiseParallel()
-        case "vocab":
-            return _vocab_style(module)
+    # Reached with an unlisted style: the annotation binds no value here --
+    # ShardAware's isinstance check is hasattr alone, and an override or
+    # deserialized config carries unchecked text. Falling through instead
+    # would silently leave the layer replicated.
+    if module.shard is None:
+        return None
+    if module.shard == "colwise":
+        return ColwiseParallel()
+    if module.shard == "rowwise":
+        return RowwiseParallel()
+    if module.shard == "vocab":
+        return _vocab_style(module)
+    raise ValueError(
+        f"Unknown shard style {module.shard!r} on {type(module).__name__}.",
+    )
 
 
 def _vocab_style(module: nn.Module) -> ParallelStyle:

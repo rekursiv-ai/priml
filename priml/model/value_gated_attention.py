@@ -193,7 +193,7 @@ class ValueGatedAttention(nn.Module):
                 )
             if self.gate_channels == -1:
                 self.gate_channels = self.channels_in
-            if not 0 < self.gate_channels <= self.channels_in:
+            if self.gate_channels <= 0 or self.gate_channels > self.channels_in:
                 raise ValueError(
                     f"gate_channels={self.gate_channels} must be positive and "
                     f"at most channels_in={self.channels_in}; the gate reads "

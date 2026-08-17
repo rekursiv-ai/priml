@@ -79,7 +79,7 @@ class BitsPerByte:
         # marker would INDEX the byte table from the back and land on a real
         # length, so the padding would be scored rather than skipped.
         valid = int(batch.get("valid_count", labels.shape[0]))
-        if not 0 <= valid <= labels.shape[0]:
+        if valid < 0 or valid > labels.shape[0]:
             raise ValueError(
                 f"valid_count {valid} is outside the batch's {labels.shape[0]} "
                 "rows; the padding markers it excludes would otherwise index "

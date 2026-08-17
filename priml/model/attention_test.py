@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import override
+
+from configgle import Fig
+from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import pytest
@@ -24,6 +28,39 @@ from priml.model.rope import RoPE
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+
+
+class _LearnedRotary(nn.Module):
+    """A custom ``RotaryFactors`` carrying a learned parameter."""
+
+    class Config(Fig["_LearnedRotary"]):
+        channels_head: int = 8
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(config.channels_head))
+
+    @override
+    def forward(self, positions: Tensor, /) -> tuple[Tensor, Tensor]:
+        factors = self.scale.expand(*positions.shape, self.scale.shape[-1])
+        return factors.cos(), factors.sin()
+
+
+def test_self_attention_registers_a_custom_rope() -> None:
+    """A rotary filled into the slot must join the module tree.
+
+    One left off it is absent from ``state_dict`` and unmoved by
+    ``.to(device)``, so a learned variant never trains.
+    """
+    module = SelfAttention.Config(
+        channels_in=64,
+        heads=4,
+        channels_head=16,
+        rope=_LearnedRotary.Config(channels_head=16),
+    ).make()
+
+    assert "rope" in dict(module.named_modules())
+    assert "rope.scale" in dict(module.named_parameters())
 
 
 def test_self_attention():

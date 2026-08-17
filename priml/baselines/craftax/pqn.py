@@ -240,7 +240,7 @@ def epsilon_at(
     """
     if total_updates <= 0:
         raise ValueError("total_updates must be positive")
-    if not 0.0 < decay_fraction <= 1.0:
+    if decay_fraction <= 0.0 or decay_fraction > 1.0:
         raise ValueError("decay_fraction must be in (0, 1]")
     horizon = max(1.0, decay_fraction * total_updates)
     progress = min(1.0, update / horizon)

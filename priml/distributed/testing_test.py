@@ -203,7 +203,7 @@ def test_enter_recovers_from_a_port_collision(
     ports: list[int] = []
 
     def _colliding_then_free() -> int:
-        port = dead_port if not ports else real_find_free_port()
+        port = real_find_free_port() if ports else dead_port
         ports.append(port)
         return port
 
