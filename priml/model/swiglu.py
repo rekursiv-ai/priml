@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import TYPE_CHECKING, Any, Literal, Self, override
+from typing import TYPE_CHECKING, Any, Self, override
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 from torch.distributed.tensor import Shard
 from torch.distributed.tensor.parallel import (
@@ -17,9 +17,11 @@ from torch.distributed.tensor.parallel import (
 
 import torch
 
+from priml.math.activations import relu_squared
 from priml.math.basic import ceil_multiple
-from priml.model.custom_types import ChannelsIn, TensorModule
-from priml.model.init import InitFn, kaiming_uniform
+from priml.math.custom_types import TensorFn
+from priml.model.custom_types import ChannelsIn, ShardStyle, TensorModule
+from priml.model.init import InitFn, kaiming_uniform, unit_fan_in_uniform
 from priml.model.linear import Linear
 
 
@@ -71,15 +73,26 @@ class SwiGLU(nn.Module):
         """
 
         norm: Makeable[TensorModule] | None = None
-        """Optional norm applied inside the gate branch."""
+        """Optional norm inside the gate branch, for Muon compatibility.
+
+        References:
+          https://arxiv.org/abs/2601.19085
+            Dillon, Joshua V. Speed is Confidence. 2026.
+        """
+
+        act: TensorFn = nn.functional.silu
+        """Nonlinearity on the gate branch; ``norm`` requires it be ``silu``."""
 
         depth: int = -1
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         init_weight: InitFn = kaiming_uniform
-        """Weight initialization function."""
+        """Weight init for ``up_proj``."""
 
-        shard: Literal["none", "colwise", "rowwise", "vocab"] = "none"
+        init_weight_out: InitFn | None = None
+        """Weight init for ``down_proj``; ``None`` reuses ``init_weight``."""
+
+        shard: ShardStyle = None
         """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
 
         @override
@@ -92,6 +105,10 @@ class SwiGLU(nn.Module):
                 self.channels_hidden = int(
                     ceil_multiple(self.channels_in * self.expansion, self.round_to),
                 )
+            # Pushed here, not in __init__: the norm is finalized with the tree,
+            # so a width written afterwards never reaches pprint or a diff.
+            if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
+                self.norm.channels_in = self.channels_hidden
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -118,15 +135,17 @@ class SwiGLU(nn.Module):
             channels_out=c_out,
             bias=config.bias,
             depth=config.depth,
-            init_weight=config.init_weight,
+            init_weight=config.init_weight_out or config.init_weight,
         ).make()
-        if config.norm is not None:
+        self.act = config.act
+        if not self.gate or config.norm is None:
+            self.norm = None
+        elif self.act is not nn.functional.silu:
+            raise ValueError("Norm can only be specified when act is silu.")
+        else:
             if isinstance(config.norm, ChannelsIn) and config.norm.channels_in == -1:
                 config.norm.channels_in = c_h
             self.norm = config.norm.make()
-        else:
-            self.norm = None
-        self.act = nn.functional.silu
 
     def reset_parameters(self) -> None:
         self.up_proj.reset_parameters()
@@ -142,12 +161,17 @@ class SwiGLU(nn.Module):
                 gate, x = self._split_gate_projection(x)
             else:
                 gate, x = self.up_proj(x).chunk(2, dim=-1)
-            if self.norm is not None:
-                # Intentional: sigmoid (not silu) for Muon compatibility.
-                # See https://github.com/jvdillon/sic
-                x = torch.sigmoid(gate) * self.norm(gate * x)
-            else:
+            if self.norm is None:
                 x = self.act(gate) * x
+            else:
+                # This exists for Muon compatibility as published in,
+                #   https://arxiv.org/abs/2601.19085
+                #   https://github.com/jvdillon/sic
+                # Notice that when norm(x)=x then this path becomes the `else`,
+                #   sigmoid(gate) * norm(gate * x) =
+                #   = sigmoid(gate) * gate * x
+                #   = silu(gate) * x
+                x = torch.sigmoid(gate) * self.norm(gate * x)
         else:
             x = self.up_proj(x)
             x = self.act(x)
@@ -185,6 +209,47 @@ class SwiGLU(nn.Module):
             gate = gate + b[:c]
             up = up + b[c:]
         return gate, up
+
+
+class SwiGLUReluSquared(SwiGLU):
+    """Ungated feed-forward with a squared-ReLU nonlinearity.
+
+    One matrix in and one out, where gated SwiGLU is three: the nonlinearity
+    carries what the gate otherwise would. Cheaper per parameter, and the shape
+    the speedrun recipes settled on.
+
+    Only the defaults differ from :class:`SwiGLU` -- no gate, ``relu**2`` for
+    the activation, a hidden width that is a plain multiple of the input (no
+    rounding), and a zero-initialized output projection, so a fresh block is the
+    identity on its residual stream and the stack deepens as training proceeds.
+
+    References:
+        https://arxiv.org/abs/2109.08668
+          So et al. Primer: Searching for Efficient Transformer for Language
+          Modeling.
+
+    """
+
+    class Config(Makes["SwiGLUReluSquared"], SwiGLU.Config, kw_only=False):
+        """:class:`SwiGLU.Config` re-defaulted; every field keeps its meaning."""
+
+        gate: bool = False
+        """Ungated: one matrix in, one out."""
+
+        act: TensorFn = relu_squared
+        """Carries the whole nonlinearity, in place of the gate."""
+
+        expansion: float = 4.0
+        """Hidden width as a multiple of ``channels_in``."""
+
+        round_to: int = 1
+        """Unrounded, so the hidden width is exactly ``expansion x channels_in``."""
+
+        init_weight: InitFn = unit_fan_in_uniform
+        """Input projection init."""
+
+        init_weight_out: InitFn | None = nn.init.zeros_
+        """Zeroed, so a fresh block is the identity on its residual stream."""
 
 
 class _SwiGLUParallel(ParallelStyle):

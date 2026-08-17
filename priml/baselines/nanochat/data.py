@@ -41,10 +41,13 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Self, override
 
+import contextlib
 import hashlib
 import json
 import logging
 import pickle
+import queue
+import threading
 
 from configgle import Fig
 from torch import Tensor
@@ -136,8 +139,11 @@ class NanoChatData:
         buffer_size: int = 1_000
         """Documents held for best-fit selection before a row is packed."""
 
-        device: str = "auto"
-        """Device batches land on ("auto" picks the best)."""
+        device: torch.device | str | None = "auto"
+        """Device batches land on.
+
+        ``"auto"`` probes the hardware, ``None`` defers to
+        ``torch.get_default_device()``; see :func:`get_device`."""
 
         vocab_size: int = -1
         """Vocabulary the fitted tokenizer must report; -1 skips the check.
@@ -242,6 +248,7 @@ class NanoChatData:
             buffer_size=self.config.buffer_size,
             device=self.device,
             max_batches=None,
+            prefetch=True,
         )
         return self._live
 
@@ -462,6 +469,7 @@ class _PackedStream:
         buffer_size: int,
         device: torch.device,
         max_batches: int | None,
+        prefetch: bool = False,
     ) -> None:
         self.paths = paths
         self.tokenizer = tokenizer
@@ -471,8 +479,24 @@ class _PackedStream:
         self.buffer_size = buffer_size
         self.device = device
         self.max_batches = max_batches
+        # Requested AND supported: the prefetch path stages through pinned host
+        # memory to overlap the copy with compute, so asking for it on a device
+        # that cannot pin would take a path built around a guarantee it lacks.
+        self.prefetch = prefetch and self._pins_host_memory
         self.served = 0
         """Batches drawn from this stream, across every iteration of it."""
+
+    @property
+    def _pins_host_memory(self) -> bool:
+        """Whether batches stage through pinned host memory before the device.
+
+        Pinning is what makes the host-to-device copy asynchronous, so it is
+        also the precondition for overlapping the copy with compute. Only CUDA
+        supports it here, and the prefetch path is built around it -- keep this
+        the single source of that answer so the staging allocation, the resident
+        buffer, and the prefetch decision cannot disagree.
+        """
+        return self.device.type == "cuda"
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         """Yield ``(input, target)`` pairs, packed to full rows without padding.
@@ -482,12 +506,30 @@ class _PackedStream:
         document that fits the space remaining, and -- when none does -- crops
         the shortest to fill it exactly. So no position is padding, no target is
         masked, and the token count per optimizer step never moves.
+
+        Packed ONE BATCH AHEAD, on a worker thread, so the packing overlaps the
+        device work of the step consuming the previous batch. The reference gets
+        the same overlap from where it calls its loader -- inside the
+        accumulation loop (``train.py:550``), after a backward has queued the
+        GPU -- while this loop asks between steps, with nothing queued to hide
+        behind. Measured at the shipped geometry: 0.160 of 1.683 s/step spent
+        packing, and our compute is faster than the reference's by 0.14.
+
+        The ORDER is untouched: one worker, one queue slot, so batch N is packed
+        after N-1 and the token stream is the one a serial packer produces.
         """
+        if self.prefetch:
+            yield from self._prefetched()
+            return
+        yield from self._packed()
+
+    def _packed(self) -> Iterator[dict[str, Any]]:
+        """Pack and yield batches serially. See :meth:`__iter__`."""
         rows = self.max_seq_len + 1
         documents = _document_batches(self.paths)
         buffer: list[list[int]] = []
 
-        pinned = self.device.type == "cuda"
+        pinned = self._pins_host_memory
         row_buffer = torch.empty(self.batch_size, rows, dtype=torch.long)
         # One staging allocation holding inputs and targets back to back, so a
         # batch reaches the device in ONE transfer rather than two.
@@ -528,6 +570,120 @@ class _PackedStream:
                 "token_bytes": self.token_bytes,
                 "valid_count": self.batch_size,
             }
+
+    def _prefetched(self) -> Iterator[dict[str, Any]]:
+        """Pack on a worker thread, one batch ahead. See :meth:`__iter__`.
+
+        The worker packs and stages into PINNED memory; this thread issues the
+        device copy and yields. Two staging slots, alternating, so the worker
+        fills one while the step consumes the other -- and a queue of depth one,
+        so it can never run more than a batch ahead and the packing order is the
+        serial one.
+
+        The packing is pure Python over a document buffer, so it releases the
+        GIL only inside the tokenizer; what it overlaps is the DEVICE, which is
+        where the step's 1.5 s/step lives.
+        """
+        rows = self.max_seq_len + 1
+        width = self.batch_size * self.max_seq_len
+        pinned = self._pins_host_memory
+        slots = [
+            torch.empty(2 * width, dtype=torch.long, pin_memory=pinned)
+            for _ in range(2)
+        ]
+        resident = torch.empty(2 * width, dtype=torch.long, device=self.device)
+        media = resident[:width].view(self.batch_size, self.max_seq_len)
+        label = resident[width:].view(self.batch_size, self.max_seq_len)
+
+        # Depth one: the worker packs batch N+1 while the step consumes N, and
+        # blocks rather than running further ahead -- which is what keeps two
+        # staging slots sufficient.
+        ready: queue.Queue[tuple[int, BaseException | None]] = queue.Queue(maxsize=1)
+        done = threading.Event()
+        # A slot is free once its own copy has landed. Recorded on the copy
+        # stream and waited for by the WORKER, so this thread never blocks on
+        # the device: waiting here would wait for the whole step queued behind
+        # the copy, which is the overlap the prefetch exists to buy.
+        copied = [threading.Event() for _ in slots]
+        for event in copied:
+            event.set()
+        copy_done = [torch.cuda.Event() for _ in slots] if pinned else None
+
+        def pack() -> None:
+            documents = _document_batches(self.paths)
+            buffer: list[list[int]] = []
+            row_buffer = torch.empty(self.batch_size, rows, dtype=torch.long)
+            drawn = 0
+            try:
+                while self.max_batches is None or drawn < self.max_batches:
+                    if done.is_set():
+                        return
+                    slot = drawn % len(slots)
+                    # This slot's previous copy must have landed before it is
+                    # overwritten: the transfer is asynchronous, so refilling it
+                    # blind would rewrite bytes still in flight. Waited HERE, on
+                    # the worker, so the consumer never blocks.
+                    copied[slot].wait()
+                    copied[slot].clear()
+                    if copy_done is not None:
+                        copy_done[slot].synchronize()
+                    for index in range(self.batch_size):
+                        position = 0
+                        while position < rows:
+                            while len(buffer) < self.buffer_size:
+                                buffer.extend(
+                                    self.tokenizer.encode_batch(next(documents)),
+                                )
+                            position = _pack_row(
+                                row_buffer[index],
+                                buffer,
+                                position=position,
+                            )
+                    staged = slots[slot]
+                    staged[:width].view(self.batch_size, self.max_seq_len).copy_(
+                        row_buffer[:, :-1],
+                    )
+                    staged[width:].view(self.batch_size, self.max_seq_len).copy_(
+                        row_buffer[:, 1:],
+                    )
+                    ready.put((slot, None))
+                    drawn += 1
+            except BaseException as error:  # noqa: BLE001 -- re-raised on the consumer
+                ready.put((-1, error))
+                return
+            ready.put((-1, None))
+
+        worker = threading.Thread(target=pack, name="nanochat-packer", daemon=True)
+        worker.start()
+        try:
+            while True:
+                slot, error = ready.get()
+                if error is not None:
+                    raise error
+                if slot < 0:
+                    return
+                resident.copy_(slots[slot], non_blocking=True)
+                if copy_done is not None:
+                    copy_done[slot].record()
+                # Released without waiting: the worker holds the event and
+                # blocks on it only when it comes back round to this slot,
+                # which is a batch later.
+                copied[slot].set()
+                self.served += 1
+                yield {
+                    "media": media,
+                    "label": label,
+                    "token_bytes": self.token_bytes,
+                    "valid_count": self.batch_size,
+                }
+        finally:
+            # Unblocks a worker parked on a full queue, so a consumer that stops
+            # early does not leave it alive holding the corpus.
+            done.set()
+            for event in copied:
+                event.set()  # unblock a worker parked on a slot it cannot refill
+            with contextlib.suppress(queue.Empty):
+                ready.get_nowait()
 
     def __len__(self) -> int:
         """Batches in one evaluation pass.

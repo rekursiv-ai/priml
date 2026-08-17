@@ -53,18 +53,38 @@ class Qwen3(CausalLM):
     class Config(Makes["Qwen3"], CausalLM.Config, kw_only=False):
         # HF-shaped positional required fields match config.json keys.
         vocab_size: int = -1
+        """Token vocabulary size; also the width of the output projection."""
 
         _: KW_ONLY
 
         hidden_size: int = -1
+        """Residual-stream width. HF's spelling of ``channels``, kept because
+        ``from_hf`` and ``remap_hf_state_dict`` both read the schema by name."""
+
         intermediate_size: int = -1
+        """FFN hidden width."""
+
         num_hidden_layers: int = -1
+        """Blocks in the stack."""
+
         num_attention_heads: int = -1
+        """Query heads."""
+
         num_key_value_heads: int = -1
+        """Key/value heads; fewer than the query heads makes it GQA."""
+
         head_dim: int = -1
+        """Per-head width. Qwen3 states it, so it need not divide the model
+        width -- the attention's inner width is decoupled from the residual."""
+
         rms_norm_eps: float = 1e-6
+        """Epsilon for every RMSNorm in the stack."""
+
         rope_theta: float = 1_000_000.0
+        """Rotary base; sets the longest wavelength the embedding resolves."""
+
         hf_inv_freq: bool = True
+        """Compute the rotary frequencies by HF's formula, for bit parity."""
         hf_split_projections: bool = False
         """Use HF's split projection order for exact parity tests.
 

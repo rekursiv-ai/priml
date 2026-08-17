@@ -10,7 +10,7 @@ forward per *active* expert, not per registered expert.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Literal, Self, cast, override
+from typing import Any, Literal, Protocol, Self, cast, override, runtime_checkable
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -24,6 +24,56 @@ from priml.model.custom_types import (
     propagate_attr,
 )
 from priml.model.swiglu import SwiGLU
+
+
+@runtime_checkable
+class TokenRouter(Protocol):
+    """Assigns each token to ``top_k`` experts and weights them."""
+
+    @property
+    def scoring_func(self) -> str:
+        """Gate activation. ``MoE`` reads it to decide whether the
+        load-balancing auxiliary loss applies: softmax routing needs it,
+        sigmoid routing is aux-loss-free and carries its balance in the
+        router's own bias.
+
+        Read-only, so an implementation may hold it at a narrower type -- a
+        mutable ``str`` member is invariant and would reject the ``Literal``
+        the shipped ``Router`` stores.
+        """
+        ...
+
+    def __call__(
+        self,
+        x: Tensor,
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return ``(weights, indices, logits)`` for one flat token batch."""
+        ...
+
+    def reset_parameters(self) -> None: ...
+
+
+@runtime_checkable
+class TokenRouterConfig(Makeable[TokenRouter], Protocol):
+    """What ``MoE`` needs of whatever fills its ``router`` slot.
+
+    The width it must be told, and the two counts ``MoE`` reads back: how many
+    experts to BUILD and how many gates each token carries. Stated as a shape
+    rather than as ``Router.Config`` so a different routing rule -- a learned
+    hash, a fixed assignment -- drops into the slot without editing ``MoE``.
+    """
+
+    channels_in: int
+    """Model width, pushed down by ``MoE.finalize``."""
+
+    num_experts: int
+    """Experts to build from the ``expert`` template."""
+
+    top_k: int
+    """Experts each token is routed to."""
 
 
 class Router(nn.Module):
@@ -223,8 +273,9 @@ class MoE(nn.Module):
 
         _: KW_ONLY
 
-        router: Router.Config = field(default_factory=Router.Config)
-        """Router config for token-to-expert assignment."""
+        router: TokenRouterConfig = field(default_factory=Router.Config)
+        """Token-to-expert assignment. Its ``num_experts`` is how many experts
+        ``MoE`` builds from the ``expert`` template."""
 
         expert: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
         """Routed expert module config."""

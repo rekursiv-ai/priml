@@ -100,6 +100,19 @@ class NanoChatLoop(TrainLoop):
         assert isinstance(step, NanoChatTrainStep)
         return step.elapsed_sec
 
+    @override
+    def _on_batch_ready(self, fetch_time: float) -> None:
+        """Charge loading to the budget, as the reference charges it.
+
+        Its ``next(train_loader)`` runs inside the region its clock brackets
+        (train.py:550, between 543 and 573). Ours happens here, outside the
+        step, so the budget would otherwise buy free steps: measured at 0.160
+        of 1.683 s/step on a 5090, a tenth of the run.
+        """
+        step = self.step
+        assert isinstance(step, NanoChatTrainStep)
+        step.charge_budget(fetch_time)
+
 
 def exp000() -> NanoChatLoop.Config:
     """The published five-minute recipe, reproduced on its own kernel.

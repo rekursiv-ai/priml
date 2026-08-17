@@ -17,6 +17,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
     HeadGeometry,
+    RotaryFactors,
     propagate_attr,
 )
 from priml.model.init import InitFn, kaiming_uniform
@@ -225,8 +226,8 @@ class SelfAttention(nn.Module):
         causal: bool = False
         """Apply causal (autoregressive) attention mask."""
 
-        rope: RoPE.Config | None = None
-        """Rotary position embedding config (None = no positional encoding)."""
+        rope: Makeable[RotaryFactors] | None = None
+        """Rotary position embedding (None = no positional encoding)."""
 
         norm_qk: Makeable[nn.Module] | None = None
         """Optional norm applied to Q and K before attention."""
@@ -271,11 +272,6 @@ class SelfAttention(nn.Module):
             _infer_head_dims(self)
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.heads
-            if self.heads % self.num_heads_kv != 0:
-                raise ValueError(
-                    f"heads={self.heads} must be divisible by "
-                    f"num_heads_kv={self.num_heads_kv}.",
-                )
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
                 self.norm_qk.channels_in = self.channels_head
             if (
@@ -287,6 +283,11 @@ class SelfAttention(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.heads % config.num_heads_kv != 0:
+            raise ValueError(
+                f"heads={config.heads} must be divisible by "
+                f"num_heads_kv={config.num_heads_kv}.",
+            )
         self.heads = config.heads
         self.channels_head = config.channels_head
         self.num_heads_kv = config.num_heads_kv
@@ -563,10 +564,10 @@ class MultiStreamAttention(nn.Module):
         causal: bool = False
         """Apply causal (autoregressive) attention mask."""
 
-        rope: list[RoPE.Config | None] = field(
-            default_factory=list[RoPE.Config | None],
+        rope: list[Makeable[RotaryFactors] | None] = field(
+            default_factory=list["Makeable[RotaryFactors] | None"],
         )
-        """Per-stream RoPE configs (empty = no internal RoPE)."""
+        """Per-stream rotary embeddings (empty = no internal RoPE)."""
 
         norm_qk: Makeable[nn.Module] | None = None
         """Optional norm applied to Q and K before attention."""
@@ -601,15 +602,6 @@ class MultiStreamAttention(nn.Module):
             _infer_head_dims(self)
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.heads
-            if self.heads % self.num_heads_kv != 0:
-                raise ValueError(
-                    f"heads={self.heads} must be divisible by "
-                    f"num_heads_kv={self.num_heads_kv}.",
-                )
-            if self.causal and self.num_streams > 1:
-                raise ValueError(
-                    "causal=True requires num_streams=1.",
-                )
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
                 self.norm_qk.channels_in = self.channels_head
             if (
@@ -621,6 +613,13 @@ class MultiStreamAttention(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.heads % config.num_heads_kv != 0:
+            raise ValueError(
+                f"heads={config.heads} must be divisible by "
+                f"num_heads_kv={config.num_heads_kv}.",
+            )
+        if config.causal and config.num_streams > 1:
+            raise ValueError("causal=True requires num_streams=1.")
         self.num_streams = config.num_streams
         self.heads = config.heads
         self.channels_head = config.channels_head
@@ -661,8 +660,14 @@ class MultiStreamAttention(nn.Module):
         )
 
         # Per-stream RoPE keyed by stream index; absent = no RoPE.
+        # ``ModuleDict`` registers submodules, so what a slot BUILDS must be an
+        # ``nn.Module`` even though the slot is typed by what it is CALLED as.
         self.ropes = nn.ModuleDict(
-            {str(i): cfg.make() for i, cfg in enumerate(config.rope) if cfg is not None}
+            {
+                str(i): cast("nn.Module", cfg.make())
+                for i, cfg in enumerate(config.rope)
+                if cfg is not None
+            }
         )
 
         # QK norm: shared instance (``share_qk_norm=True``) or two

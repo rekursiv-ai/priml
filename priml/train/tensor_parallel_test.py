@@ -56,7 +56,7 @@ def test_shard_style_stored_on_runtime_module() -> None:
     embed = Embedding.Config(num_embeddings=10, channels_out=8, shard="vocab").make()
     assert up.shard == "colwise"
     assert down.shard == "rowwise"
-    assert plain.shard == "none"
+    assert plain.shard is None
     assert embed.shard == "vocab"
 
 

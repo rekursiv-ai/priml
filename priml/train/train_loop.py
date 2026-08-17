@@ -263,18 +263,30 @@ class TrainLoop:
         empty. Set it directly to override the docstring."""
 
         step: _StepConfigT = field(default_factory=TrainStep.Config)  # pyright: ignore[reportAssignmentType]  # ty: ignore[invalid-assignment] -- default_factory yields the TypeVar default; safe by construction
+        """What one optimizer update does: model, loss, optimizer, schedule."""
+
         dataset: _DatasetConfigT = field(default_factory=DummyDataset.Config)  # pyright: ignore[reportAssignmentType]  # ty: ignore[invalid-assignment] -- default_factory yields the TypeVar default; safe by construction
+        """Supplies the train and eval loaders, and owns the epoch count."""
         metrics: dict[str, Makeable[MetricProtocol]] = field(
             default_factory=dict[str, Makeable[MetricProtocol]],
         )
+        """Eval metrics by name; each name prefixes the keys it publishes."""
+
         checkpointing: Makeable[CheckpointingProtocol] | None = field(
             default_factory=Checkpointer.Config,
         )
+        """Save cadence, resume, and retention. ``None`` writes nothing."""
+
         profiling: Makeable[ProfileProtocol] | None = None
+        """Per-step profiler hooks; ``None`` (the default) adds no overhead."""
+
         phase_timer: Makeable[PhaseTimerProtocol] = field(
             default_factory=PhaseTimer.Config,
         )
+        """Times named startup and eval phases, and beats while one is open."""
+
         tracker: Makeable[TrackerProtocol] | None = None
+        """Where metrics are published (W&B, TensorBoard, a JSON file)."""
 
         max_steps: float = math.inf
         """Optimizer-step limit. Defaults to no cap, uniform with the other stop
@@ -282,6 +294,8 @@ class TrainLoop:
         set an explicit bound. The LR schedule horizon is separate
         (``step.train_budget_steps``), so this does not affect LR defaults."""
         max_epochs: float = math.inf
+        """Passes over the training data before stopping."""
+
         max_time: float = math.inf
         """Time limit in seconds (clock chosen by ``max_time_kind``). Training
         stops if exceeded."""
@@ -306,7 +320,10 @@ class TrainLoop:
         Default False preserves score integrity: over-budget eval raises. Enable
         only for data-generation jobs where partial artifacts are useful."""
         num_steps_eval: float = 1_000
+        """Optimizer steps between evals; ``inf`` disables eval entirely."""
+
         num_steps_log: int = 10
+        """Optimizer steps between train-metric logs, after startup."""
         early_train_log_steps: int = 100
         """Log every optimizer step up to this step for startup diagnostics."""
         phase_heartbeat_sec: float = 20.0
@@ -349,14 +366,23 @@ class TrainLoop:
         differ.
         """
         seed: int | None = None
-        num_steps_garbage_collect: float = math.inf  # inf for never (auto GC)
+        """Base seed for every RNG; ``None`` draws one from OS entropy."""
 
-        # Mesh dimensions for seeding (only used in distributed mode)
-        mesh_dim_model_seed: str = "pp"  # Model weights same across this dimension
-        mesh_dim_data_seed: str = "dp"  # Data loading different across this dimension
+        num_steps_garbage_collect: float = math.inf
+        """Steps between manual GC passes. Finite values also DISABLE automatic
+        GC, trading a predictable pause for unpredictable ones."""
 
-        # Only used by `run`.
+        mesh_dim_model_seed: str = "pp"
+        """Mesh dimension the seed does NOT vary across, so every rank in it
+        initializes identical weights."""
+
+        mesh_dim_data_seed: str = "dp"
+        """Mesh dimension the seed DOES vary across, so replicas draw
+        different data."""
+
         runtime: Makeable[RuntimeProtocol] = field(default_factory=SingleProcess.Config)
+        """Process-global setup: device mesh, distributed backend, determinism.
+        Read by ``run`` alone."""
 
         @override
         def finalize(self) -> Self:
@@ -903,6 +929,9 @@ class TrainLoop:
                     "TrainLoop step %d: train batch preprocessed.",
                     self.step.global_step + 1,
                 )
+                # Measured across the staging too, not only the fetch: both are
+                # work a batch costs before a step can run.
+                self._on_batch_ready(time.perf_counter() - batch_start)
                 return batch
             except StopIteration:
                 # The loader ran out, which is the only signal a pass ended.
@@ -919,6 +948,16 @@ class TrainLoop:
                 _set_loader_epoch(self.train_loader, self.current_epoch)
                 self.train_iter = iter(self.train_loader)
         raise RuntimeError("Failed to get next batch after epoch reset")
+
+    def _on_batch_ready(self, fetch_time: float) -> None:
+        """Hook called with the seconds spent producing one training batch.
+
+        No-op in the base loop, whose clocks bracket the whole run. A subclass
+        charging a wall-clock BUDGET overrides it, because loading is training
+        time under any budget its reference also charges -- and it happens
+        here, where the step cannot see it.
+        """
+        del fetch_time
 
     def _on_train_step_timed(self, step_time: float, *, is_first: bool) -> None:
         """Hook called after each train step with its wall-clock duration.

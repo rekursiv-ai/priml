@@ -42,6 +42,7 @@ class WorkerPool:
 
     class Config(Fig["WorkerPool"]):
         mesh_dims: dict[str, int] = field(default_factory=dict)
+        """Mesh dimension name to size; their product is the world size."""
 
     def __init__(self, config: Config):
         self.mesh_dims: dict[str, int] = config.mesh_dims

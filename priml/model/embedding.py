@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY
 from functools import partial
-from typing import Literal, override
+from typing import override
 
 from configgle import Fig
 from torch import nn
 
 import torch
 
+from priml.model.custom_types import ShardStyle
 from priml.model.init import InitFn, call_init, truncated_normal
 
 
@@ -35,7 +36,7 @@ class Embedding(nn.Embedding):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        shard: Literal["none", "colwise", "rowwise", "vocab"] = "none"
+        shard: ShardStyle = None
         """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
 
         depth: int = -1

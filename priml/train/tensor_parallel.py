@@ -34,6 +34,7 @@ from torch.distributed.tensor.parallel import (
 
 import torch
 
+from priml.model.custom_types import ShardStyle
 from priml.runtime import global_device_mesh
 
 
@@ -56,7 +57,14 @@ __all__ = [
 class ShardAware(Protocol):
     """A module that declares how it shards under tensor parallelism."""
 
-    shard: str
+    @property
+    def shard(self) -> ShardStyle:
+        """The declared style, or ``None`` to stay replicated.
+
+        Read-only, so a module may hold it at a narrower type: MLA admits only
+        ``"colwise"``, and a mutable member would be invariant and reject it.
+        """
+        ...
 
 
 @runtime_checkable
@@ -168,13 +176,15 @@ def _shard_style(module: nn.Module) -> ParallelStyle | None:
     ``nn.Linear``/``nn.Embedding`` blocks dispatch on their ``shard`` field.
     """
     if isinstance(module, TensorParallelStyleProvider):
-        if not isinstance(module, ShardAware) or module.shard == "none":
+        if not isinstance(module, ShardAware) or not module.shard:
             return None
         return module.tensor_parallel_style()
     if not isinstance(module, ShardAware):
         return None
+    # Exhaustive over ``ShardStyle``: a new style is a type error here rather
+    # than a runtime one, so no fallback arm is reachable to write.
     match module.shard:
-        case "none":
+        case None:
             return None
         case "colwise":
             return ColwiseParallel()
@@ -182,10 +192,6 @@ def _shard_style(module: nn.Module) -> ParallelStyle | None:
             return RowwiseParallel()
         case "vocab":
             return _vocab_style(module)
-        case other:
-            raise ValueError(
-                f"Unknown shard style {other!r} on {type(module).__name__}."
-            )
 
 
 def _vocab_style(module: nn.Module) -> ParallelStyle:

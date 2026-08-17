@@ -60,6 +60,35 @@ class NoEMA:
 _ParamFilter = Callable[[str, "nn.Parameter"], bool]
 
 
+type DecaySchedule = Callable[[float, int], float]
+"""Maps ``(decay, post_warmup_step)`` to the decay applied at that step.
+
+A function rather than a named schedule: the two shipped curves are one line
+each, and a recipe wanting a third writes it instead of editing this module.
+"""
+
+
+def constant_decay(decay: float, step: int) -> float:
+    """Hold ``decay`` flat for the whole run."""
+    del step
+    return decay
+
+
+def karras_decay(decay: float, step: int) -> float:
+    """Grow the effective decay with the step, capped at ``decay``.
+
+    Early averaging is faster, which keeps the shadow from being dominated by
+    the first few steps' weights.
+
+    References:
+      https://arxiv.org/abs/2312.02696
+        Karras et al. 2023, "Analyzing and Improving the Training Dynamics of
+        Diffusion Models."
+
+    """
+    return min(decay, (1 + step) / (10 + step))
+
+
 class EMA:
     """Exponential Moving Average of model parameters.
 
@@ -106,9 +135,9 @@ class EMA:
       lerp schedule controls.
     - ``warmup_seed``: copy live weights into the shadow at the warmup
       boundary (the first post-warmup call) before averaging begins.
-    - ``decay_schedule``: ``"constant"`` (default) uses ``decay`` at every
-      step; ``"karras"`` grows the effective decay with the step as
-      ``min(decay, (1 + t) / (10 + t))`` so early averaging is faster.
+    - ``decay_schedule``: a ``(decay, step) -> decay`` function.
+      :func:`constant_decay` (default) ignores the step;
+      :func:`karras_decay` ramps it in so early averaging is faster.
 
     Example::
 
@@ -148,10 +177,10 @@ class EMA:
         """If True, copy live weights into the shadow at the warmup boundary
         before averaging begins (TRM-style). Default leaves the shadow at
         its first-call snapshot."""
-        decay_schedule: Literal["constant", "karras"] = "constant"
-        """Decay schedule. ``"constant"`` uses ``decay`` always; ``"karras"``
-        grows the effective decay with the post-warmup step ``t`` as
-        ``min(decay, (1 + t) / (10 + t))``."""
+        decay_schedule: DecaySchedule = constant_decay
+        """Maps ``(decay, post-warmup step)`` to the decay used at that step.
+
+        :func:`karras_decay` ramps it in; any ``(float, int) -> float`` works."""
 
     def __init__(self, config: Config) -> None:
         """Initialize EMA.
@@ -226,9 +255,7 @@ class EMA:
             ``min(self.decay, (1 + step) / (10 + step))``.
 
         """
-        if self.decay_schedule == "constant":
-            return self.decay
-        return min(self.decay, (1 + step) / (10 + step))
+        return self.decay_schedule(self.decay, step)
 
     def __call__(self, model: nn.Module) -> None:
         """Advance one EMA step.

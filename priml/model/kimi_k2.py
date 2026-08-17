@@ -71,18 +71,34 @@ class KimiK2(CausalLM):
 
     class Config(Makes["KimiK2"], CausalLM.Config, kw_only=False):
         vocab_size: int = -1
+        """Token vocabulary size; also the width of the output projection."""
 
         _: KW_ONLY
 
         hidden_size: int = -1
+        """Residual-stream width. HF's spelling of ``channels``, kept because
+        ``from_hf`` and ``remap_hf_state_dict`` both read the schema by name."""
+
         num_hidden_layers: int = -1
+        """Blocks in the stack."""
+
         num_attention_heads: int = -1
+        """Attention heads, shared by Q, K, and V."""
 
         channels_qk_nope_head: int = 128
+        """Per-head Q/K width that RoPE does NOT rotate."""
+
         channels_qk_rope_head: int = 64
+        """Per-head Q/K width RoPE rotates; the key slice is head-shared."""
+
         channels_v_head: int = 128
+        """Per-head value width, sized independently of the Q/K width."""
+
         q_lora_rank: int | None = None
+        """Rank of the Q low-rank decomposition; ``None`` projects Q directly."""
+
         kv_lora_rank: int = 512
+        """Rank of the compressed KV latent -- what the cache actually holds."""
 
         intermediate_size: int = -1
         """Dense-layer MLP hidden."""
@@ -91,17 +107,37 @@ class KimiK2(CausalLM):
         """Per-expert hidden in MoE layers (and per shared expert)."""
 
         n_routed_experts: int = 0
+        """Experts each MoE layer builds and routes across."""
+
         num_experts_per_tok: int = 1
+        """Experts each token is routed to."""
+
         n_shared_experts: int = 0
+        """Always-active experts summed onto every token."""
+
         first_k_dense_replace: int = 0
+        """Leading layers using a dense FFN instead of a MoE one."""
+
         n_group: int = 1
+        """Expert groups for grouped top-k; 1 disables grouping."""
+
         topk_group: int = 1
+        """Groups kept per token when grouping is on."""
+
         norm_topk_prob: bool = True
+        """Renormalize the selected gate weights to sum to one."""
+
         routed_scaling_factor: float = 1.0
+        """Multiplier on the routed output; DSV3 uses 2.5, Kimi-K2 2.827."""
+
         scoring_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        """Gate activation; DSV3 and Kimi-K2 both use sigmoid."""
 
         rms_norm_eps: float = 1e-6
+        """Epsilon for every RMSNorm in the stack."""
+
         rope_theta: float = 10_000.0
+        """Rotary base; sets the longest wavelength the embedding resolves."""
 
         yarn: YarnScaling | None = None
         """YaRN RoPE scaling. ``None`` = vanilla RoPE."""
@@ -194,7 +230,14 @@ class KimiK2(CausalLM):
                     base=self.rope_theta,
                     yarn=self.yarn,
                 ),
-                rms_norm_eps=self.rms_norm_eps,
+                norm_q_lora=RMSNorm.Config(
+                    eps=self.rms_norm_eps,
+                    elementwise_affine=True,
+                ),
+                norm_kv_lora=RMSNorm.Config(
+                    eps=self.rms_norm_eps,
+                    elementwise_affine=True,
+                ),
             )
 
         def _ffn_for_layer(self, layer_idx: int) -> Makeable[TensorModule]:

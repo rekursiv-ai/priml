@@ -20,13 +20,19 @@ __all__ = [
     "HasDepth",
     "HeadGeometry",
     "LookupTable",
+    "RotaryFactors",
     "ShardableConfig",
     "TensorModule",
     "propagate_attr",
 ]
 
-ShardStyle = Literal["none", "colwise", "rowwise", "vocab"]
-"""Tensor-parallel shard style for a building-block config; none = replicated."""
+ShardStyle = Literal["colwise", "rowwise", "vocab"] | None
+"""Tensor-parallel shard style for a building-block config.
+
+``None`` is replicated -- the absence of a style, spelled the way Python spells
+absence, so a caller writes ``if cfg.shard:`` rather than matching a magic
+string. ``get_args`` on the ``Literal`` inside therefore yields the real styles.
+"""
 
 type ActivationFn = Makeable[nn.Module | TensorFn] | TensorFn
 """An activation: a config that builds one, or a plain ``Tensor -> Tensor``.
@@ -46,6 +52,18 @@ class TensorModule(Protocol):
 
     def __call__(self, x: Tensor, /, *args: Any, **kwargs: Any) -> Tensor: ...
     def reset_parameters(self) -> None: ...
+
+
+@runtime_checkable
+class RotaryFactors(Protocol):
+    """Maps positions to the ``(cos, sin)`` factors a rotation applies.
+
+    Not a :class:`TensorModule`: a rotary embedding returns a PAIR, and its
+    consumer unpacks it. Naming the pair is what lets the slot hold a learned
+    or NTK-scaled variant rather than pinning ``RoPE`` itself.
+    """
+
+    def __call__(self, positions: Tensor, /) -> tuple[Tensor, Tensor]: ...
 
 
 @runtime_checkable

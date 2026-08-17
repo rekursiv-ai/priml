@@ -85,6 +85,8 @@ class TrainStep:
         """Configuration for TrainStep."""
 
         model: Makeable[nn.Module] = field(default_factory=Identity.Config)
+        """The network being trained; every other slot serves it."""
+
         _: KW_ONLY
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
@@ -177,14 +179,17 @@ class TrainStep:
         parallelism: Makeable[ParallelStrategyProtocol] = field(
             default_factory=NoParallel.Config,
         )
+        """Owns device placement, sharding, and meta materialization."""
 
         model_quantization: Makeable[ModelQuantizationProtocol] = field(
             default_factory=NoModelQuantization.Config,
         )
+        """Rewrites modules before sharding, so the strategy sees the final graph."""
 
         activation_memoization: Makeable[ActivationMemoizationProtocol] = field(
             default_factory=DefaultActivationStorage.Config,
         )
+        """How activations are kept for backward: stored, recomputed, or quantized."""
 
         compile: Makeable[Callable[[Callable[..., Any]], Callable[..., Any]]] | None = (
             field(
@@ -194,15 +199,21 @@ class TrainStep:
                 ),
             )
         )
+        """Wraps the model before its first forward; ``None`` runs eager."""
 
         ema: Makeable[EMAProtocol] = field(default_factory=NoEMA.Config)
+        """Weight-averaging shadow, applied after each optimizer update."""
 
         gradient_clip_norm: float = math.inf
+        """Global gradient-norm ceiling; infinite disables clipping."""
 
         device_init: torch.device | str | None = None
-        dtype_autocast: torch.dtype | None = (
-            None  # e.g., torch.bfloat16 for mixed precision
-        )
+        """Device the model is CONSTRUCTED on. ``"meta"`` defers allocation to
+        the parallel strategy, which materializes each rank's shard."""
+
+        dtype_autocast: torch.dtype | None = None
+        """Autocast dtype for forward and loss (e.g. ``torch.bfloat16``);
+        ``None`` disables autocast entirely."""
         autocast_cache_enabled: bool = False
         """Enable autocast's weight cache. Default False preserves exact
         numerics across forward calls; True trades a small numeric difference

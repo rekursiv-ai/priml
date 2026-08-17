@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import field
+from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path
 from typing import (
@@ -227,6 +227,39 @@ class TensorBoardTracker:
         self.close()
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WandbIngestion:
+    """How much telemetry the W&B client sends, and how long it waits to start.
+
+    One node because these are a single concern with a single failure mode: the
+    dashboard lagging the live run. The client buffers history between
+    transmissions, and its built-in system metrics dominate the point volume, so
+    the interval and the sampling rate are tuned together or not at all. Every
+    value maps to a ``wandb.Settings`` field; ``0`` defers to W&B's own default.
+    """
+
+    init_timeout_sec: float = 30.0
+    """Seconds W&B may spend waiting for run initialization."""
+
+    service_wait_sec: float = 30.0
+    """Seconds W&B may wait for its local service."""
+
+    flush_interval_sec: float = 15.0
+    """Seconds between history-stream transmissions.
+
+    A large or wedged buffer leaves dashboards empty ("no data") while the
+    summary still updates; a modest interval bounds both the lag and how much
+    history one stuck transmission holds back."""
+
+    system_metrics: bool = True
+    """Collect W&B's built-in system metrics (CPU/GPU/mem/...).
+
+    Off drops every one of them: W&B 0.27 has no per-metric allow-list."""
+
+    system_metrics_interval_sec: float = 60.0
+    """Seconds between system-metric samples; 0 keeps W&B's default (15s)."""
+
+
 class WandbTracker:
     """Weights & Biases experiment tracker.
 
@@ -270,33 +303,10 @@ class WandbTracker:
 
         Only meaningful when ``capture_console`` is enabled. The default is off
         to keep tracker setup off the critical path for distributed jobs."""
-        init_timeout_sec: float = 30.0
-        """Seconds W&B may spend waiting for run initialization; 0 keeps default."""
-        service_wait_sec: float = 30.0
-        """Seconds W&B may wait for its local service; 0 keeps default."""
         allow_startup_failure: bool = True
         """Continue with a no-op tracker if W&B startup raises an exception."""
-        flush_interval_sec: float = 15.0
-        """Seconds between history-stream transmissions; 0 keeps W&B's default.
-
-        Maps to ``wandb.Settings.x_file_stream_transmit_interval``. The W&B
-        client buffers logged history between transmissions; on a long
-        training run a large/wedged buffer leaves dashboards empty ("no data")
-        while the summary still updates. A modest interval bounds both the
-        dashboard lag and how much history one stuck transmission holds back."""
-        system_metrics: bool = True
-        """Whether W&B collects its built-in system metrics (CPU/GPU/mem/...).
-
-        Maps to ``wandb.Settings.x_disable_stats`` (inverted). Keep on for
-        memory / power / network / utilization telemetry; disable only to drop
-        every system metric (W&B 0.27 has no per-metric allow-list)."""
-        system_metrics_interval_sec: float = 60.0
-        """Seconds between system-metric samples; 0 keeps W&B's default (15s).
-
-        Maps to ``wandb.Settings.x_stats_sampling_interval``. The built-in
-        system metrics dominate history cardinality; sampling them less often
-        cuts the logged-point volume that backs up the dashboard, while still
-        capturing memory / power / traffic / utilization trends."""
+        ingestion: WandbIngestion = field(default_factory=WandbIngestion)
+        """Startup timeouts and history-volume knobs; see :class:`WandbIngestion`."""
         metric_step_metrics: dict[str, str] = field(default_factory=dict[str, str])
         """Metric paths mapped to the metric path used as their W&B x-axis."""
         run_config: dict[str, Any] = field(default_factory=dict[str, Any])
@@ -329,22 +339,27 @@ class WandbTracker:
         # ``resume="allow"`` creates the run if the id does not yet exist rather
         # than failing. A fresh run leaves both None for W&B to auto-generate.
         resume = "allow" if config.run_id else None
+        # Tune ingestion volume so the dashboard tracks the live run instead of
+        # lagging tens of thousands of steps behind: bound the history-stream
+        # transmit cadence, throttle the high-cardinality built-in system
+        # metrics (or disable them), all via wandb's experimental settings.
+        ingestion = config.ingestion
         settings_kwargs: dict[str, Any] = {}
         if not config.capture_console:
             settings_kwargs["console"] = "off"
-        if config.init_timeout_sec > 0:
-            settings_kwargs["init_timeout"] = config.init_timeout_sec
-        if config.service_wait_sec > 0:
-            settings_kwargs["x_service_wait"] = config.service_wait_sec
-        if config.flush_interval_sec > 0:
+        if ingestion.init_timeout_sec > 0:
+            settings_kwargs["init_timeout"] = ingestion.init_timeout_sec
+        if ingestion.service_wait_sec > 0:
+            settings_kwargs["x_service_wait"] = ingestion.service_wait_sec
+        if ingestion.flush_interval_sec > 0:
             settings_kwargs["x_file_stream_transmit_interval"] = (
-                config.flush_interval_sec
+                ingestion.flush_interval_sec
             )
-        if not config.system_metrics:
+        if not ingestion.system_metrics:
             settings_kwargs["x_disable_stats"] = True
-        elif config.system_metrics_interval_sec > 0:
+        elif ingestion.system_metrics_interval_sec > 0:
             settings_kwargs["x_stats_sampling_interval"] = (
-                config.system_metrics_interval_sec
+                ingestion.system_metrics_interval_sec
             )
         settings = wandb.Settings(**settings_kwargs) if settings_kwargs else None
         working_dir = validated_output_path(config.working_dir)

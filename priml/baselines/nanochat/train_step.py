@@ -485,10 +485,6 @@ class NanoChatTrainStep(TrainStep):
         self._pending_passes += 1
         metrics: dict[str, float | Tensor] = {}
         if self._pending_passes >= self.accumulate_passes:
-            # Read ONCE, at the boundary, and before the update: a diverged
-            # batch must not reach the optimizer, and every pass of this token
-            # batch has now been seen.
-            self._assert_not_diverged()
             # The step timer brackets the update, so ``global_step`` advances
             # as it does for every other recipe; ``elapsed_sec`` below stays
             # the clock this baseline's schedules read.
@@ -514,6 +510,17 @@ class NanoChatTrainStep(TrainStep):
             if self._pending_passes == 0:
                 self._synchronize()
             self.elapsed_sec += time.perf_counter() - started
+        # Read LAST, behind the drain, and outside it: both wait for the same
+        # queued work, so once the drain has run the read is free -- ahead of
+        # it, it blocks the CPU on the whole step and was measured at 160
+        # ms/step of stall. The reference is in the same order (train.py:565,
+        # below the synchronize at 542 that drained the step before it).
+        #
+        # A step later than the batch that diverged, which is the same
+        # guarantee: that update ran on gradients whose loss was finite, and
+        # the diverged batch never reaches a second one.
+        if self._pending_passes == 0:
+            self._assert_not_diverged()
         return {
             "loss": loss.detach().reshape(1),
             "model": per_token.detach(),
@@ -599,6 +606,23 @@ class NanoChatTrainStep(TrainStep):
         self._steps_this_process = int(state_dict["local_step"])
         self._pending_passes = 0
         self._pending_worst = None
+
+    def charge_budget(self, seconds: float) -> None:
+        """Add loop-side work to the budget, once warmup is past.
+
+        Called with the time spent fetching and staging a batch, which happens
+        in the loop rather than here. The reference charges it -- its
+        ``next(train_loader)`` sits at ``train.py:550``, between the ``t0`` at
+        543 and the ``t1`` at 573 -- so a budget that skipped it would buy this
+        recipe extra steps the comparison never granted. Measured on a 5090 at
+        the shipped geometry: 0.160 of 1.683 s/step, a tenth of the run.
+
+        Args:
+          seconds: Wall-clock seconds to charge.
+
+        """
+        if self._steps_this_process > self.config.budget_warmup_steps:
+            self.elapsed_sec += seconds
 
     def _assert_not_diverged(self) -> None:
         """Refuse a token batch whose worst pass diverged, discarding it.

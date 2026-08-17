@@ -16,7 +16,11 @@ import torch
 
 from priml import runtime
 from priml.optimizers import lr_scale
-from priml.optimizers.muon import Muon
+from priml.optimizers.muon import (
+    Muon,
+    adjust_lr_conv_heuristic,
+    adjust_lr_match_rms_adamw,
+)
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- autouse fixture; imported for pytest collection
 )
@@ -167,7 +171,7 @@ class TestMuon:
 
     def test_adjust_lr_match_rms_adamw(self):
         model = self._make_model()
-        opt = Muon(model.parameters(), lr=0.02, adjust_lr_fn="match_rms_adamw")
+        opt = Muon(model.parameters(), lr=0.02, adjust_lr_fn=adjust_lr_match_rms_adamw)
 
         x = torch.randn(2, 8)
         loss = model(x).sum()
@@ -176,7 +180,7 @@ class TestMuon:
 
     def test_adjust_lr_conv_heuristic(self):
         model = self._make_model()
-        opt = Muon(model.parameters(), lr=0.02, adjust_lr_fn="conv_heuristic")
+        opt = Muon(model.parameters(), lr=0.02, adjust_lr_fn=adjust_lr_conv_heuristic)
 
         x = torch.randn(2, 8)
         loss = model(x).sum()

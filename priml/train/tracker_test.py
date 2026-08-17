@@ -20,6 +20,7 @@ from priml.train.tracker import (
     FileTracker,
     TensorBoardTracker,
     TrackerList,
+    WandbIngestion,
     WandbTracker,
     default_metrics_tracker,
 )
@@ -419,7 +420,11 @@ def test_wandb_flush_interval_bounds_history_buffering(
     transmit interval keeps dashboard data flowing.
     """
     kwargs = _init_kwargs(
-        monkeypatch, WandbTracker.Config(project="trm", flush_interval_sec=15.0)
+        monkeypatch,
+        WandbTracker.Config(
+            project="trm",
+            ingestion=WandbIngestion(flush_interval_sec=15.0),
+        ),
     )
     settings = kwargs["settings"]
     assert settings is not None
@@ -436,7 +441,10 @@ def test_wandb_system_metrics_interval_throttles_sampling(
     """
     kwargs = _init_kwargs(
         monkeypatch,
-        WandbTracker.Config(project="trm", system_metrics_interval_sec=60.0),
+        WandbTracker.Config(
+            project="trm",
+            ingestion=WandbIngestion(system_metrics_interval_sec=60.0),
+        ),
     )
     settings = kwargs["settings"]
     assert settings is not None
@@ -451,7 +459,10 @@ def test_wandb_system_metrics_off_disables_stats(
     """system_metrics=False disables the built-in stats outright."""
     kwargs = _init_kwargs(
         monkeypatch,
-        WandbTracker.Config(project="trm", system_metrics=False),
+        WandbTracker.Config(
+            project="trm",
+            ingestion=WandbIngestion(system_metrics=False),
+        ),
     )
     settings = kwargs["settings"]
     assert settings is not None
@@ -469,11 +480,13 @@ def test_wandb_no_tuning_keeps_default_settings(
         WandbTracker.Config(
             project="trm",
             capture_console=True,
-            init_timeout_sec=0.0,
-            service_wait_sec=0.0,
-            flush_interval_sec=0.0,
-            system_metrics=True,
-            system_metrics_interval_sec=0.0,
+            ingestion=WandbIngestion(
+                init_timeout_sec=0.0,
+                service_wait_sec=0.0,
+                flush_interval_sec=0.0,
+                system_metrics=True,
+                system_metrics_interval_sec=0.0,
+            ),
         ),
     )
     assert kwargs["settings"] is None

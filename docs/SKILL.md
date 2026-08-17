@@ -357,6 +357,35 @@ redundant, since the list's length IS the count. (A count is right when the slot
 holds one template to broadcast -- `blocks_per_stage` beside a single `block`.)
 Declare what a slot must DO, not what it must BE.
 
+### A scalar configuring a child's internals is a MISSING SLOT
+
+The rename is a symptom; check what the parent builds before renaming anything.
+
+```python
+# Bad -- the field exists only to reach inside a norm the caller cannot see.
+rms_norm_eps: float = 1e-6
+...
+self.kv_a_layernorm = RMSNorm.Config(  # hardcoded in __init__
+    channels_in=config.kv_lora_rank,
+    eps=config.rms_norm_eps,
+    elementwise_affine=True,
+).make()
+
+# Good -- the norm is the node. The scalar disappears with it.
+norm_kv_lora: Makeable[nn.Module] = field(default_factory=RMSNorm.Config)
+```
+
+Renaming `rms_norm_eps` to `eps` fixes the word and keeps the defect: the norm
+is still unswappable, and a caller wanting `CenteredRMSNorm`, a different
+epsilon, or no norm at all still cannot say so. Deleting the field is only
+possible once the child is a slot -- there is otherwise no child to set.
+
+The blessed nouns reserve the names for this (`norm`, `norm_qk`, `norm_out`:
+"normalization slots, named for their position"), and every peer already
+complies -- `TransformerBlock.norm1/norm2`, `SelfAttention.norm_qk/norm_out`,
+`MLPMixerBlock.norm_token/norm_channel`, `SwiGLU.norm`. A module that builds a
+child while exposing NO `Makeable` slot has flattened its own subtree.
+
 ### A field the parent only forwards belongs to the child
 
 ```python
@@ -390,38 +419,13 @@ A derivation earns the parent field: the value means something the children's
 names do not say, and it appears in more than one child under more than one
 role. A rename earns nothing -- delete it and set the child.
 
-Porting a foreign schema (an HF `config.json`) is not an exception. `from_hf`
-parses the foreign names into the CHILD configs; it does not mirror them onto
-the parent.
+A SECOND READER also earns it. A weight remapper reading `num_attention_heads`
+to reshape an HF checkpoint has a real claim: digging the value back out of the
+built block tree would make the remapper depend on block STRUCTURE rather than
+on stated architecture. Check for one before deleting.
 
-### A scalar configuring a child's internals is a MISSING SLOT
-
-The rename is a symptom; check what the parent builds before renaming anything.
-
-```python
-# Bad -- the field exists only to reach inside a norm the caller cannot see.
-rms_norm_eps: float = 1e-6
-...
-self.kv_a_layernorm = RMSNorm.Config(  # hardcoded in __init__
-    channels_in=config.kv_lora_rank,
-    eps=config.rms_norm_eps,
-    elementwise_affine=True,
-).make()
-
-# Good -- the norm is the node. The scalar disappears with it.
-norm_kv_lora: Makeable[TensorModule] = field(default_factory=RMSNorm.Config)
-```
-
-Renaming `rms_norm_eps` to `eps` fixes the word and keeps the defect: the norm
-is still unswappable, and a caller wanting `CenteredRMSNorm`, a different
-epsilon, or no norm at all still cannot say so. Deleting the field is only
-possible once the child is a slot -- there is otherwise no child to set.
-
-The blessed nouns reserve the names for this (`norm`, `norm_qk`, `norm_out`:
-"normalization slots, named for their position"), and every peer already
-complies -- `TransformerBlock.norm1/norm2`, `SelfAttention.norm_qk/norm_out`,
-`MLPMixerBlock.norm_token/norm_channel`, `SwiGLU.norm`. A module that builds a
-child while exposing NO `Makeable` slot has flattened its own subtree.
+Porting a foreign schema is not by itself an exception. `from_hf` parses the
+foreign names into the CHILD configs; it does not mirror them onto the parent.
 
 Constants that are facts, not tunables, take `Final`:
 `NUM_TRAIN_SAMPLES: Final = 50_000` is a property of the dataset; a batch size
