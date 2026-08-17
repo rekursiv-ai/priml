@@ -104,6 +104,18 @@ _runtime_initialized: bool = (
 _single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = (
     None  # config-globals: ignore -- mutable process-init state, not a knob
 )
+# Whether THIS module created the torch.distributed process group, as opposed
+# to entering a process where a launcher (torchrun, a jobber run body) or an
+# earlier lifecycle already initialized one. Experiment loops may
+# run many short, failure-isolated initialize/destroy lifecycles per process
+# -- multi-phase jobs, seed panels, subprocess evaluation, dense test suites
+# -- sometimes as a guest of a pre-existing group. Destroying a group we did
+# not create breaks the owner's teardown and every sibling still using it, so
+# destroy_global_device_mesh() tears down only what initialization acquired,
+# and a failed initialization rolls this flag back with the group it created.
+_process_group_owned: bool = (
+    False  # config-globals: ignore -- process-global resource ownership
+)
 
 
 class SingleProcess:
@@ -344,10 +356,12 @@ def initialize_global_device_mesh(
         DeviceMesh.
 
     """
-    global _runtime_initialized  # noqa: PLW0603
+    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
+    global _process_group_owned  # noqa: PLW0603
 
     if _runtime_initialized:
         raise RuntimeError("Runtime already initialized.")
+    _process_group_owned = False
 
     # Validate the topology BEFORE acquiring anything. These checks used to run
     # after init_process_group, so a config error left an initialized process
@@ -383,37 +397,65 @@ def initialize_global_device_mesh(
         device = torch.device("cuda", local_rank)
         torch.cuda.set_device(device)
 
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend=backend,
-            timeout=torch.distributed.default_pg_timeout,
-            device_id=device if device.type == "cuda" else None,
+    process_group_preexisting = torch.distributed.is_initialized()
+    try:
+        if not process_group_preexisting:
+            torch.distributed.init_process_group(
+                backend=backend,
+                timeout=torch.distributed.default_pg_timeout,
+                device_id=device if device.type == "cuda" else None,
+            )
+
+        world_size_actual = torch.distributed.get_world_size()
+        mesh_topology = _resolve_mesh_topology(mesh_topology, world_size_actual)
+
+        device_mesh = init_device_mesh(
+            device.type,
+            tuple(mesh_topology.values()),
+            mesh_dim_names=tuple(mesh_topology.keys()),
         )
+    except BaseException as primary:
+        _device_mesh = None
+        _single_process_settings = None
+        _runtime_initialized = False
+        _process_group_owned = False
+        if not process_group_preexisting and torch.distributed.is_initialized():
+            try:
+                torch.distributed.destroy_process_group()
+            except BaseException as cleanup:  # noqa: BLE001 -- retain both.
+                raise BaseExceptionGroup(
+                    "Distributed runtime initialization and rollback failed",
+                    [primary, cleanup],
+                ) from None
+        raise
 
-    world_size_actual = torch.distributed.get_world_size()
+    _device_mesh = device_mesh
+    _process_group_owned = not process_group_preexisting
+    _runtime_initialized = True
+    return device_mesh
 
-    if any(s < 0 for s in mesh_topology.values()):
-        world_size_expected = math.prod(s for s in mesh_topology.values() if s > 0)
-        n = world_size_actual // world_size_expected
-        mesh_topology = {k: n if v < 0 else v for k, v in mesh_topology.items()}
 
+def _resolve_mesh_topology(
+    mesh_topology: dict[str, int],
+    world_size_actual: int,
+) -> dict[str, int]:
+    """Resolve an automatic dimension and validate the distributed world size."""
+    if any(size < 0 for size in mesh_topology.values()):
+        world_size_fixed = math.prod(
+            size for size in mesh_topology.values() if size > 0
+        )
+        automatic_size = world_size_actual // world_size_fixed
+        mesh_topology = {
+            key: automatic_size if size < 0 else size
+            for key, size in mesh_topology.items()
+        }
     world_size_expected = math.prod(mesh_topology.values())
     if world_size_actual != world_size_expected:
         raise RuntimeError(
             f"World size {world_size_actual} does not match mesh topology "
             f"{mesh_topology} (expected {world_size_expected})",
         )
-
-    global _device_mesh  # noqa: PLW0603
-    _device_mesh = init_device_mesh(
-        device.type,
-        tuple(mesh_topology.values()),
-        mesh_dim_names=tuple(mesh_topology.keys()),
-    )
-
-    _runtime_initialized = True
-
-    return _device_mesh
+    return mesh_topology
 
 
 def _set_float32_matmul_precision(
@@ -429,12 +471,19 @@ def destroy_global_device_mesh() -> None:
 
     WARNING: Must be called manually before process exit in distributed training.
     Do NOT rely on garbage collection to call this.
+
+    The process group is destroyed only when this module created it; a group
+    initialized by a launcher or an earlier same-process lifecycle survives so
+    its true owner can tear it down (see ``_process_group_owned``).
     """
     global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
+    global _process_group_owned  # noqa: PLW0603
     if not _runtime_initialized:
+        _process_group_owned = False
         return
-    if torch.distributed.is_initialized():
+    if _process_group_owned and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _device_mesh = None
     _single_process_settings = None
+    _process_group_owned = False
     _runtime_initialized = False

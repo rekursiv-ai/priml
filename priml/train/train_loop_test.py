@@ -2232,6 +2232,31 @@ def test_final_post_training_eval_logs_to_tracker() -> None:
     )
 
 
+def test_cadence_eval_runs_once_per_optimizer_step() -> None:
+    """Gradient accumulation cannot repeat eval at one optimizer step."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.checkpointing = None
+        config.num_steps_eval = 5
+        loop = config.make()
+        assert isinstance(loop.step, TrainStep)
+        loop.step.timer_step.global_count = 5
+
+        eval_count = 0
+        original_eval = loop.eval
+
+        def count_eval() -> dict[str, Any]:
+            nonlocal eval_count
+            eval_count += 1
+            return original_eval()
+
+        loop.eval = count_eval  # ty: ignore[invalid-assignment] -- bound test spy
+        loop._maybe_eval()
+        loop._maybe_eval()
+
+    assert eval_count == 1
+
+
 def test_no_post_loop_eval_when_no_training() -> None:
     """T-019: with max_steps=0, the post-loop eval must not run."""
     with tempfile.TemporaryDirectory() as tmp:

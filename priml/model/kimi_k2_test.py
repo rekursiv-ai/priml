@@ -116,6 +116,9 @@ class TestConfig:
         assert cfg.kv_lora_rank == 32
         assert cfg.q_lora_rank is None
         assert cfg.first_k_dense_replace == 1
+        assert cfg.channels_qk_nope_head == 16
+        assert cfg.channels_qk_rope_head == 8
+        assert cfg.channels_v_head == 16
 
     def test_parse_deepseek_v3(self):
         cfg = KimiK2.Config.from_hf(

@@ -203,18 +203,32 @@ def _patch_distributed(
     monkeypatch: pytest.MonkeyPatch,
     *,
     world_size: int,
+    preinitialized: bool = False,
+    destroy_failure: BaseException | None = None,
 ) -> dict[str, object]:
     """Stub the distributed/CUDA surface so the cuda branch runs off-GPU.
 
     Records ``set_device`` and ``init_process_group`` arguments for assertion.
     """
     record: dict[str, object] = {}
+    initialized = preinitialized
+    destroy_calls = 0
 
     def fake_set_device(device: torch.device) -> None:
         record["set_device"] = device
 
     def fake_init_process_group(**kwargs: object) -> None:
+        nonlocal initialized
         record["init_kwargs"] = kwargs
+        initialized = True
+
+    def fake_destroy_process_group() -> None:
+        nonlocal destroy_calls, initialized
+        destroy_calls += 1
+        record["destroy_calls"] = destroy_calls
+        if destroy_failure is not None:
+            raise destroy_failure
+        initialized = False
 
     def fake_init_device_mesh(
         device_type: str,
@@ -227,17 +241,252 @@ def _patch_distributed(
         return object()
 
     monkeypatch.setattr(torch.cuda, "set_device", fake_set_device)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: initialized)
     monkeypatch.setattr(
         torch.distributed,
         "init_process_group",
         fake_init_process_group,
     )
+    monkeypatch.setattr(
+        torch.distributed,
+        "destroy_process_group",
+        fake_destroy_process_group,
+    )
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: world_size)
     monkeypatch.setattr(runtime, "init_device_mesh", fake_init_device_mesh)
     monkeypatch.setattr(runtime, "_runtime_initialized", False)
     monkeypatch.setattr(runtime, "_device_mesh", None)
+    monkeypatch.setattr(runtime, "_process_group_owned", False)
     return record
+
+
+def test_world_size_failure_rolls_back_acquired_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=2)
+
+    with pytest.raises(RuntimeError, match="World size 2"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert record["destroy_calls"] == 1
+    assert not torch.distributed.is_initialized()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+def test_mesh_construction_failure_rolls_back_acquired_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    def fail_mesh_construction(
+        device_type: str,
+        mesh_shape: tuple[int, ...],
+        *,
+        mesh_dim_names: tuple[str, ...],
+    ) -> object:
+        del device_type, mesh_shape, mesh_dim_names
+        raise RuntimeError("mesh construction failed")
+
+    monkeypatch.setattr(runtime, "init_device_mesh", fail_mesh_construction)
+
+    with pytest.raises(RuntimeError, match="mesh construction failed"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert record["destroy_calls"] == 1
+    assert not torch.distributed.is_initialized()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_mesh_baseexception_rolls_back_acquired_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[BaseException],
+) -> None:
+    primary = exception_type("mesh construction interrupted")
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    def fail_mesh_construction(
+        device_type: str,
+        mesh_shape: tuple[int, ...],
+        *,
+        mesh_dim_names: tuple[str, ...],
+    ) -> object:
+        del device_type, mesh_shape, mesh_dim_names
+        raise primary
+
+    monkeypatch.setattr(runtime, "init_device_mesh", fail_mesh_construction)
+
+    with pytest.raises(exception_type) as raised:
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert raised.value is primary
+    assert record["destroy_calls"] == 1
+    assert not torch.distributed.is_initialized()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_mesh_baseexception_preserves_borrowed_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[BaseException],
+) -> None:
+    primary = exception_type("mesh construction interrupted")
+    record = _patch_distributed(
+        monkeypatch,
+        world_size=1,
+        preinitialized=True,
+    )
+
+    def fail_mesh_construction(
+        device_type: str,
+        mesh_shape: tuple[int, ...],
+        *,
+        mesh_dim_names: tuple[str, ...],
+    ) -> object:
+        del device_type, mesh_shape, mesh_dim_names
+        raise primary
+
+    monkeypatch.setattr(runtime, "init_device_mesh", fail_mesh_construction)
+
+    with pytest.raises(exception_type) as raised:
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert raised.value is primary
+    assert "init_kwargs" not in record
+    assert "destroy_calls" not in record
+    assert torch.distributed.is_initialized()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+def test_mesh_baseexception_and_rollback_failure_preserve_identity_order(
+    monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[BaseException],
+) -> None:
+    primary = exception_type("mesh construction interrupted")
+    cleanup = RuntimeError("process group cleanup failed")
+    record = _patch_distributed(
+        monkeypatch,
+        world_size=1,
+        destroy_failure=cleanup,
+    )
+
+    def fail_mesh_construction(
+        device_type: str,
+        mesh_shape: tuple[int, ...],
+        *,
+        mesh_dim_names: tuple[str, ...],
+    ) -> object:
+        del device_type, mesh_shape, mesh_dim_names
+        raise primary
+
+    monkeypatch.setattr(runtime, "init_device_mesh", fail_mesh_construction)
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert raised.value.exceptions == (primary, cleanup)
+    assert record["destroy_calls"] == 1
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+def test_failure_does_not_destroy_preexisting_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(
+        monkeypatch,
+        world_size=2,
+        preinitialized=True,
+    )
+
+    with pytest.raises(RuntimeError, match="World size 2"):
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert "init_kwargs" not in record
+    assert "destroy_calls" not in record
+    assert torch.distributed.is_initialized()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+def test_destroy_preserves_process_group_borrowed_during_initialize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(
+        monkeypatch,
+        world_size=1,
+        preinitialized=True,
+    )
+
+    initialize_global_device_mesh(
+        device=torch.device("cpu"),
+        backend="gloo",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+    )
+    runtime.destroy_global_device_mesh()
+
+    assert "init_kwargs" not in record
+    assert "destroy_calls" not in record
+    assert torch.distributed.is_initialized()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+
+
+def test_rollback_failure_is_preserved_with_world_size_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(
+        monkeypatch,
+        world_size=2,
+        destroy_failure=RuntimeError("process group cleanup failed"),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        initialize_global_device_mesh(
+            device=torch.device("cpu"),
+            backend="gloo",
+            mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        )
+
+    assert {str(error) for error in raised.value.exceptions} == {
+        (
+            "World size 2 does not match mesh topology "
+            "{'dp': 1, 'pp': 1, 'tp': 1} (expected 1)"
+        ),
+        "process group cleanup failed",
+    }
+    assert record["destroy_calls"] == 1
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
 
 
 def test_multiprocess_initialize_sets_float32_matmul_precision(

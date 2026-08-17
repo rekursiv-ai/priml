@@ -249,7 +249,11 @@ class CheckpointingProtocol(Protocol):
 class TrackerProtocol(Protocol):
     """Protocol for experiment tracking (TensorBoard, W&B, file, etc.).
 
-    Handles logging metrics and images at a global step.
+    Handles logging metrics and images at a global step. A tracker may defer
+    delivery, but ``close`` must drain accepted calls. Code publishing an
+    artifact that depends on successful delivery calls
+    ``priml.train.tracker.flush_tracker(tracker)`` first; synchronous
+    trackers need no special implementation.
     """
 
     def log_metrics(
@@ -298,7 +302,7 @@ class TrackerProtocol(Protocol):
         ...
 
     def close(self) -> None:
-        """Cleanup tracker resources."""
+        """Drain accepted delivery and cleanup tracker resources."""
         ...
 
 
