@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from threading import Event, Thread, get_ident
 from typing import TYPE_CHECKING, Any, cast
 
 import json
@@ -15,6 +16,7 @@ import torch
 
 from priml.train import tracker as tracker_mod
 from priml.train.tracker import (
+    AsyncTracker,
     FileTracker,
     TensorBoardTracker,
     TrackerList,
@@ -681,6 +683,110 @@ def test_file_tracker_working_dir_is_scoped_by_owner() -> None:
     assert config.finalize().working_dir == Path(
         "/scratch/runs/study/run-1/metrics.json"
     )
+
+
+class _BlockingAsyncChild:
+    """Recording child used to prove ordered background delivery."""
+
+    class Config(Fig["_BlockingAsyncChild"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        self.entered = Event()
+        self.release = Event()
+        self.metrics: list[dict[str, Any]] = []
+        self.thread_ids: list[int] = []
+        self.closed = False
+
+    def log_metrics(
+        self,
+        metrics: Mapping[str, Any],
+        step: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        del step, prefix
+        self.entered.set()
+        if not self.release.wait(timeout=2.0):
+            raise TimeoutError("blocking tracker was not released")
+        self.metrics.append(dict(metrics))
+        self.thread_ids.append(get_ident())
+
+    def log_images(self, key: str, images: list[Any], step: int) -> None:
+        del key, images, step
+
+    def log_notes(self, notes: str) -> None:
+        del notes
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_async_tracker_is_enabled_ordered_and_nonblocking_by_default() -> None:
+    tracker = AsyncTracker.Config(tracker=_BlockingAsyncChild.Config()).make()
+    child = cast(_BlockingAsyncChild, tracker.tracker)
+    caller_thread = get_ident()
+
+    first = {"index": 1}
+    tracker.log_metrics(first, 1)
+    assert child.entered.wait(timeout=1.0)
+    first["index"] = 99
+
+    second_returned = Event()
+    second = Thread(
+        target=lambda: (
+            tracker.log_metrics({"index": 2}, 2),
+            second_returned.set(),
+        )
+    )
+    second.start()
+    assert second_returned.wait(timeout=1.0)
+
+    child.release.set()
+    second.join(timeout=1.0)
+    tracker.close()
+
+    assert AsyncTracker.Config().enabled is True
+    assert child.metrics == [{"index": 1}, {"index": 2}]
+    assert child.thread_ids[0] != caller_thread
+    assert child.closed
+
+
+def test_async_tracker_can_be_disabled() -> None:
+    tracker = AsyncTracker.Config(
+        tracker=_RecordingChild.Config(),
+        enabled=False,
+    ).make()
+    child = cast(_RecordingChild, tracker.tracker)
+
+    tracker.log_metrics({"loss": 1.0}, 1)
+    tracker.flush()
+    tracker.close()
+
+    assert child.metrics == [({"loss": 1.0}, 1, "")]
+    assert child.closed == 1
+
+
+def test_tracker_list_scopes_wrapped_child_working_directory(
+    tmp_path: Path,
+) -> None:
+    config = TrackerList.Config(
+        base_dir=tmp_path,
+        working_dir="run",
+        trackers={
+            "wandb": AsyncTracker.Config(
+                tracker=FileTracker.Config(working_dir="metrics.json"),
+            ),
+        },
+    )
+
+    finalized = config.finalize()
+    wrapper = finalized.trackers["wandb"]
+    assert isinstance(wrapper, AsyncTracker.Config)
+    child = wrapper.tracker
+    assert isinstance(child, FileTracker.Config)
+    assert child.working_dir == tmp_path / "run/metrics.json"
 
 
 if __name__ == "__main__":

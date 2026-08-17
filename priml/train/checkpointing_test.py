@@ -51,7 +51,9 @@ def single_rank_group(
     try:
         port = WorkerPool.find_free_port()
     except OSError as error:
-        pytest.skip(f"Gloo requires a permitted loopback socket: {error}")
+        raise pytest.skip.Exception(
+            f"Gloo requires a permitted loopback socket: {error}"
+        ) from error
     monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
     monkeypatch.setenv("MASTER_PORT", str(port))
     monkeypatch.setenv("RANK", "0")

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import field
 from numbers import Real
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, override
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Protocol,
+    cast,
+    override,
+)
 
 import json
 import logging
@@ -311,8 +319,6 @@ class WandbTracker:
         self._run: _Run | None = None
         if not is_rank_zero():
             return
-        # ``mode`` is a free-form str in the Config for ergonomics; narrow it to
-        # wandb's Literal at this boundary (valid values named in the docstring).
         mode = cast(
             "Literal['online', 'offline', 'disabled', 'shared']",
             config.mode,
@@ -323,10 +329,6 @@ class WandbTracker:
         # ``resume="allow"`` creates the run if the id does not yet exist rather
         # than failing. A fresh run leaves both None for W&B to auto-generate.
         resume = "allow" if config.run_id else None
-        # Tune ingestion volume so the dashboard tracks the live run instead of
-        # lagging tens of thousands of steps behind: bound the history-stream
-        # transmit cadence, throttle the high-cardinality built-in system
-        # metrics (or disable them), all via wandb's experimental settings.
         settings_kwargs: dict[str, Any] = {}
         if not config.capture_console:
             settings_kwargs["console"] = "off"
@@ -448,12 +450,105 @@ class WandbTracker:
         self.close()
 
 
+class AsyncTracker:
+    """Run one explicitly selected tracker on an ordered worker.
+
+    The wrapper owns the thread so transport trackers remain simple and other
+    children in a ``TrackerList`` stay synchronous. Metric/image containers are
+    copied on submission; their contained values must not be mutated until the
+    next ``flush`` or ``close``.
+
+    The measured motivation is an H100 Craftax run whose final training
+    interval reached 135,592.5 steps/s while complete pre-evaluation training
+    averaged 132,830.7 steps/s, a 2.1% gap. That is an opportunity ceiling that
+    includes compilation and other host work, not a tracker-only or async A/B
+    speedup; this wrapper isolates the tracker-delivery part for measurement.
+    """
+
+    class Config(Fig["AsyncTracker"]):
+        """Async tracker wrapper configuration."""
+
+        tracker: Makeable[TrackerProtocol] | None = None
+        """Child tracker driven by the worker."""
+        enabled: bool = True
+        """Use the worker; false preserves synchronous child delivery."""
+
+    def __init__(self, config: Config) -> None:
+        """Build the child and, when enabled, its one-worker executor."""
+        if config.tracker is None:
+            raise ValueError("AsyncTracker requires a child tracker config.")
+        self.tracker = config.tracker.make()
+        self._executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="tracker")
+            if config.enabled
+            else None
+        )
+        self._pending: list[Future[None]] = []
+        self._closed = False
+
+    def log_metrics(
+        self,
+        metrics: Mapping[str, Any],
+        step: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        """Queue a shallow call-time snapshot of one metric batch."""
+        payload = dict(metrics) if self._executor is not None else metrics
+        self._submit(self.tracker.log_metrics, payload, step, prefix=prefix)
+
+    def log_images(self, key: str, images: list[Any], step: int) -> None:
+        """Queue a shallow call-time snapshot of one image batch."""
+        payload = list(images) if self._executor is not None else images
+        self._submit(self.tracker.log_images, key, payload, step)
+
+    def log_notes(self, notes: str) -> None:
+        """Set run notes synchronously before training starts."""
+        if self._closed:
+            raise RuntimeError("AsyncTracker is closed.")
+        self.tracker.log_notes(notes)
+
+    def flush(self) -> None:
+        """Wait for every submitted call and surface delivery failures."""
+        pending, self._pending = self._pending, []
+        for future in pending:
+            future.result()
+
+    def close(self) -> None:
+        """Drain delivery, stop the worker, and close the child."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.flush()
+        finally:
+            if self._executor is not None:
+                self._executor.shutdown(wait=True)
+            self.tracker.close()
+
+    def _submit(
+        self,
+        function: Callable[..., None],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        """Submit without waiting; the single worker preserves call order."""
+        if self._closed:
+            raise RuntimeError("AsyncTracker is closed.")
+        if self._executor is None:
+            function(*args, **kwargs)
+            return
+        self._pending.append(self._executor.submit(function, *args, **kwargs))
+
+
 class TrackerList:
-    """Tracker that fans every call out to a set of child trackers.
+    """Synchronously fan every call out to independent child trackers.
 
     Children self-gate (e.g. ``WandbTracker`` no-ops off rank 0, ``FileTracker``
-    writes only on rank 0), so ``TrackerList`` forwards on all ranks without any
-    central gating.
+    writes only on rank 0), so this composite forwards on all ranks. Wrap only
+    an explicitly thread-safe transport child in ``AsyncTracker``; distributed
+    or durable children retain caller-thread ordering.
     """
 
     class Config(Fig["TrackerList"]):
@@ -463,7 +558,6 @@ class TrackerList:
             default_factory=dict[str, Makeable[TrackerProtocol]],
         )
         """Child trackers, built and driven in insertion order."""
-
         base_dir: Path | str | None = None
         """Owner directory supplied during parent finalization."""
         working_dir: Path | str = "/"
@@ -473,11 +567,12 @@ class TrackerList:
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             for child in self.trackers.values():
+                target = unwrap_tracker_config(child)
                 if (
-                    isinstance(child, HasNormalizedWorkingDirPattern)
-                    and child.base_dir is None
+                    isinstance(target, HasNormalizedWorkingDirPattern)
+                    and target.base_dir is None
                 ):
-                    child.base_dir = self.working_dir
+                    target.base_dir = self.working_dir
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -501,9 +596,14 @@ class TrackerList:
             tracker.log_images(key, images, step)
 
     def log_notes(self, notes: str) -> None:
-        """Forward run notes to every child tracker (notes-less ones ignore)."""
+        """Forward run notes to every child tracker."""
         for tracker in self.trackers.values():
             tracker.log_notes(notes)
+
+    def flush(self) -> None:
+        """Flush deferred children."""
+        for tracker in self.trackers.values():
+            flush_tracker(tracker)
 
     def close(self) -> None:
         """Close every child tracker."""
@@ -543,3 +643,20 @@ class _Writer(Protocol):
     """Minimal scalar-logging writer interface (satisfied by SummaryWriter)."""
 
     def add_scalar(self, tag: str, scalar_value: Any, global_step: int) -> None: ...
+
+
+def unwrap_tracker_config(
+    config: Makeable[TrackerProtocol],
+) -> Makeable[TrackerProtocol]:
+    """Return the one child beneath an asynchronous tracker wrapper."""
+    if not isinstance(config, AsyncTracker.Config):
+        return config
+    if config.tracker is None:
+        raise ValueError("AsyncTracker requires a child tracker config.")
+    return config.tracker
+
+
+def flush_tracker(tracker: TrackerProtocol) -> None:
+    """Flush a deferred tracker; synchronous trackers need no barrier."""
+    if isinstance(tracker, (AsyncTracker, TrackerList)):
+        tracker.flush()

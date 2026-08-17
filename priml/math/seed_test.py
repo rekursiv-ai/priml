@@ -193,15 +193,11 @@ def test_set_seed_distributed_salting_combinations(
     receives a per-component-salted seed derived from the broadcast
     base. The previous five tests pinned ``torch.initial_seed`` only;
     a regression that dropped Python or NumPy seeding would have stayed
-    green. Here we capture the pre-call states and assert each one
-    moved.
+    green. Compare exact expected states so the test is independent of
+    whatever seed a previous test left behind.
     """
-    pre_torch = torch.initial_seed()
-    pre_python = random.getstate()
-    pre_numpy = numpy_rng.bit_generator.state
-
     _patch_dist(monkeypatch, rank=rank, broadcast=broadcast)
-    base_seed, _local_seed = set_seed_distributed(
+    base_seed, local_seed = set_seed_distributed(
         seed=100,
         mesh=mesh,
         salt_by_rank=salt_by_rank,
@@ -209,16 +205,23 @@ def test_set_seed_distributed_salting_combinations(
     assert base_seed == 100
 
     if expected_local_salt is not None:
-        local = salt(*expected_local_salt)
-        assert torch.initial_seed() == salt("torch", local)
+        expected_local_seed = salt(*expected_local_salt)
     else:
         # salt_by_rank=False means the local seed equals the base.
-        assert torch.initial_seed() == salt("torch", 100)
-    assert random.getstate() != pre_python
-    assert numpy_rng.bit_generator.state != pre_numpy
-    assert torch.initial_seed() != pre_torch or pre_torch == salt(
-        "torch",
-        100 if expected_local_salt is None else salt(*expected_local_salt),
+        expected_local_seed = 100
+    assert local_seed == expected_local_seed
+    assert torch.initial_seed() == salt("torch", expected_local_seed)
+    assert (
+        random.getstate()
+        == random.Random(  # noqa: S311
+            salt("python", expected_local_seed),
+        ).getstate()
+    )
+    assert (
+        numpy_rng.bit_generator.state
+        == np.random.PCG64(
+            salt("numpy", expected_local_seed),
+        ).state
     )
 
 

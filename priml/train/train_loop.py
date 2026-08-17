@@ -590,6 +590,12 @@ class TrainLoop:
                     self.step.global_step,
                 )
 
+            # Cadence is expressed in optimizer steps, while the training loop
+            # visits this boundary once per micro-batch. Remember the restored
+            # or most recently evaluated optimizer step so gradient
+            # accumulation cannot score the same weights repeatedly.
+            self._last_eval_step = self.step.global_step
+
             self.train_loader = None
             self.train_iter = None
             self._time_limit_latched = False
@@ -1085,6 +1091,7 @@ class TrainLoop:
             cadence_due = (
                 self.step.global_step != 0
                 and self.step.global_step % self.num_steps_eval == 0
+                and self.step.global_step != self._last_eval_step
             )
             if not is_final and not cadence_due:
                 return
@@ -1115,6 +1122,8 @@ class TrainLoop:
                     scalar_metrics,
                     eval_time,
                 )
+        if not is_final:
+            self._last_eval_step = self.step.global_step
 
     def _cleanup(self) -> None:
         """Cleanup resources after training."""
