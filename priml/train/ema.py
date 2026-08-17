@@ -49,12 +49,12 @@ class NoEMA:
 
     def state_dict(self) -> dict[str, Any]:
         """Get empty state dict."""
-        return {"global_step": self.global_step}
+        return {"global_step": self.global_step, "local_step": self.local_step}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Load step counters only."""
         self.global_step = state_dict["global_step"]
-        self.local_step = 0
+        self.local_step = state_dict.get("local_step", 0)
 
 
 _ParamFilter = Callable[[str, "nn.Parameter"], bool]
@@ -189,7 +189,7 @@ class EMA:
           config: EMA configuration.
 
         """
-        if not 0 <= config.decay <= 1:
+        if config.decay < 0 or config.decay > 1:
             raise ValueError(
                 f"decay must be in [0, 1], got {config.decay}",
             )
@@ -251,11 +251,22 @@ class EMA:
           step: Post-warmup averaging-step index (``local_step``).
 
         Returns:
-          decay: ``self.decay`` for the constant schedule; for ``"karras"``,
-            ``min(self.decay, (1 + step) / (10 + step))``.
+          decay: Whatever ``decay_schedule`` returns at ``step``, bounded to
+            ``[0, 1]``.
+
+        Raises:
+          ValueError: The schedule returned a value outside ``[0, 1]``.
 
         """
-        return self.decay_schedule(self.decay, step)
+        decay = self.decay_schedule(self.decay, step)
+        # Used directly as a lerp coefficient: outside [0, 1] it extrapolates
+        # rather than averages.
+        if decay < 0 or decay > 1:
+            raise ValueError(
+                f"decay_schedule returned {decay} at step {step}; the "
+                "effective decay must lie in [0, 1].",
+            )
+        return decay
 
     def __call__(self, model: nn.Module) -> None:
         """Advance one EMA step.
@@ -357,7 +368,10 @@ class EMA:
 
         """
         if not self._initialized:
-            return {"global_step": self.global_step}
+            return {
+                "global_step": self.global_step,
+                "local_step": self.local_step,
+            }
         if self.shadow_model is not None:
             # Clone tensors for storage independence but preserve ``_metadata``
             # so ``load_state_dict`` keeps module-version migration hooks.
@@ -371,7 +385,11 @@ class EMA:
                 # _metadata is a dynamic attr torch attaches to the state_dict
                 # OrderedDict; absent from every stub, so no checker models it.
                 cloned._metadata = metadata  # noqa: SLF001  # ty: ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
-            return {"shadow_model": cloned, "global_step": self.global_step}
+            return {
+                "shadow_model": cloned,
+                "global_step": self.global_step,
+                "local_step": self.local_step,
+            }
         return {
             "shadow_params": {
                 name: t.detach().clone() for name, t in self.shadow_params.items()
@@ -380,6 +398,7 @@ class EMA:
                 name: t.detach().clone() for name, t in self._shadow_buffers.items()
             },
             "global_step": self.global_step,
+            "local_step": self.local_step,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -393,7 +412,9 @@ class EMA:
 
         """
         self.global_step = state_dict["global_step"]
-        self.local_step = 0
+        # A step-dependent schedule reads local_step, so resetting it would
+        # restart the ramp on resume. Absent in older checkpoints.
+        self.local_step = state_dict.get("local_step", 0)
         if "shadow_model" in state_dict:
             source = state_dict["shadow_model"]
             cloned = OrderedDict(

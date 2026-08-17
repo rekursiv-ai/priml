@@ -119,7 +119,7 @@ def broadcast_sequences(
       result: Tuple of lists, all with the same length.
 
     """
-    lists = [[a] if not isinstance(a, Sequence) else list(a) for a in args]  # pyright: ignore[reportUnknownArgumentType]
+    lists = [list(a) if isinstance(a, Sequence) else [a] for a in args]  # pyright: ignore[reportUnknownArgumentType]
     n = max(len(a) for a in lists)
     for a in lists:
         if len(a) not in (1, n):

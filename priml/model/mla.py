@@ -8,41 +8,42 @@ value path.
 Q has an optional LoRA decomposition (``q_lora_rank``): DeepSeek-V3 uses
 it (1536), Kimi-K2 does not (None ⇒ single ``q_proj``).
 
-Forward shape map (B=batch, S=seq, n=num_heads)::
+Forward shape map. B batch · S new tokens · T cached+new · n ``heads`` ·
+D ``channels_qk_nope_head`` · R ``channels_qk_rope_head`` ·
+V ``channels_v_head`` · L ``kv_lora_rank``::
 
     x [B, S, hidden]
-      ├─ q_path  -> q  [B, S, n, qk_nope + qk_rope]
-      │            ├─ q_nope [B, S, n, qk_nope]
-      │            └─ q_pe   [B, S, n, qk_rope]   -> RoPE
-      └─ kv_path -> c_kv [B, S, kv_lora_rank]     (post-kv_a_layernorm)
-                   k_pe  [B, S, qk_rope]          (post-RoPE, head-shared)
+    │
+    ├─ q_proj ⟶ q [B, S, n, D+R]          (q_a_proj ⟶ norm ⟶ q_b_proj
+    │  │                                    when q_lora_rank is set)
+    │  ├─ q_nope [B, S, n, D]
+    │  └─ q_pe   [B, S, n, R] ⟵ RoPE
+    │
+    └─ kv_a_proj ⟶ [B, S, L+R]
+       ├─ c_kv [B, S, L] ⟵ kv_a_layernorm  ╮ cached; head-shared,
+       └─ k_pe [B, S, R] ⟵ RoPE            ╯ so no head axis
 
-    At attention time, kv_b_proj expands c_kv -> (k_nope, v) per head.
+Attention never materializes K or V. ``kv_b_proj.weight`` is viewed per head
+as ``W_KR [n, D, L]`` and ``W_UV [n, V, L]``, then folded into the contraction
+so both terms meet in the latent space::
 
-Output: ``[B, S, n, channels_v_head]`` → ``o_proj`` → ``[B, S, hidden]``.
+    logits = (q_nope @ W_KR) @ c_kv^T + q_pe @ k_pe^T   [B, n, S, T]
+    out    = (softmax(logits) @ c_kv) @ W_UV            [B, S, n, V]
+                                            ⟶ o_proj ⟶ [B, S, hidden]
 
 **Cache layout.** Only ``(c_kv, k_pe)`` are cached — not the expanded
-K/V. For Kimi-K2 (n=64, qk_nope+v=256, kv_lora_rank=512, qk_rope=64)
-this cuts cache memory ~25× (576 dims/token vs 16384).
+K/V. For Kimi-K2 (n=64, D+V=256, L=512, R=64) this cuts cache memory
+~25× (576 dims/token vs 16384).
 
-**Absorb-math forward.** Default path reshapes ``kv_b_proj.weight``
-into per-head ``W_KR`` (qk_nope slice) and ``W_UV`` (v_head slice),
-then fuses Q projection with the K expansion::
-
-    q_abs[b,s,h,l] = sum_d q_nope[b,s,h,d] * W_KR[h,d,l]
-    attn_logits    = q_abs · c_kv^T + q_pe · k_pe^T
-    out_latent     = attn · c_kv
-    out[b,s,h,v]   = sum_l out_latent[b,h,s,l] * W_UV[h,v,l]
-
-Decode-step compute: O(T·H·L) rather than O(T·H·(qk_nope+v)·L) for
-re-expand; the ``(qk_nope+v)/L`` factor (~0.5 on Kimi-K2) is saved on
-every step. Numerical output is identical up to softmax ordering;
-verified against a naive re-expand reference in the test suite.
+**Absorb-math cost.** Decode-step compute is O(T·n·L) rather than
+O(T·n·(D+V)·L) for re-expand; the ``(D+V)/L`` factor (~0.5 on Kimi-K2)
+is saved on every step. Numerical output is identical up to softmax
+ordering; verified against a naive re-expand reference in the test suite.
 """
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, fields
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Self, override
 
@@ -220,8 +221,10 @@ class MultiHeadLatentAttention(nn.Module):
 
             Every width here is DERIVED -- a head count times a per-head width,
             or a LoRA rank -- so a caller states the shape once and swaps the
-            projection class without restating any of it. A slot that already
-            carries a width (a caller sized it deliberately) is left alone.
+            projection class without restating any of it. Only the sentinel
+            fields are filled: a slot carrying a width, a bias, or an init the
+            caller chose deliberately is left alone, since overwriting it would
+            build a model that differs from the configured one.
             """
             qk_out = self.heads * self.channels_qk_head
             # ``object`` because the slots differ in what they BUILD (a plain
@@ -251,9 +254,10 @@ class MultiHeadLatentAttention(nn.Module):
                 if isinstance(slot, ChannelsOut) and slot.channels_out == -1:
                     slot.channels_out = c_out
                 if isinstance(slot, Linear.Config):
-                    slot.bias = self.bias
-                    slot.depth = self.depth
-                    slot.init_weight = self.init_weight
+                    _fill_unset(slot, "bias", self.bias)
+                    _fill_unset(slot, "init_weight", self.init_weight)
+                    if slot.depth == -1:
+                        slot.depth = self.depth
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -275,7 +279,12 @@ class MultiHeadLatentAttention(nn.Module):
         self.dropout = config.dropout
         self.causal = config.causal
         self.depth = config.depth
-        self.softmax_scale = config.softmax_scale or self.channels_qk_head**-0.5
+        # ``is None``, not truthiness: 0.0 is a valid scale.
+        self.softmax_scale = (
+            self.channels_qk_head**-0.5
+            if config.softmax_scale is None
+            else config.softmax_scale
+        )
         self.shard = config.shard
 
         # Tensor parallelism is head-parallel: the custom ``ParallelStyle``
@@ -578,6 +587,20 @@ class MultiHeadLatentAttention(nn.Module):
                 output_layouts=Replicate(),
             ),
         }
+
+
+def _fill_unset(config: Linear.Config, name: str, value: object) -> None:
+    """Push ``value`` onto ``config.name`` unless the caller set it.
+
+    A field left at its declared default inherits the parent's value; anything
+    else the caller chose outranks it. A field set to exactly the default is
+    indistinguishable from an untouched one.
+    """
+    # Read off the dataclass field: slots=True makes the class attribute a
+    # descriptor rather than the default value.
+    default = next(f for f in fields(config) if f.name == name).default
+    if getattr(config, name) == default:
+        setattr(config, name, value)
 
 
 class _MLAParallel(ParallelStyle):

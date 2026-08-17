@@ -235,7 +235,8 @@ class WandbIngestion:
     dashboard lagging the live run. The client buffers history between
     transmissions, and its built-in system metrics dominate the point volume, so
     the interval and the sampling rate are tuned together or not at all. Every
-    value maps to a ``wandb.Settings`` field; ``0`` defers to W&B's own default.
+    value maps to a ``wandb.Settings`` field; ``0`` on a duration defers to
+    W&B's own default, while ``system_metrics=False`` disables them outright.
     """
 
     init_timeout_sec: float = 30.0

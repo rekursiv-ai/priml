@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from priml.model.attention import MultiStreamAttention
@@ -100,6 +101,24 @@ def test_identity_at_init():
     assert torch.allclose(y1, x1, atol=1e-5)
 
 
+def test_conditioning_is_required_when_adaln_is_configured():
+    """A configured AdaLN with no conditioning is not the identity it claims.
+
+    Skipping modulation adds both sublayers ungated.
+    """
+    m = _cfg(cond_dim=32).make()
+    with pytest.raises(ValueError, match="conditioning"):
+        m([torch.randn(1, 8, 64), torch.randn(1, 12, 64)])
+
+
+def test_conditioning_count_must_match_the_streams():
+    """One conditioning short leaves the last stream silently unmodulated."""
+    m = _cfg(cond_dim=32, num_streams=3).make()
+    xs = [torch.randn(1, 4, 64), torch.randn(1, 4, 64), torch.randn(1, 4, 64)]
+    with pytest.raises(ValueError, match="conditioning"):
+        m(xs, c=[torch.randn(1, 32), torch.randn(1, 32)])
+
+
 def test_no_adaln():
     m = _cfg(cond_dim=0).make()
     x0 = torch.randn(2, 8, 64)
@@ -123,14 +142,19 @@ def test_with_rope():
     assert y1.shape == (2, 12, 64)
 
 
-def test_adaln_configured_but_c_none():
-    """AdaLN enabled in config but c=None at forward time."""
+def test_adaln_configured_takes_zero_conditioning():
+    """Zero conditioning is how an AdaLN block is run unconditioned.
+
+    It routes through the zero-initialized gates, so the block stays the
+    identity its docstring promises.
+    """
     m = _cfg(cond_dim=32).make()
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
-    y0, y1 = m([x0, x1], c=None)
-    assert y0.shape == (2, 8, 64)
-    assert y1.shape == (2, 12, 64)
+    with torch.no_grad():
+        y0, y1 = m([x0, x1], c=torch.zeros(2, 32))
+    assert torch.allclose(y0, x0, atol=1e-5)
+    assert torch.allclose(y1, x1, atol=1e-5)
 
 
 def test_rope_all_streams():

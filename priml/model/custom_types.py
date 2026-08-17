@@ -21,17 +21,18 @@ __all__ = [
     "HeadGeometry",
     "LookupTable",
     "RotaryFactors",
+    "ShardStyle",
     "ShardableConfig",
     "TensorModule",
     "propagate_attr",
 ]
 
-ShardStyle = Literal["colwise", "rowwise", "vocab"] | None
+ShardStyle = Literal["colwise", "rowwise", "vocab"]
 """Tensor-parallel shard style for a building-block config.
 
-``None`` is replicated -- the absence of a style, spelled the way Python spells
-absence, so a caller writes ``if cfg.shard:`` rather than matching a magic
-string. ``get_args`` on the ``Literal`` inside therefore yields the real styles.
+The styles themselves; a slot that may decline to shard spells that
+``ShardStyle | None``, so absence reads where it is declared rather than being
+folded into the name. ``get_args`` therefore yields exactly the real styles.
 """
 
 type ActivationFn = Makeable[nn.Module | TensorFn] | TensorFn
@@ -61,6 +62,9 @@ class RotaryFactors(Protocol):
     Not a :class:`TensorModule`: a rotary embedding returns a PAIR, and its
     consumer unpacks it. Naming the pair is what lets the slot hold a learned
     or NTK-scaled variant rather than pinning ``RoPE`` itself.
+
+    Fill the slot with an ``nn.Module``: every consumer binds what it builds as
+    a child attribute, so a plain object is left out of the module tree.
     """
 
     def __call__(self, positions: Tensor, /) -> tuple[Tensor, Tensor]: ...
@@ -178,7 +182,7 @@ class ChannelsInOut(ChannelsIn, ChannelsOut, Protocol):
 class ShardableConfig(Protocol):
     """A building-block config that declares a tensor-parallel shard style."""
 
-    shard: ShardStyle
+    shard: ShardStyle | None
 
 
 def propagate_attr(

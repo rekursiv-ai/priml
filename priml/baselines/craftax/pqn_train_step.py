@@ -223,11 +223,11 @@ class CraftaxPQNTrainStep(TrainStep):
             raise ValueError("There must be at least one minibatch")
         if config.total_train_steps <= 0:
             raise ValueError("total_train_steps must be positive")
-        if not 0.0 <= config.discount <= 1.0:
+        if config.discount < 0.0 or config.discount > 1.0:
             raise ValueError("discount must be between zero and one")
-        if not 0.0 <= config.trace_decay <= 1.0:
+        if config.trace_decay < 0.0 or config.trace_decay > 1.0:
             raise ValueError("trace_decay must be between zero and one")
-        if not 0.0 < config.epsilon_decay_fraction <= 1.0:
+        if config.epsilon_decay_fraction <= 0.0 or config.epsilon_decay_fraction > 1.0:
             raise ValueError("epsilon_decay_fraction must be in (0, 1]")
 
         # The recipe's own optimizer, into the base's slot before the

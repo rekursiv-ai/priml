@@ -92,8 +92,8 @@ class SwiGLU(nn.Module):
         init_weight_out: InitFn | None = None
         """Weight init for ``down_proj``; ``None`` reuses ``init_weight``."""
 
-        shard: ShardStyle = None
-        """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
+        shard: ShardStyle | None = None
+        """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
         @override
         def finalize(self) -> Self:
@@ -138,8 +138,10 @@ class SwiGLU(nn.Module):
             init_weight=config.init_weight_out or config.init_weight,
         ).make()
         self.act = config.act
-        if not self.gate or config.norm is None:
+        if config.norm is None:
             self.norm = None
+        elif not self.gate:
+            raise ValueError("Norm can only be specified when gate is enabled.")
         elif self.act is not nn.functional.silu:
             raise ValueError("Norm can only be specified when act is silu.")
         else:

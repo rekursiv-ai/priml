@@ -75,7 +75,7 @@ class AdamATan2(Optimizer):
     ) -> None:
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}.")
-        if not 0.0 <= betas[0] < 1.0 or not 0.0 <= betas[1] < 1.0:
+        if any(beta < 0.0 or beta >= 1.0 for beta in betas):
             raise ValueError(f"Invalid betas: {betas}.")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay: {weight_decay}.")

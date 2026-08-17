@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from priml.model.linear import Linear
 from priml.model.mla import MultiHeadLatentAttention
 from priml.model.rope import RoPE
 
@@ -20,6 +21,27 @@ def _tiny(q_lora_rank: int | None = None) -> MultiHeadLatentAttention:
         kv_lora_rank=32,
         rope=RoPE.Config(channels_head=8, base=50_000),
     ).make()
+
+
+def test_projection_slot_keeps_caller_set_fields() -> None:
+    """A deliberately-configured projection survives width propagation.
+
+    ``_size_projections`` fills derived widths; overwriting the rest builds a
+    model that differs from the configured one.
+    """
+    config = MultiHeadLatentAttention.Config(
+        channels_in=128,
+        heads=4,
+        channels_qk_nope_head=16,
+        channels_qk_rope_head=8,
+        channels_v_head=16,
+        kv_lora_rank=32,
+        proj_out=Linear.Config(bias=True),
+    ).finalize()
+
+    assert isinstance(config.proj_out, Linear.Config)
+    assert config.proj_out.bias is True
+    assert config.proj_out.channels_out == 128
 
 
 def test_forward_shape():
@@ -43,6 +65,25 @@ def test_forward_with_q_lora():
     assert m.q_a_proj is not None
     assert m.q_a_layernorm is not None
     assert m.q_b_proj is not None
+
+
+def test_explicit_zero_softmax_scale_is_honored() -> None:
+    """``0.0`` is a value, not an absence.
+
+    Truthiness defaulting silently substitutes the computed scale, so the
+    model attends with a different temperature than the one configured.
+    """
+    module = MultiHeadLatentAttention.Config(
+        channels_in=128,
+        heads=4,
+        channels_qk_nope_head=16,
+        channels_qk_rope_head=8,
+        channels_v_head=16,
+        kv_lora_rank=32,
+        softmax_scale=0.0,
+    ).make()
+
+    assert module.softmax_scale == 0.0
 
 
 def test_prealloc_cache_decode():

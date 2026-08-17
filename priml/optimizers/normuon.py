@@ -174,13 +174,13 @@ class NorMuon(Optimizer):
     ) -> None:
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}.")
-        if not 0.0 <= momentum < 1.0:
+        if momentum < 0.0 or momentum >= 1.0:
             raise ValueError(f"momentum must lie in [0, 1); got {momentum}.")
-        if not 0.0 <= beta2 < 1.0:
+        if beta2 < 0.0 or beta2 >= 1.0:
             raise ValueError(f"beta2 must lie in [0, 1); got {beta2}.")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay: {weight_decay}.")
-        if not 1 <= ns_steps <= len(coefficients):
+        if ns_steps < 1 or ns_steps > len(coefficients):
             raise ValueError(
                 f"ns_steps must lie in [1, {len(coefficients)}]; got {ns_steps}.",
             )

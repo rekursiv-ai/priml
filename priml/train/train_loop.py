@@ -373,11 +373,12 @@ class TrainLoop:
         GC, trading a predictable pause for unpredictable ones."""
 
         mesh_dim_model_seed: str = "pp"
-        """Mesh dimension the seed does NOT vary across, so every rank in it
-        initializes identical weights."""
+        """Mesh dimension the model seed varies across, so each rank along it
+        initializes DIFFERENT weights -- the stages of a pipeline hold distinct
+        layers. Ranks off this dimension share a seed and so agree."""
 
         mesh_dim_data_seed: str = "dp"
-        """Mesh dimension the seed DOES vary across, so replicas draw
+        """Mesh dimension the data seed varies across, so replicas draw
         different data."""
 
         runtime: Makeable[RuntimeProtocol] = field(default_factory=SingleProcess.Config)
@@ -567,6 +568,10 @@ class TrainLoop:
             # Rebased once the first train step's compile finishes and advanced
             # past each mid-loop eval, so neither counts as training time.
             self._train_clock_base = self._start_time
+            # Seconds spent evaluating, summed rather than only skipped past.
+            # A budget the run reports about itself is auditable only when the
+            # excluded time is stated beside the charged time.
+            self._eval_sec = 0.0
 
             # Setup tracker. W&B runs only on rank 0; the barrier keeps other
             # ranks from racing ahead into train/eval collectives while rank 0
@@ -635,6 +640,7 @@ class TrainLoop:
             logger.info("TrainLoop startup: warm eval compile complete.")
             self._start_time = time.perf_counter()
             self._train_clock_base = self._start_time
+            self._eval_sec = 0.0
         except BaseException:
             if self._owns_runtime and not self._runtime_destroyed:
                 self.runtime.destroy()
@@ -666,6 +672,7 @@ class TrainLoop:
                         eval_time = time.perf_counter() - eval_start
                         # Eval is not training time: pause the pure-train clock.
                         self._train_clock_base += eval_time
+                        self._eval_sec += eval_time
                         self._publish_eval_metrics(
                             eval_metrics,
                             eval_time=eval_time,
@@ -780,6 +787,45 @@ class TrainLoop:
     def _train_elapsed(self) -> float:
         """Pure-train seconds: first-step compile and mid-loop evals excluded."""
         return time.perf_counter() - self._train_clock_base
+
+    def _billed_train_sec(self) -> float:
+        """Seconds the recipe's own schedule charged against its budget.
+
+        A budgeted recipe (nanochat) excludes leading steps so compile time
+        cannot decide how much training a run buys; it exposes what it DID
+        charge as ``elapsed_sec``. A recipe without that distinction charges
+        every training second, which is the pure-train clock.
+        """
+        billed = getattr(self.step, "elapsed_sec", None)
+        return self._train_elapsed() if billed is None else float(billed)
+
+    def _time_account(self, elapsed: float) -> list[str]:
+        """Decompose wall time so no clock can be moved without showing.
+
+        The four terms sum to ``elapsed`` by construction, which is the point:
+        a lever that moves training out of the charged bucket -- a longer
+        warmup exclusion, work hoisted outside the timed region -- has to put
+        those seconds in another term rather than dissolve them.
+
+        Args:
+          elapsed: Wall seconds since training began.
+
+        Returns:
+          fields: ``key=value`` strings for the RESULT line.
+
+        """
+        # ``_train_elapsed`` already excludes eval -- the clock base is advanced
+        # past each one -- so eval is subtracted here exactly once, via its own
+        # term rather than again out of the residual.
+        train = self._billed_train_sec()
+        unbilled = self._train_elapsed() - train
+        other = elapsed - self._train_elapsed() - self._eval_sec
+        return [
+            f"train_sec={train:.1f}s",
+            f"train_unbilled_sec={unbilled:.1f}s",
+            f"eval_sec={self._eval_sec:.1f}s",
+            f"other_sec={other:.1f}s",
+        ]
 
     def _should_stop_early(self) -> bool:
         """Whether training should stop before ``max_steps`` / ``max_time``.
@@ -1137,10 +1183,12 @@ class TrainLoop:
         eval_start = time.perf_counter()
         eval_metrics = self.eval()
         eval_time = time.perf_counter() - eval_start
-        # A cadence eval is not training time: pause the pure-train clock. The
-        # final eval runs after training ended, so there is nothing to pause.
-        if not is_final:
-            self._train_clock_base += eval_time
+        self._eval_sec += eval_time
+        # No eval is training time, the final one included: it runs after
+        # training ends, so advancing the base changes no schedule -- but it
+        # keeps the pure-train clock meaning what its name says, which the
+        # RESULT account subtracts against.
+        self._train_clock_base += eval_time
         scalar_metrics = self._publish_eval_metrics(
             eval_metrics,
             eval_time=eval_time,
@@ -1151,6 +1199,7 @@ class TrainLoop:
             if is_final:
                 elapsed = time.perf_counter() - self._start_time
                 parts = [f"steps={self.step.global_step}", f"time={elapsed:.1f}s"]
+                parts.extend(self._time_account(elapsed))
                 for k, v in sorted(scalar_metrics.items()):
                     parts.append(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}")
                 logger.info("RESULT: %s", " | ".join(parts))

@@ -283,7 +283,7 @@ def main() -> int:
     else:
         print(f"\neval extent: {our_batches} batches on both sides")
 
-    verdict = "BIT-IDENTICAL" if not failures else f"{failures} DIFFERENCE(S)"
+    verdict = f"{failures} DIFFERENCE(S)" if failures else "BIT-IDENTICAL"
     print(f"\n{args.batches} batches per split: {verdict}")
     return 1 if failures else 0
 

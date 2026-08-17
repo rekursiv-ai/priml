@@ -258,7 +258,7 @@ class BatchRenorm(nn.Module):
             raise ValueError("max_ratio must be at least one")
         if config.max_drift < 0.0:
             raise ValueError("max_drift must be non-negative")
-        if not 0.0 <= config.momentum < 1.0:
+        if config.momentum < 0.0 or config.momentum >= 1.0:
             raise ValueError("momentum must be in [0, 1)")
 
         self.config = config

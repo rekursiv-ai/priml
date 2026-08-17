@@ -36,8 +36,8 @@ class Embedding(nn.Embedding):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        shard: ShardStyle = None
-        """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
+        shard: ShardStyle | None = None
+        """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
         depth: int = -1
         """Block depth index for depth-scaled init (-1 = no scaling).

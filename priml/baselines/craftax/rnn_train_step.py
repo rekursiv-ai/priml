@@ -218,9 +218,9 @@ class CraftaxRNNTrainStep(TrainStep):
             raise ValueError("PPO must have at least one minibatch")
         if config.total_train_steps <= 0:
             raise ValueError("total_train_steps must be positive")
-        if not 0.0 <= config.discount <= 1.0:
+        if config.discount < 0.0 or config.discount > 1.0:
             raise ValueError("discount must be between zero and one")
-        if not 0.0 <= config.trace_decay <= 1.0:
+        if config.trace_decay < 0.0 or config.trace_decay > 1.0:
             raise ValueError("trace_decay must be between zero and one")
         if config.clip_epsilon <= 0.0:
             raise ValueError("clip_epsilon must be positive")

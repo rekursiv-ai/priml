@@ -112,6 +112,15 @@ def test_relu_squared_reset_reinitializes_both_projections() -> None:
     assert not torch.isnan(ffn.down_proj.weight).any()
 
 
+def test_a_norm_is_refused_against_an_ungated_ffn() -> None:
+    """The gate norm has no gate to sit inside when ``gate=False``.
+
+    Dropping it silently builds a model the caller did not ask for.
+    """
+    with pytest.raises(ValueError, match="gate"):
+        SwiGLU.Config(channels_in=8, gate=False, norm=RMSNorm.Config()).make()
+
+
 def test_a_norm_is_refused_against_a_non_silu_activation() -> None:
     """The gate-norm identity ``sigmoid(g) * norm(g * x) == silu(g) * x`` holds
     for silu alone, so pairing it with another activation is a different model

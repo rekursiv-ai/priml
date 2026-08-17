@@ -1,9 +1,9 @@
 """Activations torch does not ship, as plain ``Tensor -> Tensor`` functions.
 
 Only what is missing: ``silu``, ``gelu``, ``relu`` and friends live in
-``torch.nn.functional`` and are passed directly into an
-:data:`~priml.model.custom_types.ActivationFn` slot. A function here earns
-its place by being absent there.
+``torch.nn.functional`` and are passed directly into a
+:data:`~priml.math.custom_types.TensorFn` slot. A function here earns its
+place by being absent there.
 """
 
 from __future__ import annotations

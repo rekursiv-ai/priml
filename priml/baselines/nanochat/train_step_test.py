@@ -167,13 +167,25 @@ def test_the_budget_clock_excludes_warmup_steps() -> None:
     assert step.elapsed_sec > 0.0
 
 
+def test_the_default_warmup_matches_the_reference() -> None:
+    """The reference leaves ELEVEN of its own steps unbilled.
+
+    Its ``step`` starts at 0 (``train.py:539``) and increments at the bottom
+    of the loop (``:598``), so the ``if step > 10`` at ``:576`` is False for
+    updates one through eleven. Ours tests a counter already incremented, so
+    the same eleven needs the field to say eleven -- at ten we would charge
+    one update the comparison gives away, and run it a step short.
+    """
+    assert NanoChatTrainStep.Config().budget_warmup_steps == 11
+
+
 def test_the_warmup_is_counted_in_steps_not_passes() -> None:
     """Otherwise accumulation silently shortens it by its own factor.
 
-    The reference excludes ten of its own steps (``train.py:576``). Counting
-    passes here would exclude ``budget_warmup_steps / accumulate_passes`` --
-    1.25 steps at the shipped geometry against the reference's ten -- so the
-    budget would pay for the compilation the exclusion exists to skip.
+    The reference excludes eleven of its own steps (``train.py:576``, whose
+    ``step`` increments below it). Counting passes here would exclude
+    ``budget_warmup_steps / accumulate_passes`` -- 1.375 steps at the shipped
+    geometry -- so the budget would pay for the compilation it skips.
     """
     step = _step(tokens_per_optimizer_step=4 * SEQ, budget_warmup_steps=1)
     assert step.accumulate_passes == 2

@@ -331,7 +331,7 @@ class EnvState:
         """Restore tensors saved by :meth:`state_dict`, in place."""
         for name, value in state_dict.items():
             head, _, tail = name.partition(".")
-            target = self if not tail else getattr(self, head)
+            target = getattr(self, head) if tail else self
             setattr(target, tail or head, value)
 
 

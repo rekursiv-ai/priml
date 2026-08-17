@@ -546,6 +546,71 @@ def test_ema_karras_decay_grows_with_step() -> None:
     torch.testing.assert_close(ema.shadow_params["weight"], ref, rtol=0, atol=0)
 
 
+def test_ema_karras_resume_continues_the_ramp() -> None:
+    """A resumed karras run must average as if never interrupted.
+
+    The schedule reads ``local_step``; omitting it from the checkpoint
+    restarts the ramp and diverges the shadow.
+    """
+
+    def advance(ema: EMA, model: nn.Module, values: list[float]) -> None:
+        for value in values:
+            with torch.no_grad():
+                model.weight.fill_(value)
+            ema(model)
+
+    model = nn.Linear(1, 1, bias=False)
+    uninterrupted = EMA.Config(
+        decay=0.99,
+        shadow_kind="param_dict",
+        decay_schedule=karras_decay,
+    ).make()
+    advance(uninterrupted, model, [0.0, 1.0, 2.0, 3.0])
+
+    source = EMA.Config(
+        decay=0.99,
+        shadow_kind="param_dict",
+        decay_schedule=karras_decay,
+    ).make()
+    advance(source, model, [0.0, 1.0, 2.0])
+    resumed = EMA.Config(
+        decay=0.99,
+        shadow_kind="param_dict",
+        decay_schedule=karras_decay,
+    ).make()
+    resumed.load_state_dict(source.state_dict())
+    advance(resumed, model, [3.0])
+
+    torch.testing.assert_close(
+        resumed.shadow_params["weight"],
+        uninterrupted.shadow_params["weight"],
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_ema_rejects_a_schedule_outside_the_unit_interval() -> None:
+    """A decay above 1 extrapolates the shadow instead of averaging it.
+
+    ``decay`` is validated to ``[0, 1]``, but the schedule's result is what
+    the lerp uses.
+    """
+
+    def overshoot(decay: float, step: int) -> float:
+        del decay, step
+        return 2.0
+
+    model = nn.Linear(1, 1, bias=False)
+    ema = EMA.Config(
+        decay=0.9,
+        shadow_kind="param_dict",
+        decay_schedule=overshoot,
+    ).make()
+
+    with pytest.raises(ValueError, match="decay"):
+        ema(model)
+
+
 def test_ema_karras_schedule_helper_values() -> None:
     """The schedule helper returns hand-computed effective decay values."""
     ema = EMA.Config(decay=0.999, decay_schedule=karras_decay).make()

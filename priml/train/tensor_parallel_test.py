@@ -10,11 +10,13 @@ from typing import TYPE_CHECKING, cast, override
 
 from torch import nn
 
+import pytest
 import torch
 
+from priml.model.custom_types import ShardStyle
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
-from priml.train.tensor_parallel import apply_tensor_parallel
+from priml.train.tensor_parallel import _shard_style, apply_tensor_parallel
 
 
 if TYPE_CHECKING:
@@ -58,6 +60,19 @@ def test_shard_style_stored_on_runtime_module() -> None:
     assert down.shard == "rowwise"
     assert plain.shard is None
     assert embed.shard == "vocab"
+
+
+def test_unknown_shard_style_is_refused() -> None:
+    """A style outside the declared set raises instead of silently replicating.
+
+    The annotation rules this out statically, so the value is cast in: a config
+    from JSON or a ``--override`` is unchecked text, and the runtime guard is
+    what catches it.
+    """
+    config = Linear.Config(channels_in=8, channels_out=8)
+    config.shard = cast("ShardStyle", "colwize")
+    with pytest.raises(ValueError, match="Unknown shard style"):
+        _shard_style(config.make())
 
 
 def test_tp1_applier_is_structural_noop() -> None:
