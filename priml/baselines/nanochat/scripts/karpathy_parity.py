@@ -314,6 +314,26 @@ def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
     return mapping
 
 
+def _progress_at(index: int, *, warmup: int, budget_steps: int) -> float:
+    """Budget progress a real run sits at on its ``index``-th update.
+
+    The first ``warmup`` updates are unbilled on both sides, so progress is
+    zero across them; each update after charges one step's share of a run
+    that lasts ``budget_steps`` billed updates.
+
+    Args:
+      index: One-based update number.
+      warmup: Updates excluded from the budget clock.
+      budget_steps: Billed updates the whole run is expected to last.
+
+    Returns:
+      progress: Fraction of the budget spent, in ``[0, 1]``.
+
+    """
+    billed = max(0, index - 1 - warmup)
+    return min(billed / budget_steps, 1.0)
+
+
 def compare_init(
     theirs: nn.Module,
     ours: nn.Module,
@@ -607,11 +627,18 @@ def main() -> int:
         # ``_apply_update``; stepping either optimizer bare would compare a run
         # whose momentum never ramps against one whose does.
         #
-        # Progress is written rather than measured: theirs and ours both read
-        # it off a wall clock, so a comparison that let it run would freeze how
-        # fast this machine is. Zero keeps both at the schedules' start, which
-        # is where five steps of a budgeted run actually sit.
-        progress = 0.0
+        # Progress is SUPPLIED, identically to both sides, rather than measured
+        # on either: both read it off a wall clock, so letting it run would
+        # freeze how fast this machine is and compare two different schedules.
+        # It follows the fencepost a real run has -- the first
+        # ``budget_warmup_steps`` updates charge nothing (train.py:576, ours at
+        # train_step.py:506), so progress is pinned at zero across them and
+        # advances one step's share afterwards. That is what carries the LR
+        # curve, the weight-decay ramp, and the momentum ramp into the
+        # comparison instead of sampling one point of each.
+        progress = _progress_at(
+            index, warmup=args.warmup, budget_steps=args.budget_steps
+        )
         multiplier = upstream.get_lr_multiplier(progress)
         for group in their_optimizer.param_groups:
             group["lr"] = group["initial_lr"] * multiplier
@@ -754,7 +781,22 @@ def _parse_args() -> argparse.Namespace:
         default=Path("/opt/scratch/karpathy-autoresearch"),
         help="Where the reference is cloned.",
     )
-    parser.add_argument("--steps", type=int, default=5, help="Optimizer steps.")
+    parser.add_argument("--steps", type=int, default=20, help="Optimizer steps.")
+    # The unbilled prefix both sides share (train.py:576; train_step.py:506).
+    # Progress is pinned at zero across it, so a default of 20 steps walks the
+    # eleven warmup updates and nine billed ones after them.
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=11,
+        help="Updates excluded from the budget clock on both sides.",
+    )
+    parser.add_argument(
+        "--budget-steps",
+        type=int,
+        default=191,
+        help="Billed updates a full run lasts; sets one step's share.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Batch seed.")
     parser.add_argument("--device", default="cuda", help="Device to compare on.")
     # The reference sizes its model from its own DEPTH, so only what it reads
