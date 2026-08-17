@@ -52,13 +52,13 @@ def test_swiglu_declares_shard_via_transformer_block() -> None:
     block = TransformerBlock.Config(channels_in=32).make()
     assert isinstance(block.ffn, SwiGLU)
     assert block.ffn.shard == "colwise"
-    assert block.ffn.up_proj.shard == "none"  # the SwiGLU style shards children
-    assert block.ffn.down_proj.shard == "none"
+    assert block.ffn.up_proj.shard is None  # the SwiGLU style shards children
+    assert block.ffn.down_proj.shard is None
 
 
 def test_standalone_swiglu_defaults_to_no_shard() -> None:
     ffn = SwiGLU.Config(channels_in=32).make()
-    assert ffn.shard == "none"
+    assert ffn.shard is None
 
 
 def test_moe_experts_inherit_swiglu_shard() -> None:

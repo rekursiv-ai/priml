@@ -55,6 +55,7 @@ from priml.optimizers import (
     complement,
     excluding,
 )
+from priml.optimizers.muon import adjust_lr_conv_heuristic
 from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop
 
@@ -189,7 +190,7 @@ def exp002() -> Cifar10TrainLoop:
     muon.nesterov = True
     muon.ns_steps = 3
     muon.weight_decay = 0.0125
-    muon.adjust_lr_fn = "conv_heuristic"
+    muon.adjust_lr_fn = adjust_lr_conv_heuristic
 
     split.optimizers = [sgd, muon]
 

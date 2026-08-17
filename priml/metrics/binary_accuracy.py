@@ -23,6 +23,7 @@ class BinaryAccuracy:
         """Binary accuracy metric configuration."""
 
         threshold: float = 0.5
+        """Score at or above which a prediction counts as the positive class."""
 
     def __init__(self, config: Config) -> None:
         """Initialize metric.

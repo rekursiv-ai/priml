@@ -22,6 +22,7 @@ class TopK:
         """Top-K metric configuration."""
 
         k_values: list[int] = field(default_factory=lambda: [1, 5])
+        """Each k reported as its own ``top{k}`` accuracy."""
 
     def __init__(self, config: Config) -> None:
         """Initialize metric.

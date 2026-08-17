@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, override
+from typing import TYPE_CHECKING, Any, override
 
 import math
 
 from configgle import Fig
-from torch import Tensor, nn
+from torch import Tensor
 from torch.optim import Optimizer
 
 import torch
@@ -19,6 +19,53 @@ from priml.math.numeric import matrix_signum_via_newtonschulz
 
 if TYPE_CHECKING:
     from torch.nn import Parameter
+
+
+type AdjustLrFn = Callable[[float, Tensor, int], float | Tensor]
+"""Rescales the step for one parameter's shape.
+
+Takes ``(lr, param, ensemble_dims)`` and returns the rate to apply. A float for
+a shape-only rule; a 0-dim ``Tensor`` for a data-dependent one, which keeps the
+value on device rather than forcing a GPU->CPU sync mid-step.
+"""
+
+
+def _shape(param: Tensor, ensemble_dims: int) -> tuple[int, int]:
+    """Return ``(fan_out, fan_in)`` with the ensemble axes folded away."""
+    return param.shape[ensemble_dims], math.prod(param.shape[ensemble_dims + 1 :])
+
+
+def adjust_lr_original(lr: float, param: Tensor, ensemble_dims: int = 0) -> float:
+    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``."""
+    c_out, c_in = _shape(param, ensemble_dims)
+    return lr * math.sqrt(max(1, c_out / c_in))
+
+
+def adjust_lr_match_rms_adamw(
+    lr: float,
+    param: Tensor,
+    ensemble_dims: int = 0,
+) -> float:
+    """Scale so the update RMS matches what AdamW would have produced.
+
+    Lets a recipe reuse an AdamW-tuned learning rate unchanged.
+    """
+    c_out, c_in = _shape(param, ensemble_dims)
+    return lr * 0.2 * math.sqrt(max(c_out, c_in))
+
+
+def adjust_lr_conv_heuristic(
+    lr: float,
+    param: Tensor,
+    ensemble_dims: int = 0,
+) -> Tensor:
+    """Scale by the parameter's own norm; returns a device-resident scalar.
+
+    Data-dependent, so the result stays a 0-dim ``Tensor``: calling ``.item()``
+    here would synchronize the device on every parameter of every step.
+    """
+    c_out, _ = _shape(param, ensemble_dims)
+    return lr * param.data.norm() / math.sqrt(c_out)
 
 
 class Muon(Optimizer):
@@ -87,10 +134,8 @@ class Muon(Optimizer):
         ns_steps: int = 5
         """Newton-Schulz iterations per update."""
 
-        adjust_lr_fn: Literal["original", "match_rms_adamw", "conv_heuristic"] = (
-            "original"
-        )
-        """How the step is rescaled for a parameter's shape."""
+        adjust_lr_fn: AdjustLrFn = adjust_lr_original
+        """Rescales the step for a parameter's shape; see :data:`AdjustLrFn`."""
 
         ensemble_dims: int = 0
         """Leading dimensions treated as an ensemble, not as matrix axes."""
@@ -127,11 +172,7 @@ class Muon(Optimizer):
         ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
         eps: float = 1e-7,
         ns_steps: int = 5,
-        adjust_lr_fn: Literal[
-            "original",
-            "match_rms_adamw",
-            "conv_heuristic",
-        ] = "original",
+        adjust_lr_fn: AdjustLrFn = adjust_lr_original,
         ensemble_dims: int = 0,
     ):
         if lr < 0.0:
@@ -142,6 +183,12 @@ class Muon(Optimizer):
             raise ValueError(f"Invalid weight_decay: {weight_decay}")
         if nesterov and momentum <= 0:
             raise ValueError("Nesterov momentum requires momentum > 0")
+        # Held on the optimizer, NOT in ``defaults``: every default lands in
+        # ``param_groups``, which ``state_dict`` serializes, and a checkpoint
+        # written under ``weights_only=True`` cannot carry a function. The rule
+        # is a property of the run's code, not of its state, so it is rebuilt
+        # from config on resume rather than restored.
+        self.adjust_lr_fn = adjust_lr_fn
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -150,7 +197,6 @@ class Muon(Optimizer):
             "ns_coefficients": ns_coefficients,
             "eps": eps,
             "ns_steps": ns_steps,
-            "adjust_lr_fn": adjust_lr_fn,
             "ensemble_dims": ensemble_dims,
         }
         super().__init__(params, defaults)
@@ -167,7 +213,6 @@ class Muon(Optimizer):
             ns_coefficients = group["ns_coefficients"]
             eps = group["eps"]
             ns_steps = group["ns_steps"]
-            adjust_lr_fn = group["adjust_lr_fn"]
             ensemble_dims = group["ensemble_dims"]
 
             for p in group["params"]:
@@ -201,31 +246,8 @@ class Muon(Optimizer):
                 if weight_decay is not None:
                     p.data.mul_(1 - lr * weight_decay)
 
-                adjusted_lr = _adjust_lr(lr, p, adjust_lr_fn, ensemble_dims)
+                adjusted_lr = self.adjust_lr_fn(lr, p, ensemble_dims)
                 if isinstance(adjusted_lr, Tensor):
                     p.data.add_(msgn_g * (-adjusted_lr))
                 else:
                     p.data.add_(msgn_g, alpha=-adjusted_lr)
-
-
-def _adjust_lr(
-    lr: float,
-    param: nn.Parameter,
-    adjust_lr_fn: str,
-    ensemble_dims: int = 0,
-) -> float | Tensor:
-    """Per-parameter learning rate adjustment for Muon.
-
-    Returns float for static adjustments, Tensor for data-dependent
-    ones (conv_heuristic) to avoid GPU→CPU sync.
-    """
-    c_out = param.shape[ensemble_dims]
-    c_in = math.prod(param.shape[ensemble_dims + 1 :])
-    if adjust_lr_fn == "original":
-        return lr * math.sqrt(max(1, c_out / c_in))
-    if adjust_lr_fn == "match_rms_adamw":
-        return lr * 0.2 * math.sqrt(max(c_out, c_in))
-    if adjust_lr_fn == "conv_heuristic":
-        # Keep on GPU: norm() returns 0-dim tensor, avoid .item() sync.
-        return lr * param.data.norm() / math.sqrt(c_out)
-    raise ValueError(f"Unknown adjust_lr_fn: {adjust_lr_fn}")

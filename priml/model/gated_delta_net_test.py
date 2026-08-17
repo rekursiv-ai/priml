@@ -12,28 +12,28 @@ from priml.model.gated_delta_net import (
 
 
 def test_gated_delta_net_rejects_non_multiple_v_heads():
-    """``num_v_heads`` must be an integer multiple of ``num_k_heads``.
+    """``heads_v`` must be an integer multiple of ``heads_k``.
 
     Regression for MODEL-004: the GQA replication
-    ``num_v_heads // num_k_heads`` silently truncated for non-multiples.
+    ``heads_v // heads_k`` silently truncated for non-multiples.
     """
     with pytest.raises(ValueError, match="multiple"):
         GatedDeltaNet.Config(
             channels_in=64,
-            num_k_heads=4,
-            num_v_heads=6,
-            head_k_dim=16,
-            head_v_dim=16,
+            heads_k=4,
+            heads_v=6,
+            channels_k_head=16,
+            channels_v_head=16,
         ).make()
 
 
 def test_gated_delta_net_forward():
     m = GatedDeltaNet.Config(
         channels_in=64,
-        num_k_heads=2,
-        num_v_heads=4,
-        head_k_dim=16,
-        head_v_dim=16,
+        heads_k=2,
+        heads_v=4,
+        channels_k_head=16,
+        channels_v_head=16,
     ).make()
     x = torch.randn(2, 8, 64)
     out = m(x)
@@ -43,10 +43,10 @@ def test_gated_delta_net_forward():
 def test_gated_delta_net_single_token():
     m = GatedDeltaNet.Config(
         channels_in=32,
-        num_k_heads=2,
-        num_v_heads=2,
-        head_k_dim=8,
-        head_v_dim=8,
+        heads_k=2,
+        heads_v=2,
+        channels_k_head=8,
+        channels_v_head=8,
     ).make()
     x = torch.randn(1, 1, 32)
     out = m(x)
@@ -95,10 +95,10 @@ def test_torch_chunk_fallback_with_final_state():
 def test_gated_delta_net_arbitrary_leading_dims():
     m = GatedDeltaNet.Config(
         channels_in=64,
-        num_k_heads=2,
-        num_v_heads=4,
-        head_k_dim=16,
-        head_v_dim=16,
+        heads_k=2,
+        heads_v=4,
+        channels_k_head=16,
+        channels_v_head=16,
     ).make()
     x = torch.randn(2, 3, 8, 64)
     out = m(x)

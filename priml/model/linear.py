@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Self, override
+from typing import TYPE_CHECKING, Any, Self, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -13,6 +13,7 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 import torch
 
+from priml.model.custom_types import ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
 
@@ -50,7 +51,7 @@ class Linear(nn.Linear):
         init_bias: InitFn = nn.init.zeros_
         """Bias initialization function."""
 
-        shard: Literal["none", "colwise", "rowwise", "vocab"] = "none"
+        shard: ShardStyle = None
         """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
 
         @override
@@ -114,7 +115,7 @@ class EnsembleLinear(nn.Module):
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function (applied per ensemble member)."""
 
-        shard: Literal["none", "colwise", "rowwise", "vocab"] = "none"
+        shard: ShardStyle = None
         """Tensor-parallel shard style over the mesh tp dim; none = replicated."""
 
     def __init__(self, config: Config) -> None:

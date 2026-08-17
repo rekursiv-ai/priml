@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import torch
 
+from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
 
 
@@ -23,10 +24,21 @@ class DummyDataset:
         """Dummy dataset configuration."""
 
         num_samples: int = 100
+        """Synthetic examples generated once at construction."""
+
         batch_size: int = 32
+        """Examples per batch from either loader."""
+
         input_shape: tuple[int, ...] = (3, 224, 224)
+        """Shape of one example, excluding the batch axis."""
+
         num_classes: int = 1000
-        device: str = "cuda"
+        """Label range; labels are drawn uniformly below this."""
+
+        device: torch.device | str | None = "auto"
+        """Device batches are delivered on. ``"auto"`` picks the best available,
+        so the default dataset is usable on a CPU-only box."""
+
         seed: int = 0
         """Seed for the random data/labels so runs are reproducible."""
         num_workers: int = 0
@@ -96,7 +108,7 @@ class DummyDataset:
 
         """
         data_list, label_list = zip(*batch, strict=True)
-        device = torch.device(self.config.device)
+        device = get_device(self.config.device)
         return {
             "media": torch.stack(data_list).to(device),
             "label": torch.stack(label_list).to(device),

@@ -40,11 +40,10 @@ from priml.model.norm import (
 )
 from priml.model.patchify import Patchify, Unpatchify
 from priml.model.qwen3 import Qwen3
-from priml.model.relu_squared import ReluSquared
 from priml.model.rope import RoPE, RoPEMixed
 from priml.model.sequential import Sequential
 from priml.model.special import Identity, Skip
-from priml.model.swiglu import SwiGLU
+from priml.model.swiglu import SwiGLU, SwiGLUReluSquared
 from priml.model.transformer import TransformerBlock
 from priml.model.value_gated_attention import ValueGatedAttention
 
@@ -76,7 +75,6 @@ __all__ = [
     "Patchify",
     "Qwen3",
     "RMSNorm",
-    "ReluSquared",
     "RoPE",
     "RoPEMixed",
     "Router",
@@ -86,6 +84,7 @@ __all__ = [
     "Sequential",
     "Skip",
     "SwiGLU",
+    "SwiGLUReluSquared",
     "TransformerBlock",
     "Unpatchify",
     "ValueGatedAttention",

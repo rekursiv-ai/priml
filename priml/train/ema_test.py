@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 
 from priml.distributed.testing import WorkerPool
-from priml.train.ema import EMA, NoEMA
+from priml.train.ema import EMA, NoEMA, karras_decay
 
 
 @pytest.fixture
@@ -519,7 +519,7 @@ def test_ema_karras_decay_grows_with_step() -> None:
     ema = EMA.Config(
         decay=0.99,
         shadow_kind="param_dict",
-        decay_schedule="karras",
+        decay_schedule=karras_decay,
     ).make()
 
     # Reference mirrors the implementation op sequence (mul_ then add_) so
@@ -548,7 +548,7 @@ def test_ema_karras_decay_grows_with_step() -> None:
 
 def test_ema_karras_schedule_helper_values() -> None:
     """The schedule helper returns hand-computed effective decay values."""
-    ema = EMA.Config(decay=0.999, decay_schedule="karras").make()
+    ema = EMA.Config(decay=0.999, decay_schedule=karras_decay).make()
     assert ema.effective_decay(0) == pytest.approx(1 / 10)
     assert ema.effective_decay(5) == pytest.approx(6 / 15)
     assert ema.effective_decay(90) == pytest.approx(91 / 100)

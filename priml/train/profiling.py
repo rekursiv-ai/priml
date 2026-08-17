@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
-from dataclasses import field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Self, cast, override
 
@@ -27,6 +27,25 @@ torch_profiler = lazy_import("torch.profiler")
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProfilerSchedule:
+    """When the torch profiler is warm, recording, and done.
+
+    One node rather than three fields, because ``torch.profiler.schedule``
+    takes all three together: a caller setting a window sets every value or
+    none, and ``wait=None`` is what says "no schedule" for the whole group.
+    """
+
+    wait: int | None = None
+    """Steps to skip before warmup; ``None`` disables the schedule."""
+
+    warmup: int = 0
+    """Steps traced but discarded, letting caches settle before recording."""
+
+    active: int = 1
+    """Steps actually recorded, once per run."""
+
+
 class TorchProfiling:
     """Torch profiler for CPU/CUDA profiling and memory profiling.
 
@@ -42,10 +61,13 @@ class TorchProfiling:
         """TorchProfiling configuration."""
 
         torch_profile: bool = True
+        """Run the torch profiler over the ``torch_profile_*`` step window."""
 
         torch_profile_start: int = 5
+        """First step the torch profiler records."""
 
         torch_profile_end: int = 10
+        """Step at which the torch profiler stops and exports."""
 
         profile_cuda: bool = True
         """Include CUDA (CUPTI) activities in the torch profiler.
@@ -67,20 +89,20 @@ class TorchProfiling:
         export_trace: bool = True
         """Export a Chrome trace after the profiler stops."""
 
-        schedule_wait: int | None = None
-        """Optional torch.profiler.schedule wait steps."""
-
-        schedule_warmup: int = 0
-        """Optional torch.profiler.schedule warmup steps."""
-
-        schedule_active: int = 1
-        """Optional torch.profiler.schedule active steps."""
+        schedule: ProfilerSchedule = field(default_factory=ProfilerSchedule)
+        """Warmup/record windowing; see :class:`ProfilerSchedule`."""
 
         memory_profile: bool = False
+        """Record a CUDA memory history over the ``memory_profile_*`` window.
+
+        Requires CUDA; construction raises without it rather than silently
+        producing no snapshot."""
 
         memory_profile_start: int = 5
+        """First step the CUDA memory history records."""
 
         memory_profile_end: int = 10
+        """Step at which the memory snapshot is dumped and recording stops."""
 
         base_dir: Path | str | None = None
         """Owner directory supplied during parent finalization."""
@@ -113,9 +135,7 @@ class TorchProfiling:
         self.record_shapes = config.record_shapes
         self.profile_memory = config.profile_memory
         self.export_trace = config.export_trace
-        self.schedule_wait = config.schedule_wait
-        self.schedule_warmup = config.schedule_warmup
-        self.schedule_active = config.schedule_active
+        self.schedule = config.schedule
         self.memory_profile = config.memory_profile
         self.memory_profile_start = config.memory_profile_start
         self.memory_profile_end = config.memory_profile_end
@@ -131,11 +151,11 @@ class TorchProfiling:
             if self.profile_cuda:
                 activities.append(torch_profiler.ProfilerActivity.CUDA)
             schedule = None
-            if self.schedule_wait is not None:
+            if self.schedule.wait is not None:
                 schedule = torch_profiler.schedule(
-                    wait=self.schedule_wait,
-                    warmup=self.schedule_warmup,
-                    active=self.schedule_active,
+                    wait=self.schedule.wait,
+                    warmup=self.schedule.warmup,
+                    active=self.schedule.active,
                     repeat=1,
                 )
             self.profiler = _torch_profile()(

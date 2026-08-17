@@ -322,10 +322,10 @@ def test_materialize_meta_initializes_gated_delta_net_raw_params() -> None:
         gdn = GatedDeltaNet(
             GatedDeltaNet.Config(
                 channels_in=32,
-                num_k_heads=2,
-                num_v_heads=4,
-                head_k_dim=8,
-                head_v_dim=8,
+                heads_k=2,
+                heads_v=4,
+                channels_k_head=8,
+                channels_v_head=8,
             ).finalize()
         )
     _materialize_meta(gdn, torch.device("cpu"))

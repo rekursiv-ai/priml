@@ -57,10 +57,10 @@ _BUILDERS: dict[str, Callable[[], nn.Module]] = {
     ).make(),
     "gated_delta_net": lambda: GatedDeltaNet.Config(
         channels_in=16,
-        num_k_heads=2,
-        num_v_heads=2,
-        head_k_dim=8,
-        head_v_dim=8,
+        heads_k=2,
+        heads_v=2,
+        channels_k_head=8,
+        channels_v_head=8,
     ).make(),
     "moe": lambda: MoE.Config(
         channels_in=16,

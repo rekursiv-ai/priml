@@ -42,10 +42,11 @@ verified against a naive re-expand reference in the test suite.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY
+from dataclasses import KW_ONLY, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Self, override
 
-from configgle import Fig
+from configgle import Fig, Makeable
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -58,6 +59,12 @@ from torch.nn import functional as f
 
 import torch
 
+from priml.model.custom_types import (
+    ChannelsIn,
+    ChannelsOut,
+    RotaryFactors,
+    TensorModule,
+)
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.kvcache import KVCache
 from priml.model.linear import Linear
@@ -109,11 +116,55 @@ class MultiHeadLatentAttention(nn.Module):
         softmax_scale: float | None = None
         """Override the SDPA scale. Default ``1/sqrt(qk_nope + qk_rope)``."""
 
-        rope: RoPE.Config | None = None
-        """RoPE config applied to ``qk_rope`` slice. ``None`` ⇒ no RoPE."""
+        rope: Makeable[RotaryFactors] | None = None
+        """Rotary embedding applied to the ``qk_rope`` slice. ``None`` ⇒ none.
 
-        rms_norm_eps: float = 1e-6
-        """Epsilon for the LoRA RMSNorm layers."""
+        Typed by what MLA CALLS -- positions in, ``(cos, sin)`` out -- rather
+        than by ``RoPE``, so a learned or NTK-scaled variant fills the slot."""
+
+        norm_q_lora: Makeable[nn.Module] = field(
+            default_factory=partial(RMSNorm.Config, elementwise_affine=True),
+        )
+        """Normalization between the Q LoRA's two projections.
+
+        Built only when ``q_lora_rank`` is set; its width is the rank."""
+
+        proj_q: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        """Q projection: model width in, ``heads * channels_qk_head`` out.
+
+        Built only when ``q_lora_rank`` is None; the LoRA path uses
+        ``proj_q_a``/``proj_q_b`` instead. Sharded head-parallel under tensor
+        parallelism (see :meth:`tensor_parallel_plan`)."""
+
+        proj_q_a: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        """Q LoRA down-projection to ``q_lora_rank``. Replicated: the rank is
+        head-shared, so sharding it over the head dim is a correctness bug."""
+
+        proj_q_b: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        """Q LoRA up-projection to ``heads * channels_qk_head``, head-major.
+        Sharded head-parallel, like ``proj_q``."""
+
+        proj_kv_a: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        """KV down-projection to ``kv_lora_rank + channels_qk_rope_head``.
+        Replicated -- this is the latent the cache holds."""
+
+        proj_kv_b: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        """KV latent expansion. Replicated even under tensor parallelism: the
+        absorb math slices its weight per head in Python, so each rank holds the
+        whole thing and expands only its own head range."""
+
+        proj_out: Makeable[TensorModule] = field(default_factory=Linear.Config)
+        """Output projection back to model width; rowwise-sharded.
+
+        Typed by its CALL shape, unlike the others: this is the one projection
+        whose result is returned directly, so a bare ``nn.Module`` (whose
+        ``__call__`` is untyped) would make the forward's return ``Any``."""
+
+        norm_kv_lora: Makeable[nn.Module] = field(
+            default_factory=partial(RMSNorm.Config, elementwise_affine=True),
+        )
+        """Normalization on the compressed KV latent; its width is
+        ``kv_lora_rank``."""
 
         init_weight: InitFn = kaiming_uniform
         """Weight init for linear projections."""
@@ -121,8 +172,8 @@ class MultiHeadLatentAttention(nn.Module):
         depth: int = -1
         """Block depth for depth-scaled init (-1 = no scaling)."""
 
-        shard: Literal["none", "colwise"] = "none"
-        """Tensor-parallel shard style over the mesh tp dim; none = replicated.
+        shard: Literal["colwise"] | None = None
+        """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates.
 
         ``"colwise"`` selects the head-parallel custom style (see
         :meth:`MultiHeadLatentAttention.tensor_parallel_style`): the q-path and
@@ -150,20 +201,68 @@ class MultiHeadLatentAttention(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in < 1:
-                raise ValueError(
-                    f"channels_in must be > 0, got {self.channels_in}.",
-                )
-            if self.heads < 1:
-                raise ValueError(f"heads must be > 0, got {self.heads}.")
-            if self.kv_lora_rank < 1:
-                raise ValueError(
-                    f"kv_lora_rank must be > 0, got {self.kv_lora_rank}.",
-                )
+            if (
+                self.q_lora_rank is not None
+                and isinstance(self.norm_q_lora, ChannelsIn)
+                and self.norm_q_lora.channels_in == -1
+            ):
+                self.norm_q_lora.channels_in = self.q_lora_rank
+            if (
+                isinstance(self.norm_kv_lora, ChannelsIn)
+                and self.norm_kv_lora.channels_in == -1
+            ):
+                self.norm_kv_lora.channels_in = self.kv_lora_rank
+            self._size_projections()
             return super().finalize()
+
+        def _size_projections(self) -> None:
+            """Fill each projection slot's widths from the shape fields.
+
+            Every width here is DERIVED -- a head count times a per-head width,
+            or a LoRA rank -- so a caller states the shape once and swaps the
+            projection class without restating any of it. A slot that already
+            carries a width (a caller sized it deliberately) is left alone.
+            """
+            qk_out = self.heads * self.channels_qk_head
+            # ``object`` because the slots differ in what they BUILD (a plain
+            # module, or one whose call shape is named); this loop only sets
+            # widths, which it gates on a Protocol either way.
+            widths: list[tuple[object, int, int]] = [
+                (
+                    self.proj_kv_a,
+                    self.channels_in,
+                    self.kv_lora_rank + self.channels_qk_rope_head,
+                ),
+                (
+                    self.proj_kv_b,
+                    self.kv_lora_rank,
+                    self.heads * (self.channels_qk_nope_head + self.channels_v_head),
+                ),
+                (self.proj_out, self.heads * self.channels_v_head, self.channels_in),
+            ]
+            if self.q_lora_rank is None:
+                widths.append((self.proj_q, self.channels_in, qk_out))
+            else:
+                widths.append((self.proj_q_a, self.channels_in, self.q_lora_rank))
+                widths.append((self.proj_q_b, self.q_lora_rank, qk_out))
+            for slot, c_in, c_out in widths:
+                if isinstance(slot, ChannelsIn) and slot.channels_in == -1:
+                    slot.channels_in = c_in
+                if isinstance(slot, ChannelsOut) and slot.channels_out == -1:
+                    slot.channels_out = c_out
+                if isinstance(slot, Linear.Config):
+                    slot.bias = self.bias
+                    slot.depth = self.depth
+                    slot.init_weight = self.init_weight
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.channels_in < 1:
+            raise ValueError(f"channels_in must be > 0, got {config.channels_in}.")
+        if config.heads < 1:
+            raise ValueError(f"heads must be > 0, got {config.heads}.")
+        if config.kv_lora_rank < 1:
+            raise ValueError(f"kv_lora_rank must be > 0, got {config.kv_lora_rank}.")
         self.heads = config.heads
         self.channels_qk_nope_head = config.channels_qk_nope_head
         self.channels_qk_rope_head = config.channels_qk_rope_head
@@ -179,8 +278,6 @@ class MultiHeadLatentAttention(nn.Module):
         self.softmax_scale = config.softmax_scale or self.channels_qk_head**-0.5
         self.shard = config.shard
 
-        c = config.channels_in
-
         # Tensor parallelism is head-parallel: the custom ``ParallelStyle``
         # (see ``tensor_parallel_style``) shards the q-path and ``o_proj`` over
         # the head dim and makes the absorb-math rank-local. Until that style is
@@ -190,69 +287,26 @@ class MultiHeadLatentAttention(nn.Module):
         self._heads_local = config.heads
         self._head_offset = 0
 
-        # Q path
+        # Q path. The attribute names below are the CONTRACT the tensor-parallel
+        # plan names (see ``tensor_parallel_plan``); the slots they are built
+        # from are the caller's choice.
         if config.q_lora_rank is None:
-            self.q_proj = Linear.Config(
-                channels_in=c,
-                channels_out=config.heads * self.channels_qk_head,
-                bias=config.bias,
-                depth=config.depth,
-                init_weight=config.init_weight,
-            ).make()
+            self.q_proj = config.proj_q.make()
             self.q_a_proj: nn.Module | None = None
             self.q_a_layernorm: nn.Module | None = None
             self.q_b_proj: nn.Module | None = None
         else:
             self.q_proj = None
-            self.q_a_proj = Linear.Config(
-                channels_in=c,
-                channels_out=config.q_lora_rank,
-                bias=config.bias,
-                depth=config.depth,
-                init_weight=config.init_weight,
-            ).make()
-            self.q_a_layernorm = RMSNorm.Config(
-                channels_in=config.q_lora_rank,
-                eps=config.rms_norm_eps,
-                elementwise_affine=True,
-            ).make()
-            self.q_b_proj = Linear.Config(
-                channels_in=config.q_lora_rank,
-                channels_out=config.heads * self.channels_qk_head,
-                bias=config.bias,
-                depth=config.depth,
-                init_weight=config.init_weight,
-            ).make()
+            self.q_a_proj = config.proj_q_a.make()
+            self.q_a_layernorm = config.norm_q_lora.make()
+            self.q_b_proj = config.proj_q_b.make()
 
         # KV path: compressed_kv is split into (c_kv, k_pe).
-        self.kv_a_proj = Linear.Config(
-            channels_in=c,
-            channels_out=config.kv_lora_rank + config.channels_qk_rope_head,
-            bias=config.bias,
-            depth=config.depth,
-            init_weight=config.init_weight,
-        ).make()
-        self.kv_a_layernorm = RMSNorm.Config(
-            channels_in=config.kv_lora_rank,
-            eps=config.rms_norm_eps,
-            elementwise_affine=True,
-        ).make()
+        self.kv_a_proj = config.proj_kv_a.make()
+        self.kv_a_layernorm = config.norm_kv_lora.make()
         # kv_b expands c_kv into (n_heads * (qk_nope + channels_v_head)).
-        self.kv_b_proj = Linear.Config(
-            channels_in=config.kv_lora_rank,
-            channels_out=config.heads
-            * (config.channels_qk_nope_head + config.channels_v_head),
-            bias=config.bias,
-            depth=config.depth,
-            init_weight=config.init_weight,
-        ).make()
-        self.o_proj = Linear.Config(
-            channels_in=config.heads * config.channels_v_head,
-            channels_out=c,
-            bias=config.bias,
-            depth=config.depth,
-            init_weight=config.init_weight,
-        ).make()
+        self.kv_b_proj = config.proj_kv_b.make()
+        self.o_proj = config.proj_out.make()
 
         self.rope = config.rope.make() if config.rope else None
 
@@ -495,16 +549,43 @@ class MultiHeadLatentAttention(nn.Module):
         self._heads_local = self.heads // tp_size
         self._head_offset = mesh.get_local_rank() * self._heads_local
 
+    def tensor_parallel_plan(self) -> dict[str, ParallelStyle]:
+        """Which of THIS module's children shard, and how.
+
+        ``parallelize_module`` addresses children by attribute name, so some
+        object has to supply those names -- and it must be the module that owns
+        them. Answering here rather than from the style keeps the projections
+        injectable: a caller may fill ``proj_q`` with any module, and the plan
+        still finds it, because the plan names the ATTRIBUTE this class binds
+        rather than the class the caller chose.
+
+        Only the per-head path shards. ``q_proj`` XOR ``q_b_proj`` exists (the
+        ``q_lora_rank`` gate); whichever emits head-major q is colwise, with a
+        LOCAL output so the absorb-math einsums see plain tensors rather than
+        DTensors. ``o_proj`` is rowwise. Everything else -- the latent path and
+        its norms -- stays replicated, which is correctness rather than thrift:
+        the latent is head-shared, so splitting it over the head dim is wrong.
+
+        Returns:
+          plan: Attribute name to style, for ``parallelize_module``.
+
+        """
+        q_name = "q_proj" if self.q_proj is not None else "q_b_proj"
+        return {
+            q_name: ColwiseParallel(use_local_output=True),
+            "o_proj": RowwiseParallel(
+                input_layouts=Shard(-1),
+                output_layouts=Replicate(),
+            ),
+        }
+
 
 class _MLAParallel(ParallelStyle):
     """Head-parallel tensor-parallel style for :class:`MultiHeadLatentAttention`.
 
-    Shards the q-path (``q_proj``/``q_b_proj``, colwise over the head dim) and
-    ``o_proj`` (rowwise), keeping each rank's q output a plain local tensor so
-    the absorb-math einsums run on plain operands (no DTensor mixed-operand
-    failure). The head-shared latent path stays replicated. The style records
-    this rank's local head range on the module so :meth:`_project_q` and
-    :meth:`_absorb_attention` expand only its ``heads // tp`` heads.
+    Holds no knowledge of MLA's children: it records this rank's head range and
+    applies the plan the module itself supplies, so adding or renaming a
+    projection is a change to one class rather than to two.
     """
 
     @override
@@ -515,16 +596,4 @@ class _MLAParallel(ParallelStyle):
     ) -> nn.Module:
         assert isinstance(module, MultiHeadLatentAttention)
         module.shard_heads_over(device_mesh)
-
-        # q_proj XOR q_b_proj is present (q_lora_rank gate); shard whichever
-        # emits the per-head q. Both are colwise over the head-major output, and
-        # the local output stays a plain tensor for the rank-local absorb-math.
-        q_name = "q_proj" if module.q_proj is not None else "q_b_proj"
-        plan: dict[str, ParallelStyle] = {
-            q_name: ColwiseParallel(use_local_output=True),
-            "o_proj": RowwiseParallel(
-                input_layouts=Shard(-1),
-                output_layouts=Replicate(),
-            ),
-        }
-        return parallelize_module(module, device_mesh, plan)
+        return parallelize_module(module, device_mesh, module.tensor_parallel_plan())

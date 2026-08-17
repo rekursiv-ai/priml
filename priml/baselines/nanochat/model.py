@@ -44,10 +44,10 @@ from priml.model.init import normal, unit_fan_in_uniform
 from priml.model.linear import Linear
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
-from priml.model.relu_squared import ReluSquared
 from priml.model.residual_mix import ResidualMix
 from priml.model.rope import RoPE
 from priml.model.softcap import SoftCap
+from priml.model.swiglu import SwiGLUReluSquared
 from priml.model.transformer import TransformerBlock
 from priml.model.value_gated_attention import (
     ValueGatedAttention,
@@ -80,7 +80,7 @@ class NanoChatLM(nn.Module):
         block: AttentionBlock | Sequence[AttentionBlock] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=ValueGatedAttention.Config(),
-                ffn=ReluSquared.Config(),
+                ffn=SwiGLUReluSquared.Config(),
             ),
         )
         """Block template (broadcast ``num_layers`` times) or per-layer list.

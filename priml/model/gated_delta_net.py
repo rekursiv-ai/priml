@@ -8,17 +8,18 @@ CPU fallback. Plugs into ``TransformerBlock.Config(attn=...)`` as a
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY
+from dataclasses import KW_ONLY, field
 from typing import TYPE_CHECKING, Any, Self, override
 
 import math
 
-from configgle import Fig
+from configgle import Fig, Makeable
 from torch import Tensor, nn
 from torch.nn import functional as f
 
 import torch
 
+from priml.model.custom_types import ChannelsIn, TensorModule
 from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
 
@@ -38,33 +39,51 @@ class GatedDeltaNet(nn.Module):
 
     class Config(Fig["GatedDeltaNet"], kw_only=False):
         channels_in: int = -1
+        """Model width read from the residual stream."""
+
         _: KW_ONLY
-        num_k_heads: int = 16
-        num_v_heads: int = 32
-        head_k_dim: int = 128
-        head_v_dim: int = 128
+
+        heads_k: int = 16
+        """Key/query heads; ``heads_v`` must be a multiple of this."""
+
+        heads_v: int = 32
+        """Value heads. Exceeding ``heads_k`` repeats q/k to match."""
+
+        channels_k_head: int = 128
+        """Per-head key/query width."""
+
+        channels_v_head: int = 128
+        """Per-head value width."""
+
         conv_kernel_size: int = 4
-        eps: float = 1e-6
+        """Depthwise causal convolution width over the q/k/v stream."""
+
+        norm: Makeable[TensorModule] = field(default_factory=CenteredRMSNorm.Config)
+        """Normalization applied per value head before the output projection."""
+
         depth: int = -1
+        """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         @override
         def finalize(self) -> Self:
-            if self.num_v_heads % self.num_k_heads != 0:
-                raise ValueError(
-                    f"num_v_heads={self.num_v_heads} must be an integer "
-                    f"multiple of num_k_heads={self.num_k_heads}.",
-                )
+            if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
+                self.norm.channels_in = self.channels_v_head
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.heads_v % config.heads_k != 0:
+            raise ValueError(
+                f"heads_v={config.heads_v} must be an integer "
+                f"multiple of heads_k={config.heads_k}.",
+            )
         h = config.channels_in
-        self.num_k_heads = config.num_k_heads
-        self.num_v_heads = config.num_v_heads
-        self.head_k_dim = config.head_k_dim
-        self.head_v_dim = config.head_v_dim
-        k_dim = config.num_k_heads * config.head_k_dim
-        v_dim = config.num_v_heads * config.head_v_dim
+        self.heads_k = config.heads_k
+        self.heads_v = config.heads_v
+        self.channels_k_head = config.channels_k_head
+        self.channels_v_head = config.channels_v_head
+        k_dim = config.heads_k * config.channels_k_head
+        v_dim = config.heads_v * config.channels_v_head
         conv_dim = 2 * k_dim + v_dim
 
         self.in_proj_qkv = Linear.Config(
@@ -79,12 +98,12 @@ class GatedDeltaNet(nn.Module):
         ).make()
         self.in_proj_b = Linear.Config(
             channels_in=h,
-            channels_out=config.num_v_heads,
+            channels_out=config.heads_v,
             bias=False,
         ).make()
         self.in_proj_a = Linear.Config(
             channels_in=h,
-            channels_out=config.num_v_heads,
+            channels_out=config.heads_v,
             bias=False,
         ).make()
 
@@ -98,12 +117,9 @@ class GatedDeltaNet(nn.Module):
         )
         # Raw params allocated empty; reset_parameters is the sole source of
         # their init values, so eager and meta materialization agree bit-for-bit.
-        self.dt_bias = nn.Parameter(torch.empty(config.num_v_heads))
-        self.A_log = nn.Parameter(torch.empty(config.num_v_heads))
-        self.norm = CenteredRMSNorm.Config(
-            channels_in=config.head_v_dim,
-            eps=config.eps,
-        ).make()
+        self.dt_bias = nn.Parameter(torch.empty(config.heads_v))
+        self.A_log = nn.Parameter(torch.empty(config.heads_v))
+        self.norm = config.norm.make()
         self.out_proj = Linear.Config(
             channels_in=v_dim,
             channels_out=h,
@@ -132,24 +148,24 @@ class GatedDeltaNet(nn.Module):
         shape = x.shape
         S = shape[-2]
         x = x.reshape(-1, S, shape[-1])
-        k_dim = self.num_k_heads * self.head_k_dim
-        v_dim = self.num_v_heads * self.head_v_dim
+        k_dim = self.heads_k * self.channels_k_head
+        v_dim = self.heads_v * self.channels_v_head
 
         qkv = self.in_proj_qkv(x)
         qkv = f.silu(self.conv1d(qkv.transpose(1, 2))[:, :, :S]).transpose(1, 2)
         q, k, v = qkv.split([k_dim, k_dim, v_dim], dim=-1)
 
-        z = self.in_proj_z(x).reshape(-1, S, self.num_v_heads, self.head_v_dim)
+        z = self.in_proj_z(x).reshape(-1, S, self.heads_v, self.channels_v_head)
         beta = self.in_proj_b(x).sigmoid()
         a = self.in_proj_a(x)
         g = -self.A_log.float().exp() * f.softplus(a.float() + self.dt_bias)
 
-        q = q.reshape(-1, S, self.num_k_heads, self.head_k_dim)
-        k = k.reshape(-1, S, self.num_k_heads, self.head_k_dim)
-        v = v.reshape(-1, S, self.num_v_heads, self.head_v_dim)
+        q = q.reshape(-1, S, self.heads_k, self.channels_k_head)
+        k = k.reshape(-1, S, self.heads_k, self.channels_k_head)
+        v = v.reshape(-1, S, self.heads_v, self.channels_v_head)
 
-        if self.num_v_heads // self.num_k_heads > 1:
-            r = self.num_v_heads // self.num_k_heads
+        if self.heads_v // self.heads_k > 1:
+            r = self.heads_v // self.heads_k
             q = q.repeat_interleave(r, dim=-2)
             k = k.repeat_interleave(r, dim=-2)
 
@@ -177,8 +193,8 @@ class GatedDeltaNet(nn.Module):
                 use_qk_l2norm_in_kernel=True,
             )
 
-        out = self.norm(out.reshape(-1, self.head_v_dim)) * f.silu(
-            z.reshape(-1, self.head_v_dim).float()
+        out = self.norm(out.reshape(-1, self.channels_v_head)) * f.silu(
+            z.reshape(-1, self.channels_v_head).float()
         ).type_as(out)
         return self.out_proj(out.reshape(-1, S, v_dim)).reshape(*shape[:-1], -1)
 

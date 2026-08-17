@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, field
+from functools import partial
 from typing import NamedTuple, Self, override
 
 import copy
@@ -29,6 +30,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
     HeadGeometry,
+    TensorModule,
     propagate_attr,
 )
 from priml.model.linear import Linear
@@ -62,16 +64,31 @@ class AdaLNZero(nn.Module):
         cond_dim: int = -1
         """Conditioning input dimension."""
 
+        proj: Makeable[TensorModule] = field(
+            default_factory=partial(
+                Linear.Config,
+                bias=True,
+                init_weight=nn.init.zeros_,
+                init_bias=nn.init.zeros_,
+            ),
+        )
+        """Conditioning projection; widths filled by ``finalize``.
+
+        Zero-initialized by default -- that is what "Zero" names, and it is what
+        makes the block an identity at init rather than a random perturbation."""
+
+        @override
+        def finalize(self) -> Self:
+            if isinstance(self.proj, ChannelsIn) and self.proj.channels_in == -1:
+                self.proj.channels_in = self.cond_dim
+            if isinstance(self.proj, ChannelsOut) and self.proj.channels_out == -1:
+                self.proj.channels_out = 6 * self.channels_in
+            return super().finalize()
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.act = nn.SiLU()
-        self.proj = Linear.Config(
-            channels_in=config.cond_dim,
-            channels_out=6 * config.channels_in,
-            bias=True,
-            init_weight=nn.init.zeros_,
-            init_bias=nn.init.zeros_,
-        ).make()
+        self.proj = config.proj.make()
 
     def reset_parameters(self) -> None:
         self.proj.reset_parameters()

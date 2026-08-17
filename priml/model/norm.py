@@ -86,8 +86,12 @@ class CenteredRMSNorm(nn.Module):
 
     class Config(Fig["CenteredRMSNorm"], kw_only=False):
         channels_in: int = -1
+        """Number of input channels (normalized shape)."""
+
         _: KW_ONLY
+
         eps: float = 1e-6
+        """Epsilon for numerical stability."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()

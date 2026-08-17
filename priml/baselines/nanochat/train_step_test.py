@@ -187,6 +187,25 @@ def test_the_warmup_is_counted_in_steps_not_passes() -> None:
     assert step.elapsed_sec > 0.0
 
 
+def test_loop_side_work_is_charged_to_the_budget_past_warmup() -> None:
+    """Loading is training time: the reference's clock brackets it too.
+
+    Its ``next(train_loader)`` sits at ``train.py:550``, between the ``t0`` at
+    543 and the ``t1`` at 573. Ours happens in the loop, outside the step, and
+    measured at 0.160 of 1.683 s/step -- so a budget that skipped it would buy
+    a tenth more steps than the comparison granted.
+    """
+    step = _step(budget_warmup_steps=1)
+    batch = _batch()
+    step.charge_budget(5.0)
+    assert step.elapsed_sec == 0.0  # warmup: not yet charged
+    step.train_step(**batch)  # the warmup step
+    step.train_step(**batch)  # past it, and itself charged
+    charged = step.elapsed_sec
+    step.charge_budget(5.0)
+    assert step.elapsed_sec >= charged + 5.0
+
+
 def test_resuming_does_not_rerun_the_budget_warmup() -> None:
     """A resumed run must not get free, uncharged training.
 
@@ -274,9 +293,15 @@ def test_divergence_raises_rather_than_burning_the_budget() -> None:
 def test_a_diverged_pass_is_caught_at_the_batch_it_belongs_to() -> None:
     """The guard reads once per UPDATE, so a mid-batch pass must still abort.
 
-    Its loss is reduced on device and read at the boundary. A pass that
-    diverged and then recovered would otherwise reach the optimizer, since the
-    last pass alone says nothing about the ones behind it.
+    Its loss is reduced on device and read at the boundary, so a pass that
+    diverged and then recovered is still caught -- the last pass alone says
+    nothing about the ones behind it.
+
+    Read AFTER the update, where the reference reads it (train.py:565): the
+    read stalls the CPU on the device, so doing it first leaves the optimizer
+    un-enqueued while waiting. The run therefore stops one update later, which
+    is the same guarantee -- that update ran on gradients whose loss was
+    finite, and the diverged batch never reaches a second one.
     """
     step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update
     step.config.divergence_threshold = 1e-6
@@ -284,7 +309,7 @@ def test_a_diverged_pass_is_caught_at_the_batch_it_belongs_to() -> None:
     assert step.global_step == 0
     with pytest.raises(RuntimeError, match="diverged"):
         step.train_step(**_batch())
-    assert step.global_step == 0
+    assert step.global_step == 1
 
 
 def test_divergence_clears_the_pending_accumulation() -> None:

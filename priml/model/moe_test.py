@@ -154,9 +154,13 @@ def test_sigmoid_routing_shared_experts_and_bias():
         ),
         num_shared_experts=1,
     ).make()
-    assert m.router.scoring_func == "sigmoid"
-    assert m.router.norm_topk_prob is True  # auto-enabled for sigmoid
-    assert m.router.e_score_correction_bias is not None
+    # The slot is typed by what MoE needs of a router; this test built the
+    # concrete one, so narrow back to inspect its own fields.
+    router = m.router
+    assert isinstance(router, Router)
+    assert router.scoring_func == "sigmoid"
+    assert router.norm_topk_prob is True  # auto-enabled for sigmoid
+    assert router.e_score_correction_bias is not None
     assert len(m.shared_experts) == 1
     x = torch.randn(2, 4, 32)
     assert m(x).shape == (2, 4, 32)
@@ -275,6 +279,7 @@ def test_group_topk_masks_inactive_groups():
             topk_group=1,
         ),
     ).make()
+    assert isinstance(m.router, Router)
     bias = m.router.e_score_correction_bias
     assert bias is not None
     with torch.no_grad():
