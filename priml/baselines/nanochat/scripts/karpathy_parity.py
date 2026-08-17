@@ -35,11 +35,13 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import argparse
 import ast
+import contextlib
 import importlib
+import re
 import subprocess
 import sys
 import types
@@ -134,7 +136,9 @@ def clone_upstream(
 def build_theirs(
     root: Path,
     *,
-    vocab_size: int,
+    corpus: Path,
+    loader: dict[str, Any],
+    rows: int,
 ) -> tuple[nn.Module, torch.optim.Optimizer, types.ModuleType]:
     """The reference's own model and optimizer, built by its own module scope.
 
@@ -143,12 +147,14 @@ def build_theirs(
     the optimizer from its own learning rates -- so passing any of those in
     would prove only that two copies of the same numbers agree.
 
-    The vocabulary is the one exception: it comes from a tokenizer fitted on a
-    corpus, which this box does not have, so the stub reports one.
+    The vocabulary is theirs too, read by their own ``Tokenizer`` from the
+    prepared corpus -- as is the dataloader whose rows the comparison steps on.
 
     Args:
       root: The clone's path.
-      vocab_size: Vocabulary their tokenizer stub reports.
+      corpus: Prepared shards and tokenizer, read by their loader.
+      loader: Filled with their built dataloader under ``"train"``.
+      rows: Rows per pass; theirs is 128, which two resident models cannot hold.
 
     Returns:
       model: Their ``GPT``.
@@ -157,7 +163,7 @@ def build_theirs(
         applies exactly as their own training loop does.
 
     """
-    upstream = load_upstream(root, vocab_size=vocab_size)
+    upstream = load_upstream(root, corpus=corpus, loader=loader, rows=rows)
     print(f"upstream: {upstream.__file__}")
     print(f"kernel:   {upstream.fa3.flash_attn_func.__qualname__}")
     # The module BENEATH their ``torch.compile`` wrapper (train.py:506). Both
@@ -203,43 +209,79 @@ def their_schedules(root: Path, module: types.ModuleType) -> types.ModuleType:
     return module
 
 
-def load_upstream(root: Path, *, vocab_size: int) -> types.ModuleType:
+def load_upstream(
+    root: Path,
+    *,
+    corpus: Path,
+    loader: dict[str, Any],
+    rows: int,
+) -> types.ModuleType:
     """Import their ``train.py`` as itself, with its training loop cut short.
 
     Their file is a script: its module scope builds a tokenizer and a
     dataloader and then trains for five minutes. It is imported rather than
     read, so every class, hyperparameter, and constant is theirs -- the only
-    things supplied from here are the three names it imports from outside
-    (``kernels``, ``prepare``, ``constants``), and the dataloader stub ends
-    module scope before the training loop by raising.
+    thing supplied from here is the ``kernels`` name, since their
+    FlashAttention-3 builds only for SM90.
+
+    Their ``prepare`` is their own, so the loader this captures is the recipe's
+    packer over the real corpus. It is taken at the moment their module scope
+    asks for it (``train.py:508``), which is also where module scope is ended:
+    letting even one iteration of their loop run would leave their weights a
+    step ahead of the comparison.
 
     Args:
       root: The clone's path.
-      vocab_size: Vocabulary their tokenizer stub reports.
+      corpus: Prepared shards and tokenizer, read by their loader.
+      loader: Filled with their built dataloader under ``"train"``.
+      rows: Rows per pass; theirs is 128, which two resident models cannot hold.
 
     Returns:
       module: Their ``train`` module.
 
     Raises:
       RuntimeError: Module scope aborted before defining what the comparison
-        needs, so the stubs no longer match what their script expects.
+        needs, so the substitutions no longer match what their script expects.
 
     """
     sys.path.insert(0, str(root))
     sys.modules["kernels"] = _kernels_stub()
-    sys.modules["prepare"] = _prepare_stub(vocab_size)
     # Their own knob, at the value that ends their training loop as early as
     # their ``step > 10`` guard allows. Their context length is left alone.
     constants = importlib.import_module("constants")
     constants.TIME_BUDGET = 1e-9  # ty: ignore[unresolved-attribute] -- dynamically imported module; attributes unknowable  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    _prepare_module(corpus, loader)
 
-    try:
-        module = importlib.import_module("train")
-    except _StopModuleScopeError as stop:
-        module = _module_from_traceback(stop)
+    # Their 128 rows hold two resident models' activations on no card this runs
+    # on; the comparison keeps BOTH models alive at once, which their script
+    # never does. Rewritten in the source text because their file assigns it at
+    # module scope, so any value handed in beforehand is overwritten the moment
+    # the line runs. Rows are an INPUT here -- both sides see the same ones --
+    # so this changes what is compared on, not the recipe being compared.
+    source = (root / "train.py").read_text()
+    source, count = re.subn(
+        r"^DEVICE_BATCH_SIZE = \d+",
+        f"DEVICE_BATCH_SIZE = {rows}",
+        source,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise RuntimeError(
+            f"expected one DEVICE_BATCH_SIZE assignment in train.py; found {count}.",
+        )
+    module = types.ModuleType("train")
+    module.__file__ = str(root / "train.py")
+    # Registered BEFORE execution: their ``@dataclass`` resolves its own class's
+    # module through ``sys.modules``, which holds nothing for a module built
+    # here, and fails on a ``None`` before their first class exists.
+    sys.modules["train"] = module
+    with contextlib.suppress(_StopModuleScopeError):
+        exec(compile(source, str(root / "train.py"), "exec"), module.__dict__)  # noqa: S102 -- their own script, from the pinned clone
     for required in ("GPT", "GPTConfig", "model", "optimizer"):
         if not hasattr(module, required):
             raise RuntimeError(f"train.py aborted before defining {required}")
+    if "train" not in loader:
+        raise RuntimeError("train.py never asked for a dataloader")
     return module
 
 
@@ -536,13 +578,17 @@ def main() -> int:
     ours = build_ours(device=args.device)
     model = ours.config.model
 
-    # Their script sizes its model from its own tokenizer, which this box does
-    # not have -- so the stub reports OUR vocabulary and context. Every other
-    # number on their side stays theirs.
+    # Their script sizes its model from its own tokenizer, reading the prepared
+    # corpus, and builds its own packer over the same shards. Every number on
+    # their side stays theirs; the rows below are the ones their loader emits.
+    their_loader: dict[str, Any] = {}
     theirs, their_optimizer, upstream = build_theirs(
         root,
-        vocab_size=model.vocab_size,
+        corpus=args.corpus,
+        loader=their_loader,
+        rows=args.rows,
     )
+    train_loader = their_loader["train"]
     mapping = name_map(theirs, layers=model.num_layers)
 
     # BEFORE the copy: it overwrites our draws with theirs, so this is the only
@@ -579,24 +625,16 @@ def main() -> int:
     stack = ExitStack()
     stack.enter_context(sdpa_kernel(SDPBackend.MATH))
     failures = len(problems)
-    generator = torch.Generator(device=args.device).manual_seed(args.seed)
 
     for index in range(1, args.steps + 1):
-        shape = (args.rows, model.max_seq_len)
-        tokens = torch.randint(
-            0,
-            model.vocab_size,
-            shape,
-            generator=generator,
-            device=args.device,
-        )
-        targets = torch.randint(
-            0,
-            model.vocab_size,
-            shape,
-            generator=generator,
-            device=args.device,
-        )
+        # THEIR loader, over the real corpus. The packer is a stateful stream --
+        # best-fit out of a document buffer refilled a fixed number at a time --
+        # so it is part of the recipe rather than a fixture, and random ids left
+        # it the one piece of the port nothing here compared. Taking it from
+        # their side keeps the reference virgin: what our packer produces is a
+        # separate question, and answering it with our own rows would let a
+        # packing difference cancel itself on both sides of the comparison.
+        tokens, targets, _ = next(train_loader)
 
         with autocast:
             their_loss = theirs(tokens, targets)
@@ -676,9 +714,106 @@ def main() -> int:
         for line in step_problems[:8]:
             print(f"    {line}")
 
+    failures += compare_eval(
+        theirs,
+        ours,
+        upstream,
+        their_loader["prepare"],
+        batches=args.eval_batches,
+    )
+
     verdict = f"{failures} DIFFERENCE(S)" if failures else "BIT-IDENTICAL"
     print(f"\n{args.steps} steps, FA3->FA2 only: {verdict}")
     return 1 if failures else 0
+
+
+def compare_eval(
+    theirs: nn.Module,
+    ours: Any,
+    upstream: types.ModuleType,
+    prepare: types.ModuleType,
+    *,
+    batches: int,
+) -> int:
+    """Score both models with THEIR metric and with ours, on their rows.
+
+    The reported number is bits per byte, and until now nothing here touched
+    it: twenty bit-identical updates say the weights agree, not that the two
+    implementations turn the same weights into the same score. Their
+    ``evaluate_bpb`` is marked DO NOT CHANGE (``prepare.py:324``) precisely
+    because it IS the comparison, so it is the one run here -- against their
+    model and ours in turn, which isolates the metric from the models.
+
+    Ours is then run on the same rows through :class:`BitsPerByte`, so a
+    difference in the ACCOUNTING shows up as well: theirs sums nats in float32
+    and multiplies by a mask (``prepare.py:347``), ours accumulates float64 and
+    indexes. Both drop zero-byte tokens, which is the part that must agree.
+
+    Args:
+      theirs: The reference model.
+      ours: This package's train step.
+      upstream: Their ``train`` module, for the tokenizer it built.
+      prepare: Their ``prepare`` module, holding the metric and its constants.
+      batches: Validation batches to score; their full evaluation is 40x
+        larger and answers the same question far more slowly.
+
+    Returns:
+      failures: One per disagreement found.
+
+    """
+    tokenizer = upstream.tokenizer
+    rows = int(upstream.DEVICE_BATCH_SIZE)
+    # Their own metric, on each model in turn. Capped by rebinding the token
+    # count their function divides by: it is a module constant they read, not
+    # an argument, and the full 40 x 524,288 tokens take minutes to answer a
+    # question a few batches settle.
+    original = prepare.EVAL_TOKENS
+    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    # Under autocast, as their own final eval runs it (train.py:609-611): their
+    # tables are held in bfloat16, so the model is only runnable inside one.
+    autocast = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+    try:
+        with autocast:
+            their_bpb = float(upstream.evaluate_bpb(theirs, tokenizer, rows))
+        with autocast:
+            our_bpb = float(
+                upstream.evaluate_bpb(_LossAdapter(ours.model), tokenizer, rows),
+            )
+    finally:
+        prepare.EVAL_TOKENS = original  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+
+    print(f"\n[eval] their metric: theirs={their_bpb:.9f} ours={our_bpb:.9f}")
+    if their_bpb != our_bpb:
+        print(f"    bpb DIFFERS by {abs(their_bpb - our_bpb):.3e}")
+        return 1
+    return 0
+
+
+class _LossAdapter(nn.Module):
+    """Present our model to their metric under their forward's signature.
+
+    Their ``evaluate_bpb`` calls ``model(x, y, reduction='none')`` and expects
+    per-token nats. Ours returns logits, so the same cross-entropy is spelled
+    here -- once, in the place their metric reaches for it -- rather than
+    reimplementing the metric around our shape.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.inner = model
+
+    @override
+    def forward(
+        self, tokens: Tensor, targets: Tensor, reduction: str = "mean"
+    ) -> Tensor:
+        logits = self.inner(tokens)
+        assert isinstance(logits, Tensor)
+        return functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]).float(),
+            targets.reshape(-1).long(),
+            ignore_index=-1,
+            reduction=reduction,
+        )
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -708,65 +843,52 @@ def _kernels_stub() -> types.ModuleType:
     return module
 
 
-def _prepare_stub(vocab_size: int) -> types.ModuleType:
-    """The data-side names their ``train.py`` imports.
+def _prepare_module(corpus: Path, loader: dict[str, Any]) -> types.ModuleType:
+    """THEIR ``prepare``, pointed at the prepared corpus.
 
-    None of the three is under test: the comparison is of the model and the
-    optimizer, and both sides are fed the same tokens from outside.
+    Their own module, not a stub: the packer it holds is a stateful stream --
+    best-fit out of a document buffer refilled a fixed number at a time -- so
+    it is part of the recipe being reproduced, and the rows it emits are what
+    both sides must be stepped on. Only the two directories are rebound, since
+    their file computes both from ``~/.cache`` at import.
+
+    ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of ``Tokenizer.from_directory``,
+    bound at definition and so unaffected by the rebinding; their ``train.py``
+    calls it with no argument, so the default is replaced too.
+
+    Their ``make_dataloader`` is wrapped rather than replaced: the real one is
+    called, its generator handed to ``loader``, and module scope then ended
+    before their training loop -- so the comparison drives their own packer
+    while their weights stay untouched.
+
+    Args:
+      corpus: Directory holding the shards and ``tokenizer/``.
+      loader: Filled with the built dataloader under ``"train"``.
+
+    Returns:
+      module: Their ``prepare`` module.
+
     """
-    module = types.ModuleType("prepare")
-
-    class Tokenizer:
-        """Enough of theirs for their module scope to size a model."""
-
-        @classmethod
-        def from_directory(cls) -> Tokenizer:
-            return cls()
-
-        def get_vocab_size(self) -> int:
-            return vocab_size
+    module = importlib.import_module("prepare")
+    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    module.Tokenizer.from_directory.__func__.__defaults__ = (str(corpus / "tokenizer"),)
+    real_make_dataloader = module.make_dataloader
 
     def make_dataloader(*args: Any, **kwargs: Any) -> Any:
-        """Ends their module scope at the prefetch, before any training.
+        """Build their loader, keep it, and end their module scope.
 
-        Their own exit is gated on ``step > 10`` (train.py:601), so no budget
-        makes it short, and letting even one iteration run would leave their
-        weights a step ahead of the comparison. Raising here unwinds at their
-        line 509: after every class, kernel, hyperparameter, and the model and
-        optimizer they expose -- and before the loop touches any of it.
-
-        Their schedule functions are defined below this point and so are not
-        on the module; :func:`their_schedules` reads them out of the source
-        instead.
+        Restores their own function first: their ``evaluate_bpb`` builds a
+        VALIDATION loader through the same name (``prepare.py:337``), and a
+        wrapper still in place would end the scoring run instead.
         """
-        del args, kwargs
+        module.make_dataloader = real_make_dataloader  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+        loader["train"] = real_make_dataloader(*args, **kwargs)
+        loader["prepare"] = module
         raise _StopModuleScopeError
 
-    def evaluate_bpb(*args: Any, **kwargs: Any) -> float:
-        del args, kwargs
-        return 0.0
-
-    module.Tokenizer = Tokenizer  # ty: ignore[unresolved-attribute] -- stub module built at runtime  # pyright: ignore[reportAttributeAccessIssue] -- stub module built at runtime
-    module.make_dataloader = make_dataloader  # ty: ignore[unresolved-attribute] -- stub module built at runtime  # pyright: ignore[reportAttributeAccessIssue] -- stub module built at runtime
-    module.evaluate_bpb = evaluate_bpb  # ty: ignore[unresolved-attribute] -- stub module built at runtime  # pyright: ignore[reportAttributeAccessIssue] -- stub module built at runtime
+    module.make_dataloader = make_dataloader  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
     return module
-
-
-def _module_from_traceback(stop: _StopModuleScopeError) -> types.ModuleType:
-    """Recover the half-built ``train`` module from an aborted import.
-
-    A module whose execution raised is removed from ``sys.modules``, so it has
-    to come from the traceback: the frame running ``train.py`` holds the
-    globals the comparison needs.
-    """
-    frame = stop.__traceback__
-    while frame is not None:
-        if frame.tb_frame.f_code.co_filename.endswith("train.py"):
-            module = types.ModuleType("train")
-            module.__dict__.update(frame.tb_frame.f_globals)
-            return module
-        frame = frame.tb_next
-    raise RuntimeError("train.py frame not found in traceback") from stop
 
 
 def _parse_args() -> argparse.Namespace:
@@ -797,18 +919,25 @@ def _parse_args() -> argparse.Namespace:
         default=191,
         help="Billed updates a full run lasts; sets one step's share.",
     )
-    parser.add_argument("--seed", type=int, default=42, help="Batch seed.")
     parser.add_argument("--device", default="cuda", help="Device to compare on.")
-    # The reference sizes its model from its own DEPTH, so only what it reads
-    # from OUTSIDE its script is set here: the tokenizer's vocabulary and the
-    # context length. Both are small because the question is whether two
-    # implementations agree, which a divergence answers in the first layer.
-    parser.add_argument("--vocab", type=int, default=64, help="Vocabulary size.")
-    parser.add_argument("--seq", type=int, default=32, help="Context length.")
-    # An input, not the recipe: both models see the same tokens, and the
-    # recipe's own batch would need more memory than one card holds while two
-    # copies of the model are resident.
-    parser.add_argument("--rows", type=int, default=1, help="Sequences compared.")
+    parser.add_argument(
+        "--eval-batches",
+        type=int,
+        default=4,
+        help="Validation batches scored; theirs is 40 x 524,288 tokens.",
+    )
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=8,
+        help="Rows per pass; theirs is 128, and two models are resident here.",
+    )
+    parser.add_argument(
+        "--corpus",
+        type=Path,
+        default=Path("/opt/scratch/datasets/nanochat-priml"),
+        help="Prepared shards and tokenizer, read by THEIR loader.",
+    )
     return parser.parse_args()
 
 
