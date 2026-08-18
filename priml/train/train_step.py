@@ -23,7 +23,7 @@ Features:
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import contextlib
 import math
@@ -207,9 +207,26 @@ class TrainStep:
         gradient_clip_norm: float = math.inf
         """Global gradient-norm ceiling; infinite disables clipping."""
 
-        device_init: torch.device | str | None = None
-        """Device the model is CONSTRUCTED on. ``"meta"`` defers allocation to
-        the parallel strategy, which materializes each rank's shard."""
+        device_init: Literal["meta", "eager"] = "eager"
+        """HOW the model's storage is allocated -- never WHERE, which is
+        ``parallelism``'s alone.
+
+        ``"eager"`` allocates during construction, then the parallel strategy
+        moves the result. ``"meta"`` constructs without storage and lets that
+        strategy materialize it instead: allocation happens once, already on
+        the target device and already sharded, so init draws from THAT device's
+        generator and no parameter crosses the bus.
+
+        ``"meta"`` is the better default and is NOT yet the default, because it
+        requires every container module to implement a ``reset_parameters``
+        that recurses into what it built (see ``materialize_meta``'s ownership
+        contract). Most models here inherit torch's leaf implementations
+        without declaring the root one, so materializing leaves them NaN and
+        the audit refuses the run. Fixing those models is what makes the flip
+        safe.
+
+        A device here would be a second answer to a question ``parallelism``
+        already answers, and the two would agree only by coincidence."""
 
         dtype_autocast: torch.dtype | None = None
         """Autocast dtype for forward and loss (e.g. ``torch.bfloat16``);
@@ -266,10 +283,19 @@ class TrainStep:
         for a step trained on a stream that has no pass -- and what makes
         ``train_budget_epochs`` unreachable rather than wrong there."""
 
-        if config.device_init is None:
+        # Checked rather than trusted to the annotation: a ``--override`` or a
+        # deserialized config carries unchecked text, and a device name here
+        # would silently build somewhere ``parallelism`` never chose.
+        if config.device_init not in ("meta", "eager"):
+            raise ValueError(
+                f"device_init must be 'meta' or 'eager'; got "
+                f"{config.device_init!r}. It names how storage is allocated, "
+                "not where -- set the device on ``parallelism``.",
+            )
+        if config.device_init == "eager":
             model = self.config.model.make()
         else:
-            with torch.device(config.device_init):
+            with torch.device("meta"):
                 model = self.config.model.make()
 
         # Quantization rewrites modules BEFORE the parallel strategy so the

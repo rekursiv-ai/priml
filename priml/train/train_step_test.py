@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 import functools
 import tempfile
@@ -74,6 +74,64 @@ def test_trainable_logistic_regression():
 
     accuracy = metric.compute()["accuracy"]
     assert accuracy > 0.9
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA generator")
+def test_meta_construction_draws_on_the_placement_devices_generator() -> None:
+    """Under ``"meta"`` init runs where the model will live, not on the host.
+
+    Eager construction allocates on the CPU and draws from the CPU generator,
+    then the strategy copies the finished weights across -- so the run's init
+    consumes a different random stream than the same recipe materialized on
+    the device, and every parameter makes the trip over the bus.
+    """
+    config = TrainStep.Config()
+    config.model = _LinearModel.Config(in_features=4, out_features=4)
+    config.parallelism = NoParallel.Config(device="cuda")
+    config.device_init = "meta"
+    config.compile = None
+
+    cpu_before = torch.get_rng_state().clone()
+    cuda_before = torch.cuda.get_rng_state().clone()
+    step = config.make()
+
+    assert next(step.model.parameters()).device.type == "cuda"
+    assert not torch.equal(cuda_before, torch.cuda.get_rng_state())
+    assert torch.equal(cpu_before, torch.get_rng_state())
+
+
+def test_eager_construction_allocates_during_the_build() -> None:
+    """``"eager"`` (today's default) builds with storage, then places.
+
+    A module whose ``__init__`` reads its own tensor values -- or one whose
+    ``reset_parameters`` does not cover everything it builds -- cannot survive
+    the meta path, so this arm is what keeps them constructible.
+    """
+    config = TrainStep.Config()
+    config.model = _LinearModel.Config(in_features=4, out_features=4)
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
+
+    step = config.make()
+
+    assert config.device_init == "eager"
+    assert next(step.model.parameters()).device == torch.device("cpu")
+
+
+def test_device_init_names_how_not_where() -> None:
+    """The field chooses allocation strategy; ``parallelism`` owns the device.
+
+    Two fields that each name a device disagree silently -- one builds on
+    ``cuda:0`` while the other places on ``cuda:1`` -- so this one no longer
+    accepts a device at all.
+    """
+    config = TrainStep.Config()
+    # Cast in, as an ``--override`` or a deserialized config delivers it: the
+    # annotation rules this out statically, so the runtime guard is what
+    # catches text that never met a type checker.
+    config.device_init = cast("Literal['meta', 'eager']", "cuda")
+    with pytest.raises(ValueError, match="device_init"):
+        config.make()
 
 
 def test_trainable_train_step():

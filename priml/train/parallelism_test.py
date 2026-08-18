@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 import functools
 import importlib
@@ -20,14 +20,15 @@ import torch
 from priml import runtime
 from priml.model.gated_delta_net import GatedDeltaNet
 from priml.model.norm import CenteredRMSNorm
+from priml.train import parallelism
 from priml.train.parallelism import (
     DataParallel,
     FullySharded,
     HybridSharded,
     NoParallel,
     RecursiveSharded,
-    _materialize_meta,
     _module_mp_policy,
+    materialize_meta,
 )
 
 
@@ -35,6 +36,30 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
+
+
+class _FakeMesh:
+    """The mesh surface a strategy reads while choosing its device and plan.
+
+    A real ``DeviceMesh`` needs an initialized process group, which the
+    placement decisions under test all precede.
+    """
+
+    device_type = "cpu"
+    mesh_dim_names = ("dp", "tp")
+    shape = (1, 1)
+
+    def __getitem__(self, key: object) -> _FakeMesh:
+        del key
+        return self
+
+    def get_group(self, name: str) -> None:
+        """Return the process group for ``name``; there is none here."""
+        del name
+
+    def size(self) -> int:
+        """Ranks along this dimension."""
+        return 1
 
 
 class SimpleModel(nn.Module):
@@ -151,11 +176,90 @@ def test_recursive_sharded_requires_distributed():
         config.make()
 
 
-def test_recursive_sharded_requires_module_types():
-    config = RecursiveSharded.Config()
-    # Even without distributed, should validate module_types in __call__
-    # We can't test this without distributed mode, but config should accept empty sequence
-    assert config.module_types == ()
+def test_recursive_sharded_requires_module_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty ``module_types`` is refused when the strategy is built.
+
+    Asserting the config's default instead proves only that the field starts
+    empty -- the guard could be deleted and that assertion would still pass.
+    The guard runs in ``__init__``, ahead of every collective, so a stand-in
+    mesh is all it takes to reach.
+    """
+    monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
+    with pytest.raises(ValueError, match="requires module_types"):
+        RecursiveSharded.Config().make()
+
+
+def test_recursive_sharded_shards_the_root_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root that is itself a matched type is sharded once, not twice.
+
+    ``model.modules()`` yields the root, so a root matching ``module_types``
+    is sharded by the loop and then again by the explicit root shard below
+    it. Composable FSDP rejects the second application, and the failure needs
+    a model shaped like the plan to appear at all.
+    """
+    monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
+    sharded: list[nn.Module] = []
+
+    def record(
+        module: nn.Module,
+        mesh: DeviceMesh,
+        mp_policy: MixedPrecisionPolicy | None,
+        reshard_after_forward: bool,
+    ) -> None:
+        del mesh, mp_policy, reshard_after_forward
+        sharded.append(module)
+
+    monkeypatch.setattr(parallelism, "_shard", record)
+    strategy = RecursiveSharded.Config(module_types=(SimpleModel,)).make()
+
+    strategy(SimpleModel())
+
+    assert len(sharded) == len(set(map(id, sharded))), "a module was sharded twice"
+
+
+def test_distributed_strategies_place_an_eager_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every strategy moves an already-built model to its device.
+
+    The module's own contract makes device assignment step one, and a model
+    built eagerly is already on the host: a strategy that only materializes
+    meta state leaves it there, and the first forward meets parameters on one
+    device and a batch on another.
+    """
+
+    def replicate_in_place(model: nn.Module, **kwargs: Any) -> nn.Module:
+        """Stand in for DDP's ``replicate``, which needs a process group."""
+        del kwargs
+        return model
+
+    def ignore(
+        module: nn.Module,
+        mesh: DeviceMesh,
+        mp_policy: MixedPrecisionPolicy | None,
+        reshard_after_forward: bool,
+    ) -> None:
+        """Stand in for ``_shard``; placement is what this test measures."""
+        del module, mesh, mp_policy, reshard_after_forward
+
+    monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
+    monkeypatch.setattr(parallelism, "replicate", replicate_in_place)
+    monkeypatch.setattr(parallelism, "_shard", ignore)
+    configs = (
+        DataParallel.Config(),
+        FullySharded.Config(),
+        HybridSharded.Config(replicate_dim="dp", shard_dim="tp"),
+        RecursiveSharded.Config(module_types=(nn.Linear,)),
+    )
+    for config in configs:
+        strategy = config.make()
+        strategy.device = torch.device("meta")  # a device the model is NOT on
+        placed = strategy(SimpleModel())
+        assert next(placed.parameters()).is_meta, type(config).__qualname__
 
 
 def _fsdp_materialize_worker(result_dir: str, mesh: DeviceMesh) -> None:
@@ -307,7 +411,7 @@ def test_materialize_meta_initializes_centered_rmsnorm() -> None:
     """
     with torch.device("meta"):
         norm = CenteredRMSNorm(CenteredRMSNorm.Config(channels_in=8))
-    _materialize_meta(norm, torch.device("cpu"))
+    materialize_meta(norm, torch.device("cpu"))
     assert torch.isfinite(norm.weight).all()
     # weight is used as ``1.0 + weight``; its init is zeros.
     # torch.equal not assert_close: to_empty garbage can be near-zero.
@@ -328,7 +432,7 @@ def test_materialize_meta_initializes_gated_delta_net_raw_params() -> None:
                 channels_v_head=8,
             ).finalize()
         )
-    _materialize_meta(gdn, torch.device("cpu"))
+    materialize_meta(gdn, torch.device("cpu"))
     assert torch.isfinite(gdn.dt_bias).all()
     assert torch.isfinite(gdn.A_log).all()
     torch.testing.assert_close(gdn.dt_bias, torch.ones_like(gdn.dt_bias))
@@ -349,7 +453,7 @@ def test_materialize_meta_raises_on_uninitialized_param() -> None:
     with torch.device("meta"):
         mod = _Uninit()
     with pytest.raises(RuntimeError, match="not initialized after materialize"):
-        _materialize_meta(mod, torch.device("cpu"))
+        materialize_meta(mod, torch.device("cpu"))
 
 
 def test_materialize_meta_raises_on_uninitialized_buffer() -> None:
@@ -369,7 +473,7 @@ def test_materialize_meta_raises_on_uninitialized_buffer() -> None:
     with torch.device("meta"):
         mod = _UninitBuf()
     with pytest.raises(RuntimeError, match="not initialized after materialize"):
-        _materialize_meta(mod, torch.device("cpu"))
+        materialize_meta(mod, torch.device("cpu"))
 
 
 def test_materialize_meta_raises_on_partial_param_init() -> None:
@@ -389,7 +493,7 @@ def test_materialize_meta_raises_on_partial_param_init() -> None:
     with torch.device("meta"):
         mod = _Partial()
     with pytest.raises(RuntimeError, match="not initialized after materialize"):
-        _materialize_meta(mod, torch.device("cpu"))
+        materialize_meta(mod, torch.device("cpu"))
 
 
 def test_materialize_meta_allows_integer_buffer() -> None:
@@ -408,7 +512,7 @@ def test_materialize_meta_allows_integer_buffer() -> None:
 
     with torch.device("meta"):
         mod = _IntBuf()
-    _materialize_meta(mod, torch.device("cpu"))
+    materialize_meta(mod, torch.device("cpu"))
     assert torch.isfinite(mod.weight).all()
 
 

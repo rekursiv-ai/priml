@@ -320,7 +320,20 @@ class TrainLoop:
         Default False preserves score integrity: over-budget eval raises. Enable
         only for data-generation jobs where partial artifacts are useful."""
         num_steps_eval: float = 1_000
-        """Optimizer steps between evals; ``inf`` disables eval entirely."""
+        """Optimizer steps between evals.
+
+        Three regimes, because "when to score" is two questions and one number
+        cannot answer both:
+
+        - ``> 0`` -- that cadence, plus the final eval.
+        - ``-1`` -- the final eval only. No mid-run scoring.
+        - ``0`` or ``inf`` -- no eval at all, final included.
+
+        ``inf`` is the older spelling of never and stays valid; ``0`` reads the
+        same and no longer divides by zero in the cadence check. Before ``-1``
+        existed, "final only" was written as a cadence too large to fire --
+        ``100_000``, ``1_000_000_000``, ``max_steps`` -- each with a comment
+        apologizing for it."""
 
         num_steps_log: int = 10
         """Optimizer steps between train-metric logs, after startup."""
@@ -424,6 +437,17 @@ class TrainLoop:
                     and part.base_dir is None
                 ):
                     part.base_dir = self.working_dir
+            # One process, one device: the runtime names it, and a placement
+            # strategy that left its own unset takes it. Two fields probing the
+            # hardware independently agree only by luck -- a run pinned to CPU
+            # by its runtime would otherwise still place the model on a GPU.
+            placement = getattr(self.step, "parallelism", None)
+            if (
+                isinstance(self.runtime, _DeclaresDevice)
+                and isinstance(placement, _DeclaresDevice)
+                and placement.device is None
+            ):
+                placement.device = self.runtime.device
             # A metric reading a shared ``/datasets/...`` corpus inherits the
             # bare root; every other (artifact/dump) metric inherits the run dir.
             for metric in self.metrics.values():
@@ -719,9 +743,10 @@ class TrainLoop:
             # The cadence eval inside the loop never lands on the final step (the
             # while-loop exits once global_step reaches max_steps), so run one
             # last eval here and mark it final: it emits the RESULT line and
-            # runs final artifacts. ``num_steps_eval=inf`` disables eval entirely
-            # (e.g. a profiling harness timing only train steps), so the final
-            # eval is skipped too -- no pass holds the GPU after the last step.
+            # runs final artifacts. ``num_steps_eval`` of 0 or inf disables eval
+            # entirely (e.g. a profiling harness timing only train steps), so
+            # this one is skipped too -- no pass holds the GPU after the last
+            # step. ``-1`` skips only the cadence and keeps this.
             # (A subclass may suppress this final eval via ``_maybe_eval`` when its
             # last cadence eval already produced the run's terminal metrics.)
             self._maybe_eval(is_final=True)
@@ -784,9 +809,19 @@ class TrainLoop:
             return self._train_elapsed()
         return time.perf_counter() - self._start_time
 
+    def _pure_train_sec(self) -> float:
+        """Wall seconds spent training: first-step compile and evals excluded.
+
+        The loop's own measurement, kept separate from ``_train_elapsed`` so a
+        subclass that redefines the budget clock cannot make the two identical
+        -- their DIFFERENCE is the seconds a recipe declined to charge, and a
+        term that collapses to zero by construction audits nothing.
+        """
+        return time.perf_counter() - self._train_clock_base
+
     def _train_elapsed(self) -> float:
         """Pure-train seconds: first-step compile and mid-loop evals excluded."""
-        return time.perf_counter() - self._train_clock_base
+        return self._pure_train_sec()
 
     def _billed_train_sec(self) -> float:
         """Seconds the recipe's own schedule charged against its budget.
@@ -797,7 +832,7 @@ class TrainLoop:
         every training second, which is the pure-train clock.
         """
         billed = getattr(self.step, "elapsed_sec", None)
-        return self._train_elapsed() if billed is None else float(billed)
+        return self._pure_train_sec() if billed is None else float(billed)
 
     def _time_account(self, elapsed: float) -> list[str]:
         """Decompose wall time so no clock can be moved without showing.
@@ -814,12 +849,17 @@ class TrainLoop:
           fields: ``key=value`` strings for the RESULT line.
 
         """
-        # ``_train_elapsed`` already excludes eval -- the clock base is advanced
-        # past each one -- so eval is subtracted here exactly once, via its own
-        # term rather than again out of the residual.
+        # ``_pure_train_sec`` already excludes eval -- the clock base is
+        # advanced past each one -- so eval is subtracted here exactly once, via
+        # its own term rather than again out of the residual. It is the loop's
+        # own measurement, not ``_train_elapsed``: a budgeted subclass points
+        # that at the recipe's clock, which is the same quantity
+        # ``_billed_train_sec`` reads, so the difference would be identically
+        # zero and the excluded seconds would silently land in ``other``.
         train = self._billed_train_sec()
-        unbilled = self._train_elapsed() - train
-        other = elapsed - self._train_elapsed() - self._eval_sec
+        pure = self._pure_train_sec()
+        unbilled = pure - train
+        other = elapsed - pure - self._eval_sec
         return [
             f"train_sec={train:.1f}s",
             f"train_unbilled_sec={unbilled:.1f}s",
@@ -1158,28 +1198,32 @@ class TrainLoop:
         forwards the full payload (including any ``extras``), since the cadence
         eval never lands on the final step and forwards scalars only (unless
         ``eval_extras_every_eval`` opts cadence evals into the full payload).
-        ``num_steps_eval=inf`` disables eval entirely (cadence and final);
-        ``force`` overrides that gate for the ``eval_only`` path, whose single
-        eval is always the final one regardless of step or cadence.
+        ``num_steps_eval`` selects the regime (see its docstring); ``force``
+        overrides it for the ``eval_only`` path, whose single eval is always
+        the final one regardless of step or cadence.
 
         Args:
             is_final: This is the run's last eval; emit RESULT and write metrics.
             force: Run regardless of the step/cadence gate (``eval_only``).
 
         """
-        # eval_only (force) always runs. Otherwise num_steps_eval=inf disables
-        # eval entirely; within an enabled run, the final eval always fires and
-        # a cadence eval fires only on its step boundary (never step 0).
+        # eval_only (force) always runs. Otherwise the three regimes: never,
+        # final-only, or a cadence plus the final. A cadence eval never fires
+        # on step 0, nor twice on the step it already scored.
         if not force:
-            if not math.isfinite(self.num_steps_eval):
+            if self.num_steps_eval == 0 or not math.isfinite(self.num_steps_eval):
                 return
-            cadence_due = (
-                self.step.global_step != 0
-                and self.step.global_step % self.num_steps_eval == 0
-                and self.step.global_step != self._last_eval_step
-            )
-            if not is_final and not cadence_due:
-                return
+            if self.num_steps_eval < 0:
+                if not is_final:
+                    return
+            else:
+                cadence_due = (
+                    self.step.global_step != 0
+                    and self.step.global_step % self.num_steps_eval == 0
+                    and self.step.global_step != self._last_eval_step
+                )
+                if not is_final and not cadence_due:
+                    return
         eval_start = time.perf_counter()
         eval_metrics = self.eval()
         eval_time = time.perf_counter() - eval_start
@@ -1444,6 +1488,17 @@ class TrainLoop:
         # Restore RNG states
         if self.restore_rng_state and "rng" in state_dict:
             set_rng_state(state_dict["rng"])
+
+
+@runtime_checkable
+class _DeclaresDevice(Protocol):
+    """A config naming the device its component uses.
+
+    Both the runtime's and the placement strategy's, so the loop can hand the
+    first's answer to the second without either importing the other.
+    """
+
+    device: torch.device | str | None
 
 
 class _HasTimer(Protocol):

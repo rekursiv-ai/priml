@@ -36,6 +36,7 @@ import torch
 
 from priml.model.custom_types import ShardStyle
 from priml.runtime import global_device_mesh
+from priml.train.parallelism import place
 
 
 if TYPE_CHECKING:
@@ -97,8 +98,13 @@ class TensorParallelValidator(Protocol):
         ...
 
 
-def apply_tensor_parallel(model: nn.Module, mesh: DeviceMesh) -> nn.Module:
-    """Shard each submodule per its declared shard style over ``mesh['tp']``.
+def apply_tensor_parallel(
+    model: nn.Module,
+    mesh: DeviceMesh,
+    *,
+    mesh_dim: str = "tp",
+) -> nn.Module:
+    """Shard each submodule per its declared shard style over ``mesh[mesh_dim]``.
 
     Walks the module tree, reads every ``ShardAware`` submodule's ``shard``
     style, and applies the matching ``ParallelStyle`` via
@@ -107,14 +113,18 @@ def apply_tensor_parallel(model: nn.Module, mesh: DeviceMesh) -> nn.Module:
 
     Args:
       model: Module whose submodules declare ``shard`` styles.
-      mesh: Device mesh containing a ``tp`` dimension.
+      mesh: Device mesh containing ``mesh_dim``.
+      mesh_dim: Dimension to shard over. Taken from the caller rather than
+        fixed here, so the strategy's validated ``mesh_dim`` is the one that
+        acts -- naming a dimension and sharding another is how a mesh without
+        a ``tp`` axis came to raise on a config that validated cleanly.
 
     Returns:
-      model: The same module, sharded in place. A ``tp`` size of 1 is a
-        structural no-op (forward bit-for-bit unchanged).
+      model: The same module, sharded in place. A size of 1 along ``mesh_dim``
+        is a structural no-op (forward bit-for-bit unchanged).
 
     """
-    tp_mesh = mesh["tp"]
+    tp_mesh = mesh[mesh_dim]
     if tp_mesh.size() == 1:
         return model
     plan: dict[str, ParallelStyle] = {}
@@ -162,11 +172,15 @@ class TensorParallel:
             else torch.device(mesh.device_type)
         )
         self.mesh = mesh
+        self.mesh_dim = config.mesh_dim
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
-        model = model.to(self.device)
-        return apply_tensor_parallel(model, self.mesh)
+        # Placed before sharding, through the shared helper, so the plan sees
+        # real tensors -- and so this strategy cannot drift from the four in
+        # ``train/parallelism.py`` the way it did when it moved with ``.to``.
+        model = place(model, self.device)
+        return apply_tensor_parallel(model, self.mesh, mesh_dim=self.mesh_dim)
 
 
 def _shard_style(module: nn.Module) -> ParallelStyle | None:
