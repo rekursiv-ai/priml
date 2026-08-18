@@ -1440,6 +1440,70 @@ def test_result_line_accounts_for_every_second(
     assert accounted == pytest.approx(seconds["time"], abs=0.05)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a second device")
+def test_the_runtime_device_places_the_model() -> None:
+    """The runtime's device decides placement when nothing narrower is set.
+
+    One process names its device ONCE, on the runtime. A placement default
+    that probes the hardware itself answers a question the runtime already
+    answered, so a CPU-pinned run silently trains on the GPU -- and two fields
+    that resolve "which device" independently can only agree by luck.
+    """
+    config = _make_step_logging_loop_config()
+    config.runtime = SingleProcess.Config(device="cpu")
+    config.step.parallelism = NoParallel.Config()  # unset: defer to the runtime
+    loop = config.copy_tree().finalize().make()
+
+    assert loop.runtime.device == torch.device("cpu")
+    assert next(loop.step.model.parameters()).device == torch.device("cpu")
+
+
+def test_result_line_shows_seconds_a_budget_declined_to_charge(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warmup seconds land in ``train_unbilled_sec``, not in ``other_sec``.
+
+    A budgeted recipe reads its own clock, so the loop must decompose against
+    the clock it keeps itself -- otherwise the excluded seconds are invisible,
+    which is exactly the lever the account exists to expose: widening the
+    warmup would buy free training and move nothing the line reports.
+    """
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: True)
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    config = _make_step_logging_loop_config()
+    config.num_steps_eval = 100  # finite (RESULT fires) but no cadence eval in 2 steps
+    loop = config.make()
+    monkeypatch.setattr(
+        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=100.0)
+    )
+    # A budgeted step: it charges only part of the second its update took.
+    loop.step.elapsed_sec = 0.4
+    monkeypatch.setattr(loop, "_train_elapsed", lambda: loop.step.elapsed_sec)
+
+    def timed_eval() -> dict[str, Any]:
+        clock.now += 5.0
+        return {"score": 1.0}
+
+    monkeypatch.setattr(loop, "eval", timed_eval)
+
+    with caplog.at_level(logging.INFO, logger="priml.train.train_loop"):
+        loop.train()
+
+    result = next(r.message for r in caplog.records if r.message.startswith("RESULT:"))
+    parts = dict(
+        field.split("=", 1) for field in result.removeprefix("RESULT:").split(" | ")
+    )
+    seconds = {k: float(v.removesuffix("s")) for k, v in parts.items() if k != "steps"}
+    # Two 1s steps after the 100s compile; the step charged 0.4s of them.
+    assert seconds["train_sec"] == pytest.approx(0.4)
+    assert seconds["train_unbilled_sec"] == pytest.approx(0.6)
+    assert seconds["eval_sec"] == pytest.approx(5.0)
+    assert seconds["other_sec"] == pytest.approx(100.0)
+    assert seconds["time"] == pytest.approx(106.0)
+
+
 def test_per_step_loss_logged_on_rank_zero(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -2225,18 +2289,20 @@ def test_phase_timer_summary_logs_before_final_eval(
     assert events[-2:] == ["summary", "final_eval"]
 
 
-def test_eval_disabled_when_num_steps_eval_infinite() -> None:
-    """``num_steps_eval=inf`` skips every eval, including the final one.
+@pytest.mark.parametrize("never", [float("inf"), 0])
+def test_eval_disabled_when_num_steps_eval_says_never(never: float) -> None:
+    """``inf`` and ``0`` both skip every eval, including the final one.
 
     Throughput/profiling runs care only about train-step timing; an eval (the
     whole eval set) is wasted work that holds the GPU long after the last train
-    step. With the cadence infinite, no eval scope runs at all.
+    step. ``0`` is the readable spelling and used to divide by zero in the
+    cadence check; ``inf`` is the older one and stays valid.
     """
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
         config.checkpointing = None
         config.max_steps = 2
-        config.num_steps_eval = float("inf")
+        config.num_steps_eval = never
         config.eval_every_epoch = False
         loop = config.make()
 
@@ -2244,6 +2310,28 @@ def test_eval_disabled_when_num_steps_eval_infinite() -> None:
 
     dataset = cast(_ScopedEvalDataset, loop.dataset)
     assert dataset.eval_scopes == []
+
+
+def test_num_steps_eval_minus_one_runs_the_final_eval_only() -> None:
+    """``-1`` scores once, at the end, with no mid-run cadence.
+
+    The third regime, because "when to score" is two questions. Before it
+    existed this was written as a cadence too large to fire -- ``100_000``,
+    ``1_000_000_000``, ``max_steps`` -- which breaks silently the moment a run
+    grows past the number somebody guessed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
+        config.checkpointing = None
+        config.max_steps = 6
+        config.num_steps_eval = -1
+        config.eval_every_epoch = False
+        loop = config.make()
+
+        loop.train()
+
+    dataset = cast(_ScopedEvalDataset, loop.dataset)
+    assert len(dataset.eval_scopes) == 1
 
 
 def test_final_post_training_eval_logs_to_tracker() -> None:

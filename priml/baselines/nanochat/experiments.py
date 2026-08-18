@@ -24,7 +24,7 @@ fork for ordinary work: the same recipe, and portable to any GPU.
 Prepare the data once, then launch::
 
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data
-    uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp000
+    time CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001 --override checkpointing.resume=False
 """
 
 from __future__ import annotations
@@ -161,15 +161,14 @@ def exp000() -> NanoChatLoop.Config:
     # recipe being reproduced rather than a deviation from one: exp000 is the
     # statement, and every other rung is a diff against it.
     block = cfg.step.model.template
-    attention = block.attn
-    assert isinstance(attention, ValueGatedAttention.Config)
-    attention.kernel = Flash3Attention.Config()
+    assert isinstance(block.attn, ValueGatedAttention.Config)
+    block.attn.kernel = Flash3Attention.Config()
 
     # The reference normalizes with a bare ``F.rms_norm(x, shape)``, which
     # leaves eps to torch -- the dtype's own epsilon, ~1.19e-7 in float32.
     # priml's RMSNorm defaults to 1e-6, an order of magnitude larger, and that
     # difference reaches the residual stream at every sublayer of every layer.
-    for norm in (block.norm1, block.norm2, attention.norm_qk):
+    for norm in (block.norm1, block.norm2, block.attn.norm_qk):
         assert isinstance(norm, RMSNorm.Config)
         norm.eps = torch.finfo(torch.float32).eps
 
@@ -188,7 +187,7 @@ def exp000() -> NanoChatLoop.Config:
 
     cfg.step.model.channels_in = 512
     cfg.step.model.num_layers = 8
-    attention.window_pattern = "SSSL"
+    block.attn.window_pattern = "SSSL"
     # Alternating layers. A stride rather than the indices it implies, so a
     # fork that changes the depth still gets alternating layers rather than
     # indices computed against a stack that no longer exists.
@@ -201,11 +200,19 @@ def exp000() -> NanoChatLoop.Config:
     cfg.max_time_kind = "train"
 
     cfg.metrics["val"] = BitsPerByte.Config()
-    cfg.num_steps_eval = 200
-    cfg.num_steps_log = 50
+    # One eval, at the end, as the reference does (train.py:611, after its
+    # loop). A mid-run eval is not charged to the budget, so it would not cost
+    # steps -- but it holds the GPU for ~23 (5090) seconds each.
+    cfg.num_steps_eval = -1
+
+    # Print every step.
+    cfg.num_steps_log = 1
+    cfg.early_train_log_steps = 0
+
     # Every row is a full context by construction, so a pass over the data is
     # not a meaningful boundary -- the budget is what ends the run.
     cfg.eval_every_epoch = False
+
     # Pinned, not left to the loop's ``None`` default, which draws from OS
     # entropy: two runs of this factory would then differ in initialization
     # before any code changed, and a comparison between them would measure the
@@ -213,10 +220,12 @@ def exp000() -> NanoChatLoop.Config:
     # order is the corpus's own, packed deterministically and never shuffled.
     cfg.seed = 42
     cfg.runtime = SingleProcess.Config()
+
     # TF32 matmuls. The reference recipe's throughput assumes them, and a
     # run left at torch's default reduces in a different order, so a score
     # measured here would not be comparable to one measured there.
     cfg.runtime.float32_matmul_precision = "high"
+
     return cfg
 
 
@@ -248,9 +257,19 @@ def exp001() -> NanoChatLoop.Config:
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
-    attention = cfg.step.model.template.attn
-    assert isinstance(attention, ValueGatedAttention.Config)
-    attention.kernel = PartialConfig(sdpa_attention)
+
+    # The following are tuned for rtx5090.
+    block = cfg.step.model.template
+    assert isinstance(block.attn, ValueGatedAttention.Config)
+    block.attn.kernel = PartialConfig(sdpa_attention)
+
+    # Karpathy uses 32 but we can get 15.7% more speed @ 64.
+    # Theoretically up to 76.
+    # cfg.step.rows_per_pass = 64
+    # Karpathy uses 128 but we can actually fit 512.
+    # cfg.dataset.eval_batch_size = 512
+    # However it doesn't seem to affect performance...dataloader bottleneck?
+
     return cfg
 
 

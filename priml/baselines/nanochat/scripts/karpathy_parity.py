@@ -33,9 +33,10 @@ Examples:
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, override
+from typing import Any, cast, override
 
 import argparse
 import ast
@@ -53,6 +54,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch
 
 from priml.baselines.nanochat.experiments import exp001
+from priml.math.seed import RngState, get_rng_state, set_rng_state
 from priml.model.value_gated_attention import sdpa_attention
 from priml.train.parallelism import NoParallel
 
@@ -139,6 +141,7 @@ def build_theirs(
     corpus: Path,
     loader: dict[str, Any],
     rows: int,
+    rng: dict[str, Any],
 ) -> tuple[nn.Module, torch.optim.Optimizer, types.ModuleType]:
     """The reference's own model and optimizer, built by its own module scope.
 
@@ -155,6 +158,8 @@ def build_theirs(
       corpus: Prepared shards and tokenizer, read by their loader.
       loader: Filled with their built dataloader under ``"train"``.
       rows: Rows per pass; theirs is 128, which two resident models cannot hold.
+      rng: Filled with the RNG state their module scope seeded, under
+        ``"state"``, so ours can draw from the same one.
 
     Returns:
       model: Their ``GPT``.
@@ -163,7 +168,7 @@ def build_theirs(
         applies exactly as their own training loop does.
 
     """
-    upstream = load_upstream(root, corpus=corpus, loader=loader, rows=rows)
+    upstream = load_upstream(root, corpus=corpus, loader=loader, rows=rows, rng=rng)
     print(f"upstream: {upstream.__file__}")
     print(f"kernel:   {upstream.fa3.flash_attn_func.__qualname__}")
     # The module BENEATH their ``torch.compile`` wrapper (train.py:506). Both
@@ -215,6 +220,7 @@ def load_upstream(
     corpus: Path,
     loader: dict[str, Any],
     rows: int,
+    rng: dict[str, Any],
 ) -> types.ModuleType:
     """Import their ``train.py`` as itself, with its training loop cut short.
 
@@ -235,6 +241,8 @@ def load_upstream(
       corpus: Prepared shards and tokenizer, read by their loader.
       loader: Filled with their built dataloader under ``"train"``.
       rows: Rows per pass; theirs is 128, which two resident models cannot hold.
+      rng: Filled with the RNG state their module scope seeded, under
+        ``"state"``.
 
     Returns:
       module: Their ``train`` module.
@@ -275,7 +283,10 @@ def load_upstream(
     # module through ``sys.modules``, which holds nothing for a module built
     # here, and fails on a ``None`` before their first class exists.
     sys.modules["train"] = module
-    with contextlib.suppress(_StopModuleScopeError):
+    # Captured where THEY seed (train.py:456-457), which is the state their
+    # model is about to draw from. Ours is built from this same state, so the
+    # two initializations compare as values rather than as spreads.
+    with _capture_rng_after_seeding(rng), contextlib.suppress(_StopModuleScopeError):
         exec(compile(source, str(root / "train.py"), "exec"), module.__dict__)  # noqa: S102 -- their own script, from the pinned clone
     for required in ("GPT", "GPTConfig", "model", "optimizer"):
         if not hasattr(module, required):
@@ -283,6 +294,44 @@ def load_upstream(
     if "train" not in loader:
         raise RuntimeError("train.py never asked for a dataloader")
     return module
+
+
+@contextlib.contextmanager
+def _capture_rng_after_seeding(rng: dict[str, Any]) -> Generator[None]:
+    """Record the RNG state their module scope seeds, before it draws.
+
+    Their ``torch.manual_seed(42)`` (``train.py:456``) is followed by the CUDA
+    seed and then by every draw their model makes. Wrapping the CUDA call is
+    what puts the capture between the two: after both seeds are set, and before
+    ``GPT(config)`` consumes any of it.
+
+    Their init draws on the CUDA generator -- the model is materialized on the
+    device (``train.py:482``) before ``init_weights`` runs -- so that generator
+    is the one the comparison must rewind. ``torch.cuda.manual_seed`` does NOT
+    initialize CUDA, and ``get_rng_state`` omits the CUDA entries until it is
+    (``seed.py:353``), so the context is forced up first. Without it the capture
+    holds CPU state only, the restore leaves the CUDA generator wherever their
+    draws left it, and the init comparison reports differences it manufactured.
+
+    Args:
+      rng: Filled with the captured state under ``"state"``.
+
+    Yields:
+      context: Block in which their seeding is observed.
+
+    """
+    real_cuda_seed = torch.cuda.manual_seed
+
+    def capture(seed: int) -> None:
+        torch.cuda.init()
+        real_cuda_seed(seed)
+        rng.setdefault("state", get_rng_state())
+
+    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- observes their seeding; restored below
+    try:
+        yield
+    finally:
+        torch.cuda.manual_seed = real_cuda_seed
 
 
 def build_ours(*, device: str) -> Any:
@@ -376,71 +425,12 @@ def _progress_at(index: int, *, warmup: int, budget_steps: int) -> float:
     return min(billed / budget_steps, 1.0)
 
 
-def compare_init(
-    theirs: nn.Module,
-    ours: nn.Module,
-    mapping: dict[str, str],
-) -> list[str]:
-    """Compare the two INITIALIZATIONS, before either is overwritten.
-
-    This has to run before :func:`copy_weights`, which writes their draws into
-    ours so every later step compares the recipe rather than the RNG. That copy
-    also makes the rest of this script structurally blind to an init bug: it
-    erased a token table drawn 1/sqrt(2) too narrow, and five steps of
-    bit-identical output said nothing about it.
-
-    Draws are random, so this compares DISTRIBUTIONS rather than values: the
-    per-tensor standard deviation, at a tolerance loose enough for sampling
-    noise on the smallest tensor here and far tighter than any real init
-    mistake, which lands at a ratio like 0.707 or 0.88 rather than 1.001.
-    A tensor both sides initialize to a constant is compared exactly, since
-    there is nothing random about it.
-
-    Args:
-      theirs: The reference model, freshly initialized.
-      ours: This package's model, freshly initialized.
-      mapping: Our parameter names to theirs.
-
-    Returns:
-      problems: One description per tensor whose spread disagrees.
-
-    """
-    src = dict(theirs.named_parameters())
-    dst = dict(ours.named_parameters())
-    problems: list[str] = []
-    for our_name, their_name in mapping.items():
-        a = src[their_name].detach().float()
-        b = dst[our_name].detach().float()
-        if a.shape != b.shape:
-            problems.append(
-                f"init {our_name}: SHAPE {tuple(a.shape)} vs {tuple(b.shape)}"
-            )
-            continue
-        # A constant tensor (the per-layer scalars, a zeroed projection) has no
-        # spread to compare, and its std is 0 on both sides -- which every
-        # ratio test passes vacuously. Compared by value instead.
-        if not a.std() and not b.std():
-            if not torch.equal(a, b):
-                problems.append(
-                    f"init {our_name}: CONSTANT {a.flatten()[0]:.6g} vs "
-                    f"{b.flatten()[0]:.6g}",
-                )
-            continue
-        ratio = float(b.std() / a.std()) if a.std() else float("inf")
-        if abs(ratio - 1.0) > 0.05:
-            problems.append(
-                f"init {our_name}: STD {float(a.std()):.6g} vs "
-                f"{float(b.std()):.6g} (ours/theirs = {ratio:.4f})",
-            )
-    return problems
-
-
 def copy_weights(theirs: nn.Module, ours: nn.Module, mapping: dict[str, str]) -> None:
     """Write the reference's initialization into ours.
 
     Every later comparison then measures the recipe rather than two RNG
-    streams. It also destroys our own draws, so :func:`compare_init` must have
-    run first -- an init bug is invisible from here onward.
+    streams. It also destroys our own draws, so the value comparison in
+    ``main`` must have run first -- an init bug is invisible from here on.
 
     Args:
       theirs: The reference model.
@@ -575,32 +565,36 @@ def main() -> int:
     args = _parse_args()
     root = clone_upstream(args.clone)
 
-    ours = build_ours(device=args.device)
-    model = ours.config.model
-
-    # Their script sizes its model from its own tokenizer, reading the prepared
-    # corpus, and builds its own packer over the same shards. Every number on
-    # their side stays theirs; the rows below are the ones their loader emits.
+    # THEIRS first, and the RNG state captured at the moment their module scope
+    # has seeded (train.py:456-457) and is about to draw. Ours is then built
+    # from that same state, so the two initializations are compared as VALUES
+    # rather than as distributions -- a draw-order or a fan-in difference shows
+    # up here instead of hiding behind a matching standard deviation.
     their_loader: dict[str, Any] = {}
     theirs, their_optimizer, upstream = build_theirs(
         root,
         corpus=args.corpus,
         loader=their_loader,
         rows=args.rows,
+        rng=(seeded := {}),
     )
     train_loader = their_loader["train"]
+
+    set_rng_state(cast("RngState", seeded["state"]))
+    ours = build_ours(device=args.device)
+    model = ours.config.model
     mapping = name_map(theirs, layers=model.num_layers)
 
     # BEFORE the copy: it overwrites our draws with theirs, so this is the only
     # point at which our initialization still exists to be checked.
-    init_problems = compare_init(theirs, ours.model, mapping)
-    print(f"\n[0] init distributions: {len(init_problems)} differ")
-    for line in init_problems:
+    init_problems = compare_all(theirs, ours.model, mapping, grads=False, tag="init")
+    print(f"\n[0] init from one RNG state: {len(init_problems)} differ")
+    for line in init_problems[:8]:
         print(f"    {line}")
 
     copy_weights(theirs, ours.model, mapping)
 
-    problems = compare_all(theirs, ours.model, mapping, grads=False, tag="init")
+    problems = compare_all(theirs, ours.model, mapping, grads=False, tag="copied")
     problems = init_problems + problems
     print(f"[0] init weights copied: {len(problems) - len(init_problems)} differ")
     for line in problems[len(init_problems) :]:

@@ -78,9 +78,9 @@ RESULT: {
 ```
 
 See Also:
-  CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001 --override checkpointing.resume=False
-  # 26-08-17 13:57:43.628488 | INFO | priml.train.train_loop | _maybe_eval:1205 | RESULT: steps=191 | time=350.4s | train_sec=300.6s | train_unbilled_sec=0.0s | eval_sec=24.8s | other_sec=24.9s | mean_batch_time=0.3083 | total_loss=3.2651 | val_bpb=1.1665
-
+  CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001 --override checkpointing.resume=False  --override cfg.step.rows_per_pass=64
+  # 26-08-17 20:40:26.175900 | INFO | priml.train.train_loop | _maybe_eval:1249 | RESULT: steps=221 | time=345.1s | train_sec=300.0s | train_unbilled_sec=17.7s | eval_sec=24.9s | other_sec=2.5s | mean_batch_time=0.3088 | total_loss=3.1983 | val_bpb=1.1426
+  # 26-08-17 20:40:26.176222 | INFO | priml.launch | main:133 | Total program time: 347.2s
 
 '''
 # fmt: on

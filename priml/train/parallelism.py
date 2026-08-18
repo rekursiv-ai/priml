@@ -3,20 +3,23 @@
 A single ``ParallelStrategy`` protocol owns the full placement lifecycle for a
 module, applied in a fixed order inside ``__call__``:
 
-  1. Device assignment -- resolve ``self.device``.
-  2. Shard application -- ``fully_shard`` / ``replicate`` / per-block sharding.
-  3. Meta -> real materialization -- ``to_empty`` for any meta parameters.
-  4. Post-shard ``reset_parameters`` -- re-initialize real tensors *after*
-     sharding so shard-aware init is correct.
+  1. Shard application -- ``fully_shard`` / ``replicate`` / per-block sharding.
+  2. Placement -- :func:`place`, which materializes a meta module onto
+     ``self.device`` or moves an already-allocated one there.
 
-Steps 3-4 run only when the incoming module carries meta parameters (lazy
-``device_init="meta"`` construction). A module already on a real device skips
-them, so the single-device forward stays bit-for-bit identical to a plain
-``model.to(device)``.
+Placement runs AFTER sharding in the sharded strategies, so each rank
+allocates and initializes only its own shard through a DTensor-aware
+``reset_parameters``. ``NoParallel`` has no shard step to order against.
 
-Tensor- and pipeline-parallel strategies are intentionally absent: no model in
-``lib`` implements a parallel plan, so advertising them here would be a dead
-stub. They live under ``experimental/`` until a model supports them.
+:func:`place` is the one entry point for step 2 because its two halves are
+mutually exclusive and each is wrong for the other's input: ``Module.to``
+cannot copy out of meta storage, and ``to_empty`` would discard an eager
+module's weights. Choosing per strategy is what let four of them skip eager
+placement while a fifth skipped materialization.
+
+Tensor parallelism lives beside this module in ``train/tensor_parallel.py``:
+its plan is read off the model's own ``shard`` declarations rather than
+configured here. Pipeline parallelism has no strategy yet.
 """
 
 from __future__ import annotations
@@ -53,6 +56,9 @@ __all__ = [
     "HybridSharded",
     "NoParallel",
     "RecursiveSharded",
+    "materialize_meta",
+    "named_meta_state",
+    "place",
 ]
 
 
@@ -63,18 +69,18 @@ class NoParallel:
     """
 
     class Config(Fig["NoParallel"]):
-        device: torch.device | str | None = "auto"
-        """Target device ("auto" = best available, None = torch default)."""
+        device: torch.device | str | None = None
+        """Target device; ``None`` takes the runtime's.
+
+        Left unset the loop injects ``runtime.device`` at finalize, so ONE
+        field names the device a single-process run uses. Set it to override
+        that for this model alone (a CPU reference beside a GPU run)."""
 
     def __init__(self, config: Config) -> None:
         self.device = get_device(config.device)
 
     def __call__(self, model: nn.Module) -> nn.Module:
-        # Meta path: materialize + reset (no sharding to interleave).
-        if any(t.is_meta for _, t in _named_meta_state(model)):
-            _materialize_meta(model, self.device)
-            return model
-        return model.to(self.device)
+        return place(model, self.device)
 
 
 class DataParallel:
@@ -121,7 +127,7 @@ class DataParallel:
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
-        _materialize_meta(model, self.device)
+        model = place(model, self.device)
         replicate(
             model,
             process_group=self.process_group,
@@ -186,9 +192,9 @@ class FullySharded:
             mp_policy=self.mp_policy,
             reshard_after_forward=self.reshard_after_forward,
         )
-        # Materialize + reset AFTER sharding so each rank initializes only its
-        # local shard with the correct (DTensor-aware) parameter init.
-        _materialize_meta(model, self.device)
+        # Placed AFTER sharding so each rank initializes only its local shard
+        # with the correct (DTensor-aware) parameter init.
+        model = place(model, self.device)
         logger.info(
             f"Applied FullySharded: mesh_dim={self.config.mesh_dim}, "
             f"reshard_after_forward={self.reshard_after_forward}",
@@ -258,7 +264,7 @@ class HybridSharded:
             mp_policy=self.mp_policy,
             reshard_after_forward=self.reshard_after_forward,
         )
-        _materialize_meta(model, self.device)
+        model = place(model, self.device)
         logger.info(
             f"Applied HybridSharded: replicate_dim={self.config.replicate_dim}, "
             f"shard_dim={self.config.shard_dim}, mesh_shape={self.mesh.shape}",
@@ -325,15 +331,22 @@ class RecursiveSharded:
         # block running under a reduced-precision policy.
         matched_count = 0
         for child in reversed(list(model.modules())):
-            if isinstance(child, (*self.module_types, _BatchNorm)):
-                _shard(
-                    child,
-                    mesh=self.mesh,
-                    mp_policy=self.mp_policy,
-                    reshard_after_forward=self.reshard_after_forward,
-                )
-                if isinstance(child, self.module_types):
-                    matched_count += 1
+            if not isinstance(child, (*self.module_types, _BatchNorm)):
+                continue
+            if isinstance(child, self.module_types):
+                matched_count += 1
+            # The root is sharded once, below, with its own
+            # ``reshard_after_forward``. It is counted above rather than
+            # skipped outright: a root that is itself a matched type is still
+            # a match, and composable FSDP refuses a second application.
+            if child is model:
+                continue
+            _shard(
+                child,
+                mesh=self.mesh,
+                mp_policy=self.mp_policy,
+                reshard_after_forward=self.reshard_after_forward,
+            )
 
         if matched_count == 0:
             raise ValueError(
@@ -349,7 +362,7 @@ class RecursiveSharded:
             reshard_after_forward=False,
         )
 
-        _materialize_meta(model, self.device)
+        model = place(model, self.device)
         logger.info(
             f"Applied RecursiveSharded: sharded {matched_count} modules matching "
             f"{[t.__name__ for t in self.module_types]}, mesh_dim={self.config.mesh_dim}",
@@ -357,7 +370,35 @@ class RecursiveSharded:
         return model
 
 
-def _named_meta_state(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+def place(model: nn.Module, device: torch.device) -> nn.Module:
+    """Put ``model`` on ``device``, by materializing it or by moving it.
+
+    The single answer to "get this module onto its device", because the two
+    ways of doing it are mutually exclusive and each is wrong for the other's
+    input: ``Module.to`` cannot copy out of meta storage (torch raises and
+    names ``to_empty``), and ``to_empty`` would discard the weights an eager
+    module already holds. Strategies call this instead of choosing, so a
+    strategy cannot forget the case it does not use -- which is how the
+    distributed four came to skip eager placement entirely while the
+    single-device one skipped materialization.
+
+    Args:
+      model: Module to place, meta-constructed or already allocated.
+      device: Target device.
+
+    Returns:
+      model: The placed module. Materialization is in-place, so the return is
+        the same object there; ``Module.to`` is also in-place for parameters,
+        and the return keeps one calling shape for both.
+
+    """
+    if any(t.is_meta for _, t in named_meta_state(model)):
+        materialize_meta(model, device)
+        return model
+    return model.to(device)
+
+
+def named_meta_state(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
     """Return every named parameter and buffer (the full materializable state).
 
     Both parameters and buffers can live on the meta device after lazy
@@ -367,7 +408,7 @@ def _named_meta_state(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
     return [*model.named_parameters(), *model.named_buffers()]
 
 
-def _materialize_meta(model: nn.Module, device: torch.device) -> None:
+def materialize_meta(model: nn.Module, device: torch.device) -> None:
     """Materialize a meta module onto ``device`` and re-init its parameters.
 
     No-op when the module has no meta state. Otherwise allocates real
@@ -389,7 +430,7 @@ def _materialize_meta(model: nn.Module, device: torch.device) -> None:
       device: Target device for real storage.
 
     """
-    meta_tensors = [t for _, t in _named_meta_state(model) if t.is_meta]
+    meta_tensors = [t for _, t in named_meta_state(model) if t.is_meta]
     if not meta_tensors:
         return
     model.to_empty(device=device)
@@ -404,7 +445,7 @@ def _materialize_meta(model: nn.Module, device: torch.device) -> None:
     # cannot hold NaN, so they are skipped -- ``to_empty`` zero-fills them and
     # there is no garbage-vs-init signal to check.
     with torch.no_grad():
-        for _, tensor in _named_meta_state(model):
+        for _, tensor in named_meta_state(model):
             if tensor.is_floating_point():
                 tensor.fill_(float("nan"))
     getattr(model, "reset_parameters", lambda: None)()
@@ -412,7 +453,7 @@ def _materialize_meta(model: nn.Module, device: torch.device) -> None:
         torch.distributed.barrier()
     uninitialized = [
         name
-        for name, tensor in _named_meta_state(model)
+        for name, tensor in named_meta_state(model)
         if tensor.is_floating_point() and torch.isnan(tensor).any()
     ]
     if uninitialized:

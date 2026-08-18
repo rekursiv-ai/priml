@@ -104,7 +104,7 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
     A param or float buffer left NaN means a module owns state that
     ``reset_parameters`` does not initialize -- so it is not the complete single
     source of truth and would ship ``to_empty`` garbage on the meta path. This
-    mirrors the production ``_materialize_meta`` audit, which poisons and checks
+    mirrors the production ``materialize_meta`` audit, which poisons and checks
     params AND float buffers (integer buffers cannot hold NaN and are skipped).
     """
     model = _BUILDERS[name]()
