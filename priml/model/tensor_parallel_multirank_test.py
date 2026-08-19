@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
 
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.network_huggingface
 
 
 def _swiglu() -> tuple[nn.Module, torch.Tensor]:

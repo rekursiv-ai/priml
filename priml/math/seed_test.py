@@ -70,7 +70,7 @@ def test_set_seed_reproducibility():
     assert py_rand1 == py_rand2
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_set_seed_reproducibility_on_cuda() -> None:
     """The CPU reproducibility check above misses the case readers
     actually rely on -- CUDA RNG reproducibility. Cover at least the
@@ -309,7 +309,7 @@ def test_set_seed_distributed_raises_on_nccl_without_cuda(
         set_seed_distributed(seed=42, mesh=None, salt_by_rank=False)
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_set_seed_distributed_uses_cuda_tensor_on_nccl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -367,7 +367,7 @@ def test_set_seed_distributed_rank_n_does_not_use_user_seed_arg(
     assert local_seed == 100
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_set_seed_local_seeds_each_visible_cuda_device() -> None:
     """``set_seed_local`` must seed device i with ``salt("cuda", i, seed)``.
 

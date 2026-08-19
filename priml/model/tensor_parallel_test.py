@@ -116,7 +116,7 @@ def _ensemble_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
         runtime._device_mesh = None
 
 
-@pytest.mark.integration
+@pytest.mark.network_huggingface
 def test_ensemble_linear_sharded_equals_dense_tp2(
     warm_pools: WarmPoolGetter,
 ) -> None:
@@ -128,7 +128,7 @@ def test_ensemble_linear_sharded_equals_dense_tp2(
     assert results == {"rank_0": "ok", "rank_1": "ok"}, results
 
 
-@pytest.mark.integration
+@pytest.mark.network_huggingface
 def test_meta_built_model_materializes_and_shards_tp2(
     warm_pools: WarmPoolGetter,
 ) -> None:

@@ -25,7 +25,7 @@ from priml.model.mla import MultiHeadLatentAttention
 from priml.model.rope import RoPE
 
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.network_huggingface
 
 
 def _reference_mla_forward(

@@ -248,7 +248,7 @@ def _muon_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
         runtime._device_mesh = None
 
 
-@pytest.mark.integration
+@pytest.mark.cli_python_subprocess
 def test_muon_sharded_matches_replicated_multirank(
     warm_pools: WarmPoolGetter,
 ) -> None:
