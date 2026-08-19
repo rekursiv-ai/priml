@@ -762,7 +762,7 @@ def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_async_multirank_does_not_deadlock(warm_pools: WarmPoolGetter) -> None:
     """Async save+prune+load across 2 ranks must not desync barriers.
 
@@ -847,7 +847,7 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_sharded_resume_remaps_or_reshards(warm_pools: WarmPoolGetter) -> None:
     """Sharded resume must restore model AND optimizer DTensors correctly."""
     pool = warm_pools({"dp": 2})
@@ -893,7 +893,7 @@ def _world1_load_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> Non
         (Path(result_dir) / f"load_rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_world_size_change_resume(warm_pools: WarmPoolGetter) -> None:
     """A world=2 checkpoint must reshard correctly when loaded at world=1."""
     save_pool = warm_pools({"dp": 2})

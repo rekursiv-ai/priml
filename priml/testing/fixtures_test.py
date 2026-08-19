@@ -32,7 +32,7 @@ def test_get_device_prefers_cuda():
         assert device.type == "cpu"
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_cleanup_cuda_with_cuda():
     """Test cleanup_cuda when CUDA is available."""
     if not torch.cuda.is_available():
@@ -79,7 +79,7 @@ def test_compiler_isolation_skips_reset_when_dynamo_is_unimported(
     assert resets == []
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_compiler_isolation_resets_cleanly_with_warnings_as_errors() -> None:
     """reset() imports cudagraph_trees only under CUDA; that path must stay clean."""
     with torch_compiler_isolation(), warnings.catch_warnings():
@@ -87,7 +87,7 @@ def test_compiler_isolation_resets_cleanly_with_warnings_as_errors() -> None:
         torch._dynamo.reset()
 
 
-@pytest.mark.slow
+@pytest.mark.compute_torch_compile
 def test_compiler_isolation_compiles() -> None:
     """The wrapped block can actually compile and run a graph."""
 

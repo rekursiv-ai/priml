@@ -79,7 +79,7 @@ Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
   matmul/softmax/reduction lands on a different last bit on a different host
   (AVX2 vs AVX-512, thread count, AMD vs Intel), and the golden minted on one
   host fails ``torch.equal`` on another. Such a test is typically
-  ``@pytest.mark.integration``, so it is deselected by default and can pass on
+  ``@pytest.mark.cli_python_subprocess``, so it is deselected by default and can pass on
   the author's Intel box while silently never running on the AMD host where it
   would fail -- the failure only surfaces when someone forces integration marks
   on a different machine.

@@ -506,7 +506,7 @@ def _uniform_count_worker(result_dir_str: str, mesh: Any) -> None:
         runtime._device_mesh = None
 
 
-@pytest.mark.integration
+@pytest.mark.cli_python_subprocess
 def test_assert_uniform_microbatch_count_across_ranks(
     warm_pools: WarmPoolGetter,
 ) -> None:

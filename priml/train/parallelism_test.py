@@ -292,7 +292,7 @@ def _fsdp_materialize_worker(result_dir: str, mesh: DeviceMesh) -> None:
         runtime._device_mesh = None
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_fully_sharded_materializes_meta_model_multirank(
     warm_pools: WarmPoolGetter,
 ) -> None:
@@ -386,7 +386,7 @@ def _bn_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
         runtime._device_mesh = None
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_recursive_sharded_shards_batchnorm_multirank(
     warm_pools: WarmPoolGetter,
 ) -> None:

@@ -25,7 +25,7 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer import TransformerBlock
 
 
-pytestmark = pytest.mark.slow
+pytestmark = pytest.mark.compute_torch_compile
 
 
 def _tiny_hf_config() -> dict[str, Any]:

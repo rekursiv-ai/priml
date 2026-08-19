@@ -91,7 +91,7 @@ def _sentinel_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
     (Path(result_dir_str) / f"rank_{mesh.get_rank()}").write_text("done")
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_call_blocks_until_worker_finishes() -> None:
     """``pool(fn)`` returns only after the worker has finished ``fn``."""
     with (
@@ -178,7 +178,7 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     assert len(respawns) == WorkerPool._DISPATCH_ATTEMPTS - 1
 
 
-@pytest.mark.integration
+@pytest.mark.compute_distributed
 def test_enter_recovers_from_a_port_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

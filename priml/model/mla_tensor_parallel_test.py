@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
 
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.network_huggingface
 
 
 def _mla(*, q_lora_rank: int | None = None) -> tuple[nn.Module, torch.Tensor]:

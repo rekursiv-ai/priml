@@ -208,7 +208,7 @@ def test_an_invalid_setting_is_refused(field: str, value: object) -> None:
         _config(**{field: value}).make()
 
 
-@pytest.mark.slow
+@pytest.mark.compute_jax_jit
 def test_compiling_agrees_with_eager_to_float32_rounding() -> None:
     """Compiling changes the last bits, and nothing above them.
 

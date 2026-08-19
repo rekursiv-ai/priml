@@ -235,7 +235,7 @@ def test_a_degenerate_tile_size_is_refused(sprite_dir: Path) -> None:
         Renderer(block_pixels=0, asset_dir=sprite_dir)
 
 
-@pytest.mark.integration
+@pytest.mark.cli_python_subprocess
 def test_the_real_sprites_draw() -> None:
     """The genuine assets download, load, and produce a plausible frame.
 

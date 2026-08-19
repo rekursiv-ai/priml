@@ -48,7 +48,7 @@ def test_adam_atan2_matches_reference_bias_corrections() -> None:
     assert "exp_avg_sq" in state
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_adam_atan2_matches_external_package_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

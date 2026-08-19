@@ -77,7 +77,7 @@ def test_explicit_dtype_override():
     assert result[1].dtype == torch.float32
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_device_parameter():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")

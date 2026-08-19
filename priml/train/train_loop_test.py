@@ -2524,7 +2524,7 @@ def _collective_skip_worker(result_dir: str, mesh: DeviceMesh) -> None:
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
-@pytest.mark.integration
+@pytest.mark.cli_python_subprocess
 def test_force_checkpoint_skip_is_collective(warm_pools: WarmPoolGetter) -> None:
     """F5: the force-checkpoint skip decision must be collective, not per-rank.
 
@@ -2825,7 +2825,7 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     assert "Timeout (" not in capfd.readouterr().err
 
 
-@pytest.mark.slow
+@pytest.mark.compute_torch_compile
 def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
     capfd: pytest.CaptureFixture[str],
 ) -> None:

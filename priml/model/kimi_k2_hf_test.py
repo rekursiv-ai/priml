@@ -28,7 +28,7 @@ import torch
 from priml.model.kimi_k2 import KimiK2, remap_hf_state_dict
 
 
-pytestmark = [pytest.mark.integration]
+pytestmark = pytest.mark.network_huggingface
 
 
 def _install_transformers_compat_shims() -> None:
