@@ -47,6 +47,8 @@ from priml.model.value_gated_attention import (
     sdpa_attention,
 )
 from priml.runtime import SingleProcess
+from priml.train.parallelism import NoParallel
+from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
 from priml.train.train_loop import TrainLoop
 
 
@@ -219,8 +221,11 @@ def exp000() -> NanoChatLoop.Config:
     # draw rather than the recipe. It seeds initialization alone -- the data
     # order is the corpus's own, packed deterministically and never shuffled.
     cfg.seed = 42
+    cfg.step.parallelism = NoParallel.Config()
+    cfg.step.parallelism.device = "cuda"
+    cfg.dataset.device = "cuda"
     cfg.runtime = SingleProcess.Config()
-
+    cfg.runtime.device = "cuda"
     # TF32 matmuls. The reference recipe's throughput assumes them, and a
     # run left at torch's default reduces in a different order, so a score
     # measured here would not be comparable to one measured there.
@@ -234,10 +239,11 @@ def exp001() -> NanoChatLoop.Config:
 
     The one deviation is the backend. ``exp000`` pins FlashAttention-3, which
     builds only for SM90, so it refuses to construct anywhere else; this rung
-    takes whatever torch dispatches instead and therefore runs everywhere.
-    Fork THIS for ordinary work -- a rung that reproduces a published number
-    has to refuse a machine that cannot reproduce it, which is the wrong
-    behaviour for everything except that one job.
+    takes the CUDA backend torch dispatches for the allocated GPU and therefore
+    runs across supported CUDA architectures. Fork THIS for ordinary work -- a
+    rung that reproduces a published number has to refuse a GPU that cannot
+    reproduce it, which is the wrong behaviour for everything except that one
+    job.
 
     ``exp000`` is the faithful reproduction and is untestable off a Hopper
     card, so this rung is where the reproduction is actually PROVEN: the
@@ -245,6 +251,9 @@ def exp001() -> NanoChatLoop.Config:
     beside it, and ``scripts/karpathy_parity.py`` reports whether every
     parameter and gradient agrees. The kernel is then common to both sides,
     so what the comparison measures is the recipe rather than the backend.
+
+    Operationally, this portable rung also reports to W&B through the shared
+    asynchronous tracker wrapper. Reporting is not a scientific treatment.
 
     Hypothesis:
       The recipe's score comes from its architecture and its optimizer rather
@@ -262,6 +271,15 @@ def exp001() -> NanoChatLoop.Config:
     block = cfg.step.model.template
     assert isinstance(block.attn, ValueGatedAttention.Config)
     block.attn.kernel = PartialConfig(sdpa_attention)
+
+    dashboard = WandbTracker.Config()
+    dashboard.project = "nanochat"
+    wrapper = AsyncTracker.Config()
+    wrapper.tracker = dashboard
+    cfg.tracker = TrackerList.Config()
+    cfg.tracker.trackers = {
+        "wandb": wrapper,
+    }
 
     # Karpathy uses 32 but we can get 15.7% more speed @ 64.
     # Theoretically up to 76.
@@ -348,6 +366,16 @@ def exp_smoke() -> NanoChatLoop.Config:
     """
     cfg = exp001()
     cfg.experiment_name = "exp_smoke"
+    # A smoke run validates the installation it is executed on. Scored rungs
+    # pin CUDA so a scheduler mistake cannot silently produce a CPU result;
+    # this unscored rung keeps the runtime's documented best-device fallback.
+    parallelism = cfg.step.parallelism
+    assert isinstance(parallelism, NoParallel.Config)
+    parallelism.device = None
+    cfg.dataset.device = "auto"
+    runtime = cfg.runtime
+    assert isinstance(runtime, SingleProcess.Config)
+    runtime.device = "auto"
     cfg.step.model.vocab_size = 16
     # The value gate reads a fixed 32 channels_in of its input, so a model
     # narrower than 32 has a gate of a different shape than the reference's.

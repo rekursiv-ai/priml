@@ -739,7 +739,6 @@ class TrainLoop:
                 return
             if self.checkpointing is not None:
                 self.checkpointing.save(self, self.step.global_step)
-            self.phase_timer.log_summary()
             # The cadence eval inside the loop never lands on the final step (the
             # while-loop exits once global_step reaches max_steps), so run one
             # last eval here and mark it final: it emits the RESULT line and
@@ -751,6 +750,10 @@ class TrainLoop:
             # last cadence eval already produced the run's terminal metrics.)
             self._maybe_eval(is_final=True)
         finally:
+            self.phase_timer.publish_summary(
+                self.tracker,
+                step=self.step.global_step,
+            )
             self.phase_timer.log_summary()
             self._cleanup()
 
@@ -1112,6 +1115,10 @@ class TrainLoop:
         )
         if not log_step:
             return
+        self.phase_timer.publish_interval(
+            self.tracker,
+            step=self.step.global_step,
+        )
 
         loss = step_results["loss"].mean().detach()
         raw_step_metrics: dict[str, float | Tensor] = step_results.get("metrics", {})

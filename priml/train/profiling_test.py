@@ -92,6 +92,45 @@ class TestPhaseTimerEnabled:
         s = timer.summary()
         assert s["total"] >= 0.01
 
+    def test_publish_interval_owns_reset_and_tracker_hook(self) -> None:
+        """Interval aggregation belongs to the timer, not its caller."""
+        timer = _phase_timer_config(enabled=True).make()
+        tracker = MagicMock()
+        timer.reset_interval()
+        timer.record("train_batch_fetch", 1.0)
+        timer.record("train_step", 2.0)
+        timer.record("train_step", 3.0)
+
+        first = timer.publish_interval(tracker, step=4)
+        timer.record("train_step", 7.0)
+        second = timer.publish_interval(tracker, step=5)
+
+        assert first["interval_train_batch_fetch_sec"] == 1.0
+        assert first["interval_train_batch_fetch_count"] == 1.0
+        assert first["interval_train_step_sec"] == 5.0
+        assert first["interval_train_step_count"] == 2.0
+        assert second["interval_train_step_sec"] == 7.0
+        assert second["interval_train_step_count"] == 1.0
+        assert "interval_train_batch_fetch_sec" not in second
+        assert tracker.log_metrics.call_count == 2
+        tracker.log_metrics.assert_any_call(first, 4, prefix="timing/")
+        tracker.log_metrics.assert_any_call(second, 5, prefix="timing/")
+
+    def test_publish_summary_owns_machine_readable_tracker_hook(self) -> None:
+        """The timer publishes its cumulative totals without caller assembly."""
+        timer = _phase_timer_config(enabled=True).make()
+        tracker = MagicMock()
+        timer.record("train_step", 3.0)
+        timer.record("train_step", 2.0)
+
+        summary = timer.publish_summary(tracker, step=8)
+
+        assert summary["train_step_sec"] == 5.0
+        assert summary["train_step_count"] == 2.0
+        assert summary["total_sec"] >= 0.0
+        assert summary["unattributed_sec"] >= 0.0
+        tracker.log_metrics.assert_called_once_with(summary, 8, prefix="timing/")
+
 
 class TestPhaseTimerLogging:
     def test_enter_logs_info(self, caplog: pytest.LogCaptureFixture):
@@ -395,6 +434,31 @@ class TestPhaseTimerLogSummaryRankGating:
 
 
 class TestPhaseTimerCudaEvents:
+    def test_cuda_measurement_is_deferred_until_summary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CUDA timing uses events without synchronizing the hot path."""
+        start = MagicMock()
+        end = MagicMock()
+        start.elapsed_time.return_value = 12.5
+        fake_torch = MagicMock()
+        fake_torch.cuda.is_available.return_value = True
+        fake_torch.cuda.Event.side_effect = [start, end]
+        monkeypatch.setattr("priml.train.profiling.torch", fake_torch)
+        timer = _phase_timer_config(enabled=True, cuda_events=True).make()
+
+        with timer.measure("forward_loss"), timer.measure_cuda("gpu"):
+            pass
+
+        start.record.assert_called_once()
+        end.record.assert_called_once()
+        end.synchronize.assert_not_called()
+        summary = timer.publish_summary(None, step=1)
+        end.synchronize.assert_called_once()
+        assert summary["gpu.forward_loss.gpu_sec"] == pytest.approx(0.0125)
+        assert summary["gpu.forward_loss.gpu_count"] == 1.0
+
     def test_record_cuda_events_logs_deferred_summary(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -412,6 +476,26 @@ class TestPhaseTimerCudaEvents:
         start.elapsed_time.assert_called_once_with(end)
         assert any("CUDA Event Timing Summary" in r.message for r in caplog.records)
         assert any("forward" in r.message for r in caplog.records)
+
+    def test_record_cuda_events_invalidates_a_resolved_summary(self) -> None:
+        timer = _phase_timer_config(enabled=True, cuda_events=True).make()
+        first_start = MagicMock()
+        first_end = MagicMock()
+        first_start.elapsed_time.return_value = 10.0
+        second_start = MagicMock()
+        second_end = MagicMock()
+        second_start.elapsed_time.return_value = 20.0
+        timer.record_cuda_events("eval", first_start, first_end)
+        first = timer.publish_summary(None, step=1)
+
+        timer.record_cuda_events("eval", second_start, second_end)
+        second = timer.publish_summary(None, step=2)
+
+        assert first["gpu.eval_sec"] == pytest.approx(0.01)
+        assert first["gpu.eval_count"] == 1.0
+        assert second["gpu.eval_sec"] == pytest.approx(0.03)
+        assert second["gpu.eval_count"] == 2.0
+        second_end.synchronize.assert_called_once()
 
     def test_record_cuda_events_disabled_noop(self) -> None:
         timer = _phase_timer_config(enabled=True, cuda_events=False).make()

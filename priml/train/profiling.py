@@ -17,7 +17,7 @@ from wrapt import lazy_import
 
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
-from priml.train.custom_types import CudaEventProtocol
+from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
 
 
 torch = lazy_import("torch")
@@ -329,13 +329,21 @@ class PhaseTimer:
         self._heartbeat_interval_sec = config.heartbeat_interval_sec
         self._cuda_events_enabled = config.cuda_events
         self._phases: dict[str, float] = {}
+        self._self_phases: dict[str, float] = {}
         self._counts: dict[str, int] = {}
+        self._interval_phases: dict[str, float] = {}
+        self._interval_self_phases: dict[str, float] = {}
+        self._interval_counts: dict[str, int] = {}
+        self._interval_started_at = time.perf_counter()
+        self._stack: list[_PhaseFrame] = []
         self._cuda_events: dict[
             str, list[tuple[CudaEventProtocol, CudaEventProtocol]]
         ] = {}
+        self._cuda_summary: dict[str, tuple[float, int]] | None = None
         self._start_time = time.perf_counter()
         self._profiler: _TorchProfiler | None = None
         self._summary_logged = False
+        self._summary_published = False
 
         if self._enabled and self._torch_profile:
             activities = [torch_profiler.ProfilerActivity.CPU]
@@ -351,28 +359,31 @@ class PhaseTimer:
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Generator[None, None, None]:
-        # Boundary narrative is rank-0 only: on an N-GPU run every rank would
-        # otherwise emit identical enter/exit lines, drowning the console. Each
-        # rank's own errors still reach its per-rank file (torchrun redirects).
-        narrate = is_rank_zero()
-        if narrate:
-            logger.info("[phase] %s started", name)
-        start = time.perf_counter()
-        heartbeat = _PhaseHeartbeat(name, start, self._heartbeat_interval_sec)
-        heartbeat.start()
+        """Measure and narrate one potentially long phase."""
+        with self._timed(name, narrate=True):
+            yield
+
+    @contextlib.contextmanager
+    def measure(self, name: str) -> Generator[None, None, None]:
+        """Measure a frequent phase without per-call boundary logs."""
+        with self._timed(name, narrate=False):
+            yield
+
+    @contextlib.contextmanager
+    def measure_cuda(self, name: str) -> Generator[None, None, None]:
+        """Record asynchronous GPU stream time without a hot-path sync."""
+        if not self.cuda_events_enabled or not torch.cuda.is_available():
+            yield
+            return
+        path = f"{self._stack[-1].path}/{name}" if self._stack else name
+        start = cast(CudaEventProtocol, torch.cuda.Event(enable_timing=True))
+        end = cast(CudaEventProtocol, torch.cuda.Event(enable_timing=True))
+        start.record()
         try:
             yield
         finally:
-            # Cancel + join before logging exit so the heartbeat thread can
-            # never outlive the phase or fire after the phase is reported done,
-            # even when the body raised.
-            heartbeat.stop()
-            elapsed = time.perf_counter() - start
-            if self._enabled:
-                self._phases[name] = self._phases.get(name, 0.0) + elapsed
-                self._counts[name] = self._counts.get(name, 0) + 1
-            if narrate:
-                logger.info("[phase] %s: %.4fs", name, elapsed)
+            end.record()
+            self.record_cuda_events(path, start, end)
 
     @property
     def cuda_events_enabled(self) -> bool:
@@ -382,8 +393,10 @@ class PhaseTimer:
     def record(self, name: str, elapsed: float) -> None:
         if not self._enabled:
             return
-        self._phases[name] = self._phases.get(name, 0.0) + elapsed
-        self._counts[name] = self._counts.get(name, 0) + 1
+        path = f"{self._stack[-1].path}/{name}" if self._stack else name
+        if self._stack:
+            self._stack[-1].child_sec += elapsed
+        self._record_timing(path, elapsed, elapsed)
 
     def record_cuda_events(
         self,
@@ -395,10 +408,73 @@ class PhaseTimer:
         if not self.cuda_events_enabled:
             return
         self._cuda_events.setdefault(name, []).append((start, end))
+        self._cuda_summary = None
 
     def summary(self) -> dict[str, float]:
         total = time.perf_counter() - self._start_time
         return {**self._phases, "total": total}
+
+    def reset_interval(self) -> None:
+        """Discard prior interval state and start a fresh wall-clock window."""
+        self._interval_phases.clear()
+        self._interval_self_phases.clear()
+        self._interval_counts.clear()
+        self._interval_started_at = time.perf_counter()
+
+    def publish_interval(
+        self,
+        tracker: TrackerProtocol | None,
+        *,
+        step: int,
+    ) -> dict[str, float]:
+        """Publish and reset one hierarchical timing interval."""
+        if not self._enabled:
+            return {}
+        metrics = self._timing_metrics(
+            self._interval_phases,
+            self._interval_self_phases,
+            self._interval_counts,
+            total_sec=time.perf_counter() - self._interval_started_at,
+            key_prefix="interval_",
+            total_key="interval_wall_sec",
+        )
+        self._publish_metrics(
+            metrics,
+            tracker,
+            step=step,
+            event="phase_timing_interval",
+        )
+        self.reset_interval()
+        return metrics
+
+    def publish_summary(
+        self,
+        tracker: TrackerProtocol | None,
+        *,
+        step: int,
+    ) -> dict[str, float]:
+        """Publish one cumulative hierarchical timing summary."""
+        if not self._enabled:
+            return {}
+        metrics = self._timing_metrics(
+            self._phases,
+            self._self_phases,
+            self._counts,
+            total_sec=time.perf_counter() - self._start_time,
+            key_prefix="",
+            total_key="total_sec",
+        )
+        metrics.update(self._cuda_metrics())
+        if self._summary_published:
+            return metrics
+        self._summary_published = True
+        self._publish_metrics(
+            metrics,
+            tracker,
+            step=step,
+            event="phase_timing_summary",
+        )
+        return metrics
 
     def log_summary(self) -> None:
         if not self._enabled or self._summary_logged:
@@ -448,15 +524,11 @@ class PhaseTimer:
     def _log_cuda_summary(self) -> None:
         if not self._cuda_events:
             return
-        rows: list[tuple[str, float, int]] = []
-        total_ms = 0.0
-        for name, pairs in self._cuda_events.items():
-            elapsed_ms = 0.0
-            for start, end in pairs:
-                end.synchronize()
-                elapsed_ms += start.elapsed_time(end)
-            total_ms += elapsed_ms
-            rows.append((name, elapsed_ms, len(pairs)))
+        rows = [
+            (name, elapsed_ms, count)
+            for name, (elapsed_ms, count) in self._collect_cuda_summary().items()
+        ]
+        total_ms = sum(elapsed_ms for _name, elapsed_ms, _count in rows)
         lines = [
             "CUDA Event Timing Summary",
             f"  {'phase':<28s} {'gpu_time':>10s}  {'pct':>7s}  {'count':>5s}",
@@ -470,6 +542,120 @@ class PhaseTimer:
         lines.append(f"  {'─' * 28} {'─' * 10}  {'─' * 7}  {'─' * 5}")
         lines.append(f"  {'total':<28s} {total_ms / 1000:>9.3f}s")
         logger.info("\n".join(lines))
+
+    def _collect_cuda_summary(self) -> dict[str, tuple[float, int]]:
+        """Resolve deferred CUDA events once, at final reporting time."""
+        if self._cuda_summary is not None:
+            return self._cuda_summary
+        summary: dict[str, tuple[float, int]] = {}
+        for name, pairs in self._cuda_events.items():
+            elapsed_ms = 0.0
+            for start, end in pairs:
+                end.synchronize()
+                elapsed_ms += start.elapsed_time(end)
+            summary[name] = (elapsed_ms, len(pairs))
+        self._cuda_summary = summary
+        return summary
+
+    def _cuda_metrics(self) -> dict[str, float]:
+        """Return machine-readable deferred GPU timings in seconds."""
+        metrics: dict[str, float] = {}
+        for path, (elapsed_ms, count) in self._collect_cuda_summary().items():
+            key = path.replace("/", ".")
+            metrics[f"gpu.{key}_sec"] = elapsed_ms / 1000.0
+            metrics[f"gpu.{key}_count"] = float(count)
+        return metrics
+
+    @contextlib.contextmanager
+    def _timed(self, name: str, *, narrate: bool) -> Generator[None, None, None]:
+        """Measure one phase and attach it beneath the active parent."""
+        if not self._enabled and not narrate:
+            yield
+            return
+        path = f"{self._stack[-1].path}/{name}" if self._stack else name
+        narrate_rank = narrate and is_rank_zero()
+        if narrate_rank:
+            logger.info("[phase] %s started", path)
+        started_at = time.perf_counter()
+        heartbeat = _PhaseHeartbeat(
+            path,
+            started_at,
+            self._heartbeat_interval_sec if narrate else 0.0,
+        )
+        heartbeat.start()
+        frame = _PhaseFrame(path=path, started_at=started_at)
+        self._stack.append(frame)
+        try:
+            yield
+        finally:
+            heartbeat.stop()
+            elapsed = time.perf_counter() - started_at
+            popped = self._stack.pop()
+            assert popped is frame
+            if self._stack:
+                self._stack[-1].child_sec += elapsed
+            if self._enabled:
+                self._record_timing(
+                    path,
+                    elapsed,
+                    max(0.0, elapsed - frame.child_sec),
+                )
+            if narrate_rank:
+                logger.info("[phase] %s: %.4fs", path, elapsed)
+
+    def _record_timing(self, path: str, elapsed: float, self_sec: float) -> None:
+        """Accumulate inclusive, exclusive, interval, and count totals."""
+        self._phases[path] = self._phases.get(path, 0.0) + elapsed
+        self._self_phases[path] = self._self_phases.get(path, 0.0) + self_sec
+        self._counts[path] = self._counts.get(path, 0) + 1
+        self._interval_phases[path] = self._interval_phases.get(path, 0.0) + elapsed
+        self._interval_self_phases[path] = (
+            self._interval_self_phases.get(path, 0.0) + self_sec
+        )
+        self._interval_counts[path] = self._interval_counts.get(path, 0) + 1
+
+    def _timing_metrics(
+        self,
+        phases: dict[str, float],
+        self_phases: dict[str, float],
+        counts: dict[str, int],
+        *,
+        total_sec: float,
+        key_prefix: str,
+        total_key: str,
+    ) -> dict[str, float]:
+        """Flatten hierarchical aggregates without double-counting parents."""
+        top_level_sec = sum(
+            elapsed for path, elapsed in phases.items() if "/" not in path
+        )
+        metrics = {
+            total_key: total_sec,
+            f"{key_prefix}unattributed_sec": max(0.0, total_sec - top_level_sec),
+        }
+        for path in sorted(phases):
+            key = path.replace("/", ".")
+            metrics[f"{key_prefix}{key}_sec"] = phases[path]
+            metrics[f"{key_prefix}{key}_self_sec"] = self_phases[path]
+            metrics[f"{key_prefix}{key}_count"] = float(counts[path])
+        return metrics
+
+    def _publish_metrics(
+        self,
+        metrics: dict[str, float],
+        tracker: TrackerProtocol | None,
+        *,
+        step: int,
+        event: str,
+    ) -> None:
+        """Emit one parseable log record and optional tracker payload."""
+        if not is_rank_zero():
+            return
+        fields = " ".join(
+            f"{name}={value:.6f}" for name, value in sorted(metrics.items())
+        )
+        logger.info("event=%s step=%d %s", event, step, fields)
+        if tracker is not None:
+            tracker.log_metrics(metrics, step, prefix="timing/")
 
 
 class _PhaseHeartbeat:
@@ -522,6 +708,15 @@ class _PhaseHeartbeat:
         with self._lock:
             if not self._stopped:
                 self._arm()
+
+
+@dataclass(slots=True, kw_only=True)
+class _PhaseFrame:
+    """One active phase and the inclusive time consumed by nested children."""
+
+    path: str
+    started_at: float
+    child_sec: float = 0.0
 
 
 class _ProfilerAverages(Protocol):

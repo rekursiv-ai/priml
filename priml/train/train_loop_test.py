@@ -2249,10 +2249,10 @@ def test_final_eval_uses_same_bounded_loader_as_cadence() -> None:
     assert "full" not in dataset.eval_scopes
 
 
-def test_phase_timer_summary_logs_before_final_eval(
+def test_phase_timer_summary_logs_after_final_eval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The timing summary prints before the final eval starts."""
+    """The timing summary includes the final eval before it is published."""
     events: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
@@ -2280,13 +2280,39 @@ def test_phase_timer_summary_logs_before_final_eval(
 
         # The cadence eval at step 2 and the final eval both call
         # eval_dataloader; the last call is the post-loop final eval, which must
-        # follow the phase-timer summary.
+        # precede the phase-timer summary.
         monkeypatch.setattr(dataset, "eval_dataloader", record_eval_dataloader)
         monkeypatch.setattr(loop.phase_timer, "log_summary", record_log_summary)
 
         loop.train()
 
-    assert events[-2:] == ["summary", "final_eval"]
+    assert events[-2:] == ["final_eval", "summary"]
+
+
+def test_phase_timer_publishes_interval_and_summary_metrics() -> None:
+    """Enabled timing reaches tracker sinks during and after training."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
+        config.checkpointing = None
+        config.max_steps = 2
+        config.num_steps_log = 1
+        config.num_steps_eval = 0
+        config.eval_every_epoch = False
+        config.phase_timer = PhaseTimer.Config(enabled=True)
+        config.tracker = _RecordingTracker.Config()
+        loop = config.make()
+
+        loop.train()
+
+    tracker = cast(_RecordingTracker, loop.tracker)
+    timing_payloads = [
+        metrics
+        for metrics, _step in tracker.metrics_by_step
+        if any(key.startswith("timing/") for key in metrics)
+    ]
+    assert any("timing/interval_wall_sec" in payload for payload in timing_payloads)
+    assert any("timing/total_sec" in payload for payload in timing_payloads)
+    assert tracker.closed
 
 
 @pytest.mark.parametrize("never", [float("inf"), 0])
