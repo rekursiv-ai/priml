@@ -360,6 +360,10 @@ class PhaseTimerProtocol(Protocol):
 
     def phase(self, name: str) -> AbstractContextManager[None]: ...
 
+    def measure(self, name: str) -> AbstractContextManager[None]: ...
+
+    def measure_cuda(self, name: str) -> AbstractContextManager[None]: ...
+
     def record(self, name: str, elapsed: float) -> None: ...
 
     def record_cuda_events(
@@ -370,6 +374,22 @@ class PhaseTimerProtocol(Protocol):
     ) -> None: ...
 
     def summary(self) -> dict[str, float]: ...
+
+    def reset_interval(self) -> None: ...
+
+    def publish_interval(
+        self,
+        tracker: TrackerProtocol | None,
+        *,
+        step: int,
+    ) -> dict[str, float]: ...
+
+    def publish_summary(
+        self,
+        tracker: TrackerProtocol | None,
+        *,
+        step: int,
+    ) -> dict[str, float]: ...
 
     def log_summary(self) -> None: ...
 

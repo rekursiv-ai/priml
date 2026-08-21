@@ -38,7 +38,9 @@ from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.value_gated_attention import ValueGatedAttention
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
+from priml.runtime import SingleProcess
 from priml.train.parallelism import NoParallel
+from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
 
 
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
@@ -102,6 +104,18 @@ def test_exp001_changes_only_the_kernel() -> None:
     assert fork.seed == base.seed
 
 
+def test_exp001_reports_to_wandb_asynchronously() -> None:
+    """The portable parent owns non-blocking dashboard delivery."""
+    config = experiments.exp001()
+
+    assert isinstance(config.tracker, TrackerList.Config)
+    assert list(config.tracker.trackers) == ["wandb"]
+    wrapper = config.tracker.trackers["wandb"]
+    assert isinstance(wrapper, AsyncTracker.Config)
+    assert isinstance(wrapper.tracker, WandbTracker.Config)
+    assert wrapper.tracker.project == "nanochat"
+
+
 def test_exp000_turns_both_mechanisms_on() -> None:
     """The baseline is the recipe to reproduce, not the plain control.
 
@@ -112,6 +126,34 @@ def test_exp000_turns_both_mechanisms_on() -> None:
     cfg = experiments.exp000()
     assert _pattern(cfg) == "SSSL"
     assert cfg.step.model.value_embedding_stride == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "factory"),
+    LADDER[:-1],
+    ids=[name for name, _ in LADDER[:-1]],
+)
+def test_every_scored_experiment_selects_cuda(
+    name: str,
+    factory: Callable[[], NanoChatLoop.Config],
+) -> None:
+    """Every scored rung must consume its requested GPU allocation."""
+    config = factory()
+    assert isinstance(config.step.parallelism, NoParallel.Config), name
+    assert config.step.parallelism.device == "cuda", name
+    assert config.dataset.device == "cuda", name
+    assert isinstance(config.runtime, SingleProcess.Config), name
+    assert config.runtime.device == "cuda", name
+
+
+def test_smoke_keeps_automatic_device_selection() -> None:
+    config = experiments.exp_smoke()
+
+    assert isinstance(config.step.parallelism, NoParallel.Config)
+    assert config.step.parallelism.device is None
+    assert config.dataset.device == "auto"
+    assert isinstance(config.runtime, SingleProcess.Config)
+    assert config.runtime.device == "auto"
 
 
 def test_exp002_removes_only_the_value_embeddings() -> None:
