@@ -67,7 +67,7 @@ def test_get_cache_dir_creates_directory():
         mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
 
 
-def test_load_transformers_model_with_class(tmp_path: Path):
+def test_load_transformers_model_with_class():
     """Test load_transformers_model with string class name."""
     mock_model = MagicMock()
     mock_model.to = MagicMock(return_value=mock_model)
@@ -75,7 +75,6 @@ def test_load_transformers_model_with_class(tmp_path: Path):
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         patch("pathlib.Path.mkdir"),
         _mock_transformers(mock_auto_model),
     ):
@@ -95,35 +94,13 @@ def test_load_transformers_model_with_class(tmp_path: Path):
         assert call_kwargs["trust_remote_code"] is False
 
 
-def test_load_transformers_model_with_string_class(tmp_path: Path):
-    """Test load_transformers_model with string class name."""
-    mock_model = MagicMock()
-    mock_model.to = MagicMock(return_value=mock_model)
-    mock_auto_model = MagicMock()
-    mock_auto_model.from_pretrained.return_value = mock_model
-
-    with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
-        patch("pathlib.Path.mkdir"),
-        _mock_transformers(mock_auto_model),
-    ):
-        model = load_transformers_model(
-            "test/model",
-            "AutoModel",
-            device="cpu",
-        )
-
-        assert model == mock_model
-
-
-def test_load_transformers_model_with_revision(tmp_path: Path):
+def test_load_transformers_model_with_revision():
     """Test load_transformers_model with specific revision."""
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         load_transformers_model(
@@ -136,14 +113,13 @@ def test_load_transformers_model_with_revision(tmp_path: Path):
         assert call_kwargs["revision"] == "v1.0"
 
 
-def test_load_transformers_model_with_trust_remote_code(tmp_path: Path):
+def test_load_transformers_model_with_trust_remote_code():
     """Test load_transformers_model with trust_remote_code."""
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         load_transformers_model(
@@ -156,14 +132,13 @@ def test_load_transformers_model_with_trust_remote_code(tmp_path: Path):
         assert call_kwargs["trust_remote_code"] is True
 
 
-def test_load_transformers_model_with_device(tmp_path: Path):
+def test_load_transformers_model_with_device():
     """Test load_transformers_model moves to device."""
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         load_transformers_model(
@@ -175,14 +150,13 @@ def test_load_transformers_model_with_device(tmp_path: Path):
         mock_model.to.assert_called_once_with("cpu")
 
 
-def test_load_transformers_model_extra_kwargs(tmp_path: Path):
+def test_load_transformers_model_extra_kwargs():
     """Test load_transformers_model passes extra kwargs."""
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
     mock_auto_model.from_pretrained.return_value = mock_model
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         load_transformers_model(
@@ -197,7 +171,7 @@ def test_load_transformers_model_extra_kwargs(tmp_path: Path):
         assert call_kwargs["low_cpu_mem_usage"] is True
 
 
-def test_dtype_uses_the_current_transformers_spelling(tmp_path: Path) -> None:
+def test_dtype_uses_the_current_transformers_spelling() -> None:
     """``dtype=`` reaches from_pretrained as ``dtype``, not ``torch_dtype``.
 
     transformers deprecated ``torch_dtype`` and warns on every call that uses
@@ -207,7 +181,6 @@ def test_dtype_uses_the_current_transformers_spelling(tmp_path: Path) -> None:
     mock_auto_model.from_pretrained.return_value = MagicMock()
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         load_transformers_model("test/model", "AutoModel", dtype=torch.float16)
@@ -217,7 +190,7 @@ def test_dtype_uses_the_current_transformers_spelling(tmp_path: Path) -> None:
     assert "torch_dtype" not in call_kwargs
 
 
-def test_load_transformers_model_no_global_env_mutation(tmp_path: Path) -> None:
+def test_load_transformers_model_no_global_env_mutation() -> None:
     """load_transformers_model must not touch process-global offline state.
 
     The HF_HUB_OFFLINE env var and the transformers logger level are
@@ -243,7 +216,6 @@ def test_load_transformers_model_no_global_env_mutation(tmp_path: Path) -> None:
 
     with (
         patch.dict(os.environ, {"HF_HUB_OFFLINE": sentinel}, clear=False),
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         load_transformers_model("test/model", "AutoModel")
@@ -256,7 +228,7 @@ def test_load_transformers_model_no_global_env_mutation(tmp_path: Path) -> None:
     assert call_kwargs["local_files_only"] is True
 
 
-def test_load_transformers_model_cache_miss_falls_back_online(tmp_path: Path) -> None:
+def test_load_transformers_model_cache_miss_falls_back_online() -> None:
     """On cache miss, retries with local_files_only=False (no env toggling)."""
     mock_model = MagicMock()
     mock_auto_model = MagicMock()
@@ -266,7 +238,6 @@ def test_load_transformers_model_cache_miss_falls_back_online(tmp_path: Path) ->
     ]
 
     with (
-        patch("priml.hub.get_cache_dir", return_value=tmp_path),
         _mock_transformers(mock_auto_model),
     ):
         model = load_transformers_model("test/model", "AutoModel")
@@ -280,6 +251,6 @@ def test_load_transformers_model_cache_miss_falls_back_online(tmp_path: Path) ->
 
 
 if __name__ == "__main__":
-    from priml.lib.testing.main import test_main
+    from priml.lib.testing import test_main
 
     test_main(__file__)
