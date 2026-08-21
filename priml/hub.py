@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import logging
+import os
 
 import torch
 
@@ -28,19 +29,30 @@ else:
 
 
 def get_cache_dir() -> Path:
-    """Return the per-user cache directory for downloaded models.
+    """Return the cache directory for downloads no library env var governs.
 
-    Model weights are regenerable downloads, not experiment state, so they
-    live under ``cache_dir() / "rekursiv-ai" / "models"`` rather than the
-    runtime scratch tree -- the hub is a shared client utility, not a
-    ``runtime.py`` derivative. The single overridable cache seam (tests patch
-    this function).
+    Loaders whose library reads its own variable -- ``HF_HOME`` for Hugging
+    Face -- do NOT come here; they let the library resolve its own path. This
+    function serves the loaders with no such variable (CLIP, EasyOCR,
+    Mamba2D), and hands them ``TORCH_HOME``: these are downloaded model
+    weights, exactly what that cache holds, so one variable governs one tree
+    instead of minting a parallel root nothing else knows about.
+
+    ``torch.hub`` itself appends ``hub/`` (`torch.hub.get_dir`), so the
+    tool subdirectories created here sit beside it, not inside it. With no
+    ``TORCH_HOME`` the location is per-user and belongs to ``userdirs``,
+    where ``rekursiv-ai`` IS the namespace segment; re-deriving that layout
+    here would return ``~/.cache`` on macOS, where callers resolve
+    ``~/Library/Caches``.
 
     Returns:
       models_dir: Path to the model cache directory (created if absent).
 
     """
-    models_dir = cache_dir() / "rekursiv-ai" / "models"
+    if torch_home := os.environ.get("TORCH_HOME"):
+        models_dir = Path(torch_home)
+    else:
+        models_dir = cache_dir() / "rekursiv-ai" / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     return models_dir
 
@@ -97,9 +109,10 @@ def load_transformers_model(
     logger = logging.getLogger(__name__)
     model_class_type = getattr(transformers, model_class)
 
-    cache_dir = get_cache_dir() / "huggingface"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
+    # No ``cache_dir=``: an explicit value OVERRIDES ``HF_HOME``, so passing
+    # one here made every provisioned shared cache inert for this loader and
+    # stranded weights in a second tree. Let huggingface_hub resolve its own
+    # root from the environment.
     if dtype is not None:
         kwargs["torch_dtype"] = dtype
 
@@ -113,7 +126,6 @@ def load_transformers_model(
             model_id,
             revision=revision,
             trust_remote_code=trust_remote_code,
-            cache_dir=str(cache_dir),
             local_files_only=False,
             force_download=True,
             **kwargs,
@@ -125,7 +137,6 @@ def load_transformers_model(
                 model_id,
                 revision=revision,
                 trust_remote_code=trust_remote_code,
-                cache_dir=str(cache_dir),
                 local_files_only=True,
                 force_download=False,
                 **kwargs,
@@ -138,7 +149,6 @@ def load_transformers_model(
                 model_id,
                 revision=revision,
                 trust_remote_code=trust_remote_code,
-                cache_dir=str(cache_dir),
                 local_files_only=False,
                 force_download=False,
                 **kwargs,
