@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 
+import pytest
 import torch
 
 from priml.hub import (
@@ -38,8 +39,22 @@ def _mock_transformers(mock_auto_model: Any) -> Generator[MagicMock]:
             sys.modules["transformers"] = saved
 
 
-def test_get_cache_dir() -> None:
-    """get_cache_dir returns the XDG per-user models cache."""
+def test_get_cache_dir_follows_torch_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Weights with no library env var of their own share TORCH_HOME."""
+    monkeypatch.setenv("TORCH_HOME", "/opt/scratch/models/torch")
+    with patch("pathlib.Path.mkdir"):
+        models_dir = get_cache_dir()
+    assert models_dir == Path("/opt/scratch/models/torch")
+
+
+def test_get_cache_dir_defers_to_userdirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no TORCH_HOME the location is per-user and userdirs owns it.
+
+    Re-deriving the XDG layout here returned ``~/.cache`` on macOS, where
+    ``cache_dir()`` resolves ``~/Library/Caches`` -- so hub wrote to a
+    directory no other caller read.
+    """
+    monkeypatch.delenv("TORCH_HOME", raising=False)
     with patch("pathlib.Path.mkdir"):
         models_dir = get_cache_dir()
     assert models_dir == cache_dir() / "rekursiv-ai" / "models"
@@ -73,7 +88,9 @@ def test_load_transformers_model_with_class(tmp_path: Path):
         assert model == mock_model
         mock_auto_model.from_pretrained.assert_called_once()
         call_kwargs = mock_auto_model.from_pretrained.call_args[1]
-        assert str(tmp_path / "huggingface") in call_kwargs["cache_dir"]
+        # No cache_dir kwarg: passing one overrides HF_HOME, which is how a
+        # provisioned shared cache became inert for every priml processor.
+        assert "cache_dir" not in call_kwargs
         assert call_kwargs["revision"] is None
         assert call_kwargs["trust_remote_code"] is False
 
