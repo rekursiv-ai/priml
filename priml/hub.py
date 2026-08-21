@@ -113,8 +113,11 @@ def load_transformers_model(
     # one here made every provisioned shared cache inert for this loader and
     # stranded weights in a second tree. Let huggingface_hub resolve its own
     # root from the environment.
+    # ``dtype``, not ``torch_dtype``: transformers renamed it and now logs
+    # "`torch_dtype` is deprecated! Use `dtype` instead!". The declared floor
+    # (transformers>=4.57.0) already accepts the new spelling.
     if dtype is not None:
-        kwargs["torch_dtype"] = dtype
+        kwargs["dtype"] = dtype
 
     # ``local_files_only`` controls offline/online behavior per call, so we
     # never mutate ``os.environ["HF_HUB_OFFLINE"]`` -- that env var is
@@ -142,7 +145,12 @@ def load_transformers_model(
                 **kwargs,
             )
             logger.debug(f"Loaded {model_id} from cache")
-        except (OSError, ValueError) as e:
+        except OSError as e:
+            # OSError only. ValueError here also caught malformed configs and
+            # bad model code, so a genuinely broken checkpoint triggered a
+            # network round-trip and surfaced the retry's traceback instead of
+            # the real one. huggingface_hub raises LocalEntryNotFoundError --
+            # a FileNotFoundError, hence OSError -- for an actual cache miss.
             logger.info(f"Cache miss for {model_id}, downloading from HuggingFace")
             logger.debug(f"Cache miss reason: {e}")
             model = model_class_type.from_pretrained(

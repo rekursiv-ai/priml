@@ -197,6 +197,26 @@ def test_load_transformers_model_extra_kwargs(tmp_path: Path):
         assert call_kwargs["low_cpu_mem_usage"] is True
 
 
+def test_dtype_uses_the_current_transformers_spelling(tmp_path: Path) -> None:
+    """``dtype=`` reaches from_pretrained as ``dtype``, not ``torch_dtype``.
+
+    transformers deprecated ``torch_dtype`` and warns on every call that uses
+    it; the declared floor already accepts the new name.
+    """
+    mock_auto_model = MagicMock()
+    mock_auto_model.from_pretrained.return_value = MagicMock()
+
+    with (
+        patch("priml.hub.get_cache_dir", return_value=tmp_path),
+        _mock_transformers(mock_auto_model),
+    ):
+        load_transformers_model("test/model", "AutoModel", dtype=torch.float16)
+
+    call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+    assert call_kwargs["dtype"] == torch.float16
+    assert "torch_dtype" not in call_kwargs
+
+
 def test_load_transformers_model_no_global_env_mutation(tmp_path: Path) -> None:
     """load_transformers_model must not touch process-global offline state.
 
