@@ -133,6 +133,7 @@ def test_a_batch_without_a_policy_is_ignored() -> None:
     assert score.compute() == {"episodes": 0.0}
 
 
+@pytest.mark.compute_large_fixture
 def test_playing_a_short_horizon_banks_nothing() -> None:
     # A truncated episode has an incomplete return, so counting it would drag
     # the mean toward zero by an amount set by the horizon, not the policy.
@@ -141,6 +142,7 @@ def test_playing_a_short_horizon_banks_nothing() -> None:
     assert score.compute() == {"episodes": 0.0}
 
 
+@pytest.mark.compute_large_fixture
 def test_playing_banks_the_episodes_that_finish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,6 +158,7 @@ def test_playing_banks_the_episodes_that_finish(
     assert math.isfinite(computed["normalized_return_pct"])
 
 
+@pytest.mark.compute_large_fixture
 def test_the_same_seed_scores_the_same_episodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -170,6 +173,7 @@ def test_the_same_seed_scores_the_same_episodes(
     assert played() == played()
 
 
+@pytest.mark.compute_large_fixture
 def test_two_plays_accumulate(monkeypatch: pytest.MonkeyPatch) -> None:
     # The loop resets once per eval and updates once per batch, so several
     # passes must add episodes rather than replace them.

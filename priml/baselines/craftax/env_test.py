@@ -13,6 +13,9 @@ from priml.baselines.craftax.game.state import EnvState
 from priml.data.environment import BatchedEnvironmentProtocol
 
 
+pytestmark = pytest.mark.compute_large_fixture
+
+
 def _env(
     num_envs: int = 4,
     seed: int = 0,

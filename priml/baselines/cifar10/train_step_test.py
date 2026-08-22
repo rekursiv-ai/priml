@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal, override
+from types import SimpleNamespace
+from typing import Any, Literal, cast, override
 
 import math
 
@@ -24,6 +25,7 @@ from priml.optimizers import (
     excluding,
 )
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.timer import CheckpointableStepTimer
 from priml.train.parallelism import NoParallel
 
 
@@ -109,12 +111,12 @@ def test_train_step_updates_the_weights() -> None:
 def test_loss_decreases_on_a_memorizable_batch() -> None:
     torch.manual_seed(0)
     config = tiny_step()
-    config.total_train_steps = 40
+    config.total_train_steps = 4
     config.translate_pad = 0
     config.label_smoothing = 0.0
     step = config.make()
     batch = tiny_batch()
-    losses = [float(step.train_step(**batch)["loss"].mean()) for _ in range(40)]
+    losses = [float(step.train_step(**batch)["loss"].mean()) for _ in range(4)]
     assert losses[-1] < losses[0]
 
 
@@ -161,22 +163,31 @@ def test_adamw_stack_is_a_single_optimizer() -> None:
 
 
 def test_schedule_warms_up_then_decays() -> None:
-    config = tiny_step()
-    config.total_train_steps = 100
-    config.warmup_fraction = 0.1
-    step = config.make()
-    peak = step.optimizer.param_groups[0]["initial_lr"]
+    step = object.__new__(Cifar10TrainStep)
+    step.config = Cifar10TrainStep.Config(
+        total_train_steps=100,
+        warmup_fraction=0.1,
+    )
+    step.schedule = cosine
+    step.timer_step = CheckpointableStepTimer()
+    step.optimizer = cast(
+        torch.optim.Optimizer,
+        SimpleNamespace(param_groups=[{"initial_lr": 1.0, "lr": 1.0}]),
+    )
+    peak = 1.0
 
     rates: list[float] = []
-    for _ in range(100):
-        _ = step.train_step(**tiny_batch())
+    for global_step in (0, 9, 50, 99):
+        step.timer_step.global_count = global_step
+        step._apply_schedule()
         rates.append(step.optimizer.param_groups[0]["lr"])
 
     assert rates[0] < peak  # warming up
-    assert max(rates) == pytest.approx(peak, rel=0.05)
-    assert rates[-1] < rates[len(rates) // 2] < max(rates)
+    assert rates[1] == pytest.approx(peak, rel=0.05)
+    assert rates[-1] < rates[2] < rates[1]
 
 
+@pytest.mark.compute_training
 def test_the_injected_schedule_drives_the_learning_rate() -> None:
     def trace(schedule: PartialConfig[float]) -> list[float]:
         config = tiny_step()

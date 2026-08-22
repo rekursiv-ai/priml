@@ -220,6 +220,7 @@ def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
 
 
 @pytest.mark.parametrize(("name", "factory"), PORTABLE, ids=[n for n, _ in PORTABLE])
+@pytest.mark.compute_training
 def test_every_experiments_eval_geometry_is_constructible(
     name: str,
     factory: Callable[[], NanoChatLoop.Config],

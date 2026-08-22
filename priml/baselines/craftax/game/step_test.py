@@ -170,6 +170,7 @@ def test_the_boss_countdown_runs_only_on_the_boss_floor() -> None:
     assert counted.boss_timesteps_to_spawn_this_round.tolist() == [4, 4]
 
 
+@pytest.mark.compute_large_fixture
 def test_a_generated_world_survives_every_action() -> None:
     """The whole game, driven by every action, must not raise or leave the map.
 

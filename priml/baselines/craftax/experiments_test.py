@@ -218,6 +218,7 @@ def test_every_published_experiment_scores_identically(
 
 
 @pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.compute_training
 def test_experiment_trains_at_minimum_size(factory: _Experiment) -> None:
     """Each published recipe runs end to end, shrunk to test size."""
     loop = shrink(factory()).make()

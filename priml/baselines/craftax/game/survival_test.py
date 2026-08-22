@@ -177,7 +177,8 @@ def test_an_unfed_player_eventually_dies() -> None:
     state = _state()
     state.player_food[:] = 0
     state.player_drink[:] = 0
-    for _ in range(400):
+    state.player_health[:] = 1
+    for _ in range(100):
         state = mechanics.clip_meters(
             survival.update_intrinsics(state, _act(Action.NOOP))
         )

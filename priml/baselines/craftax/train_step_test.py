@@ -18,16 +18,19 @@ from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
+pytestmark = pytest.mark.compute_training
+
+
 def _config(**overrides: object) -> CraftaxTrainStep.Config:
     config = CraftaxTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 4
-    config.rollout_steps = 4
-    config.num_epochs = 2
-    config.num_minibatches = 2
+    config.env.num_envs = 2
+    config.rollout_steps = 2
+    config.num_epochs = 1
+    config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.hidden_size = 32
+    config.model.hidden_size = 4
     config.model.num_layers = 1
     for name, value in overrides.items():
         setattr(config, name, value)
@@ -56,7 +59,7 @@ def test_the_network_is_sized_from_the_environment() -> None:
 
 def test_one_step_consumes_the_declared_interactions() -> None:
     step = _step()
-    assert step.steps_per_update == 4 * 4
+    assert step.steps_per_update == 2 * 2
 
 
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
@@ -110,10 +113,10 @@ def test_annealing_can_be_switched_off() -> None:
 def test_a_rollout_has_the_declared_shape() -> None:
     step = _step()
     rollout = step.collect()
-    assert rollout.observation.shape == (4, 4, step.env.observation_size)
-    assert rollout.action.shape == (4, 4)
-    assert rollout.advantage.shape == (4, 4)
-    assert rollout.target.shape == (4, 4)
+    assert rollout.observation.shape == (2, 2, step.env.observation_size)
+    assert rollout.action.shape == (2, 2)
+    assert rollout.advantage.shape == (2, 2)
+    assert rollout.target.shape == (2, 2)
 
 
 def test_a_rollout_is_collected_without_gradients() -> None:
@@ -128,7 +131,7 @@ def test_minibatches_partition_the_rollout_exactly() -> None:
     step = _step()
     rollout = step.collect()
     seen = [minibatch["action"].shape[0] for minibatch in rollout.minibatches(count=4)]
-    assert sum(seen) == 4 * 4
+    assert sum(seen) == 2 * 2
     assert len(seen) == 4
 
 

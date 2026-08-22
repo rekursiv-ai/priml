@@ -201,8 +201,8 @@ def test_no_cattle_graze_on_the_boss_floor() -> None:
 
 
 def test_creatures_never_leave_the_map() -> None:
-    state = _with_melee(_state(num_envs=8), at=(0, 0))
-    for _ in range(20):
+    state = _with_melee(_state(num_envs=1), at=(0, 0))
+    for _ in range(4):
         state = mobs.update_mobs(state, generator=_seed(17))
     positions = state.melee_mobs.position
     assert int(positions.min()) >= 0

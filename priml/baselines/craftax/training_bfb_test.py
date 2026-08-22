@@ -148,6 +148,7 @@ def _build_trace() -> nn.Module:
 
 
 @pytest.mark.parametrize("device", bfb_devices())
+@pytest.mark.compute_training
 def test_a_whole_ppo_update_matches_the_golden(device: str) -> None:
     del device
     assert_bfb_against_golden(
