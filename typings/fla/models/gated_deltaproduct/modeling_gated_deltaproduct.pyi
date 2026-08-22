@@ -1,4 +1,5 @@
 from typing import Any
+
 from fla.models.gated_deltaproduct.configuration_gated_deltaproduct import (
     GatedDeltaProductConfig,
 )

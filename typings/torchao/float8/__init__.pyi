@@ -18,7 +18,6 @@ __all__ = [
     "Float8GemmConfig",
     "Float8LinearConfig",
     "ScalingGranularity",
-    "ScalingGranularity",
     "ScalingType",
     "_auto_filter_for_recipe",
     "convert_to_float8_training",

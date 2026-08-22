@@ -1,4 +1,5 @@
 from typing import Any
+
 from fla.models.retnet.configuration_retnet import RetNetConfig
 from fla.models.utils import FLAGenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer

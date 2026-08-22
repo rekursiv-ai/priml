@@ -1,4 +1,5 @@
 from typing import Any
+
 from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
 from fla.models.utils import Cache, FLAGenerationMixin
 from torch import nn

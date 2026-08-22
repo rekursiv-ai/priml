@@ -1,7 +1,7 @@
-from torch import Tensor
 from typing import Any
+
 from fla.utils import checkpoint
-from torch import nn
+from torch import Tensor, nn
 
 import torch
 

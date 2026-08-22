@@ -1,5 +1,6 @@
-from torch import Tensor
 from typing import Any
+
+from torch import Tensor
 
 def naive_mesa_net_decoding_one_step(
     q, k, v, g, lamb, beta, prev_h_kk, prev_h_kv, max_CG_iteration=...

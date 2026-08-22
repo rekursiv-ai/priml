@@ -1,6 +1,6 @@
 from typing import Any
-from torch import Tensor
-from torch import nn
+
+from torch import Tensor, nn
 
 import torch
 

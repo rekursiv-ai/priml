@@ -1,6 +1,6 @@
-from torch import Tensor
 from typing import Any, Literal
-from torch import nn
+
+from torch import Tensor, nn
 
 def spatial_average(in_tens, keepdim=...): ...
 def upsample(in_tens, out_HW=...): ...

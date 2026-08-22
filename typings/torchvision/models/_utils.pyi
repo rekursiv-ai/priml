@@ -23,7 +23,7 @@ M = TypeVar("M", bound=nn.Module)
 V = TypeVar("V")
 
 def handle_legacy_interface(
-    **weights: tuple[str, W | None | Callable[[dict[str, Any]], W | None]],
+    **weights: tuple[str, W | Callable[[dict[str, Any]], W | None] | None],
 ): ...
 
 class _ModelURLs(dict):

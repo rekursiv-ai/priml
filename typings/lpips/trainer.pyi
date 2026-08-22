@@ -1,7 +1,8 @@
 from collections import OrderedDict
+from typing import Any, Literal
+
 from numpy.typing import NDArray
 from torch import Tensor
-from typing import Any, Literal
 
 class Trainer:
     def name(self) -> str: ...

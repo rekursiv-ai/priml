@@ -1,8 +1,9 @@
-from torch import Tensor
 from collections import OrderedDict
 from typing import NamedTuple
 
 import weakref
+
+from torch import Tensor
 
 import torch
 

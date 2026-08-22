@@ -1,5 +1,5 @@
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 from torch import Tensor, nn
 from torchvision.ops.feature_pyramid_network import ExtraFPNBlock

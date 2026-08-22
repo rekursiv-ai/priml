@@ -1,5 +1,7 @@
-from torch import Tensor
 from typing import Any
+
+from torch import Tensor
+
 import torch
 import triton
 import triton.language as tl

@@ -1,4 +1,5 @@
 from torch import Tensor
+
 import torch
 
 def naive_recurrent_gated_delta_rule(

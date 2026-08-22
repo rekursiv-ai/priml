@@ -1,4 +1,5 @@
 from typing import Any
+
 import torch
 
 from .fake_quantize_config import (

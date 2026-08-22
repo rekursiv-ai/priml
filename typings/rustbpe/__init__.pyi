@@ -1,15 +1,6 @@
-"""Type stubs for rustbpe, a Rust byte-pair-encoding trainer.
-
-The package is a compiled extension re-exported through a star import, so it
-ships no inline types and no ``py.typed``. Only the training surface the
-nanochat data preparation uses is declared here.
-"""
-
 from collections.abc import Iterable
 
 class Tokenizer:
-    """A byte-pair vocabulary fitted from a text iterator."""
-
     def __init__(self) -> None: ...
     def train_from_iterator(
         self,
