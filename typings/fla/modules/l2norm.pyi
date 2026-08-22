@@ -1,7 +1,7 @@
 from typing import Any
-from torch import Tensor
+
 from fla.utils import autotune_cache_kwargs, input_guard
-from torch import nn
+from torch import Tensor, nn
 
 import torch
 import triton

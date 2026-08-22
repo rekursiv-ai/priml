@@ -1,4 +1,5 @@
 from typing import Any
+
 import torch
 
 __all__ = ["WeightOnlyInt8QuantLinear"]

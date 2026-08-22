@@ -1,5 +1,5 @@
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from fla.models.mom.configuration_mom import MomConfig
 from fla.models.utils import Cache, FLAGenerationMixin

@@ -1,5 +1,5 @@
-from torch import Tensor
 from fla.utils import input_guard
+from torch import Tensor
 
 import torch
 import triton

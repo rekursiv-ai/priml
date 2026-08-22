@@ -1496,7 +1496,7 @@ dev = [
     { name = "safetensors" },
     { name = "scipy-stubs" },
     { name = "tqdm" },
-    { name = "ty", specifier = ">=0.0.60" },
+    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
 ]
 lint = [
     { name = "codespell", specifier = ">=2.2.4" },
@@ -1516,7 +1516,7 @@ pre-commit = [
     { name = "ruff" },
     { name = "safetensors" },
     { name = "scipy-stubs" },
-    { name = "ty", specifier = ">=0.0.60" },
+    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
 ]
 stubs = [{ name = "scipy-stubs" }]
 test = [
@@ -1531,7 +1531,7 @@ typecheck = [
     { name = "basedpyright", specifier = ">=1.10" },
     { name = "imageio", extras = ["ffmpeg"] },
     { name = "safetensors" },
-    { name = "ty", specifier = ">=0.0.60" },
+    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
 ]
 
 [[package]]

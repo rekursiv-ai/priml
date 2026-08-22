@@ -1,7 +1,7 @@
 from typing import Any
-from torch import Tensor
+
 from fla.models.utils import Cache
-from torch import nn
+from torch import Tensor, nn
 from transformers.processing_utils import Unpack
 
 import torch

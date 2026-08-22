@@ -1,8 +1,9 @@
-from numpy import ndarray
-from torch import Tensor, dtype
 from typing import Any
+
 from lpips.lpips import *
 from lpips.trainer import *
+from numpy import ndarray
+from torch import Tensor, dtype
 
 def normalize_tensor(in_feat, eps=...): ...
 def l2(p0, p1, range=...): ...

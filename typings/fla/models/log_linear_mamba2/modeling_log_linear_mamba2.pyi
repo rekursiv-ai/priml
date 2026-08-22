@@ -1,10 +1,10 @@
-from torch import Tensor
 from typing import Any
+
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import (
     LogLinearMamba2Config,
 )
 from fla.models.utils import Cache, FLAGenerationMixin
-from torch import nn
+from torch import Tensor, nn
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,

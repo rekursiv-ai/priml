@@ -1,6 +1,7 @@
-from torch import Tensor
 from typing import Any
+
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from torch import Tensor
 
 import torch
 import triton
