@@ -68,6 +68,7 @@ def test_no_key_is_bound_twice() -> None:
     assert len(play.KEYS) == len(set(play.KEYS))
 
 
+@pytest.mark.compute_large_fixture
 def test_recording_writes_a_playable_video(
     tmp_path: Path,
     sprite_dir: Path,
@@ -89,6 +90,7 @@ def test_recording_writes_a_playable_video(
     assert frames.shape[-1] == 3
 
 
+@pytest.mark.compute_large_fixture
 def test_recording_stops_when_the_episode_ends(
     tmp_path: Path,
     sprite_dir: Path,
@@ -109,6 +111,7 @@ def test_recording_stops_when_the_episode_ends(
     assert steps == 3
 
 
+@pytest.mark.compute_large_fixture
 def test_the_same_seed_records_the_same_episode(
     tmp_path: Path,
     sprite_dir: Path,
@@ -135,6 +138,7 @@ def test_a_degenerate_recording_is_refused(tmp_path: Path) -> None:
         play.record(_policy(), tmp_path / "x.mp4", max_steps=0)
 
 
+@pytest.mark.compute_large_fixture
 def test_recording_leaves_the_policy_untouched(
     tmp_path: Path,
     sprite_dir: Path,

@@ -83,12 +83,12 @@ class TestConfig:
     def test_explicit_head_dim_not_equal_hidden(self):
         """Qwen3 with hidden != heads*head_dim builds, forwards, and loads.
 
-        Regression for MODEL-008: e.g. hidden=1024, heads=16,
-        head_dim=128 (16*128=2048 != 1024). The attention inner width
+        Regression for MODEL-008: hidden=32, heads=4, head_dim=16
+        (4*16=64 != 32). The attention inner width
         differs from the residual width.
         """
         cfg = Qwen3.Config.from_hf(
-            _hf_config(hidden_size=1024, num_attention_heads=16, head_dim=128),
+            _hf_config(hidden_size=32, num_attention_heads=4, head_dim=16),
         ).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf_state_dict(cfg), cfg))

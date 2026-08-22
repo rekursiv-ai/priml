@@ -374,6 +374,7 @@ def test_state_round_trips_including_the_clock() -> None:
         assert torch.equal(a, b), name
 
 
+@pytest.mark.compute_torch_compile
 def test_a_compiled_run_checkpoints_in_the_form_it_reloads() -> None:
     """Compiling must not change what a checkpoint's keys are named.
 
@@ -492,6 +493,7 @@ class _SmokeSteps(nn.Module):
         return torch.cat(losses)
 
 
+@pytest.mark.compute_training
 def test_five_steps_bfb() -> None:
     """Freeze five optimizer steps of the recipe, end to end.
 

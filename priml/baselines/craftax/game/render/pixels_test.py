@@ -35,6 +35,8 @@ from priml.baselines.craftax.game.state import EnvState, empty_state
 TILE = 8
 """Small tiles: these assert on colour and difference, never on detail."""
 
+pytestmark = pytest.mark.compute_large_fixture
+
 
 @pytest.fixture(scope="module")
 def sprite_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:

@@ -554,6 +554,7 @@ def test_async_reads_a_sync_written_plain_file(
     assert torch.equal(loaded["x"].cpu(), torch.tensor([7, 8, 9]))
 
 
+@pytest.mark.gpu_torch_cuda
 def test_plain_file_read_maps_to_current_device(
     temp_checkpoint_dir: Path,
     single_rank_group: None,

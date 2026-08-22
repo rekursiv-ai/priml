@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
+from unittest.mock import patch
 
 import copy
 import math
@@ -15,20 +16,23 @@ from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
+pytestmark = pytest.mark.compute_training
+
+
 def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
     config = CraftaxRNNTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 4
+    config.env.num_envs = 2
     config.env.optimistic_reset_ratio = 1
     # A 3x3 view, not the benchmark's 9x11: these test the UPDATE, and a
     # 8,268-wide observation makes the first layer dominate every one.
     config.env.view = (3, 3)
-    config.rollout_steps = 4
-    config.num_epochs = 2
-    config.num_minibatches = 2
+    config.rollout_steps = 2
+    config.num_epochs = 1
+    config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.hidden_size = 16
+    config.model.hidden_size = 4
     for name, value in overrides.items():
         setattr(config, name, value)
     if "seed" in overrides:
@@ -56,7 +60,7 @@ def test_the_network_is_sized_from_the_environment() -> None:
 
 
 def test_one_step_consumes_the_declared_interactions() -> None:
-    assert _step().steps_per_update == 4 * 4
+    assert _step().steps_per_update == 2 * 2
 
 
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
@@ -76,6 +80,13 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
         assert math.isfinite(float(_metrics(result)[name])), name
 
 
+def test_each_epoch_visits_every_minibatch() -> None:
+    step = _config(num_epochs=2, num_minibatches=2).make()
+    with patch.object(step.optimizer, "step", wraps=step.optimizer.step) as optimizer:
+        step.train_step()
+    assert optimizer.call_count == 4
+
+
 def test_a_step_changes_the_policy() -> None:
     step = _step()
     before = step.model.embed[0].weight.detach().clone()
@@ -88,9 +99,9 @@ def test_a_rollout_records_the_state_it_began_from() -> None:
     # there is no per-layer cache to rebuild.
     step = _step()
     rollout = step.collect()
-    assert rollout.initial_state.shape == (4, 16)
-    assert rollout.observation.shape == (4, 4, step.env.observation_size)
-    assert rollout.previous_done.shape == (4, 4)
+    assert rollout.initial_state.shape == (2, 4)
+    assert rollout.observation.shape == (2, 2, step.env.observation_size)
+    assert rollout.previous_done.shape == (2, 2)
 
 
 def test_memory_carries_across_updates() -> None:
@@ -106,9 +117,8 @@ def test_minibatches_split_workers_and_never_time() -> None:
     minibatches = list(rollout.minibatches(count=2))
     assert len(minibatches) == 2
     for minibatch in minibatches:
-        # 4 steps x 2 workers, with the state each worker began from.
-        assert minibatch["observation"].shape[:2] == (4, 2)
-        assert minibatch["initial_state"].shape == (2, 16)
+        assert minibatch["observation"].shape[:2] == (2, 1)
+        assert minibatch["initial_state"].shape == (1, 4)
 
 
 def test_a_replayed_trajectory_reproduces_the_rollout_exactly() -> None:

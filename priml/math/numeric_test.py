@@ -564,9 +564,9 @@ def test_kahan_sum_accuracy():
 
 def test_kahan_sum_at_least_as_accurate_general():
     """Compensated sum is never worse than naive on a benign many-term sum."""
-    n = torch.arange(1, 10_001, dtype=torch.float32)
+    n = torch.arange(1, 1001, dtype=torch.float32)
     x = 1.0 / n
-    ref = (1.0 / torch.arange(1, 10_001, dtype=torch.float64)).sum().float()
+    ref = (1.0 / torch.arange(1, 1001, dtype=torch.float64)).sum().float()
     kahan_err = (kahan_sum(x) - ref).abs()
     naive_err = (x.sum() - ref).abs()
     assert kahan_err <= naive_err

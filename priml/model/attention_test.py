@@ -365,16 +365,16 @@ def test_self_attention_cached_chunk_rope_positions():
 
 def test_multi_stream_2_streams():
     m = MultiStreamAttention.Config(
-        channels_in=64,
-        heads=4,
-        channels_head=16,
+        channels_in=8,
+        heads=2,
+        channels_head=4,
         num_streams=2,
     ).make()
-    x0 = torch.randn(2, 8, 64)
-    x1 = torch.randn(2, 12, 64)
+    x0 = torch.randn(1, 2, 8)
+    x1 = torch.randn(1, 3, 8)
     y0, y1 = m([x0, x1])
-    assert y0.shape == (2, 8, 64)
-    assert y1.shape == (2, 12, 64)
+    assert y0.shape == (1, 2, 8)
+    assert y1.shape == (1, 3, 8)
 
 
 def test_multi_stream_1_stream():

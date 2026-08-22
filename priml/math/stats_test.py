@@ -164,10 +164,10 @@ def test_pca_whiten_unit_variance():
 def test_pca_power_matches_eigh():
     """Power iteration and eigh paths should produce equivalent results."""
     torch.manual_seed(7)
-    x = torch.randn(100, 8)
+    x = torch.randn(32, 4)
     x_centered = (x - x.mean(0)).float()
     vals_eigh, vecs_eigh = pca_eigh(x_centered)
-    vals_power, vecs_power = pca_power(x_centered)
+    vals_power, vecs_power = pca_power(x_centered, num_iters=100)
     torch.testing.assert_close(vals_power, vals_eigh, atol=1e-3, rtol=1e-3)
     # Eigenvectors may differ by sign; compare absolute values.
     torch.testing.assert_close(vecs_power.abs(), vecs_eigh.abs(), atol=1e-3, rtol=1e-3)
@@ -176,10 +176,10 @@ def test_pca_power_matches_eigh():
 def test_pca_power_tol_early_exit_matches_full():
     """The ``tol`` early-exit still recovers the eigenvalues to tolerance."""
     torch.manual_seed(7)
-    x = torch.randn(100, 8)
+    x = torch.randn(32, 4)
     x_centered = (x - x.mean(0)).float()
-    vals_full, _ = pca_power(x_centered, num_iters=200, tol=0.0)
-    vals_tol, _ = pca_power(x_centered, num_iters=200, tol=1e-6)
+    vals_full, _ = pca_power(x_centered, num_iters=50, tol=0.0)
+    vals_tol, _ = pca_power(x_centered, num_iters=50, tol=1e-6)
     torch.testing.assert_close(vals_tol, vals_full, atol=1e-3, rtol=1e-3)
 
 

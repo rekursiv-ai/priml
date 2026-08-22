@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
+from unittest.mock import patch
 
 import copy
 import math
@@ -15,22 +16,25 @@ from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
+pytestmark = pytest.mark.compute_training
+
+
 def _config(**overrides: object) -> CraftaxGTrXLTrainStep.Config:
     config = CraftaxGTrXLTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 4
-    config.rollout_steps = 8
-    config.gradient_window = 4
-    config.num_epochs = 2
-    config.num_minibatches = 2
+    config.env.num_envs = 2
+    config.rollout_steps = 4
+    config.gradient_window = 2
+    config.num_epochs = 1
+    config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.embed_dim = 16
-    config.model.num_heads = 2
-    config.model.num_layers = 2
-    config.model.qkv_dim = 16
-    config.model.hidden_size = 8
-    config.model.memory_length = 4
+    config.model.embed_dim = 4
+    config.model.num_heads = 1
+    config.model.num_layers = 1
+    config.model.qkv_dim = 4
+    config.model.hidden_size = 4
+    config.model.memory_length = 2
     for name, value in overrides.items():
         setattr(config, name, value)
     # The world and the policy draw from separate streams, so a reproducible
@@ -55,7 +59,7 @@ def test_the_network_is_sized_from_the_environment() -> None:
 
 
 def test_one_step_consumes_the_declared_interactions() -> None:
-    assert _step().steps_per_update == 4 * 8
+    assert _step().steps_per_update == 2 * 4
 
 
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
@@ -75,6 +79,13 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
         assert math.isfinite(float(_metrics(result)[name])), name
 
 
+def test_each_epoch_visits_every_minibatch() -> None:
+    step = _config(num_epochs=2, num_minibatches=2).make()
+    with patch.object(step.optimizer, "step", wraps=step.optimizer.step) as optimizer:
+        step.train_step()
+    assert optimizer.call_count == 4
+
+
 def test_a_step_changes_the_policy() -> None:
     step = _step()
     before = step.model.encoder.weight.detach().clone()
@@ -85,11 +96,11 @@ def test_a_step_changes_the_policy() -> None:
 def test_a_rollout_carries_the_memory_needed_to_replay_it() -> None:
     step = _step()
     rollout = step.collect()
-    assert rollout.observation.shape == (8, 4, step.env.observation_size)
+    assert rollout.observation.shape == (4, 2, step.env.observation_size)
     # One row per layer per step: exactly what each layer read, which is what
     # lets a gradient window rebuild the cache it began with.
-    assert rollout.layer_input.shape == (8, 4, 2, 16)
-    assert rollout.valid_length.shape == (8, 4)
+    assert rollout.layer_input.shape == (4, 2, 1, 4)
+    assert rollout.valid_length.shape == (4, 2)
 
 
 def test_memory_carries_across_updates() -> None:
@@ -106,7 +117,7 @@ def test_a_terminal_transition_is_recorded_before_it_clears_the_memory() -> None
     rollout = step.collect()
     # Step 0 ends every episode, so step 1 opens fresh with nothing to look
     # back at.
-    assert rollout.valid_length[1].tolist() == [0, 0, 0, 0]
+    assert rollout.valid_length[1].tolist() == [0, 0]
 
 
 def test_minibatches_split_workers_and_never_time() -> None:
@@ -123,17 +134,19 @@ def test_minibatches_split_workers_and_never_time() -> None:
         rollout.minibatches(
             initial_memory=memory,
             count=2,
-            window=4,
-            memory_length=4,
+            window=2,
+            memory_length=2,
         ),
     )
     assert len(minibatches) == 2
     for minibatch in minibatches:
-        # 2 workers x 2 windows of 4 steps.
-        assert minibatch["observation"].shape[0] == 4
-        assert minibatch["observation"].shape[1] == 4
-        assert minibatch["memory"].shape == (4, 4, 2, 16)
-        assert minibatch["valid_length"].shape == (4,)
+        assert minibatch["observation"].shape == (
+            2,
+            2,
+            step.env.observation_size,
+        )
+        assert minibatch["memory"].shape == (2, 2, 1, 4)
+        assert minibatch["valid_length"].shape == (2,)
 
 
 def test_a_replayed_window_reproduces_the_rollout_it_came_from() -> None:
@@ -150,8 +163,8 @@ def test_a_replayed_window_reproduces_the_rollout_it_came_from() -> None:
         rollout.minibatches(
             initial_memory=memory,
             count=1,
-            window=4,
-            memory_length=4,
+            window=2,
+            memory_length=2,
         ),
     )
     with torch.no_grad():
@@ -165,9 +178,8 @@ def test_a_replayed_window_reproduces_the_rollout_it_came_from() -> None:
         -1,
         minibatch["action"][..., None].long(),
     )[..., 0]
-    # Columns 0..3 are the first window of each of the four workers.
-    assert torch.allclose(value[:, :4], minibatch["value"][:, :4], atol=1e-6)
-    assert torch.allclose(log_prob[:, :4], minibatch["log_prob"][:, :4], atol=1e-6)
+    assert torch.allclose(value[:, :2], minibatch["value"][:, :2], atol=1e-6)
+    assert torch.allclose(log_prob[:, :2], minibatch["log_prob"][:, :2], atol=1e-6)
 
 
 def test_a_training_window_sees_more_context_than_the_rollout_did() -> None:
@@ -185,8 +197,8 @@ def test_a_training_window_sees_more_context_than_the_rollout_did() -> None:
         rollout.minibatches(
             initial_memory=memory,
             count=1,
-            window=4,
-            memory_length=4,
+            window=2,
+            memory_length=2,
         ),
     )
     with torch.no_grad():
@@ -197,7 +209,7 @@ def test_a_training_window_sees_more_context_than_the_rollout_did() -> None:
             minibatch["previous_done"],
         )
     # The second window's last step is where the extra context accumulates.
-    assert not torch.allclose(value[-1, 4:], minibatch["value"][-1, 4:], atol=1e-5)
+    assert not torch.allclose(value[-1, 2:], minibatch["value"][-1, 2:], atol=1e-5)
 
 
 def test_the_learning_rate_anneals_toward_zero() -> None:

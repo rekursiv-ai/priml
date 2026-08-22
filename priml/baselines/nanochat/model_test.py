@@ -334,7 +334,16 @@ def test_the_token_table_is_drawn_at_unit_variance() -> None:
     # Built through the MODEL: the vocabulary and the width are pushed down by
     # its finalize, so a table built from its own config alone has neither.
     torch.manual_seed(0)
-    model = experiments.exp001().step.model.copy_tree().finalize().make()
+    config = experiments.exp001().step.model.copy_tree()
+    config.channels_in = 16
+    config.num_layers = 1
+    config.max_seq_len = 4
+    config.vocab_size = 4096
+    attention = config.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.channels_head = 8
+    attention.gate_channels = 4
+    model = config.finalize().make()
     weight = model.embed.inner.weight.detach().float()
     # Loose enough for the draw, far tighter than the 0.707 the bug produced.
     assert abs(float(weight.std()) - 1.0) < 0.02
@@ -347,7 +356,16 @@ def test_the_output_projection_is_drawn_near_zero() -> None:
     otherwise realize 0.0007.
     """
     torch.manual_seed(0)
-    model = experiments.exp001().step.model.copy_tree().finalize().make()
+    config = experiments.exp001().step.model.copy_tree()
+    config.channels_in = 16
+    config.num_layers = 1
+    config.max_seq_len = 4
+    config.vocab_size = 4096
+    attention = config.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.channels_head = 8
+    attention.gate_channels = 4
+    model = config.finalize().make()
     head = model.lm_head
     assert isinstance(head, SoftCap)
     inner = head.inner

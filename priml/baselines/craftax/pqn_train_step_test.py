@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
+from unittest.mock import patch
 
 import copy
 import math
@@ -15,20 +16,23 @@ from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
+pytestmark = pytest.mark.compute_training
+
+
 def _config(**overrides: object) -> CraftaxPQNTrainStep.Config:
     config = CraftaxPQNTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 4
+    config.env.num_envs = 2
     config.env.optimistic_reset_ratio = 1
     # A 3x3 view, not the benchmark's 9x11: these test the UPDATE, and a
     # 8,268-wide observation makes the first layer dominate every one.
     config.env.view = (3, 3)
-    config.rollout_steps = 4
-    config.num_epochs = 2
-    config.num_minibatches = 2
+    config.rollout_steps = 2
+    config.num_epochs = 1
+    config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.hidden_size = 16
+    config.model.hidden_size = 4
     for name, value in overrides.items():
         setattr(config, name, value)
     if "seed" in overrides:
@@ -62,6 +66,13 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
         assert math.isfinite(float(_metrics(result)[name])), name
 
 
+def test_each_epoch_visits_every_minibatch() -> None:
+    step = _config(num_epochs=2, num_minibatches=2).make()
+    with patch.object(step.optimizer, "step", wraps=step.optimizer.step) as optimizer:
+        step.train_step()
+    assert optimizer.call_count == 4
+
+
 def test_a_step_changes_the_network() -> None:
     step = _step()
     before = step.model.encoder.weight.detach().clone()
@@ -92,7 +103,7 @@ def test_it_keeps_no_replay_buffer() -> None:
 def test_targets_are_built_once_before_optimizing() -> None:
     """Recomputing them per epoch would chase a value already moved.
 
-    The rollout carries its targets, so the four optimization passes all
+    The rollout carries its targets, so all optimization passes
     regress toward the same numbers.
     """
     step = _step()
@@ -105,9 +116,9 @@ def test_targets_are_built_once_before_optimizing() -> None:
 def test_a_rollout_records_both_recurrent_tensors() -> None:
     step = _step()
     rollout = step.collect()
-    assert rollout.hidden.shape == (4, 16)
-    assert rollout.cell.shape == (4, 16)
-    assert rollout.previous_action.shape == (4, 4)
+    assert rollout.hidden.shape == (2, 4)
+    assert rollout.cell.shape == (2, 4)
+    assert rollout.previous_action.shape == (2, 2)
 
 
 def test_exploration_decays_across_the_run() -> None:
@@ -123,9 +134,11 @@ def test_exploration_decays_across_the_run() -> None:
 def test_full_exploration_ignores_the_networks_preference() -> None:
     # At epsilon 1 every action is random, which is what makes the first
     # updates informative rather than a self-fulfilling greedy loop.
-    step = _config(epsilon_start=1.0, epsilon_finish=1.0).make()
+    config = _config(epsilon_start=1.0, epsilon_finish=1.0)
+    config.env.num_envs = 4
+    step = config.make()
     rollout = step.collect()
-    # A 43-action space over 16 slots: an argmax-only policy would repeat
+    # A 43-action space over eight slots: an argmax-only policy would repeat
     # itself far more than this.
     assert len(set(rollout.action.flatten().tolist())) > 4
 

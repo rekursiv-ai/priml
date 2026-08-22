@@ -393,6 +393,7 @@ class _LinearModel(nn.Module):
         return self.linear(media)
 
 
+@pytest.mark.compute_training
 def test_train_loop_basic():
     """Test TrainLoop runs without errors."""
     torch.manual_seed(42)
@@ -431,6 +432,7 @@ def test_train_loop_basic():
         assert (Path(tmp) / "step_00000010.pt").exists()
 
 
+@pytest.mark.compute_training
 def test_train_loop_with_max_epochs():
     """Test TrainLoop stops at max_epochs."""
     torch.manual_seed(42)
@@ -558,6 +560,7 @@ class _BinaryDataset:
         _ = state_dict
 
 
+@pytest.mark.compute_training
 def test_train_loop_comprehensive():
     """Comprehensive test with checkpointing and metrics."""
     torch.manual_seed(42)
@@ -1406,6 +1409,8 @@ def test_result_line_accounts_for_every_second(
     and everything else must reconstruct the wall clock.
     """
     monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: True)
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
     config = _make_step_logging_loop_config()
     config.num_steps_eval = 1
     loop = config.make()
@@ -1414,8 +1419,9 @@ def test_result_line_accounts_for_every_second(
     inner_eval = loop.eval
 
     def slow_eval() -> dict[str, Any]:
-        time.sleep(0.05)
-        return inner_eval()
+        metrics = inner_eval()
+        clock.now += 0.05
+        return metrics
 
     monkeypatch.setattr(loop, "eval", slow_eval)
 
@@ -2844,10 +2850,10 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     """
     from priml.train.train_loop import _phase_heartbeat  # noqa: PLC0415
 
-    with _phase_heartbeat("eval batch 12 eval_loss", interval_s=0.05):
-        deadline = time.perf_counter() + 0.35  # >3 watchdog periods.
+    with _phase_heartbeat("eval batch 12 eval_loss", interval_s=0.01):
+        deadline = time.perf_counter() + 0.08  # >3 watchdog periods.
         while time.perf_counter() < deadline:
-            time.sleep(0.01)  # Healthy: the GIL is released constantly.
+            time.sleep(0.002)  # Healthy: the GIL is released constantly.
     assert "Timeout (" not in capfd.readouterr().err
 
 
