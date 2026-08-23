@@ -36,6 +36,11 @@ class CraftaxStep:
       done: Whether the transition ended an episode.
       info: Per-achievement unlock indicators, valued 100 at the final step
         of an episode that unlocked one and 0 otherwise. Diagnostics only.
+      terminal_state: The state this transition REACHED, before any finished
+        worker was restarted into a fresh world. ``env.state`` already holds
+        the replacement by the time a caller sees this, so a renderer wanting
+        to draw the frame that ended the episode -- the drowning, the death --
+        has no other way to reach it.
 
     """
 
@@ -43,6 +48,7 @@ class CraftaxStep:
     reward: Tensor
     done: Tensor
     info: dict[str, Tensor]
+    terminal_state: EnvState
 
 
 class CraftaxEnv:
@@ -171,6 +177,7 @@ class CraftaxEnv:
         )
         done = step.is_done(state)
         info = _achievement_info(state, done)
+        reached = state
 
         if bool(done.any()):
             state = self._restart(state, done)
@@ -181,6 +188,7 @@ class CraftaxEnv:
             reward=reward,
             done=done,
             info=info,
+            terminal_state=reached,
         )
 
     def _restart(self, state: EnvState, done: Tensor) -> EnvState:

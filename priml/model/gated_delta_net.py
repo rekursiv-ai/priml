@@ -19,6 +19,7 @@ from torch.nn import functional as f
 
 import torch
 
+from priml.math.basic import ceil_multiple
 from priml.model.custom_types import ChannelsIn, TensorModule
 from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
@@ -225,7 +226,7 @@ def _torch_chunk_gated_delta_rule(
     ]
     B, H, S, dk = key.shape
     dv = value.shape[-1]
-    pad = (chunk_size - S % chunk_size) % chunk_size
+    pad = int(ceil_multiple(S, chunk_size)) - S
     query = f.pad(query, (0, 0, 0, pad))
     key = f.pad(key, (0, 0, 0, pad))
     value = f.pad(value, (0, 0, 0, pad))

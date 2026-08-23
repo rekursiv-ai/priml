@@ -137,7 +137,14 @@ def softcap(x: Tensorable, cap: Tensorable = 1.0) -> Tensor:
     """
     orig_dtype = torch.as_tensor(x).dtype
     x, cap = convert_to_tensor(x, cap, dtype=torch.float32)
-    return (torch.tanh(x / cap) * cap).to(orig_dtype)
+    capped = torch.tanh(x / cap) * cap
+    # Only a float input gets its dtype back. Capping is real-valued -- tanh(1)
+    # is 0.7616 -- so restoring an integer dtype would floor every capped value
+    # to zero and return all zeros for a function documented to return values
+    # in [-cap, cap].
+    if not orig_dtype.is_floating_point:
+        return capped
+    return capped.to(orig_dtype)
 
 
 def logerfc(x: Tensorable) -> Tensor:
