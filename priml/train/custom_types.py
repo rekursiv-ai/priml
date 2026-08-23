@@ -444,6 +444,10 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
     """Protocol for trainable models.
 
     Defines interface for models with training logic.
+
+    ``**preprocessed_batch`` is ``Any`` so an implementation can narrow it to
+    the batch it actually takes (``**batch: Tensor``); ``object`` would reject
+    those.
     """
 
     @property

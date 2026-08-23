@@ -8,6 +8,7 @@ import copy
 import math
 
 from configgle import PartialConfig
+from torch import Tensor
 
 import pytest
 import torch
@@ -42,7 +43,7 @@ def _config(**overrides: object) -> CraftaxTrainStep.Config:
 
 
 def _step() -> CraftaxTrainStep:
-    return cast("CraftaxTrainStep", _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
+    return cast(CraftaxTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
 
 
 def test_it_satisfies_the_training_step_protocol() -> None:
@@ -230,7 +231,7 @@ def test_compiling_agrees_with_eager_to_float32_rounding() -> None:
     assert loss(compiled=True) == pytest.approx(eager, abs=1e-6)
 
 
-def _metrics(result: TrainStepOutput) -> dict[str, float | torch.Tensor]:
+def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:
     """Read the optional diagnostics a completed update always carries."""
     return result.get("metrics", {})
 

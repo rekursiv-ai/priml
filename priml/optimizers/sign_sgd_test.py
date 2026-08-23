@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -9,9 +11,9 @@ from priml.optimizers.sign_sgd import SignSGD, _sparse_distributed_step
 
 
 def _sparse_group(
-    weights: torch.Tensor,
-    local_weights: torch.Tensor,
-    local_ids: torch.Tensor,
+    weights: Tensor,
+    local_weights: Tensor,
+    local_ids: Tensor,
     *,
     lr: float,
     weight_decay: float,

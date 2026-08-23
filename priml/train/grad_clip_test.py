@@ -9,6 +9,8 @@ measure-only path reports the same norm without mutating grads.
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import torch
 
 from priml.train.grad_clip import (
@@ -32,7 +34,7 @@ def _test_device() -> torch.device:
 _FOREACH: bool | None = None if torch.backends.mps.is_available() else True
 
 
-def _params_with_grads(grads: list[torch.Tensor]) -> list[torch.nn.Parameter]:
+def _params_with_grads(grads: list[Tensor]) -> list[torch.nn.Parameter]:
     device = _test_device()
     params: list[torch.nn.Parameter] = []
     for g in grads:
@@ -43,7 +45,7 @@ def _params_with_grads(grads: list[torch.Tensor]) -> list[torch.nn.Parameter]:
     return params
 
 
-def _close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+def _close(actual: Tensor, expected: Tensor) -> None:
     """Compare on CPU so a result on the MPS test device matches a CPU literal."""
     torch.testing.assert_close(actual.cpu(), expected)
 

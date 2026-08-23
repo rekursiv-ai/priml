@@ -19,26 +19,63 @@ Example::
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import Protocol, cast
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import torch
 
+from priml.model.custom_types import LookupTable, TensorModule
 from priml.model.kvcache import KVCache
 
 
-# CausalLM duck-type interface:
-#   embed: nn.Module           (B, S) -> (B, S, D)
-#   blocks: Iterable[Module]   each has ``attn`` with ``alloc_kv_cache``
-#                              and accepts ``(x, cache=...)``.
-#   final_norm: nn.Module      (B, S, D) -> (B, S, D)
-#   project_to_logits(hidden) -> logits
+class AttentionLike(Protocol):
+    """The attention member ``generate`` reaches for on each block."""
+
+    def alloc_kv_cache(
+        self,
+        *,
+        batch: int | tuple[int, ...],
+        max_seq: int,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> KVCache: ...
+
+
+class BlockLike(Protocol):
+    """One transformer block: callable with a cache, exposing ``attn``."""
+
+    attn: AttentionLike
+
+    def __call__(
+        self, x: Tensor, /, *, cache: KVCache | None = None
+    ) -> Tensor | tuple[Tensor, KVCache]: ...
+
+
+class CausalLMLike(Protocol):
+    """The model surface ``generate`` uses -- nothing more.
+
+    Declared structurally rather than against ``nn.Module``: a ``Protocol``
+    cannot inherit a non-protocol class, and ``Module.__call__`` erases the
+    per-model signature anyway.
+    """
+
+    @property
+    def embed(self) -> LookupTable: ...
+
+    @property
+    def blocks(self) -> Iterable[nn.Module]: ...
+
+    @property
+    def final_norm(self) -> TensorModule: ...
+
+    def project_to_logits(self, hidden: Tensor, /) -> Tensor: ...
 
 
 @torch.inference_mode()
 def generate(
-    model: Any,
+    model: CausalLMLike,
     prompt_ids: Tensor,
     *,
     max_new_tokens: int = 128,
@@ -72,13 +109,11 @@ def generate(
             f"prompt length {prompt_len} exceeds max_seq_len={max_seq_len}.",
         )
 
-    # Infer dtype from model parameters.
-    param: Tensor = next(iter(model.embed.parameters()))
-    dtype = param.dtype
+    dtype = model.embed.weight.dtype
 
     # Delegate cache alloc to block; keeps generate arch-agnostic
     # (MLA caches compressed latent).
-    blocks = list(model.blocks)
+    blocks = [cast(BlockLike, block) for block in model.blocks]
     caches = [
         block.attn.alloc_kv_cache(
             batch=B,

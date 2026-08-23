@@ -103,13 +103,13 @@ class Qwen3(CausalLM):
                     "Qwen3-MoE and earlier Qwen versions need their own loader.",
                 )
             # transformers 4.55+ nests rope params; earlier has rope_theta flat.
-            rope_theta = cast("float | None", config.get("rope_theta"))
+            rope_theta = config.get("rope_theta")
             if rope_theta is None:
                 rope_params = cast(
-                    "dict[str, Any]",
+                    dict[str, Any],
                     config.get("rope_parameters") or {},
                 )
-                rope_theta = cast("float | None", rope_params.get("rope_theta"))
+                rope_theta = rope_params.get("rope_theta")
             hidden_size = int(config["hidden_size"])
             num_heads = int(config["num_attention_heads"])
             return cls(

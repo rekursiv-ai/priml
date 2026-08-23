@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import torch
 
 from priml.optimizers.newton import Newton
@@ -17,7 +19,7 @@ def test_newton_fp64_quadratic_converges() -> None:
     param = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
     opt = Newton([param], lr=1.0, damping=0.0)
 
-    def closure() -> torch.Tensor:
+    def closure() -> Tensor:
         return ((param - 3.0) ** 2).sum()
 
     opt.step(closure)

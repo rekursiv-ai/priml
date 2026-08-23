@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import copy
 
 from configgle import Fig
+from torch import Tensor
 
 import torch
 
@@ -212,14 +213,14 @@ class EMA:
         self._param_filter: _ParamFilter | None = None
 
         self.shadow_model: nn.Module | None = None
-        self.shadow_params: dict[str, torch.Tensor] = {}
+        self.shadow_params: dict[str, Tensor] = {}
         self._module_params: dict[str, nn.Parameter] = {}
-        self._shadow_buffers: dict[str, torch.Tensor] = {}
+        self._shadow_buffers: dict[str, Tensor] = {}
         self.global_step = 0
         self.local_step = 0
         self._pending_state: dict[str, Any] | None = None
         self._tracked_names: set[str] = set()
-        self._backup: dict[str, torch.Tensor] = {}
+        self._backup: dict[str, Tensor] = {}
         self._initialized = False
         # True once a param_dict shadow has been adopted from load_state_dict
         # before lazy init, so lazy init must not re-clone over it.
@@ -463,7 +464,7 @@ class EMA:
             return True
         return self._param_filter(name, param)
 
-    def _shadow_param(self, name: str) -> torch.Tensor:
+    def _shadow_param(self, name: str) -> Tensor:
         """The shadow tensor for ``name`` regardless of shadow kind."""
         if self.shadow_model is not None:
             return self._module_params[name].data

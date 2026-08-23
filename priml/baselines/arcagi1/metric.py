@@ -62,7 +62,7 @@ class PassK:
         # puzzle id -> the true answer's hash
         self._truth: dict[int, str] = {}
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Record one batch of predictions as votes.
 
         Args:
@@ -72,15 +72,21 @@ class PassK:
             ``valid_count`` truncates the padded tail when present.
 
         """
-        labels: Tensor = batch["label"].detach().to(torch.int64)
-        identifiers: Tensor = batch["puzzle_identifiers"].detach().to(torch.int64)
+        label_raw = batch["label"]
+        assert isinstance(label_raw, Tensor)
+        labels = label_raw.detach().to(torch.int64)
+        puzzle_identifiers_raw = batch["puzzle_identifiers"]
+        assert isinstance(puzzle_identifiers_raw, Tensor)
+        identifiers = puzzle_identifiers_raw.detach().to(torch.int64)
         grid_len = labels.shape[-1]
         packed = logits.detach()
         predictions = packed[:, -grid_len:].to(torch.int64)
         # Confidence in [0, 1] so ties break on a comparable scale.
         confidence = torch.sigmoid(packed[:, 0].float())
 
-        valid_count = int(batch.get("valid_count", labels.shape[0]))
+        raw_count = batch.get("valid_count", labels.shape[0])
+        assert isinstance(raw_count, int)
+        valid_count = raw_count
         labels = labels[:valid_count].to(predictions.device)
         predictions = predictions[:valid_count]
         identifiers = identifiers[:valid_count].to(predictions.device)

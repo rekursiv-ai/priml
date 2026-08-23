@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import functools
 import tempfile
 
+from torch import Tensor
 from torch.distributed.tensor import DTensor
 
 import pytest
@@ -49,11 +50,11 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.network_huggingface
 
 
-def _swiglu() -> tuple[nn.Module, torch.Tensor]:
+def _swiglu() -> tuple[nn.Module, Tensor]:
     return SwiGLU.Config(channels_in=32, shard="colwise").make(), torch.randn(2, 5, 32)
 
 
-def _self_attention() -> tuple[nn.Module, torch.Tensor]:
+def _self_attention() -> tuple[nn.Module, Tensor]:
     attn = SelfAttention.Config(
         channels_in=32,
         heads=4,
@@ -63,7 +64,7 @@ def _self_attention() -> tuple[nn.Module, torch.Tensor]:
     return attn, torch.randn(2, 6, 32)
 
 
-def _moe() -> tuple[nn.Module, torch.Tensor]:
+def _moe() -> tuple[nn.Module, Tensor]:
     moe = MoE.Config(
         channels_in=32,
         router=Router.Config(num_experts=4, top_k=2),
@@ -71,7 +72,7 @@ def _moe() -> tuple[nn.Module, torch.Tensor]:
     return moe, torch.randn(2, 5, 32)
 
 
-def _transformer_block() -> tuple[nn.Module, torch.Tensor]:
+def _transformer_block() -> tuple[nn.Module, Tensor]:
     block = TransformerBlock.Config(
         channels_in=32,
         attn=SelfAttention.Config(
@@ -83,7 +84,7 @@ def _transformer_block() -> tuple[nn.Module, torch.Tensor]:
     return block, torch.randn(2, 6, 32)
 
 
-def _causal_lm() -> tuple[nn.Module, torch.Tensor]:
+def _causal_lm() -> tuple[nn.Module, Tensor]:
     model = CausalLM.Config(
         vocab_size=64,
         channels=32,
@@ -99,7 +100,7 @@ def _causal_lm() -> tuple[nn.Module, torch.Tensor]:
     return model, torch.randint(0, 64, (2, 6))
 
 
-def _mla_replicated() -> tuple[nn.Module, torch.Tensor]:
+def _mla_replicated() -> tuple[nn.Module, Tensor]:
     # MLA with shard="none": the applier leaves it replicated, so sharded ==
     # dense holds trivially. The head-parallel style is covered separately in
     # mla_tensor_parallel_test.py.
@@ -107,7 +108,7 @@ def _mla_replicated() -> tuple[nn.Module, torch.Tensor]:
     return mla, torch.randn(2, 6, 32)
 
 
-_CASES: dict[str, Callable[[], tuple[nn.Module, torch.Tensor]]] = {
+_CASES: dict[str, Callable[[], tuple[nn.Module, Tensor]]] = {
     "swiglu": _swiglu,
     "self_attention": _self_attention,
     "moe": _moe,
@@ -121,7 +122,7 @@ _CASES: dict[str, Callable[[], tuple[nn.Module, torch.Tensor]]] = {
 _REPLICATED_CASES = frozenset({"mla_replicated"})
 
 
-def _first(out: torch.Tensor | tuple[torch.Tensor, object]) -> torch.Tensor:
+def _first(out: Tensor | tuple[Tensor, object]) -> Tensor:
     """Unwrap a model output that may be a ``(tensor, cache)`` tuple."""
     return out[0] if isinstance(out, tuple) else out
 
@@ -151,7 +152,7 @@ def _record_case(
     result_dir: Path,
     case: str,
     rank: int,
-    build: Callable[[], tuple[nn.Module, torch.Tensor]],
+    build: Callable[[], tuple[nn.Module, Tensor]],
     mesh: DeviceMesh,
 ) -> None:
     """Assert one case's sharded forward equals dense; record the outcome."""

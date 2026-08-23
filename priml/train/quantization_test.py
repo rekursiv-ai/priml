@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from torch import nn
+from torch import Tensor, nn
 from torchao.float8.float8_linear import Float8Linear
 
 import pytest
@@ -96,7 +96,7 @@ def test_float8_linear_forward_keeps_autocast_enabled(
 
     observed: list[bool] = []
 
-    def _spy_forward(self: Float8Linear, input: torch.Tensor) -> torch.Tensor:
+    def _spy_forward(self: Float8Linear, input: Tensor) -> Tensor:
         del self
         observed.append(torch.is_autocast_enabled("cpu"))
         return input

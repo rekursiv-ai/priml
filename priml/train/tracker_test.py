@@ -11,6 +11,7 @@ import json
 import tempfile
 
 from configgle import Fig
+from wandb.sdk.wandb_run import Run
 
 import torch
 
@@ -27,8 +28,6 @@ from priml.train.tracker import (
 
 
 if TYPE_CHECKING:
-    from wandb.sdk.wandb_run import Run
-
     import pytest
 
 
@@ -147,7 +146,7 @@ def _wandb_tracker_with_fake_run() -> tuple[WandbTracker, _FakeRun]:
     """Build a WandbTracker on a recording fake run (rank-0 path, no wandb.init)."""
     tracker = WandbTracker.__new__(WandbTracker)
     run = _FakeRun()
-    tracker._run = cast("Run", run)
+    tracker._run = cast(Run, run)
     return tracker, run
 
 

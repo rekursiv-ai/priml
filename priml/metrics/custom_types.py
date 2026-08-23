@@ -24,7 +24,7 @@ class MetricProtocol(CheckpointableProtocol, Protocol):
     (e.g., quantiles, confusion matrices, running averages).
     """
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Update metric state with batch.
 
         Args:

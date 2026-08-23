@@ -12,7 +12,7 @@ the non-lazy version.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast, overload
 
 import functools
 import traceback
@@ -21,6 +21,16 @@ import torch
 
 
 _compile_traces = dict[str, list[str]]()
+
+
+@overload
+def lazy_torch_compile[**P, R](fn: Callable[P, R], /) -> Callable[P, R]: ...
+
+
+@overload
+def lazy_torch_compile[**P, R](
+    **compile_kwargs: Any,
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
 
 def lazy_torch_compile(*compile_args: Any, **compile_kwargs: Any) -> Callable[..., Any]:
@@ -54,18 +64,20 @@ def lazy_torch_compile(*compile_args: Any, **compile_kwargs: Any) -> Callable[..
     return decorator
 
 
-def _make_lazy_compiled(
-    fn: Callable[..., Any], *compile_args: Any, **compile_kwargs: Any
-) -> Callable[..., Any]:
+def _make_lazy_compiled[**P, R](
+    fn: Callable[P, R], *compile_args: Any, **compile_kwargs: Any
+) -> Callable[P, R]:
     """Wrap ``fn`` so ``torch.compile`` runs on first call, not at decoration."""
-    compiled: Callable[..., Any] | None = None
+    compiled: Callable[P, R] | None = None
 
     @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         nonlocal compiled
         target = compiled
         if target is None:
-            target = torch.compile(*compile_args, **compile_kwargs)(fn)
+            target = cast(
+                Callable[P, R], torch.compile(*compile_args, **compile_kwargs)(fn)
+            )
             compiled = target
         return target(*args, **kwargs)
 

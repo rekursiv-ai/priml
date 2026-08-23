@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, cast, override
+from typing import TYPE_CHECKING, Any, Self, override
 
 from configgle import Makes, PartialConfig
 from torch import Tensor
@@ -288,6 +288,14 @@ class CraftaxPQNTrainStep(TrainStep):
         self._finished_lengths: list[int] = []
 
     @property
+    @override
+    def model(self) -> RecurrentQNetwork:
+        """The Q-network this step trains, at its declared class."""
+        model = self._model
+        assert isinstance(model, RecurrentQNetwork)
+        return model
+
+    @property
     def steps_per_update(self) -> int:
         """Environment interactions consumed by one update."""
         workers = int(self._observation.shape[0])
@@ -321,7 +329,7 @@ class CraftaxPQNTrainStep(TrainStep):
         return batch
 
     @override
-    def train_step(self, **batch: Any) -> TrainStepOutput:
+    def train_step(self, **batch: object) -> TrainStepOutput:
         """Collect a rollout and regress toward its Q(lambda) targets.
 
         Args:
@@ -431,7 +439,7 @@ class CraftaxPQNTrainStep(TrainStep):
         )
 
     @override
-    def train_loss(self, **batch: Any) -> TrainStepOutput:
+    def train_loss(self, **batch: object) -> TrainStepOutput:
         """Score a rollout without optimizing.
 
         Args:
@@ -448,7 +456,7 @@ class CraftaxPQNTrainStep(TrainStep):
         return {"loss": loss.detach(), "model": values.detach()}
 
     @override
-    def eval_loss(self, **batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
         """Score a rollout in evaluation mode.
 
         Args:
@@ -465,11 +473,12 @@ class CraftaxPQNTrainStep(TrainStep):
             self.model.train()
 
     @override
-    def call_eval(self, **batch: Any) -> Tensor:
+    def call_eval(self, *, observation: Tensor, **_batch: object) -> Tensor:
         """Return action values for a batch of observations.
 
         Args:
-          **batch: Must contain ``observation``.
+          observation: Batched observations, ``[batch, observation_size]``.
+          **_batch: Ignored; only ``observation`` is scored.
 
         Returns:
           q_values: Value of each action, computed with a fresh state.
@@ -478,10 +487,9 @@ class CraftaxPQNTrainStep(TrainStep):
         self.model.eval()
         try:
             with torch.no_grad():
-                values = self.model(batch["observation"])
+                return self.model.forward(observation)
         finally:
             self.model.train()
-        return cast("Tensor", values)
 
     @override
     def on_epoch_end(self) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import override
 
 from configgle import Fig
-from torch import nn
+from torch import Tensor, nn
 
 import torch
 
@@ -24,7 +24,7 @@ class DummyLoss(nn.Module):
         self.value = config.value
 
     @override
-    def forward(self, *args: object, **kwargs: object) -> torch.Tensor:
+    def forward(self, *args: object, **kwargs: object) -> Tensor:
         return torch.tensor(self.value)
 
 

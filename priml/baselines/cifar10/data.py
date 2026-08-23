@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, override
+from typing import TYPE_CHECKING, Any, Self, cast, override
 
 import logging
 
@@ -242,7 +242,10 @@ def _load_split(
             "--frozen python -m priml.baselines.cifar10.scripts.prepare_data` "
             "first.",
         )
-    payload: dict[str, Tensor] = torch.load(path, map_location="cpu", weights_only=True)
+    payload = cast(
+        dict[str, Tensor],
+        torch.load(path, map_location="cpu", weights_only=True),
+    )
     # A cache written by some other tool can occupy this path with the same
     # filename and different keys; without this check that surfaces as a bare
     # KeyError from an unrelated line.

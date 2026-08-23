@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -87,8 +89,8 @@ def test_the_sequence_path_equals_the_recurrent_path() -> None:
     start = model.initial_state(3).double()
 
     state = start.clone()
-    logits: list[torch.Tensor] = []
-    values: list[torch.Tensor] = []
+    logits: list[Tensor] = []
+    values: list[Tensor] = []
     for index in range(observation.shape[0]):
         state, step_logits, step_value = model.step(
             state,

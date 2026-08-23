@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import torch
 
 from priml.baselines.sudoku.metric import GridAccuracy
 
 
-def _packed(predictions: torch.Tensor, prefix: int = 1) -> torch.Tensor:
+def _packed(predictions: Tensor, prefix: int = 1) -> Tensor:
     """Pack predictions behind ``prefix`` diagnostic columns."""
     lead = torch.zeros(predictions.shape[0], prefix)
     return torch.cat([lead, predictions.float()], dim=-1)
@@ -34,7 +36,7 @@ def test_grid_is_read_from_the_end() -> None:
     assert scores == [1.0, 1.0, 1.0]
 
 
-def _score(packed: torch.Tensor, labels: torch.Tensor) -> float:
+def _score(packed: Tensor, labels: Tensor) -> float:
     metric = GridAccuracy.Config().make()
     metric.update(packed, label=labels)
     return metric.compute()["exact"]

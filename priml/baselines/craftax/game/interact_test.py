@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -30,7 +32,7 @@ def _facing(state: EnvState, block: BlockType) -> EnvState:
     return state
 
 
-def _all(num_envs: int = 2) -> torch.Tensor:
+def _all(num_envs: int = 2) -> Tensor:
     return torch.ones(num_envs, dtype=torch.bool)
 
 

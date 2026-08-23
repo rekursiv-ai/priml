@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import torch
 
 from priml.baselines.arcagi1.metric import PassK
 
 
-def _packed(predictions: torch.Tensor, halt: torch.Tensor) -> torch.Tensor:
+def _packed(predictions: Tensor, halt: Tensor) -> Tensor:
     """Pack a halt logit ahead of the predicted tokens, as the step emits."""
     return torch.cat([halt.reshape(-1, 1), predictions.float()], dim=-1)
 

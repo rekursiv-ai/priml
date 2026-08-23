@@ -580,7 +580,7 @@ def main() -> int:
     )
     train_loader = their_loader["train"]
 
-    set_rng_state(cast("RngState", seeded["state"]))
+    set_rng_state(cast(RngState, seeded["state"]))
     ours = build_ours(device=args.device)
     model = ours.config.model
     mapping = name_map(theirs, layers=model.num_layers)

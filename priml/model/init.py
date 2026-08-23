@@ -98,12 +98,12 @@ def truncated_normal(
             return
         sqrt2 = 2.0**0.5
         z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
-        pdf_u = (2.0 * math.pi) ** -0.5 * math.exp(-0.5 * upper * upper)
-        pdf_l = (2.0 * math.pi) ** -0.5 * math.exp(-0.5 * lower * lower)
+        inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
+        pdf_u = inv_sqrt_2pi * math.exp(-0.5 * upper * upper)
+        pdf_l = inv_sqrt_2pi * math.exp(-0.5 * lower * lower)
         # Std of N(0,1) truncated to [lower, upper].
-        std /= (
-            1.0 - (upper * pdf_u - lower * pdf_l) / z - ((pdf_u - pdf_l) / z) ** 2
-        ) ** 0.5
+        ratio = (pdf_u - pdf_l) / z
+        std /= math.sqrt(1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio)
     nn.init.trunc_normal_(w, std=std, a=lower * std, b=upper * std)
     _depth_scale(w, depth)
 

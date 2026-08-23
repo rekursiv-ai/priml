@@ -411,7 +411,7 @@ def _process_interpolate_args(
             {"linear": "bilinear", "cubic": "bicubic"}.get(mode, mode),
         )
     elif output_rank == 3:
-        mode_ = cast(InterpolateMode, {"linear": "trilinear"}.get(mode, mode))
+        mode_ = cast("InterpolateMode", {"linear": "trilinear"}.get(mode, mode))
 
     # Compute target spatial dimensions.
     # `isinstance(x, Sequence)` narrows to a bare `Sequence`, dropping the element

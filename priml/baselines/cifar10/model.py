@@ -466,7 +466,7 @@ class SpeedNet(nn.Module):
                         config.init_conv,
                         module.weight.data[: module.weight.size(1)],
                     )
-            head_weight = cast("nn.Linear", self.head).weight.data
+            head_weight = cast(nn.Linear, self.head).weight.data
             head_weight.div_(head_weight.std())
 
     def init_whiten(
@@ -511,7 +511,7 @@ def _activation(activation: ActivationFn) -> TensorFn:
     if isinstance(activation, Makeable):
         # ``Makeable`` is runtime-checkable, so isinstance erases its type
         # parameter: ``make`` reads as returning ``object`` without the cast.
-        return cast("TensorFn", activation.make())
+        return cast(TensorFn, activation.make())
     return activation
 
 
@@ -547,7 +547,7 @@ def _block_grid(
             )
         # ``Makeable`` is a runtime-checkable Protocol, so ty cannot rule out a
         # config that is also a list; the cast states which arm won.
-        flat = cast("list[Makeable[nn.Module]]", block)  # pyright: ignore[reportUnnecessaryCast] -- ty cannot narrow the Protocol arm; pyright can
+        flat = cast(list[Makeable[nn.Module]], block)  # pyright: ignore[reportUnnecessaryCast] -- ty cannot narrow the Protocol arm; pyright can
     else:
         flat = [
             copy_tree(block) for _ in range(num_stages) for _ in range(blocks_per_stage)

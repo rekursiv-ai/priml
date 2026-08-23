@@ -93,7 +93,7 @@ def test_recipe_matches_reference(ported: str, upstream_name: str) -> None:
         # written as ordinary Python floats, so every comparison is made at
         # the precision the game actually runs at.
         if isinstance(actual, tuple):
-            values = cast("tuple[float, ...]", actual)
+            values = cast(tuple[float, ...], actual)
             assert [np.float32(value) for value in values] == np.asarray(
                 expected,
                 dtype=np.float32,

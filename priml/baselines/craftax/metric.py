@@ -14,7 +14,7 @@ on the policy.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -73,7 +73,7 @@ class CraftaxScore:
         self._lengths: list[int] = []
         self._unlocked: list[list[float]] = []
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Score the bound policy over a complete evaluation rollout.
 
         The metric plays its own episodes rather than reading the batch: a
@@ -89,7 +89,7 @@ class CraftaxScore:
         policy = batch.get("policy")
         if policy is None:
             return
-        self._play(policy)
+        self._play(cast(ActorCritic, policy))
 
     def compute(self) -> dict[str, Any]:
         """Summarize every episode seen since the last reset.

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import functools
 import tempfile
 
+from torch import Tensor
 from torch.distributed.tensor import DTensor
 
 import pytest
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.network_huggingface
 
 
-def _mla(*, q_lora_rank: int | None = None) -> tuple[nn.Module, torch.Tensor]:
+def _mla(*, q_lora_rank: int | None = None) -> tuple[nn.Module, Tensor]:
     """Small MLA exercising the head-parallel q/o paths and latent absorb."""
     mla = MultiHeadLatentAttention.Config(
         channels_in=16,
@@ -59,7 +60,7 @@ def _mla(*, q_lora_rank: int | None = None) -> tuple[nn.Module, torch.Tensor]:
     return mla, torch.randn(1, 3, 16)
 
 
-def _first(out: torch.Tensor | tuple[torch.Tensor, object]) -> torch.Tensor:
+def _first(out: Tensor | tuple[Tensor, object]) -> Tensor:
     """Unwrap a model output that may be a ``(tensor, cache)`` tuple."""
     return out[0] if isinstance(out, tuple) else out
 

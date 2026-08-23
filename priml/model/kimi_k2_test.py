@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -41,7 +43,7 @@ def _hf_config(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def _synth_hf(cfg: KimiK2.Config) -> dict[str, torch.Tensor]:
+def _synth_hf(cfg: KimiK2.Config) -> dict[str, Tensor]:
     h = cfg.hidden_size
     n = cfg.num_attention_heads
     qkn, qkr, vd = (
@@ -50,7 +52,7 @@ def _synth_hf(cfg: KimiK2.Config) -> dict[str, torch.Tensor]:
         cfg.channels_v_head,
     )
     lr = cfg.kv_lora_rank
-    sd: dict[str, torch.Tensor] = {
+    sd: dict[str, Tensor] = {
         "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
         "model.norm.weight": torch.randn(h),
     }

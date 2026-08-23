@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest import mock
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -33,7 +35,7 @@ def _env(
     return config.make()
 
 
-def _actions(env: CraftaxEnv, count: int, seed: int = 0) -> torch.Tensor:
+def _actions(env: CraftaxEnv, count: int, seed: int = 0) -> Tensor:
     generator = torch.Generator().manual_seed(seed)
     return torch.randint(0, env.num_actions, (count,), generator=generator)
 
@@ -173,7 +175,7 @@ def test_a_checkpoint_resumes_the_identical_episode() -> None:
     for index in range(5):
         env.step(_actions(env, 4, index))
     saved = {
-        key: value.clone() if isinstance(value, torch.Tensor) else value
+        key: value.clone() if isinstance(value, Tensor) else value
         for key, value in env.state_dict().items()
     }
     expected = [

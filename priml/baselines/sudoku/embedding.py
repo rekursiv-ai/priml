@@ -43,7 +43,7 @@ class GridChannel(Protocol):
     them.
     """
 
-    def __call__(self, tokens: Tensor, embeddings: Tensor) -> Tensor:
+    def forward(self, tokens: Tensor, embeddings: Tensor) -> Tensor:
         """Return this channel's contribution for one batch.
 
         Args:
@@ -130,8 +130,10 @@ class FactoredPositions(nn.Module):
                 "normally inherited from the model during finalize.",
             )
         self.config = config
-        self.embed_scale = (
-            config.hidden_size**0.5 if config.embed_scale < 0 else config.embed_scale
+        self.embed_scale: float = (
+            math.sqrt(config.hidden_size)
+            if config.embed_scale < 0
+            else config.embed_scale
         )
         cell = torch.arange(rows * cols)
         row = cell // cols
@@ -201,8 +203,10 @@ class PredictionFeedback(nn.Module):
                 "normally inherited from the model during finalize.",
             )
         self.config = config
-        self.embed_scale = (
-            config.hidden_size**0.5 if config.embed_scale < 0 else config.embed_scale
+        self.embed_scale: float = (
+            math.sqrt(config.hidden_size)
+            if config.embed_scale < 0
+            else config.embed_scale
         )
         self.embed_feedback = _table(
             config.vocab_size,
@@ -292,7 +296,7 @@ class GridEmbedding(nn.Module):
                 "normally inherited from the model during finalize.",
             )
         self.config = config
-        self.embed_scale = config.hidden_size**0.5
+        self.embed_scale: float = math.sqrt(config.hidden_size)
         self.embed_tokens = Embedding.Config(
             channels_out=config.hidden_size,
             num_embeddings=config.vocab_size,
@@ -323,7 +327,7 @@ class GridEmbedding(nn.Module):
         tokens_emb: Tensor = self.embed_tokens(tokens)
         embeddings: Tensor = self.embed_scale * tokens_emb
         for channel in self._channels:
-            contribution = channel(tokens, embeddings)
+            contribution = channel.forward(tokens, embeddings)
             if contribution.numel():
                 embeddings = embeddings + contribution
         return embeddings

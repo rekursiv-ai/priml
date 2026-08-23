@@ -9,7 +9,7 @@ from dataclasses import field
 from datetime import timedelta
 from multiprocessing.process import BaseProcess
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import math
 import os
@@ -352,7 +352,7 @@ class WorkerPool:
             fn_pickled = fn_list[0]
             if fn_pickled is None:
                 break
-            fn: Callable[[DeviceMesh], None] = pickle.loads(fn_pickled)
+            fn = cast(Callable[[DeviceMesh], None], pickle.loads(fn_pickled))
             fn(device_mesh)
             # A barrier before the ack guarantees every rank has finished fn
             # (and flushed any result files) before the dispatching call

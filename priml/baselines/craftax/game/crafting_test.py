@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -36,7 +38,7 @@ def _with_furnace(state: EnvState) -> EnvState:
     return state
 
 
-def _act(action: Action, num_envs: int = 2) -> torch.Tensor:
+def _act(action: Action, num_envs: int = 2) -> Tensor:
     return torch.full((num_envs,), int(action), dtype=torch.int32)
 
 

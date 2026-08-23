@@ -8,6 +8,8 @@ from unittest.mock import patch
 import copy
 import math
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -41,10 +43,10 @@ def _config(**overrides: object) -> CraftaxPQNTrainStep.Config:
 
 
 def _step() -> CraftaxPQNTrainStep:
-    return cast("CraftaxPQNTrainStep", _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
+    return cast(CraftaxPQNTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
 
 
-def _metrics(result: TrainStepOutput) -> dict[str, float | torch.Tensor]:
+def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:
     """Read the optional diagnostics a completed update always carries."""
     return result.get("metrics", {})
 

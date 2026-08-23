@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import math
 
+from torch import Tensor
+
 import numpy as np
 import pytest
 import torch
@@ -53,7 +55,7 @@ from priml.math.numeric import (
 def test_log_arctan_exp_no_nan_inf():
     """Stable version produces no NaN/Inf where naive gives -inf."""
 
-    def naive_fn(x: torch.Tensor) -> torch.Tensor:
+    def naive_fn(x: Tensor) -> Tensor:
         return torch.log(torch.arctan(torch.exp(x)))
 
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
@@ -91,7 +93,7 @@ def test_log_arctan_exp_asymptotics():
 def test_log_tan_exp_no_nan_inf():
     """Stable version produces no NaN/Inf where naive gives -inf."""
 
-    def naive_fn(x: torch.Tensor) -> torch.Tensor:
+    def naive_fn(x: Tensor) -> Tensor:
         return torch.log(torch.tan(torch.exp(x)))
 
     for dtype in [torch.float32, torch.float16, torch.bfloat16]:
@@ -149,7 +151,7 @@ def test_log1mexp_with_numpy():
     """Test log1mexp with numpy input."""
     x = np.array([-0.5, -1.5])
     result = log1mexp(x)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
     assert result.shape == (2,)
 
 
@@ -158,7 +160,7 @@ def test_logsubexp_without_return_sign():
     x = torch.tensor([2.0, 3.0, 1.0])
     y = torch.tensor([1.0, 2.0, 0.5])
     result = logsubexp(x, y)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
     # Verify: log(exp(x) - exp(y))
     expected = torch.log(torch.exp(x) - torch.exp(y))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -182,7 +184,7 @@ def test_logsubexp_equal_values():
     y = torch.tensor([1.0, 2.0])
     result = logsubexp(x, y)
     # log(exp(x) - exp(x)) = log(0) = -inf
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
     assert torch.all(torch.isinf(result))
 
 
@@ -191,7 +193,7 @@ def test_logsubexp_numpy_inputs():
     x = np.array([2.0, 3.0])
     y = np.array([1.0, 2.0])
     result = logsubexp(x, y)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
 
 
 def test_softcap_basic():
@@ -199,7 +201,7 @@ def test_softcap_basic():
     x = torch.tensor([0.5, 1.0, 2.0, 5.0])
     cap = 1.0
     result = softcap(x, cap)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
     # Result should be bounded by cap
     assert torch.all(result <= cap)
     assert torch.all(result >= -cap)
@@ -211,7 +213,7 @@ def test_softcap_with_different_caps():
     for cap in [0.5, 1.0, 2.0, 5.0]:
         result = softcap(x, cap)
         # Check that values are bounded by cap
-        assert isinstance(result, torch.Tensor)
+        assert isinstance(result, Tensor)
         assert torch.all(torch.abs(result) <= cap * 1.001)  # Small tolerance
 
 
@@ -219,7 +221,7 @@ def test_softcap_preserves_dtype():
     """Test that softcap preserves input dtype."""
     x = torch.tensor([1.0, 2.0], dtype=torch.float16)
     result = softcap(x, 1.0)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
     assert result.dtype == torch.float16
 
 
@@ -227,7 +229,7 @@ def test_softcap_with_numpy():
     """Test softcap with numpy input."""
     x = np.array([1.0, 2.0, 3.0])
     result = softcap(x, 1.5)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
 
 
 def test_softcap_zero():
@@ -365,8 +367,8 @@ def test_logsumexp_all_to_all_distributed():
     ):
 
         def mock_all_gather_impl(
-            gathered: list[torch.Tensor],
-            tensor: torch.Tensor,
+            gathered: list[Tensor],
+            tensor: Tensor,
         ) -> None:
             for t in gathered:
                 t.copy_(tensor)
@@ -388,8 +390,8 @@ def test_logmeanexp_all_to_all_distributed():
     ):
 
         def mock_all_gather_impl(
-            gathered: list[torch.Tensor],
-            tensor: torch.Tensor,
+            gathered: list[Tensor],
+            tensor: Tensor,
         ) -> None:
             for t in gathered:
                 t.copy_(tensor)

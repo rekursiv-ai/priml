@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -42,7 +44,7 @@ def test_each_environment_gets_a_different_world() -> None:
 
 
 def test_the_same_seed_reproduces_the_same_world() -> None:
-    def generate() -> torch.Tensor:
+    def generate() -> Tensor:
         return fractal_noise(
             num_envs=2,
             shape=(48, 48),

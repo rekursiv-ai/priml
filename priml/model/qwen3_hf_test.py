@@ -14,7 +14,9 @@ Run it with ``uv run pytest -m slow``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
+
+from torch import Tensor
 
 import pytest
 import torch
@@ -65,7 +67,7 @@ def _build_hf_model(cfg_dict: dict[str, Any]) -> Any:
 def _hf_state_dict_to_loop_format(
     hf_model: Any,
     config: Qwen3.Config,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Tensor]:
     raw = {k: v.detach().cpu() for k, v in hf_model.state_dict().items()}
     return remap_hf_state_dict(raw, config)
 
@@ -105,7 +107,7 @@ def test_qwen3_matches_hf(tie_embeddings: bool) -> None:
         torch.set_rng_state(rng_state)
 
 
-def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[torch.Tensor, torch.Tensor]:
+def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     """Build the HF and loop Qwen3 on shared weights; return ``(hf, loop)`` logits.
 
     The caller must have established deterministic process state and seed.
@@ -138,7 +140,7 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[torch.Tensor, torch.Ten
 
     tokens = torch.randint(0, cfg_dict["vocab_size"], (2, 5))
     with torch.no_grad():
-        hf_out: torch.Tensor = hf_model(input_ids=tokens).logits
+        hf_out = cast(Tensor, hf_model(input_ids=tokens).logits)
         loop_out = loop_model(tokens)
     return hf_out, loop_out
 

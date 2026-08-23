@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, cast, override
+from typing import TYPE_CHECKING, Any, Self, override
 
 from configgle import Makes, PartialConfig
 from torch import Tensor
@@ -274,6 +274,14 @@ class CraftaxRNNTrainStep(TrainStep):
         self._finished_lengths: list[int] = []
 
     @property
+    @override
+    def model(self) -> ActorCriticRNN:
+        """The policy this step trains, at its declared class."""
+        model = self._model
+        assert isinstance(model, ActorCriticRNN)
+        return model
+
+    @property
     def steps_per_update(self) -> int:
         """Environment interactions consumed by one update."""
         workers = int(self._observation.shape[0])
@@ -292,7 +300,7 @@ class CraftaxRNNTrainStep(TrainStep):
         return batch
 
     @override
-    def train_step(self, **batch: Any) -> TrainStepOutput:
+    def train_step(self, **batch: object) -> TrainStepOutput:
         """Collect a rollout and optimize on it.
 
         Args:
@@ -396,7 +404,7 @@ class CraftaxRNNTrainStep(TrainStep):
         )
 
     @override
-    def train_loss(self, **batch: Any) -> TrainStepOutput:
+    def train_loss(self, **batch: object) -> TrainStepOutput:
         """Score a rollout without optimizing.
 
         Args:
@@ -413,7 +421,7 @@ class CraftaxRNNTrainStep(TrainStep):
         return {"loss": loss.detach(), "model": logits.detach()}
 
     @override
-    def eval_loss(self, **batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
         """Score a rollout in evaluation mode.
 
         Args:
@@ -430,11 +438,12 @@ class CraftaxRNNTrainStep(TrainStep):
             self.model.train()
 
     @override
-    def call_eval(self, **batch: Any) -> Tensor:
+    def call_eval(self, *, observation: Tensor, **_batch: object) -> Tensor:
         """Return action logits for a batch of observations.
 
         Args:
-          **batch: Must contain ``observation``.
+          observation: Batched observations, ``[batch, observation_size]``.
+          **_batch: Ignored; only ``observation`` is scored.
 
         Returns:
           logits: Unnormalized action scores, computed with a fresh state.
@@ -443,10 +452,10 @@ class CraftaxRNNTrainStep(TrainStep):
         self.model.eval()
         try:
             with torch.no_grad():
-                logits, _ = self.model(batch["observation"])
+                logits, _ = self.model.forward(observation)
         finally:
             self.model.train()
-        return cast("Tensor", logits)
+        return logits
 
     @override
     def on_epoch_end(self) -> None:

@@ -273,7 +273,10 @@ def test_tta_averages_six_views() -> None:
     config = tiny_step()
     config.use_tta = True
     step = config.make()
-    step.model = counter
+    # The backing attribute, because ``model`` is a read-only property: it is
+    # declared that way so a subclass can narrow its return type, which a
+    # settable attribute cannot express (``train_step.py:349``).
+    step._model = counter
     _ = step.call_eval(media=tiny_batch()["media"])
     # Three crops, each with its mirror.
     assert counter.calls == 6
@@ -283,7 +286,7 @@ def test_tta_matches_the_plain_forward_for_a_shift_invariant_model() -> None:
     config = tiny_step()
     config.use_tta = True
     step = config.make()
-    step.model = _ConstantModel()
+    step._model = _ConstantModel()  # Read-only property; see the note above.
     media = tiny_batch()["media"]
     assert torch.allclose(step.call_eval(media=media), step.model(media))
 

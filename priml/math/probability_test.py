@@ -4,6 +4,7 @@ from importlib.util import find_spec
 
 import math
 
+from torch import Tensor
 from wrapt import lazy_import
 
 import numpy as np
@@ -236,7 +237,7 @@ def test_cdf_logit_distribution_outside_unit_interval_is_clamped():
 def test_pdf_logit_distribution():
     x = torch.tensor([0.1, 0.5, 0.9])
 
-    def base_pdf(x: Tensorable) -> torch.Tensor:
+    def base_pdf(x: Tensorable) -> Tensor:
         return pdf_normal(x, 0.0, 1.0)
 
     result = pdf_logit_distribution(x, base_pdf)
@@ -247,7 +248,7 @@ def test_pdf_logit_distribution():
 def test_quantile_logit_distribution():
     p = torch.tensor([0.1, 0.5, 0.9])
 
-    def base_quantile(p: Tensorable) -> torch.Tensor:
+    def base_quantile(p: Tensorable) -> Tensor:
         return quantile_normal(p, loc=0.0, scale=1.0)
 
     result = quantile_logit_distribution(p, base_quantile)

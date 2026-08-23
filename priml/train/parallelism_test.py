@@ -10,7 +10,7 @@ import importlib
 import math
 import tempfile
 
-from torch import nn
+from torch import Tensor, nn
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 
@@ -72,7 +72,7 @@ class SimpleModel(nn.Module):
         self.linear.reset_parameters()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.linear(x)
 
 
@@ -89,7 +89,7 @@ class _TwoLinear(nn.Module):
         self.fc2.reset_parameters()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.fc2(self.fc1(x))
 
 
@@ -318,7 +318,7 @@ class _BNBlock(nn.Module):
         self.bn.reset_parameters()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.bn(self.fc(x))
 
 
@@ -335,7 +335,7 @@ class _BNModel(nn.Module):
         self.head.reset_parameters()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.head(self.block(x))
 
 

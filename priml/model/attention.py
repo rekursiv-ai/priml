@@ -664,7 +664,7 @@ class MultiStreamAttention(nn.Module):
         # ``nn.Module`` even though the slot is typed by what it is CALLED as.
         self.ropes = nn.ModuleDict(
             {
-                str(i): cast("nn.Module", cfg.make())
+                str(i): cast(nn.Module, cfg.make())
                 for i, cfg in enumerate(config.rope)
                 if cfg is not None
             }

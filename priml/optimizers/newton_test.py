@@ -128,7 +128,7 @@ def test_newton_rejects_dtensor_params(tmp_path: Path) -> None:
         optimizer = Newton([param], lr=1.0, damping=0.0)
 
         def closure() -> Tensor:
-            return cast("DTensor", param.data).to_local().pow(2).sum()
+            return cast(DTensor, param.data).to_local().pow(2).sum()
 
         with pytest.raises(
             NotImplementedError,

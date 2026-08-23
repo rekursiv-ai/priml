@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -13,7 +15,7 @@ from priml.loss.lpips_loss import LPIPSLoss
 
 
 def _make_loss_with_mocked_lpips(
-    side_effect: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    side_effect: Callable[[Tensor, Tensor], Tensor],
     *,
     max_num_random_frames: int,
 ) -> LPIPSLoss:

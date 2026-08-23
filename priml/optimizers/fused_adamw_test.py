@@ -5,6 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 
+import math
+
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -12,10 +16,10 @@ from priml.optimizers.fused_adamw import FusedAdamW
 
 
 def _reference(
-    parameter: torch.Tensor,
-    gradient: torch.Tensor,
-    first: torch.Tensor,
-    second: torch.Tensor,
+    parameter: Tensor,
+    gradient: Tensor,
+    first: Tensor,
+    second: Tensor,
     *,
     step: int,
     lr: float,
@@ -23,17 +27,17 @@ def _reference(
     beta2: float,
     eps: float,
     weight_decay: float,
-) -> torch.Tensor:
+) -> Tensor:
     """One AdamW step written out longhand, in the fused spelling.
 
     Independent of the implementation under test: it is the arithmetic the
     module claims to perform, so an error in the module cannot hide here.
     """
-    decayed: torch.Tensor = parameter.clone() * (1 - lr * weight_decay)
+    decayed: Tensor = parameter.clone() * (1 - lr * weight_decay)
     first = first.lerp(gradient, 1 - beta1)
     second = second.lerp(gradient.square(), 1 - beta2)
-    denominator: torch.Tensor = (second / (1 - beta2**step)).sqrt() + eps
-    update: torch.Tensor = first / denominator * (lr / (1 - beta1**step))
+    denominator = (second / (1 - math.pow(beta2, step))).sqrt() + eps
+    update = first / denominator * (lr / (1 - math.pow(beta1, step)))
     return decayed - update
 
 
@@ -154,7 +158,7 @@ def test_the_schedule_can_move_the_rate_between_steps() -> None:
     ],
 )
 def test_invalid_hyperparameters_are_refused(
-    build: Callable[[list[torch.Tensor]], FusedAdamW],
+    build: Callable[[list[Tensor]], FusedAdamW],
     message: str,
 ) -> None:
     """Every hyperparameter is bounded at construction, not at the first step."""

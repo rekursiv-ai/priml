@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -25,14 +27,14 @@ def _model(**overrides: float) -> ActorCriticGTrXL:
 
 def _rollout(
     model: ActorCriticGTrXL,
-    observation: torch.Tensor,
-    done: torch.Tensor,
-    memory: torch.Tensor,
-    valid_length: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    observation: Tensor,
+    done: Tensor,
+    memory: Tensor,
+    valid_length: Tensor,
+) -> tuple[Tensor, Tensor]:
     """Drive the recurrent path one step at a time."""
-    logits: list[torch.Tensor] = []
-    values: list[torch.Tensor] = []
+    logits: list[Tensor] = []
+    values: list[Tensor] = []
     for index in range(observation.shape[0]):
         memory, valid_length, step_logits, step_value = model.step(
             memory,
@@ -217,7 +219,7 @@ def test_a_lag_is_encoded_the_same_wherever_the_window_sits() -> None:
     probe = torch.randn(2, 12, dtype=torch.float64)
     quiet = torch.zeros(2, dtype=torch.bool)
 
-    def predict(*, warmup: int) -> torch.Tensor:
+    def predict(*, warmup: int) -> Tensor:
         memory, valid_length = model.initial_state(2)
         memory = memory.double()
         for _ in range(warmup):

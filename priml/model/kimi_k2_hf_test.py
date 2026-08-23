@@ -22,6 +22,8 @@ from typing import Any
 
 import warnings
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -106,7 +108,7 @@ def _our_config_from_hf(hf_model: Any, q_lora_rank: int | None) -> KimiK2.Config
 def _hf_state_dict_with_bias_fill(
     hf_model: Any,
     config: KimiK2.Config,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Tensor]:
     """Extract HF state_dict; backfill per-router ``e_score_correction_bias``.
 
     HF's DSV3 model stores the bias at ``model.layers.N.mlp.gate.e_score_correction_bias``
@@ -114,7 +116,7 @@ def _hf_state_dict_with_bias_fill(
     Our remap falls back to zeros in that case — mirror that here so our
     forward uses the same bias values as HF's.
     """
-    raw: dict[str, torch.Tensor] = {
+    raw: dict[str, Tensor] = {
         k: v.detach().cpu() for k, v in hf_model.state_dict().items()
     }
     for i in range(config.first_k_dense_replace, config.num_hidden_layers):

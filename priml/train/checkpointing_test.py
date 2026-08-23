@@ -10,7 +10,7 @@ import functools
 import shutil
 import tempfile
 
-from torch import nn
+from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
@@ -789,11 +789,11 @@ class _Tiny(nn.Module):
         self.fc.reset_parameters()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.fc(x)
 
 
-def _full_tensor(t: torch.Tensor) -> torch.Tensor:
+def _full_tensor(t: Tensor) -> Tensor:
     """Gather a (possibly sharded) tensor to its full, replicated value."""
     return t.full_tensor() if isinstance(t, DTensor) else t
 

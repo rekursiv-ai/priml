@@ -6,9 +6,10 @@ tp=1 must be a structural no-op (forward bit-for-bit). Multirank correctness
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast, override
+from typing import cast, override
 
-from torch import nn
+from torch import Tensor, nn
+from torch.distributed.device_mesh import DeviceMesh
 
 import pytest
 import torch
@@ -24,10 +25,6 @@ from priml.train.tensor_parallel import (
 )
 
 
-if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
-
-
 class TwoLinear(nn.Module):
     """colwise -> rowwise pair: the canonical MLP TP shape."""
 
@@ -41,7 +38,7 @@ class TwoLinear(nn.Module):
         ).make()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.down(self.up(x))
 
 
@@ -78,7 +75,7 @@ def test_unknown_shard_style_is_refused() -> None:
     what catches it.
     """
     config = Linear.Config(channels_in=8, channels_out=8)
-    config.shard = cast("ShardStyle", "colwize")
+    config.shard = cast(ShardStyle, "colwize")
     with pytest.raises(ValueError, match="Unknown shard style"):
         _shard_style(config.make())
 
@@ -96,7 +93,7 @@ def test_meta_model_is_materialized_rather_than_copied(
     monkeypatch.setattr(
         tensor_parallel,
         "global_device_mesh",
-        lambda: cast("DeviceMesh", _TpOneMesh()),
+        lambda: cast(DeviceMesh, _TpOneMesh()),
     )
     strategy = TensorParallel.Config().make()
     with torch.device("meta"):
@@ -131,7 +128,7 @@ def test_the_configured_mesh_dim_is_the_one_sharded(
     monkeypatch.setattr(
         tensor_parallel,
         "global_device_mesh",
-        lambda: cast("DeviceMesh", _NamedMesh()),
+        lambda: cast(DeviceMesh, _NamedMesh()),
     )
     strategy = TensorParallel.Config(mesh_dim="model").make()
 
@@ -146,7 +143,7 @@ def test_tp1_applier_is_structural_noop() -> None:
     model = TwoLinear()
     x = torch.randn(4, 8)
     expected = model(x)
-    sharded = apply_tensor_parallel(model, cast("DeviceMesh", _TpOneMesh()))
+    sharded = apply_tensor_parallel(model, cast(DeviceMesh, _TpOneMesh()))
     assert sharded is model
     assert not any(p.__class__.__name__ == "DTensor" for p in sharded.parameters())
     assert torch.equal(sharded(x), expected)
