@@ -148,6 +148,6 @@ def test_local_view_matches_a_manual_slice_away_from_the_edges() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

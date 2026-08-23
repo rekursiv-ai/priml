@@ -180,6 +180,6 @@ def test_the_config_builds_a_constructor_awaiting_parameters() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

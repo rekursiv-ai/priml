@@ -103,6 +103,6 @@ def test_recipe_matches_reference(ported: str, upstream_name: str) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

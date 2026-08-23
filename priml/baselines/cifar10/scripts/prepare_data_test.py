@@ -44,6 +44,6 @@ def test_main_falls_back_to_the_default_directory(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

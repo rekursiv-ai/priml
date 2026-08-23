@@ -175,6 +175,6 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)
