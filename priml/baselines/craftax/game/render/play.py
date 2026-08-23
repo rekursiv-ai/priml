@@ -14,10 +14,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+import imageio_ffmpeg
 import numpy as np
 import pygame
 import torch
 
+from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game import (
     step as game_step,
     world_gen,
@@ -166,13 +168,6 @@ def record(
     if max_steps <= 0 or fps <= 0:
         raise ValueError("Replay geometry must be positive")
 
-    # Imported here: writing a video needs an encoder that watching a frame
-    # does not, so importing it at module scope would make ``play`` depend on
-    # ffmpeg being present.
-    import imageio.v3 as iio  # noqa: PLC0415
-
-    from priml.baselines.craftax.env import CraftaxEnv  # noqa: PLC0415
-
     config = CraftaxEnv.Config()
     config.num_envs = 1
     config.device = "cpu"
@@ -201,7 +196,28 @@ def record(
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    iio.imwrite(path, np.stack(frames), fps=fps)
+    height, width = frames[0].shape[0], frames[0].shape[1]
+    # 16 is what ``imageio.v3.imwrite`` used, so the written geometry is
+    # unchanged by the switch to the lower-level writer. It only matters off
+    # the default board: at ``block_pixels=64`` the render is 576x704, already
+    # aligned, so every value agrees. Do NOT "improve" this to 1 -- an odd
+    # dimension then yields a file ffmpeg cannot read back, and the writer
+    # returns without raising, so the corruption surfaces far from here.
+    writer = imageio_ffmpeg.write_frames(
+        str(path),
+        (width, height),
+        fps=fps,
+        macro_block_size=16,
+    )
+    # Prime the generator so it reaches its first ``yield`` and spawns ffmpeg;
+    # ``next`` rather than ``send(None)`` because the two are the same operation
+    # and only the former types as one.
+    next(writer)
+    try:
+        for frame in frames:
+            _ = writer.send(frame.tobytes())
+    finally:
+        writer.close()
     return steps
 
 
