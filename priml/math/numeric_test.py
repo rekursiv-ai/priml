@@ -239,6 +239,26 @@ def test_softcap_zero():
     torch.testing.assert_close(result, torch.tensor([0.0]), rtol=1e-5, atol=1e-5)
 
 
+def test_softcap_does_not_truncate_integer_input():
+    """An integer tensor must not round-trip through its own dtype.
+
+    Capping is a real-valued operation: ``tanh(1/1) == 0.7616``. Casting that
+    back to int64 floors every capped value to zero, so an integer input
+    silently returns all zeros -- a bounded-output contract violated by the
+    cast rather than by the maths.
+    """
+    result = softcap(torch.tensor([1, 2, 3]))
+
+    assert result.dtype.is_floating_point
+    assert torch.all(result != 0)
+
+
+def test_softcap_preserves_float_dtypes_exactly():
+    """Float inputs keep their dtype; only integers are promoted."""
+    for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        assert softcap(torch.tensor([1.0, 2.0], dtype=dtype), 1.0).dtype == dtype
+
+
 def test_logsumexp_all_to_all():
     """Test logsumexp_all_to_all without distributed setup."""
     x = torch.randn(2, 3, 4)

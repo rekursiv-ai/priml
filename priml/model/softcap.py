@@ -26,6 +26,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.math.numeric import softcap
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -91,4 +92,4 @@ class SoftCap(nn.Module):
         out = self.inner(x)
         if self.dtype is not None:
             out = out.to(self.dtype)
-        return self.cap * torch.tanh(out / self.cap)
+        return softcap(out, self.cap)

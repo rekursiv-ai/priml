@@ -238,6 +238,23 @@ def test_unpatchify_insufficient_dimensions():
         unpatchify(x, patch)
 
 
+def test_patchify_rejects_a_non_divisible_spatial_dim():
+    """A spatial dim that is not a whole number of patches is named, not floored.
+
+    ``d // p`` silently discards the remainder, and the reshape two lines later
+    then fails inside torch with a message naming neither the axis nor the
+    patch size. The rank guard beside it already raises a clean ValueError.
+    """
+    with pytest.raises(ValueError, match="divisible"):
+        patchify(torch.randn(2, 3, 32, 33), (4, 4))
+
+
+def test_unpatchify_rejects_channels_that_are_not_a_patch_multiple():
+    """The channel axis must divide by the patch volume it will unfold into."""
+    with pytest.raises(ValueError, match="divisible"):
+        unpatchify(torch.randn(2, 7, 4, 4), (2, 2))
+
+
 def test_interpolate_insufficient_dimensions():
     """Test interpolate raises ValueError when input has insufficient dimensions."""
     x = torch.randn(2)  # Only 1 dimension

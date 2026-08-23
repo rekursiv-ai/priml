@@ -192,6 +192,9 @@ def record(
             observation = transition.observation
             steps += 1
             if bool(transition.done[0]):
+                # Draw the state that ENDED the episode. Rendering ``env.state``
+                # would draw the fresh world the auto-reset already installed.
+                frames.append(renderer.render(transition.terminal_state))
                 break
 
     path = Path(path)

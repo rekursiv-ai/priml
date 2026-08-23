@@ -16,7 +16,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.math.basic import broadcast_sequences
+from priml.math.basic import broadcast_sequences, floor_multiple
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -456,7 +456,7 @@ class RoPE(nn.Module):
                 f"Cannot split dim={total} across {naxes} axes"
                 f" (need at least {2 * naxes}).",
             )
-        per = total // naxes // 2 * 2
+        per = int(floor_multiple(total // naxes, 2))
         remainder = total - per * naxes
         dims = [per] * naxes
         for i in range(remainder // 2):

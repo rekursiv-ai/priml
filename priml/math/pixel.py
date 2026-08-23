@@ -22,18 +22,6 @@ if TYPE_CHECKING:
     import numpy as np
 
 
-# Default values for standard_latent_height_width_dict
-_DEFAULT_COMPRESSION = (16, 16)  # config-globals: ignore -- image geometry default.
-_DEFAULT_RESOLUTIONS = tuple(range(180, 2_160 + 1, 180))
-_DEFAULT_ASPECTS = (
-    16 / 9,
-    4 / 3,
-    1.0,
-    3 / 4,
-    9 / 16,
-)  # config-globals: ignore -- aspect presets.
-
-
 def rgb2float(x: Tensorable) -> Tensor:
     """Convert RGB values from [0, 255] to float in [-1, 1].
 
@@ -175,6 +163,14 @@ def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     rank = len(patch_size)
     if len(x.shape) < rank:
         raise ValueError(f"{x.shape=} needs to have at least {rank=} dimensions.")
+    spatial = tuple(x.shape[-rank:])
+    # Checked here rather than left to the reshape below: `d // p` discards the
+    # remainder, so a ragged dimension fails inside torch with a message naming
+    # neither the axis nor the patch size.
+    if any(d % p for d, p in zip(spatial, patch_size, strict=True)):
+        raise ValueError(
+            f"spatial dims {spatial} must each be divisible by {patch_size=}."
+        )
     batch = x.shape[: -rank - 1]
     interleaved = (
         (d // p, p) for d, p in zip(x.shape[-rank:], patch_size, strict=True)
@@ -214,6 +210,13 @@ def unpatchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
         raise ValueError(f"{x.shape=} needs to have at least {rank=} dimensions.")
     batch = x.shape[: -rank - 1]
     c, *spatial = x.shape[-rank - 1 :]
+    # The channel axis carries one patch volume per output channel, so a
+    # remainder here means the tensor was never patchified with this patch.
+    if c % math.prod(patch_size):
+        raise ValueError(
+            f"channels {c} must be divisible by the patch volume "
+            f"{math.prod(patch_size)} from {patch_size=}."
+        )
     out = x.reshape(*batch, c // math.prod(patch_size), *patch_size, *spatial)
     base = len(batch) + 1
     axis_order = [
