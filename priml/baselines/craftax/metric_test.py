@@ -192,6 +192,6 @@ def test_an_empty_evaluation_is_refused(field: str) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

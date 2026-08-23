@@ -148,6 +148,6 @@ def test_missing_data_names_the_preparer(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

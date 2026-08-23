@@ -231,6 +231,6 @@ def test_a_prefix_of_the_coefficients_is_a_shorter_iteration() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

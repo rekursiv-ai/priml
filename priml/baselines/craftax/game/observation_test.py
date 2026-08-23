@@ -166,6 +166,6 @@ def test_the_width_matches_the_reference_environment() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

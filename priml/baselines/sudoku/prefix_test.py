@@ -116,6 +116,6 @@ def test_hidden_size_must_be_inherited() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

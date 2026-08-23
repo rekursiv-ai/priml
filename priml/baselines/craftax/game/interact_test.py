@@ -246,6 +246,6 @@ def test_a_crafting_table_can_be_reclaimed_but_yields_nothing() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

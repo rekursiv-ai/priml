@@ -1277,6 +1277,6 @@ def test_regenerate_golden_preserves_existing_regenerate_env(
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)

@@ -131,6 +131,6 @@ def test_take_returns_an_independent_state() -> None:
 
 
 if __name__ == "__main__":
-    from priml.lib.testing import test_main
+    from priml.lib.testing.main import test_main
 
     test_main(__file__)
