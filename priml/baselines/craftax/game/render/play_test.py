@@ -10,11 +10,10 @@ GitHub on the path of every test run.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import hashlib
 
-import imageio.v3 as iio
+import imageio_ffmpeg
 import pygame
 import pytest
 import torch
@@ -23,10 +22,6 @@ from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.render import play, sprites
 from priml.baselines.craftax.model import ActorCritic
-
-
-if TYPE_CHECKING:
-    import numpy as np
 
 
 @pytest.fixture(scope="module")
@@ -40,6 +35,22 @@ def sprite_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
         surface.fill((digest[0] | 0x40, digest[1] | 0x40, digest[2] | 0x41, 255))
         pygame.image.save(surface, str(directory / name))
     return directory
+
+
+def _read_video(path: Path) -> tuple[int, tuple[int, int]]:
+    """Return the frame count and (width, height) ffmpeg reports for ``path``.
+
+    Reading back through the decoder rather than an array API keeps the test
+    honest about geometry: a writer that silently rescaled would still hand a
+    plausible array to ``imread``.
+    """
+    reader = imageio_ffmpeg.read_frames(str(path))
+    meta = next(reader)
+    # Metadata is yielded first and frame bytes after; narrowing is what
+    # distinguishes the two.
+    assert isinstance(meta, dict)
+    size = meta["size"]
+    return sum(1 for _ in reader), (int(size[0]), int(size[1]))
 
 
 def _policy() -> ActorCritic:
@@ -83,11 +94,18 @@ def test_recording_writes_a_playable_video(
         asset_dir=sprite_dir,
     )
     assert steps > 0
-    frames = iio.imread(path)
+    count, size = _read_video(path)
     # Not an exact count: h264 pads to a macro-block-aligned frame count, so
     # the file may hold slightly more frames than steps were played.
-    assert frames.shape[0] >= 1
-    assert frames.shape[-1] == 3
+    assert count >= 1
+    # Geometry is macro-block-aligned, not exact: the encoder rounds each axis
+    # up to a multiple of 16. Asserting the rounded size still pins the aspect
+    # and catches a writer that rescaled to something unrelated.
+    width, height = size
+    assert width >= 8 * constants.OBS_DIM[1]
+    assert height >= 8 * constants.OBS_DIM[0]
+    assert width % 16 == 0
+    assert height % 16 == 0
 
 
 @pytest.mark.compute_large_fixture
@@ -117,7 +135,7 @@ def test_the_same_seed_records_the_same_episode(
     sprite_dir: Path,
 ) -> None:
     policy = _policy()
-    recorded: list[np.ndarray] = []
+    recorded: list[tuple[int, tuple[int, int]]] = []
     for name in ("a.mp4", "b.mp4"):
         path = tmp_path / name
         play.record(
@@ -128,8 +146,8 @@ def test_the_same_seed_records_the_same_episode(
             block_pixels=8,
             asset_dir=sprite_dir,
         )
-        recorded.append(iio.imread(path))
-    assert recorded[0].shape == recorded[1].shape
+        recorded.append(_read_video(path))
+    assert recorded[0] == recorded[1]
 
 
 def test_a_degenerate_recording_is_refused(tmp_path: Path) -> None:

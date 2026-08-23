@@ -717,25 +717,6 @@ wheels = [
 ]
 
 [[package]]
-name = "imageio"
-version = "2.37.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pillow" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/48/62/aa770a9307508d2a2a2c62d536a49347bffe9e55322db27838d3c93d0b07/imageio-2.37.4.tar.gz", hash = "sha256:e45cbc5e83502047fb138f7f585f7f105a136a57eea5f4b3cfc6ce1b52720bd3", size = 390173, upload-time = "2026-07-20T05:26:11.369Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3e/2d/ca050652104bab2cf55e569db2a178b1b61cb041fef28307f2db383f6d9f/imageio-2.37.4-py3-none-any.whl", hash = "sha256:1ab2e22c8debf700f24c3ac43e8f95f3b3a8110c83b93411e97b4b0b2cd1c7e6", size = 318000, upload-time = "2026-07-20T05:26:09.874Z" },
-]
-
-[package.optional-dependencies]
-ffmpeg = [
-    { name = "imageio-ffmpeg" },
-    { name = "psutil" },
-]
-
-[[package]]
 name = "imageio-ffmpeg"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1344,6 +1325,7 @@ dependencies = [
     { name = "configgle" },
     { name = "einops" },
     { name = "einshape" },
+    { name = "imageio-ffmpeg" },
     { name = "imagesize" },
     { name = "jaxtyping" },
     { name = "lpips" },
@@ -1375,9 +1357,6 @@ hub = [
     { name = "safetensors" },
     { name = "transformers" },
 ]
-render = [
-    { name = "imageio", extra = ["ffmpeg"] },
-]
 
 [package.dev-dependencies]
 debug = [
@@ -1388,7 +1367,6 @@ dev = [
     { name = "basedpyright" },
     { name = "codespell" },
     { name = "hypothesis" },
-    { name = "imageio", extra = ["ffmpeg"] },
     { name = "ipython" },
     { name = "nodejs-wheel-binaries" },
     { name = "pre-commit" },
@@ -1410,7 +1388,6 @@ pre-commit = [
     { name = "basedpyright" },
     { name = "codespell" },
     { name = "hypothesis" },
-    { name = "imageio", extra = ["ffmpeg"] },
     { name = "nodejs-wheel-binaries" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -1435,7 +1412,6 @@ test = [
 ]
 typecheck = [
     { name = "basedpyright" },
-    { name = "imageio", extra = ["ffmpeg"] },
     { name = "safetensors" },
     { name = "ty" },
 ]
@@ -1448,7 +1424,7 @@ requires-dist = [
     { name = "einshape" },
     { name = "hf-transfer", marker = "extra == 'hub'" },
     { name = "huggingface-hub", marker = "extra == 'hub'" },
-    { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'render'" },
+    { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "imagesize", specifier = ">=1.4" },
     { name = "jaxtyping" },
     { name = "lpips" },
@@ -1473,7 +1449,7 @@ requires-dist = [
     { name = "webp", specifier = ">=0.4.0" },
     { name = "wrapt" },
 ]
-provides-extras = ["hub", "render"]
+provides-extras = ["hub"]
 
 [package.metadata.requires-dev]
 debug = [
@@ -1484,7 +1460,6 @@ dev = [
     { name = "basedpyright", specifier = ">=1.10" },
     { name = "codespell", specifier = ">=2.2.4" },
     { name = "hypothesis", specifier = ">=6.155.1" },
-    { name = "imageio", extras = ["ffmpeg"] },
     { name = "ipython" },
     { name = "nodejs-wheel-binaries", specifier = ">=24.16.0" },
     { name = "pre-commit", specifier = ">=4.6" },
@@ -1496,7 +1471,7 @@ dev = [
     { name = "safetensors" },
     { name = "scipy-stubs" },
     { name = "tqdm" },
-    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
+    { name = "ty", specifier = ">=0.0.72,!=0.0.73,!=0.0.74" },
 ]
 lint = [
     { name = "codespell", specifier = ">=2.2.4" },
@@ -1506,7 +1481,6 @@ pre-commit = [
     { name = "basedpyright", specifier = ">=1.10" },
     { name = "codespell", specifier = ">=2.2.4" },
     { name = "hypothesis", specifier = ">=6.155.1" },
-    { name = "imageio", extras = ["ffmpeg"] },
     { name = "nodejs-wheel-binaries", specifier = ">=24.16.0" },
     { name = "pre-commit", specifier = ">=4.6" },
     { name = "pytest", specifier = ">=7.0" },
@@ -1516,7 +1490,7 @@ pre-commit = [
     { name = "ruff" },
     { name = "safetensors" },
     { name = "scipy-stubs" },
-    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
+    { name = "ty", specifier = ">=0.0.72,!=0.0.73,!=0.0.74" },
 ]
 stubs = [{ name = "scipy-stubs" }]
 test = [
@@ -1529,9 +1503,8 @@ test = [
 ]
 typecheck = [
     { name = "basedpyright", specifier = ">=1.10" },
-    { name = "imageio", extras = ["ffmpeg"] },
     { name = "safetensors" },
-    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
+    { name = "ty", specifier = ">=0.0.72,!=0.0.73,!=0.0.74" },
 ]
 
 [[package]]

@@ -26,6 +26,7 @@ dependencies = [
     # vision models
     "lpips",
     # media
+    "imageio-ffmpeg>=0.6.0",
     "imagesize>=1.4",
     "pygame-ce>=2.5.8",
     "pyturbojpeg>=1.8.2,<2",
@@ -66,15 +67,8 @@ hub = [
     "transformers>=4.57.0",
 ]
 
-# Watching a policy play the Craftax game: sprite compositing and video.
-# Opt-in because training never renders, so an install that only trains does
-# not need SDL. Install via `pip install priml[render]`.
-render = [
-    "imageio[ffmpeg]",
-]
-
 [dependency-groups]
-# uv sync --all-groups
+# uv sync --all-groups --all-extras --frozen
 
 debug = [
     "ipython",
@@ -97,11 +91,9 @@ test = [
 ]
 typecheck = [
     "basedpyright>=1.10",
-    # 0.0.72 and basedpyright 1.39.10 work correctly.
     # https://github.com/astral-sh/ty/issues/4352
-    "ty>=0.0.60,!=0.0.73",
+    "ty>=0.0.72,!=0.0.73,!=0.0.74",
     "safetensors",
-    "imageio[ffmpeg]",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
