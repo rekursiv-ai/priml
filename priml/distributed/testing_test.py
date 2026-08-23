@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
@@ -19,8 +20,6 @@ from priml.distributed.testing import WorkerPool
 
 
 if TYPE_CHECKING:
-    from multiprocessing.process import BaseProcess
-
     from torch.distributed.device_mesh import DeviceMesh
 
 
@@ -71,7 +70,7 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
 
     pool = _pool(2)
     pool.queue = MagicMock()
-    pool.processes = cast("list[BaseProcess]", [healthy, wedged])
+    pool.processes = cast(list[BaseProcess], [healthy, wedged])
 
     pool.terminate()
 
@@ -122,7 +121,7 @@ def test_call_retries_then_raises_when_worker_keeps_dying(
     pool.queue = MagicMock()
     pool.ack_queue = MagicMock()
     pool.ack_queue.get.side_effect = queue_mod.Empty
-    pool.processes = cast("list[BaseProcess]", [proc])
+    pool.processes = cast(list[BaseProcess], [proc])
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
     respawns: list[int] = []
 
@@ -156,7 +155,7 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     pool.queue = MagicMock()
     pool.ack_queue = MagicMock()
     pool.ack_queue.get.side_effect = queue_mod.Empty  # never acks -> timeout
-    pool.processes = cast("list[BaseProcess]", [proc])
+    pool.processes = cast(list[BaseProcess], [proc])
     # Make the ack deadline elapse immediately so the test does not sleep.
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)

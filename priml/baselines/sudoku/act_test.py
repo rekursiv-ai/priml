@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -18,7 +20,7 @@ def _pool(**overrides: object) -> ActPool:
     return config.make()
 
 
-def _batch(fill: int = 5) -> tuple[torch.Tensor, torch.Tensor]:
+def _batch(fill: int = 5) -> tuple[Tensor, Tensor]:
     media = torch.full((4, 81), fill, dtype=torch.long)
     labels = torch.full((4, 81), fill, dtype=torch.long)
     return media, labels

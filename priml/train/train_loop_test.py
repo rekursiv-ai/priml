@@ -232,16 +232,16 @@ class _WeightedEvalStep:
         """Return the batch unchanged."""
         return batch
 
-    def eval_loss(self, **preprocessed_batch: Any) -> dict[str, Any]:
+    def eval_loss(self, **preprocessed_batch: object) -> dict[str, Any]:
         """Return loss and metric equal to the batch media scalar."""
         media = cast(Tensor, preprocessed_batch["media"])
         return {"loss": media.flatten(), "model": media, "metrics": {"score": media}}
 
-    def train_loss(self, **preprocessed_batch: Any) -> dict[str, Any]:
+    def train_loss(self, **preprocessed_batch: object) -> dict[str, Any]:
         """Delegate to eval_loss."""
         return self.eval_loss(**preprocessed_batch)
 
-    def train_step(self, **preprocessed_batch: Any) -> dict[str, Tensor]:
+    def train_step(self, **preprocessed_batch: object) -> dict[str, Tensor]:
         """Unused train step."""
         del preprocessed_batch
         return {"loss": torch.zeros(1), "model": torch.zeros(1, 1)}
@@ -271,24 +271,24 @@ class _WarmupStep:
         """Return the batch unchanged."""
         return batch
 
-    def eval_loss(self, **preprocessed_batch: Any) -> dict[str, Tensor]:
+    def eval_loss(self, **preprocessed_batch: object) -> dict[str, Tensor]:
         """Record eval batch media."""
         media = cast(Tensor, preprocessed_batch["media"])
         self.eval_calls.append(media.clone())
         return {"loss": torch.zeros(1), "model": media}
 
-    def train_loss(self, **preprocessed_batch: Any) -> dict[str, Tensor]:
+    def train_loss(self, **preprocessed_batch: object) -> dict[str, Tensor]:
         """Delegate to eval_loss."""
         return self.eval_loss(**preprocessed_batch)
 
-    def train_step(self, **preprocessed_batch: Any) -> dict[str, Tensor]:
+    def train_step(self, **preprocessed_batch: object) -> dict[str, Tensor]:
         """Advance one train step."""
         del preprocessed_batch
         self.global_step += 1
         self.local_step += 1
         return {"loss": torch.zeros(1), "model": torch.zeros(1, 1)}
 
-    def call_eval(self, **preprocessed_batch: Any) -> Tensor:
+    def call_eval(self, **preprocessed_batch: object) -> Tensor:
         """Return eval logits placeholder."""
         return cast(Tensor, preprocessed_batch["media"])
 
@@ -350,7 +350,7 @@ class _ExtrasMetric:
     def __init__(self, config: Config) -> None:
         del config
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Ignore batches; the payload is constant."""
         del logits, batch
 
@@ -1560,7 +1560,7 @@ def test_per_step_log_includes_step_metrics(
 
     inner = loop.step.train_step
 
-    def _with_metrics(**batch: Any) -> dict[str, Any]:
+    def _with_metrics(**batch: object) -> dict[str, Any]:
         out = dict(inner(**batch))
         out["metrics"] = {"cell_accuracy": 0.875, "act_steps": 4.0}
         return out
@@ -1608,7 +1608,7 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
 
     loop = _make_step_logging_loop_config().make()
 
-    def _with_metrics(**batch: Any) -> dict[str, Any]:
+    def _with_metrics(**batch: object) -> dict[str, Any]:
         del batch
         # Advance the step counter the way the real step does -- by charging
         # the timer global_step reads -- since it is a read-only property.
@@ -1676,7 +1676,7 @@ def _timed_train_step(
     """
     inner = loop.step.train_step
 
-    def timed_step(**batch: Any) -> dict[str, Any]:
+    def timed_step(**batch: object) -> dict[str, Any]:
         clock.now += first_step_time if loop.step.global_step == 0 else 1.0
         return inner(**batch)
 
@@ -1995,7 +1995,7 @@ def test_train_step_logs_gpu_memory_to_tracker(
 
         original_train_step = loop.step.train_step
 
-        def train_step_with_cuda_metrics(**batch: Any) -> TrainStepOutput:
+        def train_step_with_cuda_metrics(**batch: object) -> TrainStepOutput:
             result = original_train_step(**batch)
             monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
             monkeypatch.setattr(
@@ -2579,7 +2579,7 @@ def test_set_loader_epoch_tolerates_loader_without_dataset() -> None:
         def __iter__(self) -> Iterator[dict[str, Tensor]]:
             return iter(())
 
-    _set_loader_epoch(cast("DataLoader[Any]", _LoaderWithoutDataset()), epoch=3)
+    _set_loader_epoch(cast(DataLoader[Any], _LoaderWithoutDataset()), epoch=3)
 
 
 def test_dataset_receives_the_step_before_the_first_batch() -> None:

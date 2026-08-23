@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import torch
 
 from priml.model.generate import _sample, _topp_filter
@@ -41,7 +43,7 @@ def test_sample_greedy_is_argmax():
     assert token.item() == 1
 
 
-def _topp_probs(logits: torch.Tensor, *, top_p: float) -> torch.Tensor:
+def _topp_probs(logits: Tensor, *, top_p: float) -> Tensor:
     """Recover the kept-token distribution under top-p, deterministically.
 
     The nucleus filter sets out-of-nucleus logits to ``-1e10``, which softmaxes

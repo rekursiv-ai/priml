@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -30,14 +32,14 @@ def _hf_config(**overrides: Any) -> dict[str, Any]:
     return base
 
 
-def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, torch.Tensor]:
+def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     """Build a random-weight state_dict in HF Qwen3 layout."""
     h = cfg.hidden_size
     inter = cfg.intermediate_size
     n_q = cfg.num_attention_heads
     n_kv = cfg.num_key_value_heads
     d = cfg.head_dim
-    sd: dict[str, torch.Tensor] = {
+    sd: dict[str, Tensor] = {
         "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
         "model.norm.weight": torch.randn(h),
     }

@@ -8,6 +8,8 @@ import inspect
 import os
 import random
 
+from torch import Tensor
+
 import numpy as np
 import pytest
 import torch
@@ -91,14 +93,14 @@ def test_set_seed_reproducibility_on_cuda() -> None:
     torch.testing.assert_close(a, b)
 
 
-def _mock_broadcast_fill(tensor: torch.Tensor, **_kwargs: object) -> None:
+def _mock_broadcast_fill(tensor: Tensor, **_kwargs: object) -> None:
     tensor.fill_(100)
 
 
 def _capture_broadcast(
-    sink: list[torch.Tensor],
+    sink: list[Tensor],
 ) -> Callable[..., None]:
-    def capture(tensor: torch.Tensor, *_args: object, **_kwargs: object) -> None:
+    def capture(tensor: Tensor, *_args: object, **_kwargs: object) -> None:
         sink.append(tensor.detach().clone())
 
     return capture
@@ -111,9 +113,9 @@ def _patch_dist(
     initialized: bool = True,
     backend: str = "gloo",
     broadcast: Callable[..., None] | None = None,
-) -> list[torch.Tensor]:
+) -> list[Tensor]:
     """Patch ``torch.distributed`` symbols and return the broadcast sink."""
-    sink: list[torch.Tensor] = []
+    sink: list[Tensor] = []
 
     def _is_initialized() -> bool:
         return initialized
@@ -406,9 +408,9 @@ def _baseline_state_without_cuda() -> RngState:
 
 
 def _record_set_rng_state_all(
-    sink: list[list[torch.Tensor]],
-) -> Callable[[Iterable[torch.Tensor]], None]:
-    def capture(states: Iterable[torch.Tensor]) -> None:
+    sink: list[list[Tensor]],
+) -> Callable[[Iterable[Tensor]], None]:
+    def capture(states: Iterable[Tensor]) -> None:
         sink.append(list(states))
 
     return capture
@@ -423,7 +425,7 @@ def test_set_rng_state_raises_when_cuda_states_exceed_devices(
     truncation footgun. The caller must explicitly slice the state list
     if they want to opt out; we will not paper over the mismatch.
     """
-    set_all_calls: list[list[torch.Tensor]] = []
+    set_all_calls: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(
@@ -450,7 +452,7 @@ def test_set_rng_state_raises_when_cuda_states_below_devices(
     devices on whatever startup state they had, which is the same kind
     of silent footgun.
     """
-    set_all_calls: list[list[torch.Tensor]] = []
+    set_all_calls: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(
@@ -486,7 +488,7 @@ def test_set_rng_state_restores_when_count_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Happy path: equal-count restore calls ``set_rng_state_all`` once."""
-    set_all_calls: list[list[torch.Tensor]] = []
+    set_all_calls: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(
@@ -561,7 +563,7 @@ def test_set_rng_state_no_cuda_key_does_not_touch_cuda(
 
     This is the legitimate "saved on CPU, restored anywhere" case.
     """
-    set_all_calls: list[list[torch.Tensor]] = []
+    set_all_calls: list[list[Tensor]] = []
     monkeypatch.setattr(
         torch.cuda,
         "set_rng_state_all",
@@ -780,7 +782,7 @@ def test_set_rng_state_warns_on_cuda_device_identity_mismatch(
     Backward-compatible: checkpoints without ``cuda_uuids`` are accepted
     silently.
     """
-    sink: list[list[torch.Tensor]] = []
+    sink: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(
@@ -821,7 +823,7 @@ def test_set_rng_state_no_warning_when_cuda_uuids_absent(
     """Legacy checkpoints have no ``cuda_uuids`` key. Accept them
     silently; the warning only fires when we have something to compare.
     """
-    sink: list[list[torch.Tensor]] = []
+    sink: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(

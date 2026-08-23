@@ -43,7 +43,7 @@ def test_each_tick_carries_a_unit_weight() -> None:
 def test_the_step_can_be_bound() -> None:
     rollouts = _rollouts()
     marker = object()
-    rollouts.bind_step(cast("TrainStepProtocol", marker))
+    rollouts.bind_step(cast(TrainStepProtocol, marker))
     assert rollouts._step is marker
 
 
@@ -52,7 +52,7 @@ def test_an_evaluation_batch_carries_the_bound_policy() -> None:
     # network, so the metric has to be handed the one that is training.
     rollouts = _rollouts()
     step = _Step()
-    rollouts.bind_step(cast("TrainStepProtocol", step))
+    rollouts.bind_step(cast(TrainStepProtocol, step))
     for batch in rollouts.eval_dataloader():
         assert batch["policy"] is step.model
 
@@ -66,7 +66,7 @@ def test_training_batches_carry_no_policy() -> None:
     # The step already owns its network; sending it back would invite a
     # training path that reads the model from the batch instead.
     rollouts = _rollouts()
-    rollouts.bind_step(cast("TrainStepProtocol", _Step()))
+    rollouts.bind_step(cast(TrainStepProtocol, _Step()))
     for batch in rollouts.train_dataloader():
         assert "policy" not in batch
 

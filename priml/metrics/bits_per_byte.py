@@ -18,18 +18,15 @@ full one.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import math
 
 from configgle import Fig
+from torch import Tensor
 
 import torch
 import torch.distributed as dist
-
-
-if TYPE_CHECKING:
-    from torch import Tensor
 
 
 class BitsPerByte:
@@ -51,7 +48,7 @@ class BitsPerByte:
         self.nats = 0.0
         self.bytes = 0
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Accumulate one batch.
 
         Args:
@@ -67,8 +64,12 @@ class BitsPerByte:
 
         """
         per_token = logits.detach().double()
-        labels: Tensor = batch["label"].detach().to(torch.int64)
-        token_bytes: Tensor = batch["token_bytes"].detach().to(labels.device)
+        label_raw = batch["label"]
+        assert isinstance(label_raw, Tensor)
+        labels = label_raw.detach().to(torch.int64)
+        token_bytes_raw = batch["token_bytes"]
+        assert isinstance(token_bytes_raw, Tensor)
+        token_bytes = token_bytes_raw.detach().to(labels.device)
         if per_token.shape != labels.shape:
             raise ValueError(
                 f"per-token loss has shape {tuple(per_token.shape)} but the "
@@ -78,7 +79,9 @@ class BitsPerByte:
         # ``valid_count`` rather than masking on the target value: a negative
         # marker would INDEX the byte table from the back and land on a real
         # length, so the padding would be scored rather than skipped.
-        valid = int(batch.get("valid_count", labels.shape[0]))
+        raw_count = batch.get("valid_count", labels.shape[0])
+        assert isinstance(raw_count, int)
+        valid = raw_count
         if valid < 0 or valid > labels.shape[0]:
             raise ValueError(
                 f"valid_count {valid} is outside the batch's {labels.shape[0]} "

@@ -429,7 +429,7 @@ def test_gan_train_step_preserves_generator_aux_losses() -> None:
 
     real_loss = gan.generator.loss
 
-    def loss_with_aux(prediction: Any, **batch: Any) -> LossOutput:
+    def loss_with_aux(prediction: Any, **batch: object) -> LossOutput:
         loss = real_loss(prediction, **batch)["loss"]
         # ``adversarial`` is an auxiliary key the trainer must preserve.
         return {"loss": loss, "adversarial": loss.detach() * 2.0}

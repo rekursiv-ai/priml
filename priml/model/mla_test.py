@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -120,7 +122,7 @@ def test_decode_equivalent_to_full_reforward():
     cache = m.alloc_kv_cache(batch=1, max_seq=16)
     with torch.no_grad():
         _, cache = m(prompt, cache=cache)
-        decode_outs: list[torch.Tensor] = []
+        decode_outs: list[Tensor] = []
         for step in steps:
             out, cache = m(step, cache=cache)
             decode_outs.append(out)

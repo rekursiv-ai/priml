@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from torch import nn
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -61,7 +61,7 @@ def _mixing_model(**overrides: Any) -> NanoChatLM:
     return model
 
 
-def _tokens() -> torch.Tensor:
+def _tokens() -> Tensor:
     return torch.randint(0, VOCAB, (2, SEQ))
 
 
@@ -458,13 +458,13 @@ def test_the_shipped_experiments_forward_bfb() -> None:
         assert isinstance(built, NanoChatLM)
         return built
 
-    def run(module: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
+    def run(module: nn.Module, tokens: Tensor) -> Tensor:
         with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
             out = module(tokens)
-        assert isinstance(out, torch.Tensor)
+        assert isinstance(out, Tensor)
         return out
 
-    def build_input() -> torch.Tensor:
+    def build_input() -> Tensor:
         return torch.randint(0, _model().vocab_size, (2, _model().max_seq_len))
 
     assert_bfb_against_golden(

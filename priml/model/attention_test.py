@@ -474,8 +474,8 @@ def test_multi_stream_no_cache_returns_tuple():
         num_streams=2,
     ).make()
     y0, y1 = m([torch.randn(2, 8, 64), torch.randn(2, 12, 64)])
-    assert isinstance(y0, torch.Tensor)
-    assert isinstance(y1, torch.Tensor)
+    assert isinstance(y0, Tensor)
+    assert isinstance(y1, Tensor)
 
 
 def test_multi_stream_causal_requires_single_stream():

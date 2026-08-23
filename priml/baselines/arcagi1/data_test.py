@@ -6,6 +6,8 @@ from pathlib import Path
 
 import json
 
+from torch import Tensor
+
 import numpy as np
 import pytest
 import torch
@@ -77,7 +79,9 @@ def test_training_draws_whole_tasks(dataset_dir: Path) -> None:
     benchmark weights every task equally.
     """
     batch = next(iter(_data(dataset_dir).train_dataloader()))
-    identifiers = batch["puzzle_identifiers"].tolist()
+    puzzle_identifiers_raw = batch["puzzle_identifiers"]
+    assert isinstance(puzzle_identifiers_raw, Tensor)
+    identifiers = puzzle_identifiers_raw.tolist()
     # 4 slots at 3 views per puzzle: at most two puzzles can appear.
     assert len(set(identifiers)) <= 2
 

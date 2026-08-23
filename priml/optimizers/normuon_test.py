@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -53,7 +55,7 @@ def test_it_is_invariant_to_the_gradient_scale() -> None:
     separates this from an optimizer that passed the scale through, which
     would differ by 1000x.
     """
-    steps: list[torch.Tensor] = []
+    steps: list[Tensor] = []
     for scale in (1.0, 1000.0):
         params = _parameters((8, 8))
         assert params[0].grad is not None
@@ -90,7 +92,7 @@ def test_weight_decay_is_cautious() -> None:
     makes this a check rather than a restatement.
     """
 
-    def step(*, weight_decay: float) -> torch.Tensor:
+    def step(*, weight_decay: float) -> Tensor:
         params = _parameters((8, 8))
         with torch.no_grad():
             params[0].copy_(torch.ones(8, 8))
@@ -128,7 +130,7 @@ def test_row_rescaling_redistributes_without_resizing() -> None:
     changes the norm instead.
     """
 
-    def update(*, skew: bool) -> torch.Tensor:
+    def update(*, skew: bool) -> Tensor:
         params = _parameters((16, 16))
         before = params[0].detach().clone()
         optimizer = NorMuon(
@@ -209,7 +211,7 @@ def test_a_prefix_of_the_coefficients_is_a_shorter_iteration() -> None:
     Pinned because the coefficients are jointly tuned for the full schedule:
     a change that reordered them would leave every other test green.
     """
-    updates: list[torch.Tensor] = []
+    updates: list[Tensor] = []
     for ns_steps in (1, 5):
         params = _parameters((16, 16))
         before = params[0].detach().clone()

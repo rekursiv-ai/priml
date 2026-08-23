@@ -14,16 +14,13 @@ one).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from configgle import Fig
+from torch import Tensor
 
 import torch
 import torch.distributed as dist
-
-
-if TYPE_CHECKING:
-    from torch import Tensor
 
 
 class GridAccuracy:
@@ -55,7 +52,7 @@ class GridAccuracy:
         self.cells_correct = 0
         self.cells = 0
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Accumulate one batch.
 
         Args:
@@ -65,11 +62,15 @@ class GridAccuracy:
             tail when present.
 
         """
-        labels: Tensor = batch["label"].detach().to(torch.int64)
+        label_raw = batch["label"]
+        assert isinstance(label_raw, Tensor)
+        labels = label_raw.detach().to(torch.int64)
         grid_len = labels.shape[-1]
         predictions = logits.detach()[:, -grid_len:].to(torch.int64)
         labels = labels.to(predictions.device)
-        valid_count = int(batch.get("valid_count", labels.shape[0]))
+        raw_count = batch.get("valid_count", labels.shape[0])
+        assert isinstance(raw_count, int)
+        valid_count = raw_count
         predictions = predictions[:valid_count]
         labels = labels[:valid_count]
 

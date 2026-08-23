@@ -22,6 +22,8 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Final
 
+from torch import Tensor
+
 import torch
 
 
@@ -265,7 +267,7 @@ REWARD_CEILING: Final = 226.0
 """Total achievement reward available, the score's normalizing denominator."""
 
 
-def _directions() -> torch.Tensor:
+def _directions() -> Tensor:
     """Map every action to the step it moves the player.
 
     The table spans the WHOLE action space, not just the four movement
@@ -451,7 +453,7 @@ RANGED_MOB_PROJECTILE: Final = torch.tensor(
 """What each ranged species shoots."""
 
 
-def _achievement_reward() -> torch.Tensor:
+def _achievement_reward() -> Tensor:
     """Price each achievement by how deep into the game it sits.
 
     The basic survival loop pays 1, mid-game crafting and the first two
@@ -574,7 +576,7 @@ MOB_ACHIEVEMENT: Final = torch.tensor(
 """Per mob class and species, the achievement its defeat unlocks."""
 
 
-def _torch_light_map() -> torch.Tensor:
+def _torch_light_map() -> Tensor:
     """Build the radial falloff a placed torch casts on its 9x9 neighborhood.
 
     The squared distance is summed as exact integers before its single

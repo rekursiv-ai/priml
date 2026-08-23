@@ -18,12 +18,12 @@ divergent definition.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Formatter
-from typing import TYPE_CHECKING, Any, Protocol, Self, cast, override
+from typing import Any, Protocol, Self, cast, override
 
 import logging
 import re
@@ -31,6 +31,7 @@ import shutil
 import time
 
 from configgle import Fig, Makeable
+from torch import Tensor
 from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
 from torch.distributed.tensor import DTensor
 
@@ -41,10 +42,6 @@ import torch.distributed.checkpoint as dcp
 from priml.custom_types import CheckpointableProtocol
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
-
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 
 logger = logging.getLogger(__name__)
@@ -268,7 +265,7 @@ class AsyncLocalStateDictStorer:
         self._pending_start = time.perf_counter()
         response: object = dcp.async_save(state_dict, checkpoint_id=str(path))
         upload: object = getattr(response, "upload_completion", response)
-        self._pending = cast("Future[Any]", upload)
+        self._pending = cast(Future[Any], upload)
         self._pending_path = path
         self._after_write = after_write
 
@@ -696,7 +693,7 @@ def _read_checkpoint(path: Path, into: StateDict) -> StateDict:
     else:
         map_location = torch.device("cpu")
     blob = cast(
-        "StateDict",
+        StateDict,
         torch.load(path, weights_only=True, map_location=map_location),
     )
     if "rng" in blob:
@@ -712,16 +709,16 @@ def _to_cpu(obj: object) -> object:
     ``torch.cuda.get_rng_state_all()``) are CPU ``ByteTensor``s, and
     ``set_rng_state`` / ``set_rng_state_all`` reject anything on another device.
     """
-    if isinstance(obj, torch.Tensor):
+    if isinstance(obj, Tensor):
         return obj.cpu()
     if isinstance(obj, Mapping):
-        mapping = cast("Mapping[object, object]", obj)
+        mapping = cast(Mapping[object, object], obj)
         return {k: _to_cpu(v) for k, v in mapping.items()}
     if isinstance(obj, list):
-        items = cast("list[object]", obj)
+        items = cast(list[object], obj)
         return [_to_cpu(v) for v in items]
     if isinstance(obj, tuple):
-        elems = cast("tuple[object, ...]", obj)
+        elems = cast(tuple[object, ...], obj)
         return tuple(_to_cpu(v) for v in elems)
     return obj
 
@@ -749,7 +746,7 @@ def _has_dtensor(obj: object) -> bool:
     if isinstance(obj, DTensor):
         return True
     if isinstance(obj, Mapping):
-        return any(_has_dtensor(v) for v in cast("Iterable[object]", obj.values()))
+        return any(_has_dtensor(v) for v in cast(Iterable[object], obj.values()))
     if isinstance(obj, (list, tuple, set)):
-        return any(_has_dtensor(v) for v in cast("Iterable[object]", obj))
+        return any(_has_dtensor(v) for v in cast(Iterable[object], obj))
     return False

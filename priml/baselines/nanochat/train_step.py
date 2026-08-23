@@ -55,7 +55,7 @@ class TokenCrossEntropy:
     def __init__(self, config: Config) -> None:
         self.ignore_index = config.ignore_index
 
-    def __call__(self, prediction: Tensor, **batch: Any) -> LossOutput:
+    def __call__(self, prediction: Tensor, **batch: object) -> LossOutput:
         """Score every target position.
 
         Args:
@@ -66,7 +66,8 @@ class TokenCrossEntropy:
           result: ``loss``, ``[B, S]`` cross-entropy in nats.
 
         """
-        label: Tensor = batch["label"]
+        label = batch["label"]
+        assert isinstance(label, Tensor)
         # Upcast: the caller's reduction runs over thousands of terms, and the
         # reference measured this loss in fp32.
         return {
@@ -429,7 +430,7 @@ class NanoChatTrainStep(TrainStep):
         }
 
     @override
-    def train_step(self, **batch: Any) -> TrainStepOutput:
+    def train_step(self, **batch: object) -> TrainStepOutput:
         """Forward, backward, and step the optimizer once the batch is full.
 
         Args:
@@ -523,7 +524,7 @@ class NanoChatTrainStep(TrainStep):
         }
 
     @override
-    def train_loss(self, **batch: Any) -> TrainStepOutput:
+    def train_loss(self, **batch: object) -> TrainStepOutput:
         """Compute the training loss without a backward pass."""
         self.model.train()
         with torch.no_grad(), self._autocast():
@@ -531,7 +532,7 @@ class NanoChatTrainStep(TrainStep):
         return {"loss": per_token.mean().reshape(1), "model": per_token}
 
     @override
-    def eval_loss(self, **batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
         """Score one batch, returning the per-token loss the metric consumes.
 
         The reported ``loss`` is the mean over REAL rows only: the loop weights
@@ -541,14 +542,16 @@ class NanoChatTrainStep(TrainStep):
         self.model.eval()
         with torch.inference_mode(), self._autocast():
             per_token = self._per_token_loss(batch)
-        valid = int(batch.get("valid_count", per_token.shape[0]))
+        raw_count = batch.get("valid_count", per_token.shape[0])
+        assert isinstance(raw_count, int)
+        valid = raw_count
         return {
             "loss": per_token[:valid].mean().reshape(1),
             "model": per_token,
         }
 
     @override
-    def call_eval(self, **batch: Any) -> Tensor:
+    def call_eval(self, **batch: object) -> Tensor:
         """Return evaluation logits for one batch.
 
         Eager: the compiled forward returns a per-token LOSS, having fused the

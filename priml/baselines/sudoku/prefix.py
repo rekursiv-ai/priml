@@ -22,7 +22,7 @@ carries the gradient, and the optimizer scatters those few rows back.
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any, Self, override
+from typing import Any, Self, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -92,7 +92,7 @@ class RegisterTokens(nn.Module):
         """Return ``[B, num_tokens, C]``, the same tokens for every row."""
         del kwargs
         tokens: Tensor = self.register_tokens.unsqueeze(0).expand(batch_size, -1, -1)
-        scaled: Tensor = self.embed_scale * tokens
+        scaled = cast(Tensor, self.embed_scale * tokens)
         return scaled
 
 
@@ -213,7 +213,7 @@ class SparsePuzzleEmbedding(nn.Module):
         prefix: Tensor = vectors.reshape(
             batch_size, config.num_tokens, config.hidden_size
         )
-        scaled: Tensor = self.embed_scale * prefix
+        scaled = cast(Tensor, self.embed_scale * prefix)
         return scaled
 
     def _lookup(self, identifiers: Tensor) -> Tensor:

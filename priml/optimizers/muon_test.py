@@ -236,7 +236,7 @@ def _muon_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
             return
         Muon([sharded], lr=0.1, momentum=0.0, nesterov=False).step()
 
-        got = cast("DTensor", sharded.data).full_tensor()
+        got = cast(DTensor, sharded.data).full_tensor()
         max_abs = (got - full_param.detach()).abs().max().item()
         if max_abs > 1e-2:
             (result_path / f"rank_{rank}").write_text(f"FAIL:maxdiff={max_abs:.4f}")

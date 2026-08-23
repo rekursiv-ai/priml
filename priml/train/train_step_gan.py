@@ -101,7 +101,7 @@ class GANTrainStep:
         self.generator.on_epoch_end()
         self.discriminator.on_epoch_end()
 
-    def train_step(self, *, media: Tensor, **batch: Any) -> TrainStepOutput:
+    def train_step(self, *, media: Tensor, **batch: object) -> TrainStepOutput:
         """Single GAN training step with discriminator and generator updates.
 
         Args:
@@ -180,7 +180,7 @@ class GANTrainStep:
         result["model"] = fake_media
         return cast(TrainStepOutput, result)
 
-    def train_loss(self, *, media: Tensor, **batch: Any) -> TrainStepOutput:
+    def train_loss(self, *, media: Tensor, **batch: object) -> TrainStepOutput:
         """Compute GAN loss in train mode without backprop."""
         real_media = media
         batch_size = real_media.shape[0]
@@ -224,7 +224,7 @@ class GANTrainStep:
         result["model"] = fake_media
         return cast(TrainStepOutput, result)
 
-    def eval_loss(self, *, media: Tensor, **batch: Any) -> TrainStepOutput:
+    def eval_loss(self, *, media: Tensor, **batch: object) -> TrainStepOutput:
         """Compute GAN loss in eval mode (uses EMA models if available)."""
         real_media = media
         batch_size = real_media.shape[0]

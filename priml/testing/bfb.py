@@ -286,9 +286,9 @@ def _upcast(value: object) -> object:
     if isinstance(value, Tensor) and _is_narrow_float(value.dtype):
         return value.double()
     if isinstance(value, list):
-        return [_upcast(v) for v in cast("list[Any]", value)]
+        return [_upcast(v) for v in cast(list[Any], value)]
     if isinstance(value, tuple):
-        return tuple(_upcast(v) for v in cast("tuple[Any, ...]", value))
+        return tuple(_upcast(v) for v in cast(tuple[Any, ...], value))
     return value
 
 
@@ -296,9 +296,9 @@ def _downcast_f64(value: object, target: torch.dtype = torch.float32) -> object:
     if isinstance(value, Tensor) and value.dtype == torch.float64:
         return value.to(target)
     if isinstance(value, list):
-        return [_downcast_f64(v, target) for v in cast("list[Any]", value)]
+        return [_downcast_f64(v, target) for v in cast(list[Any], value)]
     if isinstance(value, tuple):
-        return tuple(_downcast_f64(v, target) for v in cast("tuple[Any, ...]", value))
+        return tuple(_downcast_f64(v, target) for v in cast(tuple[Any, ...], value))
     return value
 
 
@@ -375,9 +375,9 @@ def _write_back(
     if result is None:
         return None
     if isinstance(result, tuple):
-        return tuple(_resolve(e) for e in cast("tuple[Any, ...]", result))
+        return tuple(_resolve(e) for e in cast(tuple[Any, ...], result))
     if isinstance(result, list):
-        return [_resolve(e) for e in cast("list[Any]", result)]
+        return [_resolve(e) for e in cast(list[Any], result)]
     return _resolve(result)
 
 
@@ -502,13 +502,13 @@ def move_to_device(value: Any, device: str) -> Any:
     if torch.is_tensor(value):
         return value.to(device)
     if isinstance(value, dict):
-        typed_value = cast("dict[str, Any]", value)
+        typed_value = cast(dict[str, Any], value)
         return {k: move_to_device(v, device) for k, v in typed_value.items()}
     if isinstance(value, tuple):
-        typed_value = cast("tuple[Any, ...]", value)
+        typed_value = cast(tuple[Any, ...], value)
         return tuple(move_to_device(v, device) for v in typed_value)
     if isinstance(value, list):
-        typed_value = cast("list[Any]", value)
+        typed_value = cast(list[Any], value)
         return [move_to_device(v, device) for v in typed_value]
     return value
 
@@ -821,7 +821,9 @@ def _replay_golden(
     device = _module_device(module)
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
-    payload: _Golden = torch.load(golden_path, weights_only=False, map_location="cpu")
+    payload = cast(
+        _Golden, torch.load(golden_path, weights_only=False, map_location="cpu")
+    )
     _assert_sdpa_backend_match(payload.get("sdpa_backend"), device=device)
     module.load_state_dict(payload["state_dict"])
     inp = move_to_device(payload["input"], device)
@@ -906,13 +908,13 @@ def _to_cpu(value: Any) -> Any:
         # mutation of the live module (mutating runners, EMA buffers).
         return value.detach().to("cpu", copy=True)
     if isinstance(value, dict):
-        typed_value = cast("dict[str, Any]", value)
+        typed_value = cast(dict[str, Any], value)
         return {k: _to_cpu(v) for k, v in typed_value.items()}
     if isinstance(value, tuple):
-        typed_value = cast("tuple[Any, ...]", value)
+        typed_value = cast(tuple[Any, ...], value)
         return tuple(_to_cpu(v) for v in typed_value)
     if isinstance(value, list):
-        typed_value = cast("list[Any]", value)
+        typed_value = cast(list[Any], value)
         return [_to_cpu(v) for v in typed_value]
     return value
 

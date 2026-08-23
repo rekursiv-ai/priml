@@ -439,4 +439,4 @@ def _as_int_list(t: Tensor) -> list[int]:
     Central chokepoint for the upstream torch stubs, whose
     ``Tensor.tolist()`` return type is ``list[Unknown]``.
     """
-    return cast("list[int]", t.tolist())
+    return cast(list[int], t.tolist())

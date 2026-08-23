@@ -1121,7 +1121,7 @@ class TrainLoop:
         )
 
         loss = step_results["loss"].mean().detach()
-        raw_step_metrics: dict[str, float | Tensor] = step_results.get("metrics", {})
+        raw_step_metrics = step_results.get("metrics", {})
         tensor_metrics = [
             (key, value)
             for key, value in raw_step_metrics.items()
@@ -1395,9 +1395,7 @@ class TrainLoop:
                 total_step_metrics[key] = (
                     total_step_metrics.get(key, 0.0)
                     + float(
-                        value.mean().item()
-                        if isinstance(value, torch.Tensor)
-                        else value,
+                        value.mean().item() if isinstance(value, Tensor) else value,
                     )
                     * weight
                 )

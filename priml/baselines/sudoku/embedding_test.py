@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -109,7 +111,7 @@ def test_hidden_size_must_be_inherited_or_set() -> None:
         GridEmbedding.Config().make()
 
 
-def _ordered(tokens: torch.Tensor, *, swap: bool) -> torch.Tensor:
+def _ordered(tokens: Tensor, *, swap: bool) -> Tensor:
     """Embed ``tokens`` with the two channels in one order or the other."""
     positions = FactoredPositions.Config()
     feedback = PredictionFeedback.Config(init_std=1.0)

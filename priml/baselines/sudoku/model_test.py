@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from torch import nn
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -190,7 +190,7 @@ def test_recurrent_forward_bfb() -> None:
     )
 
 
-def _logits(module: nn.Module, tokens: Any) -> torch.Tensor:
+def _logits(module: nn.Module, tokens: Any) -> Tensor:
     """Run the model and return the logits the golden compares."""
     out = module(tokens)
     assert isinstance(out, ForwardOutput)

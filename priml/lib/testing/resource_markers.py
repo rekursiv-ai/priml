@@ -217,10 +217,9 @@ def apply_resource_markers(
     """Apply virtual family markers, timeout budgets, and skip policy."""
     known_resources = set(resource_markers)
     for item in items:
-        # ONE marker walk per item. ``get_closest_marker`` re-walks the whole
-        # parent chain per name, so asking it about every registered resource
-        # marker was quadratic: 47 walks x 29k items x 7 conftest hook bindings
-        # cost 36s of every repo-wide collection.
+        # One marker walk per item: ``get_closest_marker`` re-walks the whole
+        # parent chain per name, so asking it per registered marker costs a walk
+        # per marker per item on every repo-wide collection.
         existing = {marker.name for marker in item.iter_markers()}
         _fail_on_unknown_resource_markers(existing, resource_markers=known_resources)
         carried = existing & known_resources

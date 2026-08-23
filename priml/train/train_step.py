@@ -311,7 +311,7 @@ class TrainStep:
         activation_strategy = self.config.activation_memoization.make()
         activation_strategy(model)
 
-        self.model: nn.Module = model
+        self._model = model
 
         self.optimizer: OptimizerProtocol = self.build_optimizer(self.model)
 
@@ -345,6 +345,17 @@ class TrainStep:
         for accumulation-correctness assertions; empty until the first step."""
 
         self.loss: Callable[..., LossOutput] = config.loss.make()
+
+    @property
+    def model(self) -> nn.Module:
+        """The placed, sharded, materialized module this step trains.
+
+        A read-only property rather than a plain attribute so a subclass whose
+        config pins a concrete model class can override it with that narrower
+        return type. A mutable attribute is invariant and cannot be narrowed,
+        which forced every such subclass to cast its own model at each use.
+        """
+        return self._model
 
     @property
     def device(self) -> torch.device:
@@ -549,12 +560,12 @@ class TrainStep:
         non_blocking = self.device.type == "cuda"
         return {
             key: value.to(self.device, non_blocking=non_blocking)
-            if isinstance(value, torch.Tensor)
+            if isinstance(value, Tensor)
             else value
             for key, value in batch.items()
         }
 
-    def train_step(self, **preprocessed_batch: Any) -> TrainStepOutput:
+    def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Forward + loss + backprop with gradient accumulation.
 
         The supervised shape. A recipe that augments before the forward, runs
@@ -624,7 +635,7 @@ class TrainStep:
         loss_result["model"] = cast(Tensor, output)
         return cast(TrainStepOutput, loss_result)
 
-    def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:
+    def train_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Compute loss in train mode (no backprop).
 
         Args:
@@ -639,7 +650,7 @@ class TrainStep:
         result["model"] = cast(Tensor, output)
         return cast(TrainStepOutput, result)
 
-    def eval_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Compute loss in eval mode (uses EMA if available).
 
         Args:

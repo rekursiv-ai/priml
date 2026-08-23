@@ -430,14 +430,14 @@ def _deltas(parent: Any, child: Any) -> set[str]:
 def _flatten(config: Any, prefix: str = "") -> dict[str, Any]:
     """Return a dotted-name to value map, descending into nested Configs."""
     flat: dict[str, Any] = {}
-    fields = cast("dict[str, Any]", type(config).__dataclass_fields__)
+    fields = cast(dict[str, Any], type(config).__dataclass_fields__)
     for name in fields:
         value: Any = getattr(config, name)
         dotted = f"{prefix}{name}"
         if isinstance(value, InlineConfig):
-            flat[dotted] = repr(cast("InlineConfig[Any]", value))
+            flat[dotted] = repr(cast(InlineConfig[Any], value))
         elif isinstance(value, list):
-            flat[dotted] = [repr(item) for item in cast("list[Any]", value)]
+            flat[dotted] = [repr(item) for item in cast(list[Any], value)]
         elif is_dataclass(value):
             # Record the class itself, so swapping in a different Config
             # registers as one change rather than a diff of every field.

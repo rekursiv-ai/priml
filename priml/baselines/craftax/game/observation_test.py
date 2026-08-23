@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import torch
 
 from priml.baselines.craftax.conftest import (
@@ -84,7 +86,7 @@ def test_inventory_shows_up_in_the_observation() -> None:
 
 def test_counts_are_compressed_so_early_gains_matter_most() -> None:
     # The first log should move the observation more than the ninetieth.
-    def wood(amount: int) -> torch.Tensor:
+    def wood(amount: int) -> Tensor:
         state = _state()
         state.inventory.wood[:] = amount
         return observation.render(state)
@@ -121,7 +123,7 @@ def test_a_distant_creature_is_not_visible() -> None:
 
 
 def test_creature_classes_are_distinguishable() -> None:
-    def creature(field: str) -> torch.Tensor:
+    def creature(field: str) -> Tensor:
         state = _state()
         mobs = getattr(state, field)
         mobs.mask[:, 0, 0] = True

@@ -7,10 +7,12 @@ with consistent caching behavior across all users.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import logging
 import os
+
+from torch import Tensor
 
 import torch
 
@@ -185,7 +187,7 @@ def resolve_hf_dtype(name: str) -> torch.dtype:
     }.get(name, torch.float32)
 
 
-def load_local_state_dict(path: Path) -> dict[str, torch.Tensor]:
+def load_local_state_dict(path: Path) -> dict[str, Tensor]:
     """Load sharded safetensors / pytorch_model.bin from a local dir.
 
     Args:
@@ -197,20 +199,21 @@ def load_local_state_dict(path: Path) -> dict[str, torch.Tensor]:
     """
     safetensors = sorted(path.glob("*.safetensors"))
     if safetensors:
-        sd: dict[str, torch.Tensor] = {}
+        sd: dict[str, Tensor] = {}
         for shard in safetensors:
             sd.update(load_file(str(shard)))
         return sd
     pt = path / "pytorch_model.bin"
     if pt.exists():
         # torch.load is annotated `-> Any`; weights_only=True guarantees tensors.
-        loaded: dict[str, torch.Tensor] = torch.load(
-            str(pt), map_location="cpu", weights_only=True
+        loaded = cast(
+            dict[str, Tensor],
+            torch.load(str(pt), map_location="cpu", weights_only=True),
         )
         return loaded
     shards = sorted(path.glob("pytorch_model-*.bin"))
     if shards:
-        pt_sd: dict[str, torch.Tensor] = {}
+        pt_sd: dict[str, Tensor] = {}
         for shard in shards:
             pt_sd.update(
                 torch.load(str(shard), map_location="cpu", weights_only=True),

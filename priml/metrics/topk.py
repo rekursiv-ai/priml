@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from configgle import Fig
-
-
-if TYPE_CHECKING:
-    from torch import Tensor
+from torch import Tensor
 
 
 class TopK:
@@ -44,7 +41,8 @@ class TopK:
     def update(
         self,
         logits: Tensor,
-        label: Tensor | None = None,
+        *,
+        label: object = None,
         **_kwargs: object,
     ) -> None:
         """Update metric with batch.
@@ -56,6 +54,8 @@ class TopK:
         """
         if label is None:
             raise ValueError("label must be provided")
+        if not isinstance(label, Tensor):
+            raise TypeError(f"label must be a Tensor, got {type(label)}.")
         targets = label
         batch_size = targets.size(0)
         num_classes = logits.size(1)

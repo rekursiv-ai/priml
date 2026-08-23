@@ -16,6 +16,7 @@ choice not to redistribute is about package weight, not permission.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import hashlib
 import os
@@ -76,7 +77,7 @@ def fetch(
     url = url_template.format(revision=revision, name=name)
     try:
         with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
-            payload: bytes = response.read()
+            payload = cast(bytes, response.read())
     except (urllib.error.URLError, TimeoutError) as error:
         raise RuntimeError(f"Could not download the Craftax sprite {name}") from error
 

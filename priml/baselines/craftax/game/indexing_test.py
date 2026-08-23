@@ -7,6 +7,8 @@ implementations to the same rule.
 
 from __future__ import annotations
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -18,7 +20,7 @@ from priml.baselines.craftax.game.indexing import (
 )
 
 
-def _grid() -> torch.Tensor:
+def _grid() -> Tensor:
     return torch.arange(2 * 4 * 4, dtype=torch.int32).reshape(2, 4, 4)
 
 

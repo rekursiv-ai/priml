@@ -341,7 +341,7 @@ def _parse_yarn(rope_scaling: Any) -> YarnScaling | None:
     """Parse HF ``rope_scaling`` → YarnScaling. None-pass-through; strict on type."""
     if not rope_scaling:
         return None
-    scaling = cast("dict[str, Any]", rope_scaling)
+    scaling = cast(dict[str, Any], rope_scaling)
     stype = scaling.get("type") or scaling.get("rope_type")
     if stype is None:
         return None

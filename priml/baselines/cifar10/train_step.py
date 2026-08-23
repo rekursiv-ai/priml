@@ -138,7 +138,7 @@ class Cifar10TrainStep(TrainStep):
         self._whitened = not hasattr(self.model, "init_whiten")
 
     @override
-    def train_step(self, **batch: Any) -> TrainStepOutput:
+    def train_step(self, **batch: object) -> TrainStepOutput:
         """Augment, forward, backward, and step the optimizers.
 
         Args:
@@ -148,8 +148,10 @@ class Cifar10TrainStep(TrainStep):
           result: ``loss`` (per-example) and ``model`` (logits).
 
         """
-        media: Tensor = batch["media"]
-        label: Tensor = batch["label"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        label = batch["label"]
+        assert isinstance(label, Tensor)
         self._maybe_init_whiten(media)
         media = self._augment(media)
 
@@ -176,10 +178,12 @@ class Cifar10TrainStep(TrainStep):
         return {"loss": loss.detach(), "model": logits.detach()}
 
     @override
-    def train_loss(self, **batch: Any) -> TrainStepOutput:
+    def train_loss(self, **batch: object) -> TrainStepOutput:
         """Compute the training loss without a backward pass."""
-        media: Tensor = batch["media"]
-        label: Tensor = batch["label"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        label = batch["label"]
+        assert isinstance(label, Tensor)
         self.model.train()
         with torch.no_grad(), self._autocast():
             logits = self.model(media)
@@ -187,17 +191,20 @@ class Cifar10TrainStep(TrainStep):
         return {"loss": loss, "model": logits}
 
     @override
-    def eval_loss(self, **batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
         """Compute the evaluation loss and logits."""
-        media: Tensor = batch["media"]
-        label: Tensor = batch["label"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        label = batch["label"]
+        assert isinstance(label, Tensor)
         logits = self.call_eval(media=media)
         return {"loss": self._loss(logits, label), "model": logits}
 
     @override
-    def call_eval(self, **batch: Any) -> Tensor:
+    def call_eval(self, **batch: object) -> Tensor:
         """Return evaluation logits, optionally averaged over augmentations."""
-        media: Tensor = batch["media"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
         self.model.eval()
         with torch.inference_mode(), self._autocast():
             if self.config.use_tta:
@@ -275,7 +282,7 @@ class Cifar10TrainStep(TrainStep):
         """Fit the model's whitening layer once, from the first batch seen."""
         if self._whitened:
             return
-        model = cast("Any", self.model)
+        model = cast(Any, self.model)
         configured = self.config.whiten_cache_path
         cache = Path(configured) if configured else None
         if cache is not None and cache.is_file():

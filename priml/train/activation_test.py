@@ -7,7 +7,7 @@ from typing import Any, override
 import contextlib
 
 from configgle import Fig
-from torch import nn
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -31,7 +31,7 @@ class SimpleModule(nn.Module):
         self.linear = nn.Linear(10, 10)
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         return self.linear(x)
 
 
@@ -45,7 +45,7 @@ class NestedModule(nn.Module):
         self.layer3 = nn.Linear(10, 10)
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -61,7 +61,7 @@ class BlockModule(nn.Module):
         self.ffn = nn.Linear(10, 10)
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         x = self.attention(x) + x
         x = self.ffn(x) + x
         return x
@@ -76,7 +76,7 @@ class TransformerModel(nn.Module):
         self.output = nn.Linear(10, 10)
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         for block in self.blocks:
             x = block(x)
         return self.output(x)
@@ -461,7 +461,7 @@ def test_quantized_activation_storage_with_learnable():
             self.linear = nn.Linear(10, 10)
 
         @override
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: Tensor) -> Tensor:
             return self.linear(x)
 
         class Config(Fig["TinyModel"]):
@@ -523,9 +523,9 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
     config.make()(conv)
 
     captured: dict[str, object] = {}
-    orig_to = torch.Tensor.to
+    orig_to = Tensor.to
 
-    def spy_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+    def spy_to(self: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         # Record any dequant on a float8 tensor (capture its target dtype).
         if self.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) and args:
             captured["dequant_target"] = args[0]
@@ -533,12 +533,12 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
 
     x = torch.randn(1, 2, 8, 8, dtype=torch.bfloat16, requires_grad=True)
     out = conv(x)
-    torch.Tensor.to = spy_to
+    Tensor.to = spy_to
     try:
         with contextlib.suppress(RuntimeError):  # bf16 conv backward may be unsupported
             out.sum().backward()
     finally:
-        torch.Tensor.to = orig_to
+        Tensor.to = orig_to
 
     # The float8 activation must be dequantized to the input's bf16 dtype.
     assert captured.get("dequant_target") == torch.bfloat16, (
@@ -557,7 +557,7 @@ def test_quantized_activation_storage_all_zero_no_nan() -> None:
             self.linear = nn.Linear(16, 16)
 
         @override
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: Tensor) -> Tensor:
             return self.linear(x) * 0.0
 
     config = QuantizedActivationStorage.Config()

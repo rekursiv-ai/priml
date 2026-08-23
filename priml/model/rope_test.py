@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -47,9 +49,7 @@ def test_rope_rotate_interleave():
     assert q_rot.shape == q.shape
 
 
-def _rotate_reference(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleave: bool
-) -> torch.Tensor:
+def _rotate_reference(x: Tensor, cos: Tensor, sin: Tensor, interleave: bool) -> Tensor:
     dtype = x.dtype
     shape = x.shape
     if interleave:
@@ -127,7 +127,7 @@ def test_rotate_avoids_stack_materialization(
     monkeypatch: pytest.MonkeyPatch,
     interleave: bool,
 ) -> None:
-    def fail_stack(*args: object, **kwargs: object) -> torch.Tensor:
+    def fail_stack(*args: object, **kwargs: object) -> Tensor:
         assert args or kwargs
         raise AssertionError("RoPE._rotate should not call torch.stack")
 
@@ -155,7 +155,7 @@ def test_rotate_does_not_use_empty_like(
     the production half-split path, ``zeros_like`` for the interleave path.
     """
 
-    def fail_empty_like(*args: object, **kwargs: object) -> torch.Tensor:
+    def fail_empty_like(*args: object, **kwargs: object) -> Tensor:
         assert args or kwargs
         raise AssertionError("RoPE._rotate should not call torch.empty_like")
 

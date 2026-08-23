@@ -62,7 +62,7 @@ class SimpleLoss:
     def __call__(
         self,
         prediction: Tensor,
-        **batch: Any,
+        **batch: object,
     ) -> LossOutput:
         """Compute loss from model prediction and batch.
 

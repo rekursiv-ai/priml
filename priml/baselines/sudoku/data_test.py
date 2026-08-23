@@ -6,6 +6,8 @@ from pathlib import Path
 
 import json
 
+from torch import Tensor
+
 import numpy as np
 import pytest
 import torch
@@ -70,7 +72,7 @@ def test_seeded_shuffle_is_reproducible_and_epoch_varying(
     dataset_dir: Path,
 ) -> None:
     """One seed fixes each epoch's order, and consecutive epochs differ."""
-    orders: list[list[torch.Tensor]] = []
+    orders: list[list[Tensor]] = []
     for _ in range(2):
         data = _data(dataset_dir, augment=False, seed=7)
         loader = data.train_dataloader()
@@ -130,7 +132,7 @@ def test_augmentation_is_seedable() -> None:
     """A dedicated generator makes the stream independent of ambient draws."""
     grid = torch.arange(81).reshape(1, 81) % 9 + 2
 
-    def once(disturb: bool) -> torch.Tensor:
+    def once(disturb: bool) -> Tensor:
         generator = torch.Generator().manual_seed(3)
         if disturb:
             torch.rand(11)

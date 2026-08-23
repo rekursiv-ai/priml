@@ -111,8 +111,8 @@ class SignSGD(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            lr: float = group["lr"]
-            wd: float = group["weight_decay"]
+            lr = float(group["lr"])
+            wd = float(group["weight_decay"])
             params = list(group["params"])
             if group.get("sparse_embedding", False):
                 sparse_parts = _sparse_embedding_parts(params)

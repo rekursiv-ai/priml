@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, override
 
 from configgle import PartialConfig
-from torch import nn
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -484,9 +484,9 @@ class _SmokeSteps(nn.Module):
         self.model = self.step.model
 
     @override
-    def forward(self, batch: dict[str, Any], clock: list[float]) -> torch.Tensor:
+    def forward(self, batch: dict[str, Any], clock: list[float]) -> Tensor:
         """Run one step per clock reading; return the losses."""
-        losses: list[torch.Tensor] = []
+        losses: list[Tensor] = []
         for elapsed in clock:
             self.step.elapsed_sec = elapsed
             losses.append(self.step.train_step(**batch)["loss"].reshape(1))
@@ -513,7 +513,7 @@ def test_five_steps_bfb() -> None:
     budget = experiments.exp_smoke().step.train_budget_sec
     clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
 
-    def run(module: nn.Module, batch: Any) -> torch.Tensor:
+    def run(module: nn.Module, batch: Any) -> Tensor:
         assert isinstance(module, _SmokeSteps)
         return module(batch, clock)
 

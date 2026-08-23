@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 import logging
 
 from configgle import Fig
-from torch import nn
+from torch import Tensor, nn
 from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
@@ -398,7 +398,7 @@ def place(model: nn.Module, device: torch.device) -> nn.Module:
     return model.to(device)
 
 
-def named_meta_state(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+def named_meta_state(model: nn.Module) -> list[tuple[str, Tensor]]:
     """Return every named parameter and buffer (the full materializable state).
 
     Both parameters and buffers can live on the meta device after lazy

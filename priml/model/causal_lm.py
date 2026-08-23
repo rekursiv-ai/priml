@@ -167,10 +167,6 @@ class CausalLM(nn.Module):
         x: Tensor = self.embed(tokens)
         for block in self.blocks:
             out = block(x)
-            x = (
-                cast("Tensor", out[0])
-                if isinstance(out, tuple)
-                else cast("Tensor", out)
-            )
+            x = cast(Tensor, out[0]) if isinstance(out, tuple) else cast(Tensor, out)
         x = self.final_norm(x)
         return self.project_to_logits(x)

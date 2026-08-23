@@ -16,9 +16,9 @@ import torch.linalg
 
 
 def compute_hessian(
-    loss: torch.Tensor,
-    params: list[torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
+    loss: Tensor,
+    params: list[Tensor],
+) -> tuple[Tensor, Tensor]:
     """Compute gradient and Hessian via autograd.
 
     Args:

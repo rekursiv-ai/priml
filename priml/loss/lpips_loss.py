@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -14,10 +14,6 @@ from priml.loss.custom_types import LossOutput
 
 
 lpips = lazy_import("lpips")
-
-
-if TYPE_CHECKING:
-    from typing import Any
 
 
 class LPIPSLoss(nn.Module):
@@ -41,7 +37,7 @@ class LPIPSLoss(nn.Module):
         *,
         x: Tensor,
         xhat: Tensor,
-        **batch: Any,
+        **batch: object,
     ) -> LossOutput:
         """Compute LPIPS on subsampled frames (pointwise).
 

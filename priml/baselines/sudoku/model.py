@@ -116,7 +116,7 @@ class Recurrence(Protocol):
     core it drives does.
     """
 
-    def __call__(
+    def forward(
         self,
         core: CoreFn,
         input_emb: Tensor,
@@ -451,7 +451,7 @@ class SudokuNet(nn.Module):
                 (out.logits.detach(),) if collect_intermediates else (),
             )
         else:
-            result = self.recurrence(
+            result = self.recurrence.forward(
                 self.core,
                 input_emb,
                 z_slow,

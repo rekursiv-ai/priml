@@ -5,6 +5,8 @@ from unittest.mock import patch
 import sys
 import warnings
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -91,7 +93,7 @@ def test_compiler_isolation_resets_cleanly_with_warnings_as_errors() -> None:
 def test_compiler_isolation_compiles() -> None:
     """The wrapped block can actually compile and run a graph."""
 
-    def add_one(value: torch.Tensor) -> torch.Tensor:
+    def add_one(value: Tensor) -> Tensor:
         return value + 1
 
     with torch_compiler_isolation():

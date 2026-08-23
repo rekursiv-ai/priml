@@ -52,7 +52,7 @@ def _build_min_linear() -> nn.Linear:
     return nn.Linear(4, 3, bias=True)
 
 
-def _build_min_input() -> torch.Tensor:
+def _build_min_input() -> Tensor:
     return torch.linspace(-1.0, 1.0, 8).reshape(2, 4)
 
 
@@ -82,7 +82,7 @@ class _TorchProcessState:
     cudnn_deterministic: bool
     flash_sdp_enabled: bool
     memory_efficient_sdp_enabled: bool
-    rng_state: torch.Tensor
+    rng_state: Tensor
     cublas_workspace_config: str | None
 
 
@@ -272,7 +272,7 @@ def test_bfb_detects_forward_drift(tmp_path: Path) -> None:
 
     class _DriftLinear(nn.Linear):
         @override
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
+        def forward(self, input: Tensor) -> Tensor:
             return super().forward(input) + 1e-3
 
     with pytest.raises(AssertionError, match="output"):
@@ -328,13 +328,13 @@ def test_dict_input_dispatches_via_kwargs(tmp_path: Path) -> None:
             self.lin = nn.Linear(3, 2)
 
         @override
-        def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        def forward(self, a: Tensor, b: Tensor) -> Tensor:
             return self.lin(a) + b
 
     def build_module() -> nn.Module:
         return TwoArgModule()
 
-    def build_input() -> dict[str, torch.Tensor]:
+    def build_input() -> dict[str, Tensor]:
         return {
             "a": torch.linspace(-1.0, 1.0, 6).reshape(2, 3),
             "b": torch.linspace(0.0, 1.0, 4).reshape(2, 2),
@@ -362,10 +362,10 @@ def test_param_mutating_runner_captures_post_state(tmp_path: Path) -> None:
     def build_module() -> nn.Module:
         return nn.Linear(4, 3, bias=True)
 
-    def build_input() -> torch.Tensor:
+    def build_input() -> Tensor:
         return torch.linspace(-1.0, 1.0, 8).reshape(2, 4)
 
-    def mutating_runner(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+    def mutating_runner(module: nn.Module, inp: Tensor) -> Tensor:
         assert isinstance(module, nn.Linear)
         assert module.bias is not None
         out = module(inp)
@@ -398,10 +398,10 @@ def test_detects_post_state_drift(tmp_path: Path) -> None:
     def build_module() -> nn.Module:
         return nn.Linear(4, 3, bias=True)
 
-    def build_input() -> torch.Tensor:
+    def build_input() -> Tensor:
         return torch.linspace(-1.0, 1.0, 8).reshape(2, 4)
 
-    def runner_v1(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+    def runner_v1(module: nn.Module, inp: Tensor) -> Tensor:
         assert isinstance(module, nn.Linear)
         assert module.bias is not None
         out = module(inp)
@@ -409,7 +409,7 @@ def test_detects_post_state_drift(tmp_path: Path) -> None:
             module.bias.add_(0.5)
         return out
 
-    def runner_v2(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+    def runner_v2(module: nn.Module, inp: Tensor) -> Tensor:
         # Same output (because we mutate AFTER computing out), but a
         # different post-state mutation.
         assert isinstance(module, nn.Linear)
@@ -451,9 +451,9 @@ class _BufferMutatingModule(nn.Module):
         self.register_buffer("running_sum", torch.zeros(3))
 
     @override
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: Tensor) -> Tensor:
         out = self.lin(input)
-        assert isinstance(self.running_sum, torch.Tensor)
+        assert isinstance(self.running_sum, Tensor)
         self.running_sum.add_(out.detach().sum(dim=0))
         return out
 
@@ -502,9 +502,9 @@ def test_bfb_detects_forward_buffer_drift(tmp_path: Path) -> None:
 
     class _DriftBuffer(_BufferMutatingModule):
         @override
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
+        def forward(self, input: Tensor) -> Tensor:
             out = super().forward(input)
-            assert isinstance(self.running_sum, torch.Tensor)
+            assert isinstance(self.running_sum, Tensor)
             self.running_sum.add_(1.0)
             return out
 
@@ -526,11 +526,11 @@ def test_regenerate_round_trips_immediately(tmp_path: Path) -> None:
     """
     drift = {"n": 0}
 
-    def flaky_runner(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+    def flaky_runner(module: nn.Module, inp: Tensor) -> Tensor:
         # First call (capture) returns the clean output; the verification
         # rerun returns a perturbed output, so the golden cannot round-trip.
         out = module(inp)
-        assert isinstance(out, torch.Tensor)
+        assert isinstance(out, Tensor)
         drift["n"] += 1
         if drift["n"] >= 2:
             return out + 1e-3
@@ -835,13 +835,13 @@ def _divergent_allowlisted_single_tensor_ops() -> set[str]:
             # plain-value op the allowlist would ever cover -- skip rather than
             # crash on ``equal`` (which raises NotImplementedError on sparse).
             if (
-                not isinstance(r32, torch.Tensor)
+                not isinstance(r32, Tensor)
                 or r32.dtype != torch.float32
                 or r32.layout != torch.strided
             ):
                 continue
             r64 = op(base.clone().double())
-            if not isinstance(r64, torch.Tensor) or r64.layout != torch.strided:
+            if not isinstance(r64, Tensor) or r64.layout != torch.strided:
                 continue
             equal = torch.equal(r32, r64.float())
         except (
@@ -887,7 +887,7 @@ def _f32_leaking_ops(run: Callable[[], object]) -> set[str]:
     leaks: set[str] = set()
 
     def has_f32(value: object) -> bool:
-        if isinstance(value, torch.Tensor):
+        if isinstance(value, Tensor):
             return value.dtype == torch.float32
         if isinstance(value, (list, tuple)):
             return any(has_f32(v) for v in cast("list[Any] | tuple[Any, ...]", value))
@@ -1039,7 +1039,7 @@ def test_host_agnostic_numerics_upcasts_foreach_norm() -> None:
     # torch stubs omit _foreach_norm; resolve it through a typed Callable so
     # both type checkers see a known signature for this public foreach op.
     foreach_norm = cast(
-        "Callable[[list[torch.Tensor], float], list[torch.Tensor]]",
+        Callable[[list[Tensor], float], list[Tensor]],
         getattr(torch, "_foreach_norm"),  # noqa: B009 -- stub-less torch member
     )
     with host_agnostic_numerics():
@@ -1064,7 +1064,7 @@ def test_host_agnostic_foreach_inplace_writes_back_list_targets() -> None:
     ]
     # torch stubs omit the in-place foreach ops; resolve through a typed Callable.
     foreach_mul_ = cast(
-        "Callable[[list[torch.Tensor], list[torch.Tensor]], None]",
+        Callable[[list[Tensor], list[Tensor]], None],
         getattr(torch, "_foreach_mul_"),  # noqa: B009 -- stub-less torch member
     )
     with host_agnostic_numerics():
@@ -1129,9 +1129,9 @@ def test_inplace_arith_matches_functional_recompute(name: str) -> None:
     assert torch.equal(f32, f64.float())
 
 
-def _f64_output_runner(module: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+def _f64_output_runner(module: nn.Module, inp: Tensor) -> Tensor:
     """Return the float64 scratch, skipping the round back to float32."""
-    return cast("torch.Tensor", module(inp)).double()
+    return cast(Tensor, module(inp)).double()
 
 
 def test_bfb_rejects_a_float64_golden_output(tmp_path: Path) -> None:

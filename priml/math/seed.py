@@ -10,6 +10,8 @@ import os
 import random
 import secrets
 
+from torch import Tensor
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -37,7 +39,7 @@ class RngState(TypedDict):
     python: PythonRngState
     """``random.getstate()``. Opaque round-trip value."""
 
-    torch: torch.Tensor
+    torch: Tensor
     """``torch.get_rng_state()`` byte tensor."""
 
     numpy: NotRequired[NumpyRngState]
@@ -47,7 +49,7 @@ class RngState(TypedDict):
     checkpoints minted by a capture that predates numpy tracking omit it,
     and ``set_rng_state`` must still resume them rather than raising."""
 
-    cuda: NotRequired[list[torch.Tensor]]
+    cuda: NotRequired[list[Tensor]]
     """``torch.cuda.get_rng_state_all()``. Present iff CUDA was
     available and initialized at capture."""
 

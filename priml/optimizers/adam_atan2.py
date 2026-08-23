@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, cast, overload, override
+from typing import Any, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -104,8 +104,8 @@ class AdamATan2(Optimizer):
                 loss = closure()
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
-            lr: float = group["lr"]
-            wd: float = group["weight_decay"]
+            lr = float(group["lr"])
+            wd = float(group["weight_decay"])
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -125,10 +125,10 @@ class AdamATan2(Optimizer):
                     state["exp_avg_sq"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
-                state["step"] = cast(int, state["step"]) + 1
-                step = cast(int, state["step"])
-                m = cast(Tensor, state["exp_avg"])
-                v = cast(Tensor, state["exp_avg_sq"])
+                state["step"] = int(state["step"]) + 1
+                step = int(state["step"])
+                m = state["exp_avg"]
+                v = state["exp_avg_sq"]
                 m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
                 if wd != 0.0:

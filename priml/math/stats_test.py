@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import functools
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -208,7 +210,7 @@ def test_pca_svd_matches_eigh():
 def test_pca_third_party_decompose_needs_no_library_change():
     """An arbitrary caller-supplied decomposer is honored verbatim."""
 
-    def scaled_eigh(x_centered: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def scaled_eigh(x_centered: Tensor) -> tuple[Tensor, Tensor]:
         eigenvalues, eigenvectors = pca_eigh(x_centered)
         return eigenvalues * 2, eigenvectors
 

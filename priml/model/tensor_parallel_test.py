@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, override
 import functools
 import tempfile
 
-from torch import nn
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -164,7 +164,7 @@ class _ColwiseRowwisePair(nn.Module):
         self.down.reset_parameters()
 
     @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         """Project up then back down."""
         return self.down(self.up(x))
 

@@ -21,7 +21,7 @@ halting is a learned decision rather than a fixed step count.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
 from typing import Any, Self, cast, override
@@ -189,7 +189,7 @@ class SudokuTrainStep(TrainStep):
         attribute is invariant, so redeclaring the base's ``nn.Module`` as
         ``SudokuNet`` is rejected outright.
         """
-        return cast("SudokuNet", self.model)
+        return cast(SudokuNet, self.model)
 
     @property
     def _ema(self) -> EMA | NoEMA:
@@ -212,7 +212,7 @@ class SudokuTrainStep(TrainStep):
         return ema.shadow_params
 
     @override
-    def train_step(self, **batch: Any) -> TrainStepOutput:
+    def train_step(self, **batch: object) -> TrainStepOutput:
         """Forward, backward, and step the optimizer.
 
         With an ACT pool attached the batch first refills halted slots, and the
@@ -277,11 +277,13 @@ class SudokuTrainStep(TrainStep):
         }
 
     @override
-    def train_loss(self, **batch: Any) -> TrainStepOutput:
+    def train_loss(self, **batch: object) -> TrainStepOutput:
         """Compute the training loss without a backward pass."""
         self.model.train()
-        media: Tensor = batch["media"]
-        labels: Tensor = batch["label"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        labels = batch["label"]
+        assert isinstance(labels, Tensor)
         with torch.no_grad(), self._autocast():
             out = self.net(media, **_prefix_kwargs(batch))
             active = torch.ones(media.shape[0], dtype=torch.bool, device=media.device)
@@ -291,7 +293,7 @@ class SudokuTrainStep(TrainStep):
         return {"loss": loss, "model": out.logits, "metrics": metrics}
 
     @override
-    def eval_loss(self, **batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
         """Score one batch, packing predictions for the accuracy metric.
 
         Evaluation always scores the EMA weights once past warmup, and always
@@ -299,8 +301,10 @@ class SudokuTrainStep(TrainStep):
         across steps, when ACT is attached, since that is the regime the model
         trained in.
         """
-        media: Tensor = batch["media"]
-        labels: Tensor = batch["label"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        labels = batch["label"]
+        assert isinstance(labels, Tensor)
         with self._eval_weights():
             self.model.eval()
             with torch.inference_mode(), self._autocast():
@@ -319,9 +323,10 @@ class SudokuTrainStep(TrainStep):
         return {"loss": loss.detach().reshape(1), "model": packed, "metrics": metrics}
 
     @override
-    def call_eval(self, **batch: Any) -> Tensor:
+    def call_eval(self, **batch: object) -> Tensor:
         """Return evaluation logits under the EMA weights."""
-        media: Tensor = batch["media"]
+        media = batch["media"]
+        assert isinstance(media, Tensor)
         with self._eval_weights():
             self.model.eval()
             with torch.inference_mode(), self._autocast():
@@ -387,11 +392,15 @@ class SudokuTrainStep(TrainStep):
         if self.act is not None and "act" in state_dict:
             self.act.load_state_dict(state_dict["act"])
 
-    def _ingest(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor, Tensor]:
+    def _ingest(self, batch: Mapping[str, object]) -> tuple[Tensor, Tensor, Tensor]:
         """Return the ``(media, labels, active)`` this step trains on."""
-        media: Tensor = batch["media"]
-        labels: Tensor = batch["label"]
-        valid_count = int(batch.get("valid_count", media.shape[0]))
+        media = batch["media"]
+        assert isinstance(media, Tensor)
+        labels = batch["label"]
+        assert isinstance(labels, Tensor)
+        raw_count = batch.get("valid_count", media.shape[0])
+        assert isinstance(raw_count, int)
+        valid_count = raw_count
         if self.act is None:
             active = torch.ones(media.shape[0], dtype=torch.bool, device=media.device)
             return media, labels, active

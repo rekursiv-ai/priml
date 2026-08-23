@@ -526,7 +526,7 @@ def test_cuda_branch_binds_local_rank_before_init(
     )
 
     assert record["set_device"] == torch.device("cuda", 3)
-    init_kwargs = cast("dict[str, object]", record["init_kwargs"])
+    init_kwargs = cast(dict[str, object], record["init_kwargs"])
     assert init_kwargs["device_id"] == torch.device("cuda", 3)
     # init_device_mesh forbids a device index; the type alone is passed.
     assert record["mesh_device_type"] == "cuda"
@@ -546,7 +546,7 @@ def test_cuda_branch_falls_back_when_local_rank_unset(
     )
 
     assert record["set_device"] == torch.device("cuda", 0)
-    init_kwargs = cast("dict[str, object]", record["init_kwargs"])
+    init_kwargs = cast(dict[str, object], record["init_kwargs"])
     assert init_kwargs["device_id"] == torch.device("cuda", 0)
 
 
@@ -564,7 +564,7 @@ def test_cpu_branch_does_not_bind_or_pass_device_id(
     )
 
     assert "set_device" not in record
-    init_kwargs = cast("dict[str, object]", record["init_kwargs"])
+    init_kwargs = cast(dict[str, object], record["init_kwargs"])
     assert init_kwargs["device_id"] is None
     assert record["mesh_device_type"] == "cpu"
 

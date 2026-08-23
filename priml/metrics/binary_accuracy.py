@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from configgle import Fig
+from torch import Tensor
 
 import torch
-
-
-if TYPE_CHECKING:
-    from torch import Tensor
 
 
 class BinaryAccuracy:
@@ -40,7 +37,7 @@ class BinaryAccuracy:
         self.correct = 0
         self.total = 0
 
-    def update(self, logits: Tensor, **batch: Any) -> None:
+    def update(self, logits: Tensor, **batch: object) -> None:
         """Update metric with batch.
 
         Args:
@@ -49,6 +46,7 @@ class BinaryAccuracy:
 
         """
         targets = batch["label"]
+        assert isinstance(targets, Tensor)
         batch_size = targets.size(0)
         # Drop a trailing singleton channel so [B, 1] logits compare elementwise
         # against [B] targets instead of broadcasting to [B, B].

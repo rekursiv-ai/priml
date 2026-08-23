@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from torch import Tensor
+
 import numpy as np
 import pytest
 import torch
@@ -13,7 +15,7 @@ from priml.math.custom_types import convert_to_tensor
 
 def test_single_python_scalar():
     result = convert_to_tensor(42)
-    assert isinstance(result, torch.Tensor)
+    assert isinstance(result, Tensor)
     assert result.item() == 42
 
 
@@ -193,8 +195,8 @@ def test_as_tensors_while_compiling():
         y = torch.tensor([3.0, 4.0])
         result = convert_to_tensor(x, y)
         assert len(result) == 2
-        assert isinstance(result[0], torch.Tensor)
-        assert isinstance(result[1], torch.Tensor)
+        assert isinstance(result[0], Tensor)
+        assert isinstance(result[1], Tensor)
 
 
 def test_compile_honors_dtype():

@@ -16,6 +16,7 @@ Integration-marked (heavier forward).
 
 from __future__ import annotations
 
+from torch import Tensor
 from torch.nn import functional as f
 
 import pytest
@@ -30,8 +31,8 @@ pytestmark = pytest.mark.network_huggingface
 
 def _reference_mla_forward(
     m: MultiHeadLatentAttention,
-    x: torch.Tensor,
-) -> torch.Tensor:
+    x: Tensor,
+) -> Tensor:
     """Hand-written MLA forward matching the published formulas.
 
     Independent of our fused implementation so that any reordering,
@@ -133,7 +134,7 @@ def test_mla_decode_matches_reference():
 
         cache = m.alloc_kv_cache(batch=1, max_seq=16)
         _, cache = m(prompt, cache=cache)
-        decoded: list[torch.Tensor] = []
+        decoded: list[Tensor] = []
         for step in steps:
             out, cache = m(step, cache=cache)
             decoded.append(out)

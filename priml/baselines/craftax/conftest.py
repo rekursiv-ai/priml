@@ -18,6 +18,8 @@ import importlib
 import importlib.util
 import os
 
+from torch import Tensor
+
 import numpy as np
 import pytest
 import torch
@@ -137,7 +139,7 @@ def generated_world(*, num_envs: int = 1, seed: int = 0) -> EnvState:
     return copy.deepcopy(_generated(num_envs, seed))
 
 
-def as_tensor(array: object) -> torch.Tensor:
+def as_tensor(array: object) -> Tensor:
     """Copy a reference array into a tensor.
 
     The reference tables are immutable JAX arrays. Wrapping one without
