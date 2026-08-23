@@ -523,10 +523,6 @@ reportImportCycles = false                 # Lazy imports inside functions creat
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
 # reportConstantRedefinition = false       # Uppercase locals treated as constants (math). [Violates PEP8]
 reportMissingModuleSource = false
-reportMissingTypeStubs = false             # scipy-stubs not installed in the export env.
-reportUnknownArgumentType = false
-reportUnknownMemberType = false
-reportUnknownVariableType = false
 reportUnnecessaryTypeIgnoreComment = false
 
 [[tool.basedpyright.executionEnvironments]]
