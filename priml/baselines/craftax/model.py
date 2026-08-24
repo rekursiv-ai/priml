@@ -36,7 +36,7 @@ class ActorCritic(nn.Module):
         num_actions: int = 43
         """Size of the discrete action space."""
 
-        hidden_size: int = 512
+        channels_in: int = 512
         """Width of each hidden layer, in both towers."""
 
         num_layers: int = 3
@@ -57,7 +57,7 @@ class ActorCritic(nn.Module):
             min(
                 config.observation_size,
                 config.num_actions,
-                config.hidden_size,
+                config.channels_in,
                 config.num_layers,
             )
             <= 0
@@ -65,14 +65,14 @@ class ActorCritic(nn.Module):
             raise ValueError("ActorCritic dimensions must be positive")
         self.policy = _tower(
             observation_size=config.observation_size,
-            hidden_size=config.hidden_size,
+            channels_in=config.channels_in,
             num_layers=config.num_layers,
             output_size=config.num_actions,
             output_gain=0.01,
         )
         self.value = _tower(
             observation_size=config.observation_size,
-            hidden_size=config.hidden_size,
+            channels_in=config.channels_in,
             num_layers=config.num_layers,
             output_size=1,
             output_gain=1.0,
@@ -96,7 +96,7 @@ class ActorCritic(nn.Module):
 def _tower(
     *,
     observation_size: int,
-    hidden_size: int,
+    channels_in: int,
     num_layers: int,
     output_size: int,
     output_gain: float,
@@ -105,9 +105,9 @@ def _tower(
     layers: list[nn.Module] = []
     width = observation_size
     for _ in range(num_layers):
-        layers.append(_linear(width, hidden_size, gain=math.sqrt(2.0)))
+        layers.append(_linear(width, channels_in, gain=math.sqrt(2.0)))
         layers.append(nn.Tanh())
-        width = hidden_size
+        width = channels_in
     layers.append(_linear(width, output_size, gain=output_gain))
     return nn.Sequential(*layers)
 

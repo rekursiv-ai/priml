@@ -14,7 +14,7 @@ def _model(**overrides: int) -> RecurrentQNetwork:
     config = RecurrentQNetwork.Config()
     config.observation_size = 12
     config.num_actions = 5
-    config.hidden_size = 16
+    config.channels_in = 16
     for name, value in overrides.items():
         setattr(config, name, value)
     return config.make()
@@ -149,7 +149,7 @@ def test_gradients_reach_every_parameter() -> None:
     assert [name for name, p in model.named_parameters() if p.grad is None] == []
 
 
-@pytest.mark.parametrize("field", ["observation_size", "num_actions", "hidden_size"])
+@pytest.mark.parametrize("field", ["observation_size", "num_actions", "channels_in"])
 def test_a_degenerate_dimension_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match="positive"):
         _model(**{field: 0})

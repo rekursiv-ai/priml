@@ -17,7 +17,7 @@ from priml.model.transformer import TransformerBlock
 def _tiny_config(tie: bool = False) -> CausalLM.Config:
     return CausalLM.Config(
         vocab_size=128,
-        channels=32,
+        channels_in=32,
         num_layers=2,
         block=TransformerBlock.Config(
             attn=SelfAttention.Config(
@@ -83,11 +83,11 @@ def test_generate_rejects_prompt_longer_than_cache():
 
 def test_invalid_config_rejected():
     with pytest.raises(ValueError, match="vocab_size"):
-        CausalLM.Config(vocab_size=0, channels=8, num_layers=1).make()
+        CausalLM.Config(vocab_size=0, channels_in=8, num_layers=1).make()
     with pytest.raises(ValueError, match="num_layers"):
-        CausalLM.Config(vocab_size=8, channels=8, num_layers=0).make()
+        CausalLM.Config(vocab_size=8, channels_in=8, num_layers=0).make()
     with pytest.raises(ValueError, match="channels"):
-        CausalLM.Config(vocab_size=8, channels=0, num_layers=1).make()
+        CausalLM.Config(vocab_size=8, channels_in=0, num_layers=1).make()
 
 
 if __name__ == "__main__":

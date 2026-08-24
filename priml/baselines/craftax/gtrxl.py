@@ -73,7 +73,7 @@ class ActorCriticGTrXL(nn.Module):
         qkv_dim: int = 256
         """Combined width of the query, key, and value projections."""
 
-        hidden_size: int = 256
+        channels_in: int = 256
         """Width of each hidden layer in the actor and critic heads."""
 
         memory_length: int = 128
@@ -105,7 +105,7 @@ class ActorCriticGTrXL(nn.Module):
                 config.num_heads,
                 config.num_layers,
                 config.qkv_dim,
-                config.hidden_size,
+                config.channels_in,
                 config.memory_length,
             )
             <= 0
@@ -130,13 +130,13 @@ class ActorCriticGTrXL(nn.Module):
         )
         self.actor = _head(
             embed_dim=config.embed_dim,
-            hidden_size=config.hidden_size,
+            channels_in=config.channels_in,
             output_size=config.num_actions,
             output_gain=0.01,
         )
         self.critic = _head(
             embed_dim=config.embed_dim,
-            hidden_size=config.hidden_size,
+            channels_in=config.channels_in,
             output_size=1,
             output_gain=1.0,
         )
@@ -497,17 +497,17 @@ class _RelativeAttention(nn.Module):
 def _head(
     *,
     embed_dim: int,
-    hidden_size: int,
+    channels_in: int,
     output_size: int,
     output_gain: float,
 ) -> nn.Sequential:
     """Build one two-layer ReLU head with an orthogonal output."""
     return nn.Sequential(
-        _dense(embed_dim, hidden_size, gain=math.sqrt(2.0)),
+        _dense(embed_dim, channels_in, gain=math.sqrt(2.0)),
         nn.ReLU(),
-        _dense(hidden_size, hidden_size, gain=math.sqrt(2.0)),
+        _dense(channels_in, channels_in, gain=math.sqrt(2.0)),
         nn.ReLU(),
-        _dense(hidden_size, output_size, gain=output_gain),
+        _dense(channels_in, output_size, gain=output_gain),
     )
 
 

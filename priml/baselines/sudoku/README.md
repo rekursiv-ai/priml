@@ -52,7 +52,7 @@ keeps its slot, and the batch shape never changes.
 
 ## Slots worth knowing
 
-- `step.model.embedding.channels` -- what is added to the token embedding.
+- `step.model.embedding.channels_in` -- what is added to the token embedding.
   Sudoku uses learned row/column/box positions, and the recurrent rungs add the
   previous step's own prediction. A differently shaped puzzle is a different
   channel list, not an edit here.

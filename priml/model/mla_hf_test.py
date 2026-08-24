@@ -23,7 +23,7 @@ import pytest
 import torch
 
 from priml.model.mla import MultiHeadLatentAttention
-from priml.model.rope import RoPE
+from priml.model.rope import HuggingFaceFrequencies, RoPE
 
 
 pytestmark = pytest.mark.network_huggingface
@@ -99,7 +99,9 @@ def test_mla_matches_reference(q_lora_rank: int | None):
         channels_v_head=16,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=24,
-        rope=RoPE.Config(channels_head=8, base=50_000),
+        rope=RoPE.Config(
+            channels_head=8, frequencies=HuggingFaceFrequencies.Config(base=50_000)
+        ),
     ).make()
     m.eval()
     x = torch.randn(2, 6, 128)
@@ -122,7 +124,9 @@ def test_mla_decode_matches_reference():
         channels_qk_rope_head=8,
         channels_v_head=8,
         kv_lora_rank=16,
-        rope=RoPE.Config(channels_head=8, base=50_000),
+        rope=RoPE.Config(
+            channels_head=8, frequencies=HuggingFaceFrequencies.Config(base=50_000)
+        ),
     ).make()
     m.eval()
     prompt = torch.randn(1, 4, 64)

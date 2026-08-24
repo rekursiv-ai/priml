@@ -34,7 +34,7 @@ def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
     config.num_epochs = 1
     config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.hidden_size = 4
+    config.model.channels_in = 4
     for name, value in overrides.items():
         setattr(config, name, value)
     if "seed" in overrides:

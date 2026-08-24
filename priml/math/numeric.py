@@ -9,7 +9,7 @@ from torch import Tensor
 
 import torch
 
-from priml.math.basic import broadcast_sequences
+from priml.math.basic import broadcast_sequences, ceil_div
 from priml.math.custom_types import Tensorable, convert_to_tensor
 
 
@@ -40,12 +40,16 @@ def log_arctan_exp(x: Tensorable) -> Tensor:
 def log_tan_exp(x: Tensorable) -> Tensor:
     """Numerically stable log(tan(exp(x))) for x < log(pi/2).
 
+    Args:
+      x: Input, required to be below log(pi/2). Unchecked; larger values
+        return NaN.
+
     Returns:
       result: log(tan(exp(x))).
 
     Derivation:
       Since tan(z)/z >= 1 for z in (0, pi/2), this is simply
-      x + log(tan(z)/z) — a non-negative correction to x with
+      x + log(tan(z)/z) -- a non-negative correction to x with
       no cancellation.
 
     """
@@ -57,7 +61,9 @@ def log_tan_exp(x: Tensorable) -> Tensor:
 def log1mexp(x: Tensorable) -> Tensor:
     """log(1 - exp(x)) for x < 0.
 
-    Assumes x < 0 (does not take the absolute value).
+    Args:
+      x: Input, required to be non-positive (no absolute value is taken).
+        Unchecked; positive values return NaN.
 
     Adapted from tensorflow_probability:
       tensorflow_probability/python/math/generic.py::log1mexp
@@ -124,6 +130,11 @@ def logsubexp(
 
 def softcap(x: Tensorable, cap: Tensorable = 1.0) -> Tensor:
     """Soft capping: tanh(x/cap) * cap.
+
+    Args:
+      x: Value to squash.
+      cap: Bound, required to be finite and positive. Unchecked; zero or
+        infinity return NaN.
 
     Returns:
       result: Capped value in [-cap, cap].
@@ -268,6 +279,18 @@ def logmeanexp(
     x = convert_to_tensor(x)
     dim_ = (dim,) if isinstance(dim, int) else tuple(dim)
     n = math.prod(x.shape[d] for d in dim_)
+    if n == 0:
+        # Reducing over nothing sums to zero, so every entry is log(0). Built
+        # directly because the value is a constant: ``math.log(n)`` raises on
+        # the empty case, and running the reduction to obtain it would launch
+        # a kernel to compute something already known.
+        axes = {d % x.ndim for d in dim_}
+        shape = [
+            1 if i in axes else s
+            for i, s in enumerate(x.shape)
+            if keepdim or i not in axes
+        ]
+        return torch.full(shape, -math.inf, dtype=x.dtype, device=x.device)
     return torch.logsumexp(x, dim=dim, keepdim=keepdim) - math.log(n)
 
 
@@ -296,7 +319,7 @@ def mesh_arange(
     grid = torch.meshgrid(
         *[
             torch.arange(s, e, st, dtype=dtype, device=device)
-            for s, e, st in zip(start_, end_, step_, strict=False)
+            for s, e, st in zip(start_, end_, step_, strict=True)
         ],
         indexing="ij",
     )
@@ -417,23 +440,36 @@ def kahan_sum(x: Tensorable, dim: int | None = None, keepdim: bool = False) -> T
         dim = 0
     # Move target dim to front for iteration.
     x = x.moveaxis(dim, 0)
+    n = x.shape[0]
+    # Blocked rather than one Python step per element: the recurrence is
+    # sequential WITHIN a block, but blocks are independent, so ``blocks``
+    # of them run as one vectorized step. That trades n iterations for
+    # ``block_len + blocks`` (~2*sqrt(n)) -- measured 26,578x slower than
+    # ``.sum()`` at n=10_000 before, against a docstring offering this for
+    # "large batches".
+    blocks = math.isqrt(n) if n > 1 else 1
+    block_len = ceil_div(n, blocks) if blocks else 0
+    if n < block_len * blocks:
+        # Zero pads the final short block. A zero term leaves both the total
+        # and the compensation untouched, so it cannot perturb the result.
+        x = torch.cat([x, x.new_zeros(block_len * blocks - n, *x.shape[1:])])
+    # ``[blocks, block_len, ...]`` keeps each block's elements CONTIGUOUS, so
+    # the per-block order matches the sequential form; the leading axis is
+    # then the one the vectorized step runs across.
+    x = x.reshape(blocks, block_len, *x.shape[1:]).moveaxis(1, 0)
     # An empty reduction sums to zero; ``x[0]`` would otherwise IndexError.
-    template = x[0] if x.shape[0] > 0 else x.new_zeros(x.shape[1:])
+    template = x[0] if block_len > 0 else x.new_zeros(x.shape[1:])
     total = torch.zeros_like(template)
     compensation = torch.zeros_like(template)
-    for i in range(x.shape[0]):
-        term = x[i]
-        t = total + term
-        # Recover the low-order bits of whichever operand is larger: when the
-        # running total dominates, ``(total - t) + term`` captures term's lost
-        # bits; otherwise ``(term - t) + total`` captures total's lost bits.
-        total_dominates = total.abs() >= term.abs()
-        compensation = compensation + torch.where(
-            total_dominates,
-            (total - t) + term,
-            (term - t) + total,
-        )
-        total = t
+    for i in range(block_len):
+        total, compensation = _kbn_step(total, compensation, x[i])
+    # Fold the per-block partials, compensations included, the same way.
+    block_totals, block_compensations = total, compensation
+    total = torch.zeros_like(block_totals[0])
+    compensation = torch.zeros_like(block_totals[0])
+    for i in range(blocks):
+        total, compensation = _kbn_step(total, compensation, block_totals[i])
+        compensation = compensation + block_compensations[i]
     total = total + compensation
     if keepdim:
         # When reducing all dims, restore the full original rank as size-1 dims.
@@ -482,8 +518,10 @@ def smoothstep_inverse(y: Tensorable) -> Tensor:
     for _ in range(12):
         f = x * x * (3.0 - 2.0 * x) - y
         df = 6.0 * x * (1.0 - x)
-        # Avoid division by zero at boundaries.
-        x = x - f / df.clamp(min=1e-12)
+        # Floor scaled to the dtype, not a fixed 1e-12: that literal is below
+        # float16's smallest normal, so it rounded to zero and the boundary
+        # division it guards returned NaN at both y=0 and y=1.
+        x = x - f / df.clamp(min=torch.finfo(df.dtype).tiny)
         x = torch.clamp(x, 0.0, 1.0)
     return x
 
@@ -518,7 +556,8 @@ def soft_threshold(x: Tensorable, threshold: Tensorable) -> Tensor:
 
     Args:
       x: Input tensor.
-      threshold: Non-negative threshold value.
+      threshold: Threshold, required to be non-negative. Unchecked; a
+        negative one expands magnitudes instead of shrinking them.
 
     Returns:
       result: Soft-thresholded tensor.
@@ -716,7 +755,8 @@ def sinh_arcsinh(
     Args:
       x: Input tensor.
       skewness: Skewness parameter (0 = symmetric).
-      tailweight: Tail weight parameter (1 = unchanged).
+      tailweight: Tail weight (1 = unchanged), required to be positive.
+        Unchecked; zero collapses every input to zero and is not invertible.
 
     Returns:
       result: Transformed tensor.
@@ -740,7 +780,8 @@ def sinh_arcsinh_inverse(
     Args:
       y: Input tensor.
       skewness: Skewness parameter.
-      tailweight: Tail weight parameter.
+      tailweight: Tail weight, required to be positive. Unchecked; zero is
+        not invertible.
 
     Returns:
       result: Inverse-transformed tensor.
@@ -796,7 +837,9 @@ def ste_clamp(
 
     """
     input = convert_to_tensor(input)
-    return custom_grad(actual=torch.clamp(input, min, max), phantom=input)  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownArgumentType]  # ty: ignore[no-matching-overload]
+    lo = None if min is None else convert_to_tensor(min)
+    hi = None if max is None else convert_to_tensor(max)
+    return custom_grad(actual=torch.clamp(input, lo, hi), phantom=input)
 
 
 def safe_log(input: Tensorable) -> Tensor:
@@ -806,7 +849,8 @@ def safe_log(input: Tensorable) -> Tensor:
     Adapted from tensorflow/probability.
 
     Returns:
-      result: log(input) where input > 0, -inf otherwise.
+      result: log(input) where input > 0, -inf for non-positive input, NaN
+        where the input was already NaN.
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf
@@ -815,7 +859,10 @@ def safe_log(input: Tensorable) -> Tensor:
     input = convert_to_tensor(input)
     valid = input > 0
     x = torch.where(valid, input, 1.0)
-    return torch.where(valid, torch.log(x), -math.inf)
+    # NaN is not "non-positive", so it must not be rewritten to -inf: that
+    # turns an upstream error into a plausible value far from where it began.
+    fallback = torch.where(input.isnan(), math.nan, -math.inf)
+    return torch.where(valid, torch.log(x), fallback)
 
 
 def safe_xlogy(
@@ -841,7 +888,8 @@ def safe_sqrt(input: Tensorable) -> Tensor:
     Adapted from tensorflow/probability.
 
     Returns:
-      result: sqrt(input) where input > 0, 0 otherwise.
+      result: sqrt(input) where input > 0, 0 for non-positive input, NaN where
+        the input was already NaN.
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf
@@ -849,8 +897,12 @@ def safe_sqrt(input: Tensorable) -> Tensor:
     """
     input = convert_to_tensor(input)
     valid = input > 0
-    x = torch.clamp(input, min=0.0)
-    return torch.where(valid, torch.sqrt(x), 0.0)
+    # Moved OFF the boundary rather than clamped to it: d/dx sqrt(x) is
+    # infinite at 0, and ``where`` multiplies that by zero to give a NaN
+    # gradient. This is what ``safe_rsqrt`` already does.
+    x = torch.where(valid, input, 1.0)
+    fallback = torch.where(input.isnan(), math.nan, 0.0)
+    return torch.where(valid, torch.sqrt(x), fallback)
 
 
 def safe_rsqrt(input: Tensorable) -> Tensor:
@@ -878,6 +930,7 @@ def safe_rsqrt(input: Tensorable) -> Tensor:
     valid = input > 0
     x = torch.where(valid, input, 1.0)
     fallback = torch.where(input == 0, math.inf, 0.0)
+    fallback = torch.where(input.isnan(), math.nan, fallback)
     return torch.where(valid, torch.rsqrt(x), fallback)
 
 
@@ -891,10 +944,12 @@ def safe_pow(base: Tensorable, exponent: Tensorable) -> Tensor:
       convention shared by IEEE-754 ``pow``, NumPy, and ``torch.pow``).
     - ``base == 0, exponent != 0`` or ``base < 0``: ``0`` (the safe fallback
       for the non-positive domain where a real fractional power is undefined).
+    - NaN in either argument: NaN, so a NaN introduced upstream surfaces
+      rather than being laundered into the fallback.
 
     Returns:
       result: ``base ** exponent`` on the positive domain; ``1`` for ``0 ** 0``;
-        ``0`` elsewhere.
+        ``0`` elsewhere; NaN where either argument is NaN.
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf
@@ -903,5 +958,31 @@ def safe_pow(base: Tensorable, exponent: Tensorable) -> Tensor:
     base, exponent = convert_to_tensor(base, exponent)
     valid = base > 0
     x = torch.where(valid, base, 1.0)
-    fallback = torch.where((base == 0) & (exponent == 0), 1.0, 0.0)
+    # NaN fails ``base > 0``, so without this it took the non-positive branch
+    # and came back 0.0 -- a NaN that entered upstream vanishing into a
+    # finite-looking number, which the sibling safe helpers refuse to do.
+    nan = base.isnan() | exponent.isnan()
+    fallback = torch.where(
+        nan,
+        float("nan"),
+        torch.where((base == 0) & (exponent == 0), 1.0, 0.0),
+    )
     return torch.where(valid, torch.pow(x, exponent), fallback)
+
+
+def _kbn_step(
+    total: Tensor,
+    compensation: Tensor,
+    term: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """One Kahan-Babuska-Neumaier accumulation of ``term`` into ``total``."""
+    t = total + term
+    # Recover the low-order bits of whichever operand is larger: when the
+    # running total dominates, ``(total - t) + term`` captures term's lost
+    # bits; otherwise ``(term - t) + total`` captures total's lost bits.
+    total_dominates = total.abs() >= term.abs()
+    return t, compensation + torch.where(
+        total_dominates,
+        (total - t) + term,
+        (term - t) + total,
+    )

@@ -134,7 +134,7 @@ def test_with_rope():
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
 
-    rope = RoPE.Config(channels_head=16, base=10_000.0).make()
+    rope = RoPE.Config(channels_head=16).make()
     cos_sin_0 = rope(torch.arange(8))
 
     y0, y1 = m([x0, x1], cos_sin=[cos_sin_0, None])
@@ -163,7 +163,7 @@ def test_rope_all_streams():
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
 
-    rope = RoPE.Config(channels_head=16, base=10_000.0).make()
+    rope = RoPE.Config(channels_head=16).make()
     cs0 = rope(torch.arange(8))
     cs1 = rope(torch.arange(12))
 

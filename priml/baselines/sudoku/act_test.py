@@ -14,7 +14,7 @@ def _pool(**overrides: object) -> ActPool:
     config = ActPool.Config(batch_size=4, max_steps=3)
     config.grid_len = 81
     config.seq_len = 81
-    config.hidden_size = 8
+    config.channels_hidden = 8
     for name, value in overrides.items():
         setattr(config, name, value)
     return config.make()

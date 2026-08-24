@@ -10,7 +10,7 @@ on startup.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, cast, overload
+from typing import Any, overload
 
 import functools
 
@@ -116,14 +116,17 @@ def convert_to_tensor(
 
     """
     if torch.compiler.is_compiling():
-        for x in xs:
-            assert isinstance(x, Tensor)
-        # Inputs are already tensors under compile, so dtype/device are applied
-        # with ``.to`` (a no-op when already matching) rather than re-tracing
-        # ``torch.as_tensor``. This keeps eager and compiled paths in agreement.
+        # Only the dtype default differs from the eager path below: under
+        # compile the inputs cannot be re-inspected to unify bare scalars, so
+        # the hint stands in. ``torch.as_tensor`` handles both kinds -- it
+        # returns the identical object when a Tensor already matches, and
+        # converts a Python number otherwise. Asserting Tensor here instead
+        # aborted ``softcap``, ``ste_round``, ``soft_threshold``,
+        # ``sinh_arcsinh`` and ``safe_pow`` under ``fullgraph=True``, since
+        # each passes a float as its second argument.
         if dtype is None:
             dtype = _resolve_dtype(xs) or dtype_hint
-        result = tuple(cast(Tensor, x).to(dtype=dtype, device=device) for x in xs)
+        result = tuple(torch.as_tensor(x, dtype=dtype, device=device) for x in xs)
         return result[0] if len(xs) == 1 else result
     if dtype is None:
         dtype = _resolve_dtype(xs)
@@ -138,7 +141,10 @@ def convert_to_tensor(
 
 
 def _resolve_dtype(xs: tuple[Tensorable, ...]) -> torch.dtype | None:
-    seen = set[torch.dtype]()
+    # Annotated rather than ``set[torch.dtype]()``: the subscript is evaluated
+    # at runtime, and dynamo cannot trace it ("type object 'set' has no
+    # attribute '__getitem__'"), so any compiled caller that reaches here dies.
+    seen: set[torch.dtype] = set()
     for x in xs:
         dt = getattr(x, "dtype", None)
         if dt is None:

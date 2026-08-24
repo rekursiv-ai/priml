@@ -41,24 +41,23 @@ Usage::
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY
+from dataclasses import KW_ONLY, field
 from pathlib import Path
-from typing import Any, Literal, Self, cast, override
-
-import json
+from typing import Any, Self, override
 
 from configgle import Makeable, Makes
-from torch import Tensor
+from torch import Tensor, nn
 
 import torch
 
 from priml import hub
+from priml.lib.custom_json import decode, dict_val, float_val, int_val
 from priml.model.causal_lm import CausalLM
-from priml.model.custom_types import TensorModule
+from priml.model.custom_types import ChannelsIn, propagate_attr
 from priml.model.mla import MultiHeadLatentAttention
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
-from priml.model.rope import RoPE, YarnScaling
+from priml.model.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import TransformerBlock
 
@@ -70,77 +69,62 @@ class KimiK2(CausalLM):
     """Kimi-K2 / DeepSeek-V3 causal LM — MLA + DS-V3 MoE."""
 
     class Config(Makes["KimiK2"], CausalLM.Config, kw_only=False):
-        vocab_size: int = -1
+        vocab_size: int = 163_840
         """Token vocabulary size; also the width of the output projection."""
 
         _: KW_ONLY
 
-        hidden_size: int = -1
-        """Residual-stream width. HF's spelling of ``channels``, kept because
-        ``from_hf`` and ``remap_hf_state_dict`` both read the schema by name."""
+        channels_in: int = 7_168
+        """Residual-stream width. Kimi-K2's, so the defaults load it."""
 
-        num_hidden_layers: int = -1
-        """Blocks in the stack."""
+        num_layers: int = 61
+        """Blocks in the stack. Kimi-K2's."""
 
-        num_attention_heads: int = -1
-        """Attention heads, shared by Q, K, and V."""
+        channels_hidden_dense: int = 18_432
+        """FFN hidden width in the leading dense layers.
 
-        channels_qk_nope_head: int = 128
-        """Per-head Q/K width that RoPE does NOT rotate."""
+        Named apart from the MoE width because the two differ: the dense
+        prefix is a full-width MLP, each expert is a narrow one.
+        """
 
-        channels_qk_rope_head: int = 64
-        """Per-head Q/K width RoPE rotates; the key slice is head-shared."""
+        channels_hidden_expert: int = 2_048
+        """Per-expert hidden width (and per shared expert)."""
 
-        channels_v_head: int = 128
-        """Per-head value width, sized independently of the Q/K width."""
+        first_k_dense_replace: int = 1
+        """Leading layers whose ``ffn`` is replaced by a dense SwiGLU."""
 
-        q_lora_rank: int | None = None
-        """Rank of the Q low-rank decomposition; ``None`` projects Q directly."""
+        block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
+            default_factory=lambda: TransformerBlock.Config(
+                attn=MultiHeadLatentAttention.Config(
+                    heads=64,
+                    channels_qk_nope_head=128,
+                    channels_qk_rope_head=64,
+                    channels_v_head=128,
+                    kv_lora_rank=512,
+                    bias=False,
+                    causal=True,
+                ),
+                ffn=MoE.Config(
+                    router=Router.Config(num_experts=384),
+                    num_shared_experts=1,
+                ),
+                prenorm=True,
+            ),
+        )
+        """Block template (broadcast ``num_hidden_layers`` times), or a list.
 
-        kv_lora_rank: int = 512
-        """Rank of the compressed KV latent -- what the cache actually holds."""
+        ONE slot rather than a `router`, a `norm` and a `rope` beside it: each
+        of those belongs to something the block already holds, and hoisting
+        them flattened the tree the reader is supposed to descend one node at
+        a time. The routing policy is ``block.ffn.router``, the epsilon is
+        ``block.norm1.eps``, the rotary base is
+        ``block.attn.rope.frequencies.base`` -- each named by its position, and
+        each editable without this class knowing the field exists.
 
-        intermediate_size: int = -1
-        """Dense-layer MLP hidden."""
-
-        moe_intermediate_size: int = -1
-        """Per-expert hidden in MoE layers (and per shared expert)."""
-
-        n_routed_experts: int = 0
-        """Experts each MoE layer builds and routes across."""
-
-        num_experts_per_tok: int = 1
-        """Experts each token is routed to."""
-
-        n_shared_experts: int = 0
-        """Always-active experts summed onto every token."""
-
-        first_k_dense_replace: int = 0
-        """Leading layers using a dense FFN instead of a MoE one."""
-
-        n_group: int = 1
-        """Expert groups for grouped top-k; 1 disables grouping."""
-
-        topk_group: int = 1
-        """Groups kept per token when grouping is on."""
-
-        norm_topk_prob: bool = True
-        """Renormalize the selected gate weights to sum to one."""
-
-        routed_scaling_factor: float = 1.0
-        """Multiplier on the routed output; DSV3 uses 2.5, Kimi-K2 2.827."""
-
-        scoring_func: Literal["softmax", "sigmoid"] = "sigmoid"
-        """Gate activation; DSV3 and Kimi-K2 both use sigmoid."""
-
-        rms_norm_eps: float = 1e-6
-        """Epsilon for every RMSNorm in the stack."""
-
-        rope_theta: float = 10_000.0
-        """Rotary base; sets the longest wavelength the embedding resolves."""
-
-        yarn: YarnScaling | None = None
-        """YaRN RoPE scaling. ``None`` = vanilla RoPE."""
+        ``finalize`` copies the template per layer and pushes only the widths
+        the PARENT owns (``channels_in`` and the hidden widths), so an edit to
+        the template survives it.
+        """
 
         @classmethod
         def from_hf(cls, config: dict[str, Any]) -> Self:
@@ -157,139 +141,122 @@ class KimiK2(CausalLM):
                     f"Expected scoring_func in ('softmax', 'sigmoid'), "
                     f"got {scoring_func!r}.",
                 )
+            # HF's schema is parsed into the CHILD configs; the parent does
+            # not mirror foreign names onto itself. Everything below hangs off
+            # the ONE block template, which is where each value lives.
+            eps = float(config.get("rms_norm_eps", 1e-6))
+            norm = RMSNorm.Config(elementwise_affine=True)
+            norm.eps = eps
+
+            frequencies = HuggingFaceFrequencies.Config()
+            frequencies.base = float(config.get("rope_theta", 10_000.0))
+            rope = RoPE.Config()
+            rope.frequencies = _parse_yarn(config.get("rope_scaling")) or frequencies
+
+            attn = MultiHeadLatentAttention.Config(bias=False, causal=True)
+            attn.heads = int(config["num_attention_heads"])
+            attn.channels_qk_nope_head = int(config.get("qk_nope_head_dim", 128))
+            attn.channels_qk_rope_head = int(config.get("qk_rope_head_dim", 64))
+            attn.channels_v_head = int(config.get("v_head_dim", 128))
+            attn.q_lora_rank = (
+                int(config["q_lora_rank"])
+                if config.get("q_lora_rank") is not None
+                else None
+            )
+            attn.kv_lora_rank = int(config.get("kv_lora_rank", 512))
+            attn.rope = rope
+            attn.norm_q_lora = norm.copy_tree()
+            attn.norm_kv_lora = norm.copy_tree()
+
+            router = Router.Config()
+            router.top_k = int(config.get("num_experts_per_tok", 1))
+            router.scoring_func = scoring_func
+            router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
+            router.routed_scaling_factor = float(
+                config.get("routed_scaling_factor", 1.0),
+            )
+            router.n_group = int(config.get("n_group", 1))
+            router.topk_group = int(config.get("topk_group", 1))
+
+            moe = MoE.Config()
+            moe.router = router
+            moe.num_shared_experts = int(config.get("n_shared_experts", 0))
+            router.num_experts = int(config.get("n_routed_experts", 0))
+
+            block = TransformerBlock.Config(prenorm=True)
+            block.attn = attn
+            block.ffn = moe
+            block.norm1 = norm.copy_tree()
+            block.norm2 = norm.copy_tree()
+
             return cls(
                 vocab_size=int(config["vocab_size"]),
-                hidden_size=int(config["hidden_size"]),
-                num_hidden_layers=int(config["num_hidden_layers"]),
-                num_attention_heads=int(config["num_attention_heads"]),
-                # Quoted keys are HF's JSON schema, not priml names.
-                channels_qk_nope_head=int(config.get("qk_nope_head_dim", 128)),
-                channels_qk_rope_head=int(config.get("qk_rope_head_dim", 64)),
-                channels_v_head=int(config.get("v_head_dim", 128)),
-                q_lora_rank=(
-                    int(config["q_lora_rank"])
-                    if config.get("q_lora_rank") is not None
-                    else None
-                ),
-                kv_lora_rank=int(config.get("kv_lora_rank", 512)),
-                intermediate_size=int(config["intermediate_size"]),
-                moe_intermediate_size=int(
+                channels_in=int(config["hidden_size"]),
+                num_layers=int(config["num_hidden_layers"]),
+                channels_hidden_dense=int(config["intermediate_size"]),
+                channels_hidden_expert=int(
                     config.get("moe_intermediate_size") or config["intermediate_size"],
                 ),
-                n_routed_experts=int(config.get("n_routed_experts", 0)),
-                num_experts_per_tok=int(config.get("num_experts_per_tok", 1)),
-                n_shared_experts=int(config.get("n_shared_experts", 0)),
                 first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
-                n_group=int(config.get("n_group", 1)),
-                topk_group=int(config.get("topk_group", 1)),
-                norm_topk_prob=bool(config.get("norm_topk_prob", True)),
-                routed_scaling_factor=float(
-                    config.get("routed_scaling_factor", 1.0),
-                ),
-                scoring_func=scoring_func,
-                rms_norm_eps=float(config.get("rms_norm_eps", 1e-6)),
-                rope_theta=float(config.get("rope_theta", 10_000.0)),
-                yarn=_parse_yarn(config.get("rope_scaling")),
+                block=block,
+                final_norm=norm.copy_tree(),
                 tie_embeddings=bool(config.get("tie_word_embeddings", False)),
             )
 
         @override
         def finalize(self) -> Self:
-            if self.hidden_size < 1:
-                raise ValueError(f"hidden_size must be > 0, got {self.hidden_size}.")
-            if self.num_hidden_layers < 1:
-                raise ValueError(
-                    f"num_hidden_layers must be > 0, got {self.num_hidden_layers}.",
-                )
-            self.channels = self.hidden_size
-            self.num_layers = self.num_hidden_layers
-            # Per-layer block list: dense for first_k_dense_replace layers,
-            # MoE for the rest. CausalLM.Config.block accepts a list.
-            self.block = [
-                self._block_for_layer(i) for i in range(self.num_hidden_layers)
-            ]
-            self.final_norm = RMSNorm.Config(
-                eps=self.rms_norm_eps,
-                elementwise_affine=True,
-            )
+            if self.channels_in < 1:
+                raise ValueError(f"channels_in must be > 0, got {self.channels_in}.")
+            if not isinstance(self.block, list):
+                # One template, copied per layer: a shared node would have each
+                # block's own finalize push its widths into the others.
+                self.block = [self.block.copy_tree() for _ in range(self.num_layers)]
+            for layer, block in enumerate(self.block):
+                self._size_block(block, layer)
             return super().finalize()
 
-        def _attn_config(self) -> MultiHeadLatentAttention.Config:
-            return MultiHeadLatentAttention.Config(
-                channels_in=self.hidden_size,
-                heads=self.num_attention_heads,
-                channels_qk_nope_head=self.channels_qk_nope_head,
-                channels_qk_rope_head=self.channels_qk_rope_head,
-                channels_v_head=self.channels_v_head,
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                bias=False,
-                causal=True,
-                rope=RoPE.Config(
-                    channels_head=self.channels_qk_rope_head,
-                    base=self.rope_theta,
-                    yarn=self.yarn,
-                ),
-                norm_q_lora=RMSNorm.Config(
-                    eps=self.rms_norm_eps,
-                    elementwise_affine=True,
-                ),
-                norm_kv_lora=RMSNorm.Config(
-                    eps=self.rms_norm_eps,
-                    elementwise_affine=True,
-                ),
-            )
+        def _size_block(self, block: Makeable[nn.Module], layer: int) -> None:
+            """Push the widths the PARENT owns into one already-shaped block.
 
-        def _ffn_for_layer(self, layer_idx: int) -> Makeable[TensorModule]:
-            if layer_idx < self.first_k_dense_replace:
-                return SwiGLU.Config(
-                    channels_in=self.hidden_size,
-                    channels_hidden=self.intermediate_size,
+            Only the widths: everything else on the block is the caller's, so
+            an edit to the template survives ``finalize`` rather than being
+            rebuilt over.
+            """
+            propagate_attr(block, "channels_in", self.channels_in, protocol=ChannelsIn)
+            if not isinstance(block, TransformerBlock.Config):
+                return
+            attn = block.attn
+            if isinstance(attn, MultiHeadLatentAttention.Config):
+                attn.channels_in = self.channels_in
+                rope = attn.rope
+                if isinstance(rope, RoPE.Config):
+                    rope.channels_head = attn.channels_qk_rope_head
+            # The leading layers are dense, so their MoE template is replaced
+            # outright -- there is no routing to size.
+            if layer < self.first_k_dense_replace:
+                block.ffn = SwiGLU.Config(
+                    channels_in=self.channels_in,
+                    channels_hidden=self.channels_hidden_dense,
                     gate=True,
                     bias=False,
                 )
-            return MoE.Config(
-                channels_in=self.hidden_size,
-                channels_out=self.hidden_size,
-                router=Router.Config(
-                    channels_in=self.hidden_size,
-                    num_experts=self.n_routed_experts,
-                    top_k=self.num_experts_per_tok,
-                    scoring_func=self.scoring_func,
-                    norm_topk_prob=self.norm_topk_prob,
-                    routed_scaling_factor=self.routed_scaling_factor,
-                    n_group=self.n_group,
-                    topk_group=self.topk_group,
-                ),
-                expert=SwiGLU.Config(
-                    channels_in=self.hidden_size,
-                    channels_hidden=self.moe_intermediate_size,
-                    gate=True,
-                    bias=False,
-                ),
-                num_shared_experts=self.n_shared_experts,
-                shared_expert=SwiGLU.Config(
-                    channels_in=self.hidden_size,
-                    channels_hidden=self.moe_intermediate_size,
-                    gate=True,
-                    bias=False,
-                ),
-            )
+                return
+            ffn = block.ffn
+            if not isinstance(ffn, MoE.Config):
+                return
+            ffn.channels_in = self.channels_in
+            ffn.channels_out = self.channels_in
+            if isinstance(ffn.router, Router.Config):
+                ffn.router.channels_in = self.channels_in
+            ffn.expert = self._expert_config()
+            ffn.shared_expert = self._expert_config()
 
-        def _block_for_layer(self, layer_idx: int) -> TransformerBlock.Config:
-            return TransformerBlock.Config(
-                channels_in=self.hidden_size,
-                attn=self._attn_config(),
-                ffn=self._ffn_for_layer(layer_idx),
-                norm1=RMSNorm.Config(
-                    eps=self.rms_norm_eps,
-                    elementwise_affine=True,
-                ),
-                norm2=RMSNorm.Config(
-                    eps=self.rms_norm_eps,
-                    elementwise_affine=True,
-                ),
-                prenorm=True,
+        def _expert_config(self) -> SwiGLU.Config:
+            return SwiGLU.Config(
+                channels_in=self.channels_in,
+                channels_hidden=self.channels_hidden_expert,
+                gate=True,
+                bias=False,
             )
 
     @classmethod
@@ -312,7 +279,7 @@ class KimiK2(CausalLM):
         """
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
-            hf_config = json.loads((path / "config.json").read_text())
+            hf_config = dict_val(decode("object", (path / "config.json").read_text()))
             hf_sd = hub.load_local_state_dict(path)
         else:
             hf_model = hub.load_transformers_model(
@@ -337,11 +304,14 @@ class KimiK2(CausalLM):
         return model
 
 
-def _parse_yarn(rope_scaling: Any) -> YarnScaling | None:
-    """Parse HF ``rope_scaling`` → YarnScaling. None-pass-through; strict on type."""
+def _parse_yarn(rope_scaling: Any) -> YarnScaling.Config | None:
+    """Parse HF ``rope_scaling`` → config. None-pass-through; strict on type."""
     if not rope_scaling:
         return None
-    scaling = cast(dict[str, Any], rope_scaling)
+    # Validated rather than cast: this is an HF ``config.json``, so a
+    # malformed field is caller input, and casting surfaced it as an
+    # ``AttributeError`` from inside ``.get``.
+    scaling = dict_val(rope_scaling)
     stype = scaling.get("type") or scaling.get("rope_type")
     if stype is None:
         return None
@@ -349,19 +319,52 @@ def _parse_yarn(rope_scaling: Any) -> YarnScaling | None:
         raise ValueError(
             f"Unsupported rope_scaling type={stype!r}; only yarn is implemented.",
         )
-    return YarnScaling(
-        factor=float(scaling["factor"]),
-        original_max_position_embeddings=int(
-            scaling["original_max_position_embeddings"],
-        ),
-        beta_fast=float(scaling.get("beta_fast", 32.0)),
-        beta_slow=float(scaling.get("beta_slow", 1.0)),
-        mscale=float(scaling.get("mscale", 1.0)),
-        mscale_all_dim=float(scaling.get("mscale_all_dim", 0.0)),
+    config = YarnScaling.Config()
+    config.factor = float_val(scaling["factor"])
+    config.original_max_position_embeddings = int_val(
+        scaling["original_max_position_embeddings"],
+        default=4_096,
     )
+    config.beta_fast = float_val(scaling.get("beta_fast"), 32.0)
+    config.beta_slow = float_val(scaling.get("beta_slow"), 1.0)
+    config.mscale = float_val(scaling.get("mscale"), 1.0)
+    config.mscale_all_dim = float_val(scaling.get("mscale_all_dim"), 0.0)
+    return config
 
 
 # -- HF weight remap ---------------------------------------------------
+
+
+def _attn_of(config: KimiK2.Config, layer: int) -> MultiHeadLatentAttention.Config:
+    """Return one layer's attention config.
+
+    Read off the BLOCK rather than a parent mirror of it: the geometry lives
+    where the layer is built, so a per-layer list and a broadcast template
+    both answer here without this function knowing which it was given.
+    """
+    blocks = config.block if isinstance(config.block, list) else [config.block]
+    # ``len == 1`` is the pre-finalize broadcast template, which answers for
+    # every layer. Any other short list is a genuine index error, and falling
+    # back to layer 0 there remapped excess layers against the wrong geometry.
+    block = blocks[0] if len(blocks) == 1 else blocks[layer]
+    if not isinstance(block, TransformerBlock.Config):
+        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
+    attn = block.attn
+    if not isinstance(attn, MultiHeadLatentAttention.Config):
+        raise TypeError(f"layer {layer} attention is {type(attn).__name__}, not MLA.")
+    return attn
+
+
+def _moe_of(config: KimiK2.Config, layer: int) -> MoE.Config:
+    """Return one layer's MoE config, where the expert counts live."""
+    blocks = config.block if isinstance(config.block, list) else [config.block]
+    block = blocks[0] if len(blocks) == 1 else blocks[layer]
+    if not isinstance(block, TransformerBlock.Config):
+        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
+    ffn = block.ffn
+    if not isinstance(ffn, MoE.Config):
+        raise TypeError(f"layer {layer} FFN is {type(ffn).__name__}, not MoE.")
+    return ffn
 
 
 def remap_hf_state_dict(
@@ -376,14 +379,14 @@ def remap_hf_state_dict(
     if not config.tie_embeddings:
         out["lm_head.weight"] = hf_sd["lm_head.weight"]
 
-    for i in range(config.num_hidden_layers):
+    for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]
         out[f"{b}.norm2.weight"] = hf_sd[f"{p}.post_attention_layernorm.weight"]
 
         # -- MLA --------------------------------------------------------
         attn, ba = f"{p}.self_attn", f"{b}.attn"
-        if config.q_lora_rank is None:
+        if _attn_of(config, i).q_lora_rank is None:
             out[f"{ba}.q_proj.weight"] = hf_sd[f"{attn}.q_proj.weight"]
         else:
             out[f"{ba}.q_a_proj.weight"] = hf_sd[f"{attn}.q_a_proj.weight"]
@@ -406,11 +409,14 @@ def remap_hf_state_dict(
             # MoE router lives at ``ffn.router`` (gate + optional
             # aux-loss-free correction bias).
             out[f"{bf}.router.gate.weight"] = hf_sd[f"{p}.mlp.gate.weight"]
+            moe = _moe_of(config, i)
+            router = moe.router
+            assert isinstance(router, Router.Config)
             out[f"{bf}.router.e_score_correction_bias"] = hf_sd.get(
                 f"{p}.mlp.gate.e_score_correction_bias",
-                torch.zeros(config.n_routed_experts),
+                torch.zeros(router.num_experts),
             )
-            for e in range(config.n_routed_experts):
+            for e in range(router.num_experts):
                 ep, be = f"{p}.mlp.experts.{e}", f"{bf}.experts.{e}"
                 gate = hf_sd[f"{ep}.gate_proj.weight"]
                 up = hf_sd[f"{ep}.up_proj.weight"]
@@ -418,12 +424,12 @@ def remap_hf_state_dict(
                 out[f"{be}.down_proj.weight"] = hf_sd[f"{ep}.down_proj.weight"]
             # Shared experts: HF collapses ``n_shared_experts=1`` into
             # a single module; loop stores a ModuleList indexed from 0.
-            if config.n_shared_experts == 1:
+            if moe.num_shared_experts == 1:
                 _remap_shared(
                     hf_sd, f"{p}.mlp.shared_experts", f"{bf}.shared_experts.0", out
                 )
             else:
-                for s in range(config.n_shared_experts):
+                for s in range(moe.num_shared_experts):
                     _remap_shared(
                         hf_sd,
                         f"{p}.mlp.shared_experts.{s}",

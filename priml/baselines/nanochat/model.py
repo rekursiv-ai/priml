@@ -137,9 +137,7 @@ class NanoChatLM(nn.Module):
         stable at a large learning rate. A rung wanting an uncapped readout
         supplies the bare projection."""
 
-        rope: RoPE.Config = field(
-            default_factory=lambda: RoPE.Config(hf_inv_freq=True),
-        )
+        rope: RoPE.Config = field(default_factory=RoPE.Config)
         """Rotary position embedding driving every layer's queries and keys.
 
         Its width is pushed down from the block's attention at finalize, since

@@ -97,7 +97,7 @@ class ActPool:
         seq_len: int = -1
         """Latent sequence length (prefix + grid); inherited from the model."""
 
-        hidden_size: int = -1
+        channels_hidden: int = -1
         """Latent width; inherited from the model."""
 
         @override
@@ -109,11 +109,11 @@ class ActPool:
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        if min(config.grid_len, config.seq_len, config.hidden_size) <= 0:
+        if min(config.grid_len, config.seq_len, config.channels_hidden) <= 0:
             raise ValueError(
-                "grid_len, seq_len, and hidden_size must be positive; they are "
+                "grid_len, seq_len, and channels_hidden must be positive; they are "
                 "normally inherited from the model during finalize. Got "
-                f"{config.grid_len}, {config.seq_len}, {config.hidden_size}.",
+                f"{config.grid_len}, {config.seq_len}, {config.channels_hidden}.",
             )
         self.config = config
         bs = config.batch_size
@@ -123,7 +123,7 @@ class ActPool:
         self.inputs = torch.zeros(bs, config.grid_len, dtype=torch.long)
         self.labels = torch.zeros_like(self.inputs)
         self.feedback = torch.zeros_like(self.inputs)
-        self.z_slow = torch.zeros(bs, config.seq_len, config.hidden_size)
+        self.z_slow = torch.zeros(bs, config.seq_len, config.channels_hidden)
         self.z_fast = torch.zeros_like(self.z_slow)
         self.steps = torch.zeros(bs, dtype=torch.long)
         # Every slot starts halted so the first call fills the whole pool.

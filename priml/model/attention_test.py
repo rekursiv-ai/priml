@@ -270,7 +270,7 @@ def test_self_attention_inner_width_differs_from_residual():
     """``channels_in`` (residual) may differ from ``heads*channels_head``.
 
     Regression for MODEL-008: Qwen3 sets an explicit ``head_dim`` where
-    ``hidden_size != heads * head_dim``. SelfAttention must keep the
+    ``channels_in != heads * head_dim``. SelfAttention must keep the
     residual width (channels_in) separate from the attention inner
     width (heads * channels_head), with ``proj_out`` mapping inner ->
     residual.

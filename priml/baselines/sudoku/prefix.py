@@ -29,7 +29,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import HasHiddenSize
+from priml.baselines.sudoku.embedding import HasChannels
 from priml.model.init import truncated_normal
 
 
@@ -48,7 +48,7 @@ class RegisterTokens(nn.Module):
         num_tokens: int = 1
         """Tokens prepended. 0 disables the module."""
 
-        hidden_size: int = -1
+        channels: int = -1
         """Token width; -1 inherits the model's hidden size."""
 
         init_std: float = 1.0
@@ -58,23 +58,23 @@ class RegisterTokens(nn.Module):
         """Train the tokens. False freezes them as a fixed random basis."""
 
         embed_scale: float = -1.0
-        """Runtime multiplier; -1 derives it from ``hidden_size``.
+        """Runtime multiplier; -1 derives it from ``channels``.
 
         Must match the grid embedding's, or the prefix enters the sequence at
         a different magnitude than the tokens it precedes."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.hidden_size <= 0:
+        if config.channels <= 0:
             raise ValueError(
-                f"hidden_size must be positive; got {config.hidden_size}. It is "
+                f"channels must be positive; got {config.channels}. It is "
                 "normally inherited from the model during finalize.",
             )
         self.config = config
         self.embed_scale = (
-            config.hidden_size**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
         )
-        tokens = torch.empty(config.num_tokens, config.hidden_size)
+        tokens = torch.empty(config.num_tokens, config.channels)
         truncated_normal(
             tokens,
             std=config.init_std / self.embed_scale,
@@ -128,7 +128,7 @@ class SparsePuzzleEmbedding(nn.Module):
         channels: int = -1
         """Per-puzzle vector width; -1 inherits the model's hidden size."""
 
-        hidden_size: int = -1
+        channels_in: int = -1
         """Model width; -1 inherits it. Sets the reshaped token width."""
 
         batch_size: int = 384
@@ -141,7 +141,7 @@ class SparsePuzzleEmbedding(nn.Module):
         """Realized standard deviation; 0 zero-initializes the table."""
 
         embed_scale: float = -1.0
-        """Runtime multiplier; -1 derives it from ``hidden_size``."""
+        """Runtime multiplier; -1 derives it from ``channels``."""
 
         dtype: torch.dtype | None = None
         """Cast applied to the forward output; ``None`` keeps the table dtype."""
@@ -149,20 +149,20 @@ class SparsePuzzleEmbedding(nn.Module):
         @override
         def finalize(self) -> Self:
             if self.channels == -1:
-                self.channels = self.hidden_size
+                self.channels = self.channels
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.hidden_size <= 0 or config.channels <= 0:
+        if config.channels <= 0 or config.channels <= 0:
             raise ValueError(
-                "hidden_size and channels must be positive; they are normally "
+                "channels and channels must be positive; they are normally "
                 f"inherited from the model during finalize. Got "
-                f"{config.hidden_size} and {config.channels}.",
+                f"{config.channels} and {config.channels}.",
             )
         self.config = config
         self.embed_scale = (
-            config.hidden_size**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         table = torch.zeros(config.num_puzzles, config.channels)
         if config.init_std > 0:
@@ -207,12 +207,10 @@ class SparsePuzzleEmbedding(nn.Module):
             )
         vectors = self._lookup(identifiers)
         config = self.config
-        width = config.num_tokens * config.hidden_size
+        width = config.num_tokens * config.channels
         if vectors.shape[-1] < width:
             vectors = nn.functional.pad(vectors, (0, width - vectors.shape[-1]))
-        prefix: Tensor = vectors.reshape(
-            batch_size, config.num_tokens, config.hidden_size
-        )
+        prefix: Tensor = vectors.reshape(batch_size, config.num_tokens, config.channels)
         scaled = cast(Tensor, self.embed_scale * prefix)
         return scaled
 
@@ -266,7 +264,7 @@ class PrefixStack(nn.Module):
         )
         """Modules whose outputs are concatenated along the token axis."""
 
-        hidden_size: int = -1
+        channels: int = -1
         """Token width; -1 inherits the model's.
 
         Declared even though this module owns no weights: the model propagates
@@ -276,8 +274,8 @@ class PrefixStack(nn.Module):
         @override
         def finalize(self) -> Self:
             for part in self.parts:
-                if isinstance(part, HasHiddenSize) and part.hidden_size == -1:
-                    part.hidden_size = self.hidden_size
+                if isinstance(part, HasChannels) and part.channels == -1:
+                    part.channels = self.channels
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

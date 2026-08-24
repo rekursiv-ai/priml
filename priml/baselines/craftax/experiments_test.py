@@ -13,9 +13,11 @@ Two kinds of assertion, and the distinction matters:
 from __future__ import annotations
 
 from dataclasses import is_dataclass
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from configgle import InlineConfig
+from configgle.pprinting import pformat
 
 import pytest
 
@@ -106,7 +108,7 @@ def shrink(config: _AnyLoop) -> _AnyLoop:
     config.step.total_train_steps = 2
 
     model = config.step.model
-    model.hidden_size = 8
+    model.channels_in = 8
     if isinstance(config.step, CraftaxGTrXLTrainStep.Config):
         config.step.rollout_steps = 2
         config.step.gradient_window = 1
@@ -242,7 +244,7 @@ def test_exp000_pins_the_baseline_recipe() -> None:
     assert cfg.step.value_coefficient == 0.5
     assert cfg.step.max_grad_norm == 1.0
     assert cfg.step.env.optimistic_reset_ratio == 16
-    assert cfg.step.model.hidden_size == 512
+    assert cfg.step.model.channels_in == 512
     assert cfg.step.model.num_layers == 3
     assert cfg.step.seed == cfg.step.env.seed == 42
 
@@ -450,6 +452,28 @@ def _flatten(config: Any, prefix: str = "") -> dict[str, Any]:
 
 _MISSING = object()
 """Sentinel for a field only one of the two configs has."""
+
+
+def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
+    """Pin the WHOLE finalized ``exp000`` as readable text.
+
+    ``exp000`` is the control every fork is measured against, so a change to
+    it invalidates published numbers. A digest would say only that something
+    moved; this golden says WHICH field, from what, to what.
+    ``hide_default_values=False`` so a field that changes only because a
+    library default changed still shows up here.
+
+    Refresh with ``--golden-overwrite`` after reading the diff.
+    """
+    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    rendered = pformat(exp000().copy_tree().finalize(), hide_default_values=False)
+    if request.config.getoption("--golden-overwrite", default=False):
+        golden.parent.mkdir(parents=True, exist_ok=True)
+        _ = golden.write_text(rendered + "\n", encoding="utf-8")
+    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
+        "exp000 changed; read the diff, then rerun with --golden-overwrite "
+        "if the change is intended."
+    )
 
 
 if __name__ == "__main__":

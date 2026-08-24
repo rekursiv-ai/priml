@@ -3,7 +3,7 @@
 Subclasses :class:`CausalLM` per the library idiom
 (``Makes[X]`` re-parents ``.make()``). ``Qwen3.Config`` carries the
 HF-shaped arch fields; ``finalize()`` wires them into the inherited
-``block``/``final_norm``/``channels``/``num_layers``/``lm_head``
+``block``/``final_norm``/``channels_in``/``num_layers``/``lm_head``
 slots.
 
 Qwen3 vs. LLaMA:
@@ -27,22 +27,25 @@ Only the dense Qwen3 family is handled here; Qwen3-MoE is a follow-up.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY
+from dataclasses import KW_ONLY, field
 from pathlib import Path
-from typing import Any, Self, cast, override
+from typing import Any, Self, override
 
-import json
-
-from configgle import Makes
-from torch import Tensor
+from configgle import Makeable, Makes
+from torch import Tensor, nn
 
 import torch
 
 from priml import hub
+from priml.lib.custom_json import decode, dict_val, float_val
 from priml.model.attention import SelfAttention
 from priml.model.causal_lm import CausalLM
+from priml.model.custom_types import (
+    ChannelsIn,
+    propagate_attr,
+)
 from priml.model.norm import RMSNorm
-from priml.model.rope import RoPE
+from priml.model.rope import HuggingFaceFrequencies, RoPE
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import TransformerBlock
 
@@ -51,46 +54,54 @@ class Qwen3(CausalLM):
     """Qwen3 dense causal LM — ``CausalLM`` pre-wired for the Qwen3 arch."""
 
     class Config(Makes["Qwen3"], CausalLM.Config, kw_only=False):
-        # HF-shaped positional required fields match config.json keys.
-        vocab_size: int = -1
+        vocab_size: int = 151_936
         """Token vocabulary size; also the width of the output projection."""
 
         _: KW_ONLY
 
-        hidden_size: int = -1
-        """Residual-stream width. HF's spelling of ``channels``, kept because
-        ``from_hf`` and ``remap_hf_state_dict`` both read the schema by name."""
+        channels_in: int = 1_024
+        """Residual-stream width. Qwen3-0.6B's, so the defaults load it."""
 
-        intermediate_size: int = -1
-        """FFN hidden width."""
+        num_layers: int = 28
+        """Blocks in the stack. Qwen3-0.6B's."""
 
-        num_hidden_layers: int = -1
-        """Blocks in the stack."""
+        block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
+            default_factory=lambda: TransformerBlock.Config(
+                attn=SelfAttention.Config(
+                    heads=16,
+                    num_heads_kv=8,
+                    channels_head=128,
+                    bias=False,
+                    causal=True,
+                    share_qk_norm=False,
+                    rope=RoPE.Config(
+                        frequencies=HuggingFaceFrequencies.Config(base=1_000_000.0),
+                    ),
+                    norm_qk=RMSNorm.Config(elementwise_affine=True),
+                ),
+                ffn=SwiGLU.Config(gate=True, bias=False, channels_hidden=3_072),
+                norm1=RMSNorm.Config(elementwise_affine=True),
+                norm2=RMSNorm.Config(elementwise_affine=True),
+                prenorm=True,
+            ),
+        )
+        """Block template (broadcast ``num_layers`` times), or a list.
 
-        num_attention_heads: int = -1
-        """Query heads."""
+        Defaults are Qwen3-0.6B's geometry, so ``Qwen3.Config()`` builds a
+        loadable model -- and so ``channels_in`` and ``num_layers`` above are
+        ordinary knobs a caller may change without restating the rest.
 
-        num_key_value_heads: int = -1
-        """Key/value heads; fewer than the query heads makes it GQA."""
+        ONE slot rather than a ``norm`` and a ``rope`` beside a head count:
+        each of those belongs to something the block already holds, and
+        hoisting them flattened the tree the reader descends one node at a
+        time. The head geometry is ``block.attn.heads`` /
+        ``block.attn.channels_head`` / ``block.attn.num_heads_kv``, the
+        epsilon is ``block.norm1.eps``, the rotary base is
+        ``block.attn.rope.frequencies.base`` -- each named by its position,
+        and each editable without this class knowing the field exists.
 
-        head_dim: int = -1
-        """Per-head width. Qwen3 states it, so it need not divide the model
-        width -- the attention's inner width is decoupled from the residual."""
-
-        rms_norm_eps: float = 1e-6
-        """Epsilon for every RMSNorm in the stack."""
-
-        rope_theta: float = 1_000_000.0
-        """Rotary base; sets the longest wavelength the embedding resolves."""
-
-        hf_inv_freq: bool = True
-        """Compute the rotary frequencies by HF's formula, for bit parity."""
-        hf_split_projections: bool = False
-        """Use HF's split projection order for exact parity tests.
-
-        Normal Qwen3 models keep the loop-native fused QKV and SwiGLU
-        projections. Enable this only when comparing against HuggingFace
-        outputs where matmul grouping affects low-order floating-point bits.
+        ``finalize`` copies the template per layer and pushes only the widths
+        the PARENT owns, so an edit to the template survives it.
         """
 
         @classmethod
@@ -105,86 +116,90 @@ class Qwen3(CausalLM):
             # transformers 4.55+ nests rope params; earlier has rope_theta flat.
             rope_theta = config.get("rope_theta")
             if rope_theta is None:
-                rope_params = cast(
-                    dict[str, Any],
-                    config.get("rope_parameters") or {},
-                )
-                rope_theta = rope_params.get("rope_theta")
-            hidden_size = int(config["hidden_size"])
+                # Validated rather than cast: this is an HF ``config.json``, so
+                # a malformed field is caller input. Casting produced an
+                # ``AttributeError`` from inside ``.get`` instead.
+                rope_params = dict_val(config.get("rope_parameters") or {})
+                rope_theta = float_val(rope_params.get("rope_theta"), 1e6)
+            channels_in = int(config["hidden_size"])
             num_heads = int(config["num_attention_heads"])
+            # HF's schema is parsed into the CHILD configs; the parent does
+            # not mirror foreign names onto itself. Everything below hangs off
+            # the ONE block template, which is where each value lives.
+            norm = RMSNorm.Config(elementwise_affine=True)
+            norm.eps = float(config.get("rms_norm_eps", 1e-6))
+
+            frequencies = HuggingFaceFrequencies.Config()
+            frequencies.base = float_val(rope_theta, 1e6)
+            rope = RoPE.Config()
+            rope.frequencies = frequencies
+
+            attn = SelfAttention.Config(bias=False, causal=True, share_qk_norm=False)
+            attn.heads = num_heads
+            attn.num_heads_kv = int(config.get("num_key_value_heads") or num_heads)
+            # Qwen3 states the head width, so it need not divide the model
+            # width -- the attention's inner width is decoupled from the
+            # residual. Falling back to the quotient matches HF's own default.
+            attn.channels_head = int(
+                config.get("head_dim") or (channels_in // num_heads),
+            )
+            attn.rope = rope
+            attn.norm_qk = norm.copy_tree()
+
+            block = TransformerBlock.Config(prenorm=True)
+            block.attn = attn
+            block.ffn = SwiGLU.Config(
+                gate=True,
+                bias=False,
+                channels_hidden=int(config["intermediate_size"]),
+            )
+            block.norm1 = norm.copy_tree()
+            block.norm2 = norm.copy_tree()
+
             return cls(
                 vocab_size=int(config["vocab_size"]),
-                hidden_size=hidden_size,
-                intermediate_size=int(config["intermediate_size"]),
-                num_hidden_layers=int(config["num_hidden_layers"]),
-                num_attention_heads=num_heads,
-                num_key_value_heads=int(
-                    config.get("num_key_value_heads") or num_heads,
-                ),
-                head_dim=int(
-                    config.get("head_dim") or (hidden_size // num_heads),
-                ),
-                rms_norm_eps=float(config.get("rms_norm_eps", 1e-6)),
-                rope_theta=float(rope_theta if rope_theta is not None else 1e6),
+                channels_in=channels_in,
+                num_layers=int(config["num_hidden_layers"]),
+                block=block,
+                final_norm=norm.copy_tree(),
                 tie_embeddings=bool(config.get("tie_word_embeddings", False)),
             )
 
         @override
         def finalize(self) -> Self:
-            if self.hidden_size < 1:
-                raise ValueError(f"hidden_size must be > 0, got {self.hidden_size}.")
-            if self.num_attention_heads < 1:
-                raise ValueError(
-                    f"num_attention_heads must be > 0, got {self.num_attention_heads}.",
-                )
-            # Wire arch fields into the inherited CausalLM.Config slots
-            # before ``super().finalize()`` (mutate-before-super is
-            # library convention — matches TransformerBlock/SwiGLU/MoE).
-            self.channels = self.hidden_size
-            self.num_layers = self.num_hidden_layers
-            self.block = TransformerBlock.Config(
-                channels_in=self.hidden_size,
-                attn=SelfAttention.Config(
-                    channels_in=self.hidden_size,
-                    heads=self.num_attention_heads,
-                    channels_head=self.head_dim,
-                    num_heads_kv=self.num_key_value_heads,
-                    bias=False,
-                    causal=True,
-                    rope=RoPE.Config(
-                        channels_head=self.head_dim,
-                        base=self.rope_theta,
-                        hf_inv_freq=self.hf_inv_freq,
-                    ),
-                    norm_qk=RMSNorm.Config(
-                        eps=self.rms_norm_eps,
-                        elementwise_affine=True,
-                    ),
-                    share_qk_norm=False,
-                    split_qkv_projection=self.hf_split_projections,
-                ),
-                ffn=SwiGLU.Config(
-                    channels_in=self.hidden_size,
-                    channels_hidden=self.intermediate_size,
-                    gate=True,
-                    bias=False,
-                    split_gate_projection=self.hf_split_projections,
-                ),
-                norm1=RMSNorm.Config(
-                    eps=self.rms_norm_eps,
-                    elementwise_affine=True,
-                ),
-                norm2=RMSNorm.Config(
-                    eps=self.rms_norm_eps,
-                    elementwise_affine=True,
-                ),
-                prenorm=True,
-            )
-            self.final_norm = RMSNorm.Config(
-                eps=self.rms_norm_eps,
-                elementwise_affine=True,
-            )
+            if self.channels_in < 1:
+                raise ValueError(f"channels_in must be > 0, got {self.channels_in}.")
+            # Mutate-before-super is library convention -- matches
+            # TransformerBlock/SwiGLU/MoE.
+            if not isinstance(self.block, list):
+                # One template, copied per layer: a shared node would have each
+                # block's own finalize push its widths into the others.
+                self.block = [self.block.copy_tree() for _ in range(self.num_layers)]
+            for block in self.block:
+                self._size_block(block)
             return super().finalize()
+
+        def _size_block(self, block: Makeable[nn.Module]) -> None:
+            """Push the widths the PARENT owns into one already-shaped block.
+
+            Only the widths: everything else on the block is the caller's, so
+            an edit to the template survives ``finalize`` rather than being
+            rebuilt over.
+            """
+            propagate_attr(block, "channels_in", self.channels_in, protocol=ChannelsIn)
+            if not isinstance(block, TransformerBlock.Config):
+                return
+            attn = block.attn
+            if isinstance(attn, SelfAttention.Config):
+                if attn.heads < 1:
+                    raise ValueError(f"heads must be > 0, got {attn.heads}.")
+                attn.channels_in = self.channels_in
+                rope = attn.rope
+                if isinstance(rope, RoPE.Config):
+                    rope.channels_head = attn.channels_head
+            ffn = block.ffn
+            if isinstance(ffn, SwiGLU.Config):
+                ffn.channels_in = self.channels_in
 
     # Inherits CausalLM.__init__, embed, blocks, final_norm, project_to_logits,
     # forward, reset_parameters. No per-arch Module-level behavior needed.
@@ -209,7 +224,7 @@ class Qwen3(CausalLM):
         """
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
-            hf_config = json.loads((path / "config.json").read_text())
+            hf_config = dict_val(decode("object", (path / "config.json").read_text()))
             hf_sd = hub.load_local_state_dict(path)
         else:
             hf_model = hub.load_transformers_model(
@@ -236,6 +251,28 @@ class Qwen3(CausalLM):
 # -- HF weight remap ---------------------------------------------------
 
 
+def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+    """Return one layer's attention config.
+
+    Read off the BLOCK rather than a parent mirror of it: the geometry lives
+    where the layer is built, so a per-layer list and a broadcast template
+    both answer here without this function knowing which it was given.
+    """
+    blocks = config.block if isinstance(config.block, list) else [config.block]
+    # ``len == 1`` is the pre-finalize broadcast template, which answers for
+    # every layer. Any other short list is a genuine index error, and falling
+    # back to layer 0 there remapped excess layers against the wrong geometry.
+    block = blocks[0] if len(blocks) == 1 else blocks[layer]
+    if not isinstance(block, TransformerBlock.Config):
+        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
+    attn = block.attn
+    if not isinstance(attn, SelfAttention.Config):
+        raise TypeError(
+            f"layer {layer} attention is {type(attn).__name__}, not self-attention.",
+        )
+    return attn
+
+
 def remap_hf_state_dict(
     hf_sd: dict[str, Tensor],
     config: Qwen3.Config,
@@ -244,17 +281,18 @@ def remap_hf_state_dict(
 
     Pure transform — no device moves, no dtype changes.
     """
-    h = config.hidden_size
-    n_q = config.num_attention_heads
-    n_kv = config.num_key_value_heads
-    d = config.head_dim
+    h = config.channels_in
+    attn = _attn_of(config)
+    n_q = attn.heads
+    n_kv = attn.num_heads_kv
+    d = attn.channels_head
     out: dict[str, Tensor] = {
         "embed.weight": hf_sd["model.embed_tokens.weight"],
         "final_norm.weight": hf_sd["model.norm.weight"],
     }
     if not config.tie_embeddings:
         out["lm_head.weight"] = hf_sd["lm_head.weight"]
-    for i in range(config.num_hidden_layers):
+    for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]
         out[f"{b}.norm2.weight"] = hf_sd[f"{p}.post_attention_layernorm.weight"]

@@ -33,7 +33,6 @@ from typing import Any, Self, override
 import functools
 import json
 import logging
-import math
 
 from configgle import Fig
 from torch import Tensor
@@ -41,6 +40,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.math.basic import ceil_div
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
@@ -351,7 +351,7 @@ class _SudokuBatches:
 
     def __len__(self) -> int:
         """Batches per epoch, counting a short final batch."""
-        return math.ceil(int(self.bounds[-1]) / self.batch_size)
+        return ceil_div(int(self.bounds[-1]), self.batch_size)
 
     def _shuffle_generator(self) -> torch.Generator | None:
         """A per-epoch generator, or ``None`` to use the ambient stream."""

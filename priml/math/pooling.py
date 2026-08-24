@@ -11,7 +11,7 @@ from torch import Tensor
 import torch
 
 
-_AVG_POOL: dict[int, Callable[..., Tensor]] = {
+_AVG_POOL: dict[int, Callable[[Tensor, tuple[int, ...], tuple[int, ...]], Tensor]] = {
     2: torch.nn.functional.avg_pool2d,
     3: torch.nn.functional.avg_pool3d,
 }
@@ -84,10 +84,17 @@ def _check(
 
 
 class _DimInfo(NamedTuple):
-    idx: Tensor  # [out_size, max_kernel_size] — gathered source indices
-    length: int | Tensor  # scalar or [out_size] — window lengths
-    max_kernel_size_range: Tensor  # [max_kernel_size] — for masking
-    needs_irregular_kernel: bool  # True if window lengths vary
+    idx: Tensor
+    """``[out_size, max_kernel_size]`` source indices to gather."""
+
+    length: int | Tensor
+    """Window lengths: a scalar when uniform, else ``[out_size]``."""
+
+    max_kernel_size_range: Tensor
+    """``[max_kernel_size]`` ramp used to mask past each window's end."""
+
+    needs_irregular_kernel: bool
+    """Whether window lengths vary, which the masking path requires."""
 
 
 def _dim_info(
@@ -121,15 +128,10 @@ def _dim_info(
     idx = start.unsqueeze(-1) + max_kernel_size_range
 
     if needs_irregular_kernel:
+        assert in_size > 0, f"in_size must be positive; got {in_size}."
         idx = torch.minimum(
             idx,
-            torch.scalar_tensor(
-                # in_size == 0 is rejected upstream; clamp to 0 defensively so
-                # the index ceiling can never go negative.
-                max(0, in_size - 1),
-                dtype=idx.dtype,
-                device=idx.device,
-            ),
+            torch.scalar_tensor(in_size - 1, dtype=idx.dtype, device=idx.device),
         )
         end = torch.div(
             (out_range + 1) * in_size + out_size - 1,
@@ -162,6 +164,15 @@ def _adaptive_avg_pool(
             s != 0,
             lambda: f"Expected non-zero spatial dims, got shape {tuple(x.shape)}",
         )
+    # Zero is checked but negatives are not: torch already rejects those with
+    # "elements of output_size must be greater than or equal to 0", while it
+    # ACCEPTS zero and returns an empty tensor -- which the variance-preserving
+    # path below cannot, since it divides by the window size.
+    for o in output_size:
+        _check(
+            o != 0,
+            lambda: f"Expected non-zero output_size, got {output_size}",
+        )
 
     # Plain mean pooling has a fused primitive; only the variance-preserving
     # scaling (mean * sqrt(window_size)) needs the per-window counts computed
@@ -181,10 +192,8 @@ def _adaptive_avg_pool(
             s - (o - 1) * st
             for s, o, st in zip(spatial, output_size, stride, strict=True)
         )
-        y = _AVG_POOL[n](x, kernel, stride)
-        if variance_preserving:
-            y = y * math.sqrt(math.prod(stride))
-        return y
+        # Unconditional: the plain-mean case returned above.
+        return _AVG_POOL[n](x, kernel, stride) * math.sqrt(math.prod(stride))
 
     # Per-dimension index tables.
     dims = [_dim_info(spatial[i], output_size[i], x.device) for i in range(n)]
@@ -197,10 +206,9 @@ def _adaptive_avg_pool(
     # Non-adaptive shortcut: uniform windows → mean over max_kernel_size dims.
     if not any(d.needs_irregular_kernel for d in dims):
         max_kernel_size_dims = tuple(-(2 * k + 1) for k in reversed(range(n)))
-        y = vals.mean(dim=max_kernel_size_dims)
-        if variance_preserving:
-            y = y * math.sqrt(math.prod(vals.shape[d] for d in max_kernel_size_dims))
-        return y
+        return vals.mean(dim=max_kernel_size_dims) * math.sqrt(
+            math.prod(vals.shape[d] for d in max_kernel_size_dims)
+        )
 
     # Mask out-of-window positions; accumulate per-position window sizes.
     window: int | Tensor = 1
@@ -228,4 +236,10 @@ def _adaptive_avg_pool(
         acc = term if acc is None else acc + term
 
     assert acc is not None
-    return acc / (math.sqrt(window) if isinstance(window, int) else window**0.5)
+    if isinstance(window, int):
+        # A Python float promotes to whatever ``acc`` carries.
+        return acc / math.sqrt(window)
+    # Cast before the root: ``window`` is an int64 count, and ``int64 ** 0.5``
+    # lands in float32 regardless of the input -- which lost 24 bits of a
+    # float64 pool and returned float32 for a float16 one.
+    return acc / window.to(acc.dtype) ** 0.5

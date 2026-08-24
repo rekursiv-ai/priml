@@ -151,7 +151,7 @@ class SudokuTrainStep(TrainStep):
                 # being set independently and silently disagreeing.
                 self.act.grid_len = self.model.grid_len
                 self.act.seq_len = self.model.total_seq_len
-                self.act.hidden_size = self.model.hidden_size
+                self.act.channels_hidden = self.model.channels_in
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

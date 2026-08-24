@@ -24,7 +24,6 @@ import copy
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
-from priml.math.basic import broadcast_sequences
 from priml.model.attention import MultiStreamAttention
 from priml.model.custom_types import (
     ChannelsIn,
@@ -249,7 +248,7 @@ class MMDiTBlock(nn.Module):
                 "per stream, or one to broadcast.",
             )
 
-        (cs,) = broadcast_sequences(c if c is not None else [None] * N)
+        cs: list[Tensor | None] = list(c) if isinstance(c, Sequence) else [c] * N
         if len(cs) == 1:
             cs = cs * N
         if len(cs) != N:

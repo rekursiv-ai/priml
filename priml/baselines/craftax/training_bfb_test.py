@@ -138,7 +138,7 @@ def _build_trace() -> nn.Module:
     # TWO hidden units, and not one. A width-1 axis broadcasts against
     # anything, so a transposed or mis-ordered tensor still lines up and the
     # golden would record the wrong arithmetic as correct.
-    config.model.hidden_size = 2
+    config.model.channels_in = 2
     config.model.num_layers = 1
     # Pinned, not defaulted: compiling changes which random numbers are drawn,
     # so a golden minted uncompiled cannot be replayed compiled.

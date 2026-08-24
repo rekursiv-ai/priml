@@ -142,7 +142,7 @@ def exp000() -> CraftaxTrainLoop:
     cfg.step.max_grad_norm = 1.0
     cfg.step.seed = 42
 
-    cfg.step.model.hidden_size = 512
+    cfg.step.model.channels_in = 512
     cfg.step.model.num_layers = 3
 
     # The budget is stated in INTERACTIONS, which is what the benchmark
@@ -250,7 +250,7 @@ def exp002() -> CraftaxRNNTrainLoop:
     cfg.step.value_coefficient = 0.5
     cfg.step.max_grad_norm = 1.0
     cfg.step.seed = 42
-    cfg.step.model.hidden_size = 512
+    cfg.step.model.channels_in = 512
 
     cfg.max_steps = cfg.step.total_train_steps = _updates(
         interactions=1_000_000_000,
@@ -313,7 +313,7 @@ def exp003() -> CraftaxPQNTrainLoop:
     cfg.step.epsilon_decay_fraction = 0.1
     cfg.step.max_grad_norm = 0.5
     cfg.step.seed = 42
-    cfg.step.model.hidden_size = 512
+    cfg.step.model.channels_in = 512
 
     cfg.max_steps = cfg.step.total_train_steps = _updates(
         interactions=1_000_000_000,
@@ -427,7 +427,7 @@ def exp013() -> CraftaxGTrXLTrainLoop:
     cfg.step.model.num_heads = 8
     cfg.step.model.num_layers = 2
     cfg.step.model.qkv_dim = 256
-    cfg.step.model.hidden_size = 256
+    cfg.step.model.channels_in = 256
     cfg.step.model.memory_length = 128
     cfg.step.model.gating_bias = 2.0
 
@@ -455,7 +455,7 @@ def exp_smoke() -> CraftaxTrainLoop:
     cfg.step.env.num_envs = 8
     cfg.step.rollout_steps = 4
     cfg.step.num_minibatches = 2
-    cfg.step.model.hidden_size = 32
+    cfg.step.model.channels_in = 32
     cfg.step.model.num_layers = 1
     cfg.max_steps = cfg.step.total_train_steps = 4
     cfg.dataset.updates_per_epoch = 4

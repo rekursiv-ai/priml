@@ -87,7 +87,7 @@ def _transformer_block() -> tuple[nn.Module, Tensor]:
 def _causal_lm() -> tuple[nn.Module, Tensor]:
     model = CausalLM.Config(
         vocab_size=64,
-        channels=32,
+        channels_in=32,
         num_layers=2,
         block=TransformerBlock.Config(
             attn=SelfAttention.Config(

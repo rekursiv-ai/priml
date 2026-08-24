@@ -26,15 +26,35 @@ from priml.math.pixel import (
 def test_rgb2float():
     x = torch.tensor([0.0, 127.5, 255.0])
     result = rgb2float(x)
-    expected = torch.tensor([-1.0, 0.0, 1.0])
+    # float16 by default: half the memory, and still exact over all 256
+    # levels (pinned by the round-trip test below).
+    assert result.dtype == torch.float16
+    expected = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float16)
     torch.testing.assert_close(result, expected, atol=1e-4, rtol=1e-4)
 
 
 def test_float2rgb():
     x = torch.tensor([-1.0, 0.0, 1.0])
     result = float2rgb(x)
-    expected = torch.tensor([0, 127, 255], dtype=torch.uint8)
-    torch.testing.assert_close(result, expected, atol=1, rtol=0)
+    expected = torch.tensor([0, 128, 255], dtype=torch.uint8)
+    # Exact: ``atol=1`` here could not tell rounding from truncation, which is
+    # the one thing this conversion has to get right.
+    torch.testing.assert_close(result, expected, atol=0, rtol=0)
+
+
+def test_the_pixel_pair_is_an_exact_round_trip():
+    """Every uint8 level must survive uint8 -> float -> uint8, in either width.
+
+    Truncating instead of rounding biases every value down by up to a level,
+    so an encode/decode cycle darkens the image and repeated cycles drift.
+    Measured before the fix: 4 of 256 levels came back one low in float16.
+    """
+    levels = torch.arange(256, dtype=torch.uint8)
+    # bfloat16 is the one that catches a rounding shortcut: folding the half
+    # into the offset (``+ 128.0`` instead of ``round()``) is exact in every
+    # other width and loses 127 of these 256 in this one.
+    for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        assert torch.equal(float2rgb(rgb2float(levels, dtype=dtype)), levels)
 
 
 def test_float2rgb_clamp():
@@ -225,16 +245,16 @@ def test_interpolate_cubic_to_bicubic():
 def test_patchify_insufficient_dimensions():
     """Test patchify raises ValueError when tensor has insufficient dimensions."""
     x = torch.randn(2, 3)  # Only 2 dimensions
-    patch = (4, 8, 12)  # Needs 3 spatial dims
-    with pytest.raises(ValueError, match="needs to have at least"):
+    patch = (4, 8, 12)  # Needs 3 spatial dims plus a channel axis
+    with pytest.raises(ValueError, match="needs at least"):
         patchify(x, patch)
 
 
 def test_unpatchify_insufficient_dimensions():
     """Test unpatchify raises ValueError when tensor has insufficient dimensions."""
     x = torch.randn(2, 1152)  # Only 2 dimensions
-    patch = (4, 8, 12)  # Needs 3 spatial dims
-    with pytest.raises(ValueError, match="needs to have at least"):
+    patch = (4, 8, 12)  # Needs 3 spatial dims plus a channel axis
+    with pytest.raises(ValueError, match="needs at least"):
         unpatchify(x, patch)
 
 
@@ -633,6 +653,75 @@ def test_decode_image_pil_grayscale_to_rgba():
 
     assert tensor is not None
     assert tensor.shape == (4, 100, 100)
+
+
+def test_patchify_pair_requires_a_channel_axis_beyond_the_patch_rank():
+    """``ndim == rank`` has no channel axis, so it must not be silently invented.
+
+    ``patchify(zeros(4, 4), [2, 2])`` returned ``[4, 2, 2]``: ``batch`` came out
+    empty and the reshape conjured a channel dimension, so the round trip
+    returned ``(1, 4, 4)`` for a ``(4, 4)`` input. ``unpatchify`` shares the
+    guard and failed as a bare ``RuntimeError`` from ``permute``.
+    """
+    with pytest.raises(ValueError, match="at least"):
+        _ = patchify(torch.zeros(4, 4), [2, 2])
+    with pytest.raises(ValueError, match="at least"):
+        _ = unpatchify(torch.zeros(4, 4), [2, 2])
+
+    # One more axis is the minimum, and it round-trips.
+    x = torch.arange(3 * 4 * 4).reshape(3, 4, 4).float()
+    torch.testing.assert_close(unpatchify(patchify(x, [2, 2]), [2, 2]), x)
+
+
+def test_patchify_rejects_a_degenerate_patch():
+    """A non-positive patch cannot tile, and reached ``d // p`` as a bare error.
+
+    ``Patchify.Config`` validates this (``patchify.py:79``) but the public
+    helper it wraps did not, so a direct caller got ZeroDivisionError.
+    """
+    for bad in ([0, 0], [-2, -2], [2, 0], []):
+        with pytest.raises(ValueError, match="patch_size"):
+            _ = patchify(torch.zeros(2, 3, 8, 8), bad)
+        with pytest.raises(ValueError, match="patch_size"):
+            _ = unpatchify(torch.zeros(2, 12, 4, 4), bad)
+
+
+def test_compute_video_shapes_validates_its_own_arguments():
+    """Each parameter is checked where it is used, not at one call site.
+
+    ``CalcResizeDimensions`` validates ``compression`` on its behalf
+    (``shapes.py:477``), leaving every other caller to hit ZeroDivisionError in
+    ``ceil_div``; a negative aspect reached ``aspect**0.5`` and produced a
+    complex number that failed much later in ``round``.
+    """
+    with pytest.raises(ValueError, match="compression"):
+        _ = compute_video_shapes(compression=(1, 0, 16))
+    with pytest.raises(ValueError, match="compression"):
+        _ = compute_video_shapes(compression=(1, -16, 16))
+    with pytest.raises(ValueError, match="aspect"):
+        _ = compute_video_shapes(aspect=-1.0)
+    with pytest.raises(ValueError, match="aspect"):
+        _ = compute_video_shapes(aspect=0.0)
+    with pytest.raises(ValueError, match="nominal_resolution"):
+        _ = compute_video_shapes(nominal_resolution=0)
+    with pytest.raises(ValueError, match="fps"):
+        _ = compute_video_shapes(fps=0.0)
+    with pytest.raises(ValueError, match="duration_sec"):
+        _ = compute_video_shapes(duration_sec=-1.0)
+
+
+def test_float2rgb_rejects_an_integer_tensor() -> None:
+    """The dtype hint fires only for input carrying NO dtype.
+
+    An integer tensor has one, so it reached the scaling and had its byte
+    values treated as ``[-1, 1]`` floats: uint8 ``[0, 1, 2]`` came back
+    ``[128, 255, 255]`` rather than round-tripping.
+    """
+    for dtype in (torch.uint8, torch.int64):
+        with pytest.raises(TypeError, match="floating-point"):
+            _ = float2rgb(torch.tensor([0, 1, 2], dtype=dtype))
+    # A bare Python list still takes the hint and works.
+    assert float2rgb([-1.0, 0.0, 1.0]).dtype == torch.uint8
 
 
 if __name__ == "__main__":

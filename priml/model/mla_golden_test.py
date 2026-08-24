@@ -48,7 +48,9 @@ def test_mla_bfb(device: str) -> None:
                 channels_qk_rope_head=4,
                 channels_v_head=8,
                 kv_lora_rank=8,
-                rope=RoPE.Config(channels_head=4, base=10_000),
+                rope=RoPE.Config(
+                    channels_head=4,
+                ),
             )
             .make()
             .to(device)

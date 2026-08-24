@@ -73,21 +73,20 @@ _BUILDERS: dict[str, Callable[[], nn.Module]] = {
         channels_qk_rope_head=4,
         channels_v_head=8,
         kv_lora_rank=8,
-        rope=RoPE.Config(channels_head=4, base=10_000),
+        rope=RoPE.Config(channels_head=4),
     ).make(),
     "rope_mixed_learnable": lambda: RoPEMixed(
-        RoPEMixed.Config(channels_head=8, base=10_000, heads=2, learnable=True),
+        RoPEMixed.Config(channels_head=8, heads=2, learnable=True),
     ),
     # heads=1 takes the directions=None branch (no per-head scaling);
     # reduction_mode="sum" shares channels across axes. Both are distinct
     # shape-allocation paths in reset_parameters that must round-trip.
     "rope_mixed_heads1": lambda: RoPEMixed(
-        RoPEMixed.Config(channels_head=8, base=10_000, heads=1, learnable=True),
+        RoPEMixed.Config(channels_head=8, heads=1, learnable=True),
     ),
     "rope_mixed_sum": lambda: RoPEMixed(
         RoPEMixed.Config(
             channels_head=8,
-            base=10_000,
             heads=2,
             reduction_mode="sum",
             learnable=True,

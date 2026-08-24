@@ -59,10 +59,10 @@ class GridChannel(Protocol):
 
 
 @runtime_checkable
-class HasHiddenSize(Protocol):
+class HasChannels(Protocol):
     """A channel config sized by the model's hidden width."""
 
-    hidden_size: int
+    channels: int
 
 
 @runtime_checkable
@@ -102,7 +102,7 @@ class FactoredPositions(nn.Module):
         box_shape: tuple[int, int] = (3, 3)
         """``(rows, cols)`` of one constraint box tiling the grid."""
 
-        hidden_size: int = -1
+        channels: int = -1
         """Table width; -1 inherits the model's hidden size."""
 
         init_std: float = 1.0
@@ -124,16 +124,14 @@ class FactoredPositions(nn.Module):
                 f"box_shape {config.box_shape} does not tile grid_shape "
                 f"{config.grid_shape}.",
             )
-        if config.hidden_size <= 0:
+        if config.channels <= 0:
             raise ValueError(
-                f"hidden_size must be positive; got {config.hidden_size}. It is "
+                f"channels must be positive; got {config.channels}. It is "
                 "normally inherited from the model during finalize.",
             )
         self.config = config
         self.embed_scale: float = (
-            math.sqrt(config.hidden_size)
-            if config.embed_scale < 0
-            else config.embed_scale
+            math.sqrt(config.channels) if config.embed_scale < 0 else config.embed_scale
         )
         cell = torch.arange(rows * cols)
         row = cell // cols
@@ -146,10 +144,10 @@ class FactoredPositions(nn.Module):
         # Init order is a checkpoint-parity contract: row, then column, then
         # box. Each draws from the global RNG, so reordering changes every
         # seeded run's weights.
-        width, std = config.hidden_size, config.init_std
-        self.embed_pos_row = _table(rows, hidden_size=width, init_std=std)
-        self.embed_pos_col = _table(cols, hidden_size=width, init_std=std)
-        self.embed_pos_box = _table(num_boxes, hidden_size=width, init_std=std)
+        width, std = config.channels, config.init_std
+        self.embed_pos_row = _table(rows, channels=width, init_std=std)
+        self.embed_pos_col = _table(cols, channels=width, init_std=std)
+        self.embed_pos_box = _table(num_boxes, channels=width, init_std=std)
 
     @override
     def forward(self, tokens: Tensor, embeddings: Tensor) -> Tensor:
@@ -184,7 +182,7 @@ class PredictionFeedback(nn.Module):
         vocab_size: int = -1
         """Token vocabulary; -1 inherits the model's."""
 
-        hidden_size: int = -1
+        channels: int = -1
         """Table width; -1 inherits the model's hidden size."""
 
         init_std: float = 0.0
@@ -196,21 +194,19 @@ class PredictionFeedback(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.hidden_size <= 0 or config.vocab_size <= 0:
+        if config.channels <= 0 or config.vocab_size <= 0:
             raise ValueError(
-                f"vocab_size and hidden_size must be positive; got "
-                f"{config.vocab_size} and {config.hidden_size}. Both are "
+                f"vocab_size and channels must be positive; got "
+                f"{config.vocab_size} and {config.channels}. Both are "
                 "normally inherited from the model during finalize.",
             )
         self.config = config
         self.embed_scale: float = (
-            math.sqrt(config.hidden_size)
-            if config.embed_scale < 0
-            else config.embed_scale
+            math.sqrt(config.channels) if config.embed_scale < 0 else config.embed_scale
         )
         self.embed_feedback = _table(
             config.vocab_size,
-            hidden_size=config.hidden_size,
+            channels=config.channels,
             init_std=config.init_std,
         )
         self._feedback_ids: Tensor | None = None
@@ -256,8 +252,8 @@ class GridEmbedding(nn.Module):
         vocab_size: int = 11
         """Token vocabulary size."""
 
-        hidden_size: int = -1
-        """Embedding width; -1 inherits the model's hidden size."""
+        channels_in: int = -1
+        """Embedding width; -1 inherits the model's own."""
 
         grid_shape: tuple[int, ...] = (81,)
         """Token layout per puzzle. A flat ``(81,)`` and a ``(9, 9)`` grid
@@ -280,8 +276,8 @@ class GridEmbedding(nn.Module):
         @override
         def finalize(self) -> Self:
             for channel in self.channels:
-                if isinstance(channel, HasHiddenSize) and channel.hidden_size == -1:
-                    channel.hidden_size = self.hidden_size
+                if isinstance(channel, HasChannels) and channel.channels == -1:
+                    channel.channels = self.channels_in
                 if isinstance(channel, HasGridLen) and channel.grid_len == -1:
                     channel.grid_len = self.grid_len
                 if isinstance(channel, HasVocabSize) and channel.vocab_size == -1:
@@ -290,15 +286,15 @@ class GridEmbedding(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.hidden_size <= 0:
+        if config.channels_in <= 0:
             raise ValueError(
-                f"hidden_size must be positive; got {config.hidden_size}. It is "
-                "normally inherited from the model during finalize.",
+                f"channels_in must be positive; got {config.channels_in}. It "
+                "is normally inherited from the model during finalize.",
             )
         self.config = config
-        self.embed_scale: float = math.sqrt(config.hidden_size)
+        self.embed_scale: float = math.sqrt(config.channels_in)
         self.embed_tokens = Embedding.Config(
-            channels_out=config.hidden_size,
+            channels_out=config.channels_in,
             num_embeddings=config.vocab_size,
         ).make()
         truncated_normal(
@@ -336,20 +332,20 @@ class GridEmbedding(nn.Module):
 def _table(
     num_embeddings: int,
     *,
-    hidden_size: int,
+    channels: int,
     init_std: float,
 ) -> nn.Parameter:
     """A learned table whose REALIZED std is ``init_std`` after rescaling.
 
-    The std passed to the initializer is divided by ``sqrt(hidden_size)``
+    The std passed to the initializer is divided by ``sqrt(channels)``
     because the caller multiplies by that factor at runtime (the embedding
     rescale trick), so the two cancel and the effective std is ``init_std``.
     """
-    w = torch.zeros(num_embeddings, hidden_size)
+    w = torch.zeros(num_embeddings, channels)
     if init_std > 0:
         truncated_normal(
             w,
-            std=init_std / hidden_size**0.5,
+            std=init_std / channels**0.5,
             depth=-1,
             variance_correction=True,
         )

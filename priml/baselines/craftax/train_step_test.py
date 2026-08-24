@@ -31,7 +31,7 @@ def _config(**overrides: object) -> CraftaxTrainStep.Config:
     config.num_epochs = 1
     config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.hidden_size = 4
+    config.model.channels_in = 4
     config.model.num_layers = 1
     for name, value in overrides.items():
         setattr(config, name, value)

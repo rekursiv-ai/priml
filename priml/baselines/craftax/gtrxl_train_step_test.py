@@ -35,7 +35,7 @@ def _config(**overrides: object) -> CraftaxGTrXLTrainStep.Config:
     config.model.num_heads = 1
     config.model.num_layers = 1
     config.model.qkv_dim = 4
-    config.model.hidden_size = 4
+    config.model.channels_in = 4
     config.model.memory_length = 2
     for name, value in overrides.items():
         setattr(config, name, value)

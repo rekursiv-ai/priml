@@ -83,6 +83,17 @@ class Renderer:
         for name in sprites.every_sprite():
             self._load(name)
 
+    @property
+    def frame_shape(self) -> tuple[int, int]:
+        """``(height, width)`` of every frame ``render`` returns.
+
+        Exists so a caller sizing a video writer does not restate
+        ``OBS_DIM * block_pixels``: a writer told one geometry and fed another
+        produces a file ffmpeg cannot read, and closes without raising.
+        """
+        rows, columns = constants.OBS_DIM
+        return rows * self.block_pixels, columns * self.block_pixels
+
     def render(self, state: EnvState, *, index: int = 0) -> np.ndarray:
         """Draw one worker's view.
 
@@ -94,10 +105,8 @@ class Renderer:
           frame: ``[height, width, 3]`` uint8 RGB.
 
         """
-        rows, columns = constants.OBS_DIM
-        surface = pygame.Surface(
-            (columns * self.block_pixels, rows * self.block_pixels)
-        )
+        height, width = self.frame_shape
+        surface = pygame.Surface((width, height))
 
         self._draw_terrain(surface, state, index)
         self._draw_creatures(surface, state, index)

@@ -35,6 +35,7 @@ class Patchify(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        _validate_patch_size(config.patch_size)
         self.channels_in = config.channels_in
         self.channels_out = config.channels_out
         self.patch_size = config.patch_size
@@ -63,6 +64,7 @@ class Unpatchify(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        _validate_patch_size(config.patch_size)
         self.channels_in = config.channels_in
         self.channels_out = config.channels_out
         self.patch_size = config.patch_size
@@ -71,3 +73,16 @@ class Unpatchify(nn.Module):
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
         del args, kwargs
         return unpatchify(x, self.patch_size)
+
+
+def _validate_patch_size(patch_size: list[int]) -> None:
+    """Reject a patch that cannot tile anything, naming the config field.
+
+    ``patchify`` checks the same thing, but only once a tensor arrives; a
+    config error belongs at construction, where the field that carries it is
+    still in scope.
+    """
+    if not patch_size:
+        raise ValueError("patch_size must name at least one axis.")
+    if any(p < 1 for p in patch_size):
+        raise ValueError(f"patch_size entries must be positive; got {patch_size}.")

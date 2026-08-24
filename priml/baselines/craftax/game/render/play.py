@@ -105,34 +105,40 @@ def play(
         device=torch.device("cpu"),
     )
     renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
-    frame = renderer.render(state)
-    screen = pygame.display.set_mode((frame.shape[1], frame.shape[0]))
+    height, width = renderer.frame_shape
+    screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption(f"Craftax (seed {seed})")
 
     running = True
+    _show(screen, renderer.render(state))
     while running:
-        _show(screen, renderer.render(state))
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+        # ``wait`` blocks; ``get`` returns immediately and spun a core at 100%
+        # redrawing an unchanged world. The docstring promises no clock to lose
+        # to, so there is nothing to do between keystrokes.
+        event = pygame.event.wait()
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
                 running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                    continue
-                action = KEYS.get(event.key)
-                if action is None:
-                    continue
-                state, _ = game_step.step(
-                    state,
-                    torch.tensor([int(action)]),
+                continue
+            action = KEYS.get(event.key)
+            if action is None:
+                continue
+            state, _ = game_step.step(
+                state,
+                torch.tensor([int(action)]),
+                generator=generator,
+            )
+            if bool(game_step.is_done(state)[0]):
+                state = world_gen.generate_world(
+                    num_envs=1,
                     generator=generator,
+                    device=torch.device("cpu"),
                 )
-                if bool(game_step.is_done(state)[0]):
-                    state = world_gen.generate_world(
-                        num_envs=1,
-                        generator=generator,
-                        device=torch.device("cpu"),
-                    )
+            # Redrawn only after the world moved, which is the only time it
+            # can differ.
+            _show(screen, renderer.render(state))
     pygame.quit()
     return state
 
@@ -177,29 +183,16 @@ def record(
 
     renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
     generator = torch.Generator().manual_seed(seed)
-    frames: list[np.ndarray] = []
-    steps = 0
-    with torch.no_grad():
-        for _ in range(max_steps):
-            frames.append(renderer.render(env.state))
-            logits, _ = policy(observation)
-            action = torch.multinomial(
-                logits.softmax(-1),
-                1,
-                generator=generator,
-            ).squeeze(-1)
-            transition = env.step(action)
-            observation = transition.observation
-            steps += 1
-            if bool(transition.done[0]):
-                # Draw the state that ENDED the episode. Rendering ``env.state``
-                # would draw the fresh world the auto-reset already installed.
-                frames.append(renderer.render(transition.terminal_state))
-                break
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    height, width = frames[0].shape[0], frames[0].shape[1]
+    # Asked of the renderer rather than recomputed here, so the writer cannot
+    # be told a geometry the frames do not have: ffmpeg then writes a file it
+    # cannot read back and the writer closes without raising. Taking it from
+    # the renderer (not from a first rendered frame) is what lets the writer
+    # open before the episode runs, so each frame is sent as it is drawn --
+    # buffering the episode first cost ~1.2 GB at the defaults.
+    height, width = renderer.frame_shape
     # 16 is what ``imageio.v3.imwrite`` used, so the written geometry is
     # unchanged by the switch to the lower-level writer. It only matters off
     # the default board: at ``block_pixels=64`` the render is 576x704, already
@@ -216,9 +209,28 @@ def record(
     # ``next`` rather than ``send(None)`` because the two are the same operation
     # and only the former types as one.
     next(writer)
+
+    steps = 0
     try:
-        for frame in frames:
-            _ = writer.send(frame.tobytes())
+        with torch.no_grad():
+            for _ in range(max_steps):
+                _ = writer.send(renderer.render(env.state).tobytes())
+                logits, _ = policy(observation)
+                action = torch.multinomial(
+                    logits.softmax(-1),
+                    1,
+                    generator=generator,
+                ).squeeze(-1)
+                transition = env.step(action)
+                observation = transition.observation
+                steps += 1
+                if bool(transition.done[0]):
+                    # Draw the state that ENDED the episode. Rendering
+                    # ``env.state`` would draw the fresh world the auto-reset
+                    # already installed.
+                    frame = renderer.render(transition.terminal_state)
+                    _ = writer.send(frame.tobytes())
+                    break
     finally:
         writer.close()
     return steps

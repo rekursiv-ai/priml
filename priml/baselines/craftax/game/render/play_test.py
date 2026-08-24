@@ -21,6 +21,7 @@ import torch
 from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.render import play, sprites
+from priml.baselines.craftax.game.render.pixels import Renderer
 from priml.baselines.craftax.model import ActorCritic
 
 
@@ -55,7 +56,7 @@ def _read_video(path: Path) -> tuple[int, tuple[int, int]]:
 
 def _policy() -> ActorCritic:
     config = ActorCritic.Config()
-    config.hidden_size = 8
+    config.channels_in = 8
     config.num_layers = 1
     return config.make()
 
@@ -75,8 +76,12 @@ def test_movement_is_on_the_usual_keys() -> None:
     assert play.KEYS[pygame.K_SPACE] is Action.DO
 
 
-def test_no_key_is_bound_twice() -> None:
-    assert len(play.KEYS) == len(set(play.KEYS))
+def test_no_action_is_bound_to_two_keys() -> None:
+    # ``KEYS`` is a dict, so its KEYS cannot repeat -- comparing them to their
+    # own set proved nothing. Duplication is only possible on the value side,
+    # where two keys silently doing the same thing is the real mistake.
+    actions = list(play.KEYS.values())
+    assert len(actions) == len(set(actions))
 
 
 @pytest.mark.compute_large_fixture
@@ -134,8 +139,10 @@ def test_the_same_seed_records_the_same_episode(
     tmp_path: Path,
     sprite_dir: Path,
 ) -> None:
+    # Frame count and geometry alone would pass for two entirely different
+    # episodes of equal length, so the bytes are what get compared.
     policy = _policy()
-    recorded: list[tuple[int, tuple[int, int]]] = []
+    recorded: list[bytes] = []
     for name in ("a.mp4", "b.mp4"):
         path = tmp_path / name
         play.record(
@@ -146,7 +153,7 @@ def test_the_same_seed_records_the_same_episode(
             block_pixels=8,
             asset_dir=sprite_dir,
         )
-        recorded.append(_read_video(path))
+        recorded.append(path.read_bytes())
     assert recorded[0] == recorded[1]
 
 
@@ -154,6 +161,44 @@ def test_a_degenerate_recording_is_refused(tmp_path: Path) -> None:
     # Checked before any sprite is loaded, so this needs no assets at all.
     with pytest.raises(ValueError, match="positive"):
         play.record(_policy(), tmp_path / "x.mp4", max_steps=0)
+    # The other half of the same guard; only max_steps was covered.
+    with pytest.raises(ValueError, match="positive"):
+        play.record(_policy(), tmp_path / "x.mp4", fps=0)
+    # block_pixels is validated too, by the renderer it is handed to.
+    with pytest.raises(ValueError, match="positive"):
+        play.record(_policy(), tmp_path / "x.mp4", block_pixels=0)
+
+
+@pytest.mark.compute_large_fixture
+def test_the_writer_is_sized_by_the_renderer_that_fills_it(
+    tmp_path: Path,
+    sprite_dir: Path,
+) -> None:
+    """Written geometry must come from the renderer, not a parallel formula.
+
+    ``record`` recomputed ``OBS_DIM * block_pixels`` itself, and nothing tied
+    that to what ``render`` produces. A mismatch is silent: ffmpeg writes an
+    unreadable file -- measured at 1667 bytes for a one-tile drift -- and
+    ``writer.close()`` returns without raising.
+    """
+    path = tmp_path / "sized.mp4"
+    _ = play.record(
+        _policy(),
+        path,
+        seed=7,
+        max_steps=3,
+        block_pixels=8,
+        asset_dir=sprite_dir,
+    )
+    expected_height, expected_width = Renderer(
+        block_pixels=8, asset_dir=sprite_dir
+    ).frame_shape
+
+    _, size = _read_video(path)
+    # macro_block_size=16 rounds the written frame up, so the match is to
+    # within one macroblock rather than exact.
+    assert 0 <= size[0] - expected_width < 16
+    assert 0 <= size[1] - expected_height < 16
 
 
 @pytest.mark.compute_large_fixture

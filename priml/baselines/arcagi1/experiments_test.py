@@ -11,6 +11,9 @@ ladder stays checkable on any machine.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
+
+from configgle.pprinting import pformat
 
 import pytest
 
@@ -149,7 +152,7 @@ def test_the_pool_is_built_to_the_models_shape() -> None:
     assert act is not None
     assert act.grid_len == model.grid_len
     assert act.seq_len == model.total_seq_len
-    assert act.hidden_size == model.hidden_size
+    assert act.channels_hidden == model.channels_in
 
 
 def test_schedule_horizon_matches_the_step_budget() -> None:
@@ -163,7 +166,7 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     """It answers "does this run", so anything not bearing on that is cut."""
     smoke, base = experiments.exp_smoke(), experiments.exp000()
     assert smoke.max_steps < base.max_steps
-    assert smoke.step.model.hidden_size < base.step.model.hidden_size
+    assert smoke.step.model.channels_in < base.step.model.channels_in
     assert smoke.dataset.batch_size < base.dataset.batch_size
     assert smoke.dataset.num_tasks is not None
     # The per-task table dominates startup, so the buffer shrinks with it.
@@ -172,6 +175,30 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     table = prefix.parts[0]
     assert isinstance(table, SparsePuzzleEmbedding.Config)
     assert table.batch_size == smoke.dataset.batch_size
+
+
+def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
+    """Pin the WHOLE finalized ``exp000`` as readable text.
+
+    ``exp000`` is the control every fork is measured against, so a change to
+    it invalidates published numbers. A digest would say only that something
+    moved; this golden says WHICH field, from what, to what.
+    ``hide_default_values=False`` so a field that changes only because a
+    library default changed still shows up here.
+
+    Refresh with ``--golden-overwrite`` after reading the diff.
+    """
+    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    rendered = pformat(
+        experiments.exp000().copy_tree().finalize(), hide_default_values=False
+    )
+    if request.config.getoption("--golden-overwrite", default=False):
+        golden.parent.mkdir(parents=True, exist_ok=True)
+        _ = golden.write_text(rendered + "\n", encoding="utf-8")
+    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
+        "exp000 changed; read the diff, then rerun with --golden-overwrite "
+        "if the change is intended."
+    )
 
 
 if __name__ == "__main__":

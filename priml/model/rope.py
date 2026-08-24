@@ -5,13 +5,21 @@ Ported from ~/projects/sic/code/model.py (RoPE, RoPEMixed).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import KW_ONLY, dataclass
-from typing import Any, Literal, Self, cast, override
+from collections.abc import Callable, Sequence
+from dataclasses import KW_ONLY, field
+from typing import (
+    Any,
+    Literal,
+    Protocol,
+    Self,
+    cast,
+    override,
+    runtime_checkable,
+)
 
 import math
 
-from configgle import Fig, Makes
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 
 import torch
@@ -19,49 +27,185 @@ import torch
 from priml.math.basic import broadcast_sequences, floor_multiple
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class YarnScaling:
-    """YaRN (Yet another RoPE extensioN) scaling parameters.
+@runtime_checkable
+class FrequencyTable(Protocol):
+    """Build one axis's inverse frequencies, and the mscale they imply.
 
-    NTK-aware frequency interpolation + log-scaled attention
-    correction. Reference: Peng et al., 2023
-    (https://arxiv.org/abs/2309.00071). Convention matches HuggingFace
-    ``rope_scaling={"type": "yarn", ...}`` on DeepSeek-V3 / Kimi-K2::
+    A slot rather than a flag, so the formula is a config a caller supplies.
+    ``hf_inv_freq`` enumerated two implementations the library happened to
+    know; a third -- or a YaRN wrapper over either -- had nowhere to live.
+
+    ``base`` is NOT a parameter here: it is the geometric family's own knob,
+    and a table built from a learned vector or a lookup has none. It lives on
+    the tables that use it, so the width -- which every table needs, since it
+    sets how many frequencies to return -- is all this asks for.
+    """
+
+    def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
+        """Return ``(inv_freq, mscale)`` for one axis."""
+        ...
+
+
+@runtime_checkable
+class GeometricallySpacedFrequencies(FrequencyTable, Protocol):
+    """A :class:`FrequencyTable` whose spacing is a power of some ``base``.
+
+    Both library tables are one, and YaRN needs the distinction: its ramp is
+    measured in rotations per token, which is only defined against a base.
+    """
+
+    base: float
+
+
+class GeometricFrequencies:
+    """``base ** linspace(0, -1 + 2/c, c//2)``, evaluated in float64.
+
+    The same frequencies as :class:`HuggingFaceFrequencies` -- only more
+    accurately computed. Evaluating the exponent in float64 before the power
+    keeps bits the float32 spelling rounds away; the two agree to about 1e-7,
+    which is a numerical improvement and not a different embedding. Prefer
+    this for a fresh model; the default is HF's for checkpoint parity.
+    """
+
+    class Config(Fig["GeometricFrequencies"]):
+        base: float = 10_000.0
+        """Controls the longest wavelength: period ``2*pi*base^((c-2)/c)``."""
+
+    def __init__(self, config: Config) -> None:
+        self.base = _validated_base(config.base)
+
+    def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
+        """Build the table; mscale is 1 because nothing is rescaled."""
+        return (
+            torch.linspace(
+                0,
+                math.log(self.base) * (-1 + 2 / channels),
+                channels // 2,
+                dtype=torch.float64,
+                device=device,
+            )
+            .exp()
+            .float()
+        ), 1.0
+
+
+class HuggingFaceFrequencies:
+    """``1 / base ** (arange(0, c, 2) / c)``, matching HF transformers.
+
+    The default, because every published checkpoint this library loads was
+    trained under it. The same frequencies :class:`GeometricFrequencies`
+    computes, at lower precision -- the division lands in float32 before the
+    power -- so for a fresh model that one is strictly better.
+    """
+
+    class Config(Fig["HuggingFaceFrequencies"]):
+        base: float = 10_000.0
+        """Controls the longest wavelength; HF spells this ``rope_theta``."""
+
+    def __init__(self, config: Config) -> None:
+        self.base = _validated_base(config.base)
+
+    def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
+        """Build the table; mscale is 1 because nothing is rescaled."""
+        index = torch.arange(0, channels, 2, dtype=torch.int64, device=device).float()
+        return 1.0 / (self.base ** (index / channels)), 1.0
+
+
+class YarnScaling:
+    """YaRN (Yet another RoPE extensioN) frequency scaling.
+
+    Wraps another :class:`FrequencyTable` rather than replacing it, because
+    that is what YaRN is: a rescaling of a table someone else built. So
+    ``YarnScaling.Config(inner=HuggingFaceFrequencies.Config())`` is
+    expressible, where the old ``hf_inv_freq`` flag plus a ``yarn`` field
+    were two unrelated settings that happened to interact.
+
+    NTK-aware frequency interpolation + log-scaled attention correction.
+    Reference: Peng et al., 2023 (https://arxiv.org/abs/2309.00071).
+    Convention matches HuggingFace ``rope_scaling={"type": "yarn", ...}`` on
+    DeepSeek-V3 / Kimi-K2::
 
         {"factor": 32.0, "original_max_position_embeddings": 4096,
          "beta_fast": 1.0, "beta_slow": 1.0,
          "mscale": 1.0, "mscale_all_dim": 1.0}
 
-    Given base frequencies ``theta_i = base ** (2 i / d)``, rotations
-    per token at frequency i are ``L_orig / (2 pi theta_i)``. YaRN
-    ramps between pure NTK interpolation (low freq,
-    ``r <= beta_slow``) and pure extrapolation (high freq,
-    ``r >= beta_fast``), dividing the inverse frequency by the scale
-    factor on the interpolated side.
-
-    The ``mscale`` correction scales cos/sin by ``m`` where
-    ``m = (0.1 * log(factor) + 1) * mscale * mscale_all_dim``. Baking
-    it into the rotation tables is equivalent to multiplying
-    ``softmax_scale`` by ``m**2``.
+    Given base frequencies ``theta_i = base ** (2 i / d)``, rotations per
+    token at frequency i are ``L_orig / (2 pi theta_i)``. YaRN ramps between
+    pure NTK interpolation (low freq, ``r <= beta_slow``) and pure
+    extrapolation (high freq, ``r >= beta_fast``), dividing the inverse
+    frequency by the scale factor on the interpolated side.
     """
 
-    factor: float
-    """Context-length extension factor (new_max / original_max)."""
+    class Config(Fig["YarnScaling"]):
+        factor: float = 1.0
+        """Context-length extension factor (new_max / original_max)."""
 
-    original_max_position_embeddings: int
-    """Pretraining context length used to define "base" positions."""
+        original_max_position_embeddings: int = 4_096
+        """Pretraining context length used to define "base" positions."""
 
-    beta_fast: float = 32.0
-    """High-frequency cutoff (rotations/token) -- no interpolation above."""
+        beta_fast: float = 32.0
+        """High-frequency cutoff (rotations/token) -- no interpolation above."""
 
-    beta_slow: float = 1.0
-    """Low-frequency cutoff -- full interpolation below."""
+        beta_slow: float = 1.0
+        """Low-frequency cutoff -- full interpolation below."""
 
-    mscale: float = 1.0
-    """Attention-scale correction factor."""
+        mscale: float = 1.0
+        """Attention-scale correction factor.
 
-    mscale_all_dim: float = 0.0
-    """Second factor combined with ``mscale``. Kimi-K2 / DSV3 set both to 1.0."""
+        cos/sin are scaled by ``m``, which for a zero ``mscale_all_dim`` is
+        ``0.1 * log(factor) * mscale + 1`` and otherwise the ratio of that
+        expression evaluated at each. Baking it into the tables is equivalent
+        to multiplying ``softmax_scale`` by ``m**2``.
+        """
+
+        mscale_all_dim: float = 0.0
+        """Second factor combined with ``mscale``. Kimi-K2 / DSV3 set both to 1."""
+
+        inner: Makeable[FrequencyTable] = field(
+            default_factory=HuggingFaceFrequencies.Config,
+        )
+        """Table this rescales; matches ``RoPE.Config.frequencies``' default."""
+
+    def __init__(self, config: Config) -> None:
+        # NaN is checked separately because it fails EVERY comparison, so
+        # ``value <= 0`` waves it through: measured, ``factor=nan`` built an
+        # all-NaN frequency table and surfaced only as a dead run.
+        for name, value in (
+            ("factor", config.factor),
+            (
+                "original_max_position_embeddings",
+                config.original_max_position_embeddings,
+            ),
+            ("beta_fast", config.beta_fast),
+            ("beta_slow", config.beta_slow),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive; got {value}.")
+        self.factor = config.factor
+        self.original_max_position_embeddings = config.original_max_position_embeddings
+        self.beta_fast = config.beta_fast
+        self.beta_slow = config.beta_slow
+        self.mscale = config.mscale
+        self.mscale_all_dim = config.mscale_all_dim
+        inner = config.inner.make()
+        # The ramp is defined in units of rotations per token, which is
+        # ``log(max_position / (2 pi r)) / log(base)`` -- so YaRN needs the
+        # base its inner table used, and a table built from anything else has
+        # no ramp to place. Checked here rather than at the call, where the
+        # failure would name a missing attribute instead of the wrapping.
+        if not isinstance(inner, GeometricallySpacedFrequencies):
+            raise TypeError(
+                f"YarnScaling needs a base to place its ramp, and "
+                f"{type(inner).__name__} has none.",
+            )
+        if inner.base == 1.0:
+            raise ValueError("base must not be 1 when yarn is set; log(1) is 0.")
+        self.inner = inner
+
+    def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
+        """Build the inner table, then rescale it; see ``FrequencyTable``."""
+        inv_freq, _ = self.inner(channels=channels, device=device)
+        return _yarn_apply(inv_freq, self.inner.base, channels, self)
 
 
 class RoPE(nn.Module):
@@ -101,46 +245,53 @@ class RoPE(nn.Module):
               131,072  86,372  40,484  28,751  24,428  22,560
 
     Args:
-      dim: Channel count. Scalar + multi-element ``base`` auto-splits:
-          cat mode splits evenly (e.g. 128 across 3 axes -> [44, 42, 42]),
-          sum mode replicates (e.g. 64 across 2 axes -> [64, 64]).
-          Iterable for explicit per-axis allocation. Each nonzero value
-          must be even and >= 2. Use 0 to skip an axis.
-      base: Frequency base(s). Scalar (shared across axes) or iterable
-          (one per axis). Controls the longest wavelength: the lowest
-          frequency has period ``2*pi*base^((c-2)/c)`` where c is the
-          per-axis channel count. Use ``smallest_recommended_base`` to
-          compute from max position counts.
+      channels_head: Channel count. A scalar beside a per-axis
+          ``frequencies`` list auto-splits: cat mode splits evenly (e.g. 128
+          across 3 axes -> [44, 42, 42]), sum mode replicates (e.g. 64 across
+          2 axes -> [64, 64]). A sequence allocates explicitly. Each nonzero
+          value must be even and >= 2. Use 0 to skip an axis.
+      frequencies: Table template, or one per axis. Each carries its own
+          ``base`` where it has one; ``smallest_recommended_base`` computes
+          one from a max position count.
       reduction_mode: "cat" (axial; default) or "sum" (RoPE-Mixed).
 
     """
 
     class Config(Fig["RoPE"], kw_only=False):
-        channels_head: int | Iterable[int] = 64
-        """Channel count per axis (scalar auto-splits across axes)."""
+        channels_head: int | Sequence[int] = 64
+        """Channel count per axis (scalar auto-splits across axes).
+
+        A ``Sequence``, not an ``Iterable``: it is paired against
+        ``frequencies`` by length, and a generator has none -- it was wrapped
+        as a single scalar and failed downstream at ``int(<generator>)``.
+        """
 
         _: KW_ONLY
-
-        base: float | Iterable[float] = 10e3
-        """Frequency base(s) controlling longest wavelength."""
 
         reduction_mode: Literal["cat", "sum"] = "cat"
         """How to combine axes: "cat" (axial) or "sum" (RoPE-Mixed)."""
 
-        yarn: YarnScaling | None = None
-        """Optional YaRN scaling (NTK-aware interp + mscale correction).
+        frequencies: Makeable[FrequencyTable] | list[Makeable[FrequencyTable]] = field(
+            default_factory=HuggingFaceFrequencies.Config,
+        )
+        """Frequency-table template (broadcast per axis) or an explicit list.
 
-        Applied per-axis when set. For N-axis RoPE, the same config is
-        applied to each axis (typical for single-axis LMs anyway).
-        """
+        HF's formula by default, because every published checkpoint this
+        library loads was trained under it, so the default is the one that
+        needs no restating at each call site. Swap in
+        :class:`GeometricFrequencies` for a fresh model -- it computes the
+        same frequencies more accurately.
 
-        hf_inv_freq: bool = False
-        """Use the HuggingFace inv_freq formula for bit-for-bit parity.
+        ``base`` lives on the TABLE, not here: it is the geometric family's
+        own knob, and a table built from a learned vector or a lookup has
+        none, so a top-level field would assert a parameter the slot cannot
+        promise. Per-axis bases are therefore per-axis tables::
 
-        Default (False): ``exp(linspace(0, log(b)*(-1+2/c), c//2))`` in
-        float64 (higher precision). When True:
-        ``1 / (base ** (arange(0, c, 2, int64).float() / c))`` — matches
-        HF transformers exactly.
+            cfg = RoPE.Config([44, 42])
+            cfg.frequencies = [
+                HuggingFaceFrequencies.Config(base=10_000.0),
+                HuggingFaceFrequencies.Config(base=100.0),
+            ]
         """
 
         dtype: torch.dtype | None = None
@@ -157,21 +308,29 @@ class RoPE(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         c = config.channels_head
-        base = config.base
-        reduction_mode = config.reduction_mode
-        self.reduction_mode = reduction_mode
-        if (
-            reduction_mode == "cat"
-            and isinstance(c, int)
-            and isinstance(base, Sequence)
-            and len(base) > 1
-        ):
-            c = self._split_dim(c, len(base))
-        c, base = broadcast_sequences(c, base)
-        self.channels_head = tuple(int(d) for d in c)
-        self.base = tuple(float(b) for b in base)
-        self._hf_inv_freq = config.hf_inv_freq
-        self._yarn = config.yarn
+        self.reduction_mode = config.reduction_mode
+        tables = config.frequencies
+        channels: Sequence[int] = list(c) if isinstance(c, Sequence) else [c]
+        if isinstance(tables, list):
+            if config.reduction_mode == "cat" and isinstance(c, int):
+                channels = self._split_dim(c, len(tables))
+            if len(channels) == 1 and len(tables) > 1:
+                channels = list(channels) * len(tables)
+            if len(channels) != len(tables):
+                raise ValueError(
+                    f"channels_head names {len(channels)} axes but frequencies "
+                    f"names {len(tables)}.",
+                )
+            self._frequencies = [table.make() for table in tables]
+        else:
+            # One template serves every axis, so it is copied per axis rather
+            # than shared: a table holds its own state once made.
+            self._frequencies = [tables.copy_tree().make() for _ in channels]
+        self.channels_head = tuple(channels)
+        if config.dtype is not None and not config.dtype.is_floating_point:
+            # The cos/sin factors are rounded to this width, so an integer one
+            # quantizes every rotation to {-1, 0, 1}.
+            raise ValueError(f"dtype must be floating point; got {config.dtype}.")
         # YaRN mscale applied as a scalar multiplier on cos/sin outputs.
         # When YaRN is off, this stays 1.0 and the math is a no-op.
         self._mscale = 1.0
@@ -221,8 +380,8 @@ class RoPE(nn.Module):
             emb = cast(Tensor, sum(parts))
         else:
             raise ValueError(f"Unknown {self.reduction_mode=}.")
-        cos = emb.cos() * self._mscale
-        sin = emb.sin() * self._mscale
+        cos: Tensor = emb.cos() * self._mscale
+        sin: Tensor = emb.sin() * self._mscale
         return (
             cos.to(dtype=self.dtype, device=self.device),
             sin.to(dtype=self.dtype, device=self.device),
@@ -285,6 +444,14 @@ class RoPE(nn.Module):
         seq_dim = -3
         seq_len = q.shape[seq_dim]
         rope_len = cos.shape[seq_dim]
+        # Not truncated to match: a longer table means the caller paired the
+        # wrong positions with these tokens. Silent at seq_len == 1, where the
+        # axis broadcasts to rope_len instead of raising.
+        if rope_len > seq_len:
+            raise ValueError(
+                f"cos/sin cover {rope_len} positions but q/k have {seq_len}; "
+                "slice the tables to the sequence before rotating."
+            )
         if rope_len < seq_len:
             pad_shape = list(cos.shape)
             pad_shape[seq_dim] = seq_len - rope_len
@@ -315,8 +482,8 @@ class RoPE(nn.Module):
     @classmethod
     def smallest_recommended_base(
         cls,
-        dim: int | Iterable[int],
-        max_positions: int | Iterable[int],
+        dim: int | Sequence[int],
+        max_positions: int | Sequence[int],
     ) -> float | tuple[float, ...]:
         """Return the smallest reasonable base for given position range(s).
 
@@ -326,12 +493,17 @@ class RoPE(nn.Module):
           base = ((max_pos - 1) / (2pi))^(c / (c - 2))
 
         Args:
-          dim: Per-axis channel count(s) (same as __init__).
+          dim: Per-axis channel count(s) (same as __init__). A skipped axis
+              (0) yields 0.0, matching the base ``__init__`` ignores for it.
           max_positions: Max position count per axis. Scalar or iterable.
               Broadcast against dim.
 
         Returns:
           base: Float (1D) or tuple of floats (N-D).
+
+        Raises:
+          ValueError: If a nonzero ``dim`` is below 4, where the exponent
+              ``c / (c - 2)`` has no finite value.
 
         """
         dims, maxpos = broadcast_sequences(dim, max_positions)
@@ -340,7 +512,20 @@ class RoPE(nn.Module):
             if c == 0:
                 bases.append(0.0)
                 continue
+            # ``(m - 1)`` is the span being covered: at 1 it is zero (giving a
+            # base of 0.0, which builds no table) and below 1 it is negative,
+            # so the fractional exponent returns a complex number.
+            if m <= 1:
+                raise ValueError(f"max_positions must exceed 1; got {m}.")
             cls._validate_c(c)
+            # Rejected here rather than in _validate_c: a 2-channel axis is a
+            # legal RoPE axis, it just has no base worth recommending.
+            if c == 2:
+                raise ValueError(
+                    f"Dim {c} has no recommended base: the lowest frequency's "
+                    "period is independent of it. Use at least 4 channels, "
+                    "or choose the base directly."
+                )
             bases.append(((m - 1) / (2 * math.pi)) ** (c / (c - 2)))
         return bases[0] if len(bases) == 1 else tuple(bases)
 
@@ -401,39 +586,26 @@ class RoPE(nn.Module):
         table on the accelerator cannot be matched by moving a CPU-built one.
         """
         self._inv_freqs = [torch.empty(0, device=device) for _ in self.channels_head]
-        for i, (b, c) in enumerate(zip(self.base, self.channels_head, strict=True)):
+        mscales: set[float] = set()
+        for i, (table, c) in enumerate(
+            zip(self._frequencies, self.channels_head, strict=True),
+        ):
             if c == 0:
                 continue
             self._validate_c(c)
-            inv_freq = self._make_inv_freqs(b, c, hf=self._hf_inv_freq, device=device)
-            if self._yarn is not None:
-                inv_freq, self._mscale = _yarn_apply(inv_freq, b, c, self._yarn)
+            inv_freq, mscale = table(channels=c, device=device)
+            mscales.add(mscale)
             self._inv_freqs[i] = inv_freq.unsqueeze(-2)
-
-    @classmethod
-    def _make_inv_freqs(
-        cls,
-        b: float,
-        c: int,
-        *,
-        hf: bool = False,
-        device: torch.device | None = None,
-    ) -> Tensor:
-        """Inverse frequencies: b^linspace(0, -1+2/c, c//2)."""
-        if hf:
-            channels = torch.arange(0, c, 2, dtype=torch.int64, device=device).float()
-            return 1.0 / (b ** (channels / c))
-        return (
-            torch.linspace(
-                0,
-                math.log(b) * (-1 + 2 / c),
-                c // 2,
-                dtype=torch.float64,
-                device=device,
+        # ONE scalar multiplies the whole concatenated embedding, so it cannot
+        # represent a per-axis correction. Assigning inside the loop let the
+        # last axis win, which silently dropped a first-axis YaRN scaling and
+        # trained at the wrong attention temperature with no error.
+        if len(mscales) > 1:
+            raise ValueError(
+                f"frequency tables disagree on mscale ({sorted(mscales)}); one "
+                "scalar scales every axis, so they must agree.",
             )
-            .exp()
-            .float()
-        )
+        self._mscale = mscales.pop() if mscales else 1.0
 
     @classmethod
     def _validate_c(cls, c: int) -> None:
@@ -496,11 +668,28 @@ def rotate_conjugate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
     )
 
 
+def _validated_base(base: float) -> float:
+    """Reject a base that builds an all-NaN or degenerate table."""
+    if not math.isfinite(base) or base <= 0:
+        raise ValueError(f"base must be finite and positive; got {base}.")
+    return base
+
+
 def _yarn_mscale(scale: float, mscale: float) -> float:
     """YaRN attention scale: m = 0.1 * ln(factor) * mscale + 1 (for factor > 1)."""
     if scale <= 1.0:
         return 1.0
     return 0.1 * math.log(scale) * mscale + 1.0
+
+
+def _yarn_correction_dim(
+    num_rot: float,
+    dim: int,
+    base: float,
+    max_position: int,
+) -> float:
+    """Channel index whose frequency completes ``num_rot`` rotations."""
+    return dim * math.log(max_position / (num_rot * 2 * math.pi)) / (2 * math.log(base))
 
 
 def _yarn_correction_range(
@@ -511,21 +700,8 @@ def _yarn_correction_range(
     max_position: int,
 ) -> tuple[float, float]:
     """Return the per-channel indices marking the YaRN ramp region."""
-
-    def _find_correction_dim(
-        num_rot: float,
-        dim: int,
-        base: float,
-        max_position: int,
-    ) -> float:
-        return (
-            dim
-            * math.log(max_position / (num_rot * 2 * math.pi))
-            / (2 * math.log(base))
-        )
-
-    low = math.floor(_find_correction_dim(low_rot, dim, base, max_position))
-    high = math.ceil(_find_correction_dim(high_rot, dim, base, max_position))
+    low = math.floor(_yarn_correction_dim(low_rot, dim, base, max_position))
+    high = math.ceil(_yarn_correction_dim(high_rot, dim, base, max_position))
     return max(low, 0), min(high, dim - 1)
 
 
@@ -593,7 +769,7 @@ class RoPEMixed(RoPE):
     ``RoPE.rotate``.
 
     Args:
-      dim: Channel count per axis (same semantics as ``RoPE``).
+      channels_head: Channel count per axis (same semantics as ``RoPE``).
       heads: Number of attention heads.
       base: Frequency base(s) (same semantics as ``RoPE``).
       reduction_mode: "cat" (axial; default) or "sum" (RoPE-Mixed).
@@ -610,6 +786,10 @@ class RoPEMixed(RoPE):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        if config.heads < 1:
+            # Zero skipped the per-head broadcast entirely, leaving a table of
+            # the base shape -- a one-head model that claimed to have none.
+            raise ValueError(f"heads must be positive; got {config.heads}.")
         self.heads = config.heads
         self.learnable = config.learnable
         if config.reduction_mode == "sum":

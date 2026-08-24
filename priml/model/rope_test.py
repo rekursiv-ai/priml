@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import math
 
+from configgle import Fig
 from torch import Tensor
 
 import pytest
 import torch
 
-from priml.model.rope import RoPE, RoPEMixed, YarnScaling
+from priml.model.rope import (
+    GeometricFrequencies,
+    HuggingFaceFrequencies,
+    RoPE,
+    RoPEMixed,
+    YarnScaling,
+)
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
@@ -187,8 +194,11 @@ def test_rope_sum_mode():
 
 
 def test_rope_auto_split_dim():
-    """Scalar dim + multi base auto-splits in cat mode."""
-    m = RoPE.Config(128, base=[10000.0, 10000.0, 10000.0]).make()
+    """Scalar dim + a per-axis table list auto-splits in cat mode."""
+    m = RoPE.Config(
+        128,
+        frequencies=[HuggingFaceFrequencies.Config() for _ in range(3)],
+    ).make()
     assert m.channels_head == (44, 42, 42)
 
 
@@ -250,31 +260,28 @@ def test_rope_mixed_single_head():
 
 def test_yarn_kimi_k2_mscale_unity():
     """Kimi-K2 YaRN has mscale = mscale_all_dim = 1.0 → ratio collapses to 1.0."""
-    yarn = YarnScaling(
-        factor=32.0,
-        original_max_position_embeddings=4096,
-        beta_fast=1.0,
-        beta_slow=1.0,
-        mscale=1.0,
-        mscale_all_dim=1.0,
-    )
-    m = RoPE.Config(channels_head=64, base=50_000, yarn=yarn).make()
+    yarn = YarnScaling.Config()
+    yarn.factor = 32.0
+    yarn.original_max_position_embeddings = 4096
+    yarn.beta_fast = 1.0
+    yarn.beta_slow = 1.0
+    yarn.mscale_all_dim = 1.0
+    yarn.inner = HuggingFaceFrequencies.Config(base=50_000.0)
+    m = RoPE.Config(channels_head=64, frequencies=yarn).make()
     assert math.isclose(m._mscale, 1.0)
 
 
 def test_yarn_split_interp_extrap():
     """Low-freq (high-index) channels get inv_freq/factor; high-freq stay original."""
-    yarn = YarnScaling(
-        factor=8.0,
-        original_max_position_embeddings=512,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        mscale=1.0,
-        mscale_all_dim=0.0,
-    )
+    yarn = YarnScaling.Config()
+    yarn.factor = 8.0
+    yarn.original_max_position_embeddings = 512
     dim = 64
-    m = RoPE.Config(channels_head=dim, base=10_000, yarn=yarn).make()
-    orig = RoPE._make_inv_freqs(10_000, dim)
+    yarn.inner = GeometricFrequencies.Config(base=10_000.0)
+    m = RoPE.Config(channels_head=dim, frequencies=yarn).make()
+    orig, _ = GeometricFrequencies(GeometricFrequencies.Config(base=10_000.0))(
+        channels=dim, device=torch.device("cpu")
+    )
     got = m._inv_freqs[0].squeeze(0)
     # First channel (highest freq) stays original; last channel (lowest
     # freq) is interpolated by factor.
@@ -284,27 +291,19 @@ def test_yarn_split_interp_extrap():
 
 def test_yarn_mscale_log_formula():
     """Mscale = 0.1 * log(factor) * mscale + 1 when mscale_all_dim=0."""
-    yarn = YarnScaling(
-        factor=40.0,
-        original_max_position_embeddings=4096,
-        mscale=1.0,
-        mscale_all_dim=0.0,
-    )
-    m = RoPE.Config(channels_head=32, base=10_000, yarn=yarn).make()
+    yarn = YarnScaling.Config()
+    yarn.factor = 40.0
+    m = RoPE.Config(channels_head=32, frequencies=yarn).make()
     expected = 0.1 * math.log(40.0) + 1.0
     assert math.isclose(m._mscale, expected)
 
 
 def test_yarn_mscale_applied_to_cos_sin():
     """cos/sin are scaled by mscale, so q·k attention gets mscale² (via cos²+sin²≈1)."""
-    yarn = YarnScaling(
-        factor=32.0,
-        original_max_position_embeddings=4096,
-        mscale=1.0,
-        mscale_all_dim=0.0,
-    )
-    m_plain = RoPE.Config(channels_head=32, base=10_000).make()
-    m_yarn = RoPE.Config(channels_head=32, base=10_000, yarn=yarn).make()
+    yarn = YarnScaling.Config()
+    yarn.factor = 32.0
+    m_plain = RoPE.Config(channels_head=32).make()
+    m_yarn = RoPE.Config(channels_head=32, frequencies=yarn).make()
     pos = torch.arange(16)
     cos_p, _ = m_plain(pos)
     cos_y, _ = m_yarn(pos)
@@ -313,14 +312,16 @@ def test_yarn_mscale_applied_to_cos_sin():
     assert math.isclose(cos_y[0, 0, 0].item(), m_yarn._mscale, abs_tol=1e-5)
 
 
-# -- hf_inv_freq tests -------------------------------------------------
+# -- frequency-table tests ---------------------------------------------
 
 
 def test_hf_inv_freq_matches_hf_formula():
-    """hf_inv_freq=True reproduces the HF transformers inv_freq exactly."""
+    """The HF table reproduces the HF transformers inv_freq exactly."""
     base = 1_000_000.0
     dim = 16
-    m = RoPE.Config(channels_head=dim, base=base, hf_inv_freq=True).make()
+    m = RoPE.Config(
+        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+    ).make()
     expected = 1.0 / (
         base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
     )
@@ -328,24 +329,46 @@ def test_hf_inv_freq_matches_hf_formula():
     assert torch.equal(got, expected)
 
 
-def test_hf_inv_freq_default_off():
-    """Default (hf_inv_freq=False) uses the higher-precision linspace formula."""
+def test_the_default_table_is_the_hugging_face_one():
+    """Every checkpoint this library loads was trained under HF's formula.
+
+    So it is the default, and a port states only what it changes. The
+    higher-precision :class:`GeometricFrequencies` is opt-in: it agrees to
+    ~1e-7 but is not bit-identical, which is what checkpoint parity needs.
+    """
     base = 1_000_000.0
     dim = 16
-    m_hf = RoPE.Config(channels_head=dim, base=base, hf_inv_freq=True).make()
-    m_default = RoPE.Config(channels_head=dim, base=base).make()
-    hf_freq = m_hf._inv_freqs[0].squeeze(-1)
-    default_freq = m_default._inv_freqs[0].squeeze(-1)
-    # Close but not identical — different computation paths
-    assert torch.allclose(hf_freq, default_freq, atol=1e-6)
-    assert not torch.equal(hf_freq, default_freq)
+    default = RoPE.Config(
+        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+    ).make()
+    explicit = RoPE.Config(
+        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+    ).make()
+    geometric = RoPE.Config(
+        channels_head=dim, frequencies=GeometricFrequencies.Config(base=base)
+    ).make()
+    default_freq = default._inv_freqs[0].squeeze(-1)
+    assert torch.equal(default_freq, explicit._inv_freqs[0].squeeze(-1))
+    geometric_freq = geometric._inv_freqs[0].squeeze(-1)
+    assert torch.allclose(default_freq, geometric_freq, atol=1e-6)
+    assert not torch.equal(default_freq, geometric_freq)
+
+
+def test_the_default_base_and_width_need_no_restating():
+    """``RoPE.Config()`` alone is a usable 64-channel, base-1e4 embedding."""
+    config = RoPE.Config()
+    assert config.channels_head == 64
+    assert isinstance(config.frequencies, HuggingFaceFrequencies.Config)
+    assert config.frequencies.base == 10_000.0
 
 
 def test_hf_inv_freq_cos_sin_exact():
     """cos/sin from hf_inv_freq=True match HF's rotary embedding output."""
     base = 10_000.0
     dim = 32
-    m = RoPE.Config(channels_head=dim, base=base, hf_inv_freq=True).make()
+    m = RoPE.Config(
+        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+    ).make()
     cos, sin = m(torch.arange(8))
     # Reproduce HF's computation manually
     inv_freq = 1.0 / (
@@ -393,6 +416,220 @@ def test_rope_rotate_partial_full_coverage():
     q_full, _k_full = RoPE.rotate(q, k, cos, sin)
     # No unrotated suffix — full rotation.
     assert not torch.equal(q_full, q)
+
+
+def test_rope_rotate_rejects_cos_longer_than_sequence():
+    """More rope positions than q/k positions is a caller error, not a broadcast.
+
+    The short-cos branch right-pads with identity, but nothing guards the
+    opposite. At ``S == 1`` the sequence axis broadcasts instead of erroring,
+    so a five-position table applied to a one-position query returned a
+    five-position result -- a wrong shape produced silently.
+    """
+    q = torch.randn(1, 1, 2, 8)
+    k = torch.randn(1, 1, 2, 8)
+    cos = torch.randn(1, 5, 1, 4)
+    sin = torch.randn(1, 5, 1, 4)
+    with pytest.raises(ValueError, match="positions"):
+        _ = RoPE.rotate(q, k, cos, sin)
+
+
+def test_rope_rejects_a_base_that_cannot_build_a_table():
+    """A base is a scalar config field, so it is checked where it is free.
+
+    ``nan``/``inf`` produced an all-NaN frequency table with no error, and
+    ``base=1`` divides by ``log(1)`` inside the YaRN correction. The check
+    lives on the TABLE, which is what owns the base.
+    """
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="base"):
+            _ = HuggingFaceFrequencies.Config(base=bad).make()
+    yarn = YarnScaling.Config()
+    yarn.factor = 32.0
+    yarn.inner = HuggingFaceFrequencies.Config(base=1.0)
+    with pytest.raises(ValueError, match="base"):
+        _ = RoPE.Config(32, frequencies=yarn).make()
+
+
+def test_yarn_needs_a_table_whose_spacing_has_a_base():
+    """The YaRN ramp is measured in rotations per token, so it needs one.
+
+    A table built from a learned vector or a lookup has no base, which is why
+    ``base`` is not a ``FrequencyTable`` parameter -- and why wrapping such a
+    table in YaRN is rejected where the wrapping happens.
+    """
+
+    class _NoBase:
+        class Config(Fig["_NoBase"]):
+            pass
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+        def __call__(
+            self, *, channels: int, device: torch.device
+        ) -> tuple[Tensor, float]:
+            return torch.ones(channels // 2, device=device), 1.0
+
+    yarn = YarnScaling.Config()
+    yarn.inner = _NoBase.Config()
+    with pytest.raises(TypeError, match="has none"):
+        _ = RoPE.Config(32, frequencies=yarn).make()
+
+
+def test_rope_rejects_an_integer_factor_dtype():
+    """``dtype`` rounds the cos/sin factors, so an integer one destroys them.
+
+    Measured: ``dtype=int64`` quantized every factor to ``{0, 1}`` -- the
+    rotation stops being a rotation, silently.
+    """
+    with pytest.raises(ValueError, match="floating point"):
+        _ = RoPE.Config(32, dtype=torch.int64).make()
+
+
+def test_rope_mixed_rejects_a_non_positive_head_count():
+    """``heads=0`` built a one-head table rather than failing."""
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="heads"):
+            _ = RoPEMixed.Config(32, heads=bad).make()
+
+
+def test_smallest_recommended_base_rejects_unusable_position_counts():
+    """``max_positions <= 1`` has no real base: measured complex, or 0.0."""
+    for bad in (0, 1, -5):
+        with pytest.raises(ValueError, match="max_positions"):
+            _ = RoPE.smallest_recommended_base(64, bad)
+
+
+def test_yarn_scaling_rejects_degenerate_parameters():
+    """Every YaRN parameter that divides must be positive.
+
+    ``factor=0`` is the one worth a test: it raised nothing and warned about
+    nothing, dividing the interpolated frequencies to infinity and returning a
+    table of NaNs -- a run that trains on garbage rather than one that stops.
+    """
+    # NaN and inf fail every comparison, so ``value <= 0`` waved them through
+    # and the table came out all-NaN with no error anywhere. Validation is in
+    # ``__init__``, not ``finalize``, so it fires at ``make()``.
+    for bad in (float("nan"), float("inf"), 0.0):
+        config = YarnScaling.Config()
+        config.factor = bad
+        with pytest.raises(ValueError, match="finite and positive"):
+            _ = config.make()
+    for field in ("original_max_position_embeddings", "beta_fast", "beta_slow"):
+        config = YarnScaling.Config()
+        config.factor = 32.0
+        setattr(config, field, 0)
+        with pytest.raises(ValueError, match="finite and positive"):
+            _ = config.make()
+
+
+def test_frequency_scaling_is_an_injection_point_not_a_named_field():
+    """A scaling is supplied as a config, so a variant needs no library edit.
+
+    ``yarn`` was a frozen dataclass in the slot, so changing one parameter
+    meant ``dataclasses.replace`` and a new object. As a ``Makeable`` slot it
+    is built and mutated like every other config in the tree, and anything
+    satisfying ``FrequencyTable`` fits -- linear, dynamic-NTK, LongRoPE.
+    """
+    config = RoPE.Config(64)
+    yarn = config.frequencies = YarnScaling.Config()
+    yarn.factor = 32.0
+    yarn.original_max_position_embeddings = 4096
+    # Mutating after assignment is the point: no replace(), no rebuild.
+    yarn.factor = 16.0
+    model = config.make()
+    assert math.isclose(model._mscale, 0.1 * math.log(16.0) + 1.0)
+
+    scaled = model(torch.arange(8))[0]
+    assert torch.isfinite(scaled).all()
+
+
+def test_a_custom_frequency_table_needs_no_library_change():
+    """Any callable matching the protocol drops into the slot."""
+
+    class _Halve:
+        class Config(Fig["_Halve"]):
+            pass
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+        def __call__(
+            self, *, channels: int, device: torch.device
+        ) -> tuple[Tensor, float]:
+            inner, _ = HuggingFaceFrequencies(HuggingFaceFrequencies.Config())(
+                channels=channels, device=device
+            )
+            return inner / 2.0, 1.0
+
+    config = RoPE.Config(32)
+    config.frequencies = _Halve.Config()
+    plain = RoPE.Config(32).make()._inv_freqs[0]
+    halved = config.make()._inv_freqs[0]
+    torch.testing.assert_close(halved, plain / 2.0)
+
+
+def test_the_two_builders_differ_only_in_precision():
+    """HuggingFace and geometric are the same frequencies, computed differently.
+
+    The HF spelling rounds the exponent to float32 before the power; the
+    geometric one keeps float64 until the end. Agreement to one float32 ULP
+    is what makes the default a numerical improvement rather than a different
+    embedding.
+    """
+    device = torch.device("cpu")
+    geometric, _ = GeometricFrequencies(GeometricFrequencies.Config(base=10_000.0))(
+        channels=64, device=device
+    )
+    hugging_face, _ = HuggingFaceFrequencies(
+        HuggingFaceFrequencies.Config(),
+    )(channels=64, device=device)
+    assert float(((geometric - hugging_face).abs() / geometric).max()) < 2e-7
+
+
+def test_per_axis_tables_must_agree_on_mscale() -> None:
+    """One scalar scales every axis, so a per-axis correction cannot be held.
+
+    Assigning it inside the per-axis loop let the LAST axis win: YaRN on axis
+    0 beside a plain table on axis 1 silently produced mscale 1.0, so the run
+    trained at the wrong attention temperature with nothing raised.
+    """
+    config = RoPE.Config([32, 32])
+    config.frequencies = [
+        YarnScaling.Config(factor=32.0),
+        HuggingFaceFrequencies.Config(),
+    ]
+    with pytest.raises(ValueError, match="disagree on mscale"):
+        _ = config.make()
+    # Agreeing tables are unaffected, and the correction survives.
+    agreeing = RoPE.Config([32, 32])
+    agreeing.frequencies = [
+        YarnScaling.Config(factor=32.0),
+        YarnScaling.Config(factor=32.0),
+    ]
+    assert agreeing.make()._mscale > 1.0
+
+
+def test_yarn_scaling_builds_finite_frequencies():
+    """The accepted settings still produce a usable table."""
+    yarn = YarnScaling.Config()
+    yarn.factor = 32.0
+    m = RoPE.Config(64, frequencies=yarn).make()
+    cos, sin = m(torch.arange(8))
+    assert torch.isfinite(cos).all()
+    assert torch.isfinite(sin).all()
+
+
+def test_rope_smallest_recommended_base_rejects_two_channels():
+    """``c == 2`` has no finite base, so it must raise rather than divide by zero.
+
+    The exponent is ``c / (c - 2)``, and the class documents every nonzero axis
+    as needing ``>= 2`` channels -- so the documented boundary was exactly the
+    value that crashed with a bare ZeroDivisionError.
+    """
+    with pytest.raises(ValueError, match="at least 4"):
+        _ = RoPE.smallest_recommended_base(2, 16)
 
 
 if __name__ == "__main__":

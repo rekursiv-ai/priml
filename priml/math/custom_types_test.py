@@ -232,6 +232,25 @@ def test_compile_resolves_dtype_when_unspecified():
     assert b.dtype == torch.float64
 
 
+def test_a_scalar_argument_survives_a_fullgraph_compile() -> None:
+    """A Python number must convert, not abort the graph.
+
+    The compile branch asserted every argument was already a Tensor, so every
+    helper whose second argument is an ordinary float -- ``softcap(x, 1.0)``,
+    ``soft_threshold``, ``ste_round``, ``sinh_arcsinh``, ``safe_pow`` -- raised
+    inside dynamo under ``fullgraph=True``. Compiled for real rather than with
+    a patched ``is_compiling``, because a patch cannot observe a graph break.
+    """
+
+    @torch.compile(fullgraph=True)
+    def scale(x: Tensor) -> Tensor:
+        a, b = convert_to_tensor(x, 2.0)
+        return a * b
+
+    x = torch.tensor([1.0, 2.0])
+    torch.testing.assert_close(scale(x), torch.tensor([2.0, 4.0]))
+
+
 def test_as_tensors_unrecognized_dtype():
     """``_resolve_dtype`` raises when no precedence entry matches."""
     x = torch.tensor([1.0], dtype=torch.float32)
