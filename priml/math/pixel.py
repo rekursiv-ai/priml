@@ -30,26 +30,67 @@ def rgb2float(
 ) -> Tensor:
     """Convert RGB values from [0, 255] to float in [-1, 1].
 
+    Equivalent to `x.to(float).sub(127.5).div(127.5)`.
+
     Args:
       x: Tensor with RGB values in [0, 255] range.
       dtype: Width of the result. float16 is the default because it halves
         the memory and still round-trips every level exactly through
         ``float2rgb``. float8 does not -- it represents only 80 of the 256.
-      inplace: Scale without allocating a temporary. Cuts peak memory ~40%
-        and is never slower. A no-op under ``torch.compile``. Overwrites the
-        input if no cast was needed.
+      inplace: Also consume the caller's own buffer. Only consulted when no
+        conversion happened -- see below, a converted input is scaled in
+        place regardless, since that buffer is this function's to spend.
+        Saves one allocation the size of the result. Never slower. A no-op
+        under ``torch.compile``, which fuses the expression and allocates
+        once either way.
 
     Returns:
       result: Tensor with values in [-1, 1] range.
 
+    Raises:
+      ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
+        Torch would raise ``a leaf Variable that requires grad is being used
+        in an in-place operation`` from inside the scaling; the argument at
+        fault is named here instead.
+
     """
-    x = convert_to_tensor(x, dtype=dtype)
-    # Divide by 127.5 rather than multiply by 2/255: 127.5 is exactly
-    # representable (255/2) so only the division rounds, while 2/255 has an
-    # infinite binary expansion and rounds twice. Measured 2.7x less total
-    # error over all 256 levels in float32, at the same speed -- the compiler
-    # strength-reduces the constant divide to a reciprocal multiply anyway.
-    return x.div_(127.5).sub_(1.0) if inplace else x / 127.5 - 1.0
+    x_ = convert_to_tensor(x, dtype=dtype)
+    # ``convert_to_tensor`` returns the SAME object when nothing needed
+    # converting, so identity is what separates a buffer this function minted
+    # from the caller's. A minted one is scaled in place unconditionally:
+    # nobody else holds it, and refusing to touch it allocated a second buffer
+    # to protect a temporary -- measured 96 MiB against 32 MiB peak on 16M
+    # uint8 elements widened to float16. ``inplace`` therefore governs only
+    # the case where the buffer belongs to the caller.
+    #
+    # A converted tensor is a non-leaf, so an in-place write to it is legal
+    # even under autograd and yields gradients bit-identical to the
+    # out-of-place path. Only the caller's own leaf is off limits.
+    owned = x_ is not x
+    if inplace and not owned and x_.requires_grad and x_.is_leaf:
+        raise ValueError(
+            "rgb2float cannot scale in place: x is a leaf requiring grad. "
+            "Pass inplace=False, or detach the tensor first.",
+        )
+    # Subtract before dividing. 127.5 is exactly representable (it is 255/2),
+    # so the subtraction cancels exactly in the half-integer domain -- 127 -
+    # 127.5 is -0.5 to the bit -- leaving the division as the only rounding,
+    # at the small magnitude of the result. Dividing first instead rounds
+    # while the value still has magnitude ~1, and the later ``- 1.0`` cannot
+    # undo that absolute error: measured 2.3x the total absolute error over
+    # all 256 levels (8.4x by mean relative error), in every one of
+    # float16/bfloat16/float32/float64.
+    #
+    # Divide rather than multiply by a reciprocal. Neither 1/127.5 nor 2/255
+    # is representable -- both round to 282578800148737/36028797018963968 --
+    # so a reciprocal multiply carries that constant's error into every
+    # element. It agrees with the divide at float16 and bfloat16, whose
+    # mantissas are too coarse to see the difference, and diverges at
+    # float32 and float64. The divide is not strength-reduced away: the two
+    # spellings produce different bits at those widths.
+    if owned or inplace:
+        return x_.sub_(127.5).div_(127.5)
+    return (x_ - 127.5) / 127.5
 
 
 def float2rgb(
@@ -60,38 +101,90 @@ def float2rgb(
 ) -> Tensor:
     """Convert float values from [-1, 1] to RGB in [0, 255].
 
+    Equivalent to `x.mul(127.5).add(127.5).round().clamp(0, 255).to(uint8)`.
+
     Args:
       x: Tensor with float values in [-1, 1] range. Out-of-range values are
         clamped.
       dtype: Width the scaling runs at; ``None`` keeps the input's own, which
-        is what you want. Forcing float32 on float16 input is 13x slower.
-      inplace: Scale without allocating a temporary. Cuts peak memory ~40%
-        and is never slower. A no-op under ``torch.compile``. Overwrites the
-        input if no cast was needed.
+        is what you want. Forcing float32 on float16 input is ~3.7x slower
+        (measured 0.21ms against 0.76ms on 4M CUDA elements). It does buy
+        exactness -- at float16 the widened form matches a correctly-rounded
+        oracle on all 30_721 representable inputs where the native form
+        misses 342 -- but every miss is one uint8 level, so the trade is
+        rarely worth it for pixels. It does not help bfloat16, whose 8
+        mantissa bits are the limit rather than the arithmetic.
+      inplace: Also consume the caller's own buffer. Only consulted when no
+        conversion happened; a converted input is scaled in place regardless,
+        since that buffer is this function's to spend. Saves one allocation
+        the size of the intermediate -- the uint8 result is a fresh buffer
+        either way. Never slower. A no-op under ``torch.compile``.
 
     Returns:
       result: Tensor with uint8 RGB values in [0, 255] range.
+
+    Raises:
+      TypeError: If ``x`` resolves to a non-floating-point dtype.
+      ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
+        Torch would raise ``a leaf Variable that requires grad is being used
+        in an in-place operation`` from inside the scaling; the argument at
+        fault is named here instead.
 
     """
     # The hint fires only for input carrying no dtype, where torch would pick
     # int64 for something like ``[0, 1]`` and the scaling below would fail on
     # an integer tensor. float16 to match ``rgb2float``; both are exact here.
-    x = convert_to_tensor(x, dtype=dtype, dtype_hint=torch.float16)
-    if not x.dtype.is_floating_point:
+    x_ = convert_to_tensor(x, dtype=dtype, dtype_hint=torch.float16)
+    if not x_.dtype.is_floating_point:
         # The hint above fires only for input carrying NO dtype, so an integer
         # tensor slipped through and had its byte values scaled as if they were
         # [-1, 1] floats: uint8 [0, 1, 2] came back [128, 255, 255]. A dtype is
         # metadata, so this check is free.
         raise TypeError(
-            f"float2rgb expects floating-point input in [-1, 1]; got {x.dtype}.",
+            f"float2rgb expects floating-point input in [-1, 1]; got {x_.dtype}.",
         )
+    # See ``rgb2float``: identity separates a buffer this function minted from
+    # the caller's, and only the latter needs permission to overwrite.
+    owned = x_ is not x
+    if inplace and not owned and x_.requires_grad and x_.is_leaf:
+        raise ValueError(
+            "float2rgb cannot scale in place: x is a leaf requiring grad. "
+            "Pass inplace=False, or detach the tensor first.",
+        )
+    # Python float constants, not ``torch.addcmul``. The fused form does round
+    # once rather than twice, and is measurably closer to a correctly-rounded
+    # result -- 15_328 wrong against 15_392 in bfloat16 over every
+    # representable input, 3_810 against 3_917 in float16 -- but it takes only
+    # 0-dim TENSOR operands, which are real memory loads rather than immediates
+    # folded into the kernel. That defeats the scalar fast path: dividing by a
+    # 0-dim tensor measured 3.8x a divide by the same Python float. The net was
+    # 1.8x slower on bfloat16 CPU and 2.2x on float16, the two widths the
+    # decode path actually uses, to move at most one uint8 level on 0.3% of
+    # inputs.
+    #
+    # Scale before offsetting -- the opposite order from ``rgb2float``, and
+    # deliberately not its mirror image. Adding first, ``(x + 1.0) * 127.5``,
+    # rounds while the value is near 1 and then multiplies that error by
+    # 127.5, which costs the round trip: 16 of 256 bfloat16 levels fail to
+    # survive, against 0 here.
+    #
     # Rounded explicitly rather than by folding the half into the offset
     # (``+ 128.0``, letting the cast truncate): that trick is exact for
-    # float16 and float32 but loses 127 of 256 levels in bfloat16, whose 8
-    # mantissa bits cannot hold the sum. Truncating without either biases
-    # every value down, darkening an image on each decode/encode cycle.
-    scaled = x.mul_(127.5).add_(127.5) if inplace else x * 127.5 + 127.5
-    return scaled.round_().clamp_(0.0, 255.0).to(torch.uint8)
+    # float16 and float32 but loses 63 of 256 levels in bfloat16, where the
+    # output range [128, 255] has a spacing of 1.0 and cannot hold the .5 the
+    # truncation is supposed to act on. Rounding half-UP instead (``+ 0.5``
+    # then floor, in the product domain where the half IS exact) is exact on
+    # the 256 lattice points but disagrees with half-to-even on roughly half
+    # of all other inputs, brightening an image by a quarter level per cycle.
+    # Truncating without either biases every value down, darkening it.
+    if owned or inplace:
+        x_ = x_.mul_(127.5).add_(127.5)
+    else:
+        x_ = x_ * 127.5 + 127.5
+    # ``clamp_`` is load-bearing: ``.to(torch.uint8)`` wraps modularly rather
+    # than saturating, so an out-of-range 1.004 came back 0 instead of 255 --
+    # saturated highlights turning black.
+    return x_.round_().clamp_(0.0, 255.0).to(torch.uint8)
 
 
 class ImageShape(NamedTuple):
