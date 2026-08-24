@@ -25,6 +25,7 @@ from torch import Tensor
 
 import torch
 
+from priml.math.pixel import rgb2float
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
@@ -173,7 +174,11 @@ def prepare(
             train=train,
             download=True,
         )
-        media = torch.as_tensor(source.data).moveaxis(-1, -3).float().div_(255)
+        media = rgb2float(
+            torch.as_tensor(source.data).moveaxis(-1, -3).float(),
+            inplace=True,
+            unit_interval=True,
+        )
         media = (media - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(
             1,
             3,

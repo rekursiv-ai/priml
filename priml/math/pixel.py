@@ -25,25 +25,43 @@ if TYPE_CHECKING:
 def rgb2float(
     x: Tensorable,
     *,
-    dtype: torch.dtype = torch.float16,
+    dtype_hint: torch.dtype = torch.float16,
     inplace: bool = False,
+    unit_interval: bool = False,
 ) -> Tensor:
-    """Convert RGB values from [0, 255] to float in [-1, 1].
+    """Convert RGB values from [0, 255] to float on the signed biunit interval.
 
-    Equivalent to `x.to(float).sub(127.5).div(127.5)`.
+    The default target is the closed signed biunit interval [-1, 1];
+    ``unit_interval`` selects the closed unit interval [0, 1] instead.
+    ("Biunit" is the isogeometric-analysis name for [-1, 1] -- Hughes et al.,
+    *Efficient Quadrature for NURBS-based Isogeometric Analysis*. It is rare
+    enough outside that field that "signed" is kept alongside it here.)
+
+    Equivalent to `x.to(float).sub(127.5).div(127.5)`, or with
+    ``unit_interval=True`` to `x.to(float).div(255)`.
 
     Args:
       x: Tensor with RGB values in [0, 255] range.
-      dtype: Width of the result. float16 by default: half the memory of
-        float32, and it still round-trips all 256 levels exactly through
-        ``float2rgb``. float8 does not -- it represents only 80 of them.
+      dtype_hint: Width to use when ``x`` carries none this function can scale
+        in -- a bare list, or the uint8 it exists to leave. A float ``x`` keeps
+        its own width and ignores this, so a caller that already widened to
+        float32 is not silently narrowed back. float16 by default: half the
+        memory of float32, and it still round-trips all 256 levels exactly
+        through ``float2rgb``. float8 does not -- it represents only 80.
       inplace: Permit overwriting the caller's buffer, saving one allocation
         the size of the result. Only consulted when ``x`` needed no
         conversion; a converted input is scaled in place regardless. Never
         slower, and a no-op under ``torch.compile``.
+      unit_interval: Emit the unit interval [0, 1] rather than the signed
+        biunit default. Set it for the range a model's published preprocessing
+        demands (CoTracker and BiRefNet both want it), or ahead of a mean/std
+        normalize, where it keeps the constants as published -- see Notes.
+        Otherwise prefer the default: it is what every decoder in this repo
+        emits, so a mismatch there is silent rather than loud.
 
     Returns:
-      result: Tensor with values in [-1, 1] range.
+      result: Tensor on the closed signed biunit interval [-1, 1], or the
+        closed unit interval [0, 1] when ``unit_interval`` is set.
 
     Raises:
       ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
@@ -61,8 +79,28 @@ def rgb2float(
       value. Proven in ``test_rgb2float_halves_the_error_of_a_unit_interval_
       intermediate``.
 
+      That advantage is against a bare [0, 1] conversion, and it does NOT
+      survive composition with a later rescale. A mean/std normalize is
+      exactly that: routing through [-1, 1] hands the standardization an
+      intermediate twice as large, which it then divides by ``2s`` instead of
+      ``s`` -- same magnitude, same relative error, and the published
+      constants have to be restated as ``2m - 1`` and ``2s``. Prefer
+      ``unit_interval`` in front of a mean/std step (both CIFAR-10 loaders do);
+      prefer the default when the [-1, 1] value is what the model consumes.
+      Either way [0, 1] round-trips all 256 levels on its own, proven in
+      ``test_the_unit_pixel_pair_is_an_exact_round_trip``.
+
     """
-    x_ = convert_to_tensor(x, dtype=dtype)
+    x_ = convert_to_tensor(x, dtype_hint=dtype_hint)
+    # ``dtype_hint`` fires only for input carrying no dtype at all, so an
+    # integer tensor arrives here still integral and the scaling below would
+    # fail as ``result type Float can't be cast to the desired output type
+    # Byte``. Widening is this function's whole purpose, so do it here; a
+    # float input already answered the question and is left alone.
+    if not x_.dtype.is_floating_point:
+        # Always allocates -- integer to float is never a no-op cast -- which
+        # is what keeps the identity test below sound.
+        x_ = x_.to(dtype_hint)
     # ``convert_to_tensor`` returns the SAME object when nothing needed
     # converting, so identity is what distinguishes a buffer this function
     # minted from the caller's. A minted one is unaliased and non-leaf, so
@@ -75,16 +113,18 @@ def rgb2float(
             "rgb2float cannot scale in place: x is a leaf requiring grad. "
             "Pass inplace=False, or detach the tensor first.",
         )
+    # Divide; do not multiply by a reciprocal. Neither 1/127.5, 2/255, nor
+    # 1/255 is representable, so a reciprocal multiply injects that constant's
+    # error into every element. The compiler does not strength-reduce this away
+    # -- the two spellings differ in the low bits at float32 and float64.
+    if unit_interval:
+        # No offset to apply, so the divide is the only step and 255 is exact.
+        return x_.div_(255.0) if owned or inplace else x_ / 255.0
     # Subtract before dividing, so the division is the only rounding step and
     # it happens at the small magnitude of the result. 127.5 is 255/2, hence
     # exact, so the subtraction is exact on every integer level. Note this is
     # the same ORDER torchvision's ``normalize`` uses (``sub_`` then ``div_``);
     # what differs is the domain it runs in -- see this function's Notes.
-    #
-    # Divide; do not multiply by a reciprocal. Neither 1/127.5 nor 2/255 is
-    # representable, so a reciprocal multiply injects that constant's error
-    # into every element. The compiler does not strength-reduce this away --
-    # the two spellings differ in the low bits at float32 and float64.
     if owned or inplace:
         return x_.sub_(127.5).div_(127.5)
     return (x_ - 127.5) / 127.5
@@ -95,14 +135,22 @@ def float2rgb(
     *,
     float_dtype: torch.dtype | None = None,
     inplace: bool = False,
+    unit_interval: bool = False,
 ) -> Tensor:
-    """Convert float values from [-1, 1] to RGB in [0, 255].
+    """Convert float values on the signed biunit interval to RGB in [0, 255].
 
-    Equivalent to `x.mul(127.5).add(127.5).round().clamp(0, 255).to(uint8)`.
+    The default source is the closed signed biunit interval [-1, 1];
+    ``unit_interval`` reads the closed unit interval [0, 1] instead. See
+    ``rgb2float`` for the term.
+
+    Equivalent to `x.mul(127.5).add(127.5).round().clamp(0, 255).to(uint8)`,
+    or with ``unit_interval=True`` to
+    `x.mul(255).round().clamp(0, 255).to(uint8)`.
 
     Args:
-      x: Tensor with float values in [-1, 1] range. Out-of-range values are
-        clamped.
+      x: Tensor of floats on the signed biunit interval [-1, 1], or on the
+        unit interval [0, 1] when ``unit_interval`` is set. Out-of-range
+        values are clamped.
       float_dtype: Width the scaling runs at, NOT the width of the result --
         that is always uint8. (Spelled differently from ``rgb2float``'s
         ``dtype``, which does name the output, so that ``dtype=torch.uint8``
@@ -116,6 +164,12 @@ def float2rgb(
         way. Only consulted when ``x`` needed no conversion; a converted
         input is scaled in place regardless. Never slower, and a no-op under
         ``torch.compile``.
+      unit_interval: Read ``x`` on the unit interval rather than the signed
+        biunit default. Must match the range the value actually carries; it
+        cannot be inferred, since an all-dark [-1, 1] frame and an all-dark
+        [0, 1] frame are both plausible data. Getting it wrong is silent: a
+        [0, 1] value read as biunit lands in the top half of the byte range,
+        washing the image out rather than raising.
 
     Returns:
       result: Tensor with uint8 RGB values in [0, 255] range.
@@ -147,7 +201,8 @@ def float2rgb(
         # floats: uint8 [0, 1, 2] would come back [128, 255, 255]. Reading a
         # dtype is metadata-only, so this guard is free.
         raise TypeError(
-            f"float2rgb expects floating-point input in [-1, 1]; got {x_.dtype}.",
+            "float2rgb expects floating-point input in "
+            f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x_.dtype}.",
         )
     # See ``rgb2float``: identity separates a buffer this function minted from
     # the caller's, and only the latter needs permission to overwrite. The
@@ -165,10 +220,14 @@ def float2rgb(
     # ``addcmul`` accepts only 0-dim TENSOR scalars. Those are memory loads
     # rather than immediates folded into the kernel, which forfeits the scalar
     # fast path and costs ~2x on the float16/bfloat16 widths decode uses.
+    #
+    # The unit interval needs no offset, so it is one multiply -- and unlike
+    # the forward direction there is no reciprocal to avoid, 255 being exact.
+    scale = 255.0 if unit_interval else 127.5
     if owned or inplace:
-        x_ = x_.mul_(127.5).add_(127.5)
+        x_ = x_.mul_(scale) if unit_interval else x_.mul_(scale).add_(127.5)
     else:
-        x_ = x_ * 127.5 + 127.5
+        x_ = x_ * scale if unit_interval else x_ * scale + 127.5
     # ``round_`` exists for ARBITRARY input, not for the round trip: a value
     # from ``rgb2float`` is already integral here, so truncation reproduces all
     # 256 levels and looks correct. Generated output is off that lattice, where
