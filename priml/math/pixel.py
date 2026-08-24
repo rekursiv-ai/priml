@@ -96,7 +96,7 @@ def rgb2float(
 def float2rgb(
     x: Tensorable,
     *,
-    dtype: torch.dtype | None = None,
+    float_dtype: torch.dtype | None = None,
     inplace: bool = False,
 ) -> Tensor:
     """Convert float values from [-1, 1] to RGB in [0, 255].
@@ -106,14 +106,18 @@ def float2rgb(
     Args:
       x: Tensor with float values in [-1, 1] range. Out-of-range values are
         clamped.
-      dtype: Width the scaling runs at; ``None`` keeps the input's own, which
-        is what you want. Forcing float32 on float16 input is ~3.7x slower
-        (measured 0.21ms against 0.76ms on 4M CUDA elements). It does buy
-        exactness -- at float16 the widened form matches a correctly-rounded
-        oracle on all 30_721 representable inputs where the native form
-        misses 342 -- but every miss is one uint8 level, so the trade is
-        rarely worth it for pixels. It does not help bfloat16, whose 8
-        mantissa bits are the limit rather than the arithmetic.
+      float_dtype: Width the scaling runs at, NOT the width of the result --
+        which is always uint8. Named apart from ``rgb2float``'s ``dtype``,
+        where that argument does name the output, because the obvious reading
+        of ``dtype=torch.uint8`` here raised a TypeError complaining about the
+        INPUT. ``None`` keeps the input's own width, which is what you want:
+        forcing float32 on float16 input is ~3.7x slower (measured 0.21ms
+        against 0.76ms on 4M CUDA elements). It does buy exactness -- at
+        float16 the widened form matches a correctly-rounded oracle on all
+        30_721 representable inputs where the native form misses 342 -- but
+        every miss is one uint8 level, so the trade is rarely worth it for
+        pixels. It does not help bfloat16, whose 8 mantissa bits are the
+        limit rather than the arithmetic.
       inplace: Also consume the caller's own buffer. Only consulted when no
         conversion happened; a converted input is scaled in place regardless,
         since that buffer is this function's to spend. Saves one allocation
@@ -125,16 +129,12 @@ def float2rgb(
 
     Raises:
       TypeError: If ``x`` resolves to a non-floating-point dtype.
-      ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
-        Torch would raise ``a leaf Variable that requires grad is being used
-        in an in-place operation`` from inside the scaling; the argument at
-        fault is named here instead.
 
     """
     # The hint fires only for input carrying no dtype, where torch would pick
     # int64 for something like ``[0, 1]`` and the scaling below would fail on
     # an integer tensor. float16 to match ``rgb2float``; both are exact here.
-    x_ = convert_to_tensor(x, dtype=dtype, dtype_hint=torch.float16)
+    x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
     if not x_.dtype.is_floating_point:
         # The hint above fires only for input carrying NO dtype, so an integer
         # tensor slipped through and had its byte values scaled as if they were
@@ -144,13 +144,12 @@ def float2rgb(
             f"float2rgb expects floating-point input in [-1, 1]; got {x_.dtype}.",
         )
     # See ``rgb2float``: identity separates a buffer this function minted from
-    # the caller's, and only the latter needs permission to overwrite.
+    # the caller's, and only the latter needs permission to overwrite. No
+    # autograd guard here, unlike ``rgb2float``: the result is uint8, so it
+    # carries no grad and nothing differentiates through this function. A
+    # caller donating a leaf that requires grad has asked for something
+    # incoherent, and torch's own in-place error says so.
     owned = x_ is not x
-    if inplace and not owned and x_.requires_grad and x_.is_leaf:
-        raise ValueError(
-            "float2rgb cannot scale in place: x is a leaf requiring grad. "
-            "Pass inplace=False, or detach the tensor first.",
-        )
     # Python float constants, not ``torch.addcmul``. The fused form does round
     # once rather than twice, and is measurably closer to a correctly-rounded
     # result -- 15_328 wrong against 15_392 in bfloat16 over every
