@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from fractions import Fraction
 from io import BytesIO
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
@@ -8,6 +10,19 @@ from PIL import Image
 import numpy as np
 import pytest
 import torch
+
+
+if TYPE_CHECKING:
+    from torchvision.transforms.functional import convert_image_dtype
+else:
+    # 433ms measured, and only the two baseline-comparison tests below touch
+    # torchvision; a top-level import bills every other test in the module.
+    from wrapt import lazy_import
+
+    convert_image_dtype = lazy_import(
+        "torchvision.transforms.functional",
+        "convert_image_dtype",
+    )
 
 from priml.math.pixel import (
     compute_video_shapes,
@@ -105,6 +120,96 @@ def test_float2rgb_clamp():
     # Should clamp to [0, 255]
     assert result[0] == 0
     assert result[2] == 255
+
+
+def test_rgb2float_halves_the_error_of_a_unit_interval_intermediate():
+    """Scaling straight to [-1, 1] beats routing through [0, 1], 2x, everywhere.
+
+    Both public baselines take the two-step route. diffusers divides by 255
+    (``VaeImageProcessor.pil_to_numpy``) then applies ``2.0 * v - 1.0``
+    (``normalize``); torchvision reaches [0, 1] via ``convert_image_dtype``
+    then subtracts and divides by 0.5 (``normalize(mean=.5, std=.5)``). The
+    two produce bit-identical output, asserted below, so this is one shared
+    design rather than two.
+
+    The mechanism is the intermediate, NOT the sub/div order -- torchvision's
+    ``normalize`` is itself ``sub_(mean).div_(std)``, the same order as here.
+    Landing on [0, 1] rounds while the value has magnitude ~1; the doubling
+    that follows scales that committed absolute error along with the value,
+    and nothing downstream can recover it. Scaling once from the integer
+    domain leaves the divide as the only rounding, at the magnitude of the
+    result.
+
+    The factor is 2 because that is literally the second step's multiplier,
+    which is why it holds at every width rather than at some and not others.
+    Error is measured against exact ``Fraction`` values, so no float oracle
+    sits between the claim and the assertion.
+    """
+    levels = torch.arange(256, dtype=torch.uint8)
+    exact = [Fraction(int(v) * 2 - 255, 255) for v in levels]
+
+    def worst_error(got: torch.Tensor) -> float:
+        return float(
+            max(abs(Fraction(float(g)) - e) for g, e in zip(got, exact, strict=True))
+        )
+
+    for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        diffusers = 2.0 * (levels.to(dtype) / 255.0) - 1.0
+        torchvision = convert_image_dtype(levels, dtype).sub_(0.5).div_(0.5)
+        assert torch.equal(diffusers, torchvision), (
+            f"{dtype}: the two baselines were assumed to agree bitwise"
+        )
+        ours = worst_error(rgb2float(levels, dtype=dtype))
+        assert ours > 0, f"{dtype}: exact output would make the ratio meaningless"
+        assert worst_error(diffusers) / ours >= 2.0, (
+            f"{dtype}: ours {ours:.3e} vs baseline {worst_error(diffusers):.3e}"
+        )
+
+
+def test_float2rgb_round_trips_where_both_baselines_lose_levels():
+    """Every level survives at bfloat16/float16; the baselines drop some.
+
+    Both baselines denormalize to [0, 1] first and quantize from there, which
+    is what costs them -- the unit interval has to represent 256 levels inside
+    a range where the float spacing is coarse relative to one level.
+
+    torchvision's ``convert_image_dtype`` then multiplies by ``256 - 1e-3``
+    and truncates. That epsilon exists to stop 1.0 mapping to 256, and it is
+    invisible at bfloat16 and float16: the constant rounds to exactly 256.0,
+    so white overflows and the uint8 cast WRAPS to 0 rather than saturating.
+    White pixels come back black, which is worse than a rounding difference
+    and is why this test asserts equality rather than a tolerance.
+
+    diffusers rounds, like we do, and matches us at float16 and float32. It
+    still loses 16 levels at bfloat16, from the same [0, 1] intermediate.
+    """
+    levels = torch.arange(256, dtype=torch.uint8)
+    # Exact counts, not ``> 0``: a threshold would still pass if a torchvision
+    # upgrade turned a 128-level wrap into a one-level rounding difference,
+    # and the two failures call for opposite responses.
+    expected_misses = {
+        torch.bfloat16: (16, 128),
+        torch.float16: (0, 24),
+        torch.float32: (0, 0),
+    }
+    for dtype, (diffusers_miss, torchvision_miss) in expected_misses.items():
+        latent = rgb2float(levels, dtype=dtype)
+        assert torch.equal(float2rgb(latent.clone()), levels), f"{dtype}: ours"
+
+        unit = (latent * 0.5 + 0.5).clamp(0, 1)
+        assert int((unit.mul(255).round().to(torch.uint8) != levels).sum()) == (
+            diffusers_miss
+        ), f"{dtype}: diffusers"
+        assert int((convert_image_dtype(unit, torch.uint8) != levels).sum()) == (
+            torchvision_miss
+        ), f"{dtype}: torchvision"
+
+    # The wrap, stated directly: at reduced precision the guard constant IS
+    # 256.0, so the brightest input leaves the uint8 range entirely.
+    for dtype in (torch.bfloat16, torch.float16):
+        scale = torch.tensor(255.0 + 1.0 - 1e-3, dtype=dtype)
+        assert float(scale) == 256.0, dtype
+        assert int((torch.tensor(1.0, dtype=dtype) * scale).to(torch.uint8)) == 0
 
 
 def test_compute_video_shapes():
