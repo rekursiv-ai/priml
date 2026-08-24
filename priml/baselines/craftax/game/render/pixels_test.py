@@ -8,7 +8,7 @@ shows up as an exact colour that should not be there.
 
 It also keeps the unit tier offline. Downloading 143 PNGs to assert that a
 distant mob is not drawn would make every run depend on GitHub being up.
-``test_the_real_sprites_draw`` covers the genuine assets and is marked
+``test_a_real_sprite_downloads_and_loads`` covers a genuine asset and is marked
 ``integration`` for that reason.
 """
 
@@ -27,7 +27,7 @@ import torch
 from priml.baselines.craftax.conftest import generated_world
 from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
-from priml.baselines.craftax.game.render import sprites
+from priml.baselines.craftax.game.render import assets, sprites
 from priml.baselines.craftax.game.render.pixels import Renderer
 from priml.baselines.craftax.game.state import EnvState, empty_state
 
@@ -237,26 +237,26 @@ def test_a_degenerate_tile_size_is_refused(sprite_dir: Path) -> None:
         Renderer(block_pixels=0, asset_dir=sprite_dir)
 
 
-@pytest.mark.cli_python_subprocess
-def test_the_real_sprites_draw() -> None:
-    """The genuine assets download, load, and produce a plausible frame.
+@pytest.mark.network_github
+def test_a_real_sprite_downloads_and_loads(tmp_path: Path) -> None:
+    """One genuine asset downloads and decodes as nontrivial pixel art.
 
     Marked ``integration`` because it reaches GitHub, and it SKIPS rather than
     fails when that fetch does not succeed. The distinction matters: this test
-    asserts the sprites are correct, not that the network is up, and a CI
-    runner whose connection GitHub resets has told us nothing about the
-    sprites. Everything above runs offline against generated ones.
+    asserts the asset path works, not that the network is up. Generated sprites
+    above already exercise the renderer's loading, scaling, and composition;
+    downloading all 143 identical-contract files added no independent signal.
     """
-    rows, columns = constants.OBS_DIM
     try:
-        renderer = Renderer(block_pixels=16)
+        path = assets.fetch(sprites.PLAYER_SPRITES[0], directory=tmp_path)
     except RuntimeError as error:  # pragma: no cover -- network-dependent
         pytest.skip(f"could not fetch the Craftax sprites: {error}")
-    frame = renderer.render(generated_world(num_envs=1, seed=0))
-    assert frame.shape == (rows * 16, columns * 16, 3)
-    # Art, not a flat fill: a frame of one colour would mean every sprite
-    # failed to load and the viewer silently drew background.
-    assert len(np.unique(frame.reshape(-1, 3), axis=0)) > 16
+    image = pygame.image.load(str(path))
+    assert image.get_width() > 0
+    assert image.get_height() > 0
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "3dc10f41b6d9de35fbf187198fbd12ec7063999778c69fe0610b46be7e580e42"
+    )
 
 
 def test_constructing_a_renderer_requests_the_headless_driver(
