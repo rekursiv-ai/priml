@@ -51,7 +51,7 @@ from priml.model.transformer import TransformerBlock
 
 
 class Qwen3(CausalLM):
-    """Qwen3 dense causal LM — ``CausalLM`` pre-wired for the Qwen3 arch."""
+    """Qwen3 dense causal LM -- ``CausalLM`` pre-wired for the Qwen3 arch."""
 
     class Config(Makes["Qwen3"], CausalLM.Config, kw_only=False):
         vocab_size: int = 151_936
@@ -75,34 +75,21 @@ class Qwen3(CausalLM):
                     causal=True,
                     share_qk_norm=False,
                     rope=RoPE.Config(
-                        frequencies=HuggingFaceFrequencies.Config(base=1_000_000.0),
+                        frequencies=HuggingFaceFrequencies.Config(base=1e6),
                     ),
                     norm_qk=RMSNorm.Config(elementwise_affine=True),
                 ),
-                ffn=SwiGLU.Config(gate=True, bias=False, channels_hidden=3_072),
+                ffn=SwiGLU.Config(
+                    gate=True,
+                    bias=False,
+                    channels_hidden=3_072,
+                ),
                 norm1=RMSNorm.Config(elementwise_affine=True),
                 norm2=RMSNorm.Config(elementwise_affine=True),
                 prenorm=True,
             ),
         )
-        """Block template (broadcast ``num_layers`` times), or a list.
-
-        Defaults are Qwen3-0.6B's geometry, so ``Qwen3.Config()`` builds a
-        loadable model -- and so ``channels_in`` and ``num_layers`` above are
-        ordinary knobs a caller may change without restating the rest.
-
-        ONE slot rather than a ``norm`` and a ``rope`` beside a head count:
-        each of those belongs to something the block already holds, and
-        hoisting them flattened the tree the reader descends one node at a
-        time. The head geometry is ``block.attn.heads`` /
-        ``block.attn.channels_head`` / ``block.attn.num_heads_kv``, the
-        epsilon is ``block.norm1.eps``, the rotary base is
-        ``block.attn.rope.frequencies.base`` -- each named by its position,
-        and each editable without this class knowing the field exists.
-
-        ``finalize`` copies the template per layer and pushes only the widths
-        the PARENT owns, so an edit to the template survives it.
-        """
+        """Block template (broadcast ``num_layers`` times), or a list."""
 
         @classmethod
         def from_hf(cls, config: dict[str, Any]) -> Self:
