@@ -45,14 +45,16 @@ def test_float2rgb():
 def test_the_pixel_pair_is_an_exact_round_trip():
     """Every uint8 level must survive uint8 -> float -> uint8, in either width.
 
-    Truncating instead of rounding biases every value down by up to a level,
-    so an encode/decode cycle darkens the image and repeated cycles drift.
-    Measured before the fix: 4 of 256 levels came back one low in float16.
+    This is the weakest of the pixel guarantees, and passing it does not mean
+    the conversion rounds correctly: a lattice value is already integral after
+    the scaling, so plain truncation also returns all 256. What the round
+    buys is arbitrary input, which only ``float2rgb``'s own docstring covers.
     """
     levels = torch.arange(256, dtype=torch.uint8)
     # bfloat16 is the one that catches a rounding shortcut: folding the half
     # into the offset (``+ 128.0`` instead of ``round()``) is exact in every
-    # other width and loses 127 of these 256 in this one.
+    # other width and loses 63 of these 256 in this one, because the output
+    # range [128, 255] has a spacing of 1.0 there.
     for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
         assert torch.equal(float2rgb(rgb2float(levels, dtype=dtype)), levels)
 

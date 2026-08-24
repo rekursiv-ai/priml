@@ -167,15 +167,34 @@ def float2rgb(
     # 127.5, which costs the round trip: 16 of 256 bfloat16 levels fail to
     # survive, against 0 here.
     #
-    # Rounded explicitly rather than by folding the half into the offset
-    # (``+ 128.0``, letting the cast truncate): that trick is exact for
-    # float16 and float32 but loses 63 of 256 levels in bfloat16, where the
-    # output range [128, 255] has a spacing of 1.0 and cannot hold the .5 the
-    # truncation is supposed to act on. Rounding half-UP instead (``+ 0.5``
-    # then floor, in the product domain where the half IS exact) is exact on
-    # the 256 lattice points but disagrees with half-to-even on roughly half
-    # of all other inputs, brightening an image by a quarter level per cycle.
-    # Truncating without either biases every value down, darkening it.
+    # ``round_`` is for ARBITRARY input, not for the round trip. A value that
+    # came from ``rgb2float`` is already integral after this scaling, so
+    # truncating returns all 256 levels and survives ten decode/encode cycles
+    # with zero pixels changed -- which is why the common spelling online omits
+    # the round and looks correct. Generated output is not on that lattice, and
+    # there truncation is one-sided: measured over 2^20 random values its error
+    # ran [-1.0, 0.0] with mean -0.4998, against [-0.5, +0.5] and mean +0.0001
+    # here. That is a systematic half-level darkening of every generated image,
+    # not noise, so it does not average out. The round costs 5-10% (1.09x on
+    # bfloat16 CPU, 1.05x on float32 CPU, and 0.85x -- free -- on bfloat16
+    # CUDA), measured by interleaving both variants within one session.
+    #
+    # Two cheaper spellings, both rejected:
+    #
+    # Folding the half into the offset (``+ 128.0``, letting the cast
+    # truncate) is exact for float16 and float32 but loses 63 of 256 levels in
+    # bfloat16. Its output range [128, 255] has a spacing of 1.0, so the sum
+    # snaps to an integer during the add and the .5 the truncation was meant to
+    # act on is gone before the cast sees it: level 129 computes 1.5 + 128.0,
+    # lands on 130.0, and truncates to 130.
+    #
+    # Rounding half-UP (``+ 0.5`` then floor, applied in the product domain
+    # where the half IS exactly representable) is exact on all 256 lattice
+    # points, because every one of them is a tie and the bias is invisible
+    # there. Off the lattice it disagrees with half-to-even on roughly half of
+    # all inputs -- 31_168 of 32_513 representable bfloat16 values -- and
+    # brightens by a quarter level. The lattice test alone would have shipped
+    # it.
     if owned or inplace:
         x_ = x_.mul_(127.5).add_(127.5)
     else:
