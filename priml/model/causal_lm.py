@@ -59,15 +59,6 @@ class CausalLM(nn.Module):
 
         @property
         def channels_out(self) -> int:
-            """Width this module emits.
-
-            Derived, not stored: the residual stream is carried straight
-            through, so an ``in``/``out`` pair that could only ever hold the
-            same number is one field too many. A read-only property states
-            that -- ``propagate_attr`` skips it rather than writing
-            (``model/custom_types.py:229``), so a parent pushing a width in
-            cannot silently disagree with the width coming out.
-            """
             return self.channels_in
 
         block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(

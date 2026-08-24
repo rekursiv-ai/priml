@@ -171,6 +171,10 @@ class ValueGatedAttention(nn.Module):
         depth: int = -1
         """Block depth index, accepted for the priml block contract."""
 
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
         @override
         def finalize(self) -> Self:
             if self.channels_head <= 0 or self.channels_head % 2:

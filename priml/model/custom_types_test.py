@@ -8,6 +8,7 @@ import pytest
 
 from priml.model.attention import SelfAttention
 from priml.model.custom_types import ChannelsIn, ChannelsOut, propagate_attr
+from priml.model.moe import Router
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 
@@ -26,13 +27,31 @@ def test_propagate_readonly_property_is_noop():
 
 
 def test_propagate_non_participant_skipped():
-    """A child not implementing the gating Protocol opts out silently."""
-    cfg = RMSNorm.Config(channels_in=32)
-    # RMSNorm lacks channels_out and does not satisfy ChannelsOut -> skipped.
+    """A child not implementing the gating Protocol opts out silently.
+
+    ``Router`` is the stand-in because it genuinely emits no width: it returns
+    ``(weights, indices, logits)``, so it declares no ``channels_out`` for a
+    parent to push into. A norm was used here once and stopped being a
+    non-participant the moment norms gained the derived property.
+    """
+    cfg = Router.Config(channels_in=32)
     assert not isinstance(cfg, ChannelsOut)
     propagate_attr(cfg, "channels_out", 999, protocol=ChannelsOut)
     propagate_attr(cfg, "depth", 7)  # no Protocol governs depth -> skipped
     assert not hasattr(cfg, "channels_out")
+
+
+def test_propagate_readonly_property_is_noop_for_a_norm():
+    """A norm's ``channels_out`` tracks ``channels_in`` and refuses a push.
+
+    Norms satisfy :class:`ChannelsOut` so a parent can READ the width they
+    emit; the property has no setter, so the same parent cannot make the two
+    widths disagree.
+    """
+    cfg = RMSNorm.Config(channels_in=32)
+    assert isinstance(cfg, ChannelsOut)
+    propagate_attr(cfg, "channels_out", 999, protocol=ChannelsOut)
+    assert cfg.channels_out == 32
 
 
 def test_propagate_missing_attr_raises():
