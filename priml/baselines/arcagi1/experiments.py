@@ -97,7 +97,7 @@ def exp000() -> ArcTrainLoop:
 
     batch_size = 256
     model = cfg.step.model
-    model.hidden_size = 512
+    model.channels_in = 512
     model.num_layers = 2
     model.vocab_size = VOCAB_SIZE
 
@@ -229,7 +229,7 @@ def exp_smoke() -> ArcTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
-    cfg.step.model.hidden_size = 32
+    cfg.step.model.channels_in = 32
     cfg.step.model.num_layers = 1
     cfg.dataset.batch_size = 8
     cfg.dataset.eval_batch_size = 8

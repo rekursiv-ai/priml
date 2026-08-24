@@ -38,7 +38,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import GridEmbedding, HasHiddenSize
+from priml.baselines.sudoku.embedding import GridEmbedding, HasChannels
 from priml.model.custom_types import ChannelsIn
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
@@ -224,7 +224,7 @@ class SudokuNet(nn.Module):
     class Config(Fig["SudokuNet"]):
         """Width, depth, and the three injected slots."""
 
-        hidden_size: int = 512
+        channels_in: int = 512
         """Token embedding and latent-state width."""
 
         num_layers: int = 2
@@ -233,7 +233,7 @@ class SudokuNet(nn.Module):
         embedding: Makeable[GridEmbedding] = field(
             default_factory=GridEmbedding.Config,
         )
-        """Input embedding: tokens plus whatever additive channels apply."""
+        """Input embedding: tokens plus whatever additive channels_in apply."""
 
         block: Makeable[nn.Module] = field(
             default_factory=lambda: TransformerBlock.Config(prenorm=False),
@@ -306,14 +306,14 @@ class SudokuNet(nn.Module):
         def finalize(self) -> Self:
             embedding = self.embedding
             assert isinstance(embedding, GridEmbedding.Config)
-            if embedding.hidden_size == -1:
-                embedding.hidden_size = self.hidden_size
+            if embedding.channels_in == -1:
+                embedding.channels_in = self.channels_in
             embedding.vocab_size = self.vocab_size
             propagate = self.block
             if isinstance(propagate, ChannelsIn) and propagate.channels_in == -1:
-                propagate.channels_in = self.hidden_size
-            if isinstance(self.prefix, HasHiddenSize) and self.prefix.hidden_size == -1:
-                self.prefix.hidden_size = self.hidden_size
+                propagate.channels_in = self.channels_in
+            if isinstance(self.prefix, HasChannels) and self.prefix.channels == -1:
+                self.prefix.channels = self.channels_in
             if self.num_prefix_tokens == -1:
                 self.num_prefix_tokens = _count_prefix_tokens(self.prefix)
             return super().finalize()
@@ -321,7 +321,7 @@ class SudokuNet(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
-        c = config.hidden_size
+        c = config.channels_in
         # Construction order fixes the global-RNG draw order, so a seeded init
         # is reproducible: embedding -> head -> blocks -> latent inits. The halt
         # head draws nothing (zeros and a constant bias).
@@ -545,8 +545,8 @@ def _detach_pair(
     return None if pair is None else (pair[0].detach(), pair[1].detach())
 
 
-def _latent_init(hidden_size: int) -> Tensor:
+def _latent_init(channels_in: int) -> Tensor:
     """A ``[1, C]`` learned-ish starting latent, unit-scaled."""
-    w = torch.empty(1, hidden_size)
+    w = torch.empty(1, channels_in)
     truncated_normal(w, std=1.0, depth=-1, variance_correction=True)
     return w

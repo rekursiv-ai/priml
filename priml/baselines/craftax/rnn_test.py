@@ -14,7 +14,7 @@ def _model(**overrides: int) -> ActorCriticRNN:
     config = ActorCriticRNN.Config()
     config.observation_size = 12
     config.num_actions = 5
-    config.hidden_size = 16
+    config.channels_in = 16
     for name, value in overrides.items():
         setattr(config, name, value)
     return config.make()
@@ -173,7 +173,7 @@ def test_the_policy_head_starts_near_uniform() -> None:
     assert bool(torch.isfinite(value).all())
 
 
-@pytest.mark.parametrize("field", ["observation_size", "num_actions", "hidden_size"])
+@pytest.mark.parametrize("field", ["observation_size", "num_actions", "channels_in"])
 def test_a_degenerate_dimension_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match="positive"):
         _model(**{field: 0})

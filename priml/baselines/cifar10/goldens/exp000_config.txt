@@ -1,0 +1,120 @@
+Cifar10TrainLoop(
+                study_name='cifar10',
+                experiment_name='exp000',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/cifar10/exp000'),
+                doc='',
+                step=Cifar10TrainStep.Config(
+                │       model=ResNet.Config(
+                │               channels_in=3,
+                │               channels_hidden=(64, 128, 256),
+                │               channels_out=10,
+                │               block=ResidualBlock.Config(
+                │                       channels_in=-1,
+                │                       channels_out=-1,
+                │                       stride=1,
+                │                       activation=<built-in method relu of type object at 0x0defaced0def>,
+                │                       norm_momentum=0.1
+                │               ),
+                │               blocks_per_stage=2,
+                │               activation=<built-in method relu of type object at 0x0defaced0def>,
+                │               norm_momentum=0.1,
+                │               proj_out=None
+                │       ),
+                │       optimizer=CompositeOptimizer.Config(
+                │               optimizers=[
+                │                       PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adamw.AdamW'>, lr=0.001, betas=(0.9, 0.999), weight_decay=0.05)
+                │               ],
+                │               select=[],
+                │               require_total=True,
+                │               drop_empty=False
+                │       ),
+                │       loss=SimpleLoss.Config(
+                │               loss_fn=<function binary_cross_entropy_with_logits at 0x0defaced0def>,
+                │               target_key='label',
+                │               kwargs={'reduction': 'none'}
+                │       ),
+                │       accumulate_grad_batches=1,
+                │       drop_partial_accumulation_on_epoch_end=True,
+                │       train_budget_steps=inf,
+                │       train_budget_sec=inf,
+                │       train_budget_epochs=inf,
+                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function constant at 0x0defaced0def>),
+                │       parallelism=NoParallel.Config(device='auto'),
+                │       model_quantization=NoModelQuantization.Config(),
+                │       activation_memoization=DefaultActivationStorage.Config(),
+                │       compile=PartialConfig(<class 'functools.partial'>, <function compile at 0x0defaced0def>, fullgraph=True),
+                │       ema=NoEMA.Config(),
+                │       gradient_clip_norm=inf,
+                │       device_init='eager',
+                │       dtype_autocast=None,
+                │       autocast_cache_enabled=False,
+                │       total_train_steps=2_910,
+                │       schedule=PartialConfig(<class 'functools.partial'>, <function cosine at 0x0defaced0def>),
+                │       warmup_fraction=0.02,
+                │       label_smoothing=0.1,
+                │       translate_pad=4,
+                │       cutout_size=0,
+                │       derandomized_flip=False,
+                │       use_tta=False,
+                │       whiten_num_images=5_000,
+                │       whiten_cache_path='',
+                │       whiten_decompose=<function pca_eigh at 0x0defaced0def>
+                ),
+                dataset=Cifar10Data.Config(
+                        base_dir='/opt/scratch',
+                        working_dir=PosixPath('/opt/scratch/datasets/cifar10'),
+                        batch_size=512,
+                        eval_batch_size=1_000,
+                        drop_last=False,
+                        device='auto',
+                        dtype=torch.float32
+                ),
+                metrics={'accuracy': TopK.Config(k_values=[1])},
+                checkpointing=Checkpointer.Config(
+                        base_dir=PosixPath('/opt/scratch/runs/cifar10/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/cifar10/exp000/checkpoints'),
+                        filename='step_{step:08d}.pt',
+                        save_every=1_000,
+                        keep_last_n=-1,
+                        keep_every=0,
+                        storer=SyncLocalStateDictStorer.Config(),
+                        resume=True,
+                        resume_step=-1,
+                        allow_checkpoint_overwrite=False
+                ),
+                profiling=None,
+                phase_timer=PhaseTimer.Config(
+                        enabled=False,
+                        torch_profile=False,
+                        base_dir=PosixPath('/opt/scratch/runs/cifar10/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/cifar10/exp000/profiling'),
+                        heartbeat_interval_sec=30.0,
+                        cuda_events=False
+                ),
+                tracker=None,
+                max_steps=2_910,
+                max_epochs=inf,
+                max_time=inf,
+                max_time_kind='wall',
+                max_eval_time=inf,
+                eval_stop_on_time_limit=False,
+                num_steps_eval=97,
+                num_steps_log=10,
+                early_train_log_steps=100,
+                phase_heartbeat_sec=20.0,
+                eval_every_epoch=True,
+                eval_extras_every_eval=False,
+                eval_warmup_batches=0,
+                eval_only=False,
+                restore_rng_state=True,
+                seed=None,
+                num_steps_garbage_collect=inf,
+                mesh_dim_model_seed='pp',
+                mesh_dim_data_seed='dp',
+                runtime=SingleProcess.Config(
+                        device='auto',
+                        deterministic=False,
+                        float32_matmul_precision=None
+                )
+        )

@@ -97,7 +97,7 @@ def exp000() -> SudokuTrainLoop:
     # sequence.
     embedding.channels = [FactoredPositions.Config()]
     cfg.step.model.embedding = embedding
-    cfg.step.model.hidden_size = 512
+    cfg.step.model.channels_in = 512
     cfg.step.model.num_layers = 2
 
     cfg.dataset.batch_size = 384
@@ -199,7 +199,7 @@ def exp_smoke() -> SudokuTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
-    cfg.step.model.hidden_size = 32
+    cfg.step.model.channels_in = 32
     cfg.step.model.num_layers = 1
     cfg.dataset.batch_size = 8
     cfg.dataset.num_train_puzzles = 4

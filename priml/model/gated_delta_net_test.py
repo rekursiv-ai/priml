@@ -105,6 +105,46 @@ def test_gated_delta_net_arbitrary_leading_dims():
     assert out.shape == (2, 3, 8, 64)
 
 
+def test_gated_delta_net_rejects_every_degenerate_dimension():
+    """Each count is checked, not just ``heads_k``.
+
+    A zero elsewhere reached torch and failed as a tensor-shape error naming
+    no config field: ``heads_v=0`` built a zero-width projection,
+    ``conv_kernel_size=0`` produced negative padding.
+    """
+    with pytest.raises(ValueError, match="heads_k"):
+        _ = GatedDeltaNet.Config(channels_in=64, heads_k=0, heads_v=2).make()
+    with pytest.raises(ValueError, match="heads_v"):
+        _ = GatedDeltaNet.Config(channels_in=64, heads_k=2, heads_v=0).make()
+    with pytest.raises(ValueError, match="channels_in"):
+        _ = GatedDeltaNet.Config(channels_in=0, heads_k=2, heads_v=2).make()
+    with pytest.raises(ValueError, match="channels_k_head"):
+        _ = GatedDeltaNet.Config(
+            channels_in=64, heads_k=2, heads_v=2, channels_k_head=0
+        ).make()
+    with pytest.raises(ValueError, match="channels_v_head"):
+        _ = GatedDeltaNet.Config(
+            channels_in=64, heads_k=2, heads_v=2, channels_v_head=0
+        ).make()
+    with pytest.raises(ValueError, match="conv_kernel_size"):
+        _ = GatedDeltaNet.Config(
+            channels_in=64, heads_k=2, heads_v=2, conv_kernel_size=0
+        ).make()
+
+
+def test_gated_delta_net_never_initializes_a_closed_gate():
+    """``A_log`` must stay finite: ``log(0)`` would close a head forever.
+
+    ``uniform_(0, 16)`` is half-open and really does return exactly 0.0
+    (measured once in 10M draws); the forward exponentiates ``A_log``, so a
+    single ``-inf`` is a head that can never open again.
+    """
+    model = GatedDeltaNet.Config(channels_in=64, heads_k=2, heads_v=2).make()
+    for _ in range(20):
+        model.reset_parameters()
+        assert bool(torch.isfinite(model.A_log).all())
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

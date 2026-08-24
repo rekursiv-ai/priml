@@ -9,8 +9,13 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.model.attention import SelfAttention
 from priml.model.causal_lm import CausalLM
+from priml.model.norm import RMSNorm
 from priml.model.qwen3 import Qwen3, remap_hf_state_dict
+from priml.model.rope import GeometricFrequencies, HuggingFaceFrequencies, RoPE
+from priml.model.swiglu import SwiGLU
+from priml.model.transformer import TransformerBlock
 
 
 def _hf_config(**overrides: Any) -> dict[str, Any]:
@@ -34,18 +39,19 @@ def _hf_config(**overrides: Any) -> dict[str, Any]:
 
 def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     """Build a random-weight state_dict in HF Qwen3 layout."""
-    h = cfg.hidden_size
-    inter = cfg.intermediate_size
-    n_q = cfg.num_attention_heads
-    n_kv = cfg.num_key_value_heads
-    d = cfg.head_dim
+    h = cfg.channels_in
+    inter = _ffn(cfg).channels_hidden
+    attn = _attn(cfg)
+    n_q = attn.heads
+    n_kv = attn.num_heads_kv
+    d = attn.channels_head
     sd: dict[str, Tensor] = {
         "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
         "model.norm.weight": torch.randn(h),
     }
     if not cfg.tie_embeddings:
         sd["lm_head.weight"] = torch.randn(cfg.vocab_size, h)
-    for i in range(cfg.num_hidden_layers):
+    for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
         sd[f"{p}.input_layernorm.weight"] = torch.randn(h)
         sd[f"{p}.post_attention_layernorm.weight"] = torch.randn(h)
@@ -61,14 +67,46 @@ def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     return sd
 
 
+def _attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+    """One layer's attention -- where the head geometry lives now.
+
+    Accepts a template or a finalized per-layer list, so a caller need not
+    know which side of ``finalize`` it is on.
+    """
+    block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
+    assert isinstance(block, TransformerBlock.Config)
+    attn = block.attn
+    assert isinstance(attn, SelfAttention.Config)
+    return attn
+
+
+def _ffn(cfg: Qwen3.Config, layer: int = 0) -> SwiGLU.Config:
+    """One layer's FFN -- where the hidden width lives now."""
+    block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
+    assert isinstance(block, TransformerBlock.Config)
+    ffn = block.ffn
+    assert isinstance(ffn, SwiGLU.Config)
+    return ffn
+
+
+def _block(cfg: Qwen3.Config, layer: int = 0) -> TransformerBlock.Config:
+    """One layer's block, template or finalized list alike."""
+    block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
+    assert isinstance(block, TransformerBlock.Config)
+    return block
+
+
 class TestConfig:
     def test_parse_basic(self):
         cfg = Qwen3.Config.from_hf(_hf_config())
         assert cfg.vocab_size == 128
-        assert cfg.hidden_size == 64
-        assert cfg.head_dim == 16
-        assert cfg.num_key_value_heads == 2
-        assert cfg.rope_theta == 1_000_000
+        assert cfg.channels_in == 64
+        assert _attn(cfg).channels_head == 16
+        assert _attn(cfg).num_heads_kv == 2
+        rope = _attn(cfg).rope
+        assert isinstance(rope, RoPE.Config)
+        assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
+        assert rope.frequencies.base == 1_000_000
 
     def test_wrong_model_type_rejected(self):
         with pytest.raises(ValueError, match="qwen3"):
@@ -80,7 +118,9 @@ class TestConfig:
         cfg = _hf_config()
         cfg.pop("head_dim")
         parsed = Qwen3.Config.from_hf(cfg)
-        assert parsed.head_dim == cfg["hidden_size"] // cfg["num_attention_heads"]
+        assert _attn(parsed).channels_head == (
+            cfg["hidden_size"] // cfg["num_attention_heads"]
+        )
 
     def test_explicit_head_dim_not_equal_hidden(self):
         """Qwen3 with hidden != heads*head_dim builds, forwards, and loads.
@@ -104,6 +144,52 @@ class TestConfig:
         assert isinstance(model, CausalLM)
 
 
+class TestSlots:
+    """The parent holds slots, not copies of its children's vocabulary."""
+
+    def test_a_rope_edit_survives_finalize(self):
+        """Editing the rope slot must reach the built attention.
+
+        The parent used to redeclare ``rope_theta`` and ``frequencies`` and
+        rebuild the child in ``finalize``, so this edit was discarded.
+        """
+        cfg = Qwen3.Config.from_hf(_hf_config())
+        template_rope = _attn(cfg).rope
+        assert isinstance(template_rope, RoPE.Config)
+        template_rope.frequencies = GeometricFrequencies.Config(base=12_345.0)
+        cfg = cfg.copy_tree().finalize()
+        rope = _attn(cfg).rope
+        assert isinstance(rope, RoPE.Config)
+        assert isinstance(rope.frequencies, GeometricFrequencies.Config)
+        assert rope.frequencies.base == 12_345.0
+        # The width still comes from the attention it rotates.
+        assert rope.channels_head == _attn(cfg).channels_head
+
+    def test_a_norm_edit_reaches_every_norm(self):
+        """One template, so an epsilon set once applies throughout."""
+        cfg = Qwen3.Config.from_hf(_hf_config())
+        template = _block(cfg)
+        assert isinstance(template.norm1, RMSNorm.Config)
+        template.norm1.eps = 1e-3
+        assert isinstance(cfg.final_norm, RMSNorm.Config)
+        cfg.final_norm.eps = 1e-3
+        cfg = cfg.copy_tree().finalize()
+        assert isinstance(_block(cfg).norm1, RMSNorm.Config)
+        norm1 = _block(cfg).norm1
+        assert isinstance(norm1, RMSNorm.Config)
+        assert norm1.eps == 1e-3
+        assert isinstance(cfg.final_norm, RMSNorm.Config)
+        assert cfg.final_norm.eps == 1e-3
+
+    def test_each_norm_is_its_own_object(self):
+        """Templates are copied, so one consumer cannot edit another's."""
+        cfg = Qwen3.Config.from_hf(_hf_config()).copy_tree().finalize()
+        block = _block(cfg)
+        assert block.norm1 is not block.norm2
+        assert block.norm1 is not cfg.final_norm
+        assert block.norm1 is not _block(cfg, 1).norm1
+
+
 class TestRemap:
     def test_end_to_end_load(self):
         cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
@@ -123,9 +209,10 @@ class TestRemap:
     def test_qkv_preserves_rows(self):
         """Per-head rows from HF Q/K/V land in the expected ensemble slots."""
         cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
-        h = cfg.hidden_size
-        d = cfg.head_dim
-        n_q, n_kv = cfg.num_attention_heads, cfg.num_key_value_heads
+        h = cfg.channels_in
+        attn = _attn(cfg)
+        d = attn.channels_head
+        n_q, n_kv = attn.heads, attn.num_heads_kv
         hf_sd = _synth_hf_state_dict(cfg)
         q = hf_sd["model.layers.0.self_attn.q_proj.weight"].view(n_q, d, h)
         k = hf_sd["model.layers.0.self_attn.k_proj.weight"].view(n_kv, d, h)
@@ -145,9 +232,9 @@ class TestRemap:
         up = hf_sd["model.layers.0.mlp.up_proj.weight"]
         remapped = remap_hf_state_dict(hf_sd, cfg)
         fused = remapped["blocks.0.ffn.up_proj.weight"]
-        assert fused.shape == (2 * cfg.intermediate_size, cfg.hidden_size)
-        assert torch.equal(fused[: cfg.intermediate_size], gate)
-        assert torch.equal(fused[cfg.intermediate_size :], up)
+        assert fused.shape == (2 * _ffn(cfg).channels_hidden, cfg.channels_in)
+        assert torch.equal(fused[: _ffn(cfg).channels_hidden], gate)
+        assert torch.equal(fused[_ffn(cfg).channels_hidden :], up)
 
     def test_tied_embeddings(self):
         cfg = Qwen3.Config.from_hf(_hf_config(tie_word_embeddings=True)).finalize()

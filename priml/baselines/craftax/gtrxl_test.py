@@ -18,7 +18,7 @@ def _model(**overrides: float) -> ActorCriticGTrXL:
     config.num_heads = 2
     config.num_layers = 2
     config.qkv_dim = 16
-    config.hidden_size = 8
+    config.channels_in = 8
     config.memory_length = 8
     for name, value in overrides.items():
         setattr(config, name, value)
@@ -304,7 +304,7 @@ def test_the_policy_head_starts_near_uniform() -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["embed_dim", "num_heads", "num_layers", "qkv_dim", "hidden_size", "memory_length"],
+    ["embed_dim", "num_heads", "num_layers", "qkv_dim", "channels_in", "memory_length"],
 )
 def test_a_degenerate_dimension_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match="positive"):

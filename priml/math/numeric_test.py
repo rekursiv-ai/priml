@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import math
 
 from torch import Tensor
@@ -10,10 +8,6 @@ import numpy as np
 import pytest
 import torch
 
-from priml.math.distributed import (
-    logmeanexp_all_to_all,
-    logsumexp_all_to_all,
-)
 from priml.math.numeric import (
     kahan_sum,
     log1mexp,
@@ -24,6 +18,7 @@ from priml.math.numeric import (
     log_modulus,
     log_tan_exp,
     logerfc,
+    logmeanexp,
     logsubexp,
     matrix_signum_via_newtonschulz,
     mesh_arange,
@@ -259,169 +254,6 @@ def test_softcap_preserves_float_dtypes_exactly():
         assert softcap(torch.tensor([1.0, 2.0], dtype=dtype), 1.0).dtype == dtype
 
 
-def test_logsumexp_all_to_all():
-    """Test logsumexp_all_to_all without distributed setup."""
-    x = torch.randn(2, 3, 4)
-    result = logsumexp_all_to_all(x, dim=-1)
-    expected = torch.logsumexp(x, dim=-1)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logsumexp_all_to_all_empty_reduction():
-    """An empty reduced result must not raise ZeroDivisionError."""
-    x = torch.zeros(0, 5)
-    result = logsumexp_all_to_all(x, dim=-1)
-    assert result.shape == (0,)
-    # logmeanexp shares the divide path; it must also survive the empty case.
-    assert logmeanexp_all_to_all(x, dim=-1).shape == (0,)
-
-
-def test_logsumexp_all_to_all_keepdim():
-    """Test logsumexp_all_to_all with keepdim=True."""
-    x = torch.randn(2, 3, 4)
-    result = logsumexp_all_to_all(x, dim=-1, keepdim=True)
-    expected = torch.logsumexp(x, dim=-1, keepdim=True)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logsumexp_all_to_all_multiple_dims():
-    """Test logsumexp_all_to_all with multiple dimensions."""
-    x = torch.randn(2, 3, 4, 5)
-    dim = [1, 2]
-    result = logsumexp_all_to_all(x, dim=dim)
-    expected = torch.logsumexp(x, dim=dim)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logmeanexp_all_to_all():
-    x = torch.randn(4, 3, 6)
-    dim = [0, 2]
-    result = logmeanexp_all_to_all(x, dim=dim)
-    # Reference: compute mean in linear space, then take log.
-    linear_mean = x.exp().mean(dim=dim)
-    expected = linear_mean.log()
-    torch.testing.assert_close(result, expected, rtol=1e-4, atol=1e-4)
-
-
-def test_logmeanexp_all_to_all_keepdim():
-    """Test logmeanexp_all_to_all with keepdim=True."""
-    x = torch.randn(2, 3, 4)
-    dim = 1
-    result = logmeanexp_all_to_all(x, dim=dim, keepdim=True)
-    expected = torch.logsumexp(x, dim=dim, keepdim=True) - math.log(x.shape[dim])
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logmeanexp_all_to_all_single_dim():
-    """Test logmeanexp_all_to_all with a single dimension."""
-    x = torch.randn(10, 20)
-    dim = 0
-    result = logmeanexp_all_to_all(x, dim=dim)
-    expected = torch.logsumexp(x, dim=dim) - math.log(x.shape[dim])
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logsumexp_all_to_all_with_world_size_rank():
-    """Test logsumexp_all_to_all with explicit world_size and rank (lines 109-118)."""
-    # Test non-distributed case with explicit world_size and rank
-    # When torch.distributed is not initialized, should still work
-    x = torch.randn(2, 3, 4)
-    result = logsumexp_all_to_all(x, dim=-1, world_size=1)
-    expected = torch.logsumexp(x, dim=-1)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logmeanexp_all_to_all_with_world_size_rank():
-    """Test logmeanexp_all_to_all with explicit world_size and rank (lines 109-118)."""
-    # Test non-distributed case with explicit world_size and rank
-    x = torch.randn(2, 3, 4)
-    dim = -1
-    result = logmeanexp_all_to_all(x, dim=dim, world_size=1)
-    expected = torch.logsumexp(x, dim=dim) - math.log(x.shape[dim])
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logsumexp_all_to_all_multiple_dims_sequence():
-    """Test logsumexp_all_to_all with sequence of dimensions."""
-    x = torch.randn(2, 3, 4, 5)
-    dim = (1, 3)
-    result = logsumexp_all_to_all(x, dim=dim)
-    expected = torch.logsumexp(x, dim=dim)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logmeanexp_all_to_all_multiple_dims_sequence():
-    """Test logmeanexp_all_to_all with sequence of dimensions."""
-    x = torch.randn(2, 3, 4, 5)
-    dim = (0, 2)
-    result = logmeanexp_all_to_all(x, dim=dim)
-    expected = torch.logsumexp(x, dim=dim) - sum(math.log(x.shape[i]) for i in dim)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logsumexp_all_to_all_keepdim_false():
-    """Test logsumexp_all_to_all with keepdim=False."""
-    x = torch.randn(3, 4, 5)
-    result = logsumexp_all_to_all(x, dim=1, keepdim=False)
-    expected = torch.logsumexp(x, dim=1, keepdim=False)
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logmeanexp_all_to_all_keepdim_false():
-    """Test logmeanexp_all_to_all with keepdim=False."""
-    x = torch.randn(3, 4, 5)
-    dim = 1
-    result = logmeanexp_all_to_all(x, dim=dim, keepdim=False)
-    expected = torch.logsumexp(x, dim=dim, keepdim=False) - math.log(x.shape[dim])
-    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
-
-
-def test_logsumexp_all_to_all_distributed():
-    """Test logsumexp_all_to_all with mocked distributed (all_gather path)."""
-    x = torch.randn(2, 3, 4)
-
-    with (
-        patch("torch.distributed.is_initialized", return_value=True),
-        patch("torch.distributed.get_world_size", return_value=2),
-        patch("torch.distributed.all_gather") as mock_all_gather,
-    ):
-
-        def mock_all_gather_impl(
-            gathered: list[Tensor],
-            tensor: Tensor,
-        ) -> None:
-            for t in gathered:
-                t.copy_(tensor)
-
-        mock_all_gather.side_effect = mock_all_gather_impl
-        result = logsumexp_all_to_all(x, dim=-1)
-        assert mock_all_gather.called
-        assert result.shape == (2, 3)
-
-
-def test_logmeanexp_all_to_all_distributed():
-    """Test logmeanexp_all_to_all with mocked distributed (all_gather path)."""
-    x = torch.randn(2, 3, 4)
-
-    with (
-        patch("torch.distributed.is_initialized", return_value=True),
-        patch("torch.distributed.get_world_size", return_value=2),
-        patch("torch.distributed.all_gather") as mock_all_gather,
-    ):
-
-        def mock_all_gather_impl(
-            gathered: list[Tensor],
-            tensor: Tensor,
-        ) -> None:
-            for t in gathered:
-                t.copy_(tensor)
-
-        mock_all_gather.side_effect = mock_all_gather_impl
-        result = logmeanexp_all_to_all(x, dim=-1)
-        assert mock_all_gather.called
-        assert result.shape == (2, 3)
-
-
 def test_ste_clamp():
     x = torch.tensor([-7.0, -2.5, 0.0, 1.5, 3.0, 5.5, 8.0])
     actual = ste_clamp(x, min=-2.0, max=5.0)
@@ -612,6 +444,43 @@ def test_kahan_sum_empty_returns_zero():
     # Empty along a reduced dim collapses to a zero-filled result of that shape.
     result = kahan_sum(torch.zeros(3, 0), dim=1)
     torch.testing.assert_close(result, torch.zeros(3))
+
+
+def test_kahan_sum_blocking_matches_a_strictly_sequential_recurrence() -> None:
+    """Blocking must not change the answer, only the number of Python steps.
+
+    The reduction runs ``sqrt(n)`` blocks in one vectorized step instead of one
+    step per element (measured 2013ms -> 18ms at n=100_000). Each block's terms
+    stay contiguous and in order, and the per-block compensations are folded
+    back, so the result is the sequential one.
+    """
+
+    def sequential(x: Tensor) -> Tensor:
+        total = torch.zeros((), dtype=x.dtype)
+        compensation = torch.zeros((), dtype=x.dtype)
+        for i in range(x.shape[0]):
+            term = x[i]
+            t = total + term
+            compensation = compensation + (
+                (total - t) + term
+                if bool(total.abs() >= term.abs())
+                else (term - t) + total
+            )
+            total = t
+        return total + compensation
+
+    # A length that is not a perfect square, so the final block is padded.
+    torch.manual_seed(0)
+    x = torch.randn(1_001, dtype=torch.float32)
+    torch.testing.assert_close(kahan_sum(x), sequential(x), rtol=0, atol=0)
+    # And on the swamping case the compensation exists for.
+    hard = torch.cat(
+        [
+            torch.tensor([2.0**24], dtype=torch.float32),
+            torch.full((1_000,), 1.0, dtype=torch.float32),
+        ],
+    )
+    torch.testing.assert_close(kahan_sum(hard), sequential(hard), rtol=0, atol=0)
 
 
 def test_kahan_sum_dim():
@@ -1073,6 +942,127 @@ def test_log_modulus_gradient_is_finite_in_the_tails() -> None:
 def test_log_modulus_preserves_dtype() -> None:
     for dtype in (torch.bfloat16, torch.float32, torch.float64):
         assert log_modulus(torch.zeros(3, dtype=dtype)).dtype == dtype
+
+
+def test_logmeanexp_survives_an_empty_reduction() -> None:
+    """An empty reduced axis must not raise: ``math.log(0)`` is a domain error.
+
+    The identical bug in ``logmeanexp_all_to_all`` was fixed and pinned by
+    ``test_logsumexp_all_to_all_empty_reduction``; this one was left.
+    """
+    result = logmeanexp(torch.zeros(3, 0), dim=-1)
+    assert result.shape == (3,)
+    assert bool(torch.isinf(result).all())
+
+
+def test_out_of_domain_parameters_yield_nan_rather_than_a_device_sync() -> None:
+    """These kernels do not inspect their arguments, and must not start.
+
+    Checking ``cap`` or ``tailweight`` means ``bool(t.all())`` on a possibly
+    tensor-valued argument, which synchronizes the device -- measured at 0.8x
+    the cost of the whole kernel on a 1024x1024 CUDA tensor. The out-of-domain
+    result is NaN or a collapsed map, the ordinary float contract, and the
+    config layer above validates its own scalar field where the check is free
+    (``softcap.py:79``).
+    """
+    x = torch.tensor([1.0, -2.0])
+    assert bool(softcap(x, float("inf")).isnan().all())
+    # A negative threshold expands magnitudes rather than shrinking them.
+    assert float(soft_threshold(torch.tensor([1.0]), -2.0)) == 3.0
+    # tailweight=0 collapses the map, so it is no longer invertible.
+    assert float(sinh_arcsinh(torch.tensor([2.0]), 0.0, 0.0)) == 0.0
+
+
+def test_documented_domains_propagate_nan_rather_than_syncing_to_check() -> None:
+    """Off-domain input yields NaN; guarding it would cost a device sync.
+
+    Both functions are elementwise and ``log1mexp`` is called from
+    ``logsubexp``, so a ``bool((x < c).all())`` precondition measured 0.8x the
+    cost of the whole kernel on a 1024x1024 CUDA tensor. NaN out for
+    off-domain in is the ordinary float contract; the guard is not worth
+    doubling the function.
+    """
+    assert bool(log_tan_exp(torch.tensor([1.0])).isnan())
+    assert bool(log1mexp(torch.tensor([0.5])).isnan())
+    # The documented domain is unaffected.
+    assert torch.isfinite(log_tan_exp(torch.tensor([0.4]))).all()
+    assert torch.isfinite(log1mexp(torch.tensor([-0.5]))).all()
+
+
+def test_safe_helpers_propagate_nan_rather_than_inventing_a_value() -> None:
+    """NaN is not "non-positive", so it must not become a plausible number.
+
+    ``safe_log(nan)`` returned ``-inf`` and ``safe_sqrt(nan)`` returned ``0``:
+    a NaN that entered upstream vanished into a finite-looking value instead of
+    surfacing where it was introduced.
+    """
+    nan = torch.tensor([float("nan")])
+    assert bool(safe_log(nan).isnan())
+    assert bool(safe_sqrt(nan).isnan())
+    assert bool(safe_rsqrt(nan).isnan())
+    # The negative domain keeps its documented fallback.
+    assert float(safe_sqrt(torch.tensor([-1.0]))) == 0.0
+    assert float(safe_log(torch.tensor([-1.0]))) == float("-inf")
+
+
+def test_safe_pow_propagates_nan_like_its_siblings() -> None:
+    """NaN is not "non-positive", so it must not become the safe-zero.
+
+    ``base > 0`` is False for NaN, which sent it down the fallback and
+    returned 0.0 -- the same laundering
+    ``test_safe_helpers_propagate_nan_rather_than_inventing_a_value``
+    already pins for ``safe_log``/``safe_sqrt``/``safe_rsqrt``.
+    """
+    nan = torch.tensor([float("nan")])
+    assert bool(safe_pow(nan, 0.5).isnan())
+    assert bool(safe_pow(torch.tensor([2.0]), nan).isnan())
+    # The documented non-positive fallback is unaffected.
+    assert float(safe_pow(torch.tensor([-1.0]), 0.5)) == 0.0
+    assert float(safe_pow(torch.tensor([0.0]), 0.0)) == 1.0
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.float64, torch.float32, torch.bfloat16, torch.float16]
+)
+def test_smoothstep_inverse_is_finite_at_the_boundaries(dtype: torch.dtype) -> None:
+    """The Newton guard must scale with the dtype, not be a fixed literal.
+
+    ``df.clamp(min=1e-12)`` is below float16's smallest normal, so it rounded
+    to exactly 0.0 and the division it exists to prevent happened anyway --
+    NaN at y=0 and y=1, both inside the documented [0, 1] domain.
+    """
+    out = smoothstep_inverse(torch.tensor([0.0, 0.5, 1.0], dtype=dtype))
+    assert bool(torch.isfinite(out).all())
+
+
+def test_safe_sqrt_has_a_finite_gradient_at_zero() -> None:
+    """The double-where must guard the BACKWARD pass, not just the forward.
+
+    ``safe_sqrt`` clamped its operand to 0 and then took ``sqrt`` of it, whose
+    derivative at 0 is infinite; ``where`` multiplies that by zero and yields
+    NaN. The sibling ``safe_rsqrt`` moves the operand off the boundary instead.
+    """
+    x = torch.zeros(3, requires_grad=True)
+    safe_sqrt(x).sum().backward()
+    assert x.grad is not None
+    assert bool(torch.isfinite(x.grad).all())
+
+
+def test_ste_clamp_accepts_untensored_bounds() -> None:
+    """Bounds arrive as plain floats, so they must convert like every sibling.
+
+    ``ste_round`` and the rest run their arguments through
+    ``convert_to_tensor``; ``ste_clamp`` passed ``min``/``max`` straight into
+    ``torch.clamp``, which is what the four stacked type suppressions were
+    holding up.
+    """
+    x = torch.tensor([-3.0, 0.5, 4.0], requires_grad=True)
+    out = ste_clamp(x, -1.0, 1.0)
+    torch.testing.assert_close(out, torch.tensor([-1.0, 0.5, 1.0]))
+    out.sum().backward()
+    # Straight-through: gradient is identity even where the forward clamped.
+    assert x.grad is not None
+    torch.testing.assert_close(x.grad, torch.ones(3))
 
 
 if __name__ == "__main__":

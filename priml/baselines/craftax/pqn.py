@@ -43,7 +43,7 @@ class RecurrentQNetwork(nn.Module):
     """An LSTM Q-network over renormalized observations.
 
     Attributes:
-      hidden_size: Width of the encoder and of each recurrent state.
+      channels_in: Width of the encoder and of each recurrent state.
       num_actions: Size of the discrete action space.
 
     """
@@ -57,7 +57,7 @@ class RecurrentQNetwork(nn.Module):
         num_actions: int = 43
         """Size of the discrete action space."""
 
-        hidden_size: int = 512
+        channels_in: int = 512
         """Width of the encoder and of the recurrent state."""
 
     def __init__(self, config: Config) -> None:
@@ -71,26 +71,26 @@ class RecurrentQNetwork(nn.Module):
 
         """
         super().__init__()
-        if min(config.observation_size, config.num_actions, config.hidden_size) <= 0:
+        if min(config.observation_size, config.num_actions, config.channels_in) <= 0:
             raise ValueError("RecurrentQNetwork dimensions must be positive")
 
-        self.hidden_size = config.hidden_size
+        self.channels_in = config.channels_in
         self.num_actions = config.num_actions
 
         normalize = BatchRenorm.Config()
         normalize.channels_in = config.observation_size
         self.normalize = normalize.make()
 
-        self.encoder = nn.Linear(config.observation_size, config.hidden_size)
-        self.encoder_norm = nn.LayerNorm(config.hidden_size)
+        self.encoder = nn.Linear(config.observation_size, config.channels_in)
+        self.encoder_norm = nn.LayerNorm(config.channels_in)
         # The previous action joins the encoding, not the observation: it is
         # one-hot and would otherwise pass through renormalization, whose
         # running statistics have no business tracking an action histogram.
         self.cell = nn.LSTMCell(
-            config.hidden_size + config.num_actions,
-            config.hidden_size,
+            config.channels_in + config.num_actions,
+            config.channels_in,
         )
-        self.head = nn.Linear(config.hidden_size, config.num_actions)
+        self.head = nn.Linear(config.channels_in, config.num_actions)
 
     def initial_state(
         self,
@@ -105,11 +105,11 @@ class RecurrentQNetwork(nn.Module):
           device: Device the state lives on.
 
         Returns:
-          hidden: Zeroed hidden state, ``[envs, hidden_size]``.
-          cell: Zeroed cell state, ``[envs, hidden_size]``.
+          hidden: Zeroed hidden state, ``[envs, channels_in]``.
+          cell: Zeroed cell state, ``[envs, channels_in]``.
 
         """
-        zeros = torch.zeros(num_envs, self.hidden_size, device=device)
+        zeros = torch.zeros(num_envs, self.channels_in, device=device)
         return zeros, zeros.clone()
 
     @override
@@ -152,7 +152,7 @@ class RecurrentQNetwork(nn.Module):
         """Advance the recurrence one step and value every action.
 
         Args:
-          state: Hidden and cell state, each ``[envs, hidden_size]``.
+          state: Hidden and cell state, each ``[envs, channels_in]``.
           observation: Current observations, ``[envs, observation_size]``.
           previous_action: The action taken into this state, ``[envs]``.
           previous_done: Whether the PRECEDING transition ended an episode.

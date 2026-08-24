@@ -54,7 +54,7 @@ def _mla(*, q_lora_rank: int | None = None) -> tuple[nn.Module, Tensor]:
         channels_v_head=4,
         kv_lora_rank=8,
         q_lora_rank=q_lora_rank,
-        rope=RoPE.Config(channels_head=4, base=10_000),
+        rope=RoPE.Config(channels_head=4),
         shard="colwise",
     ).make()
     return mla, torch.randn(1, 3, 16)

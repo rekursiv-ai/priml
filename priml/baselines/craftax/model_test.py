@@ -14,7 +14,7 @@ def _model(**overrides: int) -> ActorCritic:
     config = ActorCritic.Config()
     config.observation_size = 32
     config.num_actions = 5
-    config.hidden_size = 16
+    config.channels_in = 16
     config.num_layers = 2
     for name, value in overrides.items():
         setattr(config, name, value)
@@ -60,7 +60,7 @@ def test_gradients_reach_both_towers() -> None:
 
 
 def test_depth_and_width_follow_the_configuration() -> None:
-    model = _model(hidden_size=24, num_layers=3)
+    model = _model(channels_in=24, num_layers=3)
     assert model.policy[0].out_features == 24
     # Three hidden layers, each followed by an activation, then the head.
     assert len(model.policy) == 7
@@ -69,7 +69,7 @@ def test_depth_and_width_follow_the_configuration() -> None:
 def test_weights_are_orthogonally_initialized() -> None:
     # Orthogonal columns keep activations from collapsing or exploding as
     # they pass through a deep tanh stack.
-    weight = _model(hidden_size=32, observation_size=32).policy[0].weight.detach()
+    weight = _model(channels_in=32, observation_size=32).policy[0].weight.detach()
     product = weight @ weight.T
     identity = torch.eye(product.shape[0]) * (math.sqrt(2.0) ** 2)
     assert torch.allclose(product, identity, atol=1e-5)
@@ -85,7 +85,7 @@ def test_biases_start_at_zero() -> None:
     assert all(bias is not None and not bool(bias.any()) for bias in biases)
 
 
-@pytest.mark.parametrize("field", ["observation_size", "num_actions", "hidden_size"])
+@pytest.mark.parametrize("field", ["observation_size", "num_actions", "channels_in"])
 def test_a_degenerate_geometry_is_refused(field: str) -> None:
     config = ActorCritic.Config()
     setattr(config, field, 0)

@@ -41,7 +41,7 @@ class ActorCriticRNN(nn.Module):
     """A GRU actor-critic whose recurrent state clears at episode boundaries.
 
     Attributes:
-      hidden_size: Width of the embedding, the recurrent state, and both
+      channels_in: Width of the embedding, the recurrent state, and both
         heads. One number, as the reference uses.
 
     """
@@ -55,7 +55,7 @@ class ActorCriticRNN(nn.Module):
         num_actions: int = 43
         """Size of the discrete action space."""
 
-        hidden_size: int = 512
+        channels_in: int = 512
         """Width of the embedding, the GRU state, and each head."""
 
     def __init__(self, config: Config) -> None:
@@ -69,22 +69,22 @@ class ActorCriticRNN(nn.Module):
 
         """
         super().__init__()
-        if min(config.observation_size, config.num_actions, config.hidden_size) <= 0:
+        if min(config.observation_size, config.num_actions, config.channels_in) <= 0:
             raise ValueError("ActorCriticRNN dimensions must be positive")
 
-        self.hidden_size = config.hidden_size
+        self.channels_in = config.channels_in
         self.embed = nn.Sequential(
-            _dense(config.observation_size, config.hidden_size, gain=math.sqrt(2.0)),
+            _dense(config.observation_size, config.channels_in, gain=math.sqrt(2.0)),
             nn.ReLU(),
         )
-        self.cell = nn.GRUCell(config.hidden_size, config.hidden_size)
+        self.cell = nn.GRUCell(config.channels_in, config.channels_in)
         self.actor = _head(
-            hidden_size=config.hidden_size,
+            channels_in=config.channels_in,
             output_size=config.num_actions,
             output_gain=0.01,
         )
         self.critic = _head(
-            hidden_size=config.hidden_size,
+            channels_in=config.channels_in,
             output_size=1,
             output_gain=1.0,
         )
@@ -102,10 +102,10 @@ class ActorCriticRNN(nn.Module):
           device: Device the state lives on.
 
         Returns:
-          state: Zeros, ``[envs, hidden_size]``.
+          state: Zeros, ``[envs, channels_in]``.
 
         """
-        return torch.zeros(num_envs, self.hidden_size, device=device)
+        return torch.zeros(num_envs, self.channels_in, device=device)
 
     @override
     def forward(self, observation: Tensor) -> tuple[Tensor, Tensor]:
@@ -143,7 +143,7 @@ class ActorCriticRNN(nn.Module):
         """Advance the recurrence one step.
 
         Args:
-          state: Recurrent state, ``[envs, hidden_size]``.
+          state: Recurrent state, ``[envs, channels_in]``.
           observation: Current observations, ``[envs, observation_size]``.
           previous_done: Whether the PRECEDING transition ended an episode.
 
@@ -196,14 +196,14 @@ class ActorCriticRNN(nn.Module):
         return state, torch.stack(logits), torch.stack(values)
 
 
-def _head(*, hidden_size: int, output_size: int, output_gain: float) -> nn.Sequential:
+def _head(*, channels_in: int, output_size: int, output_gain: float) -> nn.Sequential:
     """Build one two-layer ReLU head with an orthogonally-scaled output."""
     return nn.Sequential(
-        _dense(hidden_size, hidden_size, gain=math.sqrt(2.0)),
+        _dense(channels_in, channels_in, gain=math.sqrt(2.0)),
         nn.ReLU(),
-        _dense(hidden_size, hidden_size, gain=math.sqrt(2.0)),
+        _dense(channels_in, channels_in, gain=math.sqrt(2.0)),
         nn.ReLU(),
-        _dense(hidden_size, output_size, gain=output_gain),
+        _dense(channels_in, output_size, gain=output_gain),
     )
 
 

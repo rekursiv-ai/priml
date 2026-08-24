@@ -73,7 +73,7 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
 
 
 def test_causal_lm_declares_embedding_and_head_vocab() -> None:
-    model = CausalLM.Config(vocab_size=64, channels=32, num_layers=1).make()
+    model = CausalLM.Config(vocab_size=64, channels_in=32, num_layers=1).make()
     assert model.embed.shard == "vocab"
     assert isinstance(model.lm_head, Linear)
     assert model.lm_head.shard == "vocab"

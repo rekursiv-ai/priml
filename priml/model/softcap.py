@@ -55,14 +55,15 @@ class SoftCap(nn.Module):
         """Output width; forwarded to ``inner``."""
 
         dtype: torch.dtype | None = torch.float32
-        """Width the squash is computed at; None keeps the projection's own.
+        """Width the projection's output is cast to; None keeps its own.
 
-        Float32 by default, and that is arithmetic rather than storage: a
-        ``tanh`` evaluated in bfloat16 rounds its own derivative, so capping
-        before the upcast and capping after it give the same forward and
-        DIFFERENT gradients (measured: 0.5 on a 32x16 readout). A capped
-        readout is the last thing before a loss that runs in float32 anyway,
-        so the upcast belongs on this side of it."""
+        Float32 by default, and that is arithmetic rather than storage. The
+        squash itself always runs in float32 -- ``softcap`` upcasts -- but
+        that upcast happens AFTER this cast, so a bfloat16 output reaches it
+        already rounded. Capping before the upcast and capping after it give
+        the same forward and DIFFERENT gradients (measured: 0.5 on a 32x16
+        readout). A capped readout is the last thing before a loss that runs
+        in float32 anyway, so the cast belongs on this side of it."""
 
         @override
         def finalize(self) -> Self:
@@ -78,6 +79,11 @@ class SoftCap(nn.Module):
         super().__init__()
         if not math.isfinite(config.cap) or config.cap <= 0:
             raise ValueError(f"cap must be finite and positive; got {config.cap}.")
+        # An integer cast is not differentiable, so it returns a leaf and the
+        # wrapped projection stops receiving gradient while still emitting
+        # plausible forward values.
+        if config.dtype is not None and not config.dtype.is_floating_point:
+            raise ValueError(f"dtype must be floating point; got {config.dtype}.")
         self.cap = config.cap
         self.dtype = config.dtype
         self.inner = config.inner.make()
@@ -88,8 +94,10 @@ class SoftCap(nn.Module):
 
     @override
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
-        out = self.inner(x)
+        # Forwarded, not dropped: the wrapper claims the ``TensorModule`` call
+        # contract, so an inner module taking an auxiliary argument -- a
+        # conditioning tensor, a cache -- must still receive it.
+        out = self.inner(x, *args, **kwargs)
         if self.dtype is not None:
             out = out.to(self.dtype)
         return softcap(out, self.cap)

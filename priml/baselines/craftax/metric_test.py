@@ -28,7 +28,7 @@ def _score(**overrides: object) -> CraftaxScore:
 
 def _policy() -> ActorCritic:
     config = ActorCritic.Config()
-    config.hidden_size = 8
+    config.channels_in = 8
     config.num_layers = 1
     return config.make()
 

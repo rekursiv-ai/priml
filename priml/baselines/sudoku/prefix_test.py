@@ -14,7 +14,7 @@ from priml.baselines.sudoku.prefix import (
 
 def _sparse(**overrides: object) -> SparsePuzzleEmbedding:
     config = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
-    config.hidden_size = 8
+    config.channels = 8
     for name, value in overrides.items():
         setattr(config, name, value)
     torch.manual_seed(0)
@@ -23,7 +23,7 @@ def _sparse(**overrides: object) -> SparsePuzzleEmbedding:
 
 def test_register_tokens_are_shared_across_the_batch() -> None:
     config = RegisterTokens.Config(num_tokens=3)
-    config.hidden_size = 8
+    config.channels = 8
     torch.manual_seed(0)
     tokens = config.make()(4)
     assert tokens.shape == (4, 3, 8)
@@ -33,7 +33,7 @@ def test_register_tokens_are_shared_across_the_batch() -> None:
 def test_register_tokens_can_be_frozen() -> None:
     """A fixed random basis is a legitimate choice, so it must not train."""
     config = RegisterTokens.Config(num_tokens=2, learnable=False)
-    config.hidden_size = 8
+    config.channels = 8
     module = config.make()
     assert not any(p.requires_grad for p in module.parameters())
 
@@ -100,9 +100,9 @@ def test_missing_identifiers_is_rejected() -> None:
 def test_stack_concatenates_in_order() -> None:
     """The halt readout reads position 0, so order decides which part owns it."""
     puzzle = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
-    puzzle.hidden_size = 8
+    puzzle.channels = 8
     registers = RegisterTokens.Config(num_tokens=3)
-    registers.hidden_size = 8
+    registers.channels = 8
     config = PrefixStack.Config()
     config.parts = [puzzle, registers]
     torch.manual_seed(0)
@@ -110,7 +110,7 @@ def test_stack_concatenates_in_order() -> None:
     assert out.shape == (4, 5, 8)
 
 
-def test_hidden_size_must_be_inherited() -> None:
+def test_channels_must_be_inherited() -> None:
     with pytest.raises(ValueError, match="must be positive"):
         RegisterTokens.Config().make()
 

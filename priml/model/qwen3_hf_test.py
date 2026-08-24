@@ -124,16 +124,21 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     config = Qwen3.Config.from_hf(
         {"model_type": "qwen3", "torch_dtype": "float32", **cfg_dict},
     )
-    # HF uses separate q/k/v and gate/up projections. Our runtime defaults to
-    # fused projections, so split here to make this test isolate weight remap
-    # and architecture parity instead of harmless matmul-order drift.
-    config.hf_split_projections = True
     config = config.finalize()
-    # Inject SdpaNaive to match HF's eager codepath exactly.
-    assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.attn, SelfAttention.Config)
-    assert isinstance(config.block.ffn, SwiGLU.Config)
-    config.block.attn.attn_kernel = SdpaNaive.Config()
+    # Per layer, since ``finalize`` expands the template into one block each.
+    #
+    # HF uses separate q/k/v and gate/up projections while the runtime defaults
+    # to fused ones, so the split is requested HERE -- on the projections that
+    # own the flag -- to isolate weight remap and architecture parity from
+    # harmless matmul-order drift. SdpaNaive matches HF's eager kernel.
+    assert isinstance(config.block, list)
+    for block in config.block:
+        assert isinstance(block, TransformerBlock.Config)
+        assert isinstance(block.attn, SelfAttention.Config)
+        assert isinstance(block.ffn, SwiGLU.Config)
+        block.attn.split_qkv_projection = True
+        block.ffn.split_gate_projection = True
+        block.attn.attn_kernel = SdpaNaive.Config()
     loop_model = config.make()
     loop_model.load_state_dict(_hf_state_dict_to_loop_format(hf_model, config))
     loop_model.eval().to(dtype=torch.float32)

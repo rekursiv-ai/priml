@@ -14,7 +14,7 @@ Example::
 
     CausalLM.Config(
         vocab_size=151_936,
-        channels=128,
+        channels_in=128,
         num_layers=2,
         block=TransformerBlock.Config(causal=True),
         tie_embeddings=True,
@@ -51,11 +51,24 @@ class CausalLM(nn.Module):
 
         _: KW_ONLY
 
-        channels: int = -1
+        channels_in: int = -1
         """Model width (embedding + residual stream dim)."""
 
         num_layers: int = -1
         """Number of stacked transformer blocks."""
+
+        @property
+        def channels_out(self) -> int:
+            """Width this module emits.
+
+            Derived, not stored: the residual stream is carried straight
+            through, so an ``in``/``out`` pair that could only ever hold the
+            same number is one field too many. A read-only property states
+            that -- ``propagate_attr`` skips it rather than writing
+            (``model/custom_types.py:229``), so a parent pushing a width in
+            cannot silently disagree with the width coming out.
+            """
+            return self.channels_in
 
         block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
             default_factory=TransformerBlock.Config,
@@ -78,21 +91,23 @@ class CausalLM(nn.Module):
                 raise ValueError(f"vocab_size must be > 0, got {self.vocab_size}.")
             if self.num_layers < 1:
                 raise ValueError(f"num_layers must be > 0, got {self.num_layers}.")
-            if self.channels < 1:
-                raise ValueError(f"channels must be > 0, got {self.channels}.")
+            if self.channels_in < 1:
+                raise ValueError(f"channels_in must be > 0, got {self.channels_in}.")
             if isinstance(self.block, list) and len(self.block) != self.num_layers:
                 raise ValueError(
                     f"block list length {len(self.block)} != "
                     f"num_layers={self.num_layers}.",
                 )
-            # Propagate channels into nested configs before super().finalize()
+            # Propagate channels_in into nested configs before super().finalize()
             # (post-super mutation wouldn't stick — configgle freezes children).
             block_configs = self.block if isinstance(self.block, list) else [self.block]
             for cfg in (*block_configs, self.final_norm):
-                propagate_attr(cfg, "channels_in", self.channels, protocol=ChannelsIn)
+                propagate_attr(
+                    cfg, "channels_in", self.channels_in, protocol=ChannelsIn
+                )
             if self.lm_head is not None:
                 propagate_attr(
-                    self.lm_head, "channels_in", self.channels, protocol=ChannelsIn
+                    self.lm_head, "channels_in", self.channels_in, protocol=ChannelsIn
                 )
                 propagate_attr(
                     self.lm_head, "channels_out", self.vocab_size, protocol=ChannelsOut
@@ -102,12 +117,12 @@ class CausalLM(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.vocab_size = config.vocab_size
-        self.channels = config.channels
+        self.channels_in = config.channels_in
         self.num_layers = config.num_layers
         self.tie_embeddings = config.tie_embeddings
 
         self.embed = Embedding.Config(
-            channels_out=config.channels,
+            channels_out=config.channels_in,
             num_embeddings=config.vocab_size,
             shard="vocab",
         ).make()
@@ -137,7 +152,7 @@ class CausalLM(nn.Module):
             self.lm_head = config.lm_head.make()
         else:
             self.lm_head = Linear.Config(
-                channels_in=config.channels,
+                channels_in=config.channels_in,
                 channels_out=config.vocab_size,
                 bias=False,
                 shard="vocab",

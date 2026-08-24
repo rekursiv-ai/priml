@@ -9,7 +9,8 @@ import torch
 
 from priml.model.linear import Linear
 from priml.model.mla import MultiHeadLatentAttention
-from priml.model.rope import RoPE
+from priml.model.rope import HuggingFaceFrequencies, RoPE
+from priml.testing.bfb import host_agnostic_numerics
 
 
 def _tiny(q_lora_rank: int | None = None) -> MultiHeadLatentAttention:
@@ -21,7 +22,9 @@ def _tiny(q_lora_rank: int | None = None) -> MultiHeadLatentAttention:
         channels_v_head=16,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=32,
-        rope=RoPE.Config(channels_head=8, base=50_000),
+        rope=RoPE.Config(
+            channels_head=8, frequencies=HuggingFaceFrequencies.Config(base=50_000)
+        ),
     ).make()
 
 
@@ -177,6 +180,78 @@ def test_mla_arbitrary_leading_dims():
     out, cache = m(x)
     assert out.shape == (2, 3, 5, 128)
     assert cache.length == 5
+
+
+def _reexpand_attention(
+    module: MultiHeadLatentAttention,
+    q_nope: Tensor,
+    q_pe: Tensor,
+    c_kv: Tensor,
+    k_pe: Tensor,
+) -> Tensor:
+    """Attend by materializing K and V, the form absorb-math replaces.
+
+    The literal spelling of the docstring's claim at ``mla.py:29-30``: expand
+    the latent through ``kv_b_proj`` into per-head K and V, then attend
+    ordinarily. ``_absorb_attention`` folds that projection into the
+    contraction instead, and must agree.
+    """
+    heads = module._heads_local
+    qk_nope = module.channels_qk_nope_head
+    v_dim = module.channels_v_head
+    latent = module.kv_lora_rank
+    weight = module.kv_b_proj.weight.view(heads, qk_nope + v_dim, latent)
+    w_kr, w_uv = weight[:, :qk_nope, :], weight[:, qk_nope:, :]
+
+    # K and V materialized per head -- what the cache would otherwise hold.
+    k_nope = torch.einsum("...tl,hdl->...thd", c_kv, w_kr)
+    value = torch.einsum("...tl,hvl->...thv", c_kv, w_uv)
+    logits = torch.einsum("...shd,...thd->...hst", q_nope, k_nope)
+    logits = logits + torch.einsum("...shr,...tr->...hst", q_pe, k_pe)
+    logits = logits * module.softmax_scale
+    seq = q_nope.shape[-3]
+    if module.causal and seq > 1:
+        mask = torch.full((seq, seq), float("-inf"), dtype=logits.dtype).triu(1)
+        logits = logits + mask
+    attn = logits.softmax(dim=-1)
+    out = torch.einsum("...hst,...thv->...shv", attn, value)
+    return module.o_proj(out.flatten(-2))
+
+
+def test_absorb_math_matches_the_reexpand_form_it_replaces() -> None:
+    """The equivalence ``mla.py:29-30`` claims, measured rather than asserted.
+
+    Absorb-math contracts in the LATENT space to avoid materializing K and V
+    (a ~25x smaller cache). That is only sound if it computes the same
+    attention as the re-expand form. Both paths run inside
+    ``host_agnostic_numerics`` so the comparison is the MATH, not the host's
+    float32 reduction order, and the assertion is exact.
+    """
+    config = MultiHeadLatentAttention.Config(
+        channels_in=32,
+        heads=4,
+        channels_qk_nope_head=8,
+        channels_qk_rope_head=8,
+        channels_v_head=8,
+        kv_lora_rank=16,
+        bias=False,
+        causal=True,
+    )
+    with host_agnostic_numerics():
+        torch.manual_seed(0)
+        module = config.make().to(torch.float32).eval()
+        seq, latent = 5, config.kv_lora_rank
+        heads = config.heads
+        q_nope = torch.randn(2, seq, heads, config.channels_qk_nope_head)
+        q_pe = torch.randn(2, seq, heads, config.channels_qk_rope_head)
+        c_kv = torch.randn(2, seq, latent)
+        k_pe = torch.randn(2, seq, config.channels_qk_rope_head)
+        with torch.no_grad():
+            absorbed = module._absorb_attention(
+                q_nope, q_pe, c_kv, k_pe, seq, total_len=seq
+            )
+            reference = _reexpand_attention(module, q_nope, q_pe, c_kv, k_pe)
+    torch.testing.assert_close(absorbed, reference, rtol=0, atol=1e-6)
 
 
 if __name__ == "__main__":

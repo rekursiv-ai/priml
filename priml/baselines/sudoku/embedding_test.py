@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def _embedding(*channels: Makeable[GridChannel]) -> GridEmbedding:
-    config = GridEmbedding.Config(hidden_size=8)
+    config = GridEmbedding.Config(channels_in=8)
     config.channels = list(channels)
     torch.manual_seed(0)
     return config.make()
@@ -36,14 +36,14 @@ def test_plain_embedding_is_token_lookup_only() -> None:
 
 def test_channels_inherit_the_models_width() -> None:
     """A channel left at its sentinel is sized by the parent, not by hand."""
-    config = GridEmbedding.Config(hidden_size=8)
+    config = GridEmbedding.Config(channels_in=8)
     config.channels = [FactoredPositions.Config(), PredictionFeedback.Config()]
     final = config.copy_tree().finalize()
     positions, feedback = final.channels
     assert isinstance(positions, FactoredPositions.Config)
     assert isinstance(feedback, PredictionFeedback.Config)
-    assert positions.hidden_size == 8
-    assert feedback.hidden_size == 8
+    assert positions.channels == 8
+    assert feedback.channels == 8
     # The vocabulary reaches the one channel that is sized by it.
     assert feedback.vocab_size == config.vocab_size
 
@@ -65,7 +65,7 @@ def test_factored_positions_share_a_row() -> None:
 
 def test_box_shape_must_tile_the_grid() -> None:
     config = FactoredPositions.Config(grid_shape=(9, 9), box_shape=(4, 4))
-    config.hidden_size = 8
+    config.channels = 8
     with pytest.raises(ValueError, match="does not tile"):
         config.make()
 
@@ -106,8 +106,8 @@ def test_channel_order_changes_the_result() -> None:
     )
 
 
-def test_hidden_size_must_be_inherited_or_set() -> None:
-    with pytest.raises(ValueError, match="hidden_size must be positive"):
+def test_channels_must_be_inherited_or_set() -> None:
+    with pytest.raises(ValueError, match="channels_in must be positive"):
         GridEmbedding.Config().make()
 
 
@@ -118,7 +118,7 @@ def _ordered(tokens: Tensor, *, swap: bool) -> Tensor:
     channels: list[Makeable[GridChannel]] = (
         [feedback, positions] if swap else [positions, feedback]
     )
-    config = GridEmbedding.Config(hidden_size=8)
+    config = GridEmbedding.Config(channels_in=8)
     config.channels = channels
     torch.manual_seed(0)
     embedding = config.make()

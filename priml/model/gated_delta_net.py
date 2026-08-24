@@ -73,6 +73,20 @@ class GatedDeltaNet(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        # Every count, not just heads_k: a zero elsewhere builds a zero-width
+        # Linear or a negative Conv padding and fails inside torch, naming a
+        # tensor shape rather than the field that produced it. heads_k comes
+        # first because the modulus below divides by it.
+        for name, value in (
+            ("heads_k", config.heads_k),
+            ("heads_v", config.heads_v),
+            ("channels_in", config.channels_in),
+            ("channels_k_head", config.channels_k_head),
+            ("channels_v_head", config.channels_v_head),
+            ("conv_kernel_size", config.conv_kernel_size),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive; got {value}.")
         if config.heads_v % config.heads_k != 0:
             raise ValueError(
                 f"heads_v={config.heads_v} must be an integer "
@@ -121,10 +135,14 @@ class GatedDeltaNet(nn.Module):
         self.dt_bias = nn.Parameter(torch.empty(config.heads_v))
         self.A_log = nn.Parameter(torch.empty(config.heads_v))
         self.norm = config.norm.make()
+        # ``depth`` scales the projection that writes back into the residual
+        # stream, which is the one deep-network init schemes shrink; the input
+        # projections are left unscaled, matching SwiGLU's down_proj.
         self.out_proj = Linear.Config(
             channels_in=v_dim,
             channels_out=h,
             bias=False,
+            depth=config.depth,
         ).make()
         self.reset_parameters()
 
@@ -141,7 +159,14 @@ class GatedDeltaNet(nn.Module):
         self.out_proj.reset_parameters()
         with torch.no_grad():
             nn.init.ones_(self.dt_bias)
-            self.A_log.copy_(torch.empty_like(self.A_log).uniform_(0, 16).log())
+            # Clamped off zero rather than sampled from a shifted range:
+            # uniform_(0, 16) really does return exactly 0.0 (measured, once
+            # in 10M draws), and log(0) is -inf, which the forward
+            # exponentiates into a permanently closed gate. Clamping keeps the
+            # distribution the reference specifies; shifting to [1, 17) would
+            # move its mean from 1.775 to 2.007.
+            draw = torch.empty_like(self.A_log).uniform_(0, 16)
+            self.A_log.copy_(draw.clamp_(min=torch.finfo(draw.dtype).tiny).log_())
 
     @override
     def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:

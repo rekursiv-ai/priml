@@ -18,6 +18,7 @@ import math
 import pickle
 
 from configgle import PartialConfig
+from configgle.pprinting import pformat
 from pyarrow import parquet
 
 import numpy as np
@@ -425,6 +426,30 @@ def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
             else:
                 assert isinstance(member, NorMuon.Config)
                 assert member.compile is True, factory.__name__
+
+
+def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
+    """Pin the WHOLE finalized ``exp000`` as readable text.
+
+    ``exp000`` is the control every fork is measured against, so a change to
+    it invalidates published numbers. A digest would say only that something
+    moved; this golden says WHICH field, from what, to what.
+    ``hide_default_values=False`` so a field that changes only because a
+    library default changed still shows up here.
+
+    Refresh with ``--golden-overwrite`` after reading the diff.
+    """
+    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    rendered = pformat(
+        experiments.exp000().copy_tree().finalize(), hide_default_values=False
+    )
+    if request.config.getoption("--golden-overwrite", default=False):
+        golden.parent.mkdir(parents=True, exist_ok=True)
+        _ = golden.write_text(rendered + "\n", encoding="utf-8")
+    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
+        "exp000 changed; read the diff, then rerun with --golden-overwrite "
+        "if the change is intended."
+    )
 
 
 if __name__ == "__main__":

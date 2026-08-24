@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import math
+
+from torch import Tensor
+
 import pytest
 import torch
 
+from priml.math.basic import ceil_div
 from priml.math.pooling import adaptive_avg_pool2d, adaptive_avg_pool3d
 
 
@@ -396,6 +401,63 @@ def test_adaptive_avg_pool3d_large_batch() -> None:
     result = adaptive_avg_pool3d(x, (5, 5, 5))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (5, 5, 5))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
+
+
+def _reference_variance_preserving(x: Tensor, output_size: tuple[int, int]) -> Tensor:
+    """Per-window ``sum / sqrt(count)``, computed at the input's own dtype."""
+    out_h, out_w = output_size
+    h, w = x.shape[-2:]
+    out = torch.zeros(*x.shape[:-2], out_h, out_w, dtype=x.dtype)
+    for i in range(out_h):
+        lo_i, hi_i = (i * h) // out_h, ceil_div((i + 1) * h, out_h)
+        for j in range(out_w):
+            lo_j, hi_j = (j * w) // out_w, ceil_div((j + 1) * w, out_w)
+            block = x[..., lo_i:hi_i, lo_j:hi_j]
+            count = block.shape[-1] * block.shape[-2]
+            out[..., i, j] = block.sum(dim=(-2, -1)) / math.sqrt(count)
+    return out
+
+
+def test_variance_preserving_ragged_windows_keep_the_input_precision() -> None:
+    """The divisor must not silently drop the result to float32.
+
+    Ragged windows divide by a per-position int64 count, and ``count ** 0.5``
+    promotes an integer tensor to float32 no matter what the input carried --
+    so a float64 pool lost ~24 bits. Every other ragged test asserts only the
+    shape, which is why this survived.
+    """
+    x = torch.randn(1, 2, 5, 5, dtype=torch.float64)
+    torch.testing.assert_close(
+        adaptive_avg_pool2d(x, (3, 3), variance_preserving=True),
+        _reference_variance_preserving(x, (3, 3)),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float64])
+def test_variance_preserving_returns_the_input_dtype(dtype: torch.dtype) -> None:
+    """A ragged size must not change the dtype a divisible one preserves."""
+    ragged = adaptive_avg_pool2d(
+        torch.randn(1, 1, 5, 5, dtype=dtype),
+        (3, 3),
+        variance_preserving=True,
+    )
+    divisible = adaptive_avg_pool2d(
+        torch.randn(1, 1, 8, 8, dtype=dtype),
+        (4, 4),
+        variance_preserving=True,
+    )
+    assert ragged.dtype == dtype
+    assert divisible.dtype == dtype
+    assert (
+        adaptive_avg_pool3d(
+            torch.randn(1, 1, 5, 5, 5, dtype=dtype),
+            (3, 3, 3),
+            variance_preserving=True,
+        ).dtype
+        == dtype
+    )
 
 
 def test_adaptive_avg_pool2d_both_dims_adaptive_vp() -> None:

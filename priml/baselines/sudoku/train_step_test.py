@@ -20,7 +20,7 @@ def _step(*, act: bool = False) -> SudokuTrainStep:
     config.compile = None
     config.dtype_autocast = None
     config.total_train_steps = 8
-    config.model.hidden_size = 16
+    config.model.channels_in = 16
     config.model.num_layers = 1
     config.model.embedding = GridEmbedding.Config()
     if act:
@@ -145,7 +145,7 @@ def test_feedback_reaches_the_channel() -> None:
     config.parallelism = NoParallel.Config(device="cpu")
     config.compile = None
     config.dtype_autocast = None
-    config.model.hidden_size = 16
+    config.model.channels_in = 16
     config.model.num_layers = 1
     embedding = GridEmbedding.Config()
     embedding.channels = [PredictionFeedback.Config()]
