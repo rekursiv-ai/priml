@@ -51,6 +51,16 @@ def rgb2float(
         in an in-place operation`` from inside the scaling; the argument at
         fault is named here instead.
 
+    Notes:
+      Scales straight from [0, 255], where both public baselines instead pass
+      through [0, 1]: diffusers divides by 255 then applies ``2v - 1``, and
+      torchvision reaches [0, 1] via ``convert_image_dtype`` before
+      ``normalize(mean=.5, std=.5)``. They emit bit-identical output, and this
+      halves their worst-case error at every float width -- the intermediate
+      rounds at magnitude ~1 and the doubling scales that error along with the
+      value. Proven in ``test_rgb2float_halves_the_error_of_a_unit_interval_
+      intermediate``.
+
     """
     x_ = convert_to_tensor(x, dtype=dtype)
     # ``convert_to_tensor`` returns the SAME object when nothing needed
@@ -67,10 +77,9 @@ def rgb2float(
         )
     # Subtract before dividing, so the division is the only rounding step and
     # it happens at the small magnitude of the result. 127.5 is 255/2, hence
-    # exact, so the subtraction is exact on every integer level. The
-    # equivalent ``x / 127.5 - 1.0`` rounds while the value is still ~1 and
-    # the subtraction cannot undo that absolute error: 2.3x the total error
-    # over the 256 levels, at every float width.
+    # exact, so the subtraction is exact on every integer level. Note this is
+    # the same ORDER torchvision's ``normalize`` uses (``sub_`` then ``div_``);
+    # what differs is the domain it runs in -- see this function's Notes.
     #
     # Divide; do not multiply by a reciprocal. Neither 1/127.5 nor 2/255 is
     # representable, so a reciprocal multiply injects that constant's error
@@ -114,6 +123,19 @@ def float2rgb(
     Raises:
       TypeError: If ``x`` resolves to a non-floating-point dtype.
 
+    Notes:
+      Rounds, as diffusers does (``numpy_to_pil``: ``(v * 255).round()``); the
+      two agree at float16 and float32. This quantizes directly from [-1, 1]
+      rather than denormalizing to [0, 1] first, which is what recovers the 16
+      bfloat16 levels diffusers drops.
+
+      torchvision's ``convert_image_dtype`` truncates after scaling by
+      ``256 - 1e-3``, an epsilon that keeps 1.0 from reaching 256. That
+      constant rounds to exactly 256.0 in bfloat16 and float16, so white
+      overflows and the uint8 cast wraps to black -- 128 of 256 levels lost at
+      bfloat16. Both claims are proven in
+      ``test_float2rgb_round_trips_where_both_baselines_lose_levels``.
+
     """
     # The hint fires only for input carrying no dtype, where torch would pick
     # int64 for something like ``[0, 1]`` and the scaling below would fail on
@@ -147,12 +169,12 @@ def float2rgb(
         x_ = x_.mul_(127.5).add_(127.5)
     else:
         x_ = x_ * 127.5 + 127.5
-    # ``round_`` exists for ARBITRARY input, not for the round trip, which is
-    # why the common spelling online omits it and still looks correct: a value
+    # ``round_`` exists for ARBITRARY input, not for the round trip: a value
     # from ``rgb2float`` is already integral here, so truncation reproduces all
-    # 256 levels. Generated output is off that lattice, where truncation errs
-    # one-sided in [-1, 0] -- a systematic half-level darkening of every image
-    # that does not average out. Costs 5-10% on CPU, nothing on CUDA.
+    # 256 levels and looks correct. Generated output is off that lattice, where
+    # truncation errs one-sided in [-1, 0] -- a systematic half-level darkening
+    # of every image that does not average out. Costs 5-10% on CPU, nothing on
+    # CUDA. diffusers rounds here too; torchvision truncates, and pays for it.
     #
     # Two cheaper spellings are wrong. Folding the half into the offset
     # (``+ 128.0``, letting the cast truncate) loses 63 of 256 bfloat16 levels:
