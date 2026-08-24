@@ -808,17 +808,33 @@ def test_a_converted_input_costs_one_buffer_not_two() -> None:
         torch.cuda.empty_cache()
 
 
-def test_inplace_on_a_grad_leaf_names_the_argument_at_fault() -> None:
+def test_rgb2float_inplace_on_a_grad_leaf_names_the_argument_at_fault() -> None:
     """Torch's own message names neither the function nor the parameter.
 
     Left to it, the failure surfaces as ``a leaf Variable that requires grad
     is being used in an in-place operation`` from inside the scaling, which
-    does not say that ``inplace=`` is the argument to change.
+    does not say that ``inplace=`` is the argument to change. ``rgb2float``
+    earns the rewrite because it returns floats: a caller really can want
+    gradients through it, so reaching this is a plausible mistake.
     """
-    for fn, arg in ((rgb2float, 128.0), (float2rgb, 0.5)):
-        leaf = torch.tensor([arg], dtype=torch.float32, requires_grad=True)
-        with pytest.raises(ValueError, match="leaf requiring grad"):
-            _ = fn(leaf, dtype=torch.float32, inplace=True)
+    leaf = torch.tensor([128.0], dtype=torch.float32, requires_grad=True)
+    with pytest.raises(ValueError, match="leaf requiring grad"):
+        _ = rgb2float(leaf, dtype=torch.float32, inplace=True)
+
+
+def test_float2rgb_lets_torch_reject_an_inplace_grad_leaf() -> None:
+    """``float2rgb`` adds no guard of its own; the leaf complains instead.
+
+    Its result is uint8, and an integer tensor cannot carry grad at all
+    (``Only Tensors of floating point and complex dtype can require grad``),
+    so no caller differentiates through this function and the donation is
+    incoherent rather than merely mistaken. Torch still rejects it -- at the
+    first in-place op, before the cast -- which is the whole contract.
+    """
+    leaf = torch.tensor([0.5], dtype=torch.float32, requires_grad=True)
+    with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
+        _ = float2rgb(leaf, float_dtype=torch.float32, inplace=True)
+    assert not float2rgb(torch.tensor([0.5])).requires_grad
 
 
 if __name__ == "__main__":
