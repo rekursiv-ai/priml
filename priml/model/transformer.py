@@ -62,13 +62,6 @@ class TransformerBlock(nn.Module):
 
         @property
         def channels_out(self) -> int:
-            """Same as ``channels_in``: a residual block preserves its width.
-
-            Derived rather than stored, because a block whose sublayers summed
-            into a stream of a DIFFERENT width could not add them. A parent
-            pushing ``channels_out`` therefore reads back what it pushed, and a
-            disagreement is a contradiction rather than a resize.
-            """
             return self.channels_in
 
         @property

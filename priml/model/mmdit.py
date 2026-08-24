@@ -141,6 +141,10 @@ class MMDiTBlock(nn.Module):
         """Block depth for depth-scaled init (-1 = no scaling)."""
 
         @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
+        @property
         def heads(self) -> int:
             """Attention heads, from the joint attention this block composes."""
             return self.attn.heads if isinstance(self.attn, HeadGeometry) else 1

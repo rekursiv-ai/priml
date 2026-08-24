@@ -59,6 +59,10 @@ class RMSNorm(nn.RMSNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
     def __init__(self, config: Config) -> None:
         super().__init__(
             normalized_shape=config.channels_in,
@@ -92,6 +96,10 @@ class CenteredRMSNorm(nn.Module):
 
         eps: float = 1e-6
         """Epsilon for numerical stability."""
+
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -131,6 +139,10 @@ class LayerNorm(nn.LayerNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
     def __init__(self, config: Config) -> None:
         super().__init__(
             normalized_shape=config.channels_in,
@@ -169,6 +181,10 @@ class BatchNorm(nn.BatchNorm1d):
 
         dtype: torch.dtype | None = None
         """Data type for parameters."""
+
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
 
     def __init__(self, config: Config) -> None:
         super().__init__(
@@ -240,6 +256,10 @@ class BatchRenorm(nn.Module):
 
         max_drift: float = 5.0
         """Bound on the mean correction, in running standard deviations."""
+
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
 
     def __init__(self, config: Config) -> None:
         """Build the learned affine and the running statistics.
@@ -367,6 +387,10 @@ class BatchNorm2d(nn.BatchNorm2d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
     def __init__(self, config: Config) -> None:
         super().__init__(
             config.channels_in,
@@ -413,6 +437,10 @@ class GroupNorm2d(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
     def __init__(self, config: Config) -> None:
         super().__init__(
             config.num_groups,
@@ -452,6 +480,10 @@ class GroupNorm(nn.GroupNorm):
 
         dtype: torch.dtype | None = None
         """Data type for parameters."""
+
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
 
     def __init__(self, config: Config) -> None:
         super().__init__(

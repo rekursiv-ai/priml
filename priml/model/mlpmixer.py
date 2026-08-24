@@ -48,6 +48,10 @@ class MLPMixerBlock(nn.Module):
         depth: int = -1
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
+        @property
+        def channels_out(self) -> int:
+            return self.channels_in
+
         @override
         def finalize(self) -> Self:
             # Token mixer operates on the seq_len dimension.
