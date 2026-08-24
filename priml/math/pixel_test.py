@@ -57,6 +57,45 @@ def test_the_pixel_pair_is_an_exact_round_trip():
         assert torch.equal(float2rgb(rgb2float(levels, dtype=dtype)), levels)
 
 
+def test_float2rgb_partitions_the_domain_into_equal_bins():
+    """Every level must claim an equal share of [-1, 1], endpoints included.
+
+    Surjectivity alone is too weak to assert on its own: the round-trip test
+    above already implies it, since each level arriving back from its own
+    preimage puts it in the image. What that test cannot see is the shape of
+    the preimage, because it only ever samples the 256 lattice points. This
+    one sweeps the continuum, so it measures the quantization bin behind
+    each level rather than one point inside it.
+
+    Two ways that goes wrong, both of which land here:
+      - Truncating instead of rounding shifts every boundary half a bin,
+        starving level 255 and doubling level 0 (65 against 1, not 33/33).
+      - A scale of 127 rather than 127.5 empties level 0 entirely.
+
+    Interior bins hold one step each and the two endpoints hold half, the
+    domain ending there. float16/bfloat16 are excluded: the swept grid
+    collapses onto too few distinct values at those widths to measure a bin
+    (bfloat16 keeps 2_304 of 16_385 samples), which is a property of the
+    input grid rather than of the conversion.
+    """
+    grid = torch.linspace(-1.0, 1.0, steps=256 * 64 + 1, dtype=torch.float64)
+    for dtype in (torch.float32, torch.float64):
+        counts = torch.bincount(
+            float2rgb(grid.to(dtype)).to(torch.int64),
+            minlength=256,
+        )
+        unreachable = (counts == 0).nonzero().flatten().tolist()
+        assert not unreachable, f"{dtype}: levels {unreachable} unreachable"
+        assert int(counts[0]) == int(counts[255]), (
+            f"{dtype}: endpoint bins {int(counts[0])} vs {int(counts[255])}"
+        )
+        interior = counts[1:255]
+        assert int(interior.max()) - int(interior.min()) <= 1, (
+            f"{dtype}: interior bins span "
+            f"[{int(interior.min())}, {int(interior.max())}]"
+        )
+
+
 def test_float2rgb_clamp():
     # Test clamping for out-of-range values
     x = torch.tensor([-2.0, 0.0, 2.0])
@@ -722,6 +761,64 @@ def test_float2rgb_rejects_an_integer_tensor() -> None:
             _ = float2rgb(torch.tensor([0, 1, 2], dtype=dtype))
     # A bare Python list still takes the hint and works.
     assert float2rgb([-1.0, 0.0, 1.0]).dtype == torch.uint8
+
+
+def test_inplace_overwrites_only_a_caller_buffer_that_needed_no_conversion() -> None:
+    """With no conversion to hide behind, ``inplace`` decides the aliasing."""
+    values = [-1.0, 0.0, 0.5, 1.0]
+
+    kept = torch.tensor(values, dtype=torch.float16)
+    before = kept.clone()
+    _ = rgb2float(kept, dtype=torch.float16, inplace=False)
+    assert torch.equal(kept, before), "inplace=False overwrote the caller"
+
+    donated = torch.tensor(values, dtype=torch.float16)
+    result = rgb2float(donated, dtype=torch.float16, inplace=True)
+    assert result.data_ptr() == donated.data_ptr()
+
+
+@pytest.mark.gpu_torch_cuda
+def test_a_converted_input_costs_one_buffer_not_two() -> None:
+    """A converted buffer is scaled in place whether or not ``inplace`` is set.
+
+    Marked ``gpu_torch_cuda`` because the CUDA caching allocator is the only
+    counter that sees this: there is no public CPU equivalent, and the result
+    cannot be compared against the converted tensor's address from outside --
+    on both paths it merely fails to alias the caller's uint8 input.
+
+    Declining to overwrite a buffer this function just minted allocates a
+    second one to protect a temporary nobody else holds, which is exactly the
+    peak the widening was meant to avoid.
+    """
+    numel = 1 << 22
+    result_mib = numel * 2 / 2**20
+    for inplace in (False, True):
+        source = torch.randint(0, 256, (numel,), dtype=torch.uint8, device="cuda")
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        scaled = rgb2float(source, dtype=torch.float16, inplace=inplace)
+        torch.cuda.synchronize()
+        peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
+        assert peak_mib < result_mib * 1.5, (
+            f"{inplace=} peaked at {peak_mib:.1f} MiB for a "
+            f"{result_mib:.1f} MiB result: the converted buffer was copied."
+        )
+        del scaled, source
+        torch.cuda.empty_cache()
+
+
+def test_inplace_on_a_grad_leaf_names_the_argument_at_fault() -> None:
+    """Torch's own message names neither the function nor the parameter.
+
+    Left to it, the failure surfaces as ``a leaf Variable that requires grad
+    is being used in an in-place operation`` from inside the scaling, which
+    does not say that ``inplace=`` is the argument to change.
+    """
+    for fn, arg in ((rgb2float, 128.0), (float2rgb, 0.5)):
+        leaf = torch.tensor([arg], dtype=torch.float32, requires_grad=True)
+        with pytest.raises(ValueError, match="leaf requiring grad"):
+            _ = fn(leaf, dtype=torch.float32, inplace=True)
 
 
 if __name__ == "__main__":
