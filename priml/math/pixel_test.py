@@ -75,6 +75,64 @@ def test_the_pixel_pair_is_an_exact_round_trip():
     # range [128, 255] has a spacing of 1.0 there.
     for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
         assert torch.equal(float2rgb(rgb2float(levels.to(dtype))), levels)
+        assert torch.equal(
+            float2rgb(
+                rgb2float(levels.to(dtype), unit_interval=True), unit_interval=True
+            ),
+            levels,
+        )
+
+
+def test_the_round_trip_survives_compilation_and_repetition() -> None:
+    """Exactness is a property of the LATTICE, not of the arithmetic width.
+
+    ``rgb2float`` puts every level on a lattice that ``float2rgb`` scales back
+    to an exact integer, so the rounding decision is never close and neither
+    reduced precision nor Inductor's wider intermediates can move it. That is
+    why the eager/compiled accuracy gap ``float2rgb``'s Notes document -- real
+    for ARBITRARY input -- is invisible here, and why a reader must not take
+    this test as evidence the conversion rounds correctly.
+    """
+    levels = torch.arange(256, dtype=torch.uint8)
+
+    def trip(u: torch.Tensor) -> torch.Tensor:
+        return float2rgb(rgb2float(u))
+
+    for dtype in (torch.float16, torch.bfloat16, torch.float32):
+        torch._dynamo.reset()
+        # Each leg compiled alone, then both fused into one graph: the fusion
+        # is what changes the intermediate width, so it needs its own case.
+        compiled_rgb2float = torch.compile(rgb2float, fullgraph=True)
+        compiled_float2rgb = torch.compile(float2rgb, fullgraph=True)
+        assert torch.equal(
+            compiled_float2rgb(compiled_rgb2float(levels.to(dtype))), levels
+        )
+
+        torch._dynamo.reset()
+        assert torch.equal(
+            torch.compile(trip, fullgraph=True)(levels.to(dtype)), levels
+        )
+
+    # Ten cycles: a half-level bias would compound into a visible drift.
+    for dtype in (torch.float16, torch.bfloat16):
+        current = levels.clone()
+        for _ in range(10):
+            current = float2rgb(rgb2float(current.to(dtype)))
+        assert torch.equal(current, levels), f"{dtype} drifted over ten cycles"
+
+
+def test_rgb2float_rejects_float8_because_torch_cannot_subtract_it() -> None:
+    """float8 fails to RUN, rather than losing levels.
+
+    The docstring once said float8 "is not" exact, which reads as a precision
+    warning and invites someone to try it for the memory saving. Torch
+    implements no float8 arithmetic at all, so the subtraction raises before
+    precision is ever in question.
+    """
+    levels = torch.arange(256, dtype=torch.uint8)
+    for dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        with pytest.raises(NotImplementedError, match="add_stub"):
+            _ = rgb2float(levels.to(dtype))
 
 
 def test_float2rgb_partitions_the_domain_into_equal_bins():
@@ -125,20 +183,6 @@ def test_float2rgb_clamp():
     assert result[2] == 255
 
 
-def test_rgb2float_refuses_complex_rather_than_dropping_the_imaginary_part():
-    """A complex input is rejected, not silently truncated.
-
-    ``Tensorable`` admits complex (it sits in ``_dtype_coercion_precedence``),
-    and ``torch.complex64.is_floating_point`` is False -- so a guard phrased
-    as "not floating point, therefore widen" sent it through ``.to(float16)``,
-    which discards the imaginary part behind a ``UserWarning`` nobody reads.
-    Nonsense input for a pixel function either way; the question is only
-    whether it fails loudly.
-    """
-    with pytest.raises(TypeError, match="complex"):
-        _ = rgb2float(torch.tensor([1 + 2j, 3 + 4j], dtype=torch.complex64))
-
-
 def test_rgb2float_keeps_the_width_the_caller_chose():
     """The output width is the input's; this function never picks one.
 
@@ -151,6 +195,55 @@ def test_rgb2float_keeps_the_width_the_caller_chose():
     for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
         source = torch.arange(256, dtype=torch.uint8).to(dtype)
         assert rgb2float(source).dtype == dtype, dtype
+
+
+def test_rgb2float_accepts_anything_convert_to_tensor_does():
+    """The ``Tensorable`` widening, mirroring ``float2rgb``.
+
+    Widening the INPUT type does not weaken the dtype contract: the value
+    must still resolve to floating point, and ``float_dtype`` is how a uint8
+    decoder output gets there. A silent lift would both guess a width the
+    caller never named and override an explicit ``float_dtype``.
+    """
+    levels = torch.arange(256, dtype=torch.uint8)
+
+    assert rgb2float(levels, float_dtype=torch.float16).dtype == torch.float16
+    assert rgb2float(levels, float_dtype=torch.bfloat16).dtype == torch.bfloat16
+    assert torch.equal(float2rgb(rgb2float(levels, float_dtype=torch.float16)), levels)
+
+    # A bare list carries no dtype, so the hint resolves it.
+    assert rgb2float([0.0, 127.5, 255.0]).tolist() == [-1.0, 0.0, 1.0]
+    assert rgb2float(np.array([0.0, 255.0], dtype=np.float32)).tolist() == [-1.0, 1.0]
+
+    # A matching-dtype ndarray is wrapped ZERO-COPY, so an ownership test
+    # written as ``x_ is not x`` would call that buffer private and scale the
+    # caller's array in place.
+    array = np.array([0.0, 255.0], dtype=np.float32)
+    before = array.copy()
+    _ = rgb2float(array)
+    assert np.array_equal(array, before), "the caller's array was scaled"
+
+    donated = torch.tensor([0.0, 255.0], dtype=torch.float32)
+    pointer = donated.data_ptr()
+    assert rgb2float(donated, inplace=True).data_ptr() == pointer
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.uint8, torch.int64, torch.bool, torch.complex64]
+)
+def test_both_conversions_refuse_a_non_float_dtype(dtype: torch.dtype) -> None:
+    """Neither function guesses a width, and neither drops an imaginary part.
+
+    ``is_floating_point`` is False for complex as well as for integers, which
+    reads like a gap in the guard -- it is not, and this pins that. Casting
+    instead would read uint8 [0, 1, 2] as [-1, 1] and hand back
+    [128, 255, 255], or truncate complex behind a ``UserWarning``.
+    """
+    source = torch.ones(3, dtype=dtype)
+    with pytest.raises(TypeError, match="floating-point"):
+        _ = rgb2float(source)
+    with pytest.raises(TypeError, match="floating-point"):
+        _ = float2rgb(source)
 
 
 def test_the_signed_range_is_the_default_interval():
@@ -491,7 +584,7 @@ def test_interpolate_linear_to_trilinear():
 def test_interpolate_cubic_to_bicubic():
     # Test that "cubic" mode gets converted to "bicubic" for 2D
     x = torch.randn(2, 3, 8, 8)
-    result = interpolate(x, mode="cubic", scale_factor=2, rank=2)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]
+    result = interpolate(x, mode="cubic", scale_factor=2, rank=2)
     assert result.shape == (2, 3, 16, 16)
 
 
@@ -1026,34 +1119,129 @@ def test_inplace_overwrites_only_a_caller_buffer_that_needed_no_conversion() -> 
 
 
 @pytest.mark.gpu_torch_cuda
-def test_a_converted_input_costs_one_buffer_not_two() -> None:
-    """A converted buffer is scaled in place whether or not ``inplace`` is set.
+def test_inplace_scaling_allocates_nothing() -> None:
+    """``inplace=True`` must cost ZERO bytes and hand back the same buffer.
 
     Marked ``gpu_torch_cuda`` because the CUDA caching allocator is the only
-    counter that sees this: there is no public CPU equivalent, and the result
-    cannot be compared against the converted tensor's address from outside --
-    on both paths it merely fails to alias the caller's uint8 input.
+    counter that sees an allocation this precisely; there is no public CPU
+    equivalent.
 
-    Declining to overwrite a buffer this function just minted allocates a
-    second one to protect a temporary nobody else holds, which is exactly the
-    peak the widening was meant to avoid.
+    Measured on the scaling ALONE. The widening cast belongs to the caller
+    since ``rgb2float`` began taking a Tensor, so including it here would
+    charge this function 8 MiB of the caller's own allocation -- which is
+    what an earlier version of this test did, and it read as a leak.
+    """
+    numel = 1 << 22
+    widened = torch.randint(0, 256, (numel,), dtype=torch.uint8, device="cuda").to(
+        torch.float16
+    )
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    scaled = rgb2float(widened, inplace=True)
+    torch.cuda.synchronize()
+
+    assert torch.cuda.max_memory_allocated() - base == 0, "in-place scaling allocated"
+    assert scaled.data_ptr() == widened.data_ptr()
+
+
+@pytest.mark.gpu_torch_cuda
+def test_out_of_place_scaling_costs_exactly_one_result() -> None:
+    """``inplace=False`` allocates the result and nothing more.
+
+    The pairing matters: the test above proves the fast path is free, and this
+    one proves the safe path does not silently cost two buffers -- a
+    ``sub`` followed by a ``div`` that each materialize would peak at twice
+    the result.
     """
     numel = 1 << 22
     result_mib = numel * 2 / 2**20
-    for inplace in (False, True):
-        source = torch.randint(0, 256, (numel,), dtype=torch.uint8, device="cuda")
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-        base = torch.cuda.memory_allocated()
-        scaled = rgb2float(source.to(torch.float16), inplace=inplace)
-        torch.cuda.synchronize()
-        peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
-        assert peak_mib < result_mib * 1.5, (
-            f"{inplace=} peaked at {peak_mib:.1f} MiB for a "
-            f"{result_mib:.1f} MiB result: the converted buffer was copied."
-        )
-        del scaled, source
-        torch.cuda.empty_cache()
+    widened = torch.randint(0, 256, (numel,), dtype=torch.uint8, device="cuda").to(
+        torch.float16
+    )
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    scaled = rgb2float(widened, inplace=False)
+    torch.cuda.synchronize()
+
+    peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
+    assert scaled.data_ptr() != widened.data_ptr()
+    assert peak_mib < result_mib * 1.5, (
+        f"peaked at {peak_mib:.1f} MiB for a {result_mib:.1f} MiB result: "
+        "the scaling materialized an extra intermediate."
+    )
+
+
+@pytest.mark.gpu_torch_cuda
+def test_float2rgb_out_of_place_holds_one_float_buffer() -> None:
+    """The float intermediate and the uint8 result, and nothing else.
+
+    ``float2rgb`` chains scale, offset, round, clamp and cast. Each step that
+    materializes out-of-place costs another buffer the size of the FLOAT
+    input, so the whole tail has to run on one: only the first operation may
+    allocate. Spelling it ``x * 127.5 + 127.5`` instead peaks at 16 MiB here
+    against 12 MiB, for output that is bit-identical.
+
+    12 MiB is the floor, not slack: an 8 MiB float16 intermediate coexists
+    with the 4 MiB uint8 result until the cast returns.
+    """
+    numel = 1 << 22
+    float_mib = numel * 2 / 2**20
+    uint8_mib = numel / 2**20
+    x = (torch.rand(numel, device="cuda", dtype=torch.float32) * 2 - 1).half()
+    before = x.clone()
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    result = float2rgb(x)
+    torch.cuda.synchronize()
+
+    peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
+    assert peak_mib <= float_mib + uint8_mib, (
+        f"peaked at {peak_mib:.1f} MiB against a {float_mib + uint8_mib:.1f} MiB "
+        "floor: a step in the chain materialized an extra buffer."
+    )
+    assert result.dtype == torch.uint8
+    assert torch.equal(x, before), "out-of-place scaling touched the caller"
+
+
+def test_rgb2float_out_of_place_still_differentiates() -> None:
+    """Halving peak memory must not cost autograd.
+
+    The out-of-place path divides the SUBTRACTION's output in place, which is
+    only safe because ``sub``'s backward reads neither its input nor its
+    output -- the local derivative is 1 -- so nothing in the graph looks at
+    that buffer again. Divide a buffer some other op needs for backward and
+    torch raises "one of the variables needed for gradient computation has
+    been modified"; this pins that the chosen buffer is not one of those.
+    """
+    leaf = torch.tensor([0.0, 127.5, 255.0], dtype=torch.float64, requires_grad=True)
+    rgb2float(leaf).sum().backward()
+    assert leaf.grad is not None
+    torch.testing.assert_close(leaf.grad, torch.full_like(leaf, 1 / 127.5))
+
+    unit = torch.tensor([0.0, 255.0], dtype=torch.float64, requires_grad=True)
+    rgb2float(unit, unit_interval=True).sum().backward()
+    assert unit.grad is not None
+    torch.testing.assert_close(unit.grad, torch.full_like(unit, 1 / 255.0))
+
+    # Double backward: an in-place op that broke the graph would fail here
+    # even when first order looks right.
+    x = torch.tensor([2.0], dtype=torch.float64, requires_grad=True)
+    (first,) = torch.autograd.grad(rgb2float(x * x).sum(), x, create_graph=True)
+    (second,) = torch.autograd.grad(first.sum(), x)
+    torch.testing.assert_close(second, torch.tensor([2 / 127.5], dtype=torch.float64))
+
+    # A producer whose backward DOES need its output, to prove the guard is
+    # about which buffer is divided rather than about autograd generally.
+    base = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+    exponential = base.exp()
+    _ = rgb2float(exponential)
+    exponential.sum().backward()
+    assert base.grad is not None
+    torch.testing.assert_close(base.grad, base.detach().exp())
 
 
 def test_rgb2float_inplace_on_a_grad_leaf_names_the_argument_at_fault() -> None:
@@ -1083,6 +1271,140 @@ def test_float2rgb_lets_torch_reject_an_inplace_grad_leaf() -> None:
     with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
         _ = float2rgb(leaf, float_dtype=torch.float32, inplace=True)
     assert not float2rgb(torch.tensor([0.5])).requires_grad
+
+
+def test_rgb2float_compiles_without_a_graph_break() -> None:
+    """The decode path compiles this, so a break costs the fusion it wanted.
+
+    Cheaper to keep traceable than ``float2rgb``: this one takes a Tensor and
+    reads no addresses. The test exists so it stays that way -- adding a
+    dtype probe or an ownership check here would break the graph silently,
+    since every eager test would still pass.
+    """
+    x = torch.randint(0, 256, (64,), dtype=torch.uint8).to(torch.float16)
+
+    torch._dynamo.reset()
+    explained = torch._dynamo.explain(rgb2float)(x)
+    assert explained.graph_break_count == 0, explained.break_reasons
+
+    torch._dynamo.reset()
+    compiled = torch.compile(rgb2float, fullgraph=True)
+    torch.testing.assert_close(compiled(x), rgb2float(x))
+    torch.testing.assert_close(
+        compiled(x, unit_interval=True),
+        rgb2float(x, unit_interval=True),
+    )
+
+    # The pair must still round-trip through a compiled leg, which is how the
+    # pipelines actually run it.
+    levels = torch.arange(256, dtype=torch.uint8)
+    assert torch.equal(float2rgb(compiled(levels.to(torch.float16))), levels)
+
+
+def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
+    """The accuracy claim in ``float2rgb``'s Notes, measured.
+
+    Inductor fuses scale/offset/round and carries the intermediate at
+    float32; eager materializes each step at the input's own width. At
+    float16 and bfloat16 that makes the compiled kernel EXACT against a
+    correctly-rounded oracle while eager misses hundreds of samples -- which
+    is why the decode pipelines want this compiled, and why a future rewrite
+    that reintroduces a materialized intermediate must fail here.
+    """
+    raw = torch.rand(4096, generator=torch.Generator().manual_seed(0)) * 2 - 1
+
+    for dtype in (torch.float16, torch.bfloat16):
+        x = raw.to(dtype)
+        # Half-to-even in float64, matching ``round_``; the input is already
+        # at ``dtype`` so no cast intervenes.
+        oracle = (x.double() * 127.5 + 127.5).clamp(0.0, 255.0).round()
+        torch._dynamo.reset()
+        compiled = torch.compile(float2rgb, fullgraph=True)
+
+        compiled_wrong = int((compiled(x).double() != oracle).sum())
+        eager_wrong = int((float2rgb(x).double() != oracle).sum())
+        assert compiled_wrong == 0, f"{dtype}: compiled missed {compiled_wrong}"
+        assert eager_wrong > compiled_wrong, (
+            f"{dtype}: eager matched the fused kernel ({eager_wrong}); the "
+            "Notes claim a gap that no longer exists."
+        )
+
+
+def test_float2rgb_compiles_without_a_graph_break() -> None:
+    """Widening to ``Tensorable`` must not cost the pipelines their graph.
+
+    The ownership check reads a buffer address, which is exactly the kind of
+    thing Dynamo refuses to trace -- ``is_private_conversion`` stays traceable
+    only because it compares an int against a ``None`` sentinel rather than
+    walking strides or calling ``untyped_storage``. That property is
+    invisible in eager tests, and ``resize.py`` and ``kenburns.py`` call this
+    inside compiled regions where a break costs the fusion.
+
+    Compiled for real rather than with a patched ``is_compiling``: a patch
+    cannot observe a graph break.
+    """
+    # Seeded and large enough that the oracle counts below are stable; the
+    # divergence is input-dependent and 64 samples hit it only sometimes.
+    x = torch.rand(4096, generator=torch.Generator().manual_seed(0)) * 2 - 1
+
+    torch._dynamo.reset()
+    explained = torch._dynamo.explain(float2rgb)(x)
+    assert explained.graph_break_count == 0, explained.break_reasons
+
+    torch._dynamo.reset()
+    compiled = torch.compile(float2rgb, fullgraph=True)
+    # Exact when no cast is involved: the input is already float32, so eager
+    # and the fused kernel run identical arithmetic.
+    assert torch.equal(compiled(x), float2rgb(x))
+
+    # A narrowing ``float_dtype`` splits them, and the compiled side is the
+    # more accurate one -- so the assertion is against an ORACLE rather than
+    # against eager. Inductor fuses mul/add/round and carries float32
+    # intermediates, while eager materializes each step at float16: for
+    # 0.70556640625 the exact product is 217.4597, which eager first snaps to
+    # 217.5 and then rounds to 218, against the fused 217.
+    #
+    # A narrowing cast is the WEAKER case: it rounds before the fused
+    # arithmetic sees the value, so compiled is better but not exact (43
+    # misses against eager's 237 at float16, where an uncast input gives 0).
+    # Asserting equality between the two would pin eager's error rate as the
+    # contract; compiled-no-worse lets the fused path stay ahead.
+    narrowed = x.to(torch.float16)
+    oracle = (narrowed.double() * 127.5 + 127.5).clamp(0.0, 255.0).round()
+    eager_wrong = int(
+        (float2rgb(x, float_dtype=torch.float16).double() != oracle).sum()
+    )
+    compiled_wrong = int(
+        (compiled(x, float_dtype=torch.float16).double() != oracle).sum()
+    )
+    assert compiled_wrong <= eager_wrong, (compiled_wrong, eager_wrong)
+    # Neither side is exact -- float32 itself rounds 31.501465 down to 31 --
+    # so the bound is one level, the quantum this conversion works in.
+    assert compiled_wrong < x.numel() // 50, compiled_wrong
+
+
+def test_float2rgb_accepts_anything_convert_to_tensor_does() -> None:
+    """The ``Tensorable`` widening, and the aliasing it must not break.
+
+    A matching-dtype ndarray is wrapped ZERO-COPY by ``convert_to_tensor``, so
+    the old ``x_ is not x`` ownership test called that buffer private and
+    scaled the caller's array in place. ``shares_storage`` sees through the
+    new Tensor object to the shared buffer.
+    """
+    assert float2rgb([-1.0, 0.0, 1.0]).tolist() == [0, 128, 255]
+    assert float2rgb(0.0).item() == 128
+
+    array = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+    before = array.copy()
+    assert float2rgb(array, unit_interval=True).tolist() == [0, 128, 255]
+    assert np.array_equal(array, before), "the caller's array was scaled"
+
+    # A donated tensor is still consumed when asked.
+    donated = torch.tensor([0.0, 0.5], dtype=torch.float32)
+    pointer = donated.data_ptr()
+    _ = float2rgb(donated, inplace=True)
+    assert donated.data_ptr() == pointer
+    assert donated[0] != 0.0, "inplace=True did not scale the caller's buffer"
 
 
 if __name__ == "__main__":
