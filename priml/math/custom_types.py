@@ -1,10 +1,9 @@
 """Tensor type aliases and the dtype-coercion entry points.
 
 Lives under ``priml.math`` because every consumer is a math/data-
-processing module. Carved out of ``priml.lib.custom_types`` so callers
-that only need the torch-free pieces (sentinels, sequence aliases,
-checkpoint/job Protocols) don't pay the ~1.2s torch + jaxtyping import
-on startup.
+processing module. Kept apart from ``priml.custom_types`` so callers
+that only need the torch-free pieces (sequence aliases, checkpoint/job
+Protocols) don't pay the ~1.2s torch + jaxtyping import on startup.
 """
 
 from __future__ import annotations
