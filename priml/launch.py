@@ -77,7 +77,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import torch
 
-from priml.lib.custom_types import JobProtocol, LaunchableExperiment
+from priml.custom_types import JobProtocol, LaunchableExperiment
 from priml.logger import setup_logging
 
 
