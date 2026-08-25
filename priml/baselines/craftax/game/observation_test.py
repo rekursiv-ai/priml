@@ -158,11 +158,40 @@ def test_each_environment_renders_its_own_world() -> None:
 
 @requires_craftax
 def test_the_width_matches_the_reference_environment() -> None:
+    """The published width, read off a reference env built at minimum size.
+
+    The window is 9x11 whatever the floor is, so the observation width is a
+    property of the VOCABULARIES, not of the world: a 9x9 single-level map with
+    one creature of each class reports the same 8_268 as the benchmark's 48x48
+    nine-level one. Building the small one asserts that independence, where
+    instantiating the full env would tie this test to a world size it is not
+    about.
+
+    The env is constructed rather than calling ``get_flat_map_obs_shape``
+    directly because the shape a caller actually receives comes from
+    ``observation_space``, and a reference change that moved the inventory
+    block out of that space would leave the two module functions agreeing.
+
+    The small env does NOT make this fast, and shrinking it further will not:
+    construction is 3e-05s and the test still takes seconds, all of it
+    ``import craftax.craftax.constants``, whose module scope runs ~51 XLA
+    compiles. Every parity test in this directory pays that once per xdist
+    worker; ``conftest.reference`` caches it within a process.
+    """
     upstream = reference("craftax.envs.craftax_symbolic_env")
-    assert (
-        upstream.get_flat_map_obs_shape() + upstream.get_inventory_obs_shape()
-        == observation.observation_size()
+    smallest = upstream.StaticEnvParams(
+        map_size=(9, 9),
+        num_levels=1,
+        max_melee_mobs=1,
+        max_passive_mobs=1,
+        max_ranged_mobs=1,
+        max_mob_projectiles=1,
+        max_player_projectiles=1,
+        max_growing_plants=1,
     )
+    environment = upstream.CraftaxSymbolicEnvNoAutoReset(smallest)
+    space = environment.observation_space(environment.default_params)
+    assert space.shape == (observation.observation_size(),)
 
 
 if __name__ == "__main__":
