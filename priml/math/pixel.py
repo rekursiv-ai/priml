@@ -28,88 +28,48 @@ def rgb2float(
     inplace: bool = False,
     unit_interval: bool = False,
 ) -> Tensor:
-    """Convert RGB values from [0, 255] to float on the signed biunit interval.
-
-    The default target is the closed signed biunit interval [-1, 1];
-    ``unit_interval`` selects the closed unit interval [0, 1] instead.
-    ("Biunit" is the isogeometric-analysis name for [-1, 1] -- Hughes et al.,
-    *Efficient Quadrature for NURBS-based Isogeometric Analysis*. It is rare
-    enough outside that field that "signed" is kept alongside it here.)
+    """Convert RGB values from [0, 255] to float in [-1, 1].
 
     Equivalent to `x.to(float).sub(127.5).div(127.5)`, or with
     ``unit_interval=True`` to `x.to(float).div(255)`.
 
     Args:
       x: Floating-point tensor holding RGB values in [0, 255]. Cast at the
-        call site -- ``uint8_frames.to(torch.float16)`` -- because the width
-        is the caller's decision and only the caller knows whether it is
-        paying for float32 or living with float16. float16 is the usual
-        choice: half the memory, and it still round-trips all 256 levels
-        exactly through ``float2rgb``. float8 does not -- it represents 80.
-
-        Scaled unconditionally, NOT passed through: calling this on a tensor
-        already in [-1, 1] shifts it a second time, into [-1.008, -0.992].
-        Guard on ``dtype == torch.uint8`` wherever the range depends on which
-        decoder ran (``bytes.py:307``).
-      inplace: Permit overwriting ``x``, saving one allocation the size of the
-        result. Set it when the cast above minted the tensor purely to hand it
-        over -- ``rgb2float(frames.to(torch.float16), inplace=True)`` scales
-        that temporary rather than copying it again, which is the common case
-        now that the cast is the caller's. Leave it unset when ``x`` outlives
-        the call: a pipeline sample another processor reads after ``yield``
-        will otherwise come back scaled. Never slower, and a no-op under
-        ``torch.compile``.
-      unit_interval: Emit the unit interval [0, 1] rather than the signed
-        biunit default. Set it for the range a model's published preprocessing
-        demands (CoTracker and BiRefNet both want it), or ahead of a mean/std
-        normalize, where it keeps the constants as published -- see Notes.
-        Otherwise prefer the default: it is what every decoder in this repo
-        emits, so a mismatch there is silent rather than loud.
+        call site; float16 is exact over all 256 levels round-tripped through
+        ``float2rgb``, float8 is not. Scaled unconditionally, so a tensor
+        already in [-1, 1] comes back in [-1.008, -0.992] -- guard on
+        ``dtype == torch.uint8`` where the range depends on which decoder ran.
+      inplace: Overwrite ``x`` rather than allocating. Unsafe when ``x``
+        outlives the call, such as a pipeline sample read after ``yield``.
+      unit_interval: Emit [0, 1]. Set it for a model whose preprocessing
+        demands that range, or ahead of a mean/std normalize -- see Notes.
 
     Returns:
-      result: Tensor on the closed signed biunit interval [-1, 1], or the
-        closed unit interval [0, 1] when ``unit_interval`` is set.
+      result: Tensor in [-1, 1], or [0, 1] when ``unit_interval`` is set.
 
     Raises:
-      TypeError: If ``x`` resolves to a complex dtype. Torch would truncate it
-        to the real part behind a ``UserWarning``, and no RGB reading of a
-        complex value exists to prefer.
+      TypeError: If ``x`` is not floating point. Torch would fail on an
+        integer and silently drop the imaginary part of a complex.
       ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
-        Torch would raise ``a leaf Variable that requires grad is being used
-        in an in-place operation`` from inside the scaling; the argument at
-        fault is named here instead.
 
     Notes:
-      Scales straight from [0, 255], where both public baselines instead pass
-      through [0, 1]: diffusers divides by 255 then applies ``2v - 1``, and
-      torchvision reaches [0, 1] via ``convert_image_dtype`` before
-      ``normalize(mean=.5, std=.5)``. They emit bit-identical output, and this
-      halves their worst-case error at every float width -- the intermediate
-      rounds at magnitude ~1 and the doubling scales that error along with the
-      value. Proven in ``test_rgb2float_halves_the_error_of_a_unit_interval_
-      intermediate``.
+      Scaling straight from [0, 255] has half the error of the two-step route
+      diffusers (``/255`` then ``2v - 1``) and torchvision (``/255`` then
+      ``normalize(.5, .5)``) both take: their intermediate rounds at magnitude
+      ~1, and the doubling scales that error with it. Proven in
+      ``test_rgb2float_halves_the_error_of_a_unit_interval_intermediate``.
 
-      That advantage is against a bare [0, 1] conversion, and it does NOT
-      survive composition with a later rescale. A mean/std normalize is
-      exactly that: routing through [-1, 1] hands the standardization an
-      intermediate twice as large, which it then divides by ``2s`` instead of
-      ``s`` -- same magnitude, same relative error, and the published
-      constants have to be restated as ``2m - 1`` and ``2s``. Prefer
-      ``unit_interval`` in front of a mean/std step (both CIFAR-10 loaders do);
-      prefer the default when the [-1, 1] value is what the model consumes.
-      Either way [0, 1] round-trips all 256 levels on its own, proven in
-      ``test_the_unit_pixel_pair_is_an_exact_round_trip``.
+      A later rescale cancels the advantage. A mean/std normalize divides a
+      [-1, 1] intermediate by ``2s`` rather than ``s``, giving the same
+      relative error, and forces the published constants to be restated as
+      ``2m - 1`` and ``2s``. Use ``unit_interval`` ahead of one, as both
+      CIFAR-10 loaders do.
 
     """
-    # float16 is the hint, not a cast: it only fires for input carrying no
-    # dtype of its own, so a tensor keeps the width its caller chose.
+    # The hint fires only for input carrying no dtype (a bare list), so a
+    # tensor keeps the width its caller chose.
     x_ = convert_to_tensor(x, dtype_hint=torch.float16)
     if not x_.dtype.is_floating_point:
-        # Integer input would fail inside the scaling as "result type Float
-        # can't be cast to the desired output type Byte", and complex would be
-        # truncated to its real part behind a torch ``UserWarning``. Both are
-        # the caller's cast to make: only they know what width they are paying
-        # for. Reading a dtype is metadata-only, so this guard is free.
         raise TypeError(
             f"rgb2float expects floating-point input in [0, 255]; got {x_.dtype}. "
             "Cast at the call site, e.g. x.to(torch.float16).",
@@ -120,18 +80,13 @@ def rgb2float(
             "rgb2float cannot scale in place: x is a leaf requiring grad. "
             "Pass inplace=False, or detach the tensor first.",
         )
-    # Divide; do not multiply by a reciprocal. Neither 1/127.5, 2/255, nor
-    # 1/255 is representable, so a reciprocal multiply injects that constant's
-    # error into every element. The compiler does not strength-reduce this away
-    # -- the two spellings differ in the low bits at float32 and float64.
+    # Divide rather than multiply by a reciprocal: 1/127.5, 2/255 and 1/255
+    # are all unrepresentable, so the reciprocal's own error reaches every
+    # element. The compiler does not strength-reduce it away.
     if unit_interval:
-        # No offset to apply, so the divide is the only step and 255 is exact.
         return x_.div_(255.0) if owned or inplace else x_ / 255.0
-    # Subtract before dividing, so the division is the only rounding step and
-    # it happens at the small magnitude of the result. 127.5 is 255/2, hence
-    # exact, so the subtraction is exact on every integer level. Note this is
-    # the same ORDER torchvision's ``normalize`` uses (``sub_`` then ``div_``);
-    # what differs is the domain it runs in -- see this function's Notes.
+    # Subtract first so the divide is the only rounding step, at the result's
+    # magnitude. 127.5 is exactly 255/2, so the subtraction is exact.
     if owned or inplace:
         return x_.sub_(127.5).div_(127.5)
     return (x_ - 127.5) / 127.5
@@ -144,144 +99,119 @@ def float2rgb(
     inplace: bool = False,
     unit_interval: bool = False,
 ) -> Tensor:
-    """Convert float values on the signed biunit interval to RGB in [0, 255].
-
-    The default source is the closed signed biunit interval [-1, 1];
-    ``unit_interval`` reads the closed unit interval [0, 1] instead. See
-    ``rgb2float`` for the term.
+    """Convert float values in [-1, 1] to RGB in [0, 255].
 
     Equivalent to `x.mul(127.5).add(127.5).round().clamp(0, 255).to(uint8)`,
     or with ``unit_interval=True`` to
     `x.mul(255).round().clamp(0, 255).to(uint8)`.
 
     Args:
-      x: Tensor of floats on the signed biunit interval [-1, 1], or on the
-        unit interval [0, 1] when ``unit_interval`` is set. Out-of-range
-        values are clamped.
-      float_dtype: Width the scaling runs at, NOT the width of the result --
-        that is always uint8. (Spelled differently from ``rgb2float``'s
-        ``dtype``, which does name the output, so that ``dtype=torch.uint8``
-        is not the natural thing to write here.) ``None`` keeps the input's
-        width and is almost always right: widening float16 to float32 costs
-        ~3.7x the runtime to buy at most one uint8 level of accuracy on 1% of
-        inputs, and buys nothing at bfloat16, where 8 mantissa bits -- not
-        the arithmetic -- are the limit.
-      inplace: Permit overwriting the caller's buffer, saving one allocation
-        the size of the float intermediate; the uint8 result is fresh either
-        way. Only consulted when ``x`` needed no conversion; a converted
-        input is scaled in place regardless. Never slower, and a no-op under
-        ``torch.compile``.
-      unit_interval: Read ``x`` on the unit interval rather than the signed
-        biunit default. Must match the range the value actually carries; it
-        cannot be inferred, since an all-dark [-1, 1] frame and an all-dark
-        [0, 1] frame are both plausible data. Getting it wrong is silent: a
-        [0, 1] value read as biunit lands in the top half of the byte range,
-        washing the image out rather than raising.
+      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set.
+        Out-of-range values are clamped.
+      float_dtype: Width the scaling runs at; the result is always uint8.
+        ``None`` keeps the input's width. Widening float16 to float32 costs
+        ~3.7x the runtime for at most one uint8 level on 1% of inputs, and
+        nothing at bfloat16, where the 8 mantissa bits are the limit.
+      inplace: Overwrite ``x`` rather than allocating the float intermediate;
+        the uint8 result is fresh either way. Unsafe when ``x`` outlives the
+        call.
+      unit_interval: Read ``x`` as [0, 1]. Must match what the value actually
+        carries -- an all-dark frame looks the same in either range, so a
+        mismatch silently washes the image out rather than raising.
 
     Returns:
-      result: Tensor with uint8 RGB values in [0, 255] range.
+      result: uint8 tensor in [0, 255].
 
     Raises:
-      TypeError: If ``x`` resolves to a non-floating-point dtype.
+      TypeError: If ``x`` is not floating point.
 
     Notes:
-      Rounds, as diffusers does (``numpy_to_pil``: ``(v * 255).round()``); the
-      two agree at float16 and float32. This quantizes directly from [-1, 1]
-      rather than denormalizing to [0, 1] first, which is what recovers the 16
-      bfloat16 levels diffusers drops.
+      Quantizes directly from [-1, 1] rather than denormalizing to [0, 1]
+      first, which recovers the 16 bfloat16 levels diffusers drops. Rounds as
+      diffusers does; the two agree at float16 and float32.
 
       torchvision's ``convert_image_dtype`` truncates after scaling by
-      ``256 - 1e-3``, an epsilon that keeps 1.0 from reaching 256. That
-      constant rounds to exactly 256.0 in bfloat16 and float16, so white
-      overflows and the uint8 cast wraps to black -- 128 of 256 levels lost at
-      bfloat16. Both claims are proven in
+      ``256 - 1e-3``, which rounds to exactly 256.0 at bfloat16 and float16 --
+      white overflows and the uint8 cast wraps to black, losing 128 of 256
+      levels. Both claims proven in
       ``test_float2rgb_round_trips_where_both_baselines_lose_levels``.
 
     """
-    # The hint fires only for input carrying no dtype, where torch would pick
-    # int64 for something like ``[0, 1]`` and the scaling below would fail on
-    # an integer tensor. float16 to match ``rgb2float``; both are exact here.
     x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
     if not x_.dtype.is_floating_point:
-        # An integer tensor carries its own dtype, so the hint above leaves it
-        # alone and the scaling below silently treats byte values as [-1, 1]
-        # floats: uint8 [0, 1, 2] would come back [128, 255, 255]. Reading a
-        # dtype is metadata-only, so this guard is free.
+        # Without this an integer tensor is read as [-1, 1]: uint8 [0, 1, 2]
+        # would come back [128, 255, 255].
         raise TypeError(
             "float2rgb expects floating-point input in "
             f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x_.dtype}.",
         )
-    # See ``rgb2float``: this separates a buffer the conversion minted from the
-    # caller's, and only the latter needs permission to overwrite. The autograd
-    # guard there has no analogue here -- a uint8 result carries no grad, so
-    # nothing differentiates through this function.
     owned = _is_private_buffer(x_, x)
-    # Scale then offset: the exact inverse of ``rgb2float``, undoing its two
-    # steps in reverse. The algebraically equal ``(x + 1.0) * 127.5`` -- which
-    # inverts the reciprocal spelling rejected there -- rounds while the value
-    # is near 1 and then multiplies that error by 127.5, breaking the round
-    # trip for 16 of 256 bfloat16 levels.
+    # Scale then offset, inverting ``rgb2float`` step for step. The equivalent
+    # ``(x + 1.0) * 127.5`` rounds near 1 and multiplies that error by 127.5,
+    # breaking the round trip for 16 of 256 bfloat16 levels.
     #
-    # Python float constants, not ``torch.addcmul``. Fusing would round once
-    # instead of twice, worth under one uint8 level on 0.3% of inputs, but
-    # ``addcmul`` accepts only 0-dim TENSOR scalars. Those are memory loads
-    # rather than immediates folded into the kernel, which forfeits the scalar
-    # fast path and costs ~2x on the float16/bfloat16 widths decode uses.
-    #
-    # The unit interval needs no offset, so it is one multiply -- and unlike
-    # the forward direction there is no reciprocal to avoid, 255 being exact.
+    # Python floats, not ``torch.addcmul``: fusing would round once instead of
+    # twice (under one uint8 level on 0.3% of inputs) but ``addcmul`` takes
+    # only 0-dim tensor scalars, which are memory loads rather than folded
+    # immediates -- ~2x slower at the float16/bfloat16 widths decode uses.
     scale = 255.0 if unit_interval else 127.5
     if owned or inplace:
         x_ = x_.mul_(scale) if unit_interval else x_.mul_(scale).add_(127.5)
     else:
         x_ = x_ * scale if unit_interval else x_ * scale + 127.5
-    # ``round_`` exists for ARBITRARY input, not for the round trip: a value
-    # from ``rgb2float`` is already integral here, so truncation reproduces all
-    # 256 levels and looks correct. Generated output is off that lattice, where
-    # truncation errs one-sided in [-1, 0] -- a systematic half-level darkening
-    # of every image that does not average out. Costs 5-10% on CPU, nothing on
-    # CUDA. diffusers rounds here too; torchvision truncates, and pays for it.
+    # ``round_`` is for arbitrary input, not the round trip: a value from
+    # ``rgb2float`` is already integral, so truncation would reproduce all 256
+    # levels and look correct. Generated output is off that lattice, where
+    # truncation errs one-sided and darkens every image by half a level.
     #
-    # Two cheaper spellings are wrong. Folding the half into the offset
-    # (``+ 128.0``, letting the cast truncate) loses 63 of 256 bfloat16 levels:
-    # spacing is 1.0 above 128, so the sum snaps to an integer and the .5 is
-    # gone before the cast sees it. Rounding half-up (``+ 0.5`` then floor)
-    # passes every lattice point -- each is a tie, where the bias hides -- yet
-    # off the lattice it brightens by a quarter level.
+    # Two cheaper spellings fail. ``+ 128.0`` with a truncating cast loses 63
+    # bfloat16 levels -- spacing is 1.0 above 128, so the .5 is gone before
+    # the cast. ``+ 0.5`` then floor passes every lattice point (each is a
+    # tie) but brightens by a quarter level off it.
     #
-    # ``clamp_`` is load-bearing: ``.to(torch.uint8)`` wraps modularly rather
-    # than saturating, so an out-of-range 1.004 becomes 0 instead of 255,
-    # turning saturated highlights black.
+    # ``clamp_`` is load-bearing: the uint8 cast wraps modularly, so 1.004
+    # would become 0 and turn saturated highlights black.
     return x_.round_().clamp_(0.0, 255.0).to(torch.uint8)
 
 
 def _is_private_buffer(converted: Tensor, original: Tensorable) -> bool:
-    """Whether ``converted`` is memory the conversion minted, safe to overwrite.
+    """Whether ``converted`` can be overwritten without the caller seeing it.
 
-    A minted buffer is unaliased and non-leaf, so scaling it in place is both
-    unobservable and autograd-legal; sparing it would double peak memory to
-    protect a temporary.
+    ``convert_to_tensor`` either allocates or wraps the caller's storage, and
+    only the address distinguishes them: ``torch.as_tensor`` wraps an
+    ``ndarray`` zero-copy, so a distinct Python object proves nothing.
 
-    Identity alone is NOT the test, though it reads like one. ``Tensorable``
-    admits ``np.ndarray``, and ``torch.as_tensor`` wraps a compatible array
-    WITHOUT copying -- a different Python object over the caller's storage.
-    Treating that as private scaled a caller's float array through on a call
-    that never passed ``inplace``, destroying its data. Compare the pointer,
-    which is what "may I write here?" actually asks.
+    Args:
+      converted: What ``convert_to_tensor`` returned.
+      original: What it was given.
+
+    Returns:
+      private: True when nothing the caller retains shares this storage.
+
+    Notes:
+      ``Tensor._base`` cannot answer this -- it tracks torch-internal views,
+      and is ``None`` both for a zero-copy ``as_tensor(ndarray)`` and for a
+      tensor built from a list. ``np.shares_memory`` needs a ``.numpy()``
+      round-trip that raises on CUDA.
+
+      A tensor ``original`` needs no comparison. ``convert_to_tensor`` returns
+      it unchanged unless it converted, and converting allocates, so a
+      different object already implies different storage. That also sidesteps
+      ``data_ptr``'s offset sensitivity: a slice shares its base's storage
+      while reporting a different address.
+
     """
     if converted is original:
         return False
-    # ``__array_interface__`` is the buffer protocol every zero-copy source
-    # exposes -- ``np.ndarray`` and anything array-like enough for
-    # ``as_tensor`` to wrap rather than copy. Reaching for it by attribute
-    # rather than ``isinstance`` keeps numpy a type-checking-only import here.
-    # A list or scalar has no such pointer, so it is private by construction.
-    interface = getattr(original, "__array_interface__", None)
-    if isinstance(original, Tensor):
-        return converted.data_ptr() != original.data_ptr()
-    if interface is None:
-        return True
-    return converted.data_ptr() != interface["data"][0]
+    # ``ctypes.data`` is the array's buffer address. Anything without one --
+    # a list, a scalar -- gets a fresh sentinel, which no int equals, so it
+    # reads as private. Re-running ``torch.as_tensor`` to get the address
+    # instead would rebuild the data: 9.7ms for a 100k list.
+    return converted.data_ptr() != getattr(
+        getattr(original, "ctypes", None),
+        "data",
+        object(),
+    )
 
 
 class ImageShape(NamedTuple):
