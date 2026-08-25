@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from torch import Tensor
-from torch.optim.optimizer import Optimizer
+from pathlib import Path
+from typing import TypedDict, cast
 
-import pytest
+from torch import Tensor
+
 import torch
 
 from priml.optimizers.adam_atan2 import AdamATan2
+
+
+_GOLDEN = Path(__file__).parent / "goldens" / "adam_atan2_0_0_3.pt"
+
+
+class _AdamATan2Golden(TypedDict):
+    initial_param: Tensor
+    grads: Tensor
+    expected_param: Tensor
 
 
 def test_adam_atan2_matches_reference_bias_corrections() -> None:
@@ -48,48 +58,24 @@ def test_adam_atan2_matches_reference_bias_corrections() -> None:
     assert "exp_avg_sq" in state
 
 
-@pytest.mark.gpu_torch_cuda
-def test_adam_atan2_matches_external_package_when_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    external = pytest.importorskip("adam_atan2")
-    if not torch.cuda.is_available():
-        pytest.skip("external adam-atan2 is a CUDA package")
-    # torch 2.11 renamed the capture guard to `_accelerator_...` and kept no
-    # deprecated alias, so the reference package's `step()` raises before it
-    # computes anything. 0.0.3 is the newest release on PyPI, so there is no
-    # version to upgrade to; restore the name it calls rather than lose the
-    # exact-parity comparison. The guard is a precondition check, not numerics.
-    monkeypatch.setattr(
-        Optimizer,
-        "_cuda_graph_capture_health_check",
-        Optimizer._accelerator_graph_capture_health_check,
-        raising=False,
+def test_adam_atan2_matches_external_package_golden() -> None:
+    """Replay the ``adam-atan2==0.0.3`` package's reference oracle exactly."""
+    golden = cast(
+        _AdamATan2Golden,
+        torch.load(_GOLDEN, weights_only=True, map_location="cpu"),
     )
-    ref_param = torch.tensor([0.5, -0.25, 0.125], device="cuda")
-    test_param = ref_param.clone()
-    ref_opt = external.AdamATan2(
-        [ref_param],
+    param = golden["initial_param"].clone()
+    opt = AdamATan2(
+        [param],
         lr=1e-3,
         betas=(0.9, 0.95),
         weight_decay=0.1,
     )
-    test_opt = AdamATan2(
-        [test_param],
-        lr=1e-3,
-        betas=(0.9, 0.95),
-        weight_decay=0.1,
-    )
-    for grad in (
-        torch.tensor([0.01, -0.02, 0.04], device="cuda"),
-        torch.tensor([0.03, -0.01, -0.02], device="cuda"),
-        torch.tensor([-0.02, 0.05, 0.01], device="cuda"),
-    ):
-        ref_param.grad = grad.clone()
-        test_param.grad = grad.clone()
-        ref_opt.step()
-        test_opt.step()
-    torch.testing.assert_close(test_param, ref_param, rtol=0, atol=0)
+
+    for grad in golden["grads"]:
+        param.grad = grad.clone()
+        opt.step()
+    assert torch.equal(param, golden["expected_param"])
 
 
 def _reference_step(
