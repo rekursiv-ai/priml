@@ -1323,6 +1323,7 @@ def test_rgb2float_compiles_without_a_graph_break() -> None:
     assert torch.equal(float2rgb(compiled(levels.to(torch.float16))), levels)
 
 
+@pytest.mark.compute_torch_compile
 def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
     """The accuracy claim in ``float2rgb``'s Notes, measured.
 
@@ -1332,6 +1333,12 @@ def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
     correctly-rounded oracle while eager misses hundreds of samples -- which
     is why the decode pipelines want this compiled, and why a future rewrite
     that reintroduces a materialized intermediate must fail here.
+
+    Marked because it is the only test in this package that must run the REAL
+    Inductor backend -- the fused kernel's numerics are the subject, so
+    ``_TRACE_ONLY`` would assert nothing. Its codegen dominates the package's
+    unit tier, and the marker's ``slow`` alias moves it to the pre-push tier
+    rather than deleting the coverage.
     """
     raw = torch.rand(4096, generator=torch.Generator().manual_seed(0)) * 2 - 1
 
