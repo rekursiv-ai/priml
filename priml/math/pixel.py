@@ -79,15 +79,15 @@ def rgb2float(
       CIFAR-10 loaders do.
 
     """
-    # ``dtype_hint`` fires only for input carrying no dtype of its own -- a
-    # bare list -- so a float tensor keeps its width and this never silently
-    # narrows float32 work.
+    # `dtype_hint` fires only for input carrying no dtype of its own -- a bare
+    # list -- so a float tensor keeps its width and this never silently narrows
+    # float32 work.
     x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
     if not x_.dtype.is_floating_point:
         # Integer and complex both land here. Casting instead would make the
         # function guess a width the caller never named, and would override an
-        # explicit ``float_dtype``; complex would lose its imaginary part
-        # behind a warning nobody reads.
+        # explicit `float_dtype`; complex would lose its imaginary part behind
+        # a warning nobody reads.
         raise TypeError(
             f"rgb2float expects floating-point input in [0, 255]; got "
             f"{x_.dtype}. Pass float_dtype=, e.g. "
@@ -100,23 +100,19 @@ def rgb2float(
             "Pass inplace=False, or detach the tensor first.",
         )
 
-    # See ``float2rgb``: a buffer this function minted is nobody else's, so it
-    # is scaled in place whatever the caller asked.
+    # A buffer we minted is nobody else's, so it is scaled in place regardless
+    # of what the caller asked.
     inplace = inplace or is_private_conversion(x_, x)
 
-    # Divide rather than multiply by a reciprocal: 1/127.5, 2/255 and 1/255
-    # are all unrepresentable, so the reciprocal's own error reaches every
-    # element. The compiler does not strength-reduce it away.
+    # Divide rather than multiply: 2/255 and 1/255 are all unrepresentable, so
+    # the reciprocal's own error reaches every element. The compiler does not
+    # strength-reduce it away.
     if unit_interval:
         return x_.div_(255.0) if inplace else x_ / 255.0
 
-    # Subtract first so the divide is the only rounding step, at the result's
-    # magnitude. 127.5 is exactly 255/2, so the subtraction is exact.
-    #
-    # ``div_`` on the SUBTRACTION's output, not ``/``: that buffer is a
-    # temporary nobody else holds, so dividing out-of-place again doubles peak
-    # memory (measured 16 MiB against 8 MiB for a 4M-element float16 result)
-    # to protect a value that is already dead. Output is bit-identical.
+    # Subtract first so the divide is the only rounding step; 127.5 is exactly
+    # representable. Inplace `div_` because its input is a buffer nobody else
+    # holds--halves memory usage.
     return (x_.sub_(127.5) if inplace else x_ - 127.5).div_(127.5)
 
 
@@ -184,44 +180,44 @@ def float2rgb(
     """
     x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
     if not x_.dtype.is_floating_point:
-        # Integer and complex both land here -- ``is_floating_point`` is False
-        # for complex, which is easy to misread as a gap. Casting instead
-        # would read an integer tensor as [-1, 1] (uint8 [0, 1, 2] comes back
-        # [128, 255, 255]) and would drop a complex imaginary part behind a
-        # warning nobody reads.
+        # Integer and complex both land here.
         raise TypeError(
             "float2rgb expects floating-point input in "
             f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x_.dtype}. "
             "Pass float_dtype=, e.g. float2rgb(x, float_dtype=torch.float16).",
         )
 
-    # Extend to inplace when we know we created the Tensor.
+    # A buffer we minted is nobody else's, so it is scaled in place regardless
+    # of what the caller asked.
     inplace = inplace or is_private_conversion(x_, x)
 
-    # Scale then offset, inverting ``rgb2float`` step for step. The equivalent
-    # ``(x + 1.0) * 127.5`` rounds near 1 and multiplies that error by 127.5,
-    # breaking the round trip for 16 of 256 bfloat16 levels.
+    # Scale then offset, inverting `rgb2float` step for step.
     #
-    # Python floats, not ``torch.addcmul``: fusing would round once instead of
-    # twice (under one uint8 level on 0.3% of inputs) but ``addcmul`` takes
-    # only 0-dim tensor scalars, which are memory loads rather than folded
-    # immediates -- ~2x slower at the float16/bfloat16 widths decode uses.
+    # The equivalent `(x + 1.0) * 127.5` rounds near 1 and multiplies that
+    # error by 127.5, breaking the round trip for 16 of 256 bfloat16 levels.
+    #
+    # We use this form and not `torch.addcmul` because the latter takes only
+    # 0-dim tensor scalars which are memory loads rather than folded
+    # immediates. It ends up being ~2x slower at the float16/bfloat16 widths
+    # decode uses.
     if unit_interval:
         x_ = x_.mul_(255.0) if inplace else x_ * 255.0
     else:
         x_ = (x_.mul_(127.5) if inplace else x_ * 127.5).add_(127.5)
 
-    # ``round_`` is for arbitrary input, not the round trip: a value from
-    # ``rgb2float`` is already integral, so truncation would reproduce all 256
-    # levels and look correct. Generated output is off that lattice, where
-    # truncation errs one-sided and darkens every image by half a level.
+    # `round_` is for arbitrary input not the round trip case.
     #
-    # Two cheaper spellings fail. ``+ 128.0`` with a truncating cast loses 63
-    # bfloat16 levels -- spacing is 1.0 above 128, so the .5 is gone before
-    # the cast. ``+ 0.5`` then floor passes every lattice point (each is a
+    # A value from `rgb2float` is already integral, so truncation would
+    # reproduce all 256 levels and look correct. Generated output is off that
+    # lattice, where truncation errs one-sided and darkens every image by half
+    # a level.
+    #
+    # Avoiding the round is not possible. `+ 128.0` with a truncating cast
+    # loses 63 bfloat16 levels -- spacing is 1.0 above 128, so the .5 is gone
+    # before the cast. `+ 0.5` then floor passes every lattice point (each is a
     # tie) but brightens by a quarter level off it.
     #
-    # ``clamp_`` is load-bearing: the uint8 cast wraps modularly, so 1.004
+    # `clamp_` is also unavoidable. The uint8 cast wraps modularly, so 1.004
     # would become 0 and turn saturated highlights black.
     return x_.round_().clamp_(0.0, 255.0).to(torch.uint8)
 
