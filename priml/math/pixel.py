@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def rgb2float(
-    x: Tensorable,
+    x: Tensor,
     *,
     inplace: bool = False,
     unit_interval: bool = False,
@@ -66,34 +66,34 @@ def rgb2float(
       CIFAR-10 loaders do.
 
     """
-    # The hint fires only for input carrying no dtype (a bare list), so a
-    # tensor keeps the width its caller chose.
-    x_ = convert_to_tensor(x, dtype_hint=torch.float16)
-    if not x_.dtype.is_floating_point:
+    if not x.dtype.is_floating_point:
         raise TypeError(
-            f"rgb2float expects floating-point input in [0, 255]; got {x_.dtype}. "
+            f"rgb2float expects floating-point input in [0, 255]; got {x.dtype}. "
             "Cast at the call site, e.g. x.to(torch.float16).",
         )
-    owned = _is_private_buffer(x_, x)
-    if inplace and not owned and x_.requires_grad and x_.is_leaf:
+
+    if inplace and x.requires_grad and x.is_leaf:
         raise ValueError(
             "rgb2float cannot scale in place: x is a leaf requiring grad. "
             "Pass inplace=False, or detach the tensor first.",
         )
+
     # Divide rather than multiply by a reciprocal: 1/127.5, 2/255 and 1/255
     # are all unrepresentable, so the reciprocal's own error reaches every
     # element. The compiler does not strength-reduce it away.
     if unit_interval:
-        return x_.div_(255.0) if owned or inplace else x_ / 255.0
+        return x.div_(255.0) if inplace else x / 255.0
+
     # Subtract first so the divide is the only rounding step, at the result's
     # magnitude. 127.5 is exactly 255/2, so the subtraction is exact.
-    if owned or inplace:
-        return x_.sub_(127.5).div_(127.5)
-    return (x_ - 127.5) / 127.5
+    if inplace:
+        return x.sub_(127.5).div_(127.5)
+
+    return (x - 127.5) / 127.5
 
 
 def float2rgb(
-    x: Tensorable,
+    x: Tensor,
     *,
     float_dtype: torch.dtype | None = None,
     inplace: bool = False,
@@ -137,15 +137,18 @@ def float2rgb(
       ``test_float2rgb_round_trips_where_both_baselines_lose_levels``.
 
     """
-    x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
-    if not x_.dtype.is_floating_point:
+    if not x.dtype.is_floating_point:
         # Without this an integer tensor is read as [-1, 1]: uint8 [0, 1, 2]
         # would come back [128, 255, 255].
         raise TypeError(
             "float2rgb expects floating-point input in "
-            f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x_.dtype}.",
+            f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x.dtype}.",
         )
-    owned = _is_private_buffer(x_, x)
+
+    # A width change allocates, so that buffer is ours to overwrite whatever
+    # the caller asked for.
+    x_ = x if float_dtype is None else x.to(float_dtype)
+
     # Scale then offset, inverting ``rgb2float`` step for step. The equivalent
     # ``(x + 1.0) * 127.5`` rounds near 1 and multiplies that error by 127.5,
     # breaking the round trip for 16 of 256 bfloat16 levels.
@@ -155,10 +158,11 @@ def float2rgb(
     # only 0-dim tensor scalars, which are memory loads rather than folded
     # immediates -- ~2x slower at the float16/bfloat16 widths decode uses.
     scale = 255.0 if unit_interval else 127.5
-    if owned or inplace:
+    if (x_ is not x) or inplace:
         x_ = x_.mul_(scale) if unit_interval else x_.mul_(scale).add_(127.5)
     else:
         x_ = x_ * scale if unit_interval else x_ * scale + 127.5
+
     # ``round_`` is for arbitrary input, not the round trip: a value from
     # ``rgb2float`` is already integral, so truncation would reproduce all 256
     # levels and look correct. Generated output is off that lattice, where
@@ -172,46 +176,6 @@ def float2rgb(
     # ``clamp_`` is load-bearing: the uint8 cast wraps modularly, so 1.004
     # would become 0 and turn saturated highlights black.
     return x_.round_().clamp_(0.0, 255.0).to(torch.uint8)
-
-
-def _is_private_buffer(converted: Tensor, original: Tensorable) -> bool:
-    """Whether ``converted`` can be overwritten without the caller seeing it.
-
-    ``convert_to_tensor`` either allocates or wraps the caller's storage, and
-    only the address distinguishes them: ``torch.as_tensor`` wraps an
-    ``ndarray`` zero-copy, so a distinct Python object proves nothing.
-
-    Args:
-      converted: What ``convert_to_tensor`` returned.
-      original: What it was given.
-
-    Returns:
-      private: True when nothing the caller retains shares this storage.
-
-    Notes:
-      ``Tensor._base`` cannot answer this -- it tracks torch-internal views,
-      and is ``None`` both for a zero-copy ``as_tensor(ndarray)`` and for a
-      tensor built from a list. ``np.shares_memory`` needs a ``.numpy()``
-      round-trip that raises on CUDA.
-
-      A tensor ``original`` needs no comparison. ``convert_to_tensor`` returns
-      it unchanged unless it converted, and converting allocates, so a
-      different object already implies different storage. That also sidesteps
-      ``data_ptr``'s offset sensitivity: a slice shares its base's storage
-      while reporting a different address.
-
-    """
-    if converted is original:
-        return False
-    # ``ctypes.data`` is the array's buffer address. Anything without one --
-    # a list, a scalar -- gets a fresh sentinel, which no int equals, so it
-    # reads as private. Re-running ``torch.as_tensor`` to get the address
-    # instead would rebuild the data: 9.7ms for a 100k list.
-    return converted.data_ptr() != getattr(
-        getattr(original, "ctypes", None),
-        "data",
-        object(),
-    )
 
 
 class ImageShape(NamedTuple):

@@ -145,16 +145,12 @@ def test_rgb2float_keeps_the_width_the_caller_chose():
     Choosing a width is a memory-versus-precision tradeoff only the caller can
     make, and a function that silently narrowed float32 to float16 would halve
     the mantissa of a tensor someone deliberately widened. So the cast belongs
-    at the call site, and anything ``convert_to_tensor`` cannot resolve into a
-    float is refused rather than guessed at -- see the integer test below.
+    at the call site, and an integer input is refused rather than guessed at
+    -- see the integer test below.
     """
     for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
         source = torch.arange(256, dtype=torch.uint8).to(dtype)
         assert rgb2float(source).dtype == dtype, dtype
-
-    # A bare list carries no width, which is exactly the gap ``dtype_hint``
-    # inside ``convert_to_tensor`` exists to fill.
-    assert rgb2float([0, 127, 255]).dtype == torch.float16
 
 
 def test_the_signed_range_is_the_default_interval():
@@ -968,17 +964,14 @@ def test_compute_video_shapes_validates_its_own_arguments():
 
 
 def test_float2rgb_rejects_an_integer_tensor() -> None:
-    """The dtype hint fires only for input carrying NO dtype.
+    """An integer input would have its byte values read as ``[-1, 1]``.
 
-    An integer tensor has one, so it reached the scaling and had its byte
-    values treated as ``[-1, 1]`` floats: uint8 ``[0, 1, 2]`` came back
-    ``[128, 255, 255]`` rather than round-tripping.
+    uint8 ``[0, 1, 2]`` came back ``[128, 255, 255]`` rather than
+    round-tripping, so the guard refuses it instead of guessing a width.
     """
     for dtype in (torch.uint8, torch.int64):
         with pytest.raises(TypeError, match="floating-point"):
             _ = float2rgb(torch.tensor([0, 1, 2], dtype=dtype))
-    # A bare Python list still takes the hint and works.
-    assert float2rgb([-1.0, 0.0, 1.0]).dtype == torch.uint8
 
 
 def test_rgb2float_converts_a_float_input_rather_than_passing_it_through() -> None:
@@ -997,28 +990,25 @@ def test_rgb2float_converts_a_float_input_rather_than_passing_it_through() -> No
     assert not torch.equal(twice, already_signed)
 
 
-def test_neither_conversion_scribbles_on_a_numpy_caller() -> None:
-    """A zero-copy numpy input is the caller's memory, not a spare buffer.
+def test_neither_conversion_writes_through_a_caller_tensor() -> None:
+    """Without ``inplace``, the caller's tensor comes back untouched.
 
-    ``Tensorable`` admits ``np.ndarray`` (``custom_types.py:44``), and
-    ``torch.as_tensor`` wraps a compatible one WITHOUT copying: a different
-    Python object over the same storage. Both functions decide "may I write
-    here?" by object identity, so a float array reads as a private temporary
-    and gets scaled through -- destroying the caller's data on a call that
-    never asked for ``inplace``. Only a dtype change hid this, by allocating.
+    ``torch.as_tensor`` wraps a numpy array zero-copy, so when these took
+    ``Tensorable`` a float array read as a private temporary and was scaled
+    through -- destroying data on a call that never asked for it. Narrowing to
+    ``Tensor`` removed the ambiguity: identity now settles ownership, and the
+    only buffer either function may write is one the caller donated.
     """
-    for dtype in (np.float32, np.float64):
-        source = np.array([0.0, 0.5, 1.0], dtype=dtype)
-        before = source.copy()
+    for dtype in (torch.float32, torch.float64):
+        source = torch.tensor([0.0, 0.5, 1.0], dtype=dtype)
+        before = source.clone()
         _ = rgb2float(source)
-        np.testing.assert_array_equal(source, before, err_msg=f"rgb2float {dtype}")
+        assert torch.equal(source, before), f"rgb2float {dtype}"
 
-        signed = np.array([-1.0, 0.0, 1.0], dtype=dtype)
-        signed_before = signed.copy()
+        signed = torch.tensor([-1.0, 0.0, 1.0], dtype=dtype)
+        signed_before = signed.clone()
         _ = float2rgb(signed)
-        np.testing.assert_array_equal(
-            signed, signed_before, err_msg=f"float2rgb {dtype}"
-        )
+        assert torch.equal(signed, signed_before), f"float2rgb {dtype}"
 
 
 def test_inplace_overwrites_only_a_caller_buffer_that_needed_no_conversion() -> None:
