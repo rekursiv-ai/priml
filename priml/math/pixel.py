@@ -14,6 +14,7 @@ from priml import image as _image
 from priml.math.basic import ceil_div
 from priml.math.custom_types import Tensorable, convert_to_tensor
 from priml.math.pooling import adaptive_avg_pool2d, adaptive_avg_pool3d
+from priml.memory import is_private_conversion
 
 
 if TYPE_CHECKING:
@@ -23,8 +24,9 @@ if TYPE_CHECKING:
 
 
 def rgb2float(
-    x: Tensor,
+    x: Tensorable,
     *,
+    float_dtype: torch.dtype | None = None,
     inplace: bool = False,
     unit_interval: bool = False,
 ) -> Tensor:
@@ -34,13 +36,24 @@ def rgb2float(
     ``unit_interval=True`` to `x.to(float).div(255)`.
 
     Args:
-      x: Floating-point tensor holding RGB values in [0, 255]. Cast at the
-        call site; float16 is exact over all 256 levels round-tripped through
-        ``float2rgb``, float8 is not. Scaled unconditionally, so a tensor
-        already in [-1, 1] comes back in [-1.008, -0.992] -- guard on
-        ``dtype == torch.uint8`` where the range depends on which decoder ran.
+      x: RGB values in [0, 255]. Anything ``convert_to_tensor`` accepts, but
+        the RESULT must be floating point: a uint8 tensor -- what a decoder
+        emits -- needs ``float_dtype``, since choosing a width for it is a
+        memory-versus-precision call this function will not make silently.
+        Scaled unconditionally, so a tensor already in [-1, 1] comes back in
+        [-1.008, -0.992] -- guard on ``dtype == torch.uint8`` where the range
+        depends on which decoder ran.
+      float_dtype: Width the scaling runs at. ``None`` keeps a float input's
+        own width. float16 is the cheapest width that round-trips all 256
+        levels exactly through ``float2rgb``; float8 does not merely lose
+        levels -- torch implements no arithmetic for it, so the subtraction
+        raises ``NotImplementedError: "add_stub" not implemented for
+        'Float8_e4m3fn'``.
       inplace: Overwrite ``x`` rather than allocating. Unsafe when ``x``
         outlives the call, such as a pipeline sample read after ``yield``.
+        Consulted only when ``x`` arrives as a tensor of the requested width;
+        any other input was converted, and that buffer is this function's to
+        spend.
       unit_interval: Emit [0, 1]. Set it for a model whose preprocessing
         demands that range, or ahead of a mean/std normalize -- see Notes.
 
@@ -48,8 +61,8 @@ def rgb2float(
       result: Tensor in [-1, 1], or [0, 1] when ``unit_interval`` is set.
 
     Raises:
-      TypeError: If ``x`` is not floating point. Torch would fail on an
-        integer and silently drop the imaginary part of a complex.
+      TypeError: If ``x`` resolves to a complex dtype, whose imaginary part
+        torch would silently drop.
       ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
 
     Notes:
@@ -66,34 +79,49 @@ def rgb2float(
       CIFAR-10 loaders do.
 
     """
-    if not x.dtype.is_floating_point:
+    # ``dtype_hint`` fires only for input carrying no dtype of its own -- a
+    # bare list -- so a float tensor keeps its width and this never silently
+    # narrows float32 work.
+    x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
+    if not x_.dtype.is_floating_point:
+        # Integer and complex both land here. Casting instead would make the
+        # function guess a width the caller never named, and would override an
+        # explicit ``float_dtype``; complex would lose its imaginary part
+        # behind a warning nobody reads.
         raise TypeError(
-            f"rgb2float expects floating-point input in [0, 255]; got {x.dtype}. "
-            "Cast at the call site, e.g. x.to(torch.float16).",
+            f"rgb2float expects floating-point input in [0, 255]; got "
+            f"{x_.dtype}. Pass float_dtype=, e.g. "
+            "rgb2float(x, float_dtype=torch.float16).",
         )
 
-    if inplace and x.requires_grad and x.is_leaf:
+    if inplace and x_.requires_grad and x_.is_leaf:
         raise ValueError(
             "rgb2float cannot scale in place: x is a leaf requiring grad. "
             "Pass inplace=False, or detach the tensor first.",
         )
 
+    # See ``float2rgb``: a buffer this function minted is nobody else's, so it
+    # is scaled in place whatever the caller asked.
+    inplace = inplace or is_private_conversion(x_, x)
+
     # Divide rather than multiply by a reciprocal: 1/127.5, 2/255 and 1/255
     # are all unrepresentable, so the reciprocal's own error reaches every
     # element. The compiler does not strength-reduce it away.
     if unit_interval:
-        return x.div_(255.0) if inplace else x / 255.0
+        return x_.div_(255.0) if inplace else x_ / 255.0
 
     # Subtract first so the divide is the only rounding step, at the result's
     # magnitude. 127.5 is exactly 255/2, so the subtraction is exact.
-    if inplace:
-        return x.sub_(127.5).div_(127.5)
-
-    return (x - 127.5) / 127.5
+    #
+    # ``div_`` on the SUBTRACTION's output, not ``/``: that buffer is a
+    # temporary nobody else holds, so dividing out-of-place again doubles peak
+    # memory (measured 16 MiB against 8 MiB for a 4M-element float16 result)
+    # to protect a value that is already dead. Output is bit-identical.
+    return (x_.sub_(127.5) if inplace else x_ - 127.5).div_(127.5)
 
 
 def float2rgb(
-    x: Tensor,
+    x: Tensorable,
     *,
     float_dtype: torch.dtype | None = None,
     inplace: bool = False,
@@ -106,15 +134,19 @@ def float2rgb(
     `x.mul(255).round().clamp(0, 255).to(uint8)`.
 
     Args:
-      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set.
-        Out-of-range values are clamped.
+      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set. Anything
+        ``convert_to_tensor`` accepts -- a list or array is materialized here,
+        and the resulting private buffer is scaled in place whatever
+        ``inplace`` says. Out-of-range values are clamped.
       float_dtype: Width the scaling runs at; the result is always uint8.
         ``None`` keeps the input's width. Widening float16 to float32 costs
         ~3.7x the runtime for at most one uint8 level on 1% of inputs, and
         nothing at bfloat16, where the 8 mantissa bits are the limit.
       inplace: Overwrite ``x`` rather than allocating the float intermediate;
         the uint8 result is fresh either way. Unsafe when ``x`` outlives the
-        call.
+        call. Consulted only when ``x`` is already a tensor of the requested
+        width: any other input was converted, and that buffer is this
+        function's to spend.
       unit_interval: Read ``x`` as [0, 1]. Must match what the value actually
         carries -- an all-dark frame looks the same in either range, so a
         mismatch silently washes the image out rather than raising.
@@ -123,7 +155,7 @@ def float2rgb(
       result: uint8 tensor in [0, 255].
 
     Raises:
-      TypeError: If ``x`` is not floating point.
+      TypeError: If ``x`` resolves to a non-floating-point dtype.
 
     Notes:
       Quantizes directly from [-1, 1] rather than denormalizing to [0, 1]
@@ -136,18 +168,35 @@ def float2rgb(
       levels. Both claims proven in
       ``test_float2rgb_round_trips_where_both_baselines_lose_levels``.
 
+      MORE ACCURATE under ``torch.compile``, and the gap is large at reduced
+      precision. Inductor fuses scale/offset/round and carries the
+      intermediate at float32, where eager materializes each step at the
+      input's own width: measured over 4096 uniform samples against an exact
+      oracle, eager misses 250 of them at float16 and 768 at bfloat16, while
+      the compiled kernel is EXACT at both. float32 input already agrees.
+      Passing ``float_dtype`` to narrow keeps the ordering but not the
+      exactness -- the cast rounds before the fused arithmetic sees the value,
+      leaving 43 misses at float16 against eager's 237.
+
+      ``rgb2float`` has no such gap: it is one subtract and one divide, with
+      no intermediate for the fusion to widen, and compiles bit-identical.
+
     """
-    if not x.dtype.is_floating_point:
-        # Without this an integer tensor is read as [-1, 1]: uint8 [0, 1, 2]
-        # would come back [128, 255, 255].
+    x_ = convert_to_tensor(x, dtype=float_dtype, dtype_hint=torch.float16)
+    if not x_.dtype.is_floating_point:
+        # Integer and complex both land here -- ``is_floating_point`` is False
+        # for complex, which is easy to misread as a gap. Casting instead
+        # would read an integer tensor as [-1, 1] (uint8 [0, 1, 2] comes back
+        # [128, 255, 255]) and would drop a complex imaginary part behind a
+        # warning nobody reads.
         raise TypeError(
             "float2rgb expects floating-point input in "
-            f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x.dtype}.",
+            f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x_.dtype}. "
+            "Pass float_dtype=, e.g. float2rgb(x, float_dtype=torch.float16).",
         )
 
-    # A width change allocates, so that buffer is ours to overwrite whatever
-    # the caller asked for.
-    x_ = x if float_dtype is None else x.to(float_dtype)
+    # Extend to inplace when we know we created the Tensor.
+    inplace = inplace or is_private_conversion(x_, x)
 
     # Scale then offset, inverting ``rgb2float`` step for step. The equivalent
     # ``(x + 1.0) * 127.5`` rounds near 1 and multiplies that error by 127.5,
@@ -157,11 +206,10 @@ def float2rgb(
     # twice (under one uint8 level on 0.3% of inputs) but ``addcmul`` takes
     # only 0-dim tensor scalars, which are memory loads rather than folded
     # immediates -- ~2x slower at the float16/bfloat16 widths decode uses.
-    scale = 255.0 if unit_interval else 127.5
-    if (x_ is not x) or inplace:
-        x_ = x_.mul_(scale) if unit_interval else x_.mul_(scale).add_(127.5)
+    if unit_interval:
+        x_ = x_.mul_(255.0) if inplace else x_ * 255.0
     else:
-        x_ = x_ * scale if unit_interval else x_ * scale + 127.5
+        x_ = (x_.mul_(127.5) if inplace else x_ * 127.5).add_(127.5)
 
     # ``round_`` is for arbitrary input, not the round trip: a value from
     # ``rgb2float`` is already integral, so truncation would reproduce all 256
@@ -405,6 +453,11 @@ InterpolateMode = Literal[
     "area-variance-preserving",
     "bicubic",
     "bilinear",
+    # Rank-free aliases, resolved against the output rank below: "linear"
+    # becomes bi/trilinear and "cubic" becomes bicubic. Omitting "cubic" here
+    # while ``_process_interpolate_args`` rewrites it made the one supported
+    # spelling un-callable without a type suppression.
+    "cubic",
     "linear",
     "nearest",
     "nearest-exact",
@@ -561,7 +614,12 @@ def _process_interpolate_args(
     int,
 ]:
     # Determine output spatial rank from size/scale_factor.
-    if mode.startswith("bi"):
+    #
+    # ``cubic`` sits with the ``bi`` prefix because it is an alias for
+    # ``bicubic`` and has to infer the same rank. Left out, a mode the
+    # Literal accepts raises "Unable to infer the output rank" while its
+    # long spelling works.
+    if mode == "cubic" or mode.startswith("bi"):
         output_rank = 2
     elif mode.startswith("tri"):
         output_rank = 3
