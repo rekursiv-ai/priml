@@ -39,14 +39,16 @@ from priml.math.pixel import (
 
 
 def test_rgb2float():
-    x = torch.tensor([0, 127, 255], dtype=torch.uint8)
+    x = torch.tensor([0, 127, 255], dtype=torch.uint8).to(torch.float16)
     result = rgb2float(x)
-    # float16 for a byte input, which carries no width the scaling can use:
-    # half the memory of float32, and still exact over all 256 levels (pinned
-    # by the round-trip test below).
+    # float16 is the caller's choice above: half the memory of float32, and
+    # still exact over all 256 levels (pinned by the round-trip test below).
     assert result.dtype == torch.float16
-    expected = torch.tensor([-1.0, -0.0039215686, 1.0], dtype=torch.float16)
-    torch.testing.assert_close(result, expected, atol=1e-4, rtol=1e-4)
+    # Exact: 127 is half a level below mid-grey, and float16 represents
+    # (127 - 127.5) / 127.5 as -0.0039215088. A tolerance here would let a
+    # changed rounding mode pass unnoticed.
+    expected = torch.tensor([-1.0, -0.0039215088, 1.0], dtype=torch.float16)
+    torch.testing.assert_close(result, expected, atol=0, rtol=0)
 
 
 def test_float2rgb():
@@ -72,7 +74,7 @@ def test_the_pixel_pair_is_an_exact_round_trip():
     # other width and loses 63 of these 256 in this one, because the output
     # range [128, 255] has a spacing of 1.0 there.
     for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
-        assert torch.equal(float2rgb(rgb2float(levels, dtype_hint=dtype)), levels)
+        assert torch.equal(float2rgb(rgb2float(levels.to(dtype))), levels)
 
 
 def test_float2rgb_partitions_the_domain_into_equal_bins():
@@ -123,29 +125,41 @@ def test_float2rgb_clamp():
     assert result[2] == 255
 
 
-def test_rgb2float_hints_a_width_rather_than_forcing_one():
-    """``dtype_hint`` fills the gap uint8 and bare lists leave; it never narrows.
+def test_rgb2float_refuses_complex_rather_than_dropping_the_imaginary_part():
+    """A complex input is rejected, not silently truncated.
 
-    Every input that needs the hint carries no usable width: a list has no
-    dtype at all, and uint8 is the one dtype the scaling cannot run in. An
-    input that already chose a float width has answered the question, and
-    silently re-answering it costs precision -- ``rgb2float(float32)`` used to
-    hand back float16, halving the mantissa of a tensor the caller had
-    deliberately widened.
+    ``Tensorable`` admits complex (it sits in ``_dtype_coercion_precedence``),
+    and ``torch.complex64.is_floating_point`` is False -- so a guard phrased
+    as "not floating point, therefore widen" sent it through ``.to(float16)``,
+    which discards the imaginary part behind a ``UserWarning`` nobody reads.
+    Nonsense input for a pixel function either way; the question is only
+    whether it fails loudly.
     """
-    assert rgb2float(torch.arange(256, dtype=torch.uint8)).dtype == torch.float16
-    assert rgb2float([0, 127, 255]).dtype == torch.float16
+    with pytest.raises(TypeError, match="complex"):
+        _ = rgb2float(torch.tensor([1 + 2j, 3 + 4j], dtype=torch.complex64))
 
-    for dtype in (torch.bfloat16, torch.float32, torch.float64):
+
+def test_rgb2float_keeps_the_width_the_caller_chose():
+    """The output width is the input's; this function never picks one.
+
+    Choosing a width is a memory-versus-precision tradeoff only the caller can
+    make, and a function that silently narrowed float32 to float16 would halve
+    the mantissa of a tensor someone deliberately widened. So the cast belongs
+    at the call site, and anything ``convert_to_tensor`` cannot resolve into a
+    float is refused rather than guessed at -- see the integer test below.
+    """
+    for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
         source = torch.arange(256, dtype=torch.uint8).to(dtype)
         assert rgb2float(source).dtype == dtype, dtype
-        # An explicit hint still loses to a width the input already carries.
-        assert rgb2float(source, dtype_hint=torch.float16).dtype == dtype, dtype
+
+    # A bare list carries no width, which is exactly the gap ``dtype_hint``
+    # inside ``convert_to_tensor`` exists to fill.
+    assert rgb2float([0, 127, 255]).dtype == torch.float16
 
 
 def test_the_signed_range_is_the_default_interval():
     """``unit_interval`` is opt-in, so an unqualified call keeps [-1, 1]."""
-    endpoints = torch.tensor([0, 255], dtype=torch.uint8)
+    endpoints = torch.tensor([0, 255], dtype=torch.uint8).to(torch.float16)
     torch.testing.assert_close(
         rgb2float(endpoints),
         torch.tensor([-1.0, 1.0], dtype=torch.float16),
@@ -177,7 +191,7 @@ def test_the_unit_pixel_pair_is_an_exact_round_trip():
     for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
         assert torch.equal(
             float2rgb(
-                rgb2float(levels, dtype_hint=dtype, unit_interval=True),
+                rgb2float(levels.to(dtype), unit_interval=True),
                 unit_interval=True,
             ),
             levels,
@@ -199,7 +213,7 @@ def test_unit_interval_divides_rather_than_multiplying_a_reciprocal():
     def worst_error(got: torch.Tensor) -> Fraction:
         return max(abs(Fraction(float(g)) - e) for g, e in zip(got, exact, strict=True))
 
-    ours = worst_error(rgb2float(levels, dtype_hint=torch.float32, unit_interval=True))
+    ours = worst_error(rgb2float(levels.to(torch.float32), unit_interval=True))
     reciprocal = worst_error(levels.to(torch.float32) * (1.0 / 255.0))
     assert ours * 2 < reciprocal, f"{ours} vs {reciprocal}"
 
@@ -256,7 +270,7 @@ def test_rgb2float_halves_the_error_of_a_unit_interval_intermediate():
         assert torch.equal(diffusers, torchvision), (
             f"{dtype}: the two baselines were assumed to agree bitwise"
         )
-        ours = worst_error(rgb2float(levels, dtype_hint=dtype))
+        ours = worst_error(rgb2float(levels.to(dtype)))
         assert ours > 0, f"{dtype}: exact output would make the ratio meaningless"
         assert worst_error(diffusers) / ours >= 2.0, (
             f"{dtype}: ours {ours:.3e} vs baseline {worst_error(diffusers):.3e}"
@@ -290,7 +304,7 @@ def test_float2rgb_round_trips_where_both_baselines_lose_levels():
         torch.float32: (0, 0),
     }
     for dtype, (diffusers_miss, torchvision_miss) in expected_misses.items():
-        latent = rgb2float(levels, dtype_hint=dtype)
+        latent = rgb2float(levels.to(dtype))
         assert torch.equal(float2rgb(latent.clone()), levels), f"{dtype}: ours"
 
         unit = (latent * 0.5 + 0.5).clamp(0, 1)
@@ -967,17 +981,57 @@ def test_float2rgb_rejects_an_integer_tensor() -> None:
     assert float2rgb([-1.0, 0.0, 1.0]).dtype == torch.uint8
 
 
+def test_rgb2float_converts_a_float_input_rather_than_passing_it_through() -> None:
+    """It is a conversion, not a normalize-if-needed.
+
+    A float input is scaled again, so a tensor already in [-1, 1] lands in
+    [-1.008, -0.992] -- a near-black frame. Callers whose range depends on
+    which decoder ran (``bytes.py:307``) must guard on the dtype; ``ocr.py``
+    and ``kenburns.py`` both do. Pinned because removing those guards looks
+    like a simplification and silently destroys the image.
+    """
+    already_signed = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float32)
+    twice = rgb2float(already_signed)
+
+    assert float(twice.max()) < -0.99, twice
+    assert not torch.equal(twice, already_signed)
+
+
+def test_neither_conversion_scribbles_on_a_numpy_caller() -> None:
+    """A zero-copy numpy input is the caller's memory, not a spare buffer.
+
+    ``Tensorable`` admits ``np.ndarray`` (``custom_types.py:44``), and
+    ``torch.as_tensor`` wraps a compatible one WITHOUT copying: a different
+    Python object over the same storage. Both functions decide "may I write
+    here?" by object identity, so a float array reads as a private temporary
+    and gets scaled through -- destroying the caller's data on a call that
+    never asked for ``inplace``. Only a dtype change hid this, by allocating.
+    """
+    for dtype in (np.float32, np.float64):
+        source = np.array([0.0, 0.5, 1.0], dtype=dtype)
+        before = source.copy()
+        _ = rgb2float(source)
+        np.testing.assert_array_equal(source, before, err_msg=f"rgb2float {dtype}")
+
+        signed = np.array([-1.0, 0.0, 1.0], dtype=dtype)
+        signed_before = signed.copy()
+        _ = float2rgb(signed)
+        np.testing.assert_array_equal(
+            signed, signed_before, err_msg=f"float2rgb {dtype}"
+        )
+
+
 def test_inplace_overwrites_only_a_caller_buffer_that_needed_no_conversion() -> None:
     """With no conversion to hide behind, ``inplace`` decides the aliasing."""
     values = [-1.0, 0.0, 0.5, 1.0]
 
     kept = torch.tensor(values, dtype=torch.float16)
     before = kept.clone()
-    _ = rgb2float(kept, dtype_hint=torch.float16, inplace=False)
+    _ = rgb2float(kept.to(torch.float16), inplace=False)
     assert torch.equal(kept, before), "inplace=False overwrote the caller"
 
     donated = torch.tensor(values, dtype=torch.float16)
-    result = rgb2float(donated, dtype_hint=torch.float16, inplace=True)
+    result = rgb2float(donated.to(torch.float16), inplace=True)
     assert result.data_ptr() == donated.data_ptr()
 
 
@@ -1001,7 +1055,7 @@ def test_a_converted_input_costs_one_buffer_not_two() -> None:
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         base = torch.cuda.memory_allocated()
-        scaled = rgb2float(source, dtype_hint=torch.float16, inplace=inplace)
+        scaled = rgb2float(source.to(torch.float16), inplace=inplace)
         torch.cuda.synchronize()
         peak_mib = (torch.cuda.max_memory_allocated() - base) / 2**20
         assert peak_mib < result_mib * 1.5, (
@@ -1023,7 +1077,7 @@ def test_rgb2float_inplace_on_a_grad_leaf_names_the_argument_at_fault() -> None:
     """
     leaf = torch.tensor([128.0], dtype=torch.float32, requires_grad=True)
     with pytest.raises(ValueError, match="leaf requiring grad"):
-        _ = rgb2float(leaf, dtype_hint=torch.float32, inplace=True)
+        _ = rgb2float(leaf.to(torch.float32), inplace=True)
 
 
 def test_float2rgb_lets_torch_reject_an_inplace_grad_leaf() -> None:
