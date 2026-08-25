@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 def rgb2float(
     x: Tensorable,
     *,
-    dtype_hint: torch.dtype = torch.float16,
     inplace: bool = False,
     unit_interval: bool = False,
 ) -> Tensor:
@@ -41,17 +40,25 @@ def rgb2float(
     ``unit_interval=True`` to `x.to(float).div(255)`.
 
     Args:
-      x: Tensor with RGB values in [0, 255] range.
-      dtype_hint: Width to use when ``x`` carries none this function can scale
-        in -- a bare list, or the uint8 it exists to leave. A float ``x`` keeps
-        its own width and ignores this, so a caller that already widened to
-        float32 is not silently narrowed back. float16 by default: half the
-        memory of float32, and it still round-trips all 256 levels exactly
-        through ``float2rgb``. float8 does not -- it represents only 80.
-      inplace: Permit overwriting the caller's buffer, saving one allocation
-        the size of the result. Only consulted when ``x`` needed no
-        conversion; a converted input is scaled in place regardless. Never
-        slower, and a no-op under ``torch.compile``.
+      x: Floating-point tensor holding RGB values in [0, 255]. Cast at the
+        call site -- ``uint8_frames.to(torch.float16)`` -- because the width
+        is the caller's decision and only the caller knows whether it is
+        paying for float32 or living with float16. float16 is the usual
+        choice: half the memory, and it still round-trips all 256 levels
+        exactly through ``float2rgb``. float8 does not -- it represents 80.
+
+        Scaled unconditionally, NOT passed through: calling this on a tensor
+        already in [-1, 1] shifts it a second time, into [-1.008, -0.992].
+        Guard on ``dtype == torch.uint8`` wherever the range depends on which
+        decoder ran (``bytes.py:307``).
+      inplace: Permit overwriting ``x``, saving one allocation the size of the
+        result. Set it when the cast above minted the tensor purely to hand it
+        over -- ``rgb2float(frames.to(torch.float16), inplace=True)`` scales
+        that temporary rather than copying it again, which is the common case
+        now that the cast is the caller's. Leave it unset when ``x`` outlives
+        the call: a pipeline sample another processor reads after ``yield``
+        will otherwise come back scaled. Never slower, and a no-op under
+        ``torch.compile``.
       unit_interval: Emit the unit interval [0, 1] rather than the signed
         biunit default. Set it for the range a model's published preprocessing
         demands (CoTracker and BiRefNet both want it), or ahead of a mean/std
@@ -64,6 +71,9 @@ def rgb2float(
         closed unit interval [0, 1] when ``unit_interval`` is set.
 
     Raises:
+      TypeError: If ``x`` resolves to a complex dtype. Torch would truncate it
+        to the real part behind a ``UserWarning``, and no RGB reading of a
+        complex value exists to prefer.
       ValueError: If ``inplace`` is set for a leaf tensor requiring grad.
         Torch would raise ``a leaf Variable that requires grad is being used
         in an in-place operation`` from inside the scaling; the argument at
@@ -91,23 +101,20 @@ def rgb2float(
       ``test_the_unit_pixel_pair_is_an_exact_round_trip``.
 
     """
-    x_ = convert_to_tensor(x, dtype_hint=dtype_hint)
-    # ``dtype_hint`` fires only for input carrying no dtype at all, so an
-    # integer tensor arrives here still integral and the scaling below would
-    # fail as ``result type Float can't be cast to the desired output type
-    # Byte``. Widening is this function's whole purpose, so do it here; a
-    # float input already answered the question and is left alone.
+    # float16 is the hint, not a cast: it only fires for input carrying no
+    # dtype of its own, so a tensor keeps the width its caller chose.
+    x_ = convert_to_tensor(x, dtype_hint=torch.float16)
     if not x_.dtype.is_floating_point:
-        # Always allocates -- integer to float is never a no-op cast -- which
-        # is what keeps the identity test below sound.
-        x_ = x_.to(dtype_hint)
-    # ``convert_to_tensor`` returns the SAME object when nothing needed
-    # converting, so identity is what distinguishes a buffer this function
-    # minted from the caller's. A minted one is unaliased and non-leaf, so
-    # overwriting it is both unobservable and autograd-legal; sparing it
-    # doubles peak memory to protect a temporary. Hence ``inplace`` governs
-    # only the caller's own buffer, and only a leaf of it is off limits.
-    owned = x_ is not x
+        # Integer input would fail inside the scaling as "result type Float
+        # can't be cast to the desired output type Byte", and complex would be
+        # truncated to its real part behind a torch ``UserWarning``. Both are
+        # the caller's cast to make: only they know what width they are paying
+        # for. Reading a dtype is metadata-only, so this guard is free.
+        raise TypeError(
+            f"rgb2float expects floating-point input in [0, 255]; got {x_.dtype}. "
+            "Cast at the call site, e.g. x.to(torch.float16).",
+        )
+    owned = _is_private_buffer(x_, x)
     if inplace and not owned and x_.requires_grad and x_.is_leaf:
         raise ValueError(
             "rgb2float cannot scale in place: x is a leaf requiring grad. "
@@ -204,11 +211,11 @@ def float2rgb(
             "float2rgb expects floating-point input in "
             f"{'[0, 1]' if unit_interval else '[-1, 1]'}; got {x_.dtype}.",
         )
-    # See ``rgb2float``: identity separates a buffer this function minted from
-    # the caller's, and only the latter needs permission to overwrite. The
-    # autograd guard there has no analogue here -- a uint8 result carries no
-    # grad, so nothing differentiates through this function.
-    owned = x_ is not x
+    # See ``rgb2float``: this separates a buffer the conversion minted from the
+    # caller's, and only the latter needs permission to overwrite. The autograd
+    # guard there has no analogue here -- a uint8 result carries no grad, so
+    # nothing differentiates through this function.
+    owned = _is_private_buffer(x_, x)
     # Scale then offset: the exact inverse of ``rgb2float``, undoing its two
     # steps in reverse. The algebraically equal ``(x + 1.0) * 127.5`` -- which
     # inverts the reciprocal spelling rejected there -- rounds while the value
@@ -246,6 +253,35 @@ def float2rgb(
     # than saturating, so an out-of-range 1.004 becomes 0 instead of 255,
     # turning saturated highlights black.
     return x_.round_().clamp_(0.0, 255.0).to(torch.uint8)
+
+
+def _is_private_buffer(converted: Tensor, original: Tensorable) -> bool:
+    """Whether ``converted`` is memory the conversion minted, safe to overwrite.
+
+    A minted buffer is unaliased and non-leaf, so scaling it in place is both
+    unobservable and autograd-legal; sparing it would double peak memory to
+    protect a temporary.
+
+    Identity alone is NOT the test, though it reads like one. ``Tensorable``
+    admits ``np.ndarray``, and ``torch.as_tensor`` wraps a compatible array
+    WITHOUT copying -- a different Python object over the caller's storage.
+    Treating that as private scaled a caller's float array through on a call
+    that never passed ``inplace``, destroying its data. Compare the pointer,
+    which is what "may I write here?" actually asks.
+    """
+    if converted is original:
+        return False
+    # ``__array_interface__`` is the buffer protocol every zero-copy source
+    # exposes -- ``np.ndarray`` and anything array-like enough for
+    # ``as_tensor`` to wrap rather than copy. Reaching for it by attribute
+    # rather than ``isinstance`` keeps numpy a type-checking-only import here.
+    # A list or scalar has no such pointer, so it is private by construction.
+    interface = getattr(original, "__array_interface__", None)
+    if isinstance(original, Tensor):
+        return converted.data_ptr() != original.data_ptr()
+    if interface is None:
+        return True
+    return converted.data_ptr() != interface["data"][0]
 
 
 class ImageShape(NamedTuple):
