@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple, cast
 
 import itertools
 import math
@@ -139,10 +139,14 @@ def float2rgb(
         ~3.7x the runtime for at most one uint8 level on 1% of inputs, and
         nothing at bfloat16, where the 8 mantissa bits are the limit.
       inplace: Overwrite ``x`` rather than allocating the float intermediate;
-        the uint8 result is fresh either way. Unsafe when ``x`` outlives the
-        call. Consulted only when ``x`` is already a tensor of the requested
-        width: any other input was converted, and that buffer is this
-        function's to spend.
+        the uint8 result is fresh either way, so it never aliases ``x``
+        (measured). What ``x`` HOLDS afterwards is the scaled float --
+        ``[-1, 0, 1]`` becomes ``[0.0, 128.0, 255.0]``, not garbage and not
+        the original -- so a caller that reads it again silently gets RGB
+        magnitudes in a float tensor, which the range guards downstream will
+        not catch. Unsafe when ``x`` outlives the call. Consulted only when
+        ``x`` is already a tensor of the requested width: any other input was
+        converted, and that buffer is this function's to spend.
       unit_interval: Read ``x`` as [0, 1]. Must match what the value actually
         carries -- an all-dark frame looks the same in either range, so a
         mismatch silently washes the image out rather than raising.
@@ -222,6 +226,14 @@ def float2rgb(
     return x_.round_().clamp_(0.0, 255.0).to(torch.uint8)
 
 
+_SQUARE_PER_NOMINAL: Final = 4 / 3
+"""Ratio lifting a nominal height to the geometric-mean side it names.
+
+A fact about the convention rather than a tunable: ``compute_video_shapes``
+reads a 16:9-equivalent HEIGHT, whose geometric-mean side is 4/3 larger.
+"""
+
+
 class ImageShape(NamedTuple):
     """Image shape in (height, width) format."""
 
@@ -238,7 +250,18 @@ class VideoShape(NamedTuple):
 
 
 class ShapeBundle(NamedTuple):
-    """Latent and pixel-space video shapes."""
+    """Latent and pixel-space video shapes.
+
+    Attributes:
+      latent: Shape after compression, every axis divided by its stride.
+      pixel_train: Shape a latent encoder consumes -- every axis rounded UP to
+        its compression stride, so each divides evenly.
+      pixel_full: The clip's true shape, no axis rounded. Differs from
+        ``pixel_train`` wherever a dimension is not already a multiple of its
+        stride, which is the usual case: 3s at 30fps is 90 frames against a
+        stride-aligned 96.
+
+    """
 
     latent: VideoShape
     pixel_train: VideoShape
@@ -286,8 +309,9 @@ def compute_video_shapes(
     if any(c < 1 for c in compression):
         raise ValueError(f"compression strides must be positive; got {compression}.")
     # Geometric-mean side length: h * w == pixel_scale**2, so it is a scale
-    # (not a radius). The 4/3 lifts a nominal height to this mean side.
-    pixel_scale = nominal_resolution * (4 / 3)
+    # (not a radius). ``_SQUARE_PER_NOMINAL`` lifts a 16:9-equivalent height
+    # to this mean side.
+    pixel_scale = nominal_resolution * _SQUARE_PER_NOMINAL
     aspect_sqrt = aspect**0.5
     h = round(pixel_scale / aspect_sqrt)
     w = round(pixel_scale * aspect_sqrt)
@@ -302,11 +326,15 @@ def compute_video_shapes(
     px_h = lat_h * comp_h
     px_w = lat_w * comp_w
 
-    f = 1 if duration_sec == 0 else px_f  # Images keep f=1; videos round up.
-
     result = ShapeBundle(
         latent=VideoShape(lat_f, lat_h, lat_w),
         pixel_train=VideoShape(px_f, px_h, px_w),
+        # ``f``, not ``px_f``: every entry here reports the shape as it really
+        # is, and the ``h``/``w`` beside it are unrounded. Taking the
+        # stride-aligned count paired one padded axis with two true ones
+        # inside a single NamedTuple, so a caller sizing to ``pixel_full``
+        # received the true spatial size and an invented duration -- 96 frames
+        # for a 90-frame clip. ``pixel_train`` is the stride-aligned answer.
         pixel_full=VideoShape(f, h, w),
     )
     if any(s <= 0 for s in result.latent):
@@ -495,8 +523,14 @@ def interpolate(
       result: Interpolated tensor.
 
     Raises:
+      ValueError: If the output rank cannot be inferred from ``mode``,
+        ``size``, ``scale_factor``, or ``rank``; or if ``input_`` carries
+        fewer dimensions than the interpolation needs.
       NotImplementedError: For ``mode="area-variance-preserving"`` with a
-        spatial rank other than 2 or 3 (only 2-D and 3-D are supported).
+        spatial rank other than 2 or 3, or combined with ``antialias``,
+        ``align_corners``, ``recompute_scale_factor``, or neither of
+        ``size``/``scale_factor`` -- none of which the pooling path
+        implements.
 
     """
     x = convert_to_tensor(input_)
@@ -660,14 +694,12 @@ def _process_interpolate_args(
     else:
         sf_ = (scale_factor,) * output_rank
 
-    # Set alignment based on interpolation mode.
-    ac_: bool | None = align_corners
-    if (
-        not align_corners
-        and not mode_.endswith("linear")
-        and not mode_.endswith("cubic")
-    ):
-        ac_ = None
+    # ``align_corners`` is meaningful only to the interpolating kernels; torch
+    # REJECTS it for the others, so a mode outside that family passes None
+    # rather than False. Stated positively -- three stacked ``not``s said the
+    # same thing and read as a double negative on the caller's own flag.
+    interpolating = mode_.endswith(("linear", "cubic"))
+    ac_: bool | None = align_corners if align_corners or interpolating else None
 
     return output_rank, mode_, size_, sf_, ac_, rank_
 
@@ -718,6 +750,7 @@ def decode_webp_libwebp(
     image_bytes: bytes,
     height: int,
     width: int,
+    *,
     crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
     channels_first: bool = True,
 ) -> Tensor | None:

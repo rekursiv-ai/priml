@@ -100,9 +100,12 @@ def test_recording_writes_a_playable_video(
     )
     assert steps > 0
     count, size = _read_video(path)
-    # Not an exact count: h264 pads to a macro-block-aligned frame count, so
-    # the file may hold slightly more frames than steps were played.
-    assert count >= 1
+    # One frame per step. This asserted only ``count >= 1``, which a writer
+    # that dropped every frame but the first would satisfy -- and blamed
+    # macro-block padding, which pads the frame GEOMETRY (see the size checks
+    # below), not the frame COUNT. Measured at 3, 6, and 12 steps: the file
+    # holds exactly as many frames as steps were played.
+    assert count == steps
     # Geometry is macro-block-aligned, not exact: the encoder rounds each axis
     # up to a multiple of 16. Asserting the rounded size still pins the aspect
     # and catches a writer that rescaled to something unrelated.

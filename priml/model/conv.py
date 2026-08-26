@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import Any, Self, override
+from typing import Self, override
 
 from configgle import Fig
 from torch import Tensor, nn
 
 import torch
 
+from priml.model.custom_types import DepthIndex
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
 
@@ -43,7 +44,7 @@ class Conv1d(nn.Conv1d):
         bias: bool = False
         """Include bias in the convolution."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         device: torch.device | str | None = None
@@ -67,7 +68,7 @@ class Conv1d(nn.Conv1d):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         self._init_bias = config.init_bias
         super().__init__(
@@ -85,13 +86,13 @@ class Conv1d(nn.Conv1d):
 
     @override
     def reset_parameters(self) -> None:
-        call_init(self._init_weight, self.weight, depth=self.depth)
+        call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth=self.depth)
+            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)
 
 
@@ -125,7 +126,7 @@ class Conv2d(nn.Conv2d):
         bias: bool = False
         """Include bias in the convolution."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         device: torch.device | str | None = None
@@ -149,7 +150,7 @@ class Conv2d(nn.Conv2d):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         self._init_bias = config.init_bias
         super().__init__(
@@ -167,13 +168,13 @@ class Conv2d(nn.Conv2d):
 
     @override
     def reset_parameters(self) -> None:
-        call_init(self._init_weight, self.weight, depth=self.depth)
+        call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth=self.depth)
+            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)
 
 
@@ -207,7 +208,7 @@ class Conv3d(nn.Conv3d):
         bias: bool = False
         """Include bias in the convolution."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         device: torch.device | str | None = None
@@ -231,7 +232,7 @@ class Conv3d(nn.Conv3d):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         self._init_bias = config.init_bias
         super().__init__(
@@ -249,11 +250,11 @@ class Conv3d(nn.Conv3d):
 
     @override
     def reset_parameters(self) -> None:
-        call_init(self._init_weight, self.weight, depth=self.depth)
+        call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth=self.depth)
+            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)

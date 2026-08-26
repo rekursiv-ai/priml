@@ -116,16 +116,32 @@ def test_working_dir_resolves_beneath_base_dir() -> None:
     assert Path(resolved.working_dir) == Path("/opt/scratch/datasets/cifar10")
 
 
-def test_state_dict_carries_the_pass_count_and_nothing_else(tmp_path: Path) -> None:
-    # Batch ORDER derives from the loop's RNG, which the loop checkpoints
-    # itself. The pass count is the loader's own: only it knows when the data
-    # ran out, and a schedule annealing against epochs reads it.
+def test_state_dict_carries_the_pass_count(tmp_path: Path) -> None:
     data = tiny_dataset(tmp_path).make()
     data.timer_epoch.global_count = 3
     restored = tiny_dataset(tmp_path).make()
     restored.load_state_dict(data.state_dict())
-    assert set(data.state_dict()) == {"timer_epoch"}
     assert restored.timer_epoch.global_count == 3
+
+
+def test_checkpoint_resumes_the_unfinished_permutation(tmp_path: Path) -> None:
+    torch.manual_seed(3)
+    data = tiny_dataset(tmp_path, count=9).make()
+    loader = data.train_dataloader()
+    iterator = iter(loader)
+    next(iterator)
+    state = data.state_dict()
+    expected = [batch["media"].clone() for batch in iterator]
+
+    restored = tiny_dataset(tmp_path, count=9).make()
+    restored.load_state_dict(state)
+    observed = [batch["media"].clone() for batch in restored.train_dataloader()]
+
+    assert len(observed) == len(expected)
+    assert all(
+        torch.equal(observed_batch, expected_batch)
+        for observed_batch, expected_batch in zip(observed, expected, strict=True)
+    )
 
 
 def test_prepare_normalizes_and_writes_both_splits(

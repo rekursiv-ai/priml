@@ -1,0 +1,9 @@
+EnsembleLinear.Config(
+                channels_in=4,
+                channels_out=3,
+                num_ensemble=2,
+                bias=False,
+                depth_index=(),
+                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                shard=None
+        )

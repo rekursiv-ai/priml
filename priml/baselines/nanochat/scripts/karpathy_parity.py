@@ -55,7 +55,7 @@ import torch
 
 from priml.baselines.nanochat.experiments import exp001
 from priml.math.seed import RngState, get_rng_state, set_rng_state
-from priml.model.value_gated_attention import sdpa_attention
+from priml.model.attention.value_gated_attention import sdpa_attention
 from priml.train.parallelism import NoParallel
 
 

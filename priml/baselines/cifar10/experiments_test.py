@@ -340,12 +340,12 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
 
     Refresh with ``--golden-overwrite`` after reading the diff.
     """
-    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    snapshot = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
     rendered = pformat(exp000().copy_tree().finalize(), hide_default_values=False)
     if request.config.getoption("--golden-overwrite", default=False):
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        _ = golden.write_text(rendered + "\n", encoding="utf-8")
-    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        _ = snapshot.write_text(rendered + "\n", encoding="utf-8")
+    assert snapshot.read_text(encoding="utf-8") == rendered + "\n", (
         "exp000 changed; read the diff, then rerun with --golden-overwrite "
         "if the change is intended."
     )

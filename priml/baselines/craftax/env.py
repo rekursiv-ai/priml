@@ -243,7 +243,8 @@ class CraftaxEnv:
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Restore a world saved by :meth:`state_dict`."""
-        self._generator.set_state(state_dict["generator"])
+        generator_state = state_dict["generator"]
+        self._generator.set_state(generator_state)
         self._num_envs = state_dict["num_envs"]
         saved = state_dict["state"]
         if not saved:
@@ -252,6 +253,7 @@ class CraftaxEnv:
         if self._state is None:
             self.reset()
         self.state.load_state_dict(saved)
+        self._generator.set_state(generator_state)
 
 
 def _achievement_info(state: EnvState, done: Tensor) -> dict[str, Tensor]:

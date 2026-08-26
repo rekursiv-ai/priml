@@ -11,7 +11,7 @@ from torch import nn
 
 import torch
 
-from priml.model.custom_types import ShardStyle
+from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, truncated_normal
 
 
@@ -39,7 +39,7 @@ class Embedding(nn.Embedding):
         shard: ShardStyle | None = None
         """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling).
 
         Present, and forwarded, for the same reason ``Linear`` and ``Conv``
@@ -58,7 +58,7 @@ class Embedding(nn.Embedding):
 
     def __init__(self, config: Config) -> None:
         self.shard = config.shard
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         super().__init__(
             num_embeddings=config.num_embeddings,
@@ -74,7 +74,7 @@ class Embedding(nn.Embedding):
         # Omitting it does not mean "no scaling": it takes the initializer's own
         # default of 1, which divides by sqrt(2) -- a table 0.707 as wide as the
         # one requested, invisible to every shape, name, and dtype check.
-        call_init(self._init_weight, self.weight, depth=self.depth)
+        call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.padding_idx is not None:
             with torch.no_grad():
                 self.weight[self.padding_idx].fill_(0)

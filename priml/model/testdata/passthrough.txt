@@ -1,0 +1,8 @@
+_PassthroughModule(
+  (read): _ReadModule(
+    (inner): _TargetModule()
+  )
+  (read_write): _ReadWriteModule(
+    (inner): _TargetModule()
+  )
+)

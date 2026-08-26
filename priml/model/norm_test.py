@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+from typing import cast
+
 import pytest
 import torch
 
@@ -15,9 +19,14 @@ from priml.model.norm import (
     LayerNorm,
     RMSNorm,
 )
+from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+from priml.testing.golden import assert_text_golden
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
 def test_rmsnorm():
@@ -81,10 +90,12 @@ def test_groupnorm2d_eval_matches_train():
     assert torch.allclose(out_train, out_eval)
 
 
-def test_norm_forward_drops_extra_args():
+def test_norm_forward_accepts_messages_and_rejects_positional_extras():
     m = RMSNorm.Config(64).make()
     x = torch.randn(2, 8, 64)
-    assert m(x, "extra", key="val").shape == (2, 8, 64)
+    assert m(x, key="val").shape == (2, 8, 64)
+    with pytest.raises(TypeError):
+        cast(Callable[..., object], m)(x, "extra")
 
 
 def test_centered_rmsnorm():
@@ -106,10 +117,12 @@ def test_centered_rmsnorm_identity_at_init():
     assert torch.allclose(out.float(), expected, atol=1e-5)
 
 
-def test_centered_rmsnorm_drops_extra_args():
+def test_centered_rmsnorm_accepts_messages_and_rejects_positional_extras():
     m = CenteredRMSNorm.Config(32).make()
     x = torch.randn(2, 8, 32)
-    assert m(x, "extra", key="val").shape == (2, 8, 32)
+    assert m(x, key="val").shape == (2, 8, 32)
+    with pytest.raises(TypeError):
+        cast(Callable[..., object], m)(x, "extra")
 
 
 def test_groupnorm_arbitrary_leading_dims():
@@ -256,6 +269,166 @@ def test_a_constant_feature_stays_finite() -> None:
 def test_an_invalid_setting_is_refused(field: str, value: float) -> None:
     with pytest.raises(ValueError, match="must"):
         _norm(**{field: value})
+
+
+def test_rms_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = RMSNorm.Config(4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="rms_norm",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_centered_rms_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = CenteredRMSNorm.Config(4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="centered_rms_norm",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_layer_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = LayerNorm.Config(4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="layer_norm",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_batch_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = BatchNorm.Config(4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="batch_norm",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_batch_renorm_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = BatchRenorm.Config(channels_in=4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="batch_renorm",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_batch_norm2d_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = BatchNorm2d.Config(4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="batch_norm2d",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_group_norm2d_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = GroupNorm2d.Config(4, num_groups=2)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="group_norm2d",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_group_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = GroupNorm.Config(4, num_groups=2)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="group_norm",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_rms_norm_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="rms_norm",
+        build_module=lambda: RMSNorm.Config(4).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
+
+
+def test_centered_rms_norm_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="centered_rms_norm",
+        build_module=lambda: CenteredRMSNorm.Config(4).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
+
+
+def test_layer_norm_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="layer_norm",
+        build_module=lambda: LayerNorm.Config(4).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
+
+
+def test_batch_norm_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="batch_norm",
+        build_module=lambda: BatchNorm.Config(4).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
+
+
+def test_batch_renorm_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="batch_renorm",
+        build_module=lambda: BatchRenorm.Config(channels_in=4).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
+
+
+def test_batch_norm2d_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="batch_norm2d",
+        build_module=lambda: BatchNorm2d.Config(4).make(),
+        build_input=lambda: torch.randn(2, 4, 2, 2),
+        seed=0,
+    )
+
+
+def test_group_norm2d_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="group_norm2d",
+        build_module=lambda: GroupNorm2d.Config(4, num_groups=2).make(),
+        build_input=lambda: torch.randn(2, 4, 2, 2),
+        seed=0,
+    )
+
+
+def test_group_norm_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="group_norm",
+        build_module=lambda: GroupNorm.Config(4, num_groups=2).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
 
 
 if __name__ == "__main__":

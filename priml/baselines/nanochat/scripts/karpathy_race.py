@@ -102,7 +102,7 @@ from torch import Tensor
 
 import torch
 
-from priml.model.value_gated_attention import sdpa_attention
+from priml.model.attention.value_gated_attention import sdpa_attention
 
 
 def their_attention(

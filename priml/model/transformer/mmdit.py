@@ -1,0 +1,333 @@
+"""N-stream joint-attention block (MMDiT).
+
+Multi-modal Diffusion Transformer block supporting an arbitrary number
+of token streams. Composes MultiStreamAttention (joint attention) with
+per-stream FFNs and optional adaLN-Zero conditioning.
+
+References:
+  [1] Esser et al., "Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis" (SD3), arXiv:2403.03206
+  [2] Peebles & Xie, "Scalable Diffusion Models with Transformers"
+      (DiT), arXiv:2212.09748
+
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import KW_ONLY, field
+from functools import partial
+from typing import NamedTuple, Protocol, Self, cast, override
+
+import copy
+
+from configgle import Fig, Makeable
+from torch import Tensor, nn
+
+from priml.model.attention.multi_stream import MultiStreamAttention
+from priml.model.custom_types import (
+    ChannelsHead,
+    ChannelsIn,
+    ChannelsOut,
+    DepthIndex,
+    HasDepthIndex,
+    NumHeads,
+    TensorModule,
+    propagate_attr,
+)
+from priml.model.linear import Linear
+from priml.model.swiglu import SwiGLU
+
+
+class _MultiStreamModule(Protocol):
+    def __call__(
+        self,
+        xs: Sequence[Tensor],
+        **kwargs: object,
+    ) -> tuple[Tensor, ...]: ...
+
+
+class AdaLNZero(nn.Module):
+    """Adaptive LayerNorm-Zero modulation.
+
+    Projects conditioning vector to 6 modulation parameters
+    (scale, shift, gate for attn and FFN each). Zero-initialized
+    so the block starts as identity at initialization.
+    """
+
+    class Output(NamedTuple):
+        """Six modulation parameters from AdaLN-Zero."""
+
+        attn_scale: Tensor
+        attn_shift: Tensor
+        attn_gate: Tensor
+        ffn_scale: Tensor
+        ffn_shift: Tensor
+        ffn_gate: Tensor
+
+    class Config(Fig["AdaLNZero"], kw_only=False):
+        channels_in: int = -1
+        """Input channels to modulate (output is 6x this)."""
+
+        _: KW_ONLY
+
+        cond_dim: int = -1
+        """Conditioning input dimension."""
+
+        proj: Makeable[TensorModule] = field(
+            default_factory=partial(
+                Linear.Config,
+                bias=True,
+                init_weight=nn.init.zeros_,
+                init_bias=nn.init.zeros_,
+            ),
+        )
+        """Conditioning projection; widths filled by ``finalize``.
+
+        Zero-initialized by default -- that is what "Zero" names, and it is what
+        makes the block an identity at init rather than a random perturbation."""
+
+        @override
+        def finalize(self) -> Self:
+            if isinstance(self.proj, ChannelsIn) and self.proj.channels_in == -1:
+                self.proj.channels_in = self.cond_dim
+            if isinstance(self.proj, ChannelsOut) and self.proj.channels_out == -1:
+                self.proj.channels_out = 6 * self.channels_in
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.act = nn.SiLU()
+        self.proj = config.proj.make()
+
+    def reset_parameters(self) -> None:
+        self.proj.reset_parameters()
+
+    @override
+    def forward(self, c: Tensor, **kwargs: object) -> Output:
+        """Compute 6 modulation parameters from conditioning vector.
+
+        Args:
+          c: [..., cond_dim] conditioning vector.
+          **kwargs: Open message bus forwarded to the projection.
+
+        Returns:
+          params: Output with [..., 1, channels_in] tensors.
+
+        """
+        params = self.proj(self.act(c), **kwargs).unsqueeze(-2)
+        return type(self).Output(*params.chunk(6, dim=-1))
+
+
+class MMDiTBlock(nn.Module):
+    """N-stream joint-attention block with optional adaLN-Zero.
+
+    Composes MultiStreamAttention with per-stream norms and FFNs.
+    With adaLN-Zero (cond_dim > 0), gates are zero-initialized,
+    making the block identity at init.
+    """
+
+    class Config(Fig["MMDiTBlock"], kw_only=False):
+        channels_in: int = -1
+        """Channel width shared across streams (-1 to infer from channels_out)."""
+
+        _: KW_ONLY
+
+        num_streams: int = 2
+        """Number of parallel token streams."""
+
+        attn: Makeable[nn.Module] = field(
+            default_factory=MultiStreamAttention.Config,
+        )
+        """Multi-stream attention config."""
+
+        cond_dim: int = 0
+        """Conditioning dimension for adaLN-Zero (0 = disabled)."""
+
+        ffn: Makeable[nn.Module] = field(
+            default_factory=SwiGLU.Config,
+        )
+        """FFN config (instantiated once per stream)."""
+
+        depth_index: DepthIndex = ()
+        """Block depth for depth-scaled init (-1 = no scaling)."""
+
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @property
+        def num_heads(self) -> int:
+            """Return the joint attention's head count."""
+            return self.attn.num_heads if isinstance(self.attn, NumHeads) else 1
+
+        @property
+        def channels_head(self) -> int:
+            """Return the joint attention's per-head channel width."""
+            if isinstance(self.attn, ChannelsHead):
+                return self.attn.channels_head
+            return self.channels_in
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            propagate_attr(
+                self.attn,
+                "channels_in",
+                self.channels_in,
+                protocol=ChannelsIn,
+            )
+            propagate_attr(self.attn, "num_streams", self.num_streams)
+            propagate_attr(
+                self.attn,
+                "depth_index",
+                self.depth_index,
+                protocol=HasDepthIndex,
+            )
+            propagate_attr(
+                self.ffn,
+                "channels_in",
+                self.channels_in,
+                protocol=ChannelsIn,
+            )
+            propagate_attr(
+                self.ffn,
+                "channels_out",
+                self.channels_in,
+                protocol=ChannelsOut,
+            )
+            propagate_attr(
+                self.ffn,
+                "depth_index",
+                self.depth_index,
+                protocol=HasDepthIndex,
+            )
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for MMDiTBlock."
+            )
+        super().__init__()
+        N = config.num_streams
+        D = config.channels_in
+
+        self.num_streams = N
+        self.attn: MultiStreamAttention = config.attn.make()  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[invalid-assignment]
+
+        self.norms1 = nn.ModuleList(
+            nn.LayerNorm(D, elementwise_affine=False) for _ in range(N)
+        )
+
+        self.norms2 = nn.ModuleList(
+            nn.LayerNorm(D, elementwise_affine=False) for _ in range(N)
+        )
+
+        # Per-stream FFNs (dims propagated in finalize).
+        self.ffns = nn.ModuleList(copy.copy(config.ffn).make() for _ in range(N))
+
+        # Optional per-stream adaLN-Zero.
+        self.adalns: nn.ModuleList | None = None
+        if config.cond_dim > 0:
+            self.adalns = nn.ModuleList(
+                AdaLNZero.Config(
+                    channels_in=D,
+                    cond_dim=config.cond_dim,
+                ).make()
+                for _ in range(N)
+            )
+
+    def reset_parameters(self) -> None:
+        self.attn.reset_parameters()
+        for modules in (self.norms1, self.norms2, self.ffns):
+            for m in modules:
+                if hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+        if self.adalns is not None:
+            for m in self.adalns:
+                if hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+
+    @override
+    def forward(
+        self,
+        xs: Sequence[Tensor],
+        *,
+        c: Tensor | Sequence[Tensor] | None = None,
+        cos_sin: (Sequence[tuple[Tensor, Tensor] | None] | None) = None,
+        **kwargs: object,
+    ) -> tuple[Tensor, ...]:
+        """Forward pass through the N-stream block.
+
+        Args:
+          xs: Per-stream tokens, each [..., S_i, channels_in].
+          c: Conditioning for adaLN. Single tensor broadcasts to
+            all streams, or a sequence of one per stream.
+          cos_sin: Per-stream RoPE (cos, sin) pairs. None entries
+            skip positional encoding for that stream.
+          **kwargs: Open message bus forwarded to every sublayer.
+
+        Returns:
+          ys: Per-stream output tokens, same shapes as xs.
+
+        """
+        N = self.num_streams
+
+        if self.adalns is not None and c is None:
+            # Skipping AdaLN would add both sublayers UNGATED, which is not the
+            # identity-at-init this block documents. Zeros give that identity.
+            raise ValueError(
+                "conditioning is required when cond_dim > 0; pass a tensor "
+                "per stream, or one to broadcast.",
+            )
+
+        cs: list[Tensor | None] = list(c) if isinstance(c, Sequence) else [c] * N
+        if len(cs) == 1:
+            cs = cs * N
+        if len(cs) != N:
+            raise ValueError(
+                f"Got {len(cs)} conditioning tensors for {N} streams; supply "
+                "one per stream, or a single tensor to broadcast.",
+            )
+
+        mods: list[AdaLNZero.Output | None] = [None] * N
+        if self.adalns is not None:
+            for i, ci in enumerate(cs):
+                if ci is not None:
+                    mods[i] = self.adalns[i](ci, **kwargs)
+
+        normed: list[Tensor] = []
+        for i, x in enumerate(xs):
+            mod = mods[i]
+            h = self.norms1[i](x, **kwargs)
+            if mod is not None:
+                h = h * (1 + mod.attn_scale) + mod.attn_shift
+            normed.append(h)
+
+        attention = cast(_MultiStreamModule, self.attn)
+        attn_outs = attention(normed, cos_sin=cos_sin, **kwargs)
+
+        results: list[Tensor] = []
+        for i in range(N):
+            mod = mods[i]
+            out = attn_outs[i]
+            if mod is not None:
+                out = mod.attn_gate * out
+            y = xs[i] + out
+
+            h = self.norms2[i](y, **kwargs)
+            if mod is not None:
+                h = h * (1 + mod.ffn_scale) + mod.ffn_shift
+            ffn_out = self.ffns[i](h, **kwargs)
+            if mod is not None:
+                ffn_out = mod.ffn_gate * ffn_out
+            results.append(y + ffn_out)
+
+        return tuple(results)

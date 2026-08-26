@@ -117,7 +117,7 @@ the unit tests:
 - **Parity tests** compare tables, formulas, and generated worlds against the
   reference implementation, and skip cleanly when the optional `craftax`
   dependency is absent. They are what makes "this is the same game" checkable.
-- **`goldens/`** holds a bit-for-bit snapshot of a complete PPO update --
+- **`testdata/`** holds a bit-for-bit snapshot of a complete PPO update --
   rollout, advantages, clipped loss, gradient clip, and Adam. A change that
   moves one floating-point bit fails it.
 - **The learning rule** is compared against the reference implementation

@@ -1,0 +1,214 @@
+ArcTrainLoop(
+                study_name='arcagi1',
+                experiment_name='exp000',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000'),
+                doc='',
+                step=SudokuTrainStep.Config(
+                │       model=SudokuNet.Config(
+                │       │       channels_in=512,
+                │       │       num_layers=2,
+                │       │       embedding=GridEmbedding.Config(
+                │       │               vocab_size=12,
+                │       │               channels_in=512,
+                │       │               grid_shape=(900,),
+                │       │               channels=[]
+                │       │       ),
+                │       │       block=TransformerBlock.Config(
+                │       │       │       channels_in=512,
+                │       │       │       attn=SelfAttention.Config(
+                │       │       │               channels_in=512,
+                │       │       │               num_heads=8,
+                │       │       │               channels_head=64,
+                │       │       │               num_heads_kv=8,
+                │       │       │               bias=False,
+                │       │       │               dropout=0.0,
+                │       │       │               causal=False,
+                │       │       │               rope=None,
+                │       │       │               norm_qk=None,
+                │       │       │               share_qk_norm=True,
+                │       │       │               norm_out=None,
+                │       │       │               split_qkv_projection=False,
+                │       │       │               attn_kernel=SdpaFused.Config(),
+                │       │       │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │       │       │               depth_index=(),
+                │       │       │               channels_out=512
+                │       │       │       ),
+                │       │       │       ffn=SwiGLU.Config(
+                │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
+                │       │       │               channels_hidden=1_536,
+                │       │       │               expansion=2.6666666666666665,
+                │       │       │               round_to=256,
+                │       │       │               gate=True,
+                │       │       │               bias=False,
+                │       │       │               split_gate_projection=False,
+                │       │       │               norm=None,
+                │       │       │               act=<function silu at 0x0defaced0def>,
+                │       │       │               depth_index=(),
+                │       │       │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │       │       │               init_weight_out=None,
+                │       │       │               shard='colwise'
+                │       │       │       ),
+                │       │       │       norm1=RMSNorm.Config(
+                │       │       │               channels_in=512,
+                │       │       │               eps=1e-06,
+                │       │       │               elementwise_affine=False,
+                │       │       │               device=None,
+                │       │       │               dtype=None,
+                │       │       │               channels_out=512
+                │       │       │       ),
+                │       │       │       norm2=RMSNorm.Config(
+                │       │       │               channels_in=512,
+                │       │       │               eps=1e-06,
+                │       │       │               elementwise_affine=False,
+                │       │       │               device=None,
+                │       │       │               dtype=None,
+                │       │       │               channels_out=512
+                │       │       │       ),
+                │       │       │       prenorm=False,
+                │       │       │       checkpoint=False,
+                │       │       │       depth_index=(),
+                │       │       │       channels_out=512
+                │       │       ),
+                │       │       recurrence=None,
+                │       │       prefix=PrefixStack.Config(
+                │       │               parts=[
+                │       │                       SparsePuzzleEmbedding.Config(
+                │       │                               num_puzzles=1,
+                │       │                               num_tokens=16,
+                │       │                               channels=512,
+                │       │                               channels_in=-1,
+                │       │                               batch_size=256,
+                │       │                               init_std=0.0,
+                │       │                               embed_scale=-1.0,
+                │       │                               dtype=None
+                │       │                       ),
+                │       │                       RegisterTokens.Config(
+                │       │                               num_tokens=1,
+                │       │                               channels=512,
+                │       │                               init_std=1.0,
+                │       │                               learnable=True,
+                │       │                               embed_scale=-1.0
+                │       │                       )
+                │       │               ],
+                │       │               channels=512
+                │       │       ),
+                │       │       num_prefix_tokens=17,
+                │       │       vocab_size=12,
+                │       │       halt_outputs=2,
+                │       │       halt_init_bias=-5.0
+                │       ),
+                │       optimizer=CompositeOptimizer.Config(
+                │               optimizers=[
+                │                       PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adamw.AdamW'>, lr=0.0001, betas=(0.9, 0.95), weight_decay=1.0),
+                │                       Muon.Config(
+                │                               lr=0.02,
+                │                               weight_decay=0.1,
+                │                               momentum=0.6,
+                │                               nesterov=True,
+                │                               ns_coefficients=(3.4445, -4.775, 2.0315),
+                │                               eps=1e-07,
+                │                               ns_steps=3,
+                │                               adjust_lr_fn=<function adjust_lr_original at 0x0defaced0def>,
+                │                               ensemble_dims=0
+                │                       )
+                │               ],
+                │               select=[
+                │                       complement(excluding(Muon.eligible_tensor, 'embed', 'head')),
+                │                       excluding(Muon.eligible_tensor, 'embed', 'head')
+                │               ],
+                │               require_total=True,
+                │               drop_empty=False
+                │       ),
+                │       loss=SimpleLoss.Config(
+                │               loss_fn=<function binary_cross_entropy_with_logits at 0x0defaced0def>,
+                │               target_key='label',
+                │               kwargs={'reduction': 'none'}
+                │       ),
+                │       accumulate_grad_batches=1,
+                │       drop_partial_accumulation_on_epoch_end=True,
+                │       train_budget_steps=inf,
+                │       train_budget_sec=inf,
+                │       train_budget_epochs=inf,
+                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function constant at 0x0defaced0def>),
+                │       parallelism=NoParallel.Config(device='auto'),
+                │       model_quantization=NoModelQuantization.Config(),
+                │       activation_memoization=DefaultActivationStorage.Config(),
+                │       compile=PartialConfig(<class 'functools.partial'>, <function compile at 0x0defaced0def>, fullgraph=True),
+                │       ema=NoEMA.Config(),
+                │       gradient_clip_norm=inf,
+                │       device_init='eager',
+                │       dtype_autocast=torch.bfloat16,
+                │       autocast_cache_enabled=False,
+                │       total_train_steps=388_670,
+                │       warmup_steps=2_000,
+                │       lr_min_ratio=0.0,
+                │       act=None,
+                │       label_smoothing=0.0,
+                │       ignore_label_id=-100,
+                │       use_ema=True,
+                │       ema_decay=0.999,
+                │       ema_warmup_steps=2_000
+                ),
+                dataset=ArcData.Config(
+                        base_dir='/opt/scratch',
+                        working_dir=PosixPath('/opt/scratch/datasets/arcagi1'),
+                        batch_size=256,
+                        eval_batch_size=256,
+                        device='auto',
+                        seed=0,
+                        num_tasks=None,
+                        num_eval_tasks=None
+                ),
+                metrics={       'pass': PassK.Config(
+                                pass_ks=(1, 2, 5, 10),
+                                ignore_label_id=-100
+                        )},
+                checkpointing=Checkpointer.Config(
+                        base_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000/checkpoints'),
+                        filename='step_{step:08d}.pt',
+                        save_every=4_000,
+                        keep_last_n=8,
+                        keep_every=40_000,
+                        storer=SyncLocalStateDictStorer.Config(),
+                        resume=True,
+                        resume_step=-1,
+                        allow_checkpoint_overwrite=False
+                ),
+                profiling=None,
+                phase_timer=PhaseTimer.Config(
+                        enabled=False,
+                        torch_profile=False,
+                        base_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/arcagi1/exp000/profiling'),
+                        heartbeat_interval_sec=30.0,
+                        cuda_events=False
+                ),
+                tracker=None,
+                max_steps=388_670,
+                max_epochs=inf,
+                max_time=inf,
+                max_time_kind='wall',
+                max_eval_time=inf,
+                eval_stop_on_time_limit=False,
+                num_steps_eval=10_000,
+                num_steps_log=100,
+                early_train_log_steps=100,
+                phase_heartbeat_sec=20.0,
+                eval_every_epoch=False,
+                eval_extras_every_eval=False,
+                eval_warmup_batches=1,
+                eval_only=False,
+                restore_rng_state=True,
+                seed=0,
+                num_steps_garbage_collect=inf,
+                mesh_dim_model_seed='pp',
+                mesh_dim_data_seed='dp',
+                runtime=SingleProcess.Config(
+                        device='auto',
+                        deterministic=False,
+                        float32_matmul_precision=None
+                )
+        )

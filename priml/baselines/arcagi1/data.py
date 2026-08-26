@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Self, override
+from typing import Any, Self, cast, override
 
 import json
 import logging
@@ -45,6 +45,7 @@ import numpy as np
 import torch
 
 from priml.math.basic import ceil_div
+from priml.math.seed import salt
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
@@ -112,6 +113,12 @@ class ArcData:
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if config.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
+        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
+            raise ValueError(
+                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
+            )
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
@@ -127,6 +134,7 @@ class ArcData:
         # the sampling sequence instead of replaying the first pass.
         self._passes = 0
         self._live: _ArcBatches | None = None
+        self._pending_loader_state: dict[str, Any] | None = None
 
     def train_dataloader(self) -> _ArcBatches:
         """Build the re-iterable training stream."""
@@ -144,6 +152,9 @@ class ArcData:
             seed=self.config.seed,
             passes=self._passes,
         )
+        if self._pending_loader_state is not None:
+            stream.load_state_dict(self._pending_loader_state)
+            self._pending_loader_state = None
         self._live = stream
         return stream
 
@@ -165,9 +176,15 @@ class ArcData:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Snapshot the completed-pass count."""
+        """Snapshot the sampled pass and its next batch."""
+        loader_state = (
+            self._live.state_dict()
+            if self._live is not None
+            else self._pending_loader_state
+        )
         return {
             "passes": self._live.passes if self._live is not None else self._passes,
+            "loader": loader_state,
             "timer_epoch": self.timer_epoch.state_dict(),
         }
 
@@ -175,8 +192,15 @@ class ArcData:
         """Restore state produced by :meth:`state_dict`."""
         if "passes" in state_dict:
             self._passes = int(state_dict["passes"])
+        loader_state_raw = state_dict.get("loader")
+        if isinstance(loader_state_raw, dict):
+            loader_state = cast(dict[str, Any], loader_state_raw)
+            self._pending_loader_state = loader_state
             if self._live is not None:
-                self._live.passes = self._passes
+                self._live.load_state_dict(loader_state)
+                self._pending_loader_state = None
+        elif self._live is not None:
+            self._live.passes = self._passes
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 
@@ -217,6 +241,8 @@ class _ArcBatches:
         self.sample_by_task = sample_by_task
         self.seed = seed
         self.passes = passes
+        self._active_pass: int | None = None
+        self._next_batch = 0
 
     @property
     def num_tasks(self) -> int:
@@ -231,8 +257,26 @@ class _ArcBatches:
             yield from self._iter_ordered()
 
     def __len__(self) -> int:
-        """Batches per pass, counting a short final batch."""
-        return ceil_div(int(self.puzzles[-1]), self.batch_size)
+        """Return the batches in the active or next pass."""
+        if not self.sample_by_task:
+            return ceil_div(int(self.puzzles[-1]), self.batch_size)
+        pass_index = self.passes if self._active_pass is None else self._active_pass
+        return sum(1 for _ in self._plan_sampled(pass_index))
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return enough state to resume an unfinished sampled pass."""
+        return {
+            "passes": self.passes,
+            "active_pass": self._active_pass,
+            "next_batch": self._next_batch,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore an unfinished sampled pass."""
+        self.passes = int(state_dict.get("passes", self.passes))
+        active_pass = state_dict.get("active_pass")
+        self._active_pass = None if active_pass is None else int(active_pass)
+        self._next_batch = int(state_dict.get("next_batch", 0))
 
     def _iter_sampled(self) -> Iterator[dict[str, Any]]:
         """Draw whole tasks, so every task carries the same weight.
@@ -242,10 +286,26 @@ class _ArcBatches:
         batch is dropped: it would be a partial task rather than a partial
         epoch.
         """
-        # Philox rather than the ambient stream: the sampling sequence must be
-        # replayable from the seed and the pass count alone.
-        rng = np.random.Generator(np.random.Philox(seed=self.seed + self.passes))
-        self.passes += 1
+        if self._active_pass is None:
+            self._active_pass = self.passes
+            self.passes += 1
+            self._next_batch = 0
+        pass_index = self._active_pass
+        for batch_index, (rows, puzzle_ids) in enumerate(
+            self._plan_sampled(pass_index),
+        ):
+            if batch_index < self._next_batch:
+                continue
+            self._next_batch = batch_index + 1
+            yield self._batch(rows, puzzle_ids, valid=self.batch_size)
+        self._active_pass = None
+        self._next_batch = 0
+
+    def _plan_sampled(self, pass_index: int) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Plan complete sampled batches for one reproducible pass."""
+        rng = np.random.Generator(
+            np.random.Philox(seed=salt("arcagi1_task_sampling", self.seed, pass_index)),
+        )
         order = rng.permutation(self.num_tasks)
         cursor = 0
         while cursor < order.size:
@@ -266,11 +326,10 @@ class _ArcBatches:
                 puzzle_ids.append(np.full(take, puzzle, dtype=np.int64))
                 filled += take
             if filled < self.batch_size:
-                break  # a partial task, not a partial epoch
-            yield self._batch(
+                return
+            yield (
                 np.concatenate(rows).astype(np.int64),
                 np.concatenate(puzzle_ids),
-                valid=self.batch_size,
             )
 
     def _iter_ordered(self) -> Iterator[dict[str, Any]]:

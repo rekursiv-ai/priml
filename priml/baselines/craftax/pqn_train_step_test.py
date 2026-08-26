@@ -185,6 +185,45 @@ def test_action_values_can_be_read_for_arbitrary_observations() -> None:
     assert not values.requires_grad
 
 
+def test_evaluation_actor_is_greedy_and_carries_lstm_inputs() -> None:
+    step = _step()
+    actor = step.make_evaluation_actor()
+    actor.reset(num_envs=2, device=torch.device("cpu"))
+    seen_actions: list[Tensor] = []
+    seen_dones: list[Tensor] = []
+
+    def recurrent(
+        state: tuple[Tensor, Tensor],
+        observation: Tensor,
+        previous_action: Tensor,
+        previous_done: Tensor,
+    ) -> tuple[tuple[Tensor, Tensor], Tensor]:
+        del observation
+        seen_actions.append(previous_action.clone())
+        seen_dones.append(previous_done.clone())
+        q_values = torch.zeros(2, 43)
+        q_values[:, 11] = 1.0
+        return (state[0] + 1, state[1] + 1), q_values
+
+    with patch.object(step.model, "step", side_effect=recurrent):
+        first = actor.act(
+            torch.zeros(2, step.env.observation_size),
+            torch.zeros(2, dtype=torch.bool),
+            generator=torch.Generator().manual_seed(0),
+        )
+        second = actor.act(
+            torch.zeros(2, step.env.observation_size),
+            torch.tensor([True, False]),
+            generator=torch.Generator().manual_seed(1),
+        )
+
+    assert first.tolist() == second.tolist() == [11, 11]
+    assert seen_actions[0].tolist() == [0, 0]
+    assert seen_actions[1].tolist() == [11, 11]
+    assert seen_dones[1].tolist() == [True, False]
+    assert step.model.training
+
+
 def test_a_checkpoint_resumes_an_identical_run() -> None:
     step = _config(seed=3).make()
     step.train_step()

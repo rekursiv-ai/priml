@@ -1,0 +1,9 @@
+YarnScaling.Config(
+                factor=1.0,
+                original_max_position_embeddings=4_096,
+                beta_fast=32.0,
+                beta_slow=1.0,
+                mscale=1.0,
+                mscale_all_dim=0.0,
+                inner=HuggingFaceFrequencies.Config(base=10000.0)
+        )

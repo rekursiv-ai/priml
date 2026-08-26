@@ -12,15 +12,16 @@ import torch
 
 from priml.baselines.nanochat import experiments
 from priml.baselines.nanochat.model import NanoChatLM
-from priml.model.attention import OutputGate, SelfAttention
-from priml.model.rope import RoPE
+from priml.model.attention.output_gate import OutputGate
+from priml.model.attention.rope import RoPE
+from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.softcap import SoftCap
-from priml.model.transformer import TransformerBlock
-from priml.model.value_gated_attention import ValueGatedAttention
+from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
 
 
-_GOLDEN_DIR = Path(__file__).parent / "goldens"
+_TESTDATA_DIR = Path(__file__).parent / "testdata"
 
 VOCAB = 32
 SEQ = 16
@@ -200,14 +201,14 @@ def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
     config = _config()
     template = config.template.attn
     assert isinstance(template, ValueGatedAttention.Config)
-    template.heads = 2
+    template.num_heads = 2
 
     blocks: list[Any] = []
-    for heads in (2, 4):  # 2 * 8 = 16 inner, against 4 * 8 = 32
+    for num_heads in (2, 4):  # 2 * 8 = 16 inner, against 4 * 8 = 32
         block = config.template.copy_tree()
         attention = block.attn
         assert isinstance(attention, ValueGatedAttention.Config)
-        attention.heads = heads
+        attention.num_heads = num_heads
         blocks.append(block)
     config.block = blocks
     config.num_layers = len(blocks)
@@ -224,23 +225,17 @@ def test_a_uniform_stack_of_explicit_blocks_still_builds() -> None:
     assert config.make()(_tokens()).shape[-1] == VOCAB
 
 
-def test_a_wrapped_attention_still_reports_its_own_head_geometry() -> None:
-    """The block answers, so a wrapper cannot hide the shape it composes.
-
-    ``OutputGate`` scales an output without reshaping one, so its geometry is
-    the wrapped module's. A reader reaching for ``block.attn.channels_head``
-    instead reads the gate's own absent field and silently reports one head of
-    the full model width -- which builds rotary factors and a value-embedding
-    table of the wrong size.
-    """
+def test_a_wrapped_attention_exposes_its_own_head_attributes() -> None:
+    """Shape-preserving wrappers expose the wrapped attention's attributes."""
     gated = TransformerBlock.Config(
         channels_in=512,
         attn=OutputGate.Config(
             channels_in=512,
-            inner=SelfAttention.Config(heads=4, channels_head=128),
+            inner=SelfAttention.Config(num_heads=4, channels_head=128),
         ),
     )
-    assert (gated.channels_head, gated.heads) == (128, 4)
+    assert gated.channels_head == 128
+    assert gated.num_heads == 4
 
 
 def test_an_injected_layer_keeps_the_values_it_was_given() -> None:
@@ -283,12 +278,12 @@ def test_flops_read_the_blocks_real_head_count() -> None:
     estimate most.
     """
 
-    # Widening the heads moves BOTH terms -- bigger projections and a bigger
+    # Widening the num_heads moves BOTH terms -- bigger projections and a bigger
     # attention span. They are separated by changing ONLY the span: halving
     # every window leaves every parameter untouched, so the drop is purely
     # attention, and its ABSOLUTE size is pinned against the closed form
     # ``12 * inner * span`` rather than against a mirror of the source.
-    def span_drop(*, heads: int) -> int:
+    def span_drop(*, num_heads: int) -> int:
         """FLOPs lost when layer 0's window halves; layer 1 is always full."""
         built: list[int] = []
         for pattern in ("L", "SL"):
@@ -296,14 +291,14 @@ def test_flops_read_the_blocks_real_head_count() -> None:
             variant_attention = variant.template.attn
             assert isinstance(variant_attention, ValueGatedAttention.Config)
             variant_attention.window_pattern = pattern
-            variant_attention.heads = heads
+            variant_attention.num_heads = num_heads
             torch.manual_seed(0)
             built.append(variant.make().flops_per_token())
         return built[0] - built[1]
 
     # One layer drops from SEQ to SEQ // 2 positions, at 12 * inner each.
-    assert span_drop(heads=2) == 12 * (2 * 8) * (SEQ - SEQ // 2)
-    assert span_drop(heads=4) == 12 * (4 * 8) * (SEQ - SEQ // 2)
+    assert span_drop(num_heads=2) == 12 * (2 * 8) * (SEQ - SEQ // 2)
+    assert span_drop(num_heads=4) == 12 * (4 * 8) * (SEQ - SEQ // 2)
 
 
 def test_flops_exclude_lookup_tables() -> None:
@@ -412,8 +407,8 @@ def test_forward_bfb() -> None:
     changes arithmetic while keeping every shape and name intact.
     """
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="plain_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="plain",
         build_module=lambda: _config().make(),
         build_input=_tokens,
         seed=0,
@@ -427,8 +422,8 @@ def test_value_embedding_forward_bfb() -> None:
     builds no value embedding at all.
     """
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="value_embedding_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="value_embedding",
         build_module=lambda: _config(value_embedding_stride=1).make(),
         build_input=_tokens,
         seed=0,
@@ -438,7 +433,7 @@ def test_value_embedding_forward_bfb() -> None:
 def test_the_shipped_experiments_forward_bfb() -> None:
     """Freeze the model the LADDER builds, not one this file assembles.
 
-    The two goldens above are minted over a config written here, so a change to
+    The two test artifacts above use a config written here, so a change to
     ``exp001`` -- a different norm epsilon, a dropped bf16 knob, another window
     pattern -- leaves them green while every shipped rung moves. This one is
     built from ``exp_smoke``, which differs from ``exp001`` only in size, so a
@@ -468,8 +463,8 @@ def test_the_shipped_experiments_forward_bfb() -> None:
         return torch.randint(0, _model().vocab_size, (2, _model().max_seq_len))
 
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="exp_smoke_forward_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="exp_smoke_forward",
         build_module=build,
         build_input=build_input,
         seed=0,

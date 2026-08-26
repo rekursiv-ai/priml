@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Self, override
+from typing import Any, Self, cast, override
 
 import functools
 import json
@@ -41,6 +41,7 @@ import numpy as np
 import torch
 
 from priml.math.basic import ceil_div
+from priml.math.seed import salt
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
@@ -155,12 +156,11 @@ class SudokuData:
 
         seed: int | None = None
         """Shuffle seed. ``None`` draws from the ambient global stream; an int
-        drives a dedicated generator seeded ``seed + epoch``, so a given epoch's
-        order is reproducible regardless of what else has drawn."""
+        drives a named per-epoch stream independent of ambient draws."""
 
         augment_seed: int | None = None
-        """Seed for the augmentation stream, kept separate from the shuffle so
-        the two are independently reproducible. ``None`` uses the global one."""
+        """Augmentation seed. ``None`` uses the global stream; an int drives a
+        named stream independent for every epoch and batch."""
 
         num_train_puzzles: int | None = None
         """Training puzzles to load; ``None`` loads all of them."""
@@ -178,6 +178,12 @@ class SudokuData:
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if config.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
+        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
+            raise ValueError(
+                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
+            )
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
@@ -193,6 +199,7 @@ class SudokuData:
         # the shuffle sequence instead of replaying epoch 0.
         self._epochs = 0
         self._live: _SudokuBatches | None = None
+        self._pending_loader_state: dict[str, Any] | None = None
 
     def train_dataloader(self) -> _SudokuBatches:
         """Build the re-iterable training stream."""
@@ -212,6 +219,9 @@ class SudokuData:
             augment=self.config.augment,
             augment_seed=self.config.augment_seed,
         )
+        if self._pending_loader_state is not None:
+            stream.load_state_dict(self._pending_loader_state)
+            self._pending_loader_state = None
         self._live = stream
         return stream
 
@@ -236,25 +246,32 @@ class SudokuData:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Snapshot the completed-epoch count.
-
-        One key, because there is one number: the count that seeds the next
-        epoch's shuffle and the count a budget reads are the same at every
-        boundary a checkpoint can land on. The stream advances its own copy
-        when an epoch BEGINS and the loop ticks the timer when the data runs
-        OUT, which is the same instant from opposite sides.
-        """
-        return {"timer_epoch": self.timer_epoch.state_dict()}
+        """Snapshot the active epoch and its next batch."""
+        loader_state = (
+            self._live.state_dict()
+            if self._live is not None
+            else self._pending_loader_state
+        )
+        return {
+            "epoch": self._live.epoch if self._live is not None else self._epochs,
+            "loader": loader_state,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Restore state produced by :meth:`state_dict`."""
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
-            # The shuffle is seeded ``seed + epoch``, so a restored run
-            # continues the sequence rather than replaying epoch 0.
-            self._epochs = self.timer_epoch.global_count
+        self._epochs = int(state_dict.get("epoch", self.timer_epoch.global_count))
+        loader_state_raw = state_dict.get("loader")
+        if isinstance(loader_state_raw, dict):
+            loader_state = cast(dict[str, Any], loader_state_raw)
+            self._pending_loader_state = loader_state
             if self._live is not None:
-                self._live.epoch = self._epochs
+                self._live.load_state_dict(loader_state)
+                self._pending_loader_state = None
+        elif self._live is not None:
+            self._live.epoch = self._epochs
 
 
 class _SudokuBatches:
@@ -293,18 +310,19 @@ class _SudokuBatches:
         self.shuffle = shuffle
         self.seed = seed
         self.augment = augment
+        self.augment_seed = augment_seed
         self.epoch = epoch
-        # Created once per loader, so it restarts from its seed on a fresh
-        # process while advancing across epochs within one -- which makes a
-        # fixed resume schedule reproduce exactly.
-        self._augment_generator: torch.Generator | None = None
-        if augment and augment_seed is not None:
-            self._augment_generator = torch.Generator(device=self.device)
-            self._augment_generator.manual_seed(augment_seed)
+        self._active_epoch: int | None = None
+        self._next_batch = 0
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         """Yield every row once, shuffled within and across puzzles."""
-        generator = self._shuffle_generator()
+        if self._active_epoch is None:
+            self._active_epoch = self.epoch
+            self.epoch += 1
+            self._next_batch = 0
+        active_epoch = self._active_epoch
+        generator = self._shuffle_generator(active_epoch)
         starts = self.bounds[:-1]
         sizes = (self.bounds[1:] - starts).long()
 
@@ -325,9 +343,10 @@ class _SudokuBatches:
             order = order[
                 torch.randperm(len(order), device=self.device, generator=generator)
             ]
-        self.epoch += 1
 
-        for start in range(0, len(order), self.batch_size):
+        for batch_index, start in enumerate(range(0, len(order), self.batch_size)):
+            if batch_index < self._next_batch:
+                continue
             rows = order[start : start + self.batch_size]
             valid = len(rows)
             inputs = self.inputs[rows]
@@ -337,28 +356,59 @@ class _SudokuBatches:
                 inputs = torch.cat([inputs, inputs.new_zeros(pad, inputs.shape[1])])
                 labels = torch.cat([labels, labels.new_zeros(pad, labels.shape[1])])
             if self.augment:
-                # After padding, so the RNG draw shapes depend only on
-                # batch_size: an epoch's augmentation stream is then identical
-                # whether or not its final batch was short. Pad rows are token
-                # 0, a fixed point of every transformation, so they stay padded.
                 inputs, labels = augment_sudoku(
                     inputs,
                     labels,
                     vocab_size=self.vocab_size,
-                    generator=self._augment_generator,
+                    generator=self._augmentation_generator(
+                        active_epoch,
+                        batch_index,
+                    ),
                 )
+            self._next_batch = batch_index + 1
             yield {"media": inputs, "label": labels, "valid_count": valid}
+        self._active_epoch = None
+        self._next_batch = 0
 
     def __len__(self) -> int:
         """Batches per epoch, counting a short final batch."""
         return ceil_div(int(self.bounds[-1]), self.batch_size)
 
-    def _shuffle_generator(self) -> torch.Generator | None:
-        """A per-epoch generator, or ``None`` to use the ambient stream."""
+    def state_dict(self) -> dict[str, Any]:
+        """Return enough state to resume an unfinished epoch."""
+        return {
+            "epoch": self.epoch,
+            "active_epoch": self._active_epoch,
+            "next_batch": self._next_batch,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore an unfinished epoch."""
+        self.epoch = int(state_dict.get("epoch", self.epoch))
+        active_epoch = state_dict.get("active_epoch")
+        self._active_epoch = None if active_epoch is None else int(active_epoch)
+        self._next_batch = int(state_dict.get("next_batch", 0))
+
+    def _shuffle_generator(self, epoch: int) -> torch.Generator | None:
+        """A named per-epoch generator, or the ambient stream."""
         if self.seed is None:
             return None
         generator = torch.Generator(device=self.device)
-        generator.manual_seed(self.seed + self.epoch)
+        generator.manual_seed(salt("sudoku_shuffle", self.seed, epoch))
+        return generator
+
+    def _augmentation_generator(
+        self,
+        epoch: int,
+        batch_index: int,
+    ) -> torch.Generator | None:
+        """A named per-batch augmentation generator, or the ambient stream."""
+        if self.augment_seed is None:
+            return None
+        generator = torch.Generator(device=self.device)
+        generator.manual_seed(
+            salt("sudoku_augmentation", self.augment_seed, epoch, batch_index),
+        )
         return generator
 
 

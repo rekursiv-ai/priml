@@ -14,7 +14,7 @@ on the policy.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from configgle import Fig
 from torch import Tensor
@@ -22,9 +22,10 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
+from priml.baselines.craftax.evaluation import evaluation_mode
 from priml.baselines.craftax.game import constants
-from priml.baselines.craftax.model import ActorCritic
 
 
 class CraftaxScore:
@@ -72,6 +73,7 @@ class CraftaxScore:
         self._returns: list[float] = []
         self._lengths: list[int] = []
         self._unlocked: list[list[float]] = []
+        self._rollout_index = 0
 
     def update(self, logits: Tensor, **batch: object) -> None:
         """Score the bound policy over a complete evaluation rollout.
@@ -82,14 +84,14 @@ class CraftaxScore:
 
         Args:
           logits: Unused; present to satisfy the metric interface.
-          **batch: Must carry ``policy``, the network to evaluate.
+          **batch: Must carry ``actor``, an isolated evaluation actor.
 
         """
         del logits
-        policy = batch.get("policy")
-        if policy is None:
-            return
-        self._play(cast(ActorCritic, policy))
+        actor = batch.get("actor")
+        if not isinstance(actor, EvaluationActor):
+            raise TypeError("CraftaxScore requires an EvaluationActor batch entry.")
+        self._play(actor)
 
     def compute(self) -> dict[str, Any]:
         """Summarize every episode seen since the last reset.
@@ -120,6 +122,7 @@ class CraftaxScore:
         self._returns = []
         self._lengths = []
         self._unlocked = []
+        self._rollout_index = 0
 
     def state_dict(self) -> dict[str, Any]:
         """Return the accumulated episodes."""
@@ -127,6 +130,7 @@ class CraftaxScore:
             "returns": list(self._returns),
             "lengths": list(self._lengths),
             "unlocked": [list(row) for row in self._unlocked],
+            "rollout_index": self._rollout_index,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -134,20 +138,38 @@ class CraftaxScore:
         self._returns = list(state_dict["returns"])
         self._lengths = list(state_dict["lengths"])
         self._unlocked = [list(row) for row in state_dict["unlocked"]]
+        self._rollout_index = int(state_dict["rollout_index"])
 
     @torch.no_grad()
-    def _play(self, policy: ActorCritic) -> None:
+    def _play(self, actor: EvaluationActor) -> None:
         """Run the fixed evaluation rollout, banking finished episodes."""
         config = CraftaxEnv.Config()
         config.num_envs = self.config.num_envs
         config.device = self.config.device
-        config.seed = self.config.seed
+        config.seed = self.config.seed + self._rollout_index
         config.view = self.config.view
         env = config.make()
 
         observation = env.reset()
+        if observation.shape[-1] != actor.observation_size:
+            raise ValueError(
+                f"Evaluation observation_size={observation.shape[-1]} does not match "
+                f"actor observation_size={actor.observation_size}."
+            )
+        if observation.device != actor.device:
+            raise ValueError(
+                f"Evaluation device={observation.device} does not match "
+                f"actor device={actor.device}."
+            )
         generator = torch.Generator(device=observation.device)
-        generator.manual_seed(self.config.seed)
+        generator.manual_seed(self.config.seed + self._rollout_index)
+        self._rollout_index += 1
+        actor.reset(num_envs=self.config.num_envs, device=observation.device)
+        previous_done = torch.zeros(
+            self.config.num_envs,
+            dtype=torch.bool,
+            device=observation.device,
+        )
         episode_return = torch.zeros(self.config.num_envs, device=observation.device)
         episode_length = torch.zeros(
             self.config.num_envs,
@@ -155,29 +177,30 @@ class CraftaxScore:
             device=observation.device,
         )
 
-        for _ in range(self.config.steps):
-            logits, _ = policy(observation)
-            action = torch.multinomial(
-                logits.softmax(-1),
-                1,
-                generator=generator,
-            ).squeeze(-1)
-            transition = env.step(action)
-            observation = transition.observation
-            episode_return = episode_return + transition.reward
-            episode_length = episode_length + 1
-
-            if bool(transition.done.any()):
-                finished = transition.done
-                self._returns.extend(episode_return[finished].tolist())
-                self._lengths.extend(episode_length[finished].tolist())
-                unlocked = torch.stack(
-                    [transition.info[name] for name in sorted(transition.info)],
-                    dim=-1,
+        with evaluation_mode(actor.model):
+            for _ in range(self.config.steps):
+                action = actor.act(
+                    observation,
+                    previous_done,
+                    generator=generator,
                 )
-                self._unlocked.extend(unlocked[finished].tolist())
-                episode_return = episode_return * ~finished
-                episode_length = episode_length * ~finished
+                transition = env.step(action)
+                observation = transition.observation
+                previous_done = transition.done
+                episode_return = episode_return + transition.reward
+                episode_length = episode_length + 1
+
+                if bool(transition.done.any()):
+                    finished = transition.done
+                    self._returns.extend(episode_return[finished].tolist())
+                    self._lengths.extend(episode_length[finished].tolist())
+                    unlocked = torch.stack(
+                        [transition.info[name] for name in sorted(transition.info)],
+                        dim=-1,
+                    )
+                    self._unlocked.extend(unlocked[finished].tolist())
+                    episode_return = episode_return * ~finished
+                    episode_length = episode_length * ~finished
 
 
 def crafter_score_pct(success_rates_pct: np.ndarray) -> float:

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import errno
 import hashlib
@@ -100,8 +100,23 @@ class Flash3Attention:
             )
         self._flash = load_flash3()
 
-    def __call__(self, q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
-        """Attend over the last ``window`` positions, causally."""
+    def __call__(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        window: int = -1,
+        **kwargs: Any,
+    ) -> Tensor:
+        """Attend over the last ``window`` positions, causally.
+
+        ``window`` defaults to ``-1``: unbounded over the causal prefix.
+        Remaining keyword arguments belong to the open model message bus; this
+        kernel reads only the window it understands.
+
+        """
+        del kwargs
         return self._flash.flash_attn_func(
             q,
             k,

@@ -1,0 +1,4 @@
+flatten_depth_index:
+  unspecified: -1
+  one level ((3, 12),): 3
+  nested ((1, 4), (3, 12)): 15

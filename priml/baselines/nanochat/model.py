@@ -31,11 +31,17 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.attention.rope import RoPE
+from priml.model.attention.value_gated_attention import (
+    ValueGatedAttention,
+)
 from priml.model.custom_types import (
-    AttentionBlock,
+    ChannelsHead,
     ChannelsIn,
     ChannelsOut,
-    HeadGeometry,
+    HasAttention,
+    HasDepthIndex,
+    NumHeads,
     TensorModule,
     propagate_attr,
 )
@@ -45,13 +51,9 @@ from priml.model.linear import Linear
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
 from priml.model.residual_mix import ResidualMix
-from priml.model.rope import RoPE
 from priml.model.softcap import SoftCap
 from priml.model.swiglu import SwiGLUReluSquared
-from priml.model.transformer import TransformerBlock
-from priml.model.value_gated_attention import (
-    ValueGatedAttention,
-)
+from priml.model.transformer.block import TransformerBlock
 
 
 class NanoChatLM(nn.Module):
@@ -77,7 +79,7 @@ class NanoChatLM(nn.Module):
         num_layers: int = 8
         """Blocks in the stack."""
 
-        block: AttentionBlock | Sequence[AttentionBlock] = field(
+        block: HasAttention | Sequence[HasAttention] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=ValueGatedAttention.Config(),
                 ffn=SwiGLUReluSquared.Config(),
@@ -217,7 +219,12 @@ class NanoChatLM(nn.Module):
                 propagate_attr(
                     block, "channels_out", self.channels_in, protocol=ChannelsOut
                 )
-                propagate_attr(block, "depth", layer)
+                propagate_attr(
+                    block,
+                    "depth_index",
+                    ((layer, self.num_layers),),
+                    protocol=HasDepthIndex,
+                )
                 attention = block.attn
                 if isinstance(attention, ValueGatedAttention.Config):
                     attention.max_seq_len = self.max_seq_len
@@ -234,7 +241,7 @@ class NanoChatLM(nn.Module):
             self.mix.num_layers = self.num_layers
             self.rope.channels_head = _head_shape(self.block[0], self.channels_in)[0]
             finalized = super().finalize()
-            # AFTER the cascade: a block that left ``heads`` at its sentinel
+            # AFTER the cascade: a block that left ``num_heads`` at its sentinel
             # derives it in its own finalize, so checking earlier would compare
             # a fallback rather than the width the layer will actually use.
             #
@@ -348,7 +355,7 @@ class NanoChatLM(nn.Module):
         x = self.norm_embed(self.embed(tokens))
         original = x
         for layer, block in enumerate(self.blocks):
-            x = self.mix(x, original, layer=layer)
+            x = self.mix(x, original=original, layer=layer)
             # ``ModuleDict`` is not a Mapping -- it has no ``get`` -- so
             # membership is tested before the lookup.
             name = str(layer)
@@ -411,7 +418,7 @@ class NanoChatLM(nn.Module):
         )
         config = self.config
         assert isinstance(config.block, list)
-        # ``heads * channels_head``, read from the block rather than derived
+        # ``num_heads * channels_head``, read from the block rather than derived
         # from the model width: the attention's inner width is decoupled from
         # the residual stream, so dividing would miscount every model where
         # they differ.
@@ -443,28 +450,14 @@ def _window(block: nn.Module) -> int:
 
 
 def _head_shape(block: object, channels_in: int) -> tuple[int, int]:
-    """A block's ``(channels_head, heads * channels_head)``.
-
-    Asked OF THE BLOCK: where its attention sits is its own business, and a
-    reader reaching for a fixed attribute gets the wrong answer from every
-    wrapper. A block declaring no geometry has no attention and is treated as
-    one head of the full width.
-
-    Args:
-      block: The block config the model was handed.
-      channels_in: Model width, for a block declaring no geometry.
-
-    Returns:
-      shape: Per-head width, and that width across every head.
-
-    """
-    if not isinstance(block, HeadGeometry):
+    """Return a block's per-head and total uniform-attention widths."""
+    if not isinstance(block, NumHeads) or not isinstance(block, ChannelsHead):
         return channels_in, channels_in
-    return block.channels_head, block.heads * block.channels_head
+    return block.channels_head, block.num_heads * block.channels_head
 
 
 def _reject_ragged_heads(
-    blocks: Sequence[AttentionBlock],
+    blocks: Sequence[HasAttention],
     *,
     channels_in: int,
 ) -> None:
@@ -472,7 +465,7 @@ def _reject_ragged_heads(
 
     Args:
       blocks: The per-layer block configs.
-      channels_in: Model width, the fallback for a block declaring no heads.
+      channels_in: Model width, the fallback for a block declaring no num_heads.
 
     Raises:
       ValueError: Two layers declare different head shapes. The model sizes its
@@ -485,5 +478,5 @@ def _reject_ragged_heads(
         raise ValueError(
             "every block must declare the same attention head geometry, since "
             "the value embeddings and rotary factors are shared across layers; "
-            f"got (channels_head, heads * channels_head) of {sorted(shapes)}.",
+            f"got (channels_head, num_heads * channels_head) of {sorted(shapes)}.",
         )

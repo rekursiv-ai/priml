@@ -1,0 +1,16 @@
+SwiGLU.Config(
+                channels_in=4,
+                channels_out=4,
+                channels_hidden=4,
+                expansion=2.6666666666666665,
+                round_to=256,
+                gate=True,
+                bias=False,
+                split_gate_projection=False,
+                norm=None,
+                act=<function silu at 0x0defaced0def>,
+                depth_index=(),
+                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                init_weight_out=None,
+                shard=None
+        )

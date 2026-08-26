@@ -17,7 +17,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Self, override
+from typing import Self, override
 
 import math
 
@@ -93,11 +93,10 @@ class SoftCap(nn.Module):
         self.inner.reset_parameters()
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         # Forwarded, not dropped: the wrapper claims the ``TensorModule`` call
-        # contract, so an inner module taking an auxiliary argument -- a
-        # conditioning tensor, a cache -- must still receive it.
-        out = self.inner(x, *args, **kwargs)
+        # contract, so every named message must still reach the inner module.
+        out = self.inner(x, **kwargs)
         if self.dtype is not None:
             out = out.to(self.dtype)
         return softcap(out, self.cap)

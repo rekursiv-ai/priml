@@ -1,0 +1,1 @@
+ResidualMix.Config(num_layers=2, running=0.5, original=0.25)

@@ -1,0 +1,15 @@
+AdaLNZero.Config(
+                channels_in=8,
+                cond_dim=4,
+                proj=Linear.Config(
+                        channels_in=4,
+                        channels_out=48,
+                        bias=True,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function zeros_ at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                )
+        )

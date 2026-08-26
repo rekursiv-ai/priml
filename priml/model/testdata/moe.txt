@@ -1,0 +1,51 @@
+MoE.Config(
+                channels_in=4,
+                channels_out=4,
+                router=Router.Config(
+                        channels_in=4,
+                        num_experts=2,
+                        top_k=1,
+                        jitter_noise=0.0,
+                        scoring_func='softmax',
+                        norm_topk_prob=False,
+                        routed_scaling_factor=1.0,
+                        n_group=1,
+                        topk_group=1,
+                        use_correction_bias=False
+                ),
+                expert=SwiGLU.Config(
+                        channels_in=4,
+                        channels_out=4,
+                        channels_hidden=256,
+                        expansion=2.6666666666666665,
+                        round_to=256,
+                        gate=True,
+                        bias=False,
+                        split_gate_projection=False,
+                        norm=None,
+                        act=<function silu at 0x0defaced0def>,
+                        depth_index=(),
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_weight_out=None,
+                        shard='colwise'
+                ),
+                num_shared_experts=0,
+                shared_expert=SwiGLU.Config(
+                        channels_in=4,
+                        channels_out=4,
+                        channels_hidden=256,
+                        expansion=2.6666666666666665,
+                        round_to=256,
+                        gate=True,
+                        bias=False,
+                        split_gate_projection=False,
+                        norm=None,
+                        act=<function silu at 0x0defaced0def>,
+                        depth_index=(),
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_weight_out=None,
+                        shard='colwise'
+                ),
+                aux_loss_weight=0.01,
+                depth_index=()
+        )

@@ -15,14 +15,19 @@ this policy just chose.
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, override
+from typing import TYPE_CHECKING, Any, Self, cast, override
 
 from configgle import Makes, PartialConfig
 from torch import Tensor
 
 import torch
 
+from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
+from priml.baselines.craftax.evaluation import (
+    evaluation_mode,
+    evaluation_transaction,
+)
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.model import ActorCritic
@@ -382,7 +387,15 @@ class CraftaxTrainStep(TrainStep):
 
     @override
     def eval_loss(self, **batch: object) -> TrainStepOutput:
-        """Score a rollout in evaluation mode.
+        """Score a rollout in evaluation mode, leaving training state intact.
+
+        On-policy scoring has to interact with the world -- there is no held
+        out batch to read -- so this collects a rollout like ``train_loss``.
+        What it must not do is KEEP the consequences: ``collect`` advances
+        ``_observation``/``_done`` and banks finished episodes, so an eval
+        pass silently moved the world the next update trains from and folded
+        its own episodes into the return/length averages reported as training
+        progress. Snapshot and restore both.
 
         Args:
           **batch: Ignored; the data comes from the environment.
@@ -391,11 +404,12 @@ class CraftaxTrainStep(TrainStep):
           result: The loss and logits of one freshly collected rollout.
 
         """
-        self.model.eval()
-        try:
+        with evaluation_transaction(
+            model=self.model,
+            save=self.state_dict,
+            restore=self.load_state_dict,
+        ):
             return self.train_loss(**batch)
-        finally:
-            self.model.train()
 
     @override
     def call_eval(self, *, observation: Tensor, **_batch: object) -> Tensor:
@@ -409,13 +423,17 @@ class CraftaxTrainStep(TrainStep):
           logits: Unnormalized action scores.
 
         """
-        self.model.eval()
-        try:
-            with torch.no_grad():
-                logits, _ = self.model.forward(observation)
-        finally:
-            self.model.train()
+        with evaluation_mode(self.model), torch.no_grad():
+            logits, _ = self.model.forward(observation)
         return logits
+
+    def make_evaluation_actor(self) -> EvaluationActor:
+        """Build a stateless sampling actor over the live policy."""
+        return _EvaluationActor(
+            self.model,
+            observation_size=self.env.observation_size,
+            device=self.device,
+        )
 
     @override
     def on_epoch_end(self) -> None:
@@ -428,8 +446,11 @@ class CraftaxTrainStep(TrainStep):
             "env": self.env.state_dict(),
             "generator": self._generator.get_state(),
             "observation": self._observation,
+            "done": self._done,
             "episode_return": self._episode_return,
             "episode_length": self._episode_length,
+            "finished_returns": list(self._finished_returns),
+            "finished_lengths": list(self._finished_lengths),
         }
 
     @override
@@ -439,8 +460,11 @@ class CraftaxTrainStep(TrainStep):
         self.env.load_state_dict(state_dict["env"])
         self._generator.set_state(state_dict["generator"])
         self._observation = state_dict["observation"]
+        self._done = state_dict["done"]
         self._episode_return = state_dict["episode_return"]
         self._episode_length = state_dict["episode_length"]
+        self._finished_returns = cast(list[float], state_dict["finished_returns"])
+        self._finished_lengths = cast(list[int], state_dict["finished_lengths"])
 
     def _optimize(self, rollout: Rollout) -> dict[str, Any]:
         """Take every configured pass over the rollout."""
@@ -532,3 +556,36 @@ class CraftaxTrainStep(TrainStep):
         self._finished_returns = []
         self._finished_lengths = []
         return metrics
+
+
+class _EvaluationActor:
+    """Sample a feed-forward policy without owning recurrent state."""
+
+    def __init__(
+        self,
+        model: ActorCritic,
+        *,
+        observation_size: int,
+        device: torch.device,
+    ) -> None:
+        self.model = model
+        self.observation_size = observation_size
+        self.device = device
+
+    def reset(self, *, num_envs: int, device: torch.device) -> None:
+        del num_envs, device
+
+    def act(
+        self,
+        observation: Tensor,
+        previous_done: Tensor,
+        *,
+        generator: torch.Generator,
+    ) -> Tensor:
+        del previous_done
+        logits, _ = self.model(observation)
+        return torch.multinomial(
+            logits.softmax(-1),
+            1,
+            generator=generator,
+        ).squeeze(-1)

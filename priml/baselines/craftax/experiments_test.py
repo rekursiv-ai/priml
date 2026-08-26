@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
+from unittest.mock import patch
 
 from configgle import InlineConfig
 from configgle.pprinting import pformat
@@ -226,6 +227,17 @@ def test_experiment_trains_at_minimum_size(factory: _Experiment) -> None:
     loop = shrink(factory()).make()
     loop.train()
     assert loop.step.global_step == 2
+
+
+@pytest.mark.compute_training
+def test_metric_only_evaluation_runs_no_discarded_trainer_rollout() -> None:
+    loop = shrink(exp000()).make()
+
+    with patch.object(loop.step, "collect", wraps=loop.step.collect) as collect:
+        metrics = loop.eval()
+
+    assert collect.call_count == 0
+    assert "craftax_episodes" in metrics
 
 
 def test_exp000_pins_the_baseline_recipe() -> None:
@@ -465,7 +477,7 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
 
     Refresh with ``--golden-overwrite`` after reading the diff.
     """
-    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    golden = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
     rendered = pformat(exp000().copy_tree().finalize(), hide_default_values=False)
     if request.config.getoption("--golden-overwrite", default=False):
         golden.parent.mkdir(parents=True, exist_ok=True)

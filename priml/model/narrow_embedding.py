@@ -20,7 +20,7 @@ this slot rather than the architecture assuming it.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Self, override
+from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -88,6 +88,6 @@ class NarrowEmbedding(nn.Module):
             self.inner.to(dtype=self.dtype)
 
     @override
-    def forward(self, tokens: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, tokens: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return self.inner(tokens)

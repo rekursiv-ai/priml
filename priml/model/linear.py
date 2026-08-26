@@ -13,7 +13,7 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 import torch
 
-from priml.model.custom_types import ShardStyle
+from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
 
@@ -36,7 +36,7 @@ class Linear(nn.Linear):
         bias: bool = False
         """Include bias in the linear layer."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         device: torch.device | str | None = None
@@ -63,7 +63,7 @@ class Linear(nn.Linear):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         self._init_bias = config.init_bias
         self.shard = config.shard
@@ -76,15 +76,15 @@ class Linear(nn.Linear):
         )
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)
 
     @override
     def reset_parameters(self) -> None:
-        call_init(self._init_weight, self.weight, depth=self.depth)
+        call_init(self._init_weight, self.weight, depth_index=self.depth_index)
         if self.bias is not None:
-            call_init(self._init_bias, self.bias, depth=self.depth)
+            call_init(self._init_bias, self.bias, depth_index=self.depth_index)
 
 
 class EnsembleLinear(nn.Module):
@@ -109,7 +109,7 @@ class EnsembleLinear(nn.Module):
         bias: bool = False
         """Include bias in each ensemble member."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         init_weight: InitFn = kaiming_uniform
@@ -130,19 +130,21 @@ class EnsembleLinear(nn.Module):
             )
         else:
             self.bias = None
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         for i in range(self.weight.shape[0]):
-            call_init(self._init_weight, self.weight.data[i], depth=self.depth)
+            call_init(
+                self._init_weight, self.weight.data[i], depth_index=self.depth_index
+            )
         if self.bias is not None:
             nn.init.zeros_(self.bias)
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         w = self.weight.to(x.dtype)
         # Not an einsum over [e, d, c]: bit-identical, but 15.7us against
         # 24.2us at [1, 2048, 512] -> 4 heads of 128.

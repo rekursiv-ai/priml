@@ -78,7 +78,7 @@ class RegisterTokens(nn.Module):
         truncated_normal(
             tokens,
             std=config.init_std / self.embed_scale,
-            depth=-1,
+            depth_index=(),
             variance_correction=True,
         )
         self.register_tokens = (
@@ -169,7 +169,7 @@ class SparsePuzzleEmbedding(nn.Module):
             truncated_normal(
                 table,
                 std=config.init_std,
-                depth=-1,
+                depth_index=(),
                 variance_correction=True,
             )
         # A buffer, not a Parameter: autograd must not build a dense gradient

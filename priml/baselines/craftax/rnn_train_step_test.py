@@ -186,6 +186,40 @@ def test_action_logits_can_be_read_for_arbitrary_observations() -> None:
     assert not logits.requires_grad
 
 
+def test_evaluation_actor_carries_gru_state_and_forwards_done() -> None:
+    step = _step()
+    actor = step.make_evaluation_actor()
+    actor.reset(num_envs=2, device=torch.device("cpu"))
+    seen_states: list[Tensor] = []
+    seen_dones: list[Tensor] = []
+
+    def recurrent(
+        state: Tensor,
+        observation: Tensor,
+        previous_done: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        del observation
+        seen_states.append(state.clone())
+        seen_dones.append(previous_done.clone())
+        return state + 1, torch.zeros(2, 43), torch.zeros(2)
+
+    with patch.object(step.model, "step", side_effect=recurrent):
+        actor.act(
+            torch.zeros(2, step.env.observation_size),
+            torch.zeros(2, dtype=torch.bool),
+            generator=torch.Generator().manual_seed(0),
+        )
+        actor.act(
+            torch.zeros(2, step.env.observation_size),
+            torch.tensor([True, False]),
+            generator=torch.Generator().manual_seed(1),
+        )
+
+    assert torch.equal(seen_states[1], seen_states[0] + 1)
+    assert seen_dones[1].tolist() == [True, False]
+    assert step.model.training
+
+
 def test_a_checkpoint_resumes_an_identical_run() -> None:
     step = _config(seed=3).make()
     step.train_step()

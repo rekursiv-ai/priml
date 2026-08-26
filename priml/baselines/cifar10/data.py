@@ -92,6 +92,8 @@ class Cifar10Data:
         self.config = config
         self.timer_epoch = CheckpointableStepTimer()
         """Passes over the data; ticked by the loop when the loader runs out."""
+        self._live: _BatchIterator | None = None
+        self._pending_loader_state: dict[str, Any] | None = None
 
         device = get_device(config.device)
         directory = Path(config.working_dir)
@@ -108,13 +110,18 @@ class Cifar10Data:
 
     def train_dataloader(self) -> _BatchIterator:
         """Return a shuffling iterator over the training split."""
-        return _BatchIterator(
+        stream = _BatchIterator(
             self.train_media,
             self.train_label,
             batch_size=self.config.batch_size,
             shuffle=True,
             drop_last=self.config.drop_last,
         )
+        if self._pending_loader_state is not None:
+            stream.load_state_dict(self._pending_loader_state)
+            self._pending_loader_state = None
+        self._live = stream
+        return stream
 
     def eval_dataloader(self) -> _BatchIterator:
         """Return a sequential iterator over the test split."""
@@ -127,13 +134,28 @@ class Cifar10Data:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the pass count; batch ORDER derives from the loop's RNG."""
-        return {"timer_epoch": self.timer_epoch.state_dict()}
+        """Return the pass count and active permutation position."""
+        loader_state = (
+            self._live.state_dict()
+            if self._live is not None
+            else self._pending_loader_state
+        )
+        return {
+            "loader": loader_state,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the pass count (see :meth:`state_dict`)."""
+        """Restore the pass count and active permutation position."""
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
+        loader_state_raw = state_dict.get("loader")
+        if isinstance(loader_state_raw, dict):
+            loader_state = cast(dict[str, Any], loader_state_raw)
+            self._pending_loader_state = loader_state
+            if self._live is not None:
+                self._live.load_state_dict(loader_state)
+                self._pending_loader_state = None
 
 
 def prepare(
@@ -213,25 +235,48 @@ class _BatchIterator:
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
+        self._order: Tensor | None = None
+        self._next_batch = 0
 
     def __iter__(self) -> Iterator[dict[str, Tensor]]:
         count = len(self.media)
-        order = (
-            torch.randperm(count, device=self.media.device)
-            if self.shuffle
-            else torch.arange(count, device=self.media.device)
-        )
-        for start in range(0, count, self.batch_size):
+        if self._order is None:
+            self._order = (
+                torch.randperm(count, device=self.media.device)
+                if self.shuffle
+                else torch.arange(count, device=self.media.device)
+            )
+            self._next_batch = 0
+        order = self._order
+        for batch_index, start in enumerate(range(0, count, self.batch_size)):
+            if batch_index < self._next_batch:
+                continue
             index = order[start : start + self.batch_size]
             if self.drop_last and len(index) < self.batch_size:
-                return
+                break
+            self._next_batch = batch_index + 1
             yield {"media": self.media[index], "label": self.label[index]}
+        self._order = None
+        self._next_batch = 0
 
     def __len__(self) -> int:
         count = len(self.media)
         if self.drop_last:
             return count // self.batch_size
         return (count + self.batch_size - 1) // self.batch_size
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return the active permutation and next batch index."""
+        return {
+            "order": None if self._order is None else self._order.cpu(),
+            "next_batch": self._next_batch,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore the active permutation and next batch index."""
+        order = state_dict.get("order")
+        self._order = order.to(self.media.device) if isinstance(order, Tensor) else None
+        self._next_batch = int(state_dict.get("next_batch", 0))
 
 
 def _load_split(

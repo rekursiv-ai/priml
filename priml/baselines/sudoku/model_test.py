@@ -20,11 +20,11 @@ from priml.baselines.sudoku.prefix import RegisterTokens
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
-from priml.model.transformer import TransformerBlock
+from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_GOLDEN_DIR = Path(__file__).parent / "goldens"
+_TESTDATA_DIR = Path(__file__).parent / "testdata"
 
 
 def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config:
@@ -165,8 +165,8 @@ def test_plain_forward_bfb() -> None:
     every shape and name intact.
     """
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="plain_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="plain",
         build_module=lambda: _config().make(),
         build_input=lambda: torch.randint(0, 11, (2, 81)),
         seed=0,
@@ -181,8 +181,8 @@ def test_recurrent_forward_bfb() -> None:
     value, so a change to the recurrence would leave the plain golden green.
     """
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="recurrent_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="recurrent",
         build_module=lambda: _config(recurrent=True).make(),
         build_input=lambda: torch.randint(0, 11, (2, 81)),
         seed=0,

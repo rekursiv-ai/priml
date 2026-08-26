@@ -30,13 +30,17 @@ def test_an_epoch_is_as_long_as_configured() -> None:
 
 
 def test_an_evaluation_runs_the_configured_passes() -> None:
-    assert len(list(_rollouts().eval_dataloader())) == 2
+    rollouts = _rollouts()
+    rollouts.bind_step(cast(TrainStepProtocol, _Step()))
+    assert len(list(rollouts.eval_dataloader())) == 2
 
 
 def test_each_tick_carries_a_unit_weight() -> None:
     # The loop weights an evaluation by ``valid_count``; one per pass makes
     # the score an average over passes rather than over environments.
-    for batch in _rollouts().eval_dataloader():
+    rollouts = _rollouts()
+    rollouts.bind_step(cast(TrainStepProtocol, _Step()))
+    for batch in rollouts.eval_dataloader():
         assert batch["valid_count"] == 1
 
 
@@ -47,28 +51,29 @@ def test_the_step_can_be_bound() -> None:
     assert rollouts._step is marker
 
 
-def test_an_evaluation_batch_carries_the_bound_policy() -> None:
-    # This is the whole point of ``bind_step``: the score is a property of the
-    # network, so the metric has to be handed the one that is training.
+def test_an_evaluation_batch_carries_a_fresh_actor() -> None:
     rollouts = _rollouts()
     step = _Step()
     rollouts.bind_step(cast(TrainStepProtocol, step))
-    for batch in rollouts.eval_dataloader():
-        assert batch["policy"] is step.model
+
+    batches = list(rollouts.eval_dataloader())
+
+    assert len(step.actors) == 1
+    assert all(batch["actor"] is step.actors[0] for batch in batches)
 
 
-def test_an_unbound_dataset_yields_no_policy() -> None:
-    for batch in _rollouts().eval_dataloader():
-        assert "policy" not in batch
+def test_an_unbound_dataset_refuses_evaluation() -> None:
+    with pytest.raises(TypeError, match="bound training step"):
+        list(_rollouts().eval_dataloader())
 
 
-def test_training_batches_carry_no_policy() -> None:
+def test_training_batches_carry_no_actor() -> None:
     # The step already owns its network; sending it back would invite a
     # training path that reads the model from the batch instead.
     rollouts = _rollouts()
     rollouts.bind_step(cast(TrainStepProtocol, _Step()))
     for batch in rollouts.train_dataloader():
-        assert "policy" not in batch
+        assert "actor" not in batch
 
 
 class _Step:
@@ -81,19 +86,36 @@ class _Step:
 
     def __init__(self) -> None:
         self.model = torch.nn.Linear(1, 1)
+        self.actors: list[object] = []
+
+    def make_evaluation_actor(self) -> object:
+        actor = object()
+        self.actors.append(actor)
+        return actor
 
 
-def test_it_carries_only_the_pass_count() -> None:
-    # The environment holds everything else a resume needs, so a second copy
-    # here would be a conflicting one. The pass count is this object's own:
-    # it sets the cadence, so only it can say when a pass ended.
+def test_it_carries_the_pass_count() -> None:
     rollouts = _rollouts()
     rollouts.timer_epoch.global_count = 2
     restored = _rollouts()
     restored.load_state_dict(rollouts.state_dict())
-    assert set(rollouts.state_dict()) == {"timer_epoch"}
     assert restored.timer_epoch.global_count == 2
     rollouts.load_state_dict({"anything": 1})
+
+
+def test_checkpoint_resumes_the_unfinished_cadence() -> None:
+    rollouts = _rollouts()
+    loader = rollouts.train_dataloader()
+    iterator = iter(loader)
+    next(iterator)
+    state = rollouts.state_dict()
+    expected = list(iterator)
+
+    restored = _rollouts()
+    restored.load_state_dict(state)
+    observed = list(restored.train_dataloader())
+
+    assert observed == expected
 
 
 def test_a_fresh_iterator_is_returned_each_epoch() -> None:

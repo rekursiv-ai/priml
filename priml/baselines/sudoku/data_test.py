@@ -87,19 +87,12 @@ def test_seeded_shuffle_is_reproducible_and_epoch_varying(
 
 
 def test_epoch_counter_round_trips(dataset_dir: Path) -> None:
-    """Resume continues the shuffle sequence rather than replaying epoch 0.
-
-    The pass count is carried by ONE key: the shuffle seed and the number a
-    budget reads are the same at every boundary a checkpoint lands on, so a
-    second copy could only ever disagree with it.
-    """
+    """Resume continues the shuffle sequence rather than replaying epoch 0."""
     data = _data(dataset_dir, augment=False, seed=1)
     loader = data.train_dataloader()
     list(loader)
-    # What the training loop does when the loader runs out.
     data.timer_epoch.global_count += 1
     state = data.state_dict()
-    assert set(state) == {"timer_epoch"}
 
     restored = _data(dataset_dir, augment=False, seed=1)
     restored.load_state_dict(state)
@@ -107,6 +100,40 @@ def test_epoch_counter_round_trips(dataset_dir: Path) -> None:
     assert torch.equal(
         next(iter(restored.train_dataloader()))["media"],
         next(iter(loader))["media"],
+    )
+
+
+def test_checkpoint_resumes_the_unfinished_epoch(dataset_dir: Path) -> None:
+    data = _data(dataset_dir, augment=True, seed=3, augment_seed=7)
+    loader = data.train_dataloader()
+    iterator = iter(loader)
+    next(iterator)
+    state = data.state_dict()
+    expected = [batch["media"].clone() for batch in iterator]
+
+    restored = _data(dataset_dir, augment=True, seed=3, augment_seed=7)
+    restored.load_state_dict(state)
+    observed = [batch["media"].clone() for batch in restored.train_dataloader()]
+
+    assert len(observed) == len(expected)
+    assert all(
+        torch.equal(observed_batch, expected_batch)
+        for observed_batch, expected_batch in zip(observed, expected, strict=True)
+    )
+
+
+def test_seed_and_epoch_are_distinct_named_stream_inputs(dataset_dir: Path) -> None:
+    later_epoch = _data(dataset_dir, augment=False, seed=4).train_dataloader()
+    list(later_epoch)
+    later = [batch["media"].clone() for batch in later_epoch]
+    first = [
+        batch["media"].clone()
+        for batch in _data(dataset_dir, augment=False, seed=5).train_dataloader()
+    ]
+
+    assert any(
+        not torch.equal(later_batch, first_batch)
+        for later_batch, first_batch in zip(later, first, strict=True)
     )
 
 
@@ -139,6 +166,43 @@ def test_augmentation_is_seedable() -> None:
         return augment_sudoku(grid, grid.clone(), generator=generator)[0]
 
     assert torch.equal(once(disturb=False), once(disturb=True))
+
+
+def test_seeded_augmentation_resumes_at_the_next_epoch(dataset_dir: Path) -> None:
+    data = _data(dataset_dir, seed=1, augment=True, augment_seed=7)
+    loader = data.train_dataloader()
+    list(loader)
+    data.timer_epoch.global_count += 1
+    state = data.state_dict()
+    expected = [batch["media"].clone() for batch in loader]
+
+    restored = _data(dataset_dir, seed=1, augment=True, augment_seed=7)
+    restored.load_state_dict(state)
+    observed = [batch["media"].clone() for batch in restored.train_dataloader()]
+
+    assert len(observed) == len(expected)
+    assert all(
+        torch.equal(observed_batch, expected_batch)
+        for observed_batch, expected_batch in zip(observed, expected, strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("batch_size", 0),
+        ("batch_size", -1),
+        ("eval_batch_size", 0),
+        ("eval_batch_size", -1),
+    ],
+)
+def test_nonpositive_batch_size_is_rejected(
+    dataset_dir: Path,
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        _data(dataset_dir, **{field: value})
 
 
 def test_missing_data_names_the_preparer(tmp_path: Path) -> None:

@@ -29,7 +29,7 @@ from priml.timer import CheckpointableStepTimer
 from priml.train.parallelism import NoParallel
 
 
-_GOLDEN_DIR = Path(__file__).parent.resolve() / "goldens"
+_TESTDATA_DIR = Path(__file__).parent.resolve() / "testdata"
 
 
 def tiny_step(
@@ -425,19 +425,19 @@ def test_rejects_out_of_range_warmup() -> None:
 
 
 def test_adamw_train_steps_bfb() -> None:
-    _assert_train_bfb(golden_name="adamw_three_steps_min_cpu", optimizer=None)
+    _assert_train_bfb(testdata_name="adamw_three_steps", optimizer=None)
 
 
 def test_muon_train_steps_bfb() -> None:
     _assert_train_bfb(
-        golden_name="muon_three_steps_min_cpu",
+        testdata_name="muon_three_steps",
         optimizer=muon_optimizer(),
     )
 
 
 def _assert_train_bfb(
     *,
-    golden_name: str,
+    testdata_name: str,
     optimizer: Makeable[Callable[..., torch.optim.Optimizer]] | None,
 ) -> None:
     """Pin three optimizer steps: loss, logits, and every resulting weight.
@@ -454,8 +454,8 @@ def _assert_train_bfb(
         return _TrainStepModule(config)
 
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name=golden_name,
+        golden_dir=_TESTDATA_DIR,
+        golden_name=testdata_name,
         build_module=build,
         build_input=tiny_batch,
         seed=42,

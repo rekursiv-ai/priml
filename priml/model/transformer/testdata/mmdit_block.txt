@@ -1,0 +1,41 @@
+MMDiTBlock.Config(
+                channels_in=8,
+                num_streams=2,
+                attn=MultiStreamAttention.Config(
+                        channels_in=8,
+                        num_streams=2,
+                        num_heads=2,
+                        channels_head=4,
+                        num_heads_kv=2,
+                        bias=False,
+                        dropout=0.0,
+                        causal=False,
+                        rope=[],
+                        norm_qk=None,
+                        share_qk_norm=True,
+                        norm_out=None,
+                        attn_kernel=SdpaFused.Config(),
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        depth_index=(),
+                        channels_out=8
+                ),
+                cond_dim=0,
+                ffn=SwiGLU.Config(
+                        channels_in=8,
+                        channels_out=8,
+                        channels_hidden=256,
+                        expansion=2.6666666666666665,
+                        round_to=256,
+                        gate=True,
+                        bias=False,
+                        split_gate_projection=False,
+                        norm=None,
+                        act=<function silu at 0x0defaced0def>,
+                        depth_index=(),
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_weight_out=None,
+                        shard=None
+                ),
+                depth_index=(),
+                channels_out=8
+        )

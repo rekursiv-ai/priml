@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from priml import runtime
-from priml.model.gated_delta_net import GatedDeltaNet
+from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.norm import CenteredRMSNorm
 from priml.train import parallelism
 from priml.train.parallelism import (
@@ -426,8 +426,8 @@ def test_materialize_meta_initializes_gated_delta_net_raw_params() -> None:
         gdn = GatedDeltaNet(
             GatedDeltaNet.Config(
                 channels_in=32,
-                heads_k=2,
-                heads_v=4,
+                num_heads_k=2,
+                num_heads_v=4,
                 channels_k_head=8,
                 channels_v_head=8,
             ).finalize()
