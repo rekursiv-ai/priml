@@ -1,1 +1,1 @@
-Patchify.Config(channels_in=2, patch_size=[2, 2])
+Patchify.Config(channels_in=2, channels_out=8, patch_size=[2, 2])

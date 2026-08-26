@@ -1,8 +1,10 @@
 MMDiTBlock.Config(
                 channels_in=8,
+                channels_out=8,
                 num_streams=2,
                 attn=MultiStreamAttention.Config(
                         channels_in=8,
+                        channels_out=8,
                         num_streams=2,
                         num_heads=2,
                         channels_head=4,
@@ -16,8 +18,7 @@ MMDiTBlock.Config(
                         norm_out=None,
                         attn_kernel=SdpaFused.Config(),
                         init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        depth_index=(),
-                        channels_out=8
+                        depth_index=()
                 ),
                 cond_dim=0,
                 ffn=SwiGLU.Config(
@@ -36,6 +37,5 @@ MMDiTBlock.Config(
                         init_weight_out=None,
                         shard=None
                 ),
-                depth_index=(),
-                channels_out=8
+                depth_index=()
         )

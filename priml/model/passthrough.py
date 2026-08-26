@@ -2,7 +2,33 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, override
+from typing import ClassVar, Self, cast, overload, override
+
+
+class PassthroughAttribute[T]:
+    """Expose one target attribute without storing a wrapper field."""
+
+    name: str = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        del owner
+        self.name = name
+
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...
+
+    @overload
+    def __get__(self, instance: ReadPassthroughMixin, owner: type) -> T: ...
+
+    def __get__(
+        self,
+        instance: ReadPassthroughMixin | None,
+        owner: type,
+    ) -> Self | T:
+        del owner
+        if instance is None:
+            return self
+        return cast(T, instance.__getattr__(self.name))
 
 
 class ReadPassthroughMixin:

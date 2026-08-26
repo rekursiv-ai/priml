@@ -103,7 +103,7 @@ def exp000() -> Cifar10TrainLoop:
     cfg.study_name = "cifar10"
     cfg.experiment_name = "exp000"
 
-    cfg.step.model = ResNet.Config()
+    cfg.step.model = ResNet.Config(channels_in=3, channels_out=10)
     cfg.dataset.batch_size = 512
 
     # Floors: a short final batch is not a whole step.
@@ -142,7 +142,7 @@ def exp001() -> Cifar10TrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
-    cfg.step.model = SpeedNet.Config()
+    cfg.step.model = SpeedNet.Config(channels_in=3, channels_out=10)
     steps_per_epoch = NUM_TRAIN_SAMPLES // cfg.dataset.batch_size
     cfg.max_steps = cfg.step.total_train_steps = 8 * steps_per_epoch
     return cfg

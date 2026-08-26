@@ -1,15 +1,16 @@
 ValueGatedAttention.Config(
                 channels_in=16,
+                channels_out=16,
                 num_heads=2,
                 channels_head=8,
                 gate_channels=4,
                 norm_qk=RMSNorm.Config(
                         channels_in=8,
+                        channels_out=8,
                         eps=1e-06,
                         elementwise_affine=False,
                         device=None,
-                        dtype=None,
-                        channels_out=8
+                        dtype=None
                 ),
                 init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 kernel=PartialConfig(<class 'functools.partial'>, <function sdpa_attention at 0x0defaced0def>),
@@ -17,6 +18,5 @@ ValueGatedAttention.Config(
                 window_pattern='SSSL',
                 max_seq_len=-1,
                 gated=True,
-                depth_index=(),
-                channels_out=16
+                depth_index=()
         )

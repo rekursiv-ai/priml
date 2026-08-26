@@ -1,9 +1,9 @@
 BatchRenorm.Config(
                 channels_in=4,
+                channels_out=4,
                 momentum=0.999,
                 eps=0.001,
                 warmup_steps=1_000,
                 max_ratio=3.0,
-                max_drift=5.0,
-                channels_out=4
+                max_drift=5.0
         )

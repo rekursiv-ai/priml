@@ -13,18 +13,20 @@ NanoChatLoop.Config(
                 │       │       block=[
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -34,8 +36,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=False,
-                │       │       │                       depth_index=((0, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((0, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -55,39 +56,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((0, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((0, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -97,8 +99,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=True,
-                │       │       │                       depth_index=((1, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((1, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -118,39 +119,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((1, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((1, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -160,8 +162,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=False,
-                │       │       │                       depth_index=((2, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((2, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -181,39 +182,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((2, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((2, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -223,8 +225,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=True,
-                │       │       │                       depth_index=((3, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((3, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -244,39 +245,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((3, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((3, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -286,8 +288,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=False,
-                │       │       │                       depth_index=((4, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((4, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -307,39 +308,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((4, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((4, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -349,8 +351,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=True,
-                │       │       │                       depth_index=((5, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((5, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -370,39 +371,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((5, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((5, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -412,8 +414,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=False,
-                │       │       │                       depth_index=((6, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((6, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -433,39 +434,40 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((6, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((6, 8),)
                 │       │       │       ),
                 │       │       │       TransformerBlock.Config(
                 │       │       │               channels_in=512,
+                │       │       │               channels_out=512,
                 │       │       │               attn=ValueGatedAttention.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       num_heads=4,
                 │       │       │                       channels_head=128,
                 │       │       │                       gate_channels=32,
                 │       │       │                       norm_qk=RMSNorm.Config(
                 │       │       │                               channels_in=128,
+                │       │       │                               channels_out=128,
                 │       │       │                               eps=1.1920928955078125e-07,
                 │       │       │                               elementwise_affine=False,
                 │       │       │                               device=None,
-                │       │       │                               dtype=None,
-                │       │       │                               channels_out=128
+                │       │       │                               dtype=None
                 │       │       │                       ),
                 │       │       │                       init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
                 │       │       │                       kernel=Flash3Attention.Config(
@@ -475,8 +477,7 @@ NanoChatLoop.Config(
                 │       │       │                       window_pattern='SSSL',
                 │       │       │                       max_seq_len=2_048,
                 │       │       │                       gated=True,
-                │       │       │                       depth_index=((7, 8),),
-                │       │       │                       channels_out=512
+                │       │       │                       depth_index=((7, 8),)
                 │       │       │               ),
                 │       │       │               ffn=SwiGLUReluSquared.Config(
                 │       │       │                       channels_in=512,
@@ -496,24 +497,23 @@ NanoChatLoop.Config(
                 │       │       │               ),
                 │       │       │               norm1=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               norm2=RMSNorm.Config(
                 │       │       │                       channels_in=512,
+                │       │       │                       channels_out=512,
                 │       │       │                       eps=1.1920928955078125e-07,
                 │       │       │                       elementwise_affine=False,
                 │       │       │                       device=None,
-                │       │       │                       dtype=None,
-                │       │       │                       channels_out=512
+                │       │       │                       dtype=None
                 │       │       │               ),
                 │       │       │               prenorm=True,
                 │       │       │               checkpoint=False,
-                │       │       │               depth_index=((7, 8),),
-                │       │       │               channels_out=512
+                │       │       │               depth_index=((7, 8),)
                 │       │       │       )
                 │       │       ],
                 │       │       value_embedding_stride=2,
@@ -534,13 +534,15 @@ NanoChatLoop.Config(
                 │       │       ),
                 │       │       norm=RMSNorm.Config(
                 │       │               channels_in=512,
+                │       │               channels_out=512,
                 │       │               eps=None,
                 │       │               elementwise_affine=False,
                 │       │               device=None,
-                │       │               dtype=None,
-                │       │               channels_out=512
+                │       │               dtype=None
                 │       │       ),
                 │       │       lm_head=SoftCap.Config(
+                │       │               channels_in=512,
+                │       │               channels_out=8_192,
                 │       │               cap=15.0,
                 │       │               inner=Linear.Config(
                 │       │                       channels_in=512,
@@ -553,8 +555,6 @@ NanoChatLoop.Config(
                 │       │                       init_bias=<function zeros_ at 0x0defaced0def>,
                 │       │                       shard=None
                 │       │               ),
-                │       │               channels_in=512,
-                │       │               channels_out=8_192,
                 │       │               dtype=torch.float32
                 │       │       ),
                 │       │       rope=RoPE.Config(

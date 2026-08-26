@@ -1,8 +1,8 @@
 RMSNorm.Config(
                 channels_in=4,
+                channels_out=4,
                 eps=1e-06,
                 elementwise_affine=False,
                 device=None,
-                dtype=None,
-                channels_out=4
+                dtype=None
         )

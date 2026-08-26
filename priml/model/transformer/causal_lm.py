@@ -47,20 +47,19 @@ class CausalLM(nn.Module):
     """Decoder-only transformer LM."""
 
     class Config(Fig["CausalLM"], kw_only=False):
-        vocab_size: int = -1
-        """Token vocabulary size."""
-
-        _: KW_ONLY
-
         channels_in: int = -1
         """Model width (embedding + residual stream dim)."""
 
+        channels_out: int = -1
+        """Residual-stream width (-1 to infer from channels_in)."""
+
+        _: KW_ONLY
+
+        vocab_size: int = -1
+        """Token vocabulary size."""
+
         num_layers: int = -1
         """Number of stacked transformer blocks."""
-
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
 
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
             default_factory=TransformerBlock.Config,
@@ -79,6 +78,15 @@ class CausalLM(nn.Module):
 
         @override
         def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for CausalLM."
+                )
             if self.vocab_size < 1:
                 raise ValueError(f"vocab_size must be > 0, got {self.vocab_size}.")
             if self.num_layers < 1:

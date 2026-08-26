@@ -234,7 +234,7 @@ def test_invalid_config_rejected():
 
 
 def test_causal_lm_config_reports_residual_width() -> None:
-    assert _tiny_config().channels_out == 32
+    assert _tiny_config().finalize().channels_out == 32
 
 
 def test_causal_lm_rejects_wrong_block_count() -> None:

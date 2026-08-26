@@ -90,9 +90,31 @@ def test_patchify_roundtrip():
 def test_patchify_channels():
     cfg = Patchify.Config(channels_in=3, patch_size=[4, 4]).finalize()
     assert cfg.channels_out == 48
+    reverse = Patchify.Config(channels_out=48, patch_size=[4, 4]).finalize()
+    assert reverse.channels_in == 3
 
     ucfg = Unpatchify.Config(channels_out=3, patch_size=[4, 4]).finalize()
     assert ucfg.channels_in == 48
+    reverse_unpatch = Unpatchify.Config(
+        channels_in=48,
+        patch_size=[4, 4],
+    ).finalize()
+    assert reverse_unpatch.channels_out == 3
+
+
+def test_patchify_rejects_inconsistent_channel_boundaries() -> None:
+    with pytest.raises(ValueError, match="channels_out=47 must equal"):
+        Patchify.Config(
+            channels_in=3,
+            channels_out=47,
+            patch_size=[4, 4],
+        ).finalize()
+    with pytest.raises(ValueError, match="channels_in=47 must equal"):
+        Unpatchify.Config(
+            channels_in=47,
+            channels_out=3,
+            patch_size=[4, 4],
+        ).finalize()
 
 
 def test_patchify_forward_accepts_messages_and_rejects_positional_extras():

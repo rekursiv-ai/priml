@@ -42,6 +42,9 @@ class GatedDeltaNet(nn.Module):
         channels_in: int = -1
         """Model width read from the residual stream."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         num_heads_k: int = 16
@@ -65,15 +68,17 @@ class GatedDeltaNet(nn.Module):
         depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for GatedDeltaNet."
+                )
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
                 self.norm.channels_in = self.channels_v_head
             return super().finalize()

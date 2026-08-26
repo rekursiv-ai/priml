@@ -1,4 +1,6 @@
 SoftCap.Config(
+                channels_in=4,
+                channels_out=4,
                 cap=2.0,
                 inner=Linear.Config(
                         channels_in=4,
@@ -11,7 +13,5 @@ SoftCap.Config(
                         init_bias=<function zeros_ at 0x0defaced0def>,
                         shard=None
                 ),
-                channels_in=4,
-                channels_out=4,
                 dtype=torch.float32
         )

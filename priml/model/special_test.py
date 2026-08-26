@@ -154,7 +154,7 @@ def test_skip_preserving_modules_reject_width_changes(config_type: type) -> None
     config.channels_out = 64
 
     with pytest.raises(ValueError, match="channels_in=128 must equal channels_out=64"):
-        config.make()
+        config.finalize()
 
 
 def test_skip_channels_proxy_inner() -> None:

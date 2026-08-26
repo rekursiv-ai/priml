@@ -1,5 +1,6 @@
 MLPMixerBlock.Config(
                 channels_in=4,
+                channels_out=4,
                 seq_len=2,
                 token_mixer=SwiGLU.Config(
                         channels_in=2,
@@ -35,21 +36,20 @@ MLPMixerBlock.Config(
                 ),
                 norm_token=RMSNorm.Config(
                         channels_in=2,
+                        channels_out=2,
                         eps=1e-06,
                         elementwise_affine=False,
                         device=None,
-                        dtype=None,
-                        channels_out=2
+                        dtype=None
                 ),
                 norm_channel=RMSNorm.Config(
                         channels_in=4,
+                        channels_out=4,
                         eps=1e-06,
                         elementwise_affine=False,
                         device=None,
-                        dtype=None,
-                        channels_out=4
+                        dtype=None
                 ),
                 prenorm=True,
-                depth_index=(),
-                channels_out=4
+                depth_index=()
         )

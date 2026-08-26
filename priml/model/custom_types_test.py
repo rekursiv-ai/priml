@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast, override
 
+import ast
+
 from torch import Tensor, nn
 
 import pytest
@@ -136,6 +138,58 @@ def test_propagate_missing_attr_raises():
 
     with pytest.raises(AttributeError, match="channels_out"):
         propagate_attr(NoChannels(), "channels_out", 64, protocol=ChannelsIn)
+
+
+def test_channel_config_fields_are_uniform() -> None:
+    root = Path(__file__).resolve().parent.parent
+    violations: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name.endswith("_test.py"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or node.name != "Config":
+                continue
+            fields = [
+                child.target.id
+                for child in node.body
+                if isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+            ]
+            properties = {
+                child.name
+                for child in node.body
+                if isinstance(child, ast.FunctionDef)
+                and any(
+                    isinstance(decorator, ast.Name) and decorator.id == "property"
+                    for decorator in child.decorator_list
+                )
+            }
+            channel_properties = properties & {"channels_in", "channels_out"}
+            if channel_properties:
+                violations.append(
+                    f"{path.relative_to(root)}:{node.lineno}: channel properties "
+                    f"{sorted(channel_properties)}"
+                )
+            if "channels_in" in fields and "channels_out" in fields:
+                if fields[:3] != ["channels_in", "channels_out", "_"]:
+                    violations.append(
+                        f"{path.relative_to(root)}:{node.lineno}: fields begin {fields[:3]}"
+                    )
+                channel_fields = {
+                    child.target.id: child
+                    for child in node.body
+                    if isinstance(child, ast.AnnAssign)
+                    and isinstance(child.target, ast.Name)
+                    and child.target.id in {"channels_in", "channels_out"}
+                }
+                for name, field in channel_fields.items():
+                    if field.value is None or ast.unparse(field.value) != "-1":
+                        violations.append(
+                            f"{path.relative_to(root)}:{field.lineno}: "
+                            f"{name} default is not -1"
+                        )
+    assert not violations, "\n".join(violations)
 
 
 class _FlattenDepthIndex(nn.Module):

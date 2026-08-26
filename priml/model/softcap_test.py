@@ -39,6 +39,11 @@ def test_softcap_bfb() -> None:
     )
 
 
+def test_softcap_infers_either_channel_boundary() -> None:
+    assert SoftCap.Config(channels_in=4).finalize().channels_out == 4
+    assert SoftCap.Config(channels_out=8).finalize().channels_in == 8
+
+
 def test_softcap_bounds_output() -> None:
     m = SoftCap.Config(cap=5.0, channels_in=4, channels_out=4).make()
     # Saturating tanh reaches exactly 1.0 in float32, so the bound is closed.

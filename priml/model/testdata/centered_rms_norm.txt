@@ -1,1 +1,1 @@
-CenteredRMSNorm.Config(channels_in=4, eps=1e-06, channels_out=4)
+CenteredRMSNorm.Config(channels_in=4, channels_out=4, eps=1e-06)

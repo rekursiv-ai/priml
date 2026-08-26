@@ -17,7 +17,7 @@ _TESTDATA_DIR = Path(__file__).parent.resolve() / "testdata"
 
 def tiny_resnet() -> ResNet.Config:
     """Return the smallest ResNet that still exercises every code path."""
-    config = ResNet.Config()
+    config = ResNet.Config(channels_in=3, channels_out=10)
     config.channels_hidden = (8, 16)
     config.blocks_per_stage = 1
     return config
@@ -25,7 +25,7 @@ def tiny_resnet() -> ResNet.Config:
 
 def tiny_speednet() -> SpeedNet.Config:
     """Return the smallest SpeedNet that still exercises every code path."""
-    config = SpeedNet.Config()
+    config = SpeedNet.Config(channels_in=3, channels_out=10)
     config.channels_hidden = (8, 16, 24)
     block = config.block = ConvBlock.Config()
     block.num_convs = 1

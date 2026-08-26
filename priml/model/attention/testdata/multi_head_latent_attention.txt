@@ -1,5 +1,6 @@
 MultiHeadLatentAttention.Config(
                 channels_in=32,
+                channels_out=32,
                 num_heads=4,
                 channels_qk_nope_head=8,
                 channels_qk_rope_head=4,
@@ -17,11 +18,11 @@ MultiHeadLatentAttention.Config(
                 ),
                 norm_q_lora=RMSNorm.Config(
                         channels_in=-1,
+                        channels_out=-1,
                         eps=1e-06,
                         elementwise_affine=True,
                         device=None,
-                        dtype=None,
-                        channels_out=-1
+                        dtype=None
                 ),
                 proj_q=Linear.Config(
                         channels_in=32,
@@ -91,14 +92,13 @@ MultiHeadLatentAttention.Config(
                 ),
                 norm_kv_lora=RMSNorm.Config(
                         channels_in=12,
+                        channels_out=12,
                         eps=1e-06,
                         elementwise_affine=True,
                         device=None,
-                        dtype=None,
-                        channels_out=12
+                        dtype=None
                 ),
                 init_weight=<function kaiming_uniform at 0x0defaced0def>,
                 depth_index=(),
-                shard=None,
-                channels_out=32
+                shard=None
         )

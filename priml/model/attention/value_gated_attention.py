@@ -21,7 +21,7 @@ References:
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import KW_ONLY, field
 from typing import Self, override
 
 from configgle import Fig, Makeable, PartialConfig
@@ -105,6 +105,11 @@ class ValueGatedAttention(nn.Module):
         channels_in: int = -1
         """Model width; -1 inherits from the block."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        _: KW_ONLY
+
         num_heads: int = -1
         """Attention num_heads; -1 derives from ``channels_in // channels_head``."""
 
@@ -172,15 +177,17 @@ class ValueGatedAttention(nn.Module):
         depth_index: DepthIndex = ()
         """Block depth index, accepted for the priml block contract."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for ValueGatedAttention."
+                )
             if self.channels_head <= 0 or self.channels_head % 2:
                 raise ValueError(
                     "channels_head must be positive and even; got "

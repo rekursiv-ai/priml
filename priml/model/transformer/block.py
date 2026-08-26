@@ -52,6 +52,9 @@ class TransformerBlock(nn.Module):
         channels_in: int = -1
         """Number of input channels."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         attn: Makeable[nn.Module] = field(default_factory=SelfAttention.Config)
@@ -75,9 +78,6 @@ class TransformerBlock(nn.Module):
         depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @property
         def num_heads(self) -> int:
             """Return the attention sublayer's head count."""
@@ -96,6 +96,11 @@ class TransformerBlock(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for TransformerBlock."
+                )
             c = self.channels_in
             for cfg in (self.attn, self.ffn, self.norm1, self.norm2):
                 propagate_attr(cfg, "channels_in", c, protocol=ChannelsIn)

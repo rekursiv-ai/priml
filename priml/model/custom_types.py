@@ -306,8 +306,8 @@ def propagate_attr(
     does not implement ``protocol`` legitimately opts out and is skipped.
 
     A participating attribute is assigned normally. Transparent Config wrappers
-    may expose a read-only descriptor for runtime Protocol recognition while
-    delegating the actual write through ``__setattr__``.
+    may explicitly inherit the runtime Protocol while delegating reads and writes
+    through their passthrough mixin.
 
     Args:
       config: Child config to mutate.

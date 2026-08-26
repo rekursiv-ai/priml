@@ -39,12 +39,12 @@ def tiny_step(
     """Return the smallest train-step config that still runs every branch."""
     config = Cifar10TrainStep.Config()
     if model_kind == "resnet":
-        model = ResNet.Config()
+        model = ResNet.Config(channels_in=3, channels_out=10)
         model.channels_hidden = (8, 16)
         model.blocks_per_stage = 1
         config.model = model
     else:
-        speed = SpeedNet.Config()
+        speed = SpeedNet.Config(channels_in=3, channels_out=10)
         speed.channels_hidden = (8, 16, 24)
         block = speed.block = ConvBlock.Config()
         block.num_convs = 1

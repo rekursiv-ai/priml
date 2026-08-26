@@ -1,12 +1,15 @@
 CausalLM.Config(
-                vocab_size=32,
                 channels_in=16,
+                channels_out=16,
+                vocab_size=32,
                 num_layers=1,
                 block=[
                 │       TransformerBlock.Config(
                 │               channels_in=16,
+                │               channels_out=16,
                 │               attn=SelfAttention.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       num_heads=2,
                 │                       channels_head=8,
                 │                       num_heads_kv=2,
@@ -20,8 +23,7 @@ CausalLM.Config(
                 │                       split_qkv_projection=False,
                 │                       attn_kernel=SdpaFused.Config(),
                 │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │                       depth_index=((0, 1),),
-                │                       channels_out=16
+                │                       depth_index=((0, 1),)
                 │               ),
                 │               ffn=SwiGLU.Config(
                 │                       channels_in=16,
@@ -41,33 +43,32 @@ CausalLM.Config(
                 │               ),
                 │               norm1=RMSNorm.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       eps=1e-06,
                 │                       elementwise_affine=False,
                 │                       device=None,
-                │                       dtype=None,
-                │                       channels_out=16
+                │                       dtype=None
                 │               ),
                 │               norm2=RMSNorm.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       eps=1e-06,
                 │                       elementwise_affine=False,
                 │                       device=None,
-                │                       dtype=None,
-                │                       channels_out=16
+                │                       dtype=None
                 │               ),
                 │               prenorm=True,
                 │               checkpoint=False,
-                │               depth_index=((0, 1),),
-                │               channels_out=16
+                │               depth_index=((0, 1),)
                 │       )
                 ],
                 final_norm=RMSNorm.Config(
                         channels_in=16,
+                        channels_out=16,
                         eps=1e-06,
                         elementwise_affine=False,
                         device=None,
-                        dtype=None,
-                        channels_out=16
+                        dtype=None
                 ),
                 tie_embeddings=False,
                 lm_head=None

@@ -1,12 +1,15 @@
 KimiK2.Config(
-                vocab_size=32,
                 channels_in=16,
+                channels_out=16,
+                vocab_size=32,
                 num_layers=2,
                 block=[
                 │       TransformerBlock.Config(
                 │               channels_in=16,
+                │               channels_out=16,
                 │               attn=MultiHeadLatentAttention.Config(
                 │               │       channels_in=16,
+                │               │       channels_out=16,
                 │               │       num_heads=2,
                 │               │       channels_qk_nope_head=4,
                 │               │       channels_qk_rope_head=4,
@@ -31,11 +34,11 @@ KimiK2.Config(
                 │               │       ),
                 │               │       norm_q_lora=RMSNorm.Config(
                 │               │               channels_in=-1,
+                │               │               channels_out=-1,
                 │               │               eps=1e-06,
                 │               │               elementwise_affine=True,
                 │               │               device=None,
-                │               │               dtype=None,
-                │               │               channels_out=-1
+                │               │               dtype=None
                 │               │       ),
                 │               │       proj_q=Linear.Config(
                 │               │               channels_in=16,
@@ -105,16 +108,15 @@ KimiK2.Config(
                 │               │       ),
                 │               │       norm_kv_lora=RMSNorm.Config(
                 │               │               channels_in=8,
+                │               │               channels_out=8,
                 │               │               eps=1e-06,
                 │               │               elementwise_affine=True,
                 │               │               device=None,
-                │               │               dtype=None,
-                │               │               channels_out=8
+                │               │               dtype=None
                 │               │       ),
                 │               │       init_weight=<function kaiming_uniform at 0x0defaced0def>,
                 │               │       depth_index=((0, 2),),
-                │               │       shard=None,
-                │               │       channels_out=16
+                │               │       shard=None
                 │               ),
                 │               ffn=SwiGLU.Config(
                 │                       channels_in=16,
@@ -134,29 +136,30 @@ KimiK2.Config(
                 │               ),
                 │               norm1=RMSNorm.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       eps=1e-06,
                 │                       elementwise_affine=True,
                 │                       device=None,
-                │                       dtype=None,
-                │                       channels_out=16
+                │                       dtype=None
                 │               ),
                 │               norm2=RMSNorm.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       eps=1e-06,
                 │                       elementwise_affine=True,
                 │                       device=None,
-                │                       dtype=None,
-                │                       channels_out=16
+                │                       dtype=None
                 │               ),
                 │               prenorm=True,
                 │               checkpoint=False,
-                │               depth_index=((0, 2),),
-                │               channels_out=16
+                │               depth_index=((0, 2),)
                 │       ),
                 │       TransformerBlock.Config(
                 │               channels_in=16,
+                │               channels_out=16,
                 │               attn=MultiHeadLatentAttention.Config(
                 │               │       channels_in=16,
+                │               │       channels_out=16,
                 │               │       num_heads=2,
                 │               │       channels_qk_nope_head=4,
                 │               │       channels_qk_rope_head=4,
@@ -181,11 +184,11 @@ KimiK2.Config(
                 │               │       ),
                 │               │       norm_q_lora=RMSNorm.Config(
                 │               │               channels_in=-1,
+                │               │               channels_out=-1,
                 │               │               eps=1e-06,
                 │               │               elementwise_affine=True,
                 │               │               device=None,
-                │               │               dtype=None,
-                │               │               channels_out=-1
+                │               │               dtype=None
                 │               │       ),
                 │               │       proj_q=Linear.Config(
                 │               │               channels_in=16,
@@ -255,16 +258,15 @@ KimiK2.Config(
                 │               │       ),
                 │               │       norm_kv_lora=RMSNorm.Config(
                 │               │               channels_in=8,
+                │               │               channels_out=8,
                 │               │               eps=1e-06,
                 │               │               elementwise_affine=True,
                 │               │               device=None,
-                │               │               dtype=None,
-                │               │               channels_out=8
+                │               │               dtype=None
                 │               │       ),
                 │               │       init_weight=<function kaiming_uniform at 0x0defaced0def>,
                 │               │       depth_index=((1, 2),),
-                │               │       shard=None,
-                │               │       channels_out=16
+                │               │       shard=None
                 │               ),
                 │               ffn=MoE.Config(
                 │               │       channels_in=16,
@@ -319,33 +321,32 @@ KimiK2.Config(
                 │               ),
                 │               norm1=RMSNorm.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       eps=1e-06,
                 │                       elementwise_affine=True,
                 │                       device=None,
-                │                       dtype=None,
-                │                       channels_out=16
+                │                       dtype=None
                 │               ),
                 │               norm2=RMSNorm.Config(
                 │                       channels_in=16,
+                │                       channels_out=16,
                 │                       eps=1e-06,
                 │                       elementwise_affine=True,
                 │                       device=None,
-                │                       dtype=None,
-                │                       channels_out=16
+                │                       dtype=None
                 │               ),
                 │               prenorm=True,
                 │               checkpoint=False,
-                │               depth_index=((1, 2),),
-                │               channels_out=16
+                │               depth_index=((1, 2),)
                 │       )
                 ],
                 final_norm=RMSNorm.Config(
                         channels_in=16,
+                        channels_out=16,
                         eps=1e-06,
                         elementwise_affine=True,
                         device=None,
-                        dtype=None,
-                        channels_out=16
+                        dtype=None
                 ),
                 tie_embeddings=False,
                 lm_head=None,
