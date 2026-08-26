@@ -17,8 +17,8 @@ import pytest
 import torch
 
 from priml.math.custom_types import TensorFn
-from priml.model.attention import SelfAttention
-from priml.model.transformer import TransformerBlock
+from priml.model.attention.self_attention import SelfAttention
+from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import (
     _ENV_REGENERATE,
     _EXACT_F32_OPS,
@@ -31,6 +31,7 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
     randomize_parameters,
     regenerate_golden,
+    state_differs,
 )
 
 
@@ -152,19 +153,21 @@ def test_randomize_parameters_is_deterministic_per_seed() -> None:
 
 
 def test_bfb_round_trip(tmp_path: Path) -> None:
-    # First call: no golden -> regenerates and passes.
-    assert_bfb_against_golden(
-        golden_dir=tmp_path,
-        golden_name="linear_min",
-        build_module=_build_min_linear,
-        build_input=_build_min_input,
-        seed=0,
-    )
-    assert (tmp_path / "linear_min.pt").exists()
+    testdata = tmp_path / "testdata"
+    # A missing committed golden is regenerated but remains red until reviewed.
+    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+        assert_bfb_against_golden(
+            golden_dir=testdata,
+            golden_name="linear_min",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            seed=0,
+        )
+    assert (testdata / "linear_min.pt").exists()
 
     # Second call: golden exists -> compares; must pass.
     assert_bfb_against_golden(
-        golden_dir=tmp_path,
+        golden_dir=testdata,
         golden_name="linear_min",
         build_module=_build_min_linear,
         build_input=_build_min_input,
@@ -392,6 +395,53 @@ def test_param_mutating_runner_captures_post_state(tmp_path: Path) -> None:
     )
 
 
+def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
+    """A golden whose run mutated nothing must not carry ``post_state_dict``.
+
+    ``_write_golden`` omits the key when the state is unchanged and
+    ``_replay_golden`` reads an absent one as "equal to ``state_dict``", so a
+    stored copy of the pre-state asserts exactly what no key asserts -- at
+    twice the weights on disk.
+
+    Gated rather than trusted because the omission arrived as a WRITER change
+    with no migration: nineteen goldens minted before it kept the copy, the
+    tolerant reader never went red, and 1.1 MiB sat unnoticed until someone
+    read a size diff. A guard that only stops new violations leaves the
+    existing ones invisible forever.
+    """
+    goldens = sorted(Path(__file__).resolve().parent.parent.rglob("*.pt"))
+    assert goldens, "no goldens found; the glob no longer matches the layout"
+    stale: list[Path] = []
+    for path in goldens:
+        payload = _loaded_golden(path)
+        post = payload.get("post_state_dict")
+        if post is None:
+            continue
+        if not state_differs(payload["state_dict"], post):
+            stale.append(path)
+    assert not stale, (
+        f"{len(stale)} golden(s) store a post-state equal to their pre-state: "
+        f"{[str(p) for p in stale]}"
+    )
+
+
+def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
+    """Read a golden's two state dicts, which are all this check reads.
+
+    ``torch.load`` is untyped, so the shape is narrowed once here rather than
+    cast at each use. Only the state entries are typed: a golden also holds an
+    input, an output, and a seed, and claiming those are state dicts to
+    satisfy one reader would be a false annotation.
+    """
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    assert isinstance(payload, dict)
+    return {
+        key: value
+        for key, value in cast(dict[str, object], payload).items()
+        if key in ("state_dict", "post_state_dict") and isinstance(value, dict)
+    }
+
+
 def test_detects_post_state_drift(tmp_path: Path) -> None:
     """A second runner that produces a different post-state should fail."""
 
@@ -583,12 +633,12 @@ def test_regenerate_cpu_golden_leaves_cuda_golden_untouched(
     cuda_golden.write_bytes(sentinel)
     regenerate_golden(
         golden_dir=tmp_path,
-        golden_name="model_min_cpu",
+        golden_name="model",
         build_module=_build_min_linear,
         build_input=_build_min_input,
         seed=0,
     )
-    assert (tmp_path / "model_min_cpu.pt").exists()
+    assert (tmp_path / "model.pt").exists()
     assert cuda_golden.read_bytes() == sentinel
 
 
@@ -930,7 +980,7 @@ def test_no_unvetted_f32_op_in_transformer_forward_backward() -> None:
     """
     torch.manual_seed(0)
     block = TransformerBlock.Config(
-        channels_in=16, attn=SelfAttention.Config(heads=2, channels_head=8)
+        channels_in=16, attn=SelfAttention.Config(num_heads=2, channels_head=8)
     ).make()
     randomize_parameters(block, seed=0)
     inp = torch.randn(2, 4, 16, requires_grad=True)

@@ -40,12 +40,12 @@ from priml.baselines.nanochat.data import NanoChatData
 from priml.baselines.nanochat.flash3 import Flash3Attention
 from priml.baselines.nanochat.train_step import NanoChatTrainStep
 from priml.metrics.bits_per_byte import BitsPerByte
-from priml.model.narrow_embedding import NarrowEmbedding
-from priml.model.norm import RMSNorm
-from priml.model.value_gated_attention import (
+from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
     sdpa_attention,
 )
+from priml.model.narrow_embedding import NarrowEmbedding
+from priml.model.norm import RMSNorm
 from priml.runtime import SingleProcess
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
@@ -359,8 +359,8 @@ def exp_smoke() -> NanoChatLoop.Config:
     cut: a few seconds of budget, and a network narrow enough to finish in
     them. The score will be poor, which is expected.
 
-    Every delta from ``exp001`` is a size or a budget, so the goldens minted
-    over this rung guard the real one: a change to the architecture, the
+    Every delta from ``exp001`` is a size or a budget, so the test artifacts
+    minted over this rung guard the real one: a change to the architecture, the
     optimizer partition, the schedules, or the precision reaches this config
     too.
     """

@@ -149,10 +149,86 @@ def test_pass_counter_round_trips(dataset_dir: Path) -> None:
     )
 
 
+def test_checkpoint_resumes_the_unfinished_sampled_pass(dataset_dir: Path) -> None:
+    data = _data(dataset_dir, seed=3)
+    loader = data.train_dataloader()
+    iterator = iter(loader)
+    next(iterator)
+    state = data.state_dict()
+    expected = [batch["media"].clone() for batch in iterator]
+
+    restored = _data(dataset_dir, seed=3)
+    restored.load_state_dict(state)
+    observed = [batch["media"].clone() for batch in restored.train_dataloader()]
+
+    assert len(observed) == len(expected)
+    assert all(
+        torch.equal(observed_batch, expected_batch)
+        for observed_batch, expected_batch in zip(observed, expected, strict=True)
+    )
+
+
+def test_seed_and_pass_are_distinct_named_stream_inputs(dataset_dir: Path) -> None:
+    later_pass = _data(dataset_dir, seed=4).train_dataloader()
+    list(later_pass)
+    later = [batch["media"].clone() for batch in later_pass]
+    first = [
+        batch["media"].clone()
+        for batch in _data(dataset_dir, seed=5).train_dataloader()
+    ]
+
+    assert any(
+        not torch.equal(later_batch, first_batch)
+        for later_batch, first_batch in zip(later, first, strict=True)
+    )
+
+
 def test_task_cap_trims_whole_tasks(dataset_dir: Path) -> None:
     data = _data(dataset_dir, num_eval_tasks=2)
     rows = sum(b["valid_count"] for b in data.eval_dataloader())
     assert rows == 2 * PUZZLES_PER_TASK * VIEWS_PER_PUZZLE
+
+
+def test_len_counts_the_batches_the_loader_actually_yields(
+    dataset_dir: Path,
+) -> None:
+    """``len`` must match iteration on both paths, not just the ordered one."""
+    data = _data(dataset_dir)
+    for name, loader in (
+        ("eval", data.eval_dataloader()),
+        ("train", data.train_dataloader()),
+    ):
+        assert len(list(loader)) == len(loader), name
+
+
+def test_sampled_len_handles_variable_puzzle_sizes(dataset_dir: Path) -> None:
+    """The sampled pass plan, not one puzzle-size statistic, determines length."""
+    train = dataset_dir / "train"
+    np.save(train / "all__puzzle_indices.npy", np.array([0, 1, 5, 6, 10]))
+    np.save(train / "all__group_indices.npy", np.arange(TASKS + 1))
+    np.save(train / "all__puzzle_identifiers.npy", np.arange(TASKS))
+
+    loader = _data(dataset_dir).train_dataloader()
+
+    assert len(loader) == len(list(loader))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("batch_size", 0),
+        ("batch_size", -1),
+        ("eval_batch_size", 0),
+        ("eval_batch_size", -1),
+    ],
+)
+def test_nonpositive_batch_size_is_rejected(
+    dataset_dir: Path,
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        _data(dataset_dir, **{field: value})
 
 
 def test_missing_data_names_the_preparer(tmp_path: Path) -> None:

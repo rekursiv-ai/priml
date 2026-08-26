@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import Any, Protocol, override, runtime_checkable
+from typing import Protocol, Self, override, runtime_checkable
 
 from configgle import Fig
 from torch import Tensor, nn
+from torch.nn import functional as f
 
 import torch
 
@@ -15,7 +16,7 @@ import torch
 class NormProtocol(Protocol):
     """Protocol for normalization layers."""
 
-    def __call__(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor: ...
+    def __call__(self, input: Tensor, **kwargs: object) -> Tensor: ...
 
 
 class NormConfigProtocol(Protocol):
@@ -33,7 +34,7 @@ class NormConfigProtocol(Protocol):
     dtype: torch.dtype | None
 
 
-class RMSNorm(nn.RMSNorm):
+class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization."""
 
     class Config(Fig["RMSNorm"], kw_only=False):
@@ -59,23 +60,51 @@ class RMSNorm(nn.RMSNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        super().__init__(
-            normalized_shape=config.channels_in,
-            eps=config.eps,
-            elementwise_affine=config.elementwise_affine,
-            device=config.device,
-            dtype=config.dtype,
-        )
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
+        super().__init__()
+        self.normalized_shape = (config.channels_in,)
+        self.eps = config.eps
+        self.elementwise_affine = config.elementwise_affine
+        self.weight: nn.Parameter | None
+        if config.elementwise_affine:
+            self.weight = nn.Parameter(
+                torch.empty(
+                    config.channels_in,
+                    device=config.device,
+                    dtype=config.dtype,
+                ),
+            )
+        else:
+            self.register_parameter("weight", None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        if self.weight is not None:
+            nn.init.ones_(self.weight)
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
-        return super().forward(input)
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        return f.rms_norm(input, self.normalized_shape, self.weight, self.eps)
 
 
 class CenteredRMSNorm(nn.Module):
@@ -97,11 +126,26 @@ class CenteredRMSNorm(nn.Module):
         eps: float = 1e-6
         """Epsilon for numerical stability."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
         super().__init__()
         self.eps = config.eps
         self.weight = nn.Parameter(torch.zeros(config.channels_in))
@@ -111,8 +155,8 @@ class CenteredRMSNorm(nn.Module):
         nn.init.zeros_(self.weight)
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         x_f32 = input.float()
         normed = x_f32 * torch.rsqrt(x_f32.pow(2).mean(-1, keepdim=True) + self.eps)
         return ((1.0 + self.weight.float()) * normed).type_as(input)
@@ -139,11 +183,26 @@ class LayerNorm(nn.LayerNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
         super().__init__(
             normalized_shape=config.channels_in,
             eps=config.eps,
@@ -153,8 +212,8 @@ class LayerNorm(nn.LayerNorm):
         )
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)
 
 
@@ -182,11 +241,26 @@ class BatchNorm(nn.BatchNorm1d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
         super().__init__(
             config.channels_in,
             momentum=config.momentum,
@@ -197,8 +271,8 @@ class BatchNorm(nn.BatchNorm1d):
         )
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         shape = input.shape
         return super().forward(input.reshape(-1, shape[-1])).reshape(shape)
 
@@ -232,8 +306,8 @@ class BatchRenorm(nn.Module):
     class Config(Fig["BatchRenorm"]):
         """Configure the normalization."""
 
-        channels_in: int = 1
-        """Width of the axis being normalized."""
+        channels_in: int = -1
+        """Width of the axis being normalized (-1 to infer from channels_out)."""
 
         momentum: float = 0.999
         """Retention of the running statistics per update.
@@ -257,9 +331,16 @@ class BatchRenorm(nn.Module):
         max_drift: float = 5.0
         """Bound on the mean correction, in running standard deviations."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         """Build the learned affine and the running statistics.
@@ -271,6 +352,14 @@ class BatchRenorm(nn.Module):
           ValueError: A dimension or bound is invalid.
 
         """
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for BatchRenorm."
+            )
         super().__init__()
         if config.channels_in <= 0:
             raise ValueError("channels_in must be positive")
@@ -298,16 +387,18 @@ class BatchRenorm(nn.Module):
         self.register_buffer("steps", torch.zeros((), dtype=torch.int64))
 
     @override
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         """Normalize ``x`` over every axis but the last.
 
         Args:
           x: Input with features last, ``[..., channels_in]``.
+          **kwargs: Open message bus ignored by this terminal layer.
 
         Returns:
           normalized: Same shape, affinely transformed.
 
         """
+        del kwargs
         if not self.training:
             mean, variance = self.running_mean, self.running_var
             return self._affine(x, mean=mean, variance=variance)
@@ -387,11 +478,26 @@ class BatchNorm2d(nn.BatchNorm2d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
         super().__init__(
             config.channels_in,
             momentum=config.momentum,
@@ -402,8 +508,8 @@ class BatchNorm2d(nn.BatchNorm2d):
         )
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)
 
 
@@ -437,11 +543,26 @@ class GroupNorm2d(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
         super().__init__(
             config.num_groups,
             config.channels_in,
@@ -452,8 +573,8 @@ class GroupNorm2d(nn.GroupNorm):
         )
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return super().forward(input)
 
 
@@ -481,11 +602,26 @@ class GroupNorm(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for {type(self).__name__}."
+            )
         super().__init__(
             config.num_groups,
             config.channels_in,
@@ -496,8 +632,8 @@ class GroupNorm(nn.GroupNorm):
         )
 
     @override
-    def forward(self, input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         shape = input.shape
         x = input.reshape(-1, *shape[-2:]).movedim(-2, -1)
         return super().forward(x).movedim(-2, -1).reshape(shape)

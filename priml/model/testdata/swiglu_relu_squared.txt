@@ -1,0 +1,16 @@
+SwiGLUReluSquared.Config(
+                channels_in=4,
+                channels_out=4,
+                channels_hidden=4,
+                expansion=4.0,
+                round_to=1,
+                gate=False,
+                bias=False,
+                split_gate_projection=False,
+                norm=None,
+                act=<function relu_squared at 0x0defaced0def>,
+                depth_index=(),
+                init_weight=<function unit_fan_in_uniform at 0x0defaced0def>,
+                init_weight_out=<function zeros_ at 0x0defaced0def>,
+                shard=None
+        )

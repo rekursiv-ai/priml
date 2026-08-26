@@ -2,30 +2,43 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, Self, runtime_checkable
 
 from configgle import Makeable
 from torch import Tensor, nn
+
+import torch
 
 from priml.math.custom_types import TensorFn
 
 
 __all__ = [
     "ActivationFn",
-    "AttentionBlock",
     "AttentionKernel",
+    "ChannelsHead",
     "ChannelsIn",
     "ChannelsInOut",
     "ChannelsOut",
-    "HasDepth",
-    "HeadGeometry",
+    "DepthIndex",
+    "HasAttention",
+    "HasDepthIndex",
+    "LatentAttentionKernel",
     "LookupTable",
+    "NumHeads",
+    "Resettable",
     "RotaryFactors",
     "ShardStyle",
-    "ShardableConfig",
+    "Shardable",
+    "TensorBlockConfig",
     "TensorModule",
+    "WeightedTensorConfig",
+    "WeightedTensorModule",
+    "flatten_depth_index",
     "propagate_attr",
 ]
+
+type DepthIndex = tuple[tuple[int, int], ...]
+"""Global-to-local ``(index, count)`` pairs; empty means unspecified."""
 
 ShardStyle = Literal["colwise", "rowwise", "vocab"]
 """Tensor-parallel shard style for a building-block config.
@@ -51,7 +64,14 @@ class TensorModule(Protocol):
     every call site ``Any``. This names the contract those call sites need.
     """
 
-    def __call__(self, x: Tensor, /, *args: Any, **kwargs: Any) -> Tensor: ...
+    def __call__(self, x: Tensor, /, **kwargs: Any) -> Tensor: ...
+    def reset_parameters(self) -> None: ...
+
+
+@runtime_checkable
+class Resettable(Protocol):
+    """Owns resettable parameters or buffers."""
+
     def reset_parameters(self) -> None: ...
 
 
@@ -72,16 +92,72 @@ class RotaryFactors(Protocol):
 
 @runtime_checkable
 class AttentionKernel(Protocol):
-    """Windowed causal attention over ``[..., S, heads, channels_head]``.
+    """Windowed causal attention over ``[..., S, num_heads, channels_head]``.
 
     The layout is the one every priml projection emits and the one a fused
-    kernel wants, so a kernel needing SDPA's ``[..., heads, S, ...]`` transposes
+    kernel wants, so a kernel needing SDPA's ``[..., num_heads, S, ...]`` transposes
     internally -- a stride view, not a copy. The window is an argument rather
     than a mask because a mask disqualifies every flash backend; a kernel that
     cannot express one builds the mask itself.
+
+    Keyword arguments are an open message bus from the model boundary. Each
+    layer consumes what it owns and forwards the remainder unchanged; the
+    concrete kernel reads only the messages it understands. The protocol does
+    not enumerate that open set because doing so would make every new modular
+    consumer a change to this shared interface.
     """
 
-    def __call__(self, q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor: ...
+    def __call__(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        **kwargs: Any,
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class LatentAttentionKernel(Protocol):
+    """Attends over a COMPRESSED kv latent rather than materialized K and V.
+
+    A separate protocol from :class:`AttentionKernel` because the inputs differ
+    in kind, not in spelling: there is no K or V to pass. What exists is the
+    latent ``c_kv``, the head-shared rope key, and the projection that would
+    expand them -- so a kernel may either fold that projection into the
+    contraction (never forming K/V, which is what makes the cache ~25x
+    smaller) or apply it and delegate to an ordinary
+    :class:`AttentionKernel`.
+
+    ``w_kr`` and ``w_uv`` arrive as per-head views rather than as the module
+    that owns them: under tensor parallelism only this rank's head rows are
+    valid, and slicing them in ONE place keeps that correctness argument out
+    of every kernel.
+
+    Args:
+      q_nope: ``[..., S, num_heads, qk_nope]`` non-rotary query part.
+      q_pe: ``[..., S, num_heads, qk_rope]`` rotary query part.
+      c_kv: ``[..., T, kv_lora_rank]`` compressed kv latent, head-shared.
+      k_pe: ``[..., T, qk_rope]`` rotary key, head-shared.
+      w_kr: ``[num_heads, qk_nope, kv_lora_rank]`` latent-to-key projection.
+      w_uv: ``[num_heads, v, kv_lora_rank]`` latent-to-value projection.
+      **kwargs: Open message bus forwarded unchanged to the attention kernel.
+
+    Returns:
+      out: ``[..., S, num_heads, v]`` per-head attention output.
+
+    """
+
+    def __call__(
+        self,
+        q_nope: Tensor,
+        q_pe: Tensor,
+        c_kv: Tensor,
+        k_pe: Tensor,
+        *,
+        w_kr: Tensor,
+        w_uv: Tensor,
+        **kwargs: Any,
+    ) -> Tensor: ...
 
 
 @runtime_checkable
@@ -96,19 +172,19 @@ class LookupTable(Protocol):
 
     weight: Tensor
 
-    def __call__(self, tokens: Tensor, /, *args: Any, **kwargs: Any) -> Tensor: ...
+    def __call__(self, tokens: Tensor, /, **kwargs: Any) -> Tensor: ...
     def reset_parameters(self) -> None: ...
-    def to(self, *args: Any, **kwargs: Any) -> Any: ...
+    def to(self, *, dtype: torch.dtype) -> Self: ...
 
 
 @runtime_checkable
-class AttentionBlock(Makeable[nn.Module], Protocol):
-    """A block config a stack can reach the attention of.
+class HasAttention(Makeable[nn.Module], Protocol):
+    """A module config exposing residual-stream attention as ``attn``.
 
     ``Makeable`` already says it builds a module; this adds the one thing a
     STACK needs beyond that -- the attention, to push what follows from DEPTH
     (how far back this layer attends, whether a table feeds its gate) and to
-    size the tensors the heads consume.
+    size the tensors the attention heads consume.
 
     Declared as a shape rather than as a block CLASS, so a wrapper or a
     replacement qualifies by exposing an attention instead of by inheriting.
@@ -119,44 +195,24 @@ class AttentionBlock(Makeable[nn.Module], Protocol):
 
 
 @runtime_checkable
-class HeadGeometry(Protocol):
-    """Answers for the head geometry of whatever attention it composes.
+class NumHeads(Protocol):
+    """Has a uniform attention-head count."""
 
-    A model that owns a tensor the heads consume -- rotary factors, sized per
-    head; a value embedding, added to the VALUES and so spanning every head --
-    has to ask the block, because the two widths are decoupled: an attention
-    wider than the residual stream is legal, so dividing the model width would
-    misreport every model where they differ.
-
-    Answered BY THE BLOCK rather than read off ``block.attn``, because where
-    the attention sits is the block's business: a wrapper (an output gate, an
-    adapter, a router) composes one without being one, and a reader reaching
-    for a fixed attribute silently gets the wrong answer from every wrapper
-    ever written.
-    """
-
-    @property
-    def heads(self) -> int:
-        """Attention heads the block's queries are split into."""
-        ...
-
-    @property
-    def channels_head(self) -> int:
-        """Channels per head."""
-        ...
+    num_heads: int
 
 
 @runtime_checkable
-class HasDepth(Protocol):
-    """Carries its INDEX in the stack, for anything that scales with position.
+class ChannelsHead(Protocol):
+    """Has a uniform per-head channel width."""
 
-    Not a count: ``depth`` says which layer, so a depth-scaled init divides by
-    it and an attention reads its reach off a pattern at it. Only blocks whose
-    behavior varies with position declare it, which is why a parent pushing one
-    gates on this rather than setting it blind.
-    """
+    channels_head: int
 
-    depth: int
+
+@runtime_checkable
+class HasDepthIndex(Protocol):
+    """Carries global-to-local positions within nested module stacks."""
+
+    depth_index: DepthIndex
 
 
 @runtime_checkable
@@ -179,10 +235,58 @@ class ChannelsInOut(ChannelsIn, ChannelsOut, Protocol):
 
 
 @runtime_checkable
-class ShardableConfig(Protocol):
+class TensorBlockConfig(Makeable[TensorModule], ChannelsInOut, Protocol):
+    """A width-preserving config that builds a tensor-returning block."""
+
+
+@runtime_checkable
+class WeightedTensorModule(TensorModule, Protocol):
+    """A tensor-returning module exposing its projection weight."""
+
+    weight: Tensor
+
+
+@runtime_checkable
+class WeightedTensorConfig(
+    Makeable[WeightedTensorModule],
+    ChannelsInOut,
+    Protocol,
+):
+    """A width-configurable config that builds a weighted tensor module."""
+
+
+@runtime_checkable
+class Shardable(Protocol):
     """A building-block config that declares a tensor-parallel shard style."""
 
     shard: ShardStyle | None
+
+
+def flatten_depth_index(depth_index: DepthIndex) -> int:
+    """Flatten a hierarchical depth index using global-to-local mixed radix.
+
+    Args:
+      depth_index: Global-to-local ``(index, count)`` pairs. Empty means the
+        position is unspecified.
+
+    Returns:
+      index: Zero-based flattened index, or ``-1`` when unspecified.
+
+    Raises:
+      ValueError: A count is non-positive or an index is outside its level.
+
+    """
+    flattened: int = -1
+    for level, pair in enumerate(depth_index):
+        index: int = pair[0]
+        count: int = pair[1]
+        if count < 1 or index < 0 or index >= count:
+            raise ValueError(
+                f"depth_index level {level} must satisfy 0 <= index < count; "
+                f"got ({index}, {count})."
+            )
+        flattened = index if flattened == -1 else flattened * count + index
+    return flattened
 
 
 def propagate_attr(
@@ -196,11 +300,14 @@ def propagate_attr(
 
     Used by composite-module configs to push shared dimensions down to
     their child configs during ``finalize``. Participation is decided by
-    ``protocol``: a child that implements it MUST accept the value, so a
-    failed set (typo, or a value-typed field shadowed by a read-only
-    property) raises rather than silently producing a child built with a
-    default sentinel dimension. A child that does not implement ``protocol``
-    legitimately opts out and is skipped.
+    ``protocol``: a child that implements it MUST have the attribute, so a
+    MISSING one (a typo, a misdeclared field) raises rather than silently
+    producing a child built with a default sentinel dimension. A child that
+    does not implement ``protocol`` legitimately opts out and is skipped.
+
+    A participating attribute is assigned normally. Transparent Config wrappers
+    may expose a read-only descriptor for runtime Protocol recognition while
+    delegating the actual write through ``__setattr__``.
 
     Args:
       config: Child config to mutate.
@@ -211,22 +318,16 @@ def propagate_attr(
         ``depth`` that no Protocol governs); absence then skips silently.
 
     Raises:
-      AttributeError: ``config`` implements ``protocol`` yet the attribute
-        cannot be set -- a typo or a misdeclared field.
+      AttributeError: ``config`` implements ``protocol`` yet has no such
+        attribute at all -- a typo or a misdeclared field.
 
     """
-    if protocol is not None and not isinstance(config, protocol):
-        return
+    participates = protocol is None or isinstance(config, protocol)
     if not hasattr(config, name):
-        if protocol is None:
+        if not participates or protocol is None:
             return
         raise AttributeError(
             f"{type(config).__name__} satisfies {protocol.__name__} but has "
             f"no attribute {name!r}; cannot propagate value {value!r}.",
         )
-    # A derived read-only property (e.g. channels_out == channels_in) declares
-    # the value rather than storing it; leave it untouched.
-    descriptor = getattr(type(config), name, None)
-    if isinstance(descriptor, property) and descriptor.fset is None:
-        return
     setattr(config, name, value)

@@ -1,0 +1,15 @@
+Conv2d.Config(
+                channels_in=2,
+                channels_out=3,
+                kernel_size=3,
+                stride=1,
+                padding='same',
+                dilation=1,
+                groups=1,
+                bias=False,
+                depth_index=(),
+                device=None,
+                dtype=None,
+                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                init_bias=<function zeros_ at 0x0defaced0def>
+        )

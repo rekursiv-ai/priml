@@ -1,0 +1,10 @@
+Embedding.Config(
+                channels_out=4,
+                num_embeddings=8,
+                padding_idx=None,
+                device=None,
+                dtype=None,
+                shard=None,
+                depth_index=(),
+                init_weight=functools.partial(<function truncated_normal at 0x0defaced0def>, std=0.02)
+        )

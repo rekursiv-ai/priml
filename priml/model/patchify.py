@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, override
+from typing import override
 
 import math
 
@@ -41,8 +41,8 @@ class Patchify(nn.Module):
         self.patch_size = config.patch_size
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return patchify(x, self.patch_size)
 
 
@@ -70,8 +70,8 @@ class Unpatchify(nn.Module):
         self.patch_size = config.patch_size
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         return unpatchify(x, self.patch_size)
 
 

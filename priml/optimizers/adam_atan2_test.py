@@ -12,7 +12,7 @@ import torch
 from priml.optimizers.adam_atan2 import AdamATan2
 
 
-_GOLDEN = Path(__file__).parent / "goldens" / "adam_atan2_0_0_3.pt"
+_GOLDEN = Path(__file__).parent / "testdata" / "adam_atan2_0_0_3.pt"
 
 
 class _AdamATan2Golden(TypedDict):

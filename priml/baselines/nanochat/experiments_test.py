@@ -35,8 +35,8 @@ from priml.baselines.nanochat.train_step import (
     nanochat_optimizer,
 )
 from priml.metrics.bits_per_byte import BitsPerByte
+from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.narrow_embedding import NarrowEmbedding
-from priml.model.value_gated_attention import ValueGatedAttention
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.runtime import SingleProcess
@@ -379,12 +379,12 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
 
 
 def test_smoke_differs_from_exp001_only_in_size() -> None:
-    """The goldens are minted over smoke and guard exp001; that rests on this.
+    """The test artifacts use smoke to guard exp001; that rests on this.
 
     Everything a golden could catch -- the windowing, the value embeddings, the
     optimizer partition, the precision -- must be the SAME object in both, or
-    the goldens freeze a model the ladder does not run. Only sizes and budgets
-    may differ.
+    the test artifacts freeze a model the ladder does not run. Only sizes and
+    budgets may differ.
     """
     smoke, base = experiments.exp_smoke(), experiments.exp001()
     smoke_model, base_model = smoke.step.model, base.step.model
@@ -414,8 +414,8 @@ def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
 
     ``exp_smoke`` turns the model's compile off to start quickly. If that
     reached the optimizer, the rung would stop reproducing the reference --
-    whose kernels are compiled -- and the goldens minted over it would freeze
-    numbers no shipped experiment computes.
+    whose kernels are compiled -- and the test artifacts minted over it would
+    freeze numbers no shipped experiment computes.
     """
     for factory in (experiments.exp_smoke, experiments.exp001):
         optimizer = factory().copy_tree().finalize().step.optimizer
@@ -437,9 +437,10 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
     ``hide_default_values=False`` so a field that changes only because a
     library default changed still shows up here.
 
-    Refresh with ``--golden-overwrite`` after reading the diff.
+    Refresh ``testdata/exp000.txt`` with ``--golden-overwrite`` after reading
+    the diff.
     """
-    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    golden = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
     rendered = pformat(
         experiments.exp000().copy_tree().finalize(), hide_default_values=False
     )

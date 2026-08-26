@@ -1,0 +1,12 @@
+Router.Config(
+                channels_in=4,
+                num_experts=2,
+                top_k=1,
+                jitter_noise=0.0,
+                scoring_func='softmax',
+                norm_topk_prob=False,
+                routed_scaling_factor=1.0,
+                n_group=1,
+                topk_group=1,
+                use_correction_bias=False
+        )

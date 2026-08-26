@@ -2,13 +2,68 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+from typing import cast
+
 import pytest
 import torch
 
 from priml.model.patchify import Patchify, Unpatchify
+from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+from priml.testing.golden import assert_text_golden
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+
+
+def test_patchify_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Patchify.Config(channels_in=2, patch_size=[2, 2])
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="patchify",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_unpatchify_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Unpatchify.Config(channels_out=2, patch_size=[2, 2])
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="unpatchify",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_patchify_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="patchify",
+        build_module=lambda: Patchify.Config(
+            channels_in=2,
+            patch_size=[2, 2],
+        ).make(),
+        build_input=lambda: torch.randn(1, 2, 4, 4),
+        seed=0,
+    )
+
+
+def test_unpatchify_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="unpatchify",
+        build_module=lambda: Unpatchify.Config(
+            channels_out=2,
+            patch_size=[2, 2],
+        ).make(),
+        build_input=lambda: torch.randn(1, 8, 2, 2),
+        seed=0,
+    )
 
 
 def test_patchify_2d():
@@ -40,10 +95,12 @@ def test_patchify_channels():
     assert ucfg.channels_in == 48
 
 
-def test_patchify_forward_drops_extra_args():
+def test_patchify_forward_accepts_messages_and_rejects_positional_extras():
     m = Patchify.Config(channels_in=3, patch_size=[2, 2]).make()
     x = torch.randn(2, 3, 8, 8)
-    assert m(x, "extra", key="val").shape == (2, 12, 4, 4)
+    assert m(x, key="val").shape == (2, 12, 4, 4)
+    with pytest.raises(TypeError):
+        cast(Callable[..., object], m)(x, "extra")
 
 
 def test_patchify_rejects_degenerate_patch_size():

@@ -162,7 +162,7 @@ class Cifar10TrainStep(TrainStep):
         loss.sum().backward()
 
         # Not the inherited ``step``: the rate is scaled from a schedule this
-        # recipe owns (a step-indexed warmup the goldens freeze), the clip is
+        # recipe owns (a step-indexed warmup the snapshots freeze), the clip is
         # unconditional there and gated here, and the counters advance on the
         # step timer either way.
         if math.isfinite(self.config.gradient_clip_norm):
@@ -248,7 +248,7 @@ class Cifar10TrainStep(TrainStep):
         :func:`~priml.math.schedules.warmup` factor: it counts
         ``int(warmup_fraction * total)`` whole steps and reads one step ahead,
         which is not the same number as a fraction of progress -- and the
-        goldens freeze the rate this produces.
+        snapshots freeze the rate this produces.
         """
         config = self.config
         multiplier = self.schedule(self.progress_learning_schedule)

@@ -184,8 +184,6 @@ def record(
     renderer = Renderer(block_pixels=block_pixels, asset_dir=asset_dir)
     generator = torch.Generator().manual_seed(seed)
 
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Asked of the renderer rather than recomputed here, so the writer cannot
     # be told a geometry the frames do not have: ffmpeg then writes a file it
     # cannot read back and the writer closes without raising. Taking it from

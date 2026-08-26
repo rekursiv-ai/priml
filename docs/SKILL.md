@@ -1,6 +1,6 @@
 ---
 name: priml
-description: ALWAYS invoke this skill when using or editing priml -- adding a model/optimizer/loss/metric, writing a baseline, designing an expNNN chain, or deciding which priml layer code belongs in. Do not write priml code -- invoke first.
+description: ALWAYS invoke this skill when using or editing priml -- adding a model/optimizer/loss/metric, writing a baseline, designing an expNNN chain, or deciding which priml layer code belongs in. Do not write priml code without invoking first.
 ---
 
 # priml
@@ -621,7 +621,7 @@ steps_per_epoch = NUM_TRAIN_SAMPLES // cfg.dataset.batch_size
 Directories are named after the dataset -- `mnist`, `cifar10`, `arcagi1`;
 `nanochat` and `sudoku` are exceptions, better known than their datasets. Layout
 mirrors priml: `data.py`, `model.py`, `train_step.py`, `experiments.py`, each
-with a `*_test.py`, plus `goldens/` and `scripts/prepare_data.py`. Data staging
+with a `*_test.py`, plus `testdata/` and `scripts/prepare_data.py`. Data staging
 lives in that script, never in a config -- `finalize()` declares, it never does
 I/O. Assume `/opt/scratch` exists.
 

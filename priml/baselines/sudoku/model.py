@@ -6,7 +6,7 @@ independently, so each is a slot rather than a flag:
 * ``embedding`` -- what signals are added to the input (see
   :mod:`priml.baselines.sudoku.embedding`).
 * ``block`` -- how tokens mix. Any module accepting ``(x, *args, **kwargs)``
-  works; :class:`~priml.model.transformer.TransformerBlock` and
+  works; :class:`~priml.model.transformer.block.TransformerBlock` and
   :class:`~priml.model.mlpmixer.MLPMixerBlock` both do.
 * ``recurrence`` -- ``None`` runs the stack once; a
   :class:`Recurrence` runs it many times over a carried latent state, which is
@@ -43,7 +43,7 @@ from priml.model.custom_types import ChannelsIn
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
-from priml.model.transformer import TransformerBlock
+from priml.model.transformer.block import TransformerBlock
 
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,9 @@ def corrected_fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
 
     """
     del depth
-    truncated_normal(w, std=w.shape[-1] ** -0.5, depth=-1, variance_correction=True)
+    truncated_normal(
+        w, std=w.shape[-1] ** -0.5, depth_index=(), variance_correction=True
+    )
 
 
 class CoreOutput(NamedTuple):
@@ -548,5 +550,5 @@ def _detach_pair(
 def _latent_init(channels_in: int) -> Tensor:
     """A ``[1, C]`` learned-ish starting latent, unit-scaled."""
     w = torch.empty(1, channels_in)
-    truncated_normal(w, std=1.0, depth=-1, variance_correction=True)
+    truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
     return w

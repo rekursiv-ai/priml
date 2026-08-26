@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from priml.math.numeric import (
+    custom_grad,
     kahan_sum,
     log1mexp,
     log1psquare,
@@ -252,6 +253,50 @@ def test_softcap_preserves_float_dtypes_exactly():
     """Float inputs keep their dtype; only integers are promoted."""
     for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
         assert softcap(torch.tensor([1.0, 2.0], dtype=dtype), 1.0).dtype == dtype
+
+
+def test_custom_grad_returns_actual_forward_and_phantom_backward():
+    """The forward value comes from ``actual``, the gradient from ``phantom``.
+
+    Untested until now, though it is what every STE in this module is built
+    on: its two callers assert only their forward values, and a body that
+    simply returned ``actual`` would pass both while silently severing the
+    gradient path the pattern exists to provide.
+    """
+    x = torch.tensor([1.5, -2.5], requires_grad=True)
+    # Deliberately unequal, so a forward reading the phantom is visible.
+    actual = torch.round(x)
+    phantom = x * 3.0
+
+    out = custom_grad(actual=actual, phantom=phantom)
+    out.sum().backward()
+
+    torch.testing.assert_close(out, torch.tensor([2.0, -2.0]))
+    # d(phantom)/dx == 3, where ``actual``'s own gradient is 0 everywhere.
+    assert x.grad is not None
+    torch.testing.assert_close(x.grad, torch.tensor([3.0, 3.0]))
+
+
+def test_ste_round_passes_gradient_through_a_zero_gradient_op():
+    """``round`` has zero gradient everywhere; the STE must still pass one."""
+    x = torch.tensor([0.6, 2.9], requires_grad=True)
+
+    ste_round(x, scale=1.0).sum().backward()
+
+    assert x.grad is not None
+    torch.testing.assert_close(x.grad, torch.ones(2))
+
+
+def test_ste_clamp_passes_gradient_through_a_clamped_value():
+    """A clamped element still receives gradient, which plain clamp kills."""
+    x = torch.tensor([-7.0, 8.0], requires_grad=True)
+
+    ste_clamp(x, min=-2.0, max=5.0).sum().backward()
+
+    # Both elements are OUTSIDE the bounds, where ``torch.clamp`` would pass
+    # zero -- that saturation is exactly what the STE exists to avoid.
+    assert x.grad is not None
+    torch.testing.assert_close(x.grad, torch.ones(2))
 
 
 def test_ste_clamp():

@@ -1,0 +1,1 @@
+LatentAttention.Config(absorb=True, attn_kernel=SdpaNaive.Config())

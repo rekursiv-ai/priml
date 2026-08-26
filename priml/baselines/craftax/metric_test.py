@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import math
 
@@ -33,6 +34,41 @@ def _policy() -> ActorCritic:
     return config.make()
 
 
+class _Actor:
+    def __init__(self, policy: ActorCritic) -> None:
+        self.model = policy
+        self.observation_size = policy.policy[0].in_features
+        self.device = next(policy.parameters()).device
+        self.reset_count = 0
+        self.previous_dones: list[torch.Tensor] = []
+        self.draws: list[float] = []
+
+    def reset(self, *, num_envs: int, device: torch.device) -> None:
+        del num_envs, device
+        self.reset_count += 1
+        self.previous_dones = []
+
+    def act(
+        self,
+        observation: torch.Tensor,
+        previous_done: torch.Tensor,
+        *,
+        generator: torch.Generator,
+    ) -> torch.Tensor:
+        self.previous_dones.append(previous_done.clone())
+        self.draws.append(float(torch.rand((), generator=generator)))
+        logits, _ = self.model(observation)
+        return torch.multinomial(
+            logits.softmax(-1),
+            1,
+            generator=generator,
+        ).squeeze(-1)
+
+
+def _actor() -> _Actor:
+    return _Actor(_policy())
+
+
 def _episodes(count: int, *, unlocked: list[float] | None = None) -> dict[str, object]:
     """Build a saved state holding ``count`` identical episodes."""
     row = unlocked or [0.0] * len(constants.Achievement)
@@ -40,6 +76,7 @@ def _episodes(count: int, *, unlocked: list[float] | None = None) -> dict[str, o
         "returns": [11.3] * count,
         "lengths": [7] * count,
         "unlocked": [list(row) for _ in range(count)],
+        "rollout_index": 0,
     }
 
 
@@ -125,12 +162,9 @@ def test_a_saved_state_is_a_copy() -> None:
     assert len(saved["returns"]) == 1
 
 
-def test_a_batch_without_a_policy_is_ignored() -> None:
-    # The loop calls every metric on every eval batch; one that carries no
-    # policy is not this metric's batch.
-    score = _score()
-    score.update(torch.zeros(2, 43))
-    assert score.compute() == {"episodes": 0.0}
+def test_a_batch_without_an_actor_is_refused() -> None:
+    with pytest.raises(TypeError, match="EvaluationActor"):
+        _score().update(torch.zeros(2, 43))
 
 
 @pytest.mark.compute_large_fixture
@@ -138,7 +172,7 @@ def test_playing_a_short_horizon_banks_nothing() -> None:
     # A truncated episode has an incomplete return, so counting it would drag
     # the mean toward zero by an amount set by the horizon, not the policy.
     score = _score(steps=2)
-    score.update(torch.zeros(2, 43), policy=_policy())
+    score.update(torch.zeros(2, 43), actor=_actor())
     assert score.compute() == {"episodes": 0.0}
 
 
@@ -150,7 +184,7 @@ def test_playing_banks_the_episodes_that_finish(
     # a test; everything else about the play is the published evaluation.
     monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
     score = _score(steps=5)
-    score.update(torch.zeros(2, 43), policy=_policy())
+    score.update(torch.zeros(2, 43), actor=_actor())
     computed = score.compute()
     assert computed["episodes"] == 4.0
     assert computed["episode_length"] == pytest.approx(2.0)
@@ -167,10 +201,42 @@ def test_the_same_seed_scores_the_same_episodes(
 
     def played() -> dict[str, Any]:
         score = _score(steps=5)
-        score.update(torch.zeros(2, 43), policy=policy)
+        score.update(torch.zeros(2, 43), actor=_Actor(policy))
         return score.compute()
 
     assert played() == played()
+
+
+@pytest.mark.compute_large_fixture
+def test_repeated_batches_use_independent_evaluation_streams() -> None:
+    score = _score(steps=1)
+    actor = _actor()
+
+    score.update(torch.zeros(2, 43), actor=actor)
+    score.update(torch.zeros(2, 43), actor=actor)
+
+    assert len(actor.draws) == 2
+    assert actor.draws[0] != actor.draws[1]
+
+
+@pytest.mark.compute_large_fixture
+def test_view_mismatch_is_rejected_at_the_actor_boundary() -> None:
+    actor = _actor()
+    actor.observation_size += 1
+
+    with pytest.raises(ValueError, match="observation_size"):
+        _score(steps=1).update(torch.zeros(2, 43), actor=actor)
+
+
+@pytest.mark.compute_large_fixture
+def test_evaluation_switches_model_mode_once_per_rollout() -> None:
+    score = _score(steps=5)
+    actor = _actor()
+
+    with patch.object(actor.model, "train", wraps=actor.model.train) as train:
+        score.update(torch.zeros(2, 43), actor=actor)
+
+    assert train.call_count == 2
 
 
 @pytest.mark.compute_large_fixture
@@ -179,9 +245,10 @@ def test_two_plays_accumulate(monkeypatch: pytest.MonkeyPatch) -> None:
     # passes must add episodes rather than replace them.
     monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
     score = _score(steps=5)
-    policy = _policy()
-    score.update(torch.zeros(2, 43), policy=policy)
-    score.update(torch.zeros(2, 43), policy=policy)
+    actor = _actor()
+    score.update(torch.zeros(2, 43), actor=actor)
+    score.update(torch.zeros(2, 43), actor=actor)
+    assert actor.reset_count == 2
     assert score.compute()["episodes"] == 8.0
 
 

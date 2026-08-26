@@ -1294,6 +1294,13 @@ class TrainLoop:
             )
             batch_start = time.perf_counter()
             batch = self.step.preprocess_batch(raw_batch)
+            if batch.get("metric_only", False):
+                logger.info(
+                    "Warm eval compile: batch %d/%d is metric-only; skipping.",
+                    batch_index + 1,
+                    self.eval_warmup_batches,
+                )
+                continue
             logger.info(
                 "Warm eval compile: batch %d/%d preprocessed in %.3fs; "
                 "running eval_loss.",
@@ -1377,28 +1384,34 @@ class TrainLoop:
             if weight == 0:
                 batch_start = time.perf_counter()
                 continue
-            # Phase heartbeat (all ranks): names the exact phase + batch this rank
-            # is in, so a distributed eval stall reports WHERE each rank is stuck
-            # (compiled forward / ACT loop vs a downstream metric all-gather)
-            # without an external py-spy. eval_loss is the per-rank compute phase;
-            # metric.update below is the cross-rank gather phase.
-            with _phase_heartbeat(
-                f"eval batch {num_batches + 1} eval_loss",
-                interval_s=self.phase_heartbeat_sec,
-            ):
-                step_results = self.step.eval_loss(**batch)
-            loss = step_results["loss"]
-            model_output = step_results["model"]
-            total_weight += weight
-            total_loss += loss.mean().item() * weight
-            for key, value in step_results.get("metrics", {}).items():
-                total_step_metrics[key] = (
-                    total_step_metrics.get(key, 0.0)
-                    + float(
-                        value.mean().item() if isinstance(value, Tensor) else value,
+            metric_only = bool(batch.pop("metric_only", False))
+            extra_votes = None
+            if metric_only:
+                model_output: Any = torch.empty(0)
+            else:
+                # Phase heartbeat (all ranks): names the exact phase + batch this rank
+                # is in, so a distributed eval stall reports WHERE each rank is stuck
+                # (compiled forward / ACT loop vs a downstream metric all-gather)
+                # without an external py-spy. eval_loss is the per-rank compute phase;
+                # metric.update below is the cross-rank gather phase.
+                with _phase_heartbeat(
+                    f"eval batch {num_batches + 1} eval_loss",
+                    interval_s=self.phase_heartbeat_sec,
+                ):
+                    step_results = self.step.eval_loss(**batch)
+                extra_votes = step_results.get("eval_extra_votes")
+                loss = step_results["loss"]
+                model_output = step_results["model"]
+                total_weight += weight
+                total_loss += loss.mean().item() * weight
+                for key, value in step_results.get("metrics", {}).items():
+                    total_step_metrics[key] = (
+                        total_step_metrics.get(key, 0.0)
+                        + float(
+                            value.mean().item() if isinstance(value, Tensor) else value,
+                        )
+                        * weight
                     )
-                    * weight
-                )
             # Per-batch eval step time, mirroring train/step_time. Summed here
             # and reported as a mean per eval (eval runs many batches at one
             # global_step, so a single mean keeps the W&B step axis monotonic).
@@ -1406,7 +1419,6 @@ class TrainLoop:
             total_batch_time += batch_dt
             num_batches += 1
 
-            extra_votes = step_results.get("eval_extra_votes")
             for name, metric in self.metrics.items():
                 cuda_events = self._cuda_event_pair()
                 # A metric ``update`` that all-gathers across ranks is a classic
@@ -1437,7 +1449,7 @@ class TrainLoop:
                     "[eval] batch %s | running total_loss=%.4f | "
                     "batch_time=%.3fs mean=%.3fs elapsed=%.1fs",
                     pct,
-                    total_loss / total_weight,
+                    total_loss / total_weight if total_weight else 0.0,
                     batch_dt,
                     total_batch_time / num_batches,
                     total_batch_time,

@@ -2,12 +2,80 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import torch
 
 from priml.model.conv import Conv1d, Conv2d, Conv3d
+from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+from priml.testing.golden import assert_text_golden
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+
+
+def test_conv1d_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Conv1d.Config(2, 3)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="conv1d",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_conv1d_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="conv1d",
+        build_module=lambda: Conv1d.Config(2, 3).make(),
+        build_input=lambda: torch.randn(1, 2, 4),
+        seed=0,
+    )
+
+
+def test_conv2d_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Conv2d.Config(2, 3)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="conv2d",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_conv2d_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="conv2d",
+        build_module=lambda: Conv2d.Config(2, 3).make(),
+        build_input=lambda: torch.randn(1, 2, 3, 3),
+        seed=0,
+    )
+
+
+def test_conv3d_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Conv3d.Config(2, 3)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="conv3d",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_conv3d_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="conv3d",
+        build_module=lambda: Conv3d.Config(2, 3).make(),
+        build_input=lambda: torch.randn(1, 2, 3, 3, 3),
+        seed=0,
+    )
 
 
 def test_conv1d():
@@ -43,10 +111,12 @@ def test_conv3d_channels_infer():
     assert cfg.channels_out == 3
 
 
-def test_conv_forward_drops_extra_args():
+def test_conv_forward_accepts_messages_and_rejects_positional_extras():
     m = Conv2d.Config(3, 16, kernel_size=3, padding=1).make()
     x = torch.randn(2, 3, 32, 32)
-    assert m(x, "extra").shape == (2, 16, 32, 32)
+    assert m(x, key="val").shape == (2, 16, 32, 32)
+    with pytest.raises(TypeError):
+        m(x, "extra")
 
 
 def test_conv_reset():

@@ -444,7 +444,10 @@ def test_compute_video_shapes():
     )
     assert actual.latent == (12, 68, 120)
     assert actual.pixel_train == (96, 1088, 1920)
-    assert actual.pixel_full == (96, 1080, 1920)
+    # 90 frames, not 96: ``pixel_full`` is the clip's TRUE shape on every
+    # axis. It read 96 while the frame entry alone was stride-aligned, which
+    # put two rounding contracts in one tuple.
+    assert actual.pixel_full == (90, 1080, 1920)
 
     # 480p 4:3 at 24fps for 2 seconds
     actual = compute_video_shapes(
@@ -466,7 +469,31 @@ def test_compute_video_shapes():
     )
     assert actual.latent == (8, 30, 30)
     assert actual.pixel_train == (64, 480, 480)
-    assert actual.pixel_full == (64, 480, 480)
+    # 4s at 15fps is 60 frames; 64 is that padded to the stride-of-8.
+    assert actual.pixel_full == (60, 480, 480)
+
+
+def test_pixel_full_reports_one_rounding_contract_per_axis() -> None:
+    """``pixel_full``'s frame axis must not be compression-rounded.
+
+    The field pairs a frame count that WAS rounded up to the temporal stride
+    with h/w that were not, so two of its three entries answer different
+    questions and nothing in the type says which. A caller resizing to
+    ``pixel_full`` gets the true spatial size and a padded duration.
+
+    Pinned on a case where the two disagree: 3s at 30fps is 90 frames, which
+    a stride of 8 rounds to 96.
+    """
+    actual = compute_video_shapes(
+        nominal_resolution=1080,
+        aspect=16 / 9,
+        duration_sec=3.0,
+        fps=30,
+    )
+
+    assert actual.pixel_train.frames == 96, "train IS stride-aligned"
+    assert actual.pixel_full.frames == 90, "full is the true frame count"
+    assert actual.pixel_full[1:] == (1080, 1920), "h/w stay unrounded"
 
 
 def test_compute_video_shapes_image():

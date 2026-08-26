@@ -1,0 +1,1 @@
+GeometricFrequencies.Config(base=10000.0)

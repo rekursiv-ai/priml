@@ -5,7 +5,7 @@ Pattern (see write-code skill rationale):
 1. **Build** a module at minimum width: 1 layer, hidden=8, smallest seq_len.
 2. **Randomize** every parameter with ``torch.randn_like`` so structurally-zero
    inits (q-head bias, etc.) don't hide a regression.
-3. **Snapshot** ``(state_dict, input, output)`` to ``<test_file_dir>/goldens/``.
+3. **Snapshot** ``(state_dict, input, output)`` to ``<test_file_dir>/testdata/``.
 4. **Assert** on subsequent runs that loading the golden state and applying it
    to the same input produces a ``torch.equal`` output.
 
@@ -61,7 +61,7 @@ Usage::
     def test_mymodule_bfb() -> None:
         cfg = MyModule.Config(channels=8, num_layers=1)
         assert_bfb_against_golden(
-            golden_dir=Path(__file__).parent.resolve() / "goldens",
+            golden_dir=Path(__file__).parent.resolve() / "testdata",
             golden_name="mymodule_min",
             build_module=lambda: cfg.make(),
             build_input=lambda: torch.randn(2, 4, 8),
@@ -96,7 +96,7 @@ Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
        UNFUSED kernel: build HF with ``attn_implementation="eager"`` (plain
        matmul+softmax) and use loop's ``SdpaNaive`` attention kernel. Both then
        run the identical op sequence and ``torch.equal`` holds cross-platform.
-       See ``priml/model/qwen3_hf_test.py`` for the canonical example.
+       See ``priml/model/transformer/qwen3_hf_test.py`` for the canonical example.
 
   Do NOT "fix" such a test by loosening ``torch.equal`` to ``allclose`` with a
   tolerance -- that hides the very reduction-order regression the bit-for-bit
@@ -105,7 +105,7 @@ Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -460,7 +460,7 @@ def host_agnostic_numerics() -> Generator[None]:
     compare bit-for-bit against such a model, also force it onto an UNFUSED
     kernel (HF: ``attn_implementation="eager"``) so both sides issue the same
     primitive ops. See the module docstring's cross-implementation section and
-    ``priml/model/qwen3_hf_test.py``.
+    ``priml/model/transformer/qwen3_hf_test.py``.
     """
     with sdpa_kernel(SDPBackend.MATH), _Float64Compute():
         yield
@@ -515,7 +515,11 @@ def move_to_device(value: Any, device: str) -> Any:
 
 def _module_device(module: nn.Module) -> str:
     """Return the module's compute device type (``"cpu"`` or ``"cuda"``)."""
-    return next(module.parameters()).device.type
+    parameter = next(module.parameters(), None)
+    if parameter is not None:
+        return parameter.device.type
+    buffer = next(module.buffers(), None)
+    return buffer.device.type if buffer is not None else "cpu"
 
 
 def _sdpa_fingerprint(device: str) -> dict[str, bool | str]:
@@ -588,6 +592,10 @@ def assert_bfb_against_golden(
       - Immediately reloads the just-written golden, reruns, and asserts
         it round-trips bit-exactly. Regeneration fails loudly otherwise
         (INF-018), so a non-reproducible golden is never committed.
+      - A missing golden under a committed ``testdata`` directory is recreated
+        but still fails the test, forcing review before the next run accepts it.
+        Disposable goldens elsewhere and explicit regeneration return normally
+        after the same round-trip check.
 
     Subsequent calls:
       - Builds the module fresh, loads the pre-run state_dict, runs the
@@ -619,11 +627,10 @@ def assert_bfb_against_golden(
     try:
         golden_dir.mkdir(parents=True, exist_ok=True)
         golden_path = golden_dir / f"{golden_name}.pt"
-        regenerate = (
-            os.environ.get(_ENV_REGENERATE, "0") == "1" or not golden_path.exists()
-        )
+        missing = not golden_path.exists()
+        regenerate = os.environ.get(_ENV_REGENERATE, "0") == "1"
 
-        if regenerate:
+        if missing or regenerate:
             _write_golden(
                 golden_path=golden_path,
                 build_module=build_module,
@@ -637,6 +644,11 @@ def assert_bfb_against_golden(
                 seed=seed,
                 run=run or _default_runner,
             )
+            if missing and golden_dir.name == "testdata":
+                raise AssertionError(
+                    f"Missing golden regenerated at {golden_path}; inspect it, "
+                    "then rerun the test."
+                )
             return
 
         _replay_golden(
@@ -765,7 +777,7 @@ def _write_golden(
     }
     # Absence means "unchanged", which the replay asserts against the pre-run
     # copy -- so omitting it is not a weaker check.
-    if _state_differs(pre_state, post_state):
+    if state_differs(pre_state, post_state):
         payload["post_state_dict"] = post_state
     torch.save(payload, golden_path)
 
@@ -795,16 +807,24 @@ def _assert_portable_output_dtype(output: Tensor) -> None:
     )
 
 
-def _state_differs(before: dict[str, Any], after: dict[str, Any]) -> bool:
-    """Whether any stored tensor changed across the run."""
+def state_differs(before: Mapping[str, Tensor], after: Mapping[str, Tensor]) -> bool:
+    """Whether any stored tensor changed across the run.
+
+    Public because it decides whether a golden STORES ``post_state_dict``, so
+    anything reasoning about that key asks the same question. A second
+    spelling of "did the state change" is how two callers drift.
+
+    Args:
+      before: State captured before the run.
+      after: State captured after it.
+
+    Returns:
+      differs: Whether any entry changed.
+
+    """
     if before.keys() != after.keys():
         return True
-    return any(
-        not torch.equal(value, after[key])
-        if isinstance(value, Tensor)
-        else value != after[key]
-        for key, value in before.items()
-    )
+    return any(not torch.equal(value, after[key]) for key, value in before.items())
 
 
 def _replay_golden(

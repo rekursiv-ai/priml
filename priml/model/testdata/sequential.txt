@@ -1,0 +1,28 @@
+Sequential.Config(
+                elements=[
+                        Linear.Config(
+                                channels_in=4,
+                                channels_out=4,
+                                bias=False,
+                                depth_index=((0, 2),),
+                                device=None,
+                                dtype=None,
+                                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                                init_bias=<function zeros_ at 0x0defaced0def>,
+                                shard=None
+                        ),
+                        Linear.Config(
+                                channels_in=4,
+                                channels_out=4,
+                                bias=False,
+                                depth_index=((1, 2),),
+                                device=None,
+                                dtype=None,
+                                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                                init_bias=<function zeros_ at 0x0defaced0def>,
+                                shard=None
+                        )
+                ],
+                repeat=1,
+                depth_index=()
+        )

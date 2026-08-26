@@ -28,7 +28,7 @@ from priml.baselines.sudoku.prefix import (
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.model.mlpmixer import MLPMixerBlock
-from priml.model.transformer import TransformerBlock
+from priml.model.transformer.block import TransformerBlock
 
 
 LADDER: list[tuple[str, Callable[[], ArcTrainLoop]]] = [
@@ -188,7 +188,7 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
 
     Refresh with ``--golden-overwrite`` after reading the diff.
     """
-    golden = Path(__file__).resolve().parent / "goldens" / "exp000_config.txt"
+    golden = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
     rendered = pformat(
         experiments.exp000().copy_tree().finalize(), hide_default_values=False
     )

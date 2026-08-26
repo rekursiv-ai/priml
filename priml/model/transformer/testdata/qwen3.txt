@@ -1,0 +1,88 @@
+Qwen3.Config(
+                vocab_size=32,
+                channels_in=16,
+                num_layers=1,
+                block=[
+                │       TransformerBlock.Config(
+                │               channels_in=16,
+                │               attn=SelfAttention.Config(
+                │                       channels_in=16,
+                │                       num_heads=2,
+                │                       channels_head=8,
+                │                       num_heads_kv=1,
+                │                       bias=False,
+                │                       dropout=0.0,
+                │                       causal=True,
+                │                       rope=RoPE.Config(
+                │                               channels_head=8,
+                │                               reduction_mode='cat',
+                │                               frequencies=HuggingFaceFrequencies.Config(
+                │                                       base=1000000.0
+                │                               ),
+                │                               dtype=None
+                │                       ),
+                │                       norm_qk=RMSNorm.Config(
+                │                               channels_in=8,
+                │                               eps=1e-06,
+                │                               elementwise_affine=True,
+                │                               device=None,
+                │                               dtype=None,
+                │                               channels_out=8
+                │                       ),
+                │                       share_qk_norm=False,
+                │                       norm_out=None,
+                │                       split_qkv_projection=False,
+                │                       attn_kernel=SdpaFused.Config(),
+                │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │                       depth_index=((0, 1),),
+                │                       channels_out=16
+                │               ),
+                │               ffn=SwiGLU.Config(
+                │                       channels_in=16,
+                │                       channels_out=16,
+                │                       channels_hidden=32,
+                │                       expansion=2.6666666666666665,
+                │                       round_to=256,
+                │                       gate=True,
+                │                       bias=False,
+                │                       split_gate_projection=False,
+                │                       norm=None,
+                │                       act=<function silu at 0x0defaced0def>,
+                │                       depth_index=((0, 1),),
+                │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │                       init_weight_out=None,
+                │                       shard='colwise'
+                │               ),
+                │               norm1=RMSNorm.Config(
+                │                       channels_in=16,
+                │                       eps=1e-06,
+                │                       elementwise_affine=True,
+                │                       device=None,
+                │                       dtype=None,
+                │                       channels_out=16
+                │               ),
+                │               norm2=RMSNorm.Config(
+                │                       channels_in=16,
+                │                       eps=1e-06,
+                │                       elementwise_affine=True,
+                │                       device=None,
+                │                       dtype=None,
+                │                       channels_out=16
+                │               ),
+                │               prenorm=True,
+                │               checkpoint=False,
+                │               depth_index=((0, 1),),
+                │               channels_out=16
+                │       )
+                ],
+                final_norm=RMSNorm.Config(
+                        channels_in=16,
+                        eps=1e-06,
+                        elementwise_affine=True,
+                        device=None,
+                        dtype=None,
+                        channels_out=16
+                ),
+                tie_embeddings=False,
+                lm_head=None
+        )

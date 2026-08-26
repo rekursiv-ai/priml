@@ -140,7 +140,7 @@ cython_debug/
 Thumbs.db
 
 # ML artifacts (weights, datasets, runs). Never commit generated bulk data;
-# keep only source, small deterministic fixtures, and goldens.
+# keep only source and small deterministic fixtures.
 wandb/
 *.npz
 *.npy
@@ -149,7 +149,7 @@ wandb/
 *.ckpt
 *.safetensors
 *.parquet
-# Bit-for-bit golden fixtures are committed on purpose (small, deterministic
-# references the golden tests compare against); re-admit them past the *.pt rule.
-!**/goldens/
-!**/goldens/*.pt
+# Bit-for-bit fixtures are committed on purpose (small, deterministic
+# references the tests compare against); re-admit them past the *.pt rule.
+!**/testdata/
+!**/testdata/*.pt

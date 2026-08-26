@@ -3,14 +3,45 @@
 from __future__ import annotations
 
 from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
 from priml.model.embedding import Embedding
 from priml.model.init import normal
+from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+from priml.testing.golden import assert_text_golden
+
+
+if TYPE_CHECKING:
+    import pytest
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+
+
+def test_embedding_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Embedding.Config(4, num_embeddings=8)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="embedding",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_embedding_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="embedding",
+        build_module=lambda: Embedding.Config(4, num_embeddings=8).make(),
+        build_input=lambda: torch.tensor([[0, 3, 7]]),
+        seed=0,
+    )
 
 
 def test_embedding():
@@ -64,7 +95,7 @@ def test_a_depth_scales_the_table_down():
     scaled = Embedding.Config(
         256,
         num_embeddings=4096,
-        depth=3,
+        depth_index=((3, 4),),
         init_weight=partial(normal, std=0.5),
     ).make()
     assert torch.allclose(scaled.weight.detach(), flat.weight.detach() / 2.0)

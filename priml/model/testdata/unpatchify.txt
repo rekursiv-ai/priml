@@ -1,0 +1,1 @@
+Unpatchify.Config(channels_out=2, patch_size=[2, 2])

@@ -1,0 +1,104 @@
+MultiHeadLatentAttention.Config(
+                channels_in=32,
+                num_heads=4,
+                channels_qk_nope_head=8,
+                channels_qk_rope_head=4,
+                channels_v_head=16,
+                q_lora_rank=None,
+                kv_lora_rank=12,
+                bias=False,
+                dropout=0.0,
+                causal=True,
+                softmax_scale=None,
+                rope=None,
+                attn_kernel=LatentAttention.Config(
+                        absorb=True,
+                        attn_kernel=SdpaNaive.Config()
+                ),
+                norm_q_lora=RMSNorm.Config(
+                        channels_in=-1,
+                        eps=1e-06,
+                        elementwise_affine=True,
+                        device=None,
+                        dtype=None,
+                        channels_out=-1
+                ),
+                proj_q=Linear.Config(
+                        channels_in=32,
+                        channels_out=48,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                ),
+                proj_q_a=Linear.Config(
+                        channels_in=-1,
+                        channels_out=-1,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                ),
+                proj_q_b=Linear.Config(
+                        channels_in=-1,
+                        channels_out=-1,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                ),
+                proj_kv_a=Linear.Config(
+                        channels_in=32,
+                        channels_out=16,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                ),
+                proj_kv_b=Linear.Config(
+                        channels_in=12,
+                        channels_out=96,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                ),
+                proj_out=Linear.Config(
+                        channels_in=64,
+                        channels_out=32,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        shard=None
+                ),
+                norm_kv_lora=RMSNorm.Config(
+                        channels_in=12,
+                        eps=1e-06,
+                        elementwise_affine=True,
+                        device=None,
+                        dtype=None,
+                        channels_out=12
+                ),
+                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                depth_index=(),
+                shard=None,
+                channels_out=32
+        )

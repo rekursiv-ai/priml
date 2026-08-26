@@ -300,7 +300,7 @@ class GridEmbedding(nn.Module):
         truncated_normal(
             self.embed_tokens.weight,
             std=1.0 / self.embed_scale,
-            depth=-1,
+            depth_index=(),
             variance_correction=True,
         )
         # The slot is typed by what a channel DOES (``GridChannel``) while
@@ -346,7 +346,7 @@ def _table(
         truncated_normal(
             w,
             std=init_std / channels**0.5,
-            depth=-1,
+            depth_index=(),
             variance_correction=True,
         )
     return nn.Parameter(w)

@@ -2,16 +2,36 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import functools
+
+from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.math.stats import pca_eigh, pca_power
 from priml.model.whitening import PCAWhiteningConv2d
+from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+from priml.testing.golden import assert_text_golden
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+
+
+def _whitening() -> PCAWhiteningConv2d:
+    return PCAWhiteningConv2d(1, 8, kernel_size=2, bias=False)
+
+
+def _run_whitening(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
+    assert isinstance(module, PCAWhiteningConv2d)
+    train_images, images = inputs
+    module.init_whiten(train_images)
+    return module(images)
 
 
 def test_init_whiten_rejects_wrong_out_channels():
@@ -64,6 +84,27 @@ def test_init_whiten_accepts_injected_decompose():
 def test_weights_frozen():
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
     assert not layer.weight.requires_grad
+
+
+def test_whitening_text(request: pytest.FixtureRequest) -> None:
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="whitening",
+        rendered=repr(_whitening()),
+    )
+
+
+@pytest.mark.parametrize("device", bfb_devices(), ids=str)
+def test_whitening_bfb(device: str) -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="whitening",
+        build_module=lambda: _whitening().to(device),
+        build_input=lambda: (torch.randn(2, 1, 3, 3), torch.randn(1, 1, 3, 3)),
+        seed=0,
+        run=_run_whitening,
+    )
 
 
 if __name__ == "__main__":

@@ -58,7 +58,14 @@ class ResidualMix(nn.Module):
             self.original.fill_(self.config.original)
 
     @override
-    def forward(self, x: Tensor, original: Tensor, *, layer: int) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        original: Tensor,
+        layer: int,
+        **kwargs: object,
+    ) -> Tensor:
         """Mix layer ``layer``'s stream with the value it started from.
 
         The weights are indexed rather than cast, and that is load-bearing: a
@@ -72,9 +79,11 @@ class ResidualMix(nn.Module):
           x: The running stream.
           original: The value the stream started from, same shape.
           layer: Which layer's weights to apply.
+          **kwargs: Open message bus ignored by this terminal layer.
 
         Returns:
           mixed: The weighted sum, same shape as ``x``.
 
         """
+        del kwargs
         return self.running[layer] * x + self.original[layer] * original

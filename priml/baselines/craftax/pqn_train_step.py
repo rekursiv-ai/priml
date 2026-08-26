@@ -20,14 +20,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, override
+from typing import TYPE_CHECKING, Any, Self, cast, override
 
 from configgle import Makes, PartialConfig
 from torch import Tensor
 
 import torch
 
+from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
+from priml.baselines.craftax.evaluation import (
+    evaluation_mode,
+    evaluation_transaction,
+)
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.pqn import RecurrentQNetwork, epsilon_at
@@ -466,11 +471,12 @@ class CraftaxPQNTrainStep(TrainStep):
           result: The loss and values of one freshly collected rollout.
 
         """
-        self.model.eval()
-        try:
+        with evaluation_transaction(
+            model=self.model,
+            save=self.state_dict,
+            restore=self.load_state_dict,
+        ):
             return self.train_loss(**batch)
-        finally:
-            self.model.train()
 
     @override
     def call_eval(self, *, observation: Tensor, **_batch: object) -> Tensor:
@@ -484,12 +490,16 @@ class CraftaxPQNTrainStep(TrainStep):
           q_values: Value of each action, computed with a fresh state.
 
         """
-        self.model.eval()
-        try:
-            with torch.no_grad():
-                return self.model.forward(observation)
-        finally:
-            self.model.train()
+        with evaluation_mode(self.model), torch.no_grad():
+            return self.model.forward(observation)
+
+    def make_evaluation_actor(self) -> EvaluationActor:
+        """Build a greedy actor with isolated LSTM state."""
+        return _EvaluationActor(
+            self.model,
+            observation_size=self.env.observation_size,
+            device=self.device,
+        )
 
     @override
     def on_epoch_end(self) -> None:
@@ -509,6 +519,8 @@ class CraftaxPQNTrainStep(TrainStep):
             "previous_done": self._previous_done,
             "episode_return": self._episode_return,
             "episode_length": self._episode_length,
+            "finished_returns": list(self._finished_returns),
+            "finished_lengths": list(self._finished_lengths),
         }
 
     @override
@@ -523,6 +535,8 @@ class CraftaxPQNTrainStep(TrainStep):
         self._previous_done = _tensor(state_dict["previous_done"])
         self._episode_return = _tensor(state_dict["episode_return"])
         self._episode_length = _tensor(state_dict["episode_length"])
+        self._finished_returns = cast(list[float], state_dict["finished_returns"])
+        self._finished_lengths = cast(list[int], state_dict["finished_lengths"])
 
     def _explore(self, q_values: Tensor, *, epsilon: float) -> Tensor:
         """Take the greedy action, except at rate ``epsilon``."""
@@ -615,6 +629,50 @@ class CraftaxPQNTrainStep(TrainStep):
         self._finished_returns = []
         self._finished_lengths = []
         return metrics
+
+
+class _EvaluationActor:
+    """Choose greedy Q actions while owning LSTM and action state."""
+
+    def __init__(
+        self,
+        model: RecurrentQNetwork,
+        *,
+        observation_size: int,
+        device: torch.device,
+    ) -> None:
+        self.model = model
+        self.observation_size = observation_size
+        self.device = device
+        self._state: tuple[Tensor, Tensor] | None = None
+        self._previous_action: Tensor | None = None
+
+    def reset(self, *, num_envs: int, device: torch.device) -> None:
+        self._state = self.model.initial_state(num_envs, device=device)
+        self._previous_action = torch.zeros(
+            num_envs,
+            dtype=torch.int64,
+            device=device,
+        )
+
+    def act(
+        self,
+        observation: Tensor,
+        previous_done: Tensor,
+        *,
+        generator: torch.Generator,
+    ) -> Tensor:
+        del generator
+        assert self._state is not None
+        assert self._previous_action is not None
+        self._state, q_values = self.model.step(
+            self._state,
+            observation,
+            self._previous_action,
+            previous_done,
+        )
+        self._previous_action = q_values.argmax(dim=-1)
+        return self._previous_action
 
 
 def _compiled(function: _StepFn, *, enabled: bool) -> _StepFn:

@@ -85,7 +85,7 @@ cfg.step.optimizer = PartialConfig(
 uv --quiet run --frozen pytest priml/baselines/cifar10
 ```
 
-Runs on CPU in a few seconds. Alongside the unit tests, `goldens/` holds
+Runs on CPU in a few seconds. Alongside the unit tests, `testdata/` holds
 bit-for-bit snapshots of both networks' forward passes and of three optimizer
 steps under each optimizer stack. They pin the arithmetic: a change that moves
 a single floating-point bit fails, which is what keeps `exp000` frozen in

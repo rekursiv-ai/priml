@@ -2,10 +2,41 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
 from priml.model.softcap import SoftCap
+from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.golden import assert_text_golden
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+
+
+def test_softcap_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = SoftCap.Config(cap=2.0, channels_in=4, channels_out=4)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="soft_cap",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_softcap_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="soft_cap",
+        build_module=lambda: SoftCap.Config(
+            cap=2.0,
+            channels_in=4,
+            channels_out=4,
+        ).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
+        seed=0,
+    )
 
 
 def test_softcap_bounds_output() -> None:

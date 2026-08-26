@@ -1,0 +1,15 @@
+GatedDeltaNet.Config(
+                channels_in=16,
+                num_heads_k=2,
+                num_heads_v=2,
+                channels_k_head=8,
+                channels_v_head=8,
+                conv_kernel_size=4,
+                norm=CenteredRMSNorm.Config(
+                        channels_in=8,
+                        eps=1e-06,
+                        channels_out=8
+                ),
+                depth_index=(),
+                channels_out=16
+        )

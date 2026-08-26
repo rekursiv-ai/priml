@@ -17,12 +17,12 @@ from priml.baselines.nanochat.train_step import (
     matrix_parameters,
     nanochat_optimizer,
 )
-from priml.model.value_gated_attention import ValueGatedAttention
+from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.train.parallelism import NoParallel
 
 
-_GOLDEN_DIR = Path(__file__).parent / "goldens"
+_TESTDATA_DIR = Path(__file__).parent / "testdata"
 
 VOCAB = 32
 SEQ = 8
@@ -36,7 +36,7 @@ def _step(**overrides: Any) -> NanoChatTrainStep:
     # The recipe's own optimizer, stepping eagerly. Dynamo traces each member's
     # kernel on first use and never caches it -- 9 of these tests' 9.5 seconds
     # -- and what the compiled graph changes is the update's last bits, which
-    # the goldens and the parity script measure and none of these assert.
+    # the test artifacts and parity script measure and none of these assert.
     config.optimizer = nanochat_optimizer(compile=False)
     config.model.vocab_size = VOCAB
     config.model.max_seq_len = SEQ
@@ -497,8 +497,8 @@ class _SmokeSteps(nn.Module):
 def test_five_steps_bfb() -> None:
     """Freeze five optimizer steps of the recipe, end to end.
 
-    The forward goldens in ``model_test`` freeze one pass. This freezes what
-    that pass FEEDS: the backward, both optimizer members, the accumulated
+    The forward test artifacts in ``model_test`` freeze one pass. This freezes
+    what that pass FEEDS: the backward, both optimizer members, the accumulated
     moment buffers, and the schedules. Minted over ``exp_smoke``, which differs
     from ``exp001`` only in size, so a change to any shared mechanism lands
     here.
@@ -518,8 +518,8 @@ def test_five_steps_bfb() -> None:
         return module(batch, clock)
 
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="five_steps_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="five_steps",
         build_module=_SmokeSteps,
         build_input=lambda: _smoke_batch(_smoke_step()),
         seed=0,

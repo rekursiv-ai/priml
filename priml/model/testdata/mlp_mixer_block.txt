@@ -1,0 +1,55 @@
+MLPMixerBlock.Config(
+                channels_in=4,
+                seq_len=2,
+                token_mixer=SwiGLU.Config(
+                        channels_in=2,
+                        channels_out=2,
+                        channels_hidden=256,
+                        expansion=2.6666666666666665,
+                        round_to=256,
+                        gate=True,
+                        bias=False,
+                        split_gate_projection=False,
+                        norm=None,
+                        act=<function silu at 0x0defaced0def>,
+                        depth_index=(),
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_weight_out=None,
+                        shard=None
+                ),
+                channel_mixer=SwiGLU.Config(
+                        channels_in=4,
+                        channels_out=4,
+                        channels_hidden=256,
+                        expansion=2.6666666666666665,
+                        round_to=256,
+                        gate=True,
+                        bias=False,
+                        split_gate_projection=False,
+                        norm=None,
+                        act=<function silu at 0x0defaced0def>,
+                        depth_index=(),
+                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                        init_weight_out=None,
+                        shard=None
+                ),
+                norm_token=RMSNorm.Config(
+                        channels_in=2,
+                        eps=1e-06,
+                        elementwise_affine=False,
+                        device=None,
+                        dtype=None,
+                        channels_out=2
+                ),
+                norm_channel=RMSNorm.Config(
+                        channels_in=4,
+                        eps=1e-06,
+                        elementwise_affine=False,
+                        device=None,
+                        dtype=None,
+                        channels_out=4
+                ),
+                prenorm=True,
+                depth_index=(),
+                channels_out=4
+        )

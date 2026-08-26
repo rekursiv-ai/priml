@@ -22,16 +22,42 @@ from priml.timer import CheckpointableStepTimer
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from torch import nn
+    from torch import Tensor, nn
+
+    import torch
 
     from priml.train.custom_types import TrainStepProtocol
 
 
 @runtime_checkable
-class _SupportsPolicy(Protocol):
-    """A training step whose network can be scored directly."""
+class EvaluationActor(Protocol):
+    """Own evaluation state and choose actions with algorithm semantics."""
 
-    model: nn.Module
+    @property
+    def model(self) -> nn.Module: ...
+
+    @property
+    def observation_size(self) -> int: ...
+
+    @property
+    def device(self) -> torch.device: ...
+
+    def reset(self, *, num_envs: int, device: torch.device) -> None: ...
+
+    def act(
+        self,
+        observation: Tensor,
+        previous_done: Tensor,
+        *,
+        generator: torch.Generator,
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class _SupportsEvaluationActor(Protocol):
+    """A training step that can isolate a fresh evaluation actor."""
+
+    def make_evaluation_actor(self) -> EvaluationActor: ...
 
 
 class CraftaxRollouts:
@@ -71,6 +97,8 @@ class CraftaxRollouts:
         """Passes over the cadence; ticked by the loop when it runs out."""
 
         self._step: TrainStepProtocol | None = None
+        self._live_train: _Cadence | None = None
+        self._pending_train_position = 0
 
     def bind_step(self, step: TrainStepProtocol) -> None:
         """Receive the training step whose policy generates the data.
@@ -83,27 +111,59 @@ class CraftaxRollouts:
         """
         self._step = step
 
-    def train_dataloader(self) -> Iterator[dict[str, Any]]:
+    def train_dataloader(self) -> _Cadence:
         """Yield one tick per update in an epoch."""
-        return iter([{"valid_count": 1} for _ in range(self.config.updates_per_epoch)])
+        stream = _Cadence(
+            count=self.config.updates_per_epoch,
+            position=self._pending_train_position,
+        )
+        self._pending_train_position = 0
+        self._live_train = stream
+        return stream
 
     def eval_dataloader(self) -> Iterator[dict[str, Any]]:
-        """Yield one tick per evaluation pass, carrying the live policy.
-
-        The score is a property of the policy, not of any batch of
-        transitions, so the network itself travels in the batch and the metric
-        plays its own episodes with it.
-        """
-        batch: dict[str, Any] = {"valid_count": 1}
-        if isinstance(self._step, _SupportsPolicy):
-            batch["policy"] = self._step.model
+        """Yield evaluation ticks carrying one isolated stateful actor."""
+        if not isinstance(self._step, _SupportsEvaluationActor):
+            raise TypeError("Evaluation requires a bound training step with an actor.")
+        batch: dict[str, Any] = {
+            "valid_count": 1,
+            "metric_only": True,
+            "actor": self._step.make_evaluation_actor(),
+        }
         return iter([dict(batch) for _ in range(self.config.eval_batches)])
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the pass count; the ENVIRONMENT carries the resumable state."""
-        return {"timer_epoch": self.timer_epoch.state_dict()}
+        """Return the pass count and active cadence position."""
+        position = (
+            self._live_train.position
+            if self._live_train is not None
+            else self._pending_train_position
+        )
+        return {
+            "train_position": position,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the pass count; there is no dataset position to restore."""
+        """Restore the pass count and active cadence position."""
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
+        position = int(state_dict.get("train_position", 0))
+        self._pending_train_position = position
+        if self._live_train is not None:
+            self._live_train.position = position
+            self._pending_train_position = 0
+
+
+class _Cadence:
+    """A finite update cadence with a checkpointable cursor."""
+
+    def __init__(self, *, count: int, position: int = 0) -> None:
+        self.count = count
+        self.position = position
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for index in range(self.position, self.count):
+            self.position = index + 1
+            yield {"valid_count": 1}
+        self.position = 0

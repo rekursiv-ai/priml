@@ -38,7 +38,7 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.train.parallelism import NoParallel
 
 
-_GOLDEN_DIR = Path(__file__).parent.resolve() / "goldens"
+_TESTDATA_DIR = Path(__file__).parent.resolve() / "testdata"
 
 _TRACED_METRICS = (
     "policy_loss",
@@ -152,8 +152,8 @@ def _build_trace() -> nn.Module:
 def test_a_whole_ppo_update_matches_the_golden(device: str) -> None:
     del device
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="craftax_ppo_training_v1",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="craftax_ppo_training",
         build_module=_build_trace,
         build_input=lambda: torch.zeros(1),
         seed=7,
@@ -165,7 +165,7 @@ def test_the_golden_is_small_enough_to_keep_in_git() -> None:
     # would be a payload, not a fixture. The bound sits just above the actual
     # size, which is almost entirely first-layer weights, so a widening that
     # doubles it has to be deliberate.
-    golden = _GOLDEN_DIR / "craftax_ppo_training_v1.pt"
+    golden = _TESTDATA_DIR / "craftax_ppo_training.pt"
     assert golden.stat().st_size < 40_000
 
 
@@ -176,7 +176,7 @@ def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:
     optimizer changed, which is the regression this file exists to catch.
     """
     payload: dict[str, Any] = torch.load(
-        _GOLDEN_DIR / "craftax_ppo_training_v1.pt",
+        _TESTDATA_DIR / "craftax_ppo_training.pt",
         weights_only=False,
         map_location="cpu",
     )

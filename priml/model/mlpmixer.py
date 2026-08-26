@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Self, override
+from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -11,6 +11,8 @@ from torch import Tensor, nn
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
+    DepthIndex,
+    HasDepthIndex,
     TensorModule,
     propagate_attr,
 )
@@ -45,15 +47,18 @@ class MLPMixerBlock(nn.Module):
         prenorm: bool = True
         """Apply norm before (True) or after (False) each mixer."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
-        @property
-        def channels_out(self) -> int:
-            return self.channels_in
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
 
         @override
         def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
             # Token mixer operates on the seq_len dimension.
             propagate_attr(
                 self.token_mixer, "channels_in", self.seq_len, protocol=ChannelsIn
@@ -73,13 +78,26 @@ class MLPMixerBlock(nn.Module):
                     cfg, "channels_out", self.channels_in, protocol=ChannelsOut
                 )
             for cfg in (self.token_mixer, self.channel_mixer):
-                propagate_attr(cfg, "depth", self.depth)
+                propagate_attr(
+                    cfg,
+                    "depth_index",
+                    self.depth_index,
+                    protocol=HasDepthIndex,
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if (
+            -1 not in (config.channels_in, config.channels_out)
+            and config.channels_in != config.channels_out
+        ):
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for MLPMixerBlock."
+            )
         super().__init__()
         self.prenorm = config.prenorm
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self.token_mixer = config.token_mixer.make()
         self.channel_mixer = config.channel_mixer.make()
         self.norm_token = config.norm_token.make()
@@ -96,17 +114,19 @@ class MLPMixerBlock(nn.Module):
                 m.reset_parameters()
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         if self.prenorm:
             xt = x.movedim(-2, -1)
-            xt = xt + self.token_mixer(self.norm_token(xt))
+            xt = xt + self.token_mixer(self.norm_token(xt, **kwargs), **kwargs)
             x = xt.movedim(-2, -1)
-            x = x + self.channel_mixer(self.norm_channel(x))
+            x = x + self.channel_mixer(self.norm_channel(x, **kwargs), **kwargs)
         else:
             xt = x.movedim(-2, -1)
-            xt = self.norm_token(xt + self.token_mixer(xt))
+            xt = self.norm_token(xt + self.token_mixer(xt, **kwargs), **kwargs)
             x = xt.movedim(-2, -1)
-            x = self.norm_channel(x + self.channel_mixer(x))
+            x = self.norm_channel(
+                x + self.channel_mixer(x, **kwargs),
+                **kwargs,
+            )
         assert isinstance(x, Tensor)
         return x

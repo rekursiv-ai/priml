@@ -10,7 +10,7 @@ forward per *active* expert, not per registered expert.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Any, Literal, Protocol, Self, cast, override, runtime_checkable
+from typing import Literal, Protocol, Self, cast, override, runtime_checkable
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -20,7 +20,9 @@ import torch
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
-    ShardableConfig,
+    DepthIndex,
+    HasDepthIndex,
+    Shardable,
     propagate_attr,
 )
 from priml.model.swiglu import SwiGLU
@@ -47,8 +49,7 @@ class TokenRouter(Protocol):
         self,
         x: Tensor,
         /,
-        *args: Any,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Return ``(weights, indices, logits)`` for one flat token batch."""
         ...
@@ -196,8 +197,7 @@ class Router(nn.Module):
     def forward(
         self,
         x: Tensor,
-        *args: Any,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Return (weights, indices, logits).
 
@@ -205,7 +205,7 @@ class Router(nn.Module):
         is ``[T, num_experts]`` (pre-activation, used by the load-
         balance loss for softmax routing).
         """
-        del args, kwargs
+        del kwargs
         if self.training and self.jitter_noise > 0:
             x = x * torch.empty_like(x).uniform_(
                 1 - self.jitter_noise,
@@ -292,7 +292,7 @@ class MoE(nn.Module):
         """Weight for the load-balancing auxiliary loss.
         Applied only with softmax routing (sigmoid is aux-loss-free)."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         @override
@@ -309,10 +309,15 @@ class MoE(nn.Module):
                 propagate_attr(
                     cfg, "channels_out", self.channels_out, protocol=ChannelsOut
                 )
-                propagate_attr(cfg, "depth", self.depth)
+                propagate_attr(
+                    cfg,
+                    "depth_index",
+                    self.depth_index,
+                    protocol=HasDepthIndex,
+                )
                 # Each expert shards intra-expert over the tp dim (its own
                 # block style handles the split alignment).
-                if isinstance(cfg, ShardableConfig):
+                if isinstance(cfg, Shardable):
                     cfg.shard = "colwise"
             return super().finalize()
 
@@ -322,7 +327,7 @@ class MoE(nn.Module):
         self.top_k = config.router.top_k
         self.channels_out = config.channels_out
         self.aux_loss_weight = config.aux_loss_weight
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self.router = config.router.make()
         self.experts = nn.ModuleList(
             [config.expert.make() for _ in range(self.num_experts)],
@@ -350,13 +355,12 @@ class MoE(nn.Module):
                     expert.reset_parameters()
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         shape = x.shape
         x_flat = x.reshape(-1, shape[-1])
         num_tokens = x_flat.shape[0]
 
-        weights, indices, logits = self.router(x_flat)
+        weights, indices, logits = self.router(x_flat, **kwargs)
         if (
             self.training
             and self.aux_loss_weight > 0
@@ -364,9 +368,15 @@ class MoE(nn.Module):
         ):
             self._aux_loss = self._load_balance_loss(logits, indices)
 
-        y = self._dispatch_routed(x_flat, weights, indices, num_tokens)
+        y = self._dispatch_routed(
+            x_flat,
+            weights,
+            indices,
+            num_tokens,
+            **kwargs,
+        )
         for shared in self.shared_experts:
-            y = y + shared(x_flat)
+            y = y + shared(x_flat, **kwargs)
         assert isinstance(y, Tensor)
         return y.reshape(*shape[:-1], self.channels_out)
 
@@ -376,6 +386,7 @@ class MoE(nn.Module):
         weights: Tensor,
         indices: Tensor,
         num_tokens: int,
+        **kwargs: object,
     ) -> Tensor:
         """Sort (token, expert) pairs by expert; dispatch contiguously.
 
@@ -410,7 +421,11 @@ class MoE(nn.Module):
             tok_slice = sorted_tok[start:end]
             w_slice = sorted_w[start:end].unsqueeze(-1)
             x_e = x_flat.index_select(0, tok_slice)
-            y.index_add_(0, tok_slice, self.experts[expert_id](x_e) * w_slice)
+            y.index_add_(
+                0,
+                tok_slice,
+                self.experts[expert_id](x_e, **kwargs) * w_slice,
+            )
         return y
 
     def _load_balance_loss(self, logits: Tensor, indices: Tensor) -> Tensor:

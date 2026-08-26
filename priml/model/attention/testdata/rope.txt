@@ -1,0 +1,6 @@
+RoPE.Config(
+                channels_head=8,
+                reduction_mode='cat',
+                frequencies=HuggingFaceFrequencies.Config(base=10000.0),
+                dtype=None
+        )

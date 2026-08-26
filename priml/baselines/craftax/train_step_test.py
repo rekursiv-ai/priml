@@ -58,6 +58,27 @@ def test_the_network_is_sized_from_the_environment() -> None:
     assert step.model.policy[-1].out_features == step.env.num_actions
 
 
+def test_eval_scores_without_advancing_the_training_environment() -> None:
+    """Evaluation must not step the env or bank episodes into training metrics.
+
+    ``eval_loss`` delegates to ``train_loss``, which calls ``collect()`` --
+    and ``collect`` advances ``_observation``/``_done`` and calls
+    ``_record_episodes``. So merely SCORING moved the world the next update
+    would train from, and folded eval episodes into the return/length averages
+    an experiment reads as training progress.
+    """
+    step = _step()
+    observation = step._observation.clone()
+    done = step._done.clone()
+    banked = len(step._finished_returns)
+
+    _ = step.eval_loss()
+
+    assert torch.equal(step._observation, observation), "eval moved the env"
+    assert torch.equal(step._done, done), "eval moved the done flags"
+    assert len(step._finished_returns) == banked, "eval banked episodes"
+
+
 def test_one_step_consumes_the_declared_interactions() -> None:
     step = _step()
     assert step.steps_per_update == 2 * 2
@@ -168,6 +189,27 @@ def test_action_logits_can_be_read_for_arbitrary_observations() -> None:
     logits = step.call_eval(observation=torch.zeros(3, step.env.observation_size))
     assert logits.shape == (3, step.env.num_actions)
     assert not logits.requires_grad
+
+
+def test_evaluation_actor_samples_policy_logits_and_preserves_mode() -> None:
+    step = _step()
+    for parameter in step.model.policy.parameters():
+        torch.nn.init.zeros_(parameter)
+    head = step.model.policy[-1]
+    assert isinstance(head, torch.nn.Linear)
+    assert head.bias is not None
+    head.bias.data[7] = 100.0
+    actor = step.make_evaluation_actor()
+    actor.reset(num_envs=2, device=torch.device("cpu"))
+
+    action = actor.act(
+        torch.zeros(2, step.env.observation_size),
+        torch.zeros(2, dtype=torch.bool),
+        generator=torch.Generator().manual_seed(0),
+    )
+
+    assert action.tolist() == [7, 7]
+    assert step.model.training
 
 
 def test_a_checkpoint_resumes_an_identical_run() -> None:

@@ -1,14 +1,37 @@
-"""Tests for moe module."""
+"""Tests for ``MoE``, including bit-for-bit golden coverage.
+
+Regenerate after an intentional numeric change::
+
+    BFB_REGENERATE=1 uv --quiet run --frozen pytest priml/model/moe_test.py
+
+Run through ``pytest``: the priml ``conftest.py`` sets ``MKL_CBWR`` and caps
+math threads before torch imports. Minting from bare Python skips that setup.
+"""
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+from typing import cast
+
+from torch import Tensor
 
 import pytest
 import torch
 
 from priml.model.moe import MoE, Router
+from priml.testing.bfb import (
+    assert_bfb_against_golden,
+    bfb_devices,
+    move_to_device,
+)
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+from priml.testing.golden import assert_text_golden
+
+
+_TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
 def test_router_rejects_top_k_above_num_experts():
@@ -65,10 +88,12 @@ def test_router_reset():
     m.reset_parameters()
 
 
-def test_router_forward_drops_extra_args():
+def test_router_forward_accepts_messages_and_rejects_positional_extras():
     m = Router.Config(channels_in=64, num_experts=4).make()
     x = torch.randn(2, 8, 64)
-    m(x, "extra", key="val")
+    m(x, key="val")
+    with pytest.raises(TypeError):
+        cast(Callable[..., object], m)(x, "extra")
 
 
 def test_moe():
@@ -99,13 +124,15 @@ def test_moe_reset():
     m.reset_parameters()
 
 
-def test_moe_forward_drops_extra_args():
+def test_moe_forward_accepts_messages_and_rejects_positional_extras():
     m = MoE.Config(
         channels_in=64,
         router=Router.Config(num_experts=4, top_k=2),
     ).make()
     x = torch.randn(2, 8, 64)
-    assert m(x, "extra", key="val").shape == (2, 8, 64)
+    assert m(x, key="val").shape == (2, 8, 64)
+    with pytest.raises(TypeError):
+        cast(Callable[..., object], m)(x, "extra")
 
 
 def test_moe_channels_infer():
@@ -288,6 +315,73 @@ def test_group_topk_masks_inactive_groups():
     x = torch.randn(8, 32)
     _, indices, _ = m.router(x)
     assert ((indices >= 0) & (indices < 4)).all()
+
+
+def test_router_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = Router.Config(channels_in=4, num_experts=2, top_k=1)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="router",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+def test_moe_config_pprint(request: pytest.FixtureRequest) -> None:
+    config = MoE.Config(
+        channels_in=4,
+        router=Router.Config(num_experts=2, top_k=1),
+    )
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="moe",
+        rendered=config.pformat(hide_default_values=False),
+    )
+
+
+@pytest.mark.parametrize("device", bfb_devices(), ids=str)
+def test_router_bfb(device: str) -> None:
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="router",
+        build_module=lambda: (
+            Router.Config(channels_in=4, num_experts=2, top_k=1).make().to(device)
+        ),
+        build_input=lambda: move_to_device(torch.randn(4, 4), device),
+        seed=0,
+        run=lambda module, x: _first_tensor(module(x)),
+    )
+
+
+@pytest.mark.parametrize("device", bfb_devices(), ids=str)
+def test_moe_bfb(device: str) -> None:
+    """Regenerate with ``BFB_REGENERATE=1`` against this canonical sidecar."""
+    assert_bfb_against_golden(
+        golden_dir=_TESTDATA,
+        golden_name="moe",
+        build_module=lambda: (
+            MoE.Config(
+                channels_in=4,
+                router=Router.Config(num_experts=2, top_k=1),
+            )
+            .make()
+            .to(device)
+        ),
+        build_input=lambda: move_to_device(torch.randn(2, 2, 4), device),
+        seed=0,
+        run=lambda module, x: _first_tensor(module(x)),
+    )
+
+
+def _first_tensor(result: Tensor | tuple[object, ...] | list[object]) -> Tensor:
+    """Extract the primary output tensor from a module's return value."""
+    if isinstance(result, (tuple, list)):
+        head = result[0]
+        assert isinstance(head, Tensor)
+        return head
+    assert isinstance(result, Tensor)
+    return result
 
 
 if __name__ == "__main__":

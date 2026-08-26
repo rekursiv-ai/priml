@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import TYPE_CHECKING, Any, Self, override
+from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
@@ -20,7 +20,12 @@ import torch
 from priml.math.activations import relu_squared
 from priml.math.basic import ceil_multiple
 from priml.math.custom_types import TensorFn
-from priml.model.custom_types import ChannelsIn, ShardStyle, TensorModule
+from priml.model.custom_types import (
+    ChannelsIn,
+    DepthIndex,
+    ShardStyle,
+    TensorModule,
+)
 from priml.model.init import InitFn, kaiming_uniform, unit_fan_in_uniform
 from priml.model.linear import Linear
 
@@ -83,7 +88,7 @@ class SwiGLU(nn.Module):
         act: TensorFn = nn.functional.silu
         """Nonlinearity on the gate branch; ``norm`` requires it be ``silu``."""
 
-        depth: int = -1
+        depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
         init_weight: InitFn = kaiming_uniform
@@ -117,7 +122,7 @@ class SwiGLU(nn.Module):
         c_h = config.channels_hidden
         c_out = config.channels_out
         self.gate = config.gate
-        self.depth = config.depth
+        self.depth_index = config.depth_index
         self.channels_hidden = c_h
         self.split_gate_projection = config.split_gate_projection
         self.shard = config.shard
@@ -127,14 +132,14 @@ class SwiGLU(nn.Module):
             channels_in=c_in,
             channels_out=(c_h * 2) if config.gate else c_h,
             bias=config.bias,
-            depth=config.depth,
+            depth_index=config.depth_index,
             init_weight=config.init_weight,
         ).make()
         self.down_proj = Linear.Config(
             channels_in=c_h,
             channels_out=c_out,
             bias=config.bias,
-            depth=config.depth,
+            depth_index=config.depth_index,
             init_weight=config.init_weight_out or config.init_weight,
         ).make()
         self.act = config.act
@@ -156,8 +161,8 @@ class SwiGLU(nn.Module):
             self.norm.reset_parameters()
 
     @override
-    def forward(self, x: Tensor, *args: Any, **kwargs: Any) -> Tensor:
-        del args, kwargs
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
         if self.gate:
             if self.split_gate_projection:
                 gate, x = self._split_gate_projection(x)

@@ -1,0 +1,355 @@
+KimiK2.Config(
+                vocab_size=32,
+                channels_in=16,
+                num_layers=2,
+                block=[
+                │       TransformerBlock.Config(
+                │               channels_in=16,
+                │               attn=MultiHeadLatentAttention.Config(
+                │               │       channels_in=16,
+                │               │       num_heads=2,
+                │               │       channels_qk_nope_head=4,
+                │               │       channels_qk_rope_head=4,
+                │               │       channels_v_head=4,
+                │               │       q_lora_rank=None,
+                │               │       kv_lora_rank=8,
+                │               │       bias=False,
+                │               │       dropout=0.0,
+                │               │       causal=True,
+                │               │       softmax_scale=None,
+                │               │       rope=RoPE.Config(
+                │               │               channels_head=4,
+                │               │               reduction_mode='cat',
+                │               │               frequencies=HuggingFaceFrequencies.Config(
+                │               │                       base=50000.0
+                │               │               ),
+                │               │               dtype=None
+                │               │       ),
+                │               │       attn_kernel=LatentAttention.Config(
+                │               │               absorb=True,
+                │               │               attn_kernel=SdpaNaive.Config()
+                │               │       ),
+                │               │       norm_q_lora=RMSNorm.Config(
+                │               │               channels_in=-1,
+                │               │               eps=1e-06,
+                │               │               elementwise_affine=True,
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               channels_out=-1
+                │               │       ),
+                │               │       proj_q=Linear.Config(
+                │               │               channels_in=16,
+                │               │               channels_out=16,
+                │               │               bias=False,
+                │               │               depth_index=((0, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_q_a=Linear.Config(
+                │               │               channels_in=-1,
+                │               │               channels_out=-1,
+                │               │               bias=False,
+                │               │               depth_index=(),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_q_b=Linear.Config(
+                │               │               channels_in=-1,
+                │               │               channels_out=-1,
+                │               │               bias=False,
+                │               │               depth_index=(),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_kv_a=Linear.Config(
+                │               │               channels_in=16,
+                │               │               channels_out=12,
+                │               │               bias=False,
+                │               │               depth_index=((0, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_kv_b=Linear.Config(
+                │               │               channels_in=8,
+                │               │               channels_out=16,
+                │               │               bias=False,
+                │               │               depth_index=((0, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_out=Linear.Config(
+                │               │               channels_in=8,
+                │               │               channels_out=16,
+                │               │               bias=False,
+                │               │               depth_index=((0, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       norm_kv_lora=RMSNorm.Config(
+                │               │               channels_in=8,
+                │               │               eps=1e-06,
+                │               │               elementwise_affine=True,
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               channels_out=8
+                │               │       ),
+                │               │       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │       depth_index=((0, 2),),
+                │               │       shard=None,
+                │               │       channels_out=16
+                │               ),
+                │               ffn=SwiGLU.Config(
+                │                       channels_in=16,
+                │                       channels_out=16,
+                │                       channels_hidden=32,
+                │                       expansion=2.6666666666666665,
+                │                       round_to=256,
+                │                       gate=True,
+                │                       bias=False,
+                │                       split_gate_projection=False,
+                │                       norm=None,
+                │                       act=<function silu at 0x0defaced0def>,
+                │                       depth_index=((0, 2),),
+                │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │                       init_weight_out=None,
+                │                       shard='colwise'
+                │               ),
+                │               norm1=RMSNorm.Config(
+                │                       channels_in=16,
+                │                       eps=1e-06,
+                │                       elementwise_affine=True,
+                │                       device=None,
+                │                       dtype=None,
+                │                       channels_out=16
+                │               ),
+                │               norm2=RMSNorm.Config(
+                │                       channels_in=16,
+                │                       eps=1e-06,
+                │                       elementwise_affine=True,
+                │                       device=None,
+                │                       dtype=None,
+                │                       channels_out=16
+                │               ),
+                │               prenorm=True,
+                │               checkpoint=False,
+                │               depth_index=((0, 2),),
+                │               channels_out=16
+                │       ),
+                │       TransformerBlock.Config(
+                │               channels_in=16,
+                │               attn=MultiHeadLatentAttention.Config(
+                │               │       channels_in=16,
+                │               │       num_heads=2,
+                │               │       channels_qk_nope_head=4,
+                │               │       channels_qk_rope_head=4,
+                │               │       channels_v_head=4,
+                │               │       q_lora_rank=None,
+                │               │       kv_lora_rank=8,
+                │               │       bias=False,
+                │               │       dropout=0.0,
+                │               │       causal=True,
+                │               │       softmax_scale=None,
+                │               │       rope=RoPE.Config(
+                │               │               channels_head=4,
+                │               │               reduction_mode='cat',
+                │               │               frequencies=HuggingFaceFrequencies.Config(
+                │               │                       base=50000.0
+                │               │               ),
+                │               │               dtype=None
+                │               │       ),
+                │               │       attn_kernel=LatentAttention.Config(
+                │               │               absorb=True,
+                │               │               attn_kernel=SdpaNaive.Config()
+                │               │       ),
+                │               │       norm_q_lora=RMSNorm.Config(
+                │               │               channels_in=-1,
+                │               │               eps=1e-06,
+                │               │               elementwise_affine=True,
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               channels_out=-1
+                │               │       ),
+                │               │       proj_q=Linear.Config(
+                │               │               channels_in=16,
+                │               │               channels_out=16,
+                │               │               bias=False,
+                │               │               depth_index=((1, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_q_a=Linear.Config(
+                │               │               channels_in=-1,
+                │               │               channels_out=-1,
+                │               │               bias=False,
+                │               │               depth_index=(),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_q_b=Linear.Config(
+                │               │               channels_in=-1,
+                │               │               channels_out=-1,
+                │               │               bias=False,
+                │               │               depth_index=(),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_kv_a=Linear.Config(
+                │               │               channels_in=16,
+                │               │               channels_out=12,
+                │               │               bias=False,
+                │               │               depth_index=((1, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_kv_b=Linear.Config(
+                │               │               channels_in=8,
+                │               │               channels_out=16,
+                │               │               bias=False,
+                │               │               depth_index=((1, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       proj_out=Linear.Config(
+                │               │               channels_in=8,
+                │               │               channels_out=16,
+                │               │               bias=False,
+                │               │               depth_index=((1, 2),),
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               shard=None
+                │               │       ),
+                │               │       norm_kv_lora=RMSNorm.Config(
+                │               │               channels_in=8,
+                │               │               eps=1e-06,
+                │               │               elementwise_affine=True,
+                │               │               device=None,
+                │               │               dtype=None,
+                │               │               channels_out=8
+                │               │       ),
+                │               │       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │       depth_index=((1, 2),),
+                │               │       shard=None,
+                │               │       channels_out=16
+                │               ),
+                │               ffn=MoE.Config(
+                │               │       channels_in=16,
+                │               │       channels_out=16,
+                │               │       router=Router.Config(
+                │               │               channels_in=16,
+                │               │               num_experts=2,
+                │               │               top_k=1,
+                │               │               jitter_noise=0.0,
+                │               │               scoring_func='sigmoid',
+                │               │               norm_topk_prob=True,
+                │               │               routed_scaling_factor=2.0,
+                │               │               n_group=1,
+                │               │               topk_group=1,
+                │               │               use_correction_bias=True
+                │               │       ),
+                │               │       expert=SwiGLU.Config(
+                │               │               channels_in=16,
+                │               │               channels_out=16,
+                │               │               channels_hidden=16,
+                │               │               expansion=2.6666666666666665,
+                │               │               round_to=256,
+                │               │               gate=True,
+                │               │               bias=False,
+                │               │               split_gate_projection=False,
+                │               │               norm=None,
+                │               │               act=<function silu at 0x0defaced0def>,
+                │               │               depth_index=((1, 2),),
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_weight_out=None,
+                │               │               shard='colwise'
+                │               │       ),
+                │               │       num_shared_experts=1,
+                │               │       shared_expert=SwiGLU.Config(
+                │               │               channels_in=16,
+                │               │               channels_out=16,
+                │               │               channels_hidden=16,
+                │               │               expansion=2.6666666666666665,
+                │               │               round_to=256,
+                │               │               gate=True,
+                │               │               bias=False,
+                │               │               split_gate_projection=False,
+                │               │               norm=None,
+                │               │               act=<function silu at 0x0defaced0def>,
+                │               │               depth_index=((1, 2),),
+                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_weight_out=None,
+                │               │               shard='colwise'
+                │               │       ),
+                │               │       aux_loss_weight=0.01,
+                │               │       depth_index=((1, 2),)
+                │               ),
+                │               norm1=RMSNorm.Config(
+                │                       channels_in=16,
+                │                       eps=1e-06,
+                │                       elementwise_affine=True,
+                │                       device=None,
+                │                       dtype=None,
+                │                       channels_out=16
+                │               ),
+                │               norm2=RMSNorm.Config(
+                │                       channels_in=16,
+                │                       eps=1e-06,
+                │                       elementwise_affine=True,
+                │                       device=None,
+                │                       dtype=None,
+                │                       channels_out=16
+                │               ),
+                │               prenorm=True,
+                │               checkpoint=False,
+                │               depth_index=((1, 2),),
+                │               channels_out=16
+                │       )
+                ],
+                final_norm=RMSNorm.Config(
+                        channels_in=16,
+                        eps=1e-06,
+                        elementwise_affine=True,
+                        device=None,
+                        dtype=None,
+                        channels_out=16
+                ),
+                tie_embeddings=False,
+                lm_head=None,
+                channels_hidden_dense=32,
+                channels_hidden_expert=16,
+                first_k_dense_replace=1
+        )

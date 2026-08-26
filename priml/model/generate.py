@@ -26,8 +26,8 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.attention.kvcache import KVCache
 from priml.model.custom_types import LookupTable, TensorModule
-from priml.model.kvcache import KVCache
 
 
 class AttentionLike(Protocol):
@@ -44,13 +44,17 @@ class AttentionLike(Protocol):
 
 
 class BlockLike(Protocol):
-    """One transformer block: callable with a cache, exposing ``attn``."""
+    """One transformer block with an explicit cached path."""
 
     attn: AttentionLike
 
-    def __call__(
-        self, x: Tensor, /, *, cache: KVCache | None = None
-    ) -> Tensor | tuple[Tensor, KVCache]: ...
+    def forward_cached(
+        self,
+        x: Tensor,
+        /,
+        *,
+        cache: KVCache,
+    ) -> tuple[Tensor, KVCache]: ...
 
 
 class CausalLMLike(Protocol):
@@ -126,11 +130,7 @@ def generate(
 
     x: Tensor = model.embed(prompt_ids)
     for i, block in enumerate(blocks):
-        result: Tensor | tuple[Tensor, KVCache] = block(x, cache=caches[i])
-        if isinstance(result, tuple):
-            x, caches[i] = result
-        else:
-            x = result
+        x, caches[i] = block.forward_cached(x, cache=caches[i])
     x = model.final_norm(x)
     logits: Tensor = model.project_to_logits(x[:, -1:, :])
 
@@ -148,11 +148,7 @@ def generate(
 
         x = model.embed(next_token)
         for i, block in enumerate(blocks):
-            step_result: Tensor | tuple[Tensor, KVCache] = block(x, cache=caches[i])
-            if isinstance(step_result, tuple):
-                x, caches[i] = step_result
-            else:
-                x = step_result
+            x, caches[i] = block.forward_cached(x, cache=caches[i])
         x = model.final_norm(x)
         logits = model.project_to_logits(x)
 

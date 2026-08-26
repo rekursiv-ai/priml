@@ -12,7 +12,7 @@ from priml.model.init import dirac
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_GOLDEN_DIR = Path(__file__).parent.resolve() / "goldens"
+_TESTDATA_DIR = Path(__file__).parent.resolve() / "testdata"
 
 
 def tiny_resnet() -> ResNet.Config:
@@ -147,8 +147,8 @@ def test_speednet_dirac_init_passes_input_through_each_block() -> None:
 
 def test_resnet_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="resnet_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="resnet",
         build_module=lambda: tiny_resnet().make(),
         build_input=lambda: torch.randn(2, 3, 8, 8),
         seed=0,
@@ -168,8 +168,8 @@ def test_speednet_bfb() -> None:
     # catch, since BatchNorm runs with ``affine=False`` and the harness never
     # reaches training mode.
     assert_bfb_against_golden(
-        golden_dir=_GOLDEN_DIR,
-        golden_name="speednet_min_cpu",
+        golden_dir=_TESTDATA_DIR,
+        golden_name="speednet",
         build_module=lambda: tiny_speednet().make(),
         build_input=lambda: torch.randn(1, 3, 32, 32),
         seed=0,
