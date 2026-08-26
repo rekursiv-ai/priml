@@ -118,6 +118,14 @@ class EnsembleLinear(nn.Module):
         shard: ShardStyle | None = None
         """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
 
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.shard = config.shard

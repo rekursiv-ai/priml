@@ -39,6 +39,9 @@ class MultiStreamAttention(nn.Module):
         channels_in: int = -1
         """Channel width shared across all streams."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         num_streams: int = 2
@@ -91,9 +94,6 @@ class MultiStreamAttention(nn.Module):
         depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
@@ -105,6 +105,11 @@ class MultiStreamAttention(nn.Module):
             )
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for MultiStreamAttention."
+                )
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.num_heads
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:

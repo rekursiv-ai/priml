@@ -15,7 +15,7 @@ an explicit list whose length IS the block count.
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import KW_ONLY, field
 from typing import Self, cast, override
 
 from configgle import Fig, Makeable
@@ -48,6 +48,8 @@ class ResidualBlock(nn.Module):
 
         channels_out: int = -1
         """Output channels (-1 to infer from channels_in)."""
+
+        _: KW_ONLY
 
         stride: int = 1
         """Spatial stride of the first convolution; 2 halves resolution."""
@@ -123,6 +125,8 @@ class ConvBlock(nn.Module):
 
         channels_out: int = -1
         """Output channels (-1 to infer from channels_in)."""
+
+        _: KW_ONLY
 
         num_convs: int = 3
         """Convolutions in this block; 3 adds a residual connection."""
@@ -205,11 +209,21 @@ class ScaledLinear(nn.Linear):
         channels_out: int = -1
         """Output features."""
 
+        _: KW_ONLY
+
         scale: float = 0.0
         """Output multiplier; 0 means ``1 / channels_in``."""
 
         bias: bool = False
         """Whether the projection learns an additive bias."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            return super().finalize()
 
     def __init__(self, config: Config) -> None:
         super().__init__(config.channels_in, config.channels_out, bias=config.bias)
@@ -240,14 +254,16 @@ class ResNet(nn.Module):
     class Config(Fig["ResNet"]):
         """Width and block composition of the residual stack."""
 
-        channels_in: int = 3
+        channels_in: int = -1
         """Input image channels."""
+
+        channels_out: int = -1
+        """Output logits, one per class."""
+
+        _: KW_ONLY
 
         channels_hidden: tuple[int, ...] = (64, 128, 256)
         """Width of each stage; the first also sizes the stem."""
-
-        channels_out: int = 10
-        """Output logits, one per class."""
 
         block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
             default_factory=ResidualBlock.Config,
@@ -370,14 +386,16 @@ class SpeedNet(nn.Module):
     class Config(Fig["SpeedNet"]):
         """Width and block composition of the speedrun network."""
 
-        channels_in: int = 3
+        channels_in: int = -1
         """Input image channels."""
+
+        channels_out: int = -1
+        """Output logits, one per class."""
+
+        _: KW_ONLY
 
         channels_hidden: tuple[int, ...] = (128, 384, 512)
         """Width of each convolution block."""
-
-        channels_out: int = 10
-        """Output logits, one per class."""
 
         block: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
             default_factory=ConvBlock.Config,

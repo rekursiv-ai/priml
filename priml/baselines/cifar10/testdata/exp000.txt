@@ -7,8 +7,8 @@ Cifar10TrainLoop(
                 step=Cifar10TrainStep.Config(
                 │       model=ResNet.Config(
                 │               channels_in=3,
-                │               channels_hidden=(64, 128, 256),
                 │               channels_out=10,
+                │               channels_hidden=(64, 128, 256),
                 │               block=ResidualBlock.Config(
                 │                       channels_in=-1,
                 │                       channels_out=-1,

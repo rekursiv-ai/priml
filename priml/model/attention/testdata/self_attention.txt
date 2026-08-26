@@ -1,5 +1,6 @@
 SelfAttention.Config(
                 channels_in=16,
+                channels_out=16,
                 num_heads=2,
                 channels_head=8,
                 num_heads_kv=2,
@@ -13,6 +14,5 @@ SelfAttention.Config(
                 split_qkv_projection=False,
                 attn_kernel=SdpaFused.Config(),
                 init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                depth_index=(),
-                channels_out=16
+                depth_index=()
         )

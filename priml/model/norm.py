@@ -41,6 +41,9 @@ class RMSNorm(nn.Module):
         channels_in: int = -1
         """Number of input channels (normalized shape)."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         eps: float | None = 1e-6
@@ -60,15 +63,17 @@ class RMSNorm(nn.Module):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -121,13 +126,13 @@ class CenteredRMSNorm(nn.Module):
         channels_in: int = -1
         """Number of input channels (normalized shape)."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         eps: float = 1e-6
         """Epsilon for numerical stability."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
 
         @override
         def finalize(self) -> Self:
@@ -135,6 +140,11 @@ class CenteredRMSNorm(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -169,6 +179,9 @@ class LayerNorm(nn.LayerNorm):
         channels_in: int = -1
         """Number of input channels (normalized shape)."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         eps: float = 1e-5
@@ -183,15 +196,17 @@ class LayerNorm(nn.LayerNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -224,6 +239,9 @@ class BatchNorm(nn.BatchNorm1d):
         channels_in: int = -1
         """Number of input channels."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         momentum: float = 0.1
@@ -241,15 +259,17 @@ class BatchNorm(nn.BatchNorm1d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -309,6 +329,11 @@ class BatchRenorm(nn.Module):
         channels_in: int = -1
         """Width of the axis being normalized (-1 to infer from channels_out)."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
+        _: KW_ONLY
+
         momentum: float = 0.999
         """Retention of the running statistics per update.
 
@@ -331,15 +356,17 @@ class BatchRenorm(nn.Module):
         max_drift: float = 5.0
         """Bound on the mean correction, in running standard deviations."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -461,6 +488,9 @@ class BatchNorm2d(nn.BatchNorm2d):
         channels_in: int = -1
         """Number of input channels."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         momentum: float = 0.1
@@ -478,15 +508,17 @@ class BatchNorm2d(nn.BatchNorm2d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -526,6 +558,9 @@ class GroupNorm2d(nn.GroupNorm):
         channels_in: int = -1
         """Number of input channels."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         num_groups: int = 8
@@ -543,15 +578,17 @@ class GroupNorm2d(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -585,6 +622,9 @@ class GroupNorm(nn.GroupNorm):
         channels_in: int = -1
         """Number of input channels."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         num_groups: int = 8
@@ -602,15 +642,17 @@ class GroupNorm(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @override
         def finalize(self) -> Self:
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out}."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

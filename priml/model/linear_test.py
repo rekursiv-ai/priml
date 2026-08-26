@@ -108,6 +108,11 @@ def test_linear_arbitrary_batch_dims():
     assert m(x).shape == (2, 3, 4, 8, 32)
 
 
+def test_ensemble_linear_infers_either_channel_boundary() -> None:
+    assert EnsembleLinear.Config(channels_in=64).finalize().channels_out == 64
+    assert EnsembleLinear.Config(channels_out=32).finalize().channels_in == 32
+
+
 def test_ensemble_linear():
     m = EnsembleLinear.Config(channels_in=64, channels_out=16, num_ensemble=4).make()
     x = torch.randn(2, 8, 64)

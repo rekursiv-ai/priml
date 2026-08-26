@@ -14,6 +14,7 @@ from priml.model.custom_types import (
     TensorModule,
 )
 from priml.model.passthrough import (
+    PassthroughAttribute,
     ReadPassthroughMixin,
     ReadWritePassthroughMixin,
 )
@@ -37,6 +38,11 @@ class Identity(nn.Identity):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for Identity."
+                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -71,15 +77,8 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         inner: Makeable[TensorModule] | None = None
         """Submodule to wrap with a residual connection."""
 
-        @property
-        def channels_in(self) -> int:
-            """Return the wrapped config's input width."""
-            return int(getattr(self.inner, "channels_in", -1))
-
-        @property
-        def channels_out(self) -> int:
-            """Return the wrapped config's output width."""
-            return int(getattr(self.inner, "channels_out", -1))
+        channels_in = PassthroughAttribute[int]()
+        channels_out = PassthroughAttribute[int]()
 
     def __init__(self, config: Config) -> None:
         if config.inner is None:

@@ -186,6 +186,9 @@ class MultiHeadLatentAttention(nn.Module):
         channels_in: int = -1
         """Model width."""
 
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         num_heads: int = -1
@@ -293,9 +296,6 @@ class MultiHeadLatentAttention(nn.Module):
         block, not per child projection.
         """
 
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
         @property
         def channels_qk_head(self) -> int:
             return self.channels_qk_nope_head + self.channels_qk_rope_head
@@ -315,6 +315,11 @@ class MultiHeadLatentAttention(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.channels_in != self.channels_out:
+                raise ValueError(
+                    f"channels_in={self.channels_in} must equal "
+                    f"channels_out={self.channels_out} for MultiHeadLatentAttention."
+                )
             if (
                 self.q_lora_rank is not None
                 and isinstance(self.norm_q_lora, ChannelsIn)

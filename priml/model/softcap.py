@@ -40,19 +40,19 @@ class SoftCap(nn.Module):
     """A projection whose output is squashed into ``[-cap, cap]``."""
 
     class Config(Fig["SoftCap"], kw_only=False):
-        cap: float = 15.0
-        """Bound the output is squashed into, in both directions."""
-
-        _: KW_ONLY
-
-        inner: Makeable[TensorModule] = field(default_factory=Linear.Config)
-        """The projection being bounded."""
-
         channels_in: int = -1
         """Input width; forwarded to ``inner``."""
 
         channels_out: int = -1
         """Output width; forwarded to ``inner``."""
+
+        _: KW_ONLY
+
+        cap: float = 15.0
+        """Bound the output is squashed into, in both directions."""
+
+        inner: Makeable[TensorModule] = field(default_factory=Linear.Config)
+        """The projection being bounded."""
 
         dtype: torch.dtype | None = torch.float32
         """Width the projection's output is cast to; None keeps its own.
@@ -67,6 +67,10 @@ class SoftCap(nn.Module):
 
         @override
         def finalize(self) -> Self:
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
             propagate_attr(
                 self.inner, "channels_in", self.channels_in, protocol=ChannelsIn
             )
