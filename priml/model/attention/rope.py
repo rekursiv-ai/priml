@@ -323,12 +323,12 @@ class RoPE(nn.Module):
         c = config.channels_head
         self.reduction_mode = config.reduction_mode
         tables = config.frequencies
-        channels: Sequence[int] = list(c) if isinstance(c, Sequence) else [c]
+        channels: list[int] = [int(v) for v in c] if isinstance(c, Sequence) else [c]
         if isinstance(tables, list):
             if config.reduction_mode == "cat" and isinstance(c, int):
                 channels = self._split_dim(c, len(tables))
             if len(channels) == 1 and len(tables) > 1:
-                channels = list(channels) * len(tables)
+                channels = channels * len(tables)
             if len(channels) != len(tables):
                 raise ValueError(
                     f"channels_head names {len(channels)} axes but frequencies "
