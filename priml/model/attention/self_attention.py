@@ -109,11 +109,6 @@ class SelfAttention(nn.Module):
             )
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for SelfAttention."
-                )
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.num_heads
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
@@ -126,6 +121,7 @@ class SelfAttention(nn.Module):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        _validate_head_dims(config)
         if (
             -1 not in (config.channels_in, config.channels_out)
             and config.channels_in != config.channels_out
@@ -397,25 +393,44 @@ def _infer_head_dims(
     channels_head: int,
 ) -> tuple[int, int, int]:
     """Infer one missing boundary or uniform-head dimension."""
-    if channels_in == -1 and num_heads != -1 and channels_head != -1:
+    if channels_in == -1 and num_heads > 0 and channels_head > 0:
         channels_in = num_heads * channels_head
-    if channels_head == -1 and channels_in != -1 and num_heads != -1:
-        if channels_in % num_heads != 0:
-            raise ValueError(
-                f"channels_in={channels_in} not divisible by "
-                f"num_heads={num_heads}; set channels_head explicitly.",
-            )
+    if (
+        channels_head == -1
+        and channels_in != -1
+        and num_heads > 0
+        and channels_in % num_heads == 0
+    ):
         channels_head = channels_in // num_heads
-    if num_heads == -1 and channels_in != -1 and channels_head != -1:
-        if channels_in % channels_head != 0:
-            raise ValueError(
-                f"channels_in={channels_in} not divisible by "
-                f"channels_head={channels_head}; set num_heads explicitly.",
-            )
+    if (
+        num_heads == -1
+        and channels_in != -1
+        and channels_head > 0
+        and channels_in % channels_head == 0
+    ):
         num_heads = channels_in // channels_head
-    if -1 in (channels_in, num_heads, channels_head):
-        raise ValueError(
-            f"Need at least two of channels_in={channels_in}, "
-            f"num_heads={num_heads}, channels_head={channels_head}.",
-        )
     return channels_in, num_heads, channels_head
+
+
+def _validate_head_dims(config: SelfAttention.Config) -> None:
+    """Reject geometry that stayed unresolved after finalize.
+
+    Only the inference contract, never a dimension's sign: torch raises on a
+    negative extent when it builds the tensor, and re-checking here would add a
+    second message for one fault (STYLE.md "Let the leaf complain").
+    """
+    if config.channels_head == -1 and config.channels_in != -1:
+        raise ValueError(
+            f"channels_in={config.channels_in} not divisible by "
+            f"num_heads={config.num_heads}; set channels_head explicitly.",
+        )
+    if config.num_heads == -1 and config.channels_in != -1:
+        raise ValueError(
+            f"channels_in={config.channels_in} not divisible by "
+            f"channels_head={config.channels_head}; set num_heads explicitly.",
+        )
+    if -1 in (config.channels_in, config.num_heads, config.channels_head):
+        raise ValueError(
+            f"Need at least two of channels_in={config.channels_in}, "
+            f"num_heads={config.num_heads}, channels_head={config.channels_head}.",
+        )

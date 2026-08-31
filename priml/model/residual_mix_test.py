@@ -9,29 +9,24 @@ applies::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from configgle.testing import assert_pprint_golden
 
 import torch
 
 from priml.model.residual_mix import ResidualMix
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.golden import assert_text_golden
-
-
-if TYPE_CHECKING:
-    import pytest
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_residual_mix_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_residual_mix_config_pprint() -> None:
     config = ResidualMix.Config(num_layers=2, running=0.5, original=0.25)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="residual_mix",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

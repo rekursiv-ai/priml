@@ -13,11 +13,11 @@ Cifar10TrainLoop(
                 │                       channels_in=-1,
                 │                       channels_out=-1,
                 │                       stride=1,
-                │                       activation=<built-in method relu of type object at 0x0defaced0def>,
+                │                       activation=<built-in method relu of type object at 0xdefacedeface>,
                 │                       norm_momentum=0.1
                 │               ),
                 │               blocks_per_stage=2,
-                │               activation=<built-in method relu of type object at 0x0defaced0def>,
+                │               activation=<built-in method relu of type object at 0xdefacedeface>,
                 │               norm_momentum=0.1,
                 │               proj_out=None
                 │       ),
@@ -30,7 +30,7 @@ Cifar10TrainLoop(
                 │               drop_empty=False
                 │       ),
                 │       loss=SimpleLoss.Config(
-                │               loss_fn=<function binary_cross_entropy_with_logits at 0x0defaced0def>,
+                │               loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
                 │               target_key='label',
                 │               kwargs={'reduction': 'none'}
                 │       ),
@@ -39,18 +39,18 @@ Cifar10TrainLoop(
                 │       train_budget_steps=inf,
                 │       train_budget_sec=inf,
                 │       train_budget_epochs=inf,
-                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function constant at 0x0defaced0def>),
+                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
                 │       parallelism=NoParallel.Config(device='auto'),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
-                │       compile=PartialConfig(<class 'functools.partial'>, <function compile at 0x0defaced0def>, fullgraph=True),
+                │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
                 │       ema=NoEMA.Config(),
                 │       gradient_clip_norm=inf,
                 │       device_init='eager',
                 │       dtype_autocast=None,
                 │       autocast_cache_enabled=False,
                 │       total_train_steps=2_910,
-                │       schedule=PartialConfig(<class 'functools.partial'>, <function cosine at 0x0defaced0def>),
+                │       schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.cosine at 0xdefacedeface>),
                 │       warmup_fraction=0.02,
                 │       label_smoothing=0.1,
                 │       translate_pad=4,
@@ -59,7 +59,7 @@ Cifar10TrainLoop(
                 │       use_tta=False,
                 │       whiten_num_images=5_000,
                 │       whiten_cache_path='',
-                │       whiten_decompose=<function pca_eigh at 0x0defaced0def>
+                │       whiten_decompose=<function priml.math.stats.pca_eigh at 0xdefacedeface>
                 ),
                 dataset=Cifar10Data.Config(
                         base_dir='/opt/scratch',

@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
-from torch import Tensor
+from configgle.testing import assert_pprint_golden
 
 import pytest
 import torch
@@ -23,12 +23,12 @@ from priml.model.moe import MoE, Router
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
+    first_tensor,
     move_to_device,
 )
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -289,7 +289,10 @@ def test_router_rejects_unknown_scoring_func():
     previously hit the ``softmax`` else-branch with no error.
     """
     cfg = Router.Config(channels_in=8, num_experts=4, top_k=2)
-    object.__setattr__(cfg, "scoring_func", "softmaxx")
+    # The literal is what the guard defends against, so the checker rejecting
+    # it is correct: a caller reaching this branch got here from JSON, a CLI
+    # override, or an untyped dict, none of which the annotation constrains.
+    cfg.scoring_func = cast('Literal["softmax", "sigmoid"]', "softmaxx")
     with pytest.raises(ValueError, match="scoring_func"):
         cfg.make()
 
@@ -317,26 +320,24 @@ def test_group_topk_masks_inactive_groups():
     assert ((indices >= 0) & (indices < 4)).all()
 
 
-def test_router_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_router_config_pprint() -> None:
     config = Router.Config(channels_in=4, num_experts=2, top_k=1)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="router",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_moe_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_moe_config_pprint() -> None:
     config = MoE.Config(
         channels_in=4,
         router=Router.Config(num_experts=2, top_k=1),
     )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="moe",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -350,7 +351,7 @@ def test_router_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(4, 4), device),
         seed=0,
-        run=lambda module, x: _first_tensor(module(x)),
+        run=lambda module, x: first_tensor(module(x)),
     )
 
 
@@ -370,18 +371,8 @@ def test_moe_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(2, 2, 4), device),
         seed=0,
-        run=lambda module, x: _first_tensor(module(x)),
+        run=lambda module, x: first_tensor(module(x)),
     )
-
-
-def _first_tensor(result: Tensor | tuple[object, ...] | list[object]) -> Tensor:
-    """Extract the primary output tensor from a module's return value."""
-    if isinstance(result, (tuple, list)):
-        head = result[0]
-        assert isinstance(head, Tensor)
-        return head
-    assert isinstance(result, Tensor)
-    return result
 
 
 if __name__ == "__main__":

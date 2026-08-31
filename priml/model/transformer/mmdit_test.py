@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from configgle.testing import assert_pprint_golden
+
 import pytest
 import torch
 
@@ -27,7 +29,6 @@ from priml.testing.bfb import (
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -57,12 +58,11 @@ def _canonical_mmdit_config() -> MMDiTBlock.Config:
     return config
 
 
-def test_adaln_zero_config_pprint(request: pytest.FixtureRequest) -> None:
-    assert_text_golden(
-        request,
+def test_adaln_zero_config_pprint() -> None:
+    assert_pprint_golden(
         test_file=__file__,
         name="ada_ln_zero",
-        rendered=_canonical_adaln_config().pformat(hide_default_values=False),
+        config=_canonical_adaln_config(),
     )
 
 
@@ -77,12 +77,11 @@ def test_adaln_zero_bfb() -> None:
     )
 
 
-def test_mmdit_block_config_pprint(request: pytest.FixtureRequest) -> None:
-    assert_text_golden(
-        request,
+def test_mmdit_block_config_pprint() -> None:
+    assert_pprint_golden(
         test_file=__file__,
         name="mmdit_block",
-        rendered=_canonical_mmdit_config().pformat(hide_default_values=False),
+        config=_canonical_mmdit_config(),
     )
 
 

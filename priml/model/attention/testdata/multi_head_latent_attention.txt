@@ -31,8 +31,8 @@ MultiHeadLatentAttention.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 proj_q_a=Linear.Config(
@@ -42,8 +42,8 @@ MultiHeadLatentAttention.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 proj_q_b=Linear.Config(
@@ -53,8 +53,8 @@ MultiHeadLatentAttention.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 proj_kv_a=Linear.Config(
@@ -64,8 +64,8 @@ MultiHeadLatentAttention.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 proj_kv_b=Linear.Config(
@@ -75,8 +75,8 @@ MultiHeadLatentAttention.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 proj_out=Linear.Config(
@@ -86,8 +86,8 @@ MultiHeadLatentAttention.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 norm_kv_lora=RMSNorm.Config(
@@ -98,7 +98,7 @@ MultiHeadLatentAttention.Config(
                         device=None,
                         dtype=None
                 ),
-                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 depth_index=(),
                 shard=None
         )

@@ -695,16 +695,53 @@ config.optimizer = plain_sgd  # Bad -- recipe, not size
 Touching the recipe (optimizer, schedule, loss, init) means the test no longer
 covers the experiment. Changing size never does that.
 
+### Pprint golden tests
+
+Use the public Configgle harness when a config's defaults and finalized
+propagation are part of its tested contract:
+
+```python
+from configgle.testing import assert_pprint_golden
+
+
+def test_sandwich_config_pprint() -> None:
+    assert_pprint_golden(
+        test_file=__file__,
+        name="sandwich",
+        config=Sandwich.Config(),
+    )
+```
+
+The harness finalizes the config and forces `hide_default_values=False`, so the
+golden catches inherited-default changes as well as explicit overrides. It
+stores `testdata/<name>.txt` beside the test. After an intentional change, read
+the diff, regenerate, inspect the file, then rerun without regeneration:
+
+```bash
+CONFIGGLE_REGENERATE_GOLDEN=1 uv --quiet run --frozen pytest <test_file>::<test_nodeid>
+uv --quiet run --frozen pytest <test_file>::<test_nodeid>
+```
+
+Import from `configgle.testing`, never through a consumer package's testing
+facade. Do not call `pformat` manually at the callsite; the harness owns the
+full finalized rendering policy.
+
+### Bit-for-bit goldens
+
 Goldens (`priml/testing/bfb.py`) make `exp000` frozen in practice rather than by
 convention: one per model (`state_dict` after init, plus the forward output) and
 one per optimizer stack (a few train steps, so loss, augmentation draws,
 schedule, and optimizer all reach the compared post-state). Mint and replay
 inside `host_agnostic_numerics()`, and return `.float()` from the runner: it
 computes in fp64 and the round BACK to fp32 is what makes the bits
-host-independent, since an fp64 kernel is itself approximate. Assert
-`torch.equal`, never `allclose`. Verify a golden BITES before trusting it:
+host-independent, since an fp64 kernel is itself approximate. Compare stored
+bits exactly, never with `allclose`. Verify a golden BITES before trusting it:
 perturb a constant and confirm the failure. Regenerating one means the recipe
 changed.
+
+Pprint goldens freeze configuration structure, defaults, and propagation. BFB
+goldens freeze initialized state and numerical outputs. A module commonly needs
+both; neither substitutes for the other.
 
 Experiment tests assert the DELTA -- exactly which fields each fork changes --
 which is what enforces "one change per experiment". That construction reads no

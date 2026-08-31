@@ -183,22 +183,11 @@ class ValueGatedAttention(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for ValueGatedAttention."
-                )
-            if self.channels_head <= 0 or self.channels_head % 2:
-                raise ValueError(
-                    "channels_head must be positive and even; got "
-                    f"{self.channels_head}.",
-                )
-            if self.num_heads == -1:
-                if self.channels_in % self.channels_head:
-                    raise ValueError(
-                        f"channels_in={self.channels_in} is not divisible by "
-                        f"channels_head={self.channels_head}; set num_heads.",
-                    )
+            if (
+                self.num_heads == -1
+                and self.channels_head > 0
+                and self.channels_in % self.channels_head == 0
+            ):
                 self.num_heads = self.channels_in // self.channels_head
             if self.window == -1 and self.max_seq_len > 0 and self.depth_index:
                 self.window = layer_window(
@@ -208,12 +197,6 @@ class ValueGatedAttention(nn.Module):
                 )
             if self.gate_channels == -1:
                 self.gate_channels = self.channels_in
-            if self.gate_channels <= 0 or self.gate_channels > self.channels_in:
-                raise ValueError(
-                    f"gate_channels={self.gate_channels} must be positive and "
-                    f"at most channels_in={self.channels_in}; the gate reads "
-                    "that many leading channels of the layer input.",
-                )
             # The norm sees one HEAD, not the residual stream, so it takes the
             # head width rather than the model width the block propagated.
             propagate_attr(
@@ -233,13 +216,25 @@ class ValueGatedAttention(nn.Module):
                 f"channels_in={config.channels_in} must equal "
                 f"channels_out={config.channels_out} for ValueGatedAttention."
             )
-        super().__init__()
-        if min(config.channels_in, config.num_heads, config.gate_channels) <= 0:
+        # Only constraints torch cannot state: RoPE pairs the head width, and
+        # the gate indexes into the layer input. A nonpositive extent is torch's
+        # to reject (STYLE.md "Let the leaf complain").
+        if config.channels_head % 2:
             raise ValueError(
-                "channels_in, num_heads, and gate_channels must be positive; they "
-                "are normally inherited from the block during finalize. Got "
-                f"{config.channels_in}, {config.num_heads}, {config.gate_channels}.",
+                f"channels_head must be even; got {config.channels_head}.",
             )
+        if config.num_heads == -1:
+            raise ValueError(
+                f"channels_in={config.channels_in} is not divisible by "
+                f"channels_head={config.channels_head}; set num_heads.",
+            )
+        if config.gate_channels > config.channels_in:
+            raise ValueError(
+                f"gate_channels={config.gate_channels} must be "
+                f"at most channels_in={config.channels_in}; the gate reads "
+                "that many leading channels of the layer input.",
+            )
+        super().__init__()
         self.config = config
         inner = config.num_heads * config.channels_head
         projection = Linear.Config(

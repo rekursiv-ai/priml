@@ -6,6 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from configgle.testing import assert_pprint_golden
+
 import pytest
 import torch
 
@@ -14,7 +16,6 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -45,13 +46,12 @@ def test_mlp_mixer_forward_accepts_messages_and_rejects_positional_extras():
         cast(Callable[..., object], m)(x, "extra")
 
 
-def test_mlp_mixer_block_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_mlp_mixer_block_config_pprint() -> None:
     config = MLPMixerBlock.Config(channels_in=4, seq_len=2)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="mlp_mixer_block",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

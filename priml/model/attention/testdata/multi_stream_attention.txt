@@ -13,6 +13,6 @@ MultiStreamAttention.Config(
                 share_qk_norm=True,
                 norm_out=None,
                 attn_kernel=SdpaFused.Config(),
-                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 depth_index=()
         )

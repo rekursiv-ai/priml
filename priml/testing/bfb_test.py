@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast, override
+from typing import TYPE_CHECKING, cast, override
 
-import inspect
+import ast
 import os
 
 from torch import Tensor, nn
@@ -15,6 +15,10 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 import pytest
 import torch
+
+
+if TYPE_CHECKING:
+    from torch._ops import OpOverload
 
 from priml.math.custom_types import TensorFn
 from priml.model.attention.self_attention import SelfAttention
@@ -24,10 +28,11 @@ from priml.testing.bfb import (
     _EXACT_F32_OPS,
     _assert_equal,
     _assert_portable_output_dtype,
-    _assert_sdpa_backend_match,
     _max_ulp_diff,
+    _op_name,
     assert_bfb_against_golden,
     bfb_devices,
+    first_tensor,
     host_agnostic_numerics,
     randomize_parameters,
     regenerate_golden,
@@ -57,7 +62,7 @@ def _build_min_input() -> Tensor:
     return torch.linspace(-1.0, 1.0, 8).reshape(2, 4)
 
 
-def _raise_runner_failure(module: nn.Module, inp: Any) -> Tensor:
+def _raise_runner_failure(module: nn.Module, inp: object) -> Tensor:
     del module, inp
     raise RuntimeError("runner failed")
 
@@ -175,9 +180,87 @@ def test_bfb_round_trip(tmp_path: Path) -> None:
     )
 
 
+def test_missing_golden_always_fails_after_minting(tmp_path: Path) -> None:
+    golden_dir = tmp_path / "goldens"
+
+    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+        assert_bfb_against_golden(
+            golden_dir=golden_dir,
+            golden_name="linear_min",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            seed=0,
+        )
+
+    assert (golden_dir / "linear_min.pt").exists()
+
+
 def test_bfb_devices_is_cpu_only() -> None:
     assert bfb_devices() == ["cpu"]
-    assert "cuda" not in inspect.signature(bfb_devices).parameters
+
+
+def test_bfb_files_do_not_use_typing_any() -> None:
+    paths = [
+        Path(__file__),
+        Path(__file__).with_name("bfb.py"),
+        Path(__file__).parents[1] / "model" / "transformer" / "block_test.py",
+    ]
+    offenders = list[str]()
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            (isinstance(node, ast.Name) and node.id == "Any")
+            or (isinstance(node, ast.Attribute) and node.attr == "Any")
+            for node in ast.walk(tree)
+        ):
+            offenders.append(str(path))
+
+    assert not offenders, f"typing.Any used in {offenders}"
+
+
+def test_first_tensor_extracts_and_validates_primary_output() -> None:
+    tensor = torch.tensor([1.0])
+
+    assert first_tensor(tensor) is tensor
+    assert first_tensor((tensor, object())) is tensor
+    assert first_tensor([tensor, object()]) is tensor
+    with pytest.raises(TypeError):
+        first_tensor(object())
+    with pytest.raises(TypeError):
+        first_tensor((object(),))
+    with pytest.raises(TypeError):
+        first_tensor([object()])
+    with pytest.raises(TypeError):
+        first_tensor(())
+    with pytest.raises(TypeError):
+        first_tensor([])
+
+
+def test_bfb_preserves_a_falsey_runner(tmp_path: Path) -> None:
+    class FalseyRunner:
+        calls = 0
+
+        def __bool__(self) -> bool:
+            return False
+
+        def __call__(self, module: nn.Module, inp: Tensor) -> Tensor:
+            self.calls += 1
+            output = module(inp)
+            assert isinstance(output, Tensor)
+            return output
+
+    runner = FalseyRunner()
+
+    with pytest.raises(AssertionError, match="Missing golden regenerated"):
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="falsey_runner",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            run=runner,
+        )
+
+    assert runner.calls == 2
 
 
 def test_bfb_rejects_non_cpu_module(
@@ -215,7 +298,7 @@ def test_bfb_restores_process_state_after_success(
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         expected = _capture_torch_process_state()
 
-        assert_bfb_against_golden(
+        regenerate_golden(
             golden_dir=tmp_path,
             golden_name="restores_success",
             build_module=_build_min_linear,
@@ -265,7 +348,7 @@ def test_bfb_restores_process_state_after_runner_failure(
 
 
 def test_bfb_detects_forward_drift(tmp_path: Path) -> None:
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="linear_min",
         build_module=_build_min_linear,
@@ -289,7 +372,7 @@ def test_bfb_detects_forward_drift(tmp_path: Path) -> None:
 
 
 def test_bfb_detects_state_dict_key_drift(tmp_path: Path) -> None:
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="linear_min",
         build_module=_build_min_linear,
@@ -324,6 +407,21 @@ def test_regenerate_golden_helper_overwrites(tmp_path: Path) -> None:
     assert (tmp_path / "linear_min.pt").exists()
 
 
+def test_regenerate_golden_does_not_swallow_runner_assertion(tmp_path: Path) -> None:
+    def runner(module: nn.Module, inp: Tensor) -> Tensor:
+        del module, inp
+        raise AssertionError("Missing golden regenerated: model failure")
+
+    with pytest.raises(AssertionError, match="model failure"):
+        regenerate_golden(
+            golden_dir=tmp_path,
+            golden_name="runner_failure",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            run=runner,
+        )
+
+
 def test_dict_input_dispatches_via_kwargs(tmp_path: Path) -> None:
     class TwoArgModule(nn.Module):
         def __init__(self) -> None:
@@ -343,7 +441,7 @@ def test_dict_input_dispatches_via_kwargs(tmp_path: Path) -> None:
             "b": torch.linspace(0.0, 1.0, 4).reshape(2, 2),
         }
 
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="two_arg",
         build_module=build_module,
@@ -376,7 +474,7 @@ def test_param_mutating_runner_captures_post_state(tmp_path: Path) -> None:
             module.bias.add_(out.mean())
         return out
 
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="mutating",
         build_module=build_module,
@@ -469,7 +567,7 @@ def test_detects_post_state_drift(tmp_path: Path) -> None:
             module.bias.add_(0.7)
         return out
 
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="mutating_drift",
         build_module=build_module,
@@ -515,7 +613,7 @@ def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
     live state to the PRE-run golden and falsely fail. The buffer mutation
     must be captured and compared bit-for-bit on its own.
     """
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="buffer_mutating",
         build_module=_BufferMutatingModule,
@@ -542,7 +640,7 @@ def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
 
 def test_bfb_detects_forward_buffer_drift(tmp_path: Path) -> None:
     """INF-017: a divergent buffer mutation must be caught."""
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="buffer_mutating",
         build_module=_BufferMutatingModule,
@@ -597,6 +695,36 @@ def test_regenerate_round_trips_immediately(tmp_path: Path) -> None:
         )
 
 
+def test_failed_regeneration_preserves_the_last_valid_golden(tmp_path: Path) -> None:
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="linear_min",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+    )
+    path = tmp_path / "linear_min.pt"
+    original = path.read_bytes()
+    calls = 0
+
+    def flaky_runner(module: nn.Module, inp: Tensor) -> Tensor:
+        nonlocal calls
+        calls += 1
+        output = module(inp)
+        assert isinstance(output, Tensor)
+        return output + calls * 1e-3
+
+    with pytest.raises(AssertionError):
+        regenerate_golden(
+            golden_dir=tmp_path,
+            golden_name="linear_min",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            run=flaky_runner,
+        )
+
+    assert path.read_bytes() == original
+
+
 def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
     """INF-018: a deterministic module regenerates and self-verifies cleanly."""
     regenerate_golden(
@@ -614,86 +742,6 @@ def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
         build_input=_build_min_input,
         seed=0,
     )
-
-
-def test_regenerate_cpu_golden_leaves_cuda_golden_untouched(
-    tmp_path: Path,
-) -> None:
-    """Per-device goldens are independent: a CPU mint never disturbs CUDA.
-
-    On a host without a working GPU, ``_bfb_devices`` collects only the
-    ``cpu`` leg, so a CPU regeneration must leave the committed ``_cuda``
-    golden byte-for-byte intact -- otherwise a CPU-only box regenerating
-    goldens would skew the committed set against a GPU box. Each device's
-    golden carries its own ``golden_name`` and is written independently, so
-    a sibling file is never read or rewritten.
-    """
-    cuda_golden = tmp_path / "model_min_cuda.pt"
-    sentinel = b"committed-cuda-golden-bytes"
-    cuda_golden.write_bytes(sentinel)
-    regenerate_golden(
-        golden_dir=tmp_path,
-        golden_name="model",
-        build_module=_build_min_linear,
-        build_input=_build_min_input,
-        seed=0,
-    )
-    assert (tmp_path / "model.pt").exists()
-    assert cuda_golden.read_bytes() == sentinel
-
-
-def test_sdpa_backend_skips_when_device_class_differs() -> None:
-    """A CUDA golden replayed on CPU skips, it does not fail.
-
-    The golden's attention kernel cannot be reproduced on a different device
-    class, so a bit-for-bit comparison is meaningless here -- ``pytest.skip``
-    rather than an error that every CPU-only dev would hit.
-    """
-    with pytest.raises(pytest.skip.Exception):
-        _assert_sdpa_backend_match(
-            {
-                "device": "cuda",
-                "flash": False,
-                "mem_efficient": False,
-                "math": True,
-            },
-            device="cpu",
-        )
-
-
-def test_sdpa_backend_fails_on_same_class_drift(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Sub-backend drift within the CUDA device class stays a loud failure.
-
-    Pin the live fingerprint so the assertion exercises the drift branch
-    regardless of the host's actual SDPA backend flags.
-    """
-
-    def fake_fingerprint(device: str) -> dict[str, str | bool]:
-        del device
-        return {"device": "cuda", "flash": True, "mem_efficient": False, "math": True}
-
-    monkeypatch.setattr("priml.testing.bfb._sdpa_fingerprint", fake_fingerprint)
-    with pytest.raises(AssertionError, match="SDPA backend mismatch"):
-        _assert_sdpa_backend_match(
-            {
-                "device": "cuda",
-                "flash": False,
-                "mem_efficient": False,
-                "math": True,
-            },
-            device="cuda",
-        )
-
-
-def test_sdpa_backend_match_is_noop() -> None:
-    """Identical CPU fingerprints neither skip nor fail (GPU presence irrelevant).
-
-    The CPU fingerprint never consults ``torch.cuda``, so a CPU golden replays on
-    every host -- GPU present, absent, or wedged.
-    """
-    _assert_sdpa_backend_match({"device": "cpu"}, device="cpu")
 
 
 def _f32_equals_f64_downcast(op: TensorFn) -> bool:
@@ -762,6 +810,7 @@ _NONARITHMETIC_PROBES: dict[str, TensorFn] = {
     "masked_fill_": lambda a: a.clone().masked_fill_(a > 0, 0.123),
     "masked_select": lambda a: a.masked_select(a > 0),
     "cat": lambda a: torch.cat([a, a.flip(0)]),
+    "stack": lambda a: torch.stack([a, a.flip(0)]),
     "clone": lambda a: a.clone(),
     "copy_": lambda a: torch.empty_like(a).copy_(a),
     "_to_copy": lambda a: torch.ops.aten._to_copy(a, dtype=a.dtype),
@@ -940,20 +989,23 @@ def _f32_leaking_ops(run: Callable[[], object]) -> set[str]:
         if isinstance(value, Tensor):
             return value.dtype == torch.float32
         if isinstance(value, (list, tuple)):
-            return any(has_f32(v) for v in cast("list[Any] | tuple[Any, ...]", value))
+            return any(
+                has_f32(v) for v in cast("list[object] | tuple[object, ...]", value)
+            )
         return False
 
     class _Trace(TorchDispatchMode):
         @override
         def __torch_dispatch__(
             self,
-            func: Any,
-            types: Any,
-            args: tuple[Any, ...] = (),
-            kwargs: dict[str, Any] | None = None,
-        ) -> Any:
-            name = func.overloadpacket.__name__
-            if name not in _EXACT_F32_OPS and any(has_f32(a) for a in args):
+            func: OpOverload[..., object],
+            types: tuple[type, ...],
+            args: tuple[object, ...] = (),
+            kwargs: dict[str, object] | None = None,
+        ) -> object:
+            name = _op_name(func)
+            values = (*args, *(kwargs or {}).values())
+            if name not in _EXACT_F32_OPS and any(has_f32(value) for value in values):
                 leaks.add(name)
             return func(*args, **(kwargs or {}))
 
@@ -1074,6 +1126,63 @@ def test_host_agnostic_upcasts_out_kwarg_and_writes_destination() -> None:
     expected = torch.sin(x.double()).float()
     assert ret is y
     assert torch.equal(y, expected)
+
+
+def test_host_agnostic_out_kwarg_preserves_native_resize_semantics() -> None:
+    x = torch.tensor([0.0, 1.0], dtype=torch.float32)
+    output = torch.empty(1, dtype=torch.float32)
+    expected = torch.sin(x.double()).float()
+
+    with pytest.warns(UserWarning, match="resized"), host_agnostic_numerics():
+        returned = torch.sin(x, out=output)
+
+    assert returned is output
+    assert output.shape == x.shape
+    assert torch.equal(output, expected)
+
+
+def test_host_agnostic_numerics_preserves_mixed_float64_promotion() -> None:
+    wide = torch.tensor([1.25], dtype=torch.float64)
+    narrow = torch.tensor([0.5], dtype=torch.float32)
+    expected = torch.atan2(wide, narrow)
+
+    with host_agnostic_numerics():
+        actual = torch.atan2(wide, narrow)
+
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual, expected)
+
+
+def test_host_agnostic_numerics_preserves_explicit_output_dtype() -> None:
+    value = torch.tensor([1.25, 0.5], dtype=torch.float32)
+    expected = torch.sum(value, dtype=torch.float64)
+
+    with host_agnostic_numerics():
+        actual = torch.sum(value, dtype=torch.float64)
+
+    assert actual.dtype == expected.dtype
+    assert torch.equal(actual, expected)
+
+
+def test_host_agnostic_numerics_preserves_mixed_foreach_dtypes() -> None:
+    inputs = [
+        torch.tensor([0.5], dtype=torch.float16),
+        torch.tensor([0.5], dtype=torch.float32),
+    ]
+    foreach_sin = cast(
+        Callable[[list[Tensor]], list[Tensor]],
+        getattr(torch, "_foreach_sin"),  # noqa: B009 -- stub-less torch member
+    )
+    expected = foreach_sin(inputs)
+
+    with host_agnostic_numerics():
+        actual = foreach_sin(inputs)
+
+    assert [value.dtype for value in actual] == [value.dtype for value in expected]
+    assert all(
+        torch.equal(value, reference)
+        for value, reference in zip(actual, expected, strict=True)
+    )
 
 
 def test_host_agnostic_numerics_upcasts_foreach_norm() -> None:
@@ -1214,7 +1323,7 @@ def test_bfb_rejects_a_float64_golden_on_replay(tmp_path: Path) -> None:
     check, so the replay path must name the cause too rather than failing on a
     one-ULP comparison the reader cannot attribute.
     """
-    assert_bfb_against_golden(
+    regenerate_golden(
         golden_dir=tmp_path,
         golden_name="legacy_f64",
         build_module=_build_min_linear,
@@ -1257,6 +1366,13 @@ def test_ulp_diff_counts_steps_within_the_negative_half() -> None:
     assert _max_ulp_diff(value, neighbour) == 1
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_ulp_diff_counts_half_precision_steps(dtype: torch.dtype) -> None:
+    value = torch.tensor([1.0], dtype=dtype)
+    neighbour = torch.nextafter(value, torch.tensor([2.0], dtype=dtype))
+    assert _max_ulp_diff(value, neighbour) == 1
+
+
 def test_ulp_diff_names_nan_rather_than_counting_it() -> None:
     """A NaN mismatch reports NaN, not a bit-pattern distance.
 
@@ -1276,7 +1392,7 @@ def test_assert_equal_reports_an_integer_difference() -> None:
     and a report of ``0.000e+00`` on a failing comparison reads as a passing
     one that somehow raised.
     """
-    with pytest.raises(AssertionError, match=r"max_abs_diff=7\.000e\+00"):
+    with pytest.raises(AssertionError, match=r"max_abs_diff=7"):
         _assert_equal(
             torch.tensor([1, 2], dtype=torch.int64),
             torch.tensor([1, 9], dtype=torch.int64),
@@ -1284,9 +1400,50 @@ def test_assert_equal_reports_an_integer_difference() -> None:
         )
 
 
+def test_assert_equal_reports_an_unsigned_integer_difference() -> None:
+    with pytest.raises(AssertionError, match=r"max_abs_diff=255"):
+        _assert_equal(
+            torch.tensor([0], dtype=torch.uint8),
+            torch.tensor([255], dtype=torch.uint8),
+            label="output",
+        )
+
+
+def test_assert_equal_reports_exact_int64_extreme_difference() -> None:
+    with pytest.raises(
+        AssertionError,
+        match=r"max_abs_diff=18446744073709551615",
+    ):
+        _assert_equal(
+            torch.tensor([torch.iinfo(torch.int64).min]),
+            torch.tensor([torch.iinfo(torch.int64).max]),
+            label="output",
+        )
+
+
+def test_assert_equal_reports_adjacent_large_uint64_difference() -> None:
+    with pytest.raises(AssertionError, match=r"max_abs_diff=1"):
+        _assert_equal(
+            torch.tensor([2**63], dtype=torch.uint64),
+            torch.tensor([2**63 + 1], dtype=torch.uint64),
+            label="output",
+        )
+
+
+def test_bfb_compares_float_bits_not_value_equality() -> None:
+    positive_zero = torch.tensor([0.0])
+    negative_zero = torch.tensor([-0.0])
+    nan = torch.tensor([float("nan")])
+
+    with pytest.raises(AssertionError):
+        _assert_equal(positive_zero, negative_zero, label="output")
+    _assert_equal(nan, nan.clone(), label="output")
+    assert not state_differs({"value": nan}, {"value": nan.clone()})
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float64])
 def test_bfb_rejects_every_non_float32_golden_output(dtype: torch.dtype) -> None:
-    """Any narrow-float comparand is refused, not float64 alone.
+    """Every narrow-float comparand is refused, not float64 alone.
 
     ``_is_narrow_float`` treats bfloat16 and float16 as compute dtypes the
     harness upcasts, so a runner returning either skipped the same round back
@@ -1299,6 +1456,11 @@ def test_bfb_rejects_every_non_float32_golden_output(dtype: torch.dtype) -> None
 def test_bfb_accepts_a_float32_golden_output() -> None:
     """The dtype the whole mechanism produces is the one that passes."""
     _assert_portable_output_dtype(torch.zeros(2, dtype=torch.float32))
+
+
+def test_bfb_rejects_complex_golden_output() -> None:
+    with pytest.raises(TypeError, match="complex64"):
+        _assert_portable_output_dtype(torch.zeros(2, dtype=torch.complex64))
 
 
 def test_bfb_accepts_an_integer_golden_output() -> None:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from configgle.testing import assert_pprint_golden
 
 import torch
 
@@ -14,23 +15,17 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
-
-
-if TYPE_CHECKING:
-    import pytest
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_embedding_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_embedding_config_pprint() -> None:
     config = Embedding.Config(4, num_embeddings=8)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="embedding",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

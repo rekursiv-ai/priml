@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from configgle.testing import assert_pprint_golden
 from torch.distributed.tensor import Replicate, Shard
 
 import pytest
@@ -16,7 +17,6 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 if TYPE_CHECKING:
@@ -26,13 +26,12 @@ if TYPE_CHECKING:
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_linear_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_linear_config_pprint() -> None:
     config = Linear.Config(4, 3)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="linear",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -46,13 +45,12 @@ def test_linear_bfb() -> None:
     )
 
 
-def test_ensemble_linear_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_ensemble_linear_config_pprint() -> None:
     config = EnsembleLinear.Config(4, 3, num_ensemble=2)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="ensemble_linear",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

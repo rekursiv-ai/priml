@@ -8,6 +8,7 @@ from typing import cast
 import math
 
 from configgle import Fig
+from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -24,7 +25,6 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -41,15 +41,13 @@ _TESTDATA = Path(__file__).parent.resolve() / "testdata"
     ],
 )
 def test_rope_config_pprint(
-    request: pytest.FixtureRequest,
     name: str,
     config: Fig[object],
 ) -> None:
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name=name,
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -206,15 +204,15 @@ def test_rotate_does_not_use_empty_like(
     assert torch.isfinite(out).all()
 
 
-def test_rope_rotate_padding():
+def test_rope_rotate_padding() -> None:
     """cos/sin shorter than seq_len should be padded with identity."""
     q = torch.randn(2, 16, 1, 32)
     k = torch.randn(2, 16, 1, 32)
     cos = torch.randn(8, 1, 16)  # shorter than seq_len=16
     sin = torch.randn(8, 1, 16)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
-    assert q_rot.shape == q.shape
-    assert k_rot.shape == k.shape
+    assert torch.equal(q_rot[:, 8:], q[:, 8:])
+    assert torch.equal(k_rot[:, 8:], k[:, 8:])
 
 
 def test_rope_sum_mode():
@@ -389,11 +387,9 @@ def test_the_default_table_is_the_hugging_face_one():
     higher-precision :class:`GeometricFrequencies` is opt-in: it agrees to
     ~1e-7 but is not bit-identical, which is what checkpoint parity needs.
     """
-    base = 1_000_000.0
+    base = 10_000.0
     dim = 16
-    default = RoPE.Config(
-        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
-    ).make()
+    default = RoPE.Config(channels_head=dim).make()
     explicit = RoPE.Config(
         channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
     ).make()

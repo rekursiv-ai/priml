@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from configgle import PartialConfig
+from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -21,24 +22,22 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_multi_stream_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_multi_stream_config_pprint() -> None:
     config = MultiStreamAttention.Config(
         channels_in=16,
         num_heads=2,
         channels_head=8,
         num_streams=2,
     )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="multi_stream_attention",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -309,3 +308,9 @@ def test_multi_stream_bfb(device: str) -> None:
         seed=0,
         run=lambda module, xs: torch.cat(cast(tuple[Tensor, ...], module(xs)), dim=1),
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

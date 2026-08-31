@@ -13,7 +13,7 @@ CraftaxTrainLoop(
                         ),
                         optimizer=PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adamw.AdamW'>, lr=0.001, betas=(0.9, 0.999), weight_decay=0.01),
                         loss=SimpleLoss.Config(
-                                loss_fn=<function binary_cross_entropy_with_logits at 0x0defaced0def>,
+                                loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
                                 target_key='label',
                                 kwargs={'reduction': 'none'}
                         ),
@@ -22,11 +22,11 @@ CraftaxTrainLoop(
                         train_budget_steps=inf,
                         train_budget_sec=inf,
                         train_budget_epochs=inf,
-                        learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function constant at 0x0defaced0def>),
+                        learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
                         parallelism=NoParallel.Config(device='auto'),
                         model_quantization=NoModelQuantization.Config(),
                         activation_memoization=DefaultActivationStorage.Config(),
-                        compile=PartialConfig(<class 'functools.partial'>, <function compile at 0x0defaced0def>, fullgraph=True),
+                        compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
                         ema=NoEMA.Config(),
                         gradient_clip_norm=inf,
                         device_init='eager',

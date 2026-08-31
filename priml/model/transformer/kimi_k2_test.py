@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock
 
 import warnings
 
+from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -25,7 +28,6 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.causal_lm import CausalLM
 from priml.model.transformer.kimi_k2 import KimiK2, remap_hf_state_dict
 from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -80,12 +82,11 @@ def _canonical_config() -> KimiK2.Config:
     )
 
 
-def test_kimi_k2_config_pprint(request: pytest.FixtureRequest) -> None:
-    assert_text_golden(
-        request,
+def test_kimi_k2_config_pprint() -> None:
+    assert_pprint_golden(
         test_file=__file__,
         name="kimi_k2",
-        rendered=_canonical_config().pformat(hide_default_values=False),
+        config=_canonical_config(),
     )
 
 
@@ -226,10 +227,26 @@ class TestConfig:
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 50_000.0
 
-    def test_nonpositive_channels_rejected(self):
-        cfg = KimiK2.Config.from_hf(_hf_config(hidden_size=0))
-        with pytest.raises(ValueError, match="channels_in must be > 0"):
-            cfg.finalize()
+    @pytest.mark.parametrize("moe_intermediate_size", [0, -64])
+    def test_nonpositive_moe_width_rejected(self, moe_intermediate_size: int):
+        """An explicit width names its own field instead of silently defaulting."""
+        with pytest.raises(ValueError, match="moe_intermediate_size must be > 0"):
+            KimiK2.Config.from_hf(
+                _hf_config(moe_intermediate_size=moe_intermediate_size),
+            )
+
+    def test_absent_moe_width_falls_back_to_dense_width(self):
+        """Only a MISSING key defaults; the fallback itself must survive."""
+        config = _hf_config()
+        del config["moe_intermediate_size"]
+        cfg = KimiK2.Config.from_hf(config)
+        assert cfg.channels_hidden_expert == cfg.channels_hidden_dense == 128
+
+    def test_nonpositive_channels_still_print(self) -> None:
+        """The degenerate config is the one worth rendering; torch rejects it."""
+        config = KimiK2.Config.from_hf(_hf_config(hidden_size=0))
+
+        assert "KimiK2.Config" in config.pformat(hide_default_values=False)
 
     def test_yarn_scaling_wired(self):
         """YaRN params land on the rope slot's frequency builder."""
@@ -448,49 +465,85 @@ class TestRemap:
 def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
     """KimiK2 logits must match HF's DeepseekV3ForCausalLM."""
     torch.manual_seed(0)
-    hf_model = _build_hf_model(q_lora_rank)
-    config = _our_config_from_hf(hf_model, q_lora_rank)
-    loop_sd = remap_hf_state_dict(
-        _hf_state_dict_with_bias_fill(hf_model, config), config
-    )
-    loop_model = config.make()
-    loop_model.load_state_dict(loop_sd, strict=True)
-    loop_model = loop_model.to(torch.float32).eval()
+    # The shims stay installed across the HF forward pass, not just
+    # construction: the remote DeepSeek-V3 code reads both symbols at call
+    # time, so exiting the block earlier would raise inside ``hf_model(...)``.
+    with _install_transformers_compat_shims():
+        hf_model = _build_hf_model(q_lora_rank)
+        config = _our_config_from_hf(hf_model, q_lora_rank)
+        loop_sd = remap_hf_state_dict(
+            _hf_state_dict_with_bias_fill(hf_model, config), config
+        )
+        loop_model = config.make()
+        loop_model.load_state_dict(loop_sd, strict=True)
+        loop_model = loop_model.to(torch.float32).eval()
 
-    tokens = torch.randint(0, config.vocab_size, (2, 5))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        with host_agnostic_numerics(), torch.no_grad():
-            hf_out = hf_model(input_ids=tokens, use_cache=False).logits
-            loop_out = loop_model(tokens)
+        tokens = torch.randint(0, config.vocab_size, (2, 5))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            with host_agnostic_numerics(), torch.no_grad():
+                hf_out = hf_model(input_ids=tokens, use_cache=False).logits
+                loop_out = loop_model(tokens)
     diff = (hf_out - loop_out).abs().max().item()
     assert torch.allclose(hf_out, loop_out, atol=5e-5, rtol=1e-4), (
         f"max abs diff: {diff:.3e}"
     )
 
 
-def _install_transformers_compat_shims() -> None:
+def test_transformers_compat_shims_restore_module_state() -> None:
+    """Shims apply inside the block and leave the modules exactly as found."""
+    pytest.importorskip("transformers")
+    from transformers import DynamicCache  # noqa: PLC0415
+    from transformers.utils import import_utils  # noqa: PLC0415
+
+    # ``vars``, not ``getattr``: ``DynamicCache`` inherits from ``Cache``, so a
+    # deleted shim would still resolve through the base class and hide a leak.
+    absent = object()
+    fx_before: object = vars(import_utils).get("is_torch_fx_available", absent)
+    legacy_before: object = vars(DynamicCache).get("from_legacy_cache", absent)
+
+    with _install_transformers_compat_shims():
+        assert callable(import_utils.is_torch_fx_available)
+        assert callable(DynamicCache.from_legacy_cache)
+
+    assert vars(import_utils).get("is_torch_fx_available", absent) is fx_before
+    assert vars(DynamicCache).get("from_legacy_cache", absent) is legacy_before
+
+
+@contextmanager
+def _install_transformers_compat_shims() -> Generator[None]:
     """Backfill transformers 4.x symbols removed in transformers 5.x."""
+    pytest.importorskip("transformers")
+    from transformers import DynamicCache  # noqa: PLC0415
     from transformers.utils import import_utils  # noqa: PLC0415
 
     def unavailable() -> bool:
         return False
 
-    if not hasattr(import_utils, "is_torch_fx_available"):
-        import_utils.is_torch_fx_available = unavailable
-    from transformers import DynamicCache  # noqa: PLC0415
-
     def passthrough_cache(_cls: type[DynamicCache], pkv: Any) -> Any:
         return pkv
 
-    if not hasattr(DynamicCache, "from_legacy_cache"):
-        DynamicCache.from_legacy_cache = classmethod(passthrough_cache)  # pyright: ignore[reportAttributeAccessIssue]
+    # Names come from this tuple rather than literals so the shims install and
+    # uninstall through one pair of dynamic accesses: a literal
+    # ``DynamicCache.from_legacy_cache = ...`` is an attribute the stub does not
+    # declare, and unwinding it would need a second, separately-maintained list.
+    shims: tuple[tuple[object, str, object], ...] = (
+        (import_utils, "is_torch_fx_available", unavailable),
+        (DynamicCache, "from_legacy_cache", classmethod(passthrough_cache)),
+    )
+    installed = [shim for shim in shims if not hasattr(shim[0], shim[1])]
+    for owner, name, value in installed:
+        setattr(owner, name, value)
+    try:
+        yield
+    finally:
+        for owner, name, _ in installed:
+            delattr(owner, name)
 
 
 def _build_hf_model(q_lora_rank: int | None) -> Any:
     """Instantiate HF's real ``DeepseekV3ForCausalLM`` at tiny size."""
     transformers = pytest.importorskip("transformers")
-    _install_transformers_compat_shims()
     config = transformers.AutoConfig.from_pretrained(
         "deepseek-ai/DeepSeek-V3",
         trust_remote_code=True,

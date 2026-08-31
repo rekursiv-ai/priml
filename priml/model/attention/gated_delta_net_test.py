@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from torch import Tensor
+from configgle.testing import assert_pprint_golden
 
 import pytest
 import torch
@@ -24,12 +24,12 @@ from priml.model.attention.gated_delta_net import (
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
+    first_tensor,
     move_to_device,
 )
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -51,7 +51,7 @@ def test_gated_delta_net_rejects_non_multiple_v_heads():
         ).make()
 
 
-def test_gated_delta_net_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_gated_delta_net_config_pprint() -> None:
     config = GatedDeltaNet.Config(
         channels_in=16,
         num_heads_k=2,
@@ -59,11 +59,10 @@ def test_gated_delta_net_config_pprint(request: pytest.FixtureRequest) -> None:
         channels_k_head=8,
         channels_v_head=8,
     )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="gated_delta_net",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -203,18 +202,8 @@ def test_gated_delta_net_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
         seed=0,
-        run=lambda m, x: _first_tensor(m(x)),
+        run=lambda m, x: first_tensor(m(x)),
     )
-
-
-def _first_tensor(result: Tensor | tuple[object, ...] | list[object]) -> Tensor:
-    """Extract the primary output tensor from a module's return value."""
-    if isinstance(result, (tuple, list)):
-        head = result[0]
-        assert isinstance(head, Tensor)
-        return head
-    assert isinstance(result, Tensor)
-    return result
 
 
 if __name__ == "__main__":

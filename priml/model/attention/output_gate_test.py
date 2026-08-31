@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from configgle.testing import assert_pprint_golden
+
 import pytest
 import torch
 
@@ -15,22 +17,20 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_output_gate_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_output_gate_config_pprint() -> None:
     config = OutputGate.Config(
         channels_in=16,
         inner=SelfAttention.Config(num_heads=2, channels_head=8),
     )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="output_gate",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -124,3 +124,9 @@ def test_output_gate_bfb(device: str) -> None:
         build_input=lambda: torch.randn(2, 4, 16),
         seed=0,
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

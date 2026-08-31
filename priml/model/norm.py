@@ -413,6 +413,16 @@ class BatchRenorm(nn.Module):
         self.register_buffer("running_var", torch.ones(config.channels_in))
         self.register_buffer("steps", torch.zeros((), dtype=torch.int64))
 
+    def reset_parameters(self) -> None:
+        # The running estimates reset too: they are learned state, and the
+        # correction this layer applies is measured against them, so leaving
+        # them warm would reinitialize into the previous run's statistics.
+        nn.init.ones_(self.weight)
+        nn.init.zeros_(self.bias)
+        nn.init.zeros_(self.running_mean)
+        nn.init.ones_(self.running_var)
+        nn.init.zeros_(self.steps)
+
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         """Normalize ``x`` over every axis but the last.

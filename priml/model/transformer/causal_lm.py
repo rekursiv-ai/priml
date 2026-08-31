@@ -12,11 +12,15 @@ times, with per-layer ``depth_index`` set via ``copy_tree``) or an explicit
 
 Example::
 
+    from priml.model.attention.self_attention import SelfAttention
+
     CausalLM.Config(
         vocab_size=151_936,
         channels_in=128,
         num_layers=2,
-        block=TransformerBlock.Config(causal=True),
+        block=TransformerBlock.Config(
+            attn=SelfAttention.Config(causal=True),
+        ),
         tie_embeddings=True,
     ).make()
 """
@@ -82,64 +86,92 @@ class CausalLM(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for CausalLM."
-                )
-            if self.vocab_size < 1:
-                raise ValueError(f"vocab_size must be > 0, got {self.vocab_size}.")
-            if self.num_layers < 1:
-                raise ValueError(f"num_layers must be > 0, got {self.num_layers}.")
-            if self.channels_in < 1:
-                raise ValueError(f"channels_in must be > 0, got {self.channels_in}.")
-            if isinstance(self.block, list) and len(self.block) != self.num_layers:
-                raise ValueError(
-                    f"block list length {len(self.block)} != "
-                    f"num_layers={self.num_layers}.",
-                )
-            templates = self.block if isinstance(self.block, list) else [self.block]
+            if isinstance(self.block, list):
+                templates = self.block
+            else:
+                templates = [self.block] * max(self.num_layers, 0)
             block_configs: list[TensorBlockConfig] = []
-            for index in range(self.num_layers):
-                template = templates[index] if len(templates) > 1 else templates[0]
+            for index, template in enumerate(templates):
                 config = template.copy_tree()
                 if isinstance(config, HasDepthIndex):
                     config.depth_index = ((index, self.num_layers),)
                 block_configs.append(config)
             self.block = block_configs
-            for index, cfg in enumerate(block_configs):
-                if cfg.channels_in not in (-1, self.channels_in):
-                    raise ValueError(
-                        f"block[{index}].channels_in={cfg.channels_in} must equal "
-                        f"channels_in={self.channels_in}."
+            for cfg in block_configs:
+                if cfg.channels_in == -1:
+                    propagate_attr(
+                        cfg, "channels_in", self.channels_in, protocol=ChannelsIn
                     )
-                if cfg.channels_out not in (-1, self.channels_in):
-                    raise ValueError(
-                        f"block[{index}].channels_out={cfg.channels_out} must equal "
-                        f"channels_in={self.channels_in}."
+                if cfg.channels_out == -1:
+                    propagate_attr(
+                        cfg, "channels_out", self.channels_in, protocol=ChannelsOut
                     )
+            if (
+                isinstance(self.final_norm, ChannelsIn)
+                and self.final_norm.channels_in == -1
+            ):
                 propagate_attr(
-                    cfg, "channels_in", self.channels_in, protocol=ChannelsIn
-                )
-                propagate_attr(
-                    cfg, "channels_out", self.channels_in, protocol=ChannelsOut
-                )
-            for cfg in (self.final_norm,):
-                propagate_attr(
-                    cfg, "channels_in", self.channels_in, protocol=ChannelsIn
+                    self.final_norm,
+                    "channels_in",
+                    self.channels_in,
+                    protocol=ChannelsIn,
                 )
             if self.tie_embeddings:
                 self.lm_head = None
             elif self.lm_head is not None:
-                propagate_attr(
-                    self.lm_head, "channels_in", self.channels_in, protocol=ChannelsIn
-                )
-                propagate_attr(
-                    self.lm_head, "channels_out", self.vocab_size, protocol=ChannelsOut
-                )
+                if (
+                    isinstance(self.lm_head, ChannelsIn)
+                    and self.lm_head.channels_in == -1
+                ):
+                    propagate_attr(
+                        self.lm_head,
+                        "channels_in",
+                        self.channels_in,
+                        protocol=ChannelsIn,
+                    )
+                if (
+                    isinstance(self.lm_head, ChannelsOut)
+                    and self.lm_head.channels_out == -1
+                ):
+                    propagate_attr(
+                        self.lm_head,
+                        "channels_out",
+                        self.vocab_size,
+                        protocol=ChannelsOut,
+                    )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if config.channels_in != config.channels_out:
+            raise ValueError(
+                f"channels_in={config.channels_in} must equal "
+                f"channels_out={config.channels_out} for CausalLM."
+            )
+        # Only what this config owns. A child's WIDTH is the child's invariant:
+        # ``finalize`` propagates into every ``-1`` slot, a slot the caller set
+        # explicitly is rejected by that child's own ``__init__``, and a residual
+        # mismatch surfaces as a torch shape error naming both operands.
+        #
+        # The head's OUTPUT width is the exception, because it is checked against
+        # ``vocab_size`` -- this config's own field, which no child can see. It
+        # also fails silently: a wrong width yields logits of the wrong size and
+        # forward succeeds, so nothing downstream names the cause.
+        if (
+            isinstance(config.lm_head, ChannelsOut)
+            and config.lm_head.channels_out != config.vocab_size
+        ):
+            raise ValueError(
+                f"lm_head.channels_out={config.lm_head.channels_out} must equal "
+                f"vocab_size={config.vocab_size}."
+            )
+        block_configs = config.block
+        if not isinstance(block_configs, list):
+            raise TypeError("A finalized CausalLM config must contain a block list.")
+        if len(block_configs) != config.num_layers:
+            raise ValueError(
+                f"block list length {len(block_configs)} != "
+                f"num_layers={config.num_layers}.",
+            )
         super().__init__()
         self.vocab_size = config.vocab_size
         self.channels_in = config.channels_in
@@ -151,8 +183,6 @@ class CausalLM(nn.Module):
             num_embeddings=config.vocab_size,
             shard="vocab",
         ).make()
-        block_configs = config.block
-        assert isinstance(block_configs, list)
         blocks: list[nn.Module] = []
         for block_config in block_configs:
             block = block_config.make()
@@ -183,12 +213,12 @@ class CausalLM(nn.Module):
         if self.lm_head is not None and hasattr(self.lm_head, "reset_parameters"):
             self.lm_head.reset_parameters()
 
-    def project_to_logits(self, hidden: Tensor) -> Tensor:
+    def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
         """Map ``hidden`` to vocab logits. Ties to ``embed`` when configured."""
         if self.tie_embeddings:
             return hidden @ self.embed.weight.T
         assert self.lm_head is not None
-        return self.lm_head(hidden)
+        return self.lm_head(hidden, **kwargs)
 
     @override
     def forward(self, tokens: Tensor, **kwargs: object) -> Tensor:
@@ -196,5 +226,5 @@ class CausalLM(nn.Module):
         x: Tensor = self.embed(tokens)
         for block in self.blocks:
             x = cast(Tensor, block(x, **kwargs))
-        x = self.final_norm(x)
-        return self.project_to_logits(x)
+        x = self.final_norm(x, **kwargs)
+        return self.project_to_logits(x, **kwargs)

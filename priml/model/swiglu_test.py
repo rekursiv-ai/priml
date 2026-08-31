@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from configgle.testing import assert_pprint_golden
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.parallel import (
@@ -23,31 +24,26 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_swiglu_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_swiglu_config_pprint() -> None:
     config = SwiGLU.Config(channels_in=4, channels_hidden=4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="swiglu",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_swiglu_relu_squared_config_pprint(
-    request: pytest.FixtureRequest,
-) -> None:
+def test_swiglu_relu_squared_config_pprint() -> None:
     config = SwiGLUReluSquared.Config(channels_in=4, channels_hidden=4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="swiglu_relu_squared",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

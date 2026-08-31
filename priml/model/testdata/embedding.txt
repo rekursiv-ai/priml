@@ -6,5 +6,5 @@ Embedding.Config(
                 dtype=None,
                 shard=None,
                 depth_index=(),
-                init_weight=functools.partial(<function truncated_normal at 0x0defaced0def>, std=0.02)
+                init_weight=functools.partial(<function priml.model.init.truncated_normal at 0xdefacedeface>, std=0.02)
         )
