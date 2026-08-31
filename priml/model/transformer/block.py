@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import Protocol, Self, cast, override
+from typing import Protocol, Self, cast, override, runtime_checkable
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -29,6 +29,7 @@ from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 
 
+@runtime_checkable
 class CachedAttention(Protocol):
     """An attention sublayer with an explicit cached path."""
 
@@ -45,7 +46,7 @@ class TransformerBlock(nn.Module):
     """Transformer block with attention and FFN.
 
     Module names match sic convention for checkpoint compatibility:
-    attn, ffn, norm1 (post-attn), norm2 (post-ffn).
+    ``attn``, ``ffn``, and their corresponding ``norm1`` and ``norm2``.
     """
 
     class Config(Fig["TransformerBlock"], kw_only=False):
@@ -76,7 +77,7 @@ class TransformerBlock(nn.Module):
         """Use activation checkpointing to trade compute for memory."""
 
         depth_index: DepthIndex = ()
-        """Block depth index for depth-scaled init (-1 = no scaling)."""
+        """Block depth index for depth-scaled init (empty = no scaling)."""
 
         @property
         def num_heads(self) -> int:
@@ -96,22 +97,24 @@ class TransformerBlock(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for TransformerBlock."
-                )
             c = self.channels_in
             for cfg in (self.attn, self.ffn, self.norm1, self.norm2):
-                propagate_attr(cfg, "channels_in", c, protocol=ChannelsIn)
-                propagate_attr(cfg, "channels_out", c, protocol=ChannelsOut)
-                propagate_attr(
-                    cfg, "depth_index", self.depth_index, protocol=HasDepthIndex
-                )
+                if isinstance(cfg, ChannelsIn) and cfg.channels_in == -1:
+                    propagate_attr(cfg, "channels_in", c, protocol=ChannelsIn)
+                if isinstance(cfg, ChannelsOut) and cfg.channels_out == -1:
+                    propagate_attr(cfg, "channels_out", c, protocol=ChannelsOut)
+                if (
+                    self.depth_index
+                    and isinstance(cfg, HasDepthIndex)
+                    and not cfg.depth_index
+                ):
+                    propagate_attr(
+                        cfg, "depth_index", self.depth_index, protocol=HasDepthIndex
+                    )
             # Tensor parallelism: the FFN shards over the tp dim (its block-
             # internal style handles the fused-gate split alignment). The
             # attention block's children self-declare their styles.
-            if isinstance(self.ffn, Shardable):
+            if isinstance(self.ffn, Shardable) and self.ffn.shard is None:
                 self.ffn.shard = "colwise"
             return super().finalize()
 
@@ -124,6 +127,9 @@ class TransformerBlock(nn.Module):
                 f"channels_in={config.channels_in} must equal "
                 f"channels_out={config.channels_out} for TransformerBlock."
             )
+        # A child's width is the CHILD's invariant: ``finalize`` propagates into
+        # every ``-1`` slot, and a slot the caller set explicitly is rejected by
+        # that child's own ``__init__``, in its own vocabulary.
         super().__init__()
         self.prenorm = config.prenorm
         self.checkpoint = config.checkpoint
@@ -167,7 +173,9 @@ class TransformerBlock(nn.Module):
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
         """Run the block while updating its attention cache."""
-        attention = cast(CachedAttention, self.attn)
+        if not isinstance(self.attn, CachedAttention):
+            raise TypeError("The attention module must implement cached attention.")
+        attention = self.attn
         if self.prenorm:
             attn_out, cache = attention.forward_cached(
                 self.norm1(x, **kwargs),

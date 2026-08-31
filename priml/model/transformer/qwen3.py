@@ -37,7 +37,7 @@ from torch import Tensor
 import torch
 
 from priml import hub
-from priml.lib.custom_json import decode, dict_val, float_val
+from priml.lib.custom_json import DictCodec, FloatCodec, decode
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
@@ -107,8 +107,8 @@ class Qwen3(CausalLM):
                 # Validated rather than cast: this is an HF ``config.json``, so
                 # a malformed field is caller input. Casting produced an
                 # ``AttributeError`` from inside ``.get`` instead.
-                rope_params = dict_val(config.get("rope_parameters") or {})
-                rope_theta = float_val(rope_params.get("rope_theta"), 1e6)
+                rope_params = DictCodec.coerce(config.get("rope_parameters") or {})
+                rope_theta = FloatCodec.coerce(rope_params.get("rope_theta"), 1e6)
             channels_in = int(config["hidden_size"])
             num_heads = int(config["num_attention_heads"])
             # HF's schema is parsed into the CHILD configs; the parent does
@@ -118,19 +118,27 @@ class Qwen3(CausalLM):
             norm.eps = float(config.get("rms_norm_eps", 1e-6))
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = float_val(rope_theta, 1e6)
+            frequencies.base = FloatCodec.coerce(rope_theta, 1e6)
             rope = RoPE.Config()
             rope.frequencies = frequencies
 
             attn = SelfAttention.Config(bias=False, causal=True, share_qk_norm=False)
             attn.num_heads = num_heads
-            attn.num_heads_kv = int(config.get("num_key_value_heads") or num_heads)
+            num_heads_kv = int(config.get("num_key_value_heads", num_heads))
+            if num_heads_kv < 1:
+                raise ValueError(
+                    f"num_key_value_heads must be > 0, got {num_heads_kv}."
+                )
+            attn.num_heads_kv = num_heads_kv
             # Qwen3 states the head width, so it need not divide the model
             # width -- the attention's inner width is decoupled from the
             # residual. Falling back to the quotient matches HF's own default.
-            attn.channels_head = int(
-                config.get("head_dim") or (channels_in // num_heads),
+            channels_head = int(
+                config["head_dim"] if "head_dim" in config else channels_in // num_heads
             )
+            if channels_head < 1:
+                raise ValueError(f"head_dim must be > 0, got {channels_head}.")
+            attn.channels_head = channels_head
             attn.rope = rope
             attn.norm_qk = norm.copy_tree()
 
@@ -155,8 +163,6 @@ class Qwen3(CausalLM):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in < 1:
-                raise ValueError(f"channels_in must be > 0, got {self.channels_in}.")
             # Mutate-before-super is library convention -- matches
             # TransformerBlock/SwiGLU/MoE.
             if not isinstance(self.block, list):
@@ -179,8 +185,6 @@ class Qwen3(CausalLM):
                 return
             attn = block.attn
             if isinstance(attn, SelfAttention.Config):
-                if attn.num_heads < 1:
-                    raise ValueError(f"num_heads must be > 0, got {attn.num_heads}.")
                 attn.channels_in = self.channels_in
                 rope = attn.rope
                 if isinstance(rope, RoPE.Config):
@@ -188,9 +192,6 @@ class Qwen3(CausalLM):
             ffn = block.ffn
             if isinstance(ffn, SwiGLU.Config):
                 ffn.channels_in = self.channels_in
-
-    # Inherits CausalLM.__init__, embed, blocks, final_norm, project_to_logits,
-    # forward, reset_parameters. No per-arch Module-level behavior needed.
 
     @classmethod
     def load(
@@ -212,7 +213,9 @@ class Qwen3(CausalLM):
         """
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
-            hf_config = dict_val(decode("object", (path / "config.json").read_text()))
+            hf_config = DictCodec.coerce(
+                decode("object", (path / "config.json").read_text())
+            )
             hf_sd = hub.load_local_state_dict(path)
         else:
             hf_model = hub.load_transformers_model(

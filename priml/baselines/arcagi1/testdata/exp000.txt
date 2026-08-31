@@ -32,7 +32,7 @@ ArcTrainLoop(
                 │       │       │               norm_out=None,
                 │       │       │               split_qkv_projection=False,
                 │       │       │               attn_kernel=SdpaFused.Config(),
-                │       │       │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │       │       │               depth_index=()
                 │       │       │       ),
                 │       │       │       ffn=SwiGLU.Config(
@@ -45,9 +45,9 @@ ArcTrainLoop(
                 │       │       │               bias=False,
                 │       │       │               split_gate_projection=False,
                 │       │       │               norm=None,
-                │       │       │               act=<function silu at 0x0defaced0def>,
+                │       │       │               act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │       │       │               depth_index=(),
-                │       │       │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │       │       │               init_weight_out=None,
                 │       │       │               shard='colwise'
                 │       │       │       ),
@@ -110,7 +110,7 @@ ArcTrainLoop(
                 │                               ns_coefficients=(3.4445, -4.775, 2.0315),
                 │                               eps=1e-07,
                 │                               ns_steps=3,
-                │                               adjust_lr_fn=<function adjust_lr_original at 0x0defaced0def>,
+                │                               adjust_lr_fn=<function priml.optimizers.muon.adjust_lr_original at 0xdefacedeface>,
                 │                               ensemble_dims=0
                 │                       )
                 │               ],
@@ -122,7 +122,7 @@ ArcTrainLoop(
                 │               drop_empty=False
                 │       ),
                 │       loss=SimpleLoss.Config(
-                │               loss_fn=<function binary_cross_entropy_with_logits at 0x0defaced0def>,
+                │               loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
                 │               target_key='label',
                 │               kwargs={'reduction': 'none'}
                 │       ),
@@ -131,11 +131,11 @@ ArcTrainLoop(
                 │       train_budget_steps=inf,
                 │       train_budget_sec=inf,
                 │       train_budget_epochs=inf,
-                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function constant at 0x0defaced0def>),
+                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
                 │       parallelism=NoParallel.Config(device='auto'),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
-                │       compile=PartialConfig(<class 'functools.partial'>, <function compile at 0x0defaced0def>, fullgraph=True),
+                │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
                 │       ema=NoEMA.Config(),
                 │       gradient_clip_norm=inf,
                 │       device_init='eager',

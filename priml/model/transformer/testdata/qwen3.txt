@@ -36,7 +36,7 @@ Qwen3.Config(
                 │                       norm_out=None,
                 │                       split_qkv_projection=False,
                 │                       attn_kernel=SdpaFused.Config(),
-                │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │                       depth_index=((0, 1),)
                 │               ),
                 │               ffn=SwiGLU.Config(
@@ -49,9 +49,9 @@ Qwen3.Config(
                 │                       bias=False,
                 │                       split_gate_projection=False,
                 │                       norm=None,
-                │                       act=<function silu at 0x0defaced0def>,
+                │                       act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │                       depth_index=((0, 1),),
-                │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │                       init_weight_out=None,
                 │                       shard='colwise'
                 │               ),

@@ -10,6 +10,7 @@ import importlib.util
 import os
 import sys
 
+from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -31,7 +32,6 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.causal_lm import CausalLM
 from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -70,12 +70,11 @@ def _canonical_config() -> Qwen3.Config:
     )
 
 
-def test_qwen3_config_pprint(request: pytest.FixtureRequest) -> None:
-    assert_text_golden(
-        request,
+def test_qwen3_config_pprint() -> None:
+    assert_pprint_golden(
         test_file=__file__,
         name="qwen3",
-        rendered=_canonical_config().pformat(hide_default_values=False),
+        config=_canonical_config(),
     )
 
 
@@ -174,6 +173,20 @@ class TestConfig:
             cfg["hidden_size"] // cfg["num_attention_heads"]
         )
 
+    def test_num_key_value_heads_inferred_when_missing(self):
+        cfg = _hf_config()
+        cfg.pop("num_key_value_heads")
+        parsed = Qwen3.Config.from_hf(cfg)
+        assert _attn(parsed).num_heads_kv == cfg["num_attention_heads"]
+
+    @pytest.mark.parametrize("field_name", ["num_key_value_heads", "head_dim"])
+    def test_explicit_zero_head_geometry_rejected(self, field_name: str):
+        with pytest.raises(
+            ValueError,
+            match=rf"{field_name} must be > 0, got 0\.",
+        ):
+            Qwen3.Config.from_hf(_hf_config(**{field_name: 0}))
+
     def test_nested_rope_parameters_accept_numeric_text(self):
         cfg = _hf_config(rope_theta=None, rope_parameters={"rope_theta": "25000"})
         parsed = Qwen3.Config.from_hf(cfg)
@@ -190,15 +203,18 @@ class TestConfig:
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 1_000_000.0
 
-    def test_nonpositive_channels_rejected(self):
-        cfg = Qwen3.Config.from_hf(_hf_config(hidden_size=0))
-        with pytest.raises(ValueError, match="channels_in must be > 0"):
-            cfg.finalize()
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"hidden_size": 0}, {"num_attention_heads": 0}],
+    )
+    def test_invalid_architecture_still_prints(
+        self,
+        overrides: dict[str, int],
+    ) -> None:
+        """A degenerate width renders; building it is torch's to refuse."""
+        config = Qwen3.Config.from_hf(_hf_config(**overrides))
 
-    def test_nonpositive_heads_rejected(self):
-        cfg = Qwen3.Config.from_hf(_hf_config(num_attention_heads=0))
-        with pytest.raises(ValueError, match="num_heads must be > 0"):
-            cfg.finalize()
+        assert "Qwen3.Config" in config.pformat(hide_default_values=False)
 
     def test_explicit_head_dim_not_equal_hidden(self):
         """Qwen3 with hidden != num_heads*head_dim builds, forwards, and loads.
@@ -418,14 +434,6 @@ def test_qwen3_matches_hf(tie_embeddings: bool) -> None:
         generator.manual_seed(0)
         torch.set_rng_state(generator.get_state())
         hf_out, loop_out = _qwen3_parity_outputs(tie_embeddings)
-        if not torch.equal(hf_out, loop_out):
-            pytest.skip(
-                "loop-vs-HF Qwen3 float32 matmul ordering is not bit-exact on "
-                f"this host (max abs diff "
-                f"{(hf_out - loop_out).abs().max().item():.3e}); the parity "
-                "invariant holds only where the host's matmul reduction order "
-                "matches the golden's."
-            )
         assert torch.equal(hf_out, loop_out)
     finally:
         torch.use_deterministic_algorithms(
@@ -433,6 +441,19 @@ def test_qwen3_matches_hf(tie_embeddings: bool) -> None:
             warn_only=warn_only_enabled,
         )
         torch.set_rng_state(rng_state)
+
+
+def test_qwen3_parity_mismatch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_qwen3_parity_outputs",
+        Mock(return_value=(torch.tensor([0.0]), torch.tensor([1.0]))),
+    )
+
+    with pytest.raises((AssertionError, pytest.skip.Exception)) as exc_info:
+        test_qwen3_matches_hf(False)
+
+    assert isinstance(exc_info.value, AssertionError)
 
 
 @pytest.mark.parametrize(

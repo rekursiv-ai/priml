@@ -9,8 +9,6 @@ from configgle import Fig, Makeable
 from torch import Tensor, nn
 
 from priml.model.custom_types import (
-    ChannelsIn,
-    ChannelsOut,
     TensorModule,
 )
 from priml.model.passthrough import (
@@ -38,11 +36,6 @@ class Identity(nn.Identity):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for Identity."
-                )
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -83,16 +76,9 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
     def __init__(self, config: Config) -> None:
         if config.inner is None:
             raise ValueError("Must specify `inner`.")
-        inner = config.inner
-        if (
-            isinstance(inner, ChannelsIn)
-            and isinstance(inner, ChannelsOut)
-            and inner.channels_in != inner.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={inner.channels_in} must equal "
-                f"channels_out={inner.channels_out} for Skip."
-            )
+        # The inner module's own widths are its invariant, not this one's: a
+        # residual add over mismatched widths raises from torch, naming both
+        # sizes and the dimension they disagree on.
         super().__init__()
         self.inner = config.inner.make()
 

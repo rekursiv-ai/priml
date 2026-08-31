@@ -51,7 +51,7 @@ from torch import Tensor
 import torch
 
 from priml import hub
-from priml.lib.custom_json import decode, dict_val, float_val, int_val
+from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, decode
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import ChannelsIn, TensorBlockConfig, propagate_attr
@@ -189,14 +189,28 @@ class KimiK2(CausalLM):
             block.norm1 = norm.copy_tree()
             block.norm2 = norm.copy_tree()
 
+            # ABSENCE, not falsiness, selects the dense width: ``... or
+            # config["intermediate_size"]`` also swallowed an explicit
+            # ``moe_intermediate_size: 0``, which then built every expert at the
+            # 18432-wide dense size and only surfaced as a shape mismatch when
+            # the checkpoint failed to load.
+            channels_hidden_expert = int(
+                config.get(
+                    "moe_intermediate_size",
+                    config["intermediate_size"],
+                )
+            )
+            if channels_hidden_expert < 1:
+                raise ValueError(
+                    f"moe_intermediate_size must be > 0, got {channels_hidden_expert}.",
+                )
+
             return cls(
                 vocab_size=int(config["vocab_size"]),
                 channels_in=int(config["hidden_size"]),
                 num_layers=int(config["num_hidden_layers"]),
                 channels_hidden_dense=int(config["intermediate_size"]),
-                channels_hidden_expert=int(
-                    config.get("moe_intermediate_size") or config["intermediate_size"],
-                ),
+                channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
                 block=block,
                 final_norm=norm.copy_tree(),
@@ -205,8 +219,6 @@ class KimiK2(CausalLM):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in < 1:
-                raise ValueError(f"channels_in must be > 0, got {self.channels_in}.")
             if not isinstance(self.block, list):
                 # One template, copied per layer: a shared node would have each
                 # block's own finalize push its widths into the others.
@@ -279,7 +291,9 @@ class KimiK2(CausalLM):
         """
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
-            hf_config = dict_val(decode("object", (path / "config.json").read_text()))
+            hf_config = DictCodec.coerce(
+                decode("object", (path / "config.json").read_text())
+            )
             hf_sd = hub.load_local_state_dict(path)
         else:
             hf_model = hub.load_transformers_model(
@@ -311,7 +325,7 @@ def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
     # Validated rather than cast: this is an HF ``config.json``, so a
     # malformed field is caller input, and casting surfaced it as an
     # ``AttributeError`` from inside ``.get``.
-    scaling = dict_val(rope_scaling)
+    scaling = DictCodec.coerce(rope_scaling)
     stype = scaling.get("type") or scaling.get("rope_type")
     if stype is None:
         return None
@@ -320,15 +334,15 @@ def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
             f"Unsupported rope_scaling type={stype!r}; only yarn is implemented.",
         )
     config = YarnScaling.Config()
-    config.factor = float_val(scaling["factor"])
-    config.original_max_position_embeddings = int_val(
+    config.factor = FloatCodec.coerce(scaling["factor"])
+    config.original_max_position_embeddings = IntCodec.coerce(
         scaling["original_max_position_embeddings"],
         default=4_096,
     )
-    config.beta_fast = float_val(scaling.get("beta_fast"), 32.0)
-    config.beta_slow = float_val(scaling.get("beta_slow"), 1.0)
-    config.mscale = float_val(scaling.get("mscale"), 1.0)
-    config.mscale_all_dim = float_val(scaling.get("mscale_all_dim"), 0.0)
+    config.beta_fast = FloatCodec.coerce(scaling.get("beta_fast"), 32.0)
+    config.beta_slow = FloatCodec.coerce(scaling.get("beta_slow"), 1.0)
+    config.mscale = FloatCodec.coerce(scaling.get("mscale"), 1.0)
+    config.mscale_all_dim = FloatCodec.coerce(scaling.get("mscale_all_dim"), 0.0)
     return config
 
 

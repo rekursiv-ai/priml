@@ -4,6 +4,6 @@ EnsembleLinear.Config(
                 num_ensemble=2,
                 bias=False,
                 depth_index=(),
-                init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 shard=None
         )

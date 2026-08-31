@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from configgle.testing import assert_pprint_golden
+
 import pytest
 import torch
 
@@ -38,29 +40,26 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_identity_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_identity_config_pprint() -> None:
     config = Identity.Config(channels_in=4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="identity",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_skip_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_skip_config_pprint() -> None:
     config = Skip.Config(inner=Linear.Config(4, 4))
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="skip",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -99,6 +98,17 @@ def test_identity_channels_infer():
 
     cfg2 = Identity.Config(channels_out=32).finalize()
     assert cfg2.channels_in == 32
+
+
+def test_identity_invalid_widths_print_before_make_rejects() -> None:
+    config = Identity.Config(channels_in=128, channels_out=64)
+
+    rendered = config.pformat(hide_default_values=False)
+
+    assert "channels_in=128" in rendered
+    assert "channels_out=64" in rendered
+    with pytest.raises(ValueError, match="channels_in=128 must equal channels_out=64"):
+        config.make()
 
 
 def test_identity_reset():
@@ -154,7 +164,7 @@ def test_skip_preserving_modules_reject_width_changes(config_type: type) -> None
     config.channels_out = 64
 
     with pytest.raises(ValueError, match="channels_in=128 must equal channels_out=64"):
-        config.finalize()
+        config.make()
 
 
 def test_skip_channels_proxy_inner() -> None:
@@ -184,8 +194,16 @@ def test_skip_forwards_direct_attributes_and_propagation_to_inner() -> None:
 
 
 def test_skip_rejects_an_inner_width_change() -> None:
-    with pytest.raises(ValueError, match="channels_in=64 must equal channels_out=32"):
-        Skip.Config(inner=Linear.Config(64, 32)).make()
+    """The residual add rejects it, naming both widths and the axis.
+
+    Skip does not pre-check the inner module's widths: that is the inner
+    module's invariant, and torch reports it with more detail than a
+    parent-side check could.
+    """
+    model = Skip.Config(inner=Linear.Config(64, 32)).make()
+
+    with pytest.raises(RuntimeError, match="must match the size of tensor"):
+        model(torch.randn(2, 8, 64))
 
 
 def test_skip():

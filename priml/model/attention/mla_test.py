@@ -22,6 +22,7 @@ import functools
 import tempfile
 
 from configgle import Makeable, PartialConfig
+from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as f
@@ -38,13 +39,13 @@ from priml.model.linear import Linear
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
+    first_tensor,
     host_agnostic_numerics,
     move_to_device,
 )
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 from priml.train.tensor_parallel import apply_tensor_parallel
 
 
@@ -58,18 +59,12 @@ _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
 @pytest.mark.parametrize("name", ["latent_attention", "multi_head_latent_attention"])
-def test_mla_config_pprint(request: pytest.FixtureRequest, name: str) -> None:
+def test_mla_config_pprint(name: str) -> None:
     config, latent = _mla_config()
-    rendered = (
-        latent.pformat(hide_default_values=False)
-        if name == "latent_attention"
-        else config.pformat(hide_default_values=False)
-    )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name=name,
-        rendered=rendered,
+        config=latent if name == "latent_attention" else config,
     )
 
 
@@ -276,15 +271,16 @@ def test_is_causal_false_overrides_causal_config() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("channels_qk_nope_head", 0),
-        ("channels_qk_rope_head", 0),
-        ("channels_v_head", 0),
-        ("q_lora_rank", 0),
         ("dropout", -0.1),
         ("dropout", 1.1),
     ],
 )
 def test_mla_rejects_invalid_geometry(field: str, value: float) -> None:
+    """Only ``dropout`` is checked here: it is a probability this layer owns.
+
+    A nonpositive width is torch's to reject when it builds the tensor
+    (STYLE.md "Let the leaf complain").
+    """
     config = MultiHeadLatentAttention.Config(
         channels_in=128,
         num_heads=4,
@@ -307,19 +303,6 @@ def test_softmax_scale_override():
         softmax_scale=0.25,
     ).make()
     assert m.softmax_scale == 0.25
-
-
-def test_rejects_bad_config():
-    with pytest.raises(ValueError, match="channels_in"):
-        MultiHeadLatentAttention.Config(channels_in=0).make()
-    with pytest.raises(ValueError, match="num_heads"):
-        MultiHeadLatentAttention.Config(
-            channels_in=64, num_heads=0, kv_lora_rank=16
-        ).make()
-    with pytest.raises(ValueError, match="kv_lora_rank"):
-        MultiHeadLatentAttention.Config(
-            channels_in=64, num_heads=4, kv_lora_rank=0
-        ).make()
 
 
 def test_mla_arbitrary_leading_dims():
@@ -464,7 +447,7 @@ def test_mla_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
         seed=0,
-        run=lambda m, x: _first_tensor(m(x)),
+        run=lambda m, x: first_tensor(m(x)),
     )
 
 
@@ -607,16 +590,6 @@ def _reference_mla_forward(
     return module.o_proj(out.movedim(-3, -2).flatten(-2))
 
 
-def _first_tensor(result: Tensor | tuple[object, ...] | list[object]) -> Tensor:
-    """Extract the primary output tensor from a module's return value."""
-    if isinstance(result, (tuple, list)):
-        head = result[0]
-        assert isinstance(head, Tensor)
-        return head
-    assert isinstance(result, Tensor)
-    return result
-
-
 def _tensor_parallel_mla(
     *,
     q_lora_rank: int | None = None,
@@ -648,14 +621,14 @@ def _record_case(
     try:
         torch.manual_seed(0)
         model, x = _tensor_parallel_mla(q_lora_rank=q_lora_rank)
-        dense = _first_tensor(model(x))
+        dense = first_tensor(model(x))
         sharded = apply_tensor_parallel(model, mesh)
         # A sharded q-path guards against a replicated no-op passing trivially.
         q = sharded.q_proj if sharded.q_proj is not None else sharded.q_b_proj
         if not isinstance(q.weight, DTensor):
             target.write_text("FAIL:q-path-not-sharded")
             return
-        out = _first_tensor(sharded(x))
+        out = first_tensor(sharded(x))
         full = out.full_tensor() if isinstance(out, DTensor) else out
         if torch.allclose(full, dense, rtol=1e-4, atol=1e-5):
             target.write_text("ok")

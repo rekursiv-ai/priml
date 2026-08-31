@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Self, override
 from unittest.mock import Mock
 
+import warnings
+
 from configgle import PartialConfig
+from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -14,14 +17,13 @@ import torch
 
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.custom_types import DepthIndex
+from priml.model.custom_types import DepthIndex, TensorModule
 from priml.model.generate import generate
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.causal_lm import CausalLM
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -57,12 +59,11 @@ def _canonical_config() -> CausalLM.Config:
     )
 
 
-def test_causal_lm_config_pprint(request: pytest.FixtureRequest) -> None:
-    assert_text_golden(
-        request,
+def test_causal_lm_config_pprint() -> None:
+    assert_pprint_golden(
         test_file=__file__,
         name="causal_lm",
-        rendered=_canonical_config().pformat(hide_default_values=False),
+        config=_canonical_config(),
     )
 
 
@@ -102,6 +103,33 @@ def test_model_forwards_the_open_message_bus_to_every_block() -> None:
     assert messages == [message, message]
 
 
+def test_model_forwards_the_open_message_bus_through_output_layers() -> None:
+    messages: list[object] = []
+    model = _tiny_config().make()
+
+    class RecordingLayer(torch.nn.Module):
+        def __init__(self, wrapped: TensorModule) -> None:
+            super().__init__()
+            self.wrapped = wrapped
+
+        @override
+        def forward(self, input: Tensor, **kwargs: object) -> Tensor:
+            messages.append(kwargs["message"])
+            return self.wrapped(input)
+
+        def reset_parameters(self) -> None:
+            self.wrapped.reset_parameters()
+
+    assert model.lm_head is not None
+    model.final_norm = RecordingLayer(model.final_norm)
+    model.lm_head = RecordingLayer(model.lm_head)
+    message = object()
+
+    model(torch.randint(0, 128, (1, 4)), message=message)
+
+    assert messages == [message, message]
+
+
 def test_forward_shape():
     m = _tiny_config().make()
     toks = torch.randint(0, 128, (2, 6))
@@ -133,6 +161,28 @@ def test_explicit_lm_head_receives_model_dimensions() -> None:
     assert isinstance(model.lm_head, Linear)
     assert model.lm_head.in_features == config.channels_in
     assert model.lm_head.out_features == config.vocab_size
+
+
+def test_causal_lm_preserves_an_explicit_lm_head_width() -> None:
+    """The head's INPUT width is torch's to reject; its output width is not.
+
+    A wrong input width fails the matmul, naming both operands. A wrong OUTPUT
+    width is silent -- it yields logits of the wrong size and forward succeeds --
+    so ``vocab_size``, a field only this config holds, is checked here.
+    """
+    config = _tiny_config()
+    config.lm_head = Linear.Config(channels_in=7, channels_out=128)
+
+    finalized = config.copy_tree().finalize()
+
+    assert isinstance(finalized.lm_head, Linear.Config)
+    assert finalized.lm_head.channels_in == 7
+    with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
+        config.make()(torch.zeros(2, 3, dtype=torch.long))
+
+    config.lm_head = Linear.Config(channels_in=32, channels_out=99)
+    with pytest.raises(ValueError, match=r"lm_head.channels_out=99"):
+        config.make()
 
 
 def test_num_layers_materialized():
@@ -194,8 +244,10 @@ def test_causal_lm_rejects_width_changing_blocks() -> None:
         final_norm=RMSNorm.Config(),
     )
 
-    with pytest.raises(ValueError, match=r"block.*channels_out"):
-        config.make()
+    # A width-CHANGING block in a width-preserving slot: torch names both
+    # operands of the matmul that cannot compose.
+    with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
+        config.make()(torch.zeros(2, 3, dtype=torch.long))
 
 
 def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
@@ -224,17 +276,54 @@ def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
     config.make()
 
 
-def test_invalid_config_rejected():
-    with pytest.raises(ValueError, match="vocab_size"):
-        CausalLM.Config(vocab_size=0, channels_in=8, num_layers=1).make()
-    with pytest.raises(ValueError, match="num_layers"):
-        CausalLM.Config(vocab_size=8, channels_in=8, num_layers=0).make()
-    with pytest.raises(ValueError, match="channels"):
-        CausalLM.Config(vocab_size=8, channels_in=0, num_layers=1).make()
+@pytest.mark.parametrize(
+    "config",
+    [
+        CausalLM.Config(vocab_size=0, channels_in=8, num_layers=1),
+        CausalLM.Config(vocab_size=8, channels_in=8, num_layers=0),
+        CausalLM.Config(vocab_size=8, channels_in=0, num_layers=1),
+    ],
+)
+def test_a_nonsense_width_still_prints(config: CausalLM.Config) -> None:
+    """A config too degenerate to build is exactly the one worth printing.
+
+    ``pformat`` finalizes a copy, so a ``finalize`` that raised would downgrade
+    to a warning and print the tree as TYPED -- without a single propagated
+    value. Rejecting the width is torch's job at build time, not finalize's.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert "CausalLM.Config" in config.pformat(hide_default_values=False)
 
 
 def test_causal_lm_config_reports_residual_width() -> None:
     assert _tiny_config().finalize().channels_out == 32
+
+
+def test_causal_lm_preserves_an_explicit_final_norm_width() -> None:
+    """An explicit child width survives finalize; the child owns rejecting it.
+
+    The parent does not re-derive a child's invariant: a norm built at the wrong
+    width raises from torch, naming both the shape it expected and the one it
+    got, which the parent could not have reported.
+    """
+    config = _tiny_config()
+    config.final_norm = RMSNorm.Config(channels_in=7)
+
+    finalized = config.copy_tree().finalize()
+
+    assert isinstance(finalized.final_norm, RMSNorm.Config)
+    assert finalized.final_norm.channels_in == 7
+    with pytest.raises(RuntimeError, match="normalized_shape"):
+        config.make()(torch.zeros(2, 3, dtype=torch.long))
+
+
+def test_causal_lm_rejects_width_changing_final_norm() -> None:
+    config = _tiny_config()
+    config.final_norm = Linear.Config(channels_in=32, channels_out=7)
+
+    with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
+        config.make()(torch.zeros(2, 3, dtype=torch.long))
 
 
 def test_causal_lm_rejects_wrong_block_count() -> None:
@@ -242,6 +331,9 @@ def test_causal_lm_rejects_wrong_block_count() -> None:
     assert isinstance(config.block, TransformerBlock.Config)
     config.block = [config.block]
 
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert "CausalLM.Config" in config.pformat(hide_default_values=False)
     with pytest.raises(ValueError, match="block list length 1 != num_layers=2"):
         config.make()
 
@@ -251,7 +343,11 @@ def test_causal_lm_rejects_wrong_block_input_width() -> None:
     assert isinstance(config.block, TransformerBlock.Config)
     config.block.channels_in = 16
 
-    with pytest.raises(ValueError, match=r"block\[0\].channels_in=16"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert "CausalLM.Config" in config.pformat(hide_default_values=False)
+    # The BLOCK owns its own width invariant and names itself in the failure.
+    with pytest.raises(ValueError, match="for TransformerBlock"):
         config.make()
 
 

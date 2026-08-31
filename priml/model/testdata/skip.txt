@@ -6,8 +6,8 @@ Skip.Config(
                         depth_index=(),
                         device=None,
                         dtype=None,
-                        init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                        init_bias=<function zeros_ at 0x0defaced0def>,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 )
         )

@@ -47,8 +47,8 @@ KimiK2.Config(
                 │               │               depth_index=((0, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_q_a=Linear.Config(
@@ -58,8 +58,8 @@ KimiK2.Config(
                 │               │               depth_index=(),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_q_b=Linear.Config(
@@ -69,8 +69,8 @@ KimiK2.Config(
                 │               │               depth_index=(),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_kv_a=Linear.Config(
@@ -80,8 +80,8 @@ KimiK2.Config(
                 │               │               depth_index=((0, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_kv_b=Linear.Config(
@@ -91,8 +91,8 @@ KimiK2.Config(
                 │               │               depth_index=((0, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_out=Linear.Config(
@@ -102,8 +102,8 @@ KimiK2.Config(
                 │               │               depth_index=((0, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       norm_kv_lora=RMSNorm.Config(
@@ -114,7 +114,7 @@ KimiK2.Config(
                 │               │               device=None,
                 │               │               dtype=None
                 │               │       ),
-                │               │       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │               │       depth_index=((0, 2),),
                 │               │       shard=None
                 │               ),
@@ -128,9 +128,9 @@ KimiK2.Config(
                 │                       bias=False,
                 │                       split_gate_projection=False,
                 │                       norm=None,
-                │                       act=<function silu at 0x0defaced0def>,
+                │                       act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │                       depth_index=((0, 2),),
-                │                       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │                       init_weight_out=None,
                 │                       shard='colwise'
                 │               ),
@@ -197,8 +197,8 @@ KimiK2.Config(
                 │               │               depth_index=((1, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_q_a=Linear.Config(
@@ -208,8 +208,8 @@ KimiK2.Config(
                 │               │               depth_index=(),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_q_b=Linear.Config(
@@ -219,8 +219,8 @@ KimiK2.Config(
                 │               │               depth_index=(),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_kv_a=Linear.Config(
@@ -230,8 +230,8 @@ KimiK2.Config(
                 │               │               depth_index=((1, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_kv_b=Linear.Config(
@@ -241,8 +241,8 @@ KimiK2.Config(
                 │               │               depth_index=((1, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       proj_out=Linear.Config(
@@ -252,8 +252,8 @@ KimiK2.Config(
                 │               │               depth_index=((1, 2),),
                 │               │               device=None,
                 │               │               dtype=None,
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
-                │               │               init_bias=<function zeros_ at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                │               │               init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │               │               shard=None
                 │               │       ),
                 │               │       norm_kv_lora=RMSNorm.Config(
@@ -264,7 +264,7 @@ KimiK2.Config(
                 │               │               device=None,
                 │               │               dtype=None
                 │               │       ),
-                │               │       init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │               │       depth_index=((1, 2),),
                 │               │       shard=None
                 │               ),
@@ -293,9 +293,9 @@ KimiK2.Config(
                 │               │               bias=False,
                 │               │               split_gate_projection=False,
                 │               │               norm=None,
-                │               │               act=<function silu at 0x0defaced0def>,
+                │               │               act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │               │               depth_index=((1, 2),),
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │               │               init_weight_out=None,
                 │               │               shard='colwise'
                 │               │       ),
@@ -310,9 +310,9 @@ KimiK2.Config(
                 │               │               bias=False,
                 │               │               split_gate_projection=False,
                 │               │               norm=None,
-                │               │               act=<function silu at 0x0defaced0def>,
+                │               │               act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │               │               depth_index=((1, 2),),
-                │               │               init_weight=<function kaiming_uniform at 0x0defaced0def>,
+                │               │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │               │               init_weight_out=None,
                 │               │               shard='colwise'
                 │               │       ),

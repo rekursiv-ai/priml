@@ -392,21 +392,6 @@ class MultiHeadLatentAttention(nn.Module):
                 f"channels_out={config.channels_out} for MultiHeadLatentAttention."
             )
         super().__init__()
-        if config.channels_in < 1:
-            raise ValueError(f"channels_in must be > 0, got {config.channels_in}.")
-        if config.num_heads < 1:
-            raise ValueError(f"num_heads must be > 0, got {config.num_heads}.")
-        if config.kv_lora_rank < 1:
-            raise ValueError(f"kv_lora_rank must be > 0, got {config.kv_lora_rank}.")
-        for name, value in (
-            ("channels_qk_nope_head", config.channels_qk_nope_head),
-            ("channels_qk_rope_head", config.channels_qk_rope_head),
-            ("channels_v_head", config.channels_v_head),
-        ):
-            if value < 1:
-                raise ValueError(f"{name} must be > 0, got {value}.")
-        if config.q_lora_rank is not None and config.q_lora_rank < 1:
-            raise ValueError(f"q_lora_rank must be > 0, got {config.q_lora_rank}.")
         if config.dropout < 0.0 or config.dropout > 1.0:
             raise ValueError(f"dropout must be between 0 and 1, got {config.dropout}.")
         self.num_heads = config.num_heads

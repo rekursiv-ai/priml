@@ -9,34 +9,29 @@ applies::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from configgle.testing import assert_pprint_golden
 
 import torch
 
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.golden import assert_text_golden
-
-
-if TYPE_CHECKING:
-    import pytest
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_narrow_embedding_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_narrow_embedding_config_pprint() -> None:
     config = NarrowEmbedding.Config(
         torch.bfloat16,
         channels_out=4,
         num_embeddings=8,
     )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="narrow_embedding",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

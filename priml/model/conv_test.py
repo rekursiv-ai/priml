@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from configgle.testing import assert_pprint_golden
+
 import pytest
 import torch
 
@@ -12,19 +14,17 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_conv1d_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_conv1d_config_pprint() -> None:
     config = Conv1d.Config(2, 3)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="conv1d",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -38,13 +38,12 @@ def test_conv1d_bfb() -> None:
     )
 
 
-def test_conv2d_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_conv2d_config_pprint() -> None:
     config = Conv2d.Config(2, 3)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="conv2d",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -58,13 +57,12 @@ def test_conv2d_bfb() -> None:
     )
 
 
-def test_conv3d_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_conv3d_config_pprint() -> None:
     config = Conv3d.Config(2, 3)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="conv3d",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

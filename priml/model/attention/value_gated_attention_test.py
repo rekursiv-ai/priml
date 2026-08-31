@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from configgle import PartialConfig
+from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
@@ -17,13 +18,12 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_value_gated_attention_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_value_gated_attention_config_pprint() -> None:
     config = ValueGatedAttention.Config(
         channels_in=16,
         num_heads=2,
@@ -31,11 +31,10 @@ def test_value_gated_attention_config_pprint(request: pytest.FixtureRequest) -> 
         gate_channels=4,
         window=4,
     )
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="value_gated_attention",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -102,18 +101,37 @@ def test_value_gated_attention_ungated_reset() -> None:
     assert attention.value_gate is None
 
 
-def test_value_gated_attention_config_validation() -> None:
-    with pytest.raises(ValueError, match="positive and even"):
-        ValueGatedAttention.Config(channels_in=16, channels_head=7).finalize()
-    with pytest.raises(ValueError, match="not divisible"):
-        ValueGatedAttention.Config(channels_in=15, channels_head=8).finalize()
-    with pytest.raises(ValueError, match="at most channels_in"):
-        ValueGatedAttention.Config(
-            channels_in=16,
-            num_heads=2,
-            channels_head=8,
-            gate_channels=17,
-        ).finalize()
+@pytest.mark.parametrize(
+    ("config", "match"),
+    [
+        (
+            ValueGatedAttention.Config(channels_in=16, channels_head=7),
+            "must be even",
+        ),
+        (
+            ValueGatedAttention.Config(channels_in=15, channels_head=8),
+            "not divisible",
+        ),
+        (
+            ValueGatedAttention.Config(
+                channels_in=16,
+                num_heads=2,
+                channels_head=8,
+                gate_channels=17,
+            ),
+            "at most channels_in",
+        ),
+    ],
+)
+def test_value_gated_attention_invalid_config_prints_before_make_rejects(
+    config: ValueGatedAttention.Config,
+    match: str,
+) -> None:
+    rendered = config.pformat(hide_default_values=False)
+
+    assert "ValueGatedAttention.Config" in rendered
+    with pytest.raises(ValueError, match=match):
+        config.make()
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
@@ -140,3 +158,9 @@ def test_value_gated_attention_bfb(device: str) -> None:
             value_embedding=x,
         ),
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from configgle.testing import assert_pprint_golden
+
 import pytest
 import torch
 
@@ -14,29 +16,26 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def test_patchify_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_patchify_config_pprint() -> None:
     config = Patchify.Config(channels_in=2, patch_size=[2, 2])
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="patchify",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_unpatchify_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_unpatchify_config_pprint() -> None:
     config = Unpatchify.Config(channels_out=2, patch_size=[2, 2])
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="unpatchify",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

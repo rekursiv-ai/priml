@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import override
 
 from configgle import Fig, PartialConfig
+from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
@@ -22,7 +23,6 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -44,13 +44,12 @@ class _LearnedRotary(nn.Module):
         return factors.cos(), factors.sin()
 
 
-def test_self_attention_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_self_attention_config_pprint() -> None:
     config = SelfAttention.Config(channels_in=16, num_heads=2, channels_head=8)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="self_attention",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -265,17 +264,29 @@ def test_self_attention_split_qkv_projection() -> None:
     assert m(torch.randn(2, 4, 16)).shape == (2, 4, 16)
 
 
-def test_self_attention_head_inference_rejects_ambiguous_or_ragged_dims() -> None:
-    with pytest.raises(ValueError, match="Need at least two"):
-        SelfAttention.Config().finalize()
-    with pytest.raises(ValueError, match="not divisible by num_heads"):
-        SelfAttention.Config(channels_in=15, num_heads=2).finalize()
-    with pytest.raises(ValueError, match="not divisible by channels_head"):
-        SelfAttention.Config(
-            channels_in=15,
-            num_heads=-1,
-            channels_head=8,
-        ).finalize()
+@pytest.mark.parametrize(
+    ("config", "match"),
+    [
+        (SelfAttention.Config(), "Need at least two"),
+        (
+            SelfAttention.Config(channels_in=15, num_heads=2),
+            "not divisible by num_heads",
+        ),
+        (
+            SelfAttention.Config(channels_in=15, num_heads=-1, channels_head=8),
+            "not divisible by channels_head",
+        ),
+    ],
+)
+def test_self_attention_invalid_head_geometry_prints_before_make_rejects(
+    config: SelfAttention.Config,
+    match: str,
+) -> None:
+    rendered = config.pformat(hide_default_values=False)
+
+    assert "SelfAttention.Config" in rendered
+    with pytest.raises(ValueError, match=match):
+        config.make()
 
 
 def test_self_attention_inner_width_differs_from_residual():
@@ -465,3 +476,9 @@ def test_self_attention_bfb(device: str) -> None:
         build_input=lambda: torch.randn(2, 4, 16),
         seed=0,
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

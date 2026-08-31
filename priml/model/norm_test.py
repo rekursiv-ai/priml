@@ -6,6 +6,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from configgle.testing import assert_pprint_golden
+from torch import nn
+
 import pytest
 import torch
 
@@ -23,7 +26,6 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -141,6 +143,27 @@ def _norm(**overrides: float) -> BatchRenorm:
     for name, value in overrides.items():
         setattr(config, name, value)
     return config.make()
+
+
+def test_batch_renorm_reset_parameters_restores_the_identity_transform() -> None:
+    """Reset restores the affine AND the running estimates it normalizes by.
+
+    The buffers are part of the layer's learned state, so a reset that left them
+    warm would reinitialize into another run's statistics.
+    """
+    layer = _norm()
+    layer.train()
+    layer(torch.randn(32, 4) * 3.0 + 5.0)
+    nn.init.constant_(layer.weight, 7.0)
+    nn.init.constant_(layer.bias, 7.0)
+
+    layer.reset_parameters()
+
+    assert torch.equal(layer.weight, torch.ones(4))
+    assert torch.equal(layer.bias, torch.zeros(4))
+    assert torch.equal(layer.running_mean, torch.zeros(4))
+    assert torch.equal(layer.running_var, torch.ones(4))
+    assert int(layer.steps) == 0
 
 
 @torch.no_grad()
@@ -271,83 +294,75 @@ def test_an_invalid_setting_is_refused(field: str, value: float) -> None:
         _norm(**{field: value})
 
 
-def test_rms_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_rms_norm_config_pprint() -> None:
     config = RMSNorm.Config(4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="rms_norm",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_centered_rms_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_centered_rms_norm_config_pprint() -> None:
     config = CenteredRMSNorm.Config(4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="centered_rms_norm",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_layer_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_layer_norm_config_pprint() -> None:
     config = LayerNorm.Config(4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="layer_norm",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_batch_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_batch_norm_config_pprint() -> None:
     config = BatchNorm.Config(4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="batch_norm",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_batch_renorm_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_batch_renorm_config_pprint() -> None:
     config = BatchRenorm.Config(channels_in=4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="batch_renorm",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_batch_norm2d_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_batch_norm2d_config_pprint() -> None:
     config = BatchNorm2d.Config(4)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="batch_norm2d",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_group_norm2d_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_group_norm2d_config_pprint() -> None:
     config = GroupNorm2d.Config(4, num_groups=2)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="group_norm2d",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
-def test_group_norm_config_pprint(request: pytest.FixtureRequest) -> None:
+def test_group_norm_config_pprint() -> None:
     config = GroupNorm.Config(4, num_groups=2)
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name="group_norm",
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 

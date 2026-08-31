@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast, override
 
+from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 
 import pytest
@@ -15,7 +16,6 @@ from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -34,15 +34,13 @@ class _Kernel(nn.Module):
 
 @pytest.mark.parametrize("config", [SdpaFused.Config(), SdpaNaive.Config()])
 def test_kernel_config_pprint(
-    request: pytest.FixtureRequest,
     config: SdpaFused.Config | SdpaNaive.Config,
 ) -> None:
     name = "sdpa_fused" if isinstance(config, SdpaFused.Config) else "sdpa_naive"
-    assert_text_golden(
-        request,
+    assert_pprint_golden(
         test_file=__file__,
         name=name,
-        rendered=config.pformat(hide_default_values=False),
+        config=config,
     )
 
 
@@ -128,3 +126,9 @@ def test_kernel_bfb(device: str, name: str, kernel: object) -> None:
         build_input=lambda: tuple(torch.randn(1, 4, 2, 8) for _ in range(3)),
         seed=0,
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

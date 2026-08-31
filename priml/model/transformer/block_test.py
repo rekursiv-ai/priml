@@ -12,14 +12,20 @@ math threads before torch imports. Minting from bare Python skips that setup.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+import warnings
+
+from configgle.testing import assert_pprint_golden
+from torch.utils.checkpoint import checkpoint as real_checkpoint
 
 import pytest
 import torch
 
+from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.linear import Linear
+from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import (
@@ -30,7 +36,6 @@ from priml.testing.bfb import (
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
-from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
@@ -43,12 +48,11 @@ def _canonical_config() -> TransformerBlock.Config:
     )
 
 
-def test_transformer_block_config_pprint(request: pytest.FixtureRequest) -> None:
-    assert_text_golden(
-        request,
+def test_transformer_block_config_pprint() -> None:
+    assert_pprint_golden(
         test_file=__file__,
         name="transformer_block",
-        rendered=_canonical_config().pformat(hide_default_values=False),
+        config=_canonical_config(),
     )
 
 
@@ -96,6 +100,17 @@ def test_transformer_block_cached(prenorm: bool) -> None:
     assert cache.length == 8
 
 
+def test_transformer_block_cached_rejects_attention_without_cached_path() -> None:
+    model = TransformerBlock.Config(
+        channels_in=16,
+        attn=Linear.Config(16, 16),
+    ).make()
+    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=1, channels_head=1)
+
+    with pytest.raises(TypeError, match="cached attention"):
+        model.forward_cached(torch.randn(1, 1, 16), cache=cache)
+
+
 def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     m = TransformerBlock.Config(
         channels_in=64,
@@ -139,12 +154,16 @@ def test_transformer_block_infers_input_width_from_output() -> None:
 
 
 def test_transformer_block_rejects_width_changing_config() -> None:
+    config = TransformerBlock.Config(
+        channels_in=16,
+        channels_out=8,
+        attn=SelfAttention.Config(num_heads=2, channels_head=8),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert "TransformerBlock.Config" in config.pformat(hide_default_values=False)
     with pytest.raises(ValueError, match="channels_in=16 must equal channels_out=8"):
-        TransformerBlock.Config(
-            channels_in=16,
-            channels_out=8,
-            attn=SelfAttention.Config(num_heads=2, channels_head=8),
-        ).make()
+        config.make()
 
 
 def test_transformer_block_depth_propagation():
@@ -157,6 +176,26 @@ def test_transformer_block_depth_propagation():
     assert cfg.ffn.depth_index == ((5, 6),)
 
 
+def test_transformer_block_preserves_explicit_child_configuration() -> None:
+    config = TransformerBlock.Config(
+        channels_in=16,
+        norm1=RMSNorm.Config(channels_in=7, channels_out=7),
+        ffn=SwiGLU.Config(shard="rowwise", depth_index=((1, 2),)),
+    )
+
+    finalized = config.copy_tree().finalize()
+
+    assert isinstance(finalized.norm1, RMSNorm.Config)
+    assert finalized.norm1.channels_in == 7
+    assert isinstance(finalized.ffn, SwiGLU.Config)
+    assert finalized.ffn.shard == "rowwise"
+    assert finalized.ffn.depth_index == ((1, 2),)
+    # The norm owns its width: it raises from torch at the shape it was built
+    # for, which the block could not have named.
+    with pytest.raises(RuntimeError, match="normalized_shape"):
+        config.make()(torch.randn(2, 3, 16))
+
+
 def test_block_checkpoint_skipped_under_eval():
     """``checkpoint=True`` must NOT wrap the block in ``torch.utils.checkpoint``
     when grad is off (eval / ``no_grad`` / ``inference_mode``).
@@ -166,8 +205,6 @@ def test_block_checkpoint_skipped_under_eval():
     backward, so the grad-mode gate must skip it. Patches ``torch_checkpoint`` to
     fail if called, then forwards under both eval contexts.
     """
-    from unittest.mock import patch  # noqa: PLC0415
-
     m = TransformerBlock.Config(
         channels_in=64,
         attn=SelfAttention.Config(num_heads=4, channels_head=16),
@@ -175,7 +212,7 @@ def test_block_checkpoint_skipped_under_eval():
     ).make()
     x = torch.randn(2, 8, 64)
 
-    def _boom(*args: Any, **kwargs: Any) -> Any:
+    def _boom(*args: object, **kwargs: object) -> object:
         del args, kwargs
         raise AssertionError("torch_checkpoint must not run under eval (grad off)")
 
@@ -188,27 +225,19 @@ def test_block_checkpoint_skipped_under_eval():
 
 def test_block_checkpoint_wraps_under_grad():
     """With grad enabled, ``checkpoint=True`` does enter ``torch_checkpoint``."""
-    from unittest.mock import patch  # noqa: PLC0415
-
-    from torch.utils.checkpoint import checkpoint as real_checkpoint  # noqa: PLC0415
-
     m = TransformerBlock.Config(
         channels_in=64,
         attn=SelfAttention.Config(num_heads=4, channels_head=16),
         checkpoint=True,
     ).make()
     x = torch.randn(2, 8, 64, requires_grad=True)
-    seen = [0]
+    spy = Mock(wraps=real_checkpoint)
 
-    def _spy(*args: Any, **kwargs: Any) -> Any:
-        seen[0] += 1
-        return real_checkpoint(*args, **kwargs)
-
-    with patch("priml.model.transformer.block.torch_checkpoint", _spy):
+    with patch("priml.model.transformer.block.torch_checkpoint", spy):
         out = m(x)
         assert isinstance(out, torch.Tensor)
         out.sum().backward()
-    assert seen[0] > 0, "checkpoint=True did not checkpoint during training"
+    assert spy.call_count > 0, "checkpoint=True did not checkpoint during training"
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

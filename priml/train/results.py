@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 
-from priml.lib.custom_json import dict_val, float_val
+from priml.lib.custom_json import DictCodec, FloatCodec
 
 
 def read_metrics(path: Path) -> dict[str, float]:
@@ -33,7 +33,7 @@ def read_metrics(path: Path) -> dict[str, float]:
 
     """
     decoded = json.loads(path.read_text())
-    return {k: float_val(v) for k, v in dict_val(decoded).items()}
+    return {k: FloatCodec.coerce(v) for k, v in DictCodec.coerce(decoded).items()}
 
 
 def format_summary(
