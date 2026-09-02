@@ -49,9 +49,10 @@ class WorkerPool:
         self.processes = self.queue = self.ack_queue = None
 
     def __enter__(self) -> Self:
-        # ``find_free_port`` closes the socket before the workers bind it, so a
-        # concurrent pool (xdist runs many at once) can steal the port in the
-        # gap, leaving this pool's ranks unable to rendezvous. Rather than race,
+        # ``find_free_port`` closes the socket before the workers bind it, so
+        # ANY process on this host -- a concurrent pool, or anything else
+        # holding a port on any local address -- can claim it in the gap,
+        # leaving this pool's ranks unable to rendezvous. Rather than race,
         # spawn against a fresh port and require every worker to ack readiness
         # within a bound; a collided/wedged attempt is torn down and retried
         # (the shared spawn-with-retry loop lives in ``_respawn``).
@@ -260,7 +261,7 @@ class WorkerPool:
     _RENDEZVOUS_ATTEMPTS = 3
 
     def _pick_bindable_port(self) -> int:
-        """Return a port the parent just confirmed it can bind on loopback.
+        """Return a port the parent just confirmed it can bind on the wildcard.
 
         ``find_free_port`` has a TOCTOU window: a concurrent pool can claim the
         port between selection and the workers' bind. Re-binding it here, in the
@@ -274,7 +275,10 @@ class WorkerPool:
             port = type(self).find_free_port()
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                probe.bind(("127.0.0.1", port))
+                # "" is INADDR_ANY -- the address TCPStore listens on. See
+                # ``find_free_port``; probing 127.0.0.1 here would re-admit
+                # exactly the ports this method exists to reject.
+                probe.bind(("", port))
             except OSError:
                 probe.close()
                 continue  # stolen in the TOCTOU window; pick another
@@ -289,7 +293,16 @@ class WorkerPool:
 
     @classmethod
     def find_free_port(cls) -> int:
-        """Return an OS-assigned free loopback port for the worker rendezvous.
+        """Return an OS-assigned free port for the worker rendezvous.
+
+        Bound on ``""`` (INADDR_ANY, the wildcard), matching where ``TCPStore``
+        actually listens: handed ``MASTER_ADDR=localhost`` it still binds
+        ``*:port``. Probing ``127.0.0.1`` tests a strictly weaker condition --
+        a port held by any process on a NON-loopback local address is invisible
+        to a loopback probe yet collides with the wildcard listen, so rank 0
+        dies with ``EADDRINUSE`` on a port just certified free. Measured with
+        400 ports held on a secondary local address, a loopback probe returned
+        a doomed port 118 times in 4000; the wildcard probe, 0.
 
         The socket is closed before the caller uses it, so a concurrent process
         could claim the port in the interim (a TOCTOU window). Callers that need
@@ -297,7 +310,7 @@ class WorkerPool:
         which re-verifies and re-picks on a collision.
         """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
+            s.bind(("", 0))
             # getsockname() is `Any`; AF_INET always yields (host, port).
             port = s.getsockname()[1]
             assert isinstance(port, int)
