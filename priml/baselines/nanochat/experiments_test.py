@@ -449,6 +449,7 @@ def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
                 assert member.compile is True, factory.__name__
 
 
+@pytest.mark.compute_large_fixture
 def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
     """Pin the WHOLE finalized ``exp000`` as readable text.
 
@@ -457,6 +458,13 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
     moved; this golden says WHICH field, from what, to what.
     ``hide_default_values=False`` so a field that changes only because a
     library default changed still shows up here.
+
+    Marked rather than shrunk: the claim IS the whole tree, so every lever that
+    would bring the render under the unit budget -- a narrower model, fewer
+    layers, hiding defaults -- pins a config no experiment runs. Measured 0.25s
+    on colossus, essentially all of it inside ``pformat``, which walks the
+    finalized tree and tokenizes each rendered node to find replacements
+    outside string literals.
 
     Refresh ``testdata/exp000.txt`` with ``--golden-overwrite`` after reading
     the diff.
