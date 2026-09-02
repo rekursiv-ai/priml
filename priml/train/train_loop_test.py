@@ -10,6 +10,7 @@ import functools
 import json
 import logging
 import math
+import shutil
 import tempfile
 import time
 
@@ -659,29 +660,18 @@ def _eval_only_step_config() -> TrainStep.Config:
     return step_config
 
 
-def test_eval_only_loads_checkpoint_and_skips_training():
-    """eval_only loads a checkpoint, evals once, and runs no training step."""
+def test_eval_only_loads_checkpoint_and_skips_training(seeded_checkpoints: Path):
+    """eval_only loads a checkpoint, evals once, and runs no training step.
+
+    Reads the session's checkpoints rather than training its own: the claim is
+    about what ``eval_only`` does GIVEN a checkpoint, so producing one is setup,
+    and the session run writes it under the same recipe, seed, and cadence.
+
+    """
     torch.manual_seed(42)
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "checkpoints"
-
-        train_cfg = TrainLoop.Config(
-            step=_eval_only_step_config(),
-            dataset=_BinaryDataset.Config(),
-        )
-        train_cfg.metrics = {"accuracy": BinaryAccuracy.Config()}
-        train_cfg.max_steps = 20
-        train_cfg.num_steps_eval = float("inf")
-        train_cfg.checkpointing = Checkpointer.Config(
-            base_dir="/",
-            working_dir=checkpoint_dir,
-            save_every=10,
-            keep_last_n=2,
-        )
-        train_cfg.seed = 42
-        train_loop = train_cfg.make()
-        train_loop.train()
-        assert train_loop.step.global_step == 20
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
         assert (checkpoint_dir / "step_00000020.pt").exists()
 
         # eval_only run: loads the step-20 checkpoint, evals, no training.
@@ -749,21 +739,47 @@ def _resume_table_config(checkpoint_dir: Path):
     return cfg
 
 
-def _seed_checkpoints(checkpoint_dir: Path) -> None:
-    """Train a fresh run to populate ``checkpoint_dir`` with step_10, step_20."""
-    cfg = _resume_table_config(checkpoint_dir)
+@pytest.fixture(scope="session")
+def seeded_checkpoints(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Train ONE 20-step run per session; every resume test copies its output."""
+    source = tmp_path_factory.mktemp("seeded-checkpoints") / "ck"
+    cfg = _resume_table_config(source)
     assert isinstance(cfg.checkpointing, Checkpointer.Config)
     cfg.checkpointing.resume = False
     loop = cfg.make()
     loop.train()
-    assert (checkpoint_dir / "step_00000020.pt").exists()
+    assert (source / "step_00000020.pt").exists()
+    # Several one-time torch imports hide under this path: the first optimizer
+    # build pulls in torch._dynamo (417ms on colossus against 3ms warm), the
+    # first RESUME pulls in torch.load's deserialization machinery, and the
+    # first EVAL pulls in its own. Each is per-process, so leaving them to
+    # whichever test runs first bills an arbitrary one -- a different one per
+    # worker under xdist, which is what put these tests in the slow report at
+    # -n 24. Paying them here makes the cost attributable to this fixture and
+    # paid once. Warmed by REPLAYING the real build-resume-eval path rather
+    # than by importing torch internals directly, so it stays correct if what
+    # that path touches changes.
+    warm = source.parent / "warm"
+    shutil.copytree(source, warm)
+    warm_config = _resume_table_config(warm)
+    assert isinstance(warm_config.checkpointing, Checkpointer.Config)
+    warm_config.checkpointing.resume = True
+    warm_config.metrics = {"accuracy": BinaryAccuracy.Config()}
+    warm_config.eval_only = True
+    warm_config.make().train()
+    return source
 
 
-def test_resume_latest_uses_largest_when_checkpoints_exist():
+def _seed_checkpoints(checkpoint_dir: Path, seeded: Path) -> None:
+    """Populate ``checkpoint_dir`` with the session run's step_10 and step_20."""
+    shutil.copytree(seeded, checkpoint_dir)
+
+
+def test_resume_latest_uses_largest_when_checkpoints_exist(seeded_checkpoints: Path):
     """resume=True, resume_step=-1, checkpoints exist -> load largest."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -789,11 +805,11 @@ def test_resume_latest_starts_fresh_when_no_checkpoints():
         assert loop.step.global_step == 0
 
 
-def test_resume_explicit_step_loads_that_step():
+def test_resume_explicit_step_loads_that_step(seeded_checkpoints: Path):
     """resume=True, resume_step>0 present -> load exactly that step."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -806,11 +822,11 @@ def test_resume_explicit_step_loads_that_step():
         assert loop.step.global_step == 10
 
 
-def test_resume_explicit_step_missing_raises():
+def test_resume_explicit_step_missing_raises(seeded_checkpoints: Path):
     """resume=True, resume_step>0 absent -> hard error (named step not found)."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)  # has 10, 20 -- not 999
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # has 10, 20 -- not 999
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -853,6 +869,7 @@ def test_resume_defaults_to_true():
 
 def test_a_resume_with_nothing_left_to_do_says_so(
     caplog: pytest.LogCaptureFixture,
+    seeded_checkpoints: Path,
 ) -> None:
     """A completed experiment re-run must explain itself, not just exit 0.
 
@@ -866,7 +883,9 @@ def test_a_resume_with_nothing_left_to_do_says_so(
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)  # trains to max_steps and saves step_20
+        _seed_checkpoints(
+            checkpoint_dir, seeded_checkpoints
+        )  # trains to max_steps and saves step_20
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -886,7 +905,7 @@ def test_a_resume_with_nothing_left_to_do_says_so(
         assert any("experiment_name" in message for message in warnings), warnings
 
 
-def test_fresh_run_refuses_to_overwrite_existing_checkpoints():
+def test_fresh_run_refuses_to_overwrite_existing_checkpoints(seeded_checkpoints: Path):
     """A from-scratch run whose saves would land on existing files is refused.
 
     The colleague's footgun: a fresh run reusing a name silently overwrote the
@@ -895,7 +914,7 @@ def test_fresh_run_refuses_to_overwrite_existing_checkpoints():
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)  # steps 10, 20
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -905,7 +924,9 @@ def test_fresh_run_refuses_to_overwrite_existing_checkpoints():
             cfg.make()
 
 
-def test_rewind_resume_refuses_to_overwrite_newer_checkpoints():
+def test_rewind_resume_refuses_to_overwrite_newer_checkpoints(
+    seeded_checkpoints: Path,
+):
     """Resuming an older step is refused when later saves would clobber newer.
 
     Orthogonal to resume: resuming step 10 then training to 20 would mint
@@ -914,7 +935,7 @@ def test_rewind_resume_refuses_to_overwrite_newer_checkpoints():
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)  # steps 10, 20
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -925,11 +946,11 @@ def test_rewind_resume_refuses_to_overwrite_newer_checkpoints():
             cfg.make()
 
 
-def test_resume_latest_does_not_trip_overwrite_guard():
+def test_resume_latest_does_not_trip_overwrite_guard(seeded_checkpoints: Path):
     """Resuming the latest checkpoint never collides -- no save step exceeds it."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)  # steps 10, 20
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -955,11 +976,11 @@ def test_fresh_run_into_off_cadence_dir_is_allowed():
         assert loop.step.global_step == 0
 
 
-def test_allow_checkpoint_overwrite_permits_clobber():
+def test_allow_checkpoint_overwrite_permits_clobber(seeded_checkpoints: Path):
     """allow_checkpoint_overwrite=True lets a run mint over existing files."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -976,7 +997,7 @@ def test_allow_checkpoint_overwrite_defaults_to_false():
     assert finalized.checkpointing.allow_checkpoint_overwrite is False
 
 
-def test_eval_only_never_trips_overwrite_guard():
+def test_eval_only_never_trips_overwrite_guard(seeded_checkpoints: Path):
     """eval_only writes no checkpoint, so the overwrite guard must not fire.
 
     Loading an older explicit step (10) while a newer one (20) exists would
@@ -985,7 +1006,7 @@ def test_eval_only_never_trips_overwrite_guard():
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir)  # steps 10, 20
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20
 
         cfg = _resume_table_config(checkpoint_dir)
         cfg.eval_only = True
