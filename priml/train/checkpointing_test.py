@@ -19,7 +19,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml.distributed.testing import WorkerPool
 from priml.train.checkpointing import (
     AsyncLocalStateDictStorer,
     Checkpointer,
@@ -44,22 +43,18 @@ def temp_checkpoint_dir() -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def single_rank_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Generator[None, None, None]:
-    """Initialize a 1-rank gloo process group for sharded-checkpoint tests."""
-    try:
-        port = WorkerPool.find_free_port()
-    except OSError as error:
-        raise pytest.skip.Exception(
-            f"Gloo requires a permitted loopback socket: {error}"
-        ) from error
-    monkeypatch.setenv("MASTER_ADDR", "127.0.0.1")
-    monkeypatch.setenv("MASTER_PORT", str(port))
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setenv("WORLD_SIZE", "1")
+def single_rank_group(tmp_path: Path) -> Generator[None, None, None]:
+    """Initialize a 1-rank gloo process group for sharded-checkpoint tests.
+
+    A file rendezvous, not TCP: a TCP one picks a port by binding
+    ``127.0.0.1:0`` and closing, but ``TCPStore`` then listens on the
+    WILDCARD address, so a port held by any other process on a non-loopback
+    address passes the probe and fails the listen (``EADDRINUSE``). A
+    per-test rendezvous file cannot collide at all.
+    """
     dist.init_process_group(
         backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
         rank=0,
         world_size=1,
     )

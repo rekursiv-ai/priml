@@ -5,9 +5,8 @@ full-module (default) and parameter-only (TRM-style) shadows.
 from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any, cast
-
-import os
 
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
@@ -17,24 +16,25 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from priml.distributed.testing import WorkerPool
 from priml.train.ema import EMA, NoEMA, karras_decay
 
 
 @pytest.fixture
-def single_rank_group() -> Generator[None, None, None]:
+def single_rank_group(tmp_path: Path) -> Generator[None, None, None]:
     """Initialize a 1-rank gloo process group for DTensor-shadow tests.
 
-    The rendezvous port is OS-assigned (not hardcoded) so concurrent
-    xdist workers running this fixture never collide on a fixed port --
-    the prior fixed 29557 made the second worker fail to bind with
-    ``DistNetworkError: server socket has failed to listen``.
+    A file rendezvous, not TCP: an OS-assigned port is still not collision
+    free, because it is chosen by binding ``127.0.0.1:0`` and closing while
+    ``TCPStore`` listens on the WILDCARD address. A port held by another
+    process on a non-loopback address passes that probe and fails the listen
+    (``DistNetworkError ... EADDRINUSE``). A per-test file cannot collide.
     """
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(WorkerPool.find_free_port())
-    os.environ["RANK"] = "0"
-    os.environ["WORLD_SIZE"] = "1"
-    dist.init_process_group(backend="gloo", rank=0, world_size=1)
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
     try:
         yield
     finally:
