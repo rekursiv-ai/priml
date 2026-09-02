@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import functools
+import platform
 
 from torch import Tensor, nn
 
@@ -21,6 +22,16 @@ from priml.testing.golden import assert_text_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
+
+# ``linalg.eigh`` may choose either sign for each eigenvector. The whitening
+# layer deliberately retains both signs as [V, -V], so Linux AArch64 is
+# mathematically equivalent to the x86 golden but swaps some channel pairs.
+# Keep an exact golden for each observed orientation instead of weakening BFB.
+_GOLDEN_NAME = (
+    "whitening-linux-aarch64"
+    if (platform.system(), platform.machine()) == ("Linux", "aarch64")
+    else "whitening"
+)
 
 
 def _whitening() -> PCAWhiteningConv2d:
@@ -99,7 +110,7 @@ def test_whitening_text(request: pytest.FixtureRequest) -> None:
 def test_whitening_bfb(device: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_TESTDATA,
-        golden_name="whitening",
+        golden_name=_GOLDEN_NAME,
         build_module=lambda: _whitening().to(device),
         build_input=lambda: (torch.randn(2, 1, 3, 3), torch.randn(1, 1, 3, 3)),
         seed=0,
