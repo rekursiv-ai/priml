@@ -851,6 +851,41 @@ def test_resume_defaults_to_true():
     assert finalized.checkpointing.resume is True
 
 
+def test_a_resume_with_nothing_left_to_do_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A completed experiment re-run must explain itself, not just exit 0.
+
+    Resume defaults on and a run is identified by its directory, so re-running
+    a finished experiment restores its last step, finds the budget already
+    spent, and returns in seconds with no RESULT line. That is correct
+    behaviour and unreadable output: measured on a cifar10 re-run, the only
+    signal was a 4-second job log with nothing in it. The warning names the
+    step it resumed and what to do instead; it stays a warning because
+    resume-by-default is the intended policy.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        checkpoint_dir = Path(temp_dir) / "ck"
+        _seed_checkpoints(checkpoint_dir)  # trains to max_steps and saves step_20
+
+        cfg = _resume_table_config(checkpoint_dir)
+        assert isinstance(cfg.checkpointing, Checkpointer.Config)
+        cfg.checkpointing.resume = True
+        cfg.checkpointing.resume_step = -1
+        loop = cfg.make()
+        assert loop.step.global_step == cfg.max_steps  # nothing left to run
+        with caplog.at_level(logging.WARNING, logger=train_loop.__name__):
+            loop.train()
+        assert loop.step.global_step == 20  # exited cleanly, trained nothing
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any("already completed at step 20" in message for message in warnings), (
+            warnings
+        )
+        assert any("experiment_name" in message for message in warnings), warnings
+
+
 def test_fresh_run_refuses_to_overwrite_existing_checkpoints():
     """A from-scratch run whose saves would land on existing files is refused.
 

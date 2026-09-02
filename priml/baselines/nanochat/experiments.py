@@ -24,7 +24,7 @@ fork for ordinary work: the same recipe, and portable to any GPU.
 Prepare the data once, then launch::
 
     uv --quiet run --frozen python -m priml.baselines.nanochat.scripts.prepare_data
-    time CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001 --override checkpointing.resume=False
+    time CUDA_VISIBLE_DEVICES=1 uv --quiet run --frozen python -m priml priml.baselines.nanochat.experiments.exp001
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from priml.model.attention.value_gated_attention import (
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
 from priml.runtime import SingleProcess
+from priml.train.checkpointing import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
 from priml.train.train_loop import TrainLoop
@@ -221,6 +222,11 @@ def exp000() -> NanoChatLoop.Config:
     # draw rather than the recipe. It seeds initialization alone -- the data
     # order is the corpus's own, packed deterministically and never shuffled.
     cfg.seed = 42
+    # Avoid checkpoint resuming because the job is single-shot
+    checkpointing = cfg.checkpointing
+    assert isinstance(checkpointing, Checkpointer.Config)
+    checkpointing.resume = False
+
     cfg.step.parallelism = NoParallel.Config()
     cfg.step.parallelism.device = "cuda"
     cfg.dataset.device = "cuda"

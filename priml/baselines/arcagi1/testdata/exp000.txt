@@ -75,7 +75,7 @@ ArcTrainLoop(
                 │       │       prefix=PrefixStack.Config(
                 │       │               parts=[
                 │       │                       SparsePuzzleEmbedding.Config(
-                │       │                               num_puzzles=1,
+                │       │                               num_puzzles=876_403,
                 │       │                               num_tokens=16,
                 │       │                               channels=512,
                 │       │                               channels_in=-1,
