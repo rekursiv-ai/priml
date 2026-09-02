@@ -227,6 +227,39 @@ def test_enter_recovers_from_a_port_collision(
     assert len(ports) >= 2
 
 
+def test_port_selection_sees_a_holder_on_a_non_loopback_address() -> None:
+    """A port held on ANY local address must not be offered as free.
+
+    ``TCPStore`` listens on the wildcard address even when handed
+    ``MASTER_ADDR=localhost``, so a port bound by another process on a
+    non-loopback local address (``127.0.1.1`` here, but on CI any interface
+    the runner holds) collides with rank 0's listen. Selecting on
+    ``127.0.0.1`` cannot see such a holder and hands back a doomed port,
+    which surfaced as an intermittent CI
+    ``DistNetworkError ... EADDRINUSE`` during ``init_process_group``.
+    """
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind(("127.0.1.1", 0))
+        holder.listen(1)
+    except OSError as error:  # pragma: no cover -- host lacks a second local addr
+        holder.close()
+        pytest.skip(f"no non-loopback local address to hold: {error}")
+    held_port = holder.getsockname()[1]
+    try:
+        # The pool must reject a port it cannot actually listen on. Feeding the
+        # held port as the first candidate makes the probe the only thing that
+        # can catch it.
+        pool = _pool(2)
+        with (
+            patch.object(WorkerPool, "find_free_port", staticmethod(lambda: held_port)),
+            pytest.raises(RuntimeError, match="could not secure a bindable"),
+        ):
+            pool._pick_bindable_port()
+    finally:
+        holder.close()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 
