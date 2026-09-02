@@ -40,6 +40,7 @@ from priml.model.narrow_embedding import NarrowEmbedding
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.runtime import SingleProcess
+from priml.train.checkpointing import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
 
@@ -187,6 +188,26 @@ def test_the_value_embedding_stride_follows_a_changed_depth() -> None:
     cfg.step.model.num_layers = 4
     final = cfg.copy_tree().finalize()
     assert final.step.model.value_embedding_layers == [1, 3]
+
+
+@pytest.mark.parametrize(("name", "factory"), LADDER, ids=[n for n, _ in LADDER])
+def test_no_rung_resumes_a_checkpoint(
+    name: str,
+    factory: Callable[[], NanoChatLoop.Config],
+) -> None:
+    """Every rung must start fresh, and state it in the config rather than a flag.
+
+    Two independent reasons, either alone sufficient: the run is a wall-clock
+    BUDGET, so a resumed run measures a different budget than the one it
+    reports; and the packed token stream cannot be positioned mid-corpus, so
+    the dataset refuses the restore outright. Carried on ``exp000`` and
+    inherited, since every rung forks it -- a per-launch ``--override`` is a
+    property of one command line, and the rung it protects is launched from
+    several.
+    """
+    checkpointing = factory().checkpointing
+    assert isinstance(checkpointing, Checkpointer.Config), name
+    assert checkpointing.resume is False, name
 
 
 def test_the_budget_and_the_schedule_horizon_agree() -> None:

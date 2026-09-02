@@ -565,6 +565,9 @@ class TrainLoop:
             logger.info("TrainLoop startup: checkpointer ready.")
 
             # Store training hyperparameters
+            self.working_dir = config.working_dir
+            """This run's resolved directory; its identity, and what a re-run
+            of a finished experiment must be told to change."""
             self.local_step = 0
             # The last optimizer step whose cadences fired. Guards the
             # checkpoint and eval cadences against a loop body that runs once
@@ -736,6 +739,7 @@ class TrainLoop:
             # ran (e.g. max_steps already reached on resume); there is nothing
             # new to persist or measure.
             if not trained_any:
+                self._warn_nothing_to_train()
                 return
             if self.checkpointing is not None:
                 self.checkpointing.save(self, self.step.global_step)
@@ -756,6 +760,20 @@ class TrainLoop:
             )
             self.phase_timer.log_summary()
             self._cleanup()
+
+    def _warn_nothing_to_train(self) -> None:
+        """Explain a run that resumed a finished experiment and did nothing."""
+        if not is_rank_zero() or self.step.global_step == 0:
+            return
+        logger.warning(
+            "No training step ran: this experiment already completed at step "
+            "%d (max_steps=%s) in %s. To train further, raise the stop "
+            "condition; to train again from scratch, fork it with a new "
+            "experiment_name or point working_dir elsewhere.",
+            self.step.global_step,
+            self.max_steps,
+            self.working_dir,
+        )
 
     @property
     def current_epoch(self) -> int:

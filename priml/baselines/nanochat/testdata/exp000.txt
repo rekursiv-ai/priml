@@ -675,7 +675,7 @@ NanoChatLoop.Config(
                         keep_last_n=-1,
                         keep_every=0,
                         storer=SyncLocalStateDictStorer.Config(),
-                        resume=True,
+                        resume=False,
                         resume_step=-1,
                         allow_checkpoint_overwrite=False
                 ),

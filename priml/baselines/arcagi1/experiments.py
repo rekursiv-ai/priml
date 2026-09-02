@@ -54,6 +54,15 @@ GRID_LEN: Final = 900
 VOCAB_SIZE: Final = 12
 """Tokens: pad, a blank marker, and the ten ARC colors."""
 
+NUM_PUZZLE_IDENTIFIERS: Final = 876_403
+"""Distinct puzzle ids in ``arc1concept-aug-1000``: 876,402 puzzles plus blank.
+
+A property of the prepared dataset, not a tunable. The build assigns ids once
+across every split, so the largest is the puzzle count and the per-task table
+needs a row for each -- a shorter table indexes off the end on the first batch
+rather than training a smaller model. The dataset cannot supply this: a config
+must build with no data on disk, so ``finalize`` may not read the tree."""
+
 
 class ArcTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
     """A training loop with the ARC step and dataset already in place.
@@ -111,7 +120,11 @@ def exp000() -> ArcTrainLoop:
     # first, so it owns position 0 -- where the halt head reads.
     prefix = PrefixStack.Config()
     prefix.parts = [
-        SparsePuzzleEmbedding.Config(num_tokens=16, batch_size=batch_size),
+        SparsePuzzleEmbedding.Config(
+            num_puzzles=NUM_PUZZLE_IDENTIFIERS,
+            num_tokens=16,
+            batch_size=batch_size,
+        ),
         RegisterTokens.Config(num_tokens=1),
     ]
     model.prefix = prefix
@@ -224,8 +237,10 @@ def exp_smoke() -> ArcTrainLoop:
     loop run -- so every axis that costs time without bearing on that answer is
     cut. Accuracy will be poor, which is expected.
 
-    The per-task table shrinks with the task count: at full size it dominates
-    both startup time and memory.
+    The per-task table keeps its full height. Capping tasks does not cap the
+    ids they carry -- the build numbers puzzles once across every split -- so a
+    table sized to ``num_tasks`` would index off the end. At this width it
+    costs 112 MB and 35 ms, which does not bear on the question.
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
