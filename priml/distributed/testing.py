@@ -4,12 +4,12 @@ from __future__ import annotations
 # ruff: noqa: S301 (Suspicious pickle usage.)
 # ruff: noqa: T201 (Print.)
 # pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportImplicitStringConcatenation=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportAttributeAccessIssue=false
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import field
 from datetime import timedelta
 from multiprocessing.process import BaseProcess
 from types import TracebackType
-from typing import Any, Self, cast
+from typing import Any, Protocol, Self, cast
 
 import math
 import os
@@ -35,6 +35,24 @@ class _WorkerDiedError(RuntimeError):
     alive worker (a dispatch timeout), so only the former triggers a respawn-
     and-retry rather than failing the test outright.
     """
+
+
+class PoolWorker(Protocol):
+    """The child-process surface the pool watches and tears down.
+
+    Narrower than ``BaseProcess`` on purpose: the pool polls liveness and kills
+    stragglers, so anything process-shaped -- a test double included --
+    satisfies it without impersonating a real ``multiprocessing`` object.
+    """
+
+    @property
+    def exitcode(self) -> int | None: ...
+
+    def join(self, timeout: float | None = ...) -> None: ...
+
+    def is_alive(self) -> bool: ...
+
+    def kill(self) -> None: ...
 
 
 class WorkerPool:
@@ -80,7 +98,7 @@ class WorkerPool:
         queue: tm.Queue[Any] = ctx.Queue()
         ack_queue: tm.Queue[Any] = ctx.Queue()
         ready_queue: tm.Queue[Any] = ctx.Queue()
-        processes: list[BaseProcess] = []
+        processes: list[PoolWorker] = []
         # ``__exit__`` does not run when ``__enter__`` raises (PEP 343), so a
         # failure mid-spawn must kill the children already started here.
         try:
@@ -110,11 +128,11 @@ class WorkerPool:
             raise
         self.queue = queue
         self.ack_queue = ack_queue
-        self.processes = processes
+        self.processes: Sequence[PoolWorker] | None = processes
 
     def _await_ready(
         self,
-        processes: list[BaseProcess],
+        processes: Sequence[PoolWorker],
         ready_queue: tm.Queue[Any],
         world_size: int,
     ) -> None:
@@ -211,7 +229,7 @@ class WorkerPool:
         msg = f"worker pool {self.mesh_dims} failed to rendezvous"
         raise RuntimeError(msg) from last_exc
 
-    def _await_dispatch_ack(self, processes: list[BaseProcess]) -> None:
+    def _await_dispatch_ack(self, processes: Sequence[PoolWorker]) -> None:
         """Wait for rank 0's command ack; fail if the warm pool died."""
         assert self.ack_queue is not None
         deadline = time.monotonic() + self._RENDEZVOUS_TIMEOUT.total_seconds()
@@ -237,7 +255,7 @@ class WorkerPool:
         self._kill_all(self.processes)
 
     @classmethod
-    def _kill_all(cls, processes: list[BaseProcess]) -> None:
+    def _kill_all(cls, processes: Sequence[PoolWorker]) -> None:
         """Join each child with a bounded timeout, killing any that hang.
 
         A wedged worker (stuck in ``init_process_group`` or a user ``fn``)

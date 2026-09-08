@@ -54,7 +54,7 @@ def compute_hessian(
         )
         hess_row_flat: Tensor = torch.cat(
             [
-                h.view(-1) if h is not None else torch.zeros_like(p.view(-1))  # pyright: ignore[reportUnnecessaryComparison]
+                h.view(-1) if h is not None else torch.zeros_like(p.view(-1))
                 for h, p in zip(hess_row, params, strict=True)
             ],
         )

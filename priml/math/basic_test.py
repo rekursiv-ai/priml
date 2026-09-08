@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
-
 import math
 
 from torch import Tensor
@@ -18,7 +16,6 @@ from priml.math.basic import (
     factors,
     floor_multiple,
 )
-from priml.math.custom_types import Tensorable
 
 
 def test_factors_small_numbers() -> None:
@@ -241,7 +238,7 @@ def test_a_float_grid_promotes_an_integer_input() -> None:
 def test_multiple_rejects_a_type_it_cannot_scale() -> None:
     """A Sequence is ``Tensorable``, so this is caller input and must raise."""
     with pytest.raises(TypeError, match="Unsupported scalar type"):
-        _ = ceil_multiple(cast("Tensorable", "nope"), 2)
+        _ = ceil_multiple("nope", 2)  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType] -- negative test: proves the scalar path rejects a type it cannot scale
 
 
 def test_multiple_is_exact_beyond_float53() -> None:

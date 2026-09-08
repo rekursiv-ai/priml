@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, override
+from typing import TYPE_CHECKING, Any, override
 
 import functools
 import tempfile
@@ -126,10 +126,10 @@ def test_device_init_names_how_not_where() -> None:
     accepts a device at all.
     """
     config = TrainStep.Config()
-    # Cast in, as an ``--override`` or a deserialized config delivers it: the
+    # Assigned as an ``--override`` or a deserialized config delivers it: the
     # annotation rules this out statically, so the runtime guard is what
     # catches text that never met a type checker.
-    config.device_init = cast("Literal['meta', 'eager']", "cuda")
+    config.device_init = "cuda"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: proves the field refuses a device name
     with pytest.raises(ValueError, match="device_init"):
         config.make()
 
