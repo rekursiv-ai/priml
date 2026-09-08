@@ -14,7 +14,6 @@ from torch.distributed.device_mesh import DeviceMesh
 import pytest
 import torch
 
-from priml.model.custom_types import ShardStyle
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.train import tensor_parallel
@@ -70,12 +69,12 @@ def test_shard_style_stored_on_runtime_module() -> None:
 def test_unknown_shard_style_is_refused() -> None:
     """A style outside the declared set raises instead of silently replicating.
 
-    The annotation rules this out statically, so the value is cast in: a config
-    from JSON or a ``--override`` is unchecked text, and the runtime guard is
-    what catches it.
+    The annotation rules this out statically, so the assignment is suppressed
+    rather than cast: a config from JSON or a ``--override`` is unchecked text,
+    and the runtime guard is what catches it.
     """
     config = Linear.Config(channels_in=8, channels_out=8)
-    config.shard = cast(ShardStyle, "colwize")
+    config.shard = "colwize"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: proves the runtime guard rejects an unknown shard style
     with pytest.raises(ValueError, match="Unknown shard style"):
         _shard_style(config.make())
 

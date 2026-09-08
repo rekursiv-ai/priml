@@ -669,9 +669,7 @@ class TrainLoop:
             self._train_clock_base = self._start_time
             self._eval_sec = 0.0
         except BaseException:
-            if self._owns_runtime and not self._runtime_destroyed:
-                self.runtime.destroy()
-                self._runtime_destroyed = True
+            self._destroy_runtime_once()
             raise
 
     def train(self) -> None:
@@ -1292,6 +1290,15 @@ class TrainLoop:
             self.profiling.cleanup()
         if math.isfinite(self.num_steps_garbage_collect):
             gc.enable()
+        self._destroy_runtime_once()
+
+    def _destroy_runtime_once(self) -> None:
+        """Tear down an owned runtime, at most once.
+
+        Reached from both ``_cleanup`` and the startup failure path, either of
+        which may run first: a component in the startup body can reach
+        ``_cleanup`` before the failure handler sees the exception.
+        """
         if self._owns_runtime and not self._runtime_destroyed:
             self.runtime.destroy()
             self._runtime_destroyed = True

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 from configgle.testing import assert_pprint_golden
 
@@ -292,7 +292,7 @@ def test_router_rejects_unknown_scoring_func():
     # The literal is what the guard defends against, so the checker rejecting
     # it is correct: a caller reaching this branch got here from JSON, a CLI
     # override, or an untyped dict, none of which the annotation constrains.
-    cfg.scoring_func = cast('Literal["softmax", "sigmoid"]', "softmaxx")
+    cfg.scoring_func = "softmaxx"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: the invalid literal is the input under test
     with pytest.raises(ValueError, match="scoring_func"):
         cfg.make()
 
