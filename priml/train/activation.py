@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast, override
+from typing import TYPE_CHECKING, Any, override
 
 import logging
 
@@ -296,7 +296,7 @@ class QuantizedActivationStorage:
             with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                 return original_forward(*args, **kwargs)
 
-        model.forward = wrapped_forward  # ty: ignore[invalid-assignment]
+        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- rebinding a live module's method; no declaration models an instance-level override
 
         logger.info(
             f"Applied QuantizedActivationStorage: dtype_storage={self.dtype_storage}, "
@@ -424,7 +424,7 @@ class QuantizedModuleActivationStorage:
 
             @classmethod
             @override
-            def backward(  # ty: ignore[invalid-method-override]
+            def backward(  # ty: ignore[invalid-method-override] -- a classmethod cannot override the base's staticmethod; autograd accepts either, but no declaration expresses "one or the other"
                 cls,
                 ctx: Any,
                 grad_output: Tensor,
@@ -497,24 +497,16 @@ class QuantizedModuleActivationStorage:
             weight: Tensor,
             bias: Tensor | None,
         ) -> Tensor:
-            # Legacy `forward(ctx, ...)` convention: `apply` is typed against
-            # the modern ctx-less static `forward`, so every argument lands one
-            # position early. Converting would mean returning the quantized
-            # intermediates as outputs, which changes the autograd signature.
-            result = cast(  # ty: ignore[redundant-cast] -- pyright still infers Unknown here
-                "Tensor",
-                QuantizedConv2dFunction.apply(  # ty: ignore[missing-argument]  # pyright: ignore[reportCallIssue]
-                    input,
-                    weight,
-                    bias,  # ty: ignore[invalid-argument-type]
-                    module.stride,  # ty: ignore[invalid-argument-type]
-                    module.padding,
-                    module.dilation,
-                    module.groups,
-                    self.dtype_storage,  # ty: ignore[invalid-argument-type]
-                    self.min_size,  # ty: ignore[invalid-argument-type]
-                ),
+            return QuantizedConv2dFunction.apply(
+                input,
+                weight,
+                bias,
+                module.stride,
+                module.padding,
+                module.dilation,
+                module.groups,
+                self.dtype_storage,
+                self.min_size,
             )
-            return result
 
-        module._conv_forward = quantized_conv_forward  # noqa: SLF001  # ty: ignore[invalid-assignment]
+        module._conv_forward = quantized_conv_forward  # noqa: SLF001  # ty: ignore[invalid-assignment] -- rebinding a live module's method; no declaration models an instance-level override
