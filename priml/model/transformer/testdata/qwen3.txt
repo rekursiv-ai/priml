@@ -1,9 +1,9 @@
 Qwen3.Config(
                 channels_in=16,
-                channels_out=16,
+                channels_out=32,
                 vocab_size=32,
                 num_layers=1,
-                embedding=Embedding.Config(
+                in_proj=Embedding.Config(
                         channels_out=16,
                         num_embeddings=32,
                         padding_idx=None,
@@ -94,8 +94,7 @@ Qwen3.Config(
                         device=None,
                         dtype=None
                 ),
-                tie_embeddings=False,
-                lm_head=Linear.Config(
+                out_proj=Linear.Config(
                         channels_in=16,
                         channels_out=32,
                         bias=False,

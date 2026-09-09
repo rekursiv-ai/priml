@@ -1,9 +1,9 @@
 """Qwen3 dense LM: configgle-native Config + HF weight loader.
 
-Subclasses :class:`CausalLM` per the library idiom
+Subclasses :class:`Transformer` per the library idiom
 (``Makes[X]`` re-parents ``.make()``). ``Qwen3.Config`` carries the
 HF-shaped arch fields; ``finalize()`` wires them into the inherited
-``block``/``final_norm``/``channels_in``/``num_layers``/``lm_head``
+``block``/``final_norm``/``channels_in``/``num_layers``/``out_proj``
 slots.
 
 Qwen3 vs. LLaMA:
@@ -30,7 +30,9 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Self, override
+from typing import Any, Literal, Self, override
+
+import json
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -38,12 +40,12 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec, decode
+from priml.lib.custom_json import DictCodec, FloatCodec
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsIn,
-    LookupTable,
+    ChannelsInOutConfig,
     TensorBlockConfig,
     TensorModule,
     propagate_attr,
@@ -53,13 +55,13 @@ from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
+from priml.model.transformer.transformer import Transformer
 
 
-class Qwen3(CausalLM):
-    """Qwen3 dense causal LM -- ``CausalLM`` pre-wired for the Qwen3 arch."""
+class Qwen3(Transformer):
+    """Qwen3 dense causal LM -- ``Transformer`` pre-wired for the Qwen3 arch."""
 
-    class Config(Makes["Qwen3"], CausalLM.Config, kw_only=False):
+    class Config(Makes["Qwen3"], Transformer.Config, kw_only=False):
         vocab_size: int = 151_936
         """Token vocabulary size; also the width of the output projection."""
 
@@ -71,7 +73,7 @@ class Qwen3(CausalLM):
         num_layers: int = 28
         """Blocks in the stack. Qwen3-0.6B's."""
 
-        embedding: Makeable[LookupTable] = field(
+        in_proj: Makeable[TensorModule] | None = field(
             default_factory=lambda: Embedding.Config(
                 init_weight=partial(nn.init.normal_, std=0.02),
                 shard="vocab",
@@ -79,7 +81,7 @@ class Qwen3(CausalLM):
         )
         """Reference token embedding initialization."""
 
-        lm_head: Makeable[TensorModule] | None = field(
+        out_proj: ChannelsInOutConfig | Literal["tied"] | None = field(
             default_factory=lambda: Linear.Config(
                 init_weight=partial(nn.init.normal_, std=0.02),
                 shard="vocab",
@@ -195,11 +197,14 @@ class Qwen3(CausalLM):
                 vocab_size=int(config["vocab_size"]),
                 channels_in=channels_in,
                 num_layers=int(config["num_hidden_layers"]),
-                embedding=Embedding.Config(init_weight=init_weight, shard="vocab"),
-                lm_head=Linear.Config(init_weight=init_weight, shard="vocab"),
+                in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
+                out_proj=(
+                    "tied"
+                    if bool(config.get("tie_word_embeddings", False))
+                    else Linear.Config(init_weight=init_weight, shard="vocab")
+                ),
                 block=block,
                 final_norm=norm.copy_tree(),
-                tie_embeddings=bool(config.get("tie_word_embeddings", False)),
             )
 
         @override
@@ -252,22 +257,7 @@ class Qwen3(CausalLM):
           dtype: Override the dtype recorded in ``config.json``.
 
         """
-        path = Path(path_or_repo)
-        if path.is_dir() and (path / "config.json").exists():
-            hf_config = DictCodec.coerce(
-                decode("object", (path / "config.json").read_text())
-            )
-            hf_sd = hub.load_local_state_dict(path)
-        else:
-            hf_model = hub.load_transformers_model(
-                str(path_or_repo),
-                "AutoModelForCausalLM",
-                dtype=dtype,
-            )
-            hf_config = hf_model.config.to_dict()
-            hf_sd = {k: v.detach().cpu() for k, v in hf_model.state_dict().items()}
-            del hf_model
-
+        hf_config, hf_sd = _load_hf_checkpoint(path_or_repo, dtype=dtype)
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
         model.load_state_dict(remap_hf_state_dict(hf_sd, config), strict=True)
@@ -281,6 +271,22 @@ class Qwen3(CausalLM):
 
 
 # -- HF weight remap ---------------------------------------------------
+
+
+def _load_hf_checkpoint(
+    path_or_repo: Path | str, *, dtype: torch.dtype | None
+) -> tuple[dict[str, object], dict[str, Tensor]]:
+    """Read Qwen checkpoint metadata and tensors once, locally or through the hub."""
+    path = Path(path_or_repo)
+    if path.is_dir() and (path / "config.json").exists():
+        hf_config = DictCodec.coerce(json.loads((path / "config.json").read_text()))
+        return hf_config, hub.load_local_state_dict(path)
+    hf_model = hub.load_transformers_model(
+        str(path_or_repo), "AutoModelForCausalLM", dtype=dtype
+    )
+    return DictCodec.coerce(hf_model.config.to_dict()), {
+        key: value.detach().cpu() for key, value in hf_model.state_dict().items()
+    }
 
 
 def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
@@ -319,11 +325,11 @@ def remap_hf_state_dict(
     n_kv = attn.num_heads_kv
     d = attn.channels_head
     out: dict[str, Tensor] = {
-        "embed.weight": hf_sd["model.embed_tokens.weight"],
+        "in_proj.weight": hf_sd["model.embed_tokens.weight"],
         "final_norm.weight": hf_sd["model.norm.weight"],
     }
-    if not config.tie_embeddings:
-        out["lm_head.weight"] = hf_sd["lm_head.weight"]
+    if config.out_proj != "tied":
+        out["out_proj.weight"] = hf_sd["lm_head.weight"]
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]

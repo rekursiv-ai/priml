@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, Self, runtime_checkable
+from typing import Any, Literal, Protocol, Self, TypeGuard, cast, runtime_checkable
 
 from configgle import Makeable
 from torch import Tensor, nn
@@ -18,6 +18,7 @@ __all__ = [
     "ChannelsHead",
     "ChannelsIn",
     "ChannelsInOut",
+    "ChannelsInOutConfig",
     "ChannelsOut",
     "DepthIndex",
     "HasAttention",
@@ -31,9 +32,11 @@ __all__ = [
     "Shardable",
     "TensorBlockConfig",
     "TensorModule",
+    "TransformerConfig",
     "WeightedTensorConfig",
     "WeightedTensorModule",
     "flatten_depth_index",
+    "has_weight",
     "propagate_attr",
 ]
 
@@ -235,8 +238,24 @@ class ChannelsInOut(ChannelsIn, ChannelsOut, Protocol):
 
 
 @runtime_checkable
-class TensorBlockConfig(Makeable[TensorModule], ChannelsInOut, Protocol):
+class ChannelsInOutConfig(Makeable[TensorModule], ChannelsInOut, Protocol):
+    """A config with input/output widths that builds a tensor-returning module."""
+
+
+@runtime_checkable
+class TensorBlockConfig(ChannelsInOutConfig, Protocol):
     """A width-preserving config that builds a tensor-returning block."""
+
+
+@runtime_checkable
+class TransformerConfig(ChannelsInOutConfig, Protocol):
+    """A buildable transformer architecture exposing its replaceable components."""
+
+    num_layers: int
+    in_proj: Makeable[TensorModule] | None
+    block: TensorBlockConfig | list[TensorBlockConfig]
+    final_norm: Makeable[TensorModule]
+    out_proj: ChannelsInOutConfig | Literal["tied"] | None
 
 
 @runtime_checkable
@@ -260,6 +279,16 @@ class Shardable(Protocol):
     """A building-block config that declares a tensor-parallel shard style."""
 
     shard: ShardStyle | None
+
+
+def has_weight(module: TensorModule | None) -> TypeGuard[WeightedTensorModule]:
+    """Check tensor weights, including parameters registered through nn.Module.
+
+    Runtime protocol checks use static lookup, missing registered parameters.
+    """
+    return hasattr(module, "weight") and isinstance(
+        cast(_WeightAttribute, module).weight, Tensor
+    )
 
 
 def flatten_depth_index(depth_index: DepthIndex) -> int:
@@ -331,3 +360,7 @@ def propagate_attr(
             f"no attribute {name!r}; cannot propagate value {value!r}.",
         )
     setattr(config, name, value)
+
+
+class _WeightAttribute(Protocol):
+    weight: object

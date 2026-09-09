@@ -39,17 +39,16 @@ from priml.model.sequential import Sequential
 from priml.model.special import Identity, Skip
 from priml.model.swiglu import SwiGLU, SwiGLUReluSquared
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
 from priml.model.transformer.kimi_k2 import KimiK2
 from priml.model.transformer.mmdit import AdaLNZero, MMDiTBlock
 from priml.model.transformer.qwen3 import Qwen3
+from priml.model.transformer.transformer import Transformer
 
 
 __all__ = [
     "AdaLNZero",
     "BatchNorm",
     "BatchNorm2d",
-    "CausalLM",
     "Conv1d",
     "Conv2d",
     "Conv3d",
@@ -82,6 +81,7 @@ __all__ = [
     "Skip",
     "SwiGLU",
     "SwiGLUReluSquared",
+    "Transformer",
     "TransformerBlock",
     "Unpatchify",
     "ValueGatedAttention",

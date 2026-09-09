@@ -39,7 +39,7 @@ from priml.model.linear import EnsembleLinear, Linear
 from priml.model.moe import MoE, Router
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
+from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import randomize_parameters
 from priml.train.tensor_parallel import TensorParallel, apply_tensor_parallel
 
@@ -86,12 +86,15 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
     assert all(expert.shard == "colwise" for expert in block.ffn.experts)
 
 
-def test_causal_lm_declares_embedding_and_head_vocab() -> None:
-    model = CausalLM.Config(vocab_size=64, channels_in=32, num_layers=1).make()
-    assert isinstance(model.embed, Embedding)
-    assert model.embed.shard == "vocab"
-    assert isinstance(model.lm_head, Linear)
-    assert model.lm_head.shard == "vocab"
+def test_transformer_declares_embedding_and_head_vocab() -> None:
+    config = Transformer.Config(vocab_size=64, channels_in=32, num_layers=1)
+    config.in_proj = Embedding.Config(shard="vocab")
+    config.out_proj = Linear.Config(shard="vocab")
+    model = config.make()
+    assert isinstance(model.in_proj, Embedding)
+    assert model.in_proj.shard == "vocab"
+    assert isinstance(model.out_proj, Linear)
+    assert model.out_proj.shard == "vocab"
 
 
 def _ensemble_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
@@ -267,8 +270,10 @@ def _transformer_block() -> tuple[nn.Module, Tensor]:
     return block, torch.randn(2, 6, 32)
 
 
-def _causal_lm() -> tuple[nn.Module, Tensor]:
-    model = CausalLM.Config(
+def _transformer() -> tuple[nn.Module, Tensor]:
+    model = Transformer.Config(
+        in_proj=Embedding.Config(shard="vocab"),
+        out_proj=Linear.Config(shard="vocab"),
         vocab_size=64,
         channels_in=32,
         num_layers=2,
@@ -296,7 +301,7 @@ _CASES: dict[str, Callable[[], tuple[nn.Module, Tensor]]] = {
     "self_attention": _self_attention,
     "moe": _moe,
     "transformer_block": _transformer_block,
-    "causal_lm": _causal_lm,
+    "transformer": _transformer,
     "mla_replicated": _mla_replicated,
 }
 

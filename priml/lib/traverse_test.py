@@ -501,7 +501,7 @@ def test_attribute_error_handling():
     """Test handling of AttributeError when accessing slots."""
 
     class LazySlotObject:
-        __slots__ = ("x", "y")  # pyright: ignore[reportUninitializedInstanceVariable]
+        __slots__ = ("x", "y")  # pyright: ignore[reportUninitializedInstanceVariable] -- leaving `y` unset IS the subject: the walk must skip the AttributeError it raises
 
         def __init__(self):
             self.x = 1

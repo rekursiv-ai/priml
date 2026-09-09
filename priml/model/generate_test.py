@@ -21,7 +21,7 @@ _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
     prompt = torch.tensor([[0, 1]])
-    generated = _canonical_generate(_CausalLM(), prompt)
+    generated = _canonical_generate(_Transformer(), prompt)
     tokens = cast(list[list[int]], generated.tolist())
     assert_text_golden(
         request,
@@ -91,7 +91,7 @@ def test_sample_applies_temperature_top_k_and_top_p() -> None:
 
 
 def test_generate_rejects_prompt_longer_than_cache() -> None:
-    model = _CausalLM()
+    model = _Transformer()
 
     with pytest.raises(
         ValueError,
@@ -103,7 +103,7 @@ def test_generate_rejects_prompt_longer_than_cache() -> None:
 
 
 def test_generate_returns_prompt_when_no_tokens_requested() -> None:
-    model = _CausalLM()
+    model = _Transformer()
     prompt = torch.tensor([[0, 1]])
 
     result = generate(model, prompt, max_new_tokens=0, max_seq_len=4)
@@ -114,7 +114,7 @@ def test_generate_returns_prompt_when_no_tokens_requested() -> None:
 
 
 def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
-    model = _CausalLM()
+    model = _Transformer()
     prompt = torch.tensor([[0, 1]])
 
     result = generate(
@@ -130,11 +130,11 @@ def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
     assert model.block.attn.batch == 1
     assert model.block.attn.max_seq == 6
     assert model.block.attn.device == prompt.device
-    assert model.block.attn.dtype == model.embed.weight.dtype
+    assert model.block.attn.dtype == model.in_proj.weight.dtype
     assert model.block.seen_caches == [model.block.attn.cache] * 2
-    assert len(model.embed.inputs) == 2
-    assert torch.equal(model.embed.inputs[0], prompt)
-    assert torch.equal(model.embed.inputs[1], torch.tensor([[2]]))
+    assert len(model.in_proj.inputs) == 2
+    assert torch.equal(model.in_proj.inputs[0], prompt)
+    assert torch.equal(model.in_proj.inputs[1], torch.tensor([[2]]))
 
 
 def _topp_probs(logits: Tensor, *, top_p: float) -> Tensor:
@@ -223,9 +223,9 @@ class _Block(nn.Module):
         return x, cache
 
 
-class _CausalLM:
+class _Transformer:
     def __init__(self) -> None:
-        self.embed = _Lookup()
+        self.in_proj = _Lookup()
         self.block = _Block()
         self.blocks: list[nn.Module] = [self.block]
         self.final_norm = _Norm()
@@ -242,14 +242,14 @@ class _CausalLM:
 class _GenerateHarness(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.model = _CausalLM()
+        self.model = _Transformer()
 
     @override
     def forward(self, prompt: Tensor) -> Tensor:
         return _canonical_generate(self.model, prompt)
 
 
-def _canonical_generate(model: _CausalLM, prompt: Tensor) -> Tensor:
+def _canonical_generate(model: _Transformer, prompt: Tensor) -> Tensor:
     return generate(
         model,
         prompt,
