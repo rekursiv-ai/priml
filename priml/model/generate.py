@@ -1,7 +1,7 @@
 """Autoregressive text generation with KV caching.
 
 Works with any model exposing the standard interface:
-  embed(tokens) -> hidden
+  in_proj(tokens) -> hidden
   blocks: Iterable[TransformerBlock]
   final_norm(hidden) -> hidden
   project_to_logits(hidden) -> logits
@@ -27,7 +27,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.model.attention.kvcache import KVCache
-from priml.model.custom_types import LookupTable, TensorModule
+from priml.model.custom_types import TensorModule, has_weight
 
 
 class AttentionLike(Protocol):
@@ -57,7 +57,7 @@ class BlockLike(Protocol):
     ) -> tuple[Tensor, KVCache]: ...
 
 
-class CausalLMLike(Protocol):
+class TransformerLike(Protocol):
     """The model surface ``generate`` uses -- nothing more.
 
     Declared structurally rather than against ``nn.Module``: a ``Protocol``
@@ -66,7 +66,7 @@ class CausalLMLike(Protocol):
     """
 
     @property
-    def embed(self) -> LookupTable: ...
+    def in_proj(self) -> TensorModule | None: ...
 
     @property
     def blocks(self) -> Iterable[nn.Module]: ...
@@ -79,7 +79,7 @@ class CausalLMLike(Protocol):
 
 @torch.inference_mode()
 def generate(
-    model: CausalLMLike,
+    model: TransformerLike,
     prompt_ids: Tensor,
     *,
     max_new_tokens: int = 128,
@@ -92,7 +92,7 @@ def generate(
     """Generate tokens autoregressively with KV caching.
 
     Args:
-      model: A CausalLM-compatible model.
+      model: A Transformer-compatible model.
       prompt_ids: (B, S) prompt token ids.
       max_new_tokens: Maximum tokens to generate.
       temperature: Sampling temperature (0 = greedy).
@@ -113,7 +113,10 @@ def generate(
             f"prompt length {prompt_len} exceeds max_seq_len={max_seq_len}.",
         )
 
-    dtype = model.embed.weight.dtype
+    in_proj = model.in_proj
+    if not has_weight(in_proj):
+        raise TypeError("Token generation requires an in_proj with embedding weights.")
+    dtype = in_proj.weight.dtype
 
     # Delegate cache alloc to block; keeps generate arch-agnostic
     # (MLA caches compressed latent).
@@ -128,7 +131,7 @@ def generate(
         for block in blocks
     ]
 
-    x: Tensor = model.embed(prompt_ids)
+    x: Tensor = in_proj(prompt_ids)
     for i, block in enumerate(blocks):
         x, caches[i] = block.forward_cached(x, cache=caches[i])
     x = model.final_norm(x)
@@ -146,7 +149,7 @@ def generate(
             if finished.all():
                 break
 
-        x = model.embed(next_token)
+        x = in_proj(next_token)
         for i, block in enumerate(blocks):
             x, caches[i] = block.forward_cached(x, cache=caches[i])
         x = model.final_norm(x)

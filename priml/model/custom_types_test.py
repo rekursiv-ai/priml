@@ -20,6 +20,7 @@ from priml.model.custom_types import (
     ChannelsOut,
     NumHeads,
     flatten_depth_index,
+    has_weight,
     propagate_attr,
 )
 from priml.model.moe import Router
@@ -62,6 +63,13 @@ def test_custom_types_bfb() -> None:
         ),
         seed=0,
     )
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_has_weight_finds_registered_parameters(weighted: bool) -> None:
+    module = nn.Embedding(8, 4) if weighted else RMSNorm.Config(4).make()
+    assert has_weight(module) is weighted
+    assert not has_weight(None)
 
 
 def test_head_capabilities_are_direct_attributes() -> None:

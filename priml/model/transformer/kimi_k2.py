@@ -1,6 +1,6 @@
 """Kimi-K2 (DeepSeek-V3 architecture) LM: configgle-native Config + loader.
 
-Subclasses :class:`CausalLM` via the library idiom (``Makes[X]``
+Subclasses :class:`Transformer` via the library idiom (``Makes[X]``
 re-parents ``.make()``). ``KimiK2.Config`` carries HF-shaped arch
 fields; ``finalize()`` wires them into the inherited slots, including
 a per-layer ``block`` list (dense SwiGLU for the first
@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Self, override
+from typing import Any, Literal, Self, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -57,7 +57,7 @@ from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
-    LookupTable,
+    ChannelsInOutConfig,
     TensorBlockConfig,
     TensorModule,
     propagate_attr,
@@ -68,16 +68,16 @@ from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
+from priml.model.transformer.transformer import Transformer
 
 
 _VALID_MODEL_TYPES = frozenset({"kimi_k2", "deepseek_v3"})
 
 
-class KimiK2(CausalLM):
+class KimiK2(Transformer):
     """Kimi-K2 / DeepSeek-V3 causal LM — MLA + DS-V3 MoE."""
 
-    class Config(Makes["KimiK2"], CausalLM.Config, kw_only=False):
+    class Config(Makes["KimiK2"], Transformer.Config, kw_only=False):
         vocab_size: int = 163_840
         """Token vocabulary size; also the width of the output projection."""
 
@@ -102,14 +102,14 @@ class KimiK2(CausalLM):
         first_k_dense_replace: int = 1
         """Leading layers whose ``ffn`` is replaced by a dense SwiGLU."""
 
-        embedding: Makeable[LookupTable] = field(
+        in_proj: Makeable[TensorModule] | None = field(
             default_factory=lambda: Embedding.Config(
                 init_weight=partial(nn.init.normal_, std=0.02), shard="vocab"
             )
         )
         """Reference token embedding initialization."""
 
-        lm_head: Makeable[TensorModule] | None = field(
+        out_proj: ChannelsInOutConfig | Literal["tied"] | None = field(
             default_factory=lambda: Linear.Config(
                 init_weight=partial(nn.init.normal_, std=0.02), shard="vocab"
             )
@@ -263,14 +263,17 @@ class KimiK2(CausalLM):
                 vocab_size=int(config["vocab_size"]),
                 channels_in=int(config["hidden_size"]),
                 num_layers=int(config["num_hidden_layers"]),
-                embedding=Embedding.Config(init_weight=init_weight, shard="vocab"),
-                lm_head=Linear.Config(init_weight=init_weight, shard="vocab"),
+                in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
+                out_proj=(
+                    "tied"
+                    if bool(config.get("tie_word_embeddings", False))
+                    else Linear.Config(init_weight=init_weight, shard="vocab")
+                ),
                 channels_hidden_dense=int(config["intermediate_size"]),
                 channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
                 block=block,
                 final_norm=norm.copy_tree(),
-                tie_embeddings=bool(config.get("tie_word_embeddings", False)),
             )
 
         @override
@@ -436,11 +439,11 @@ def remap_hf_state_dict(
 ) -> dict[str, Tensor]:
     """Convert an HF Kimi-K2 / DSV3 state_dict to loop-native names."""
     out: dict[str, Tensor] = {
-        "embed.weight": hf_sd["model.embed_tokens.weight"],
+        "in_proj.weight": hf_sd["model.embed_tokens.weight"],
         "final_norm.weight": hf_sd["model.norm.weight"],
     }
-    if not config.tie_embeddings:
-        out["lm_head.weight"] = hf_sd["lm_head.weight"]
+    if config.out_proj != "tied":
+        out["out_proj.weight"] = hf_sd["lm_head.weight"]
 
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"

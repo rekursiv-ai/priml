@@ -20,13 +20,14 @@ from priml import hub
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import TensorBlockConfig
+from priml.model.embedding import Embedding
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import kimi_k2
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
 from priml.model.transformer.kimi_k2 import KimiK2, remap_hf_state_dict
+from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
 
 
@@ -124,7 +125,7 @@ def _synth_hf(cfg: KimiK2.Config) -> dict[str, Tensor]:
         "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
         "model.norm.weight": torch.randn(h),
     }
-    if not cfg.tie_embeddings:
+    if cfg.out_proj != "tied":
         sd["lm_head.weight"] = torch.randn(cfg.vocab_size, h)
     for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
@@ -331,7 +332,7 @@ class TestSlots:
     def test_make_returns_kimik2_instance(self):
         model = KimiK2.Config.from_hf(_hf_config()).make()
         assert isinstance(model, KimiK2)
-        assert isinstance(model, CausalLM)
+        assert isinstance(model, Transformer)
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
         cfg = KimiK2.Config.from_hf(_hf_config())
@@ -369,8 +370,9 @@ class TestLoad:
         model = KimiK2.load("moonshotai/tiny-kimi", device="cpu", dtype=torch.float32)
 
         assert isinstance(model, KimiK2)
-        assert model.embed.weight.dtype == torch.float32
-        assert model.embed.weight.device.type == "cpu"
+        assert isinstance(model.in_proj, Embedding)
+        assert model.in_proj.weight.dtype == torch.float32
+        assert model.in_proj.weight.device.type == "cpu"
         load_transformers_model.assert_called_once_with(
             "moonshotai/tiny-kimi",
             "AutoModelForCausalLM",

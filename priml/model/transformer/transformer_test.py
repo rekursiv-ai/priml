@@ -1,9 +1,9 @@
-"""Tests for priml.model.transformer.causal_lm."""
+"""Tests for priml.model.transformer.transformer."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Self, override
+from typing import override
 from unittest.mock import Mock
 
 import warnings
@@ -18,19 +18,21 @@ import torch
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import DepthIndex, TensorModule
+from priml.model.embedding import Embedding
 from priml.model.generate import generate
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
+from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
 
 
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
-def _tiny_config(tie: bool = False) -> CausalLM.Config:
-    return CausalLM.Config(
+def _tiny_config(tie: bool = False) -> Transformer.Config:
+    return Transformer.Config(
+        in_proj=Embedding.Config(shard="vocab"),
         vocab_size=128,
         channels_in=32,
         num_layers=2,
@@ -43,12 +45,14 @@ def _tiny_config(tie: bool = False) -> CausalLM.Config:
             ),
         ),
         final_norm=RMSNorm.Config(),
-        tie_embeddings=tie,
+        out_proj="tied" if tie else Linear.Config(shard="vocab"),
     )
 
 
-def _canonical_config() -> CausalLM.Config:
-    return CausalLM.Config(
+def _canonical_config() -> Transformer.Config:
+    return Transformer.Config(
+        in_proj=Embedding.Config(shard="vocab"),
+        out_proj=Linear.Config(shard="vocab"),
         vocab_size=32,
         channels_in=16,
         num_layers=1,
@@ -59,18 +63,18 @@ def _canonical_config() -> CausalLM.Config:
     )
 
 
-def test_causal_lm_config_pprint() -> None:
+def test_transformer_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
-        name="causal_lm",
+        name="transformer",
         config=_canonical_config(),
     )
 
 
-def test_causal_lm_bfb() -> None:
+def test_transformer_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_TESTDATA,
-        golden_name="causal_lm",
+        golden_name="transformer",
         build_module=lambda: _canonical_config().make(),
         build_input=lambda: torch.tensor([[0, 1, 2, 3]]),
         seed=0,
@@ -120,9 +124,9 @@ def test_model_forwards_the_open_message_bus_through_output_layers() -> None:
         def reset_parameters(self) -> None:
             self.wrapped.reset_parameters()
 
-    assert model.lm_head is not None
+    assert isinstance(model.out_proj, Linear)
     model.final_norm = RecordingLayer(model.final_norm)
-    model.lm_head = RecordingLayer(model.lm_head)
+    model.out_proj = RecordingLayer(model.out_proj)
     message = object()
 
     model(torch.randint(0, 128, (1, 4)), message=message)
@@ -139,31 +143,32 @@ def test_forward_shape():
 
 def test_tied_embeddings():
     m = _tiny_config(tie=True).make()
-    assert m.lm_head is None
+    assert m.out_proj == "tied"
     toks = torch.randint(0, 128, (1, 4))
     out = m(toks)
     assert out.shape == (1, 4, 128)
 
 
-def test_separate_lm_head():
+def test_separate_out_proj():
     m = _tiny_config(tie=False).make()
-    assert isinstance(m.lm_head, Linear)
+    assert isinstance(m.out_proj, Linear)
+    assert isinstance(m.in_proj, Embedding)
     # Distinct parameter, not the embed matrix.
-    assert m.lm_head.weight.data_ptr() != m.embed.weight.data_ptr()
+    assert m.out_proj.weight.data_ptr() != m.in_proj.weight.data_ptr()
 
 
-def test_explicit_lm_head_receives_model_dimensions() -> None:
+def test_explicit_out_proj_receives_model_dimensions() -> None:
     config = _tiny_config()
-    config.lm_head = Linear.Config()
+    config.out_proj = Linear.Config()
 
     model = config.make()
 
-    assert isinstance(model.lm_head, Linear)
-    assert model.lm_head.in_features == config.channels_in
-    assert model.lm_head.out_features == config.vocab_size
+    assert isinstance(model.out_proj, Linear)
+    assert model.out_proj.in_features == config.channels_in
+    assert model.out_proj.out_features == config.vocab_size
 
 
-def test_causal_lm_preserves_an_explicit_lm_head_width() -> None:
+def test_transformer_preserves_an_explicit_out_proj_width() -> None:
     """The head's INPUT width is torch's to reject; its output width is not.
 
     A wrong input width fails the matmul, naming both operands. A wrong OUTPUT
@@ -171,17 +176,17 @@ def test_causal_lm_preserves_an_explicit_lm_head_width() -> None:
     so ``vocab_size``, a field only this config holds, is checked here.
     """
     config = _tiny_config()
-    config.lm_head = Linear.Config(channels_in=7, channels_out=128)
+    config.out_proj = Linear.Config(channels_in=7, channels_out=128)
 
     finalized = config.copy_tree().finalize()
 
-    assert isinstance(finalized.lm_head, Linear.Config)
-    assert finalized.lm_head.channels_in == 7
+    assert isinstance(finalized.out_proj, Linear.Config)
+    assert finalized.out_proj.channels_in == 7
     with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
         config.make()(torch.zeros(2, 3, dtype=torch.long))
 
-    config.lm_head = Linear.Config(channels_in=32, channels_out=99)
-    with pytest.raises(ValueError, match=r"lm_head.channels_out=99"):
+    config.out_proj = Linear.Config(channels_in=32, channels_out=99)
+    with pytest.raises(ValueError, match=r"out_proj.channels_out=99"):
         config.make()
 
 
@@ -223,20 +228,10 @@ def test_generate_rejects_prompt_longer_than_cache():
         generate(m, prompt, max_new_tokens=1, max_seq_len=4)
 
 
-def test_tied_embeddings_ignore_lm_head_config() -> None:
-    class RaisingHead(Linear.Config):
-        @override
-        def finalize(self) -> Self:
-            raise ValueError("lm_head finalized")
-
-    config = _tiny_config(tie=True)
-    config.lm_head = RaisingHead()
-
-    config.make()
-
-
-def test_causal_lm_rejects_width_changing_blocks() -> None:
-    config = CausalLM.Config(
+def test_transformer_rejects_width_changing_blocks() -> None:
+    config = Transformer.Config(
+        in_proj=Embedding.Config(shard="vocab"),
+        out_proj=Linear.Config(shard="vocab"),
         vocab_size=128,
         channels_in=32,
         num_layers=2,
@@ -265,7 +260,9 @@ def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
             del memo
             raise AssertionError("leaf must remain aliased")
 
-    config = CausalLM.Config(
+    config = Transformer.Config(
+        in_proj=Embedding.Config(shard="vocab"),
+        out_proj=Linear.Config(shard="vocab"),
         vocab_size=128,
         channels_in=32,
         num_layers=2,
@@ -279,12 +276,12 @@ def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
 @pytest.mark.parametrize(
     "config",
     [
-        CausalLM.Config(vocab_size=0, channels_in=8, num_layers=1),
-        CausalLM.Config(vocab_size=8, channels_in=8, num_layers=0),
-        CausalLM.Config(vocab_size=8, channels_in=0, num_layers=1),
+        Transformer.Config(vocab_size=0, channels_in=8, num_layers=1),
+        Transformer.Config(vocab_size=8, channels_in=8, num_layers=0),
+        Transformer.Config(vocab_size=8, channels_in=0, num_layers=1),
     ],
 )
-def test_a_nonsense_width_still_prints(config: CausalLM.Config) -> None:
+def test_a_nonsense_width_still_prints(config: Transformer.Config) -> None:
     """A config too degenerate to build is exactly the one worth printing.
 
     ``pformat`` finalizes a copy, so a ``finalize`` that raised would downgrade
@@ -293,14 +290,14 @@ def test_a_nonsense_width_still_prints(config: CausalLM.Config) -> None:
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert "CausalLM.Config" in config.pformat(hide_default_values=False)
+        assert "Transformer.Config" in config.pformat(hide_default_values=False)
 
 
-def test_causal_lm_config_reports_residual_width() -> None:
-    assert _tiny_config().finalize().channels_out == 32
+def test_transformer_config_reports_output_width() -> None:
+    assert _tiny_config().finalize().channels_out == 128
 
 
-def test_causal_lm_preserves_an_explicit_final_norm_width() -> None:
+def test_transformer_preserves_an_explicit_final_norm_width() -> None:
     """An explicit child width survives finalize; the child owns rejecting it.
 
     The parent does not re-derive a child's invariant: a norm built at the wrong
@@ -318,7 +315,7 @@ def test_causal_lm_preserves_an_explicit_final_norm_width() -> None:
         config.make()(torch.zeros(2, 3, dtype=torch.long))
 
 
-def test_causal_lm_rejects_width_changing_final_norm() -> None:
+def test_transformer_rejects_width_changing_final_norm() -> None:
     config = _tiny_config()
     config.final_norm = Linear.Config(channels_in=32, channels_out=7)
 
@@ -326,36 +323,36 @@ def test_causal_lm_rejects_width_changing_final_norm() -> None:
         config.make()(torch.zeros(2, 3, dtype=torch.long))
 
 
-def test_causal_lm_rejects_wrong_block_count() -> None:
+def test_transformer_rejects_wrong_block_count() -> None:
     config = _tiny_config()
     assert isinstance(config.block, TransformerBlock.Config)
     config.block = [config.block]
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert "CausalLM.Config" in config.pformat(hide_default_values=False)
+        assert "Transformer.Config" in config.pformat(hide_default_values=False)
     with pytest.raises(ValueError, match="block list length 1 != num_layers=2"):
         config.make()
 
 
-def test_causal_lm_rejects_wrong_block_input_width() -> None:
+def test_transformer_rejects_wrong_block_input_width() -> None:
     config = _tiny_config()
     assert isinstance(config.block, TransformerBlock.Config)
     config.block.channels_in = 16
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert "CausalLM.Config" in config.pformat(hide_default_values=False)
+        assert "Transformer.Config" in config.pformat(hide_default_values=False)
     # The BLOCK owns its own width invariant and names itself in the failure.
     with pytest.raises(ValueError, match="for TransformerBlock"):
         config.make()
 
 
-def test_causal_lm_reset_visits_every_parameterized_module(
+def test_transformer_reset_visits_every_parameterized_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _tiny_config().make()
-    modules = [model.embed, model.final_norm, *model.blocks, model.lm_head]
+    modules = [model.in_proj, model.final_norm, *model.blocks, model.out_proj]
     resetters: list[Mock] = []
     for module in modules:
         assert module is not None

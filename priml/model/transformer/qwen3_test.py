@@ -7,6 +7,7 @@ from typing import Any, cast
 from unittest.mock import Mock
 
 import importlib.util
+import json
 import os
 import sys
 
@@ -25,12 +26,13 @@ from priml.model.attention.rope import (
 )
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import TensorBlockConfig
+from priml.model.embedding import Embedding
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import qwen3
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.causal_lm import CausalLM
 from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
+from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
 
 
@@ -100,7 +102,7 @@ def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
         "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
         "model.norm.weight": torch.randn(h),
     }
-    if not cfg.tie_embeddings:
+    if cfg.out_proj != "tied":
         sd["lm_head.weight"] = torch.randn(cfg.vocab_size, h)
     for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
@@ -232,10 +234,10 @@ class TestConfig:
         assert model(toks).shape == (2, 5, cfg.vocab_size)
 
     def test_make_returns_qwen3_instance(self):
-        """Makes[Qwen3] re-narrows .make() to Qwen3, not CausalLM."""
+        """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
         model = Qwen3.Config.from_hf(_hf_config()).make()
         assert isinstance(model, Qwen3)
-        assert isinstance(model, CausalLM)
+        assert isinstance(model, Transformer)
 
 
 class TestSlots:
@@ -298,17 +300,17 @@ class TestLoad:
     ) -> None:
         hf_config = _hf_config(num_hidden_layers=1)
         cfg = Qwen3.Config.from_hf(hf_config).finalize()
-        (tmp_path / "config.json").write_text("{}")
-        decode = Mock(return_value=hf_config)
+        (tmp_path / "config.json").write_text(json.dumps(hf_config))
         load_local_state_dict = Mock(return_value=_synth_hf_state_dict(cfg))
-        monkeypatch.setattr(qwen3, "decode", decode)
         monkeypatch.setattr(hub, "load_local_state_dict", load_local_state_dict)
 
         model = Qwen3.load(tmp_path, device="cpu", dtype=torch.float32)
 
         assert isinstance(model, Qwen3)
-        assert model.embed.weight.dtype == torch.float32
-        decode.assert_called_once_with("object", "{}")
+        assert isinstance(model.in_proj, Embedding)
+        assert model.in_proj.weight.dtype == torch.float32
+        assert model.num_layers == 1
+        assert model.in_proj.weight.shape == (cfg.vocab_size, cfg.channels_in)
         load_local_state_dict.assert_called_once_with(tmp_path)
 
     def test_remote_load_uses_hf_model_config_and_weights(
@@ -387,10 +389,10 @@ class TestRemap:
         cfg = Qwen3.Config.from_hf(_hf_config(tie_word_embeddings=True)).finalize()
         hf_sd = _synth_hf_state_dict(cfg)
         remapped = remap_hf_state_dict(hf_sd, cfg)
-        assert "lm_head.weight" not in remapped
+        assert "out_proj.weight" not in remapped
         model = cfg.make()
         model.load_state_dict(remapped, strict=True)
-        assert model.lm_head is None
+        assert model.out_proj == "tied"
 
     def test_independent_qk_norms(self):
         """q_norm and k_norm weights must be independent after load."""

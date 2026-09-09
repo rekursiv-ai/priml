@@ -349,7 +349,7 @@ proj_out: Makeable[nn.Module] = field(default_factory=ScaledLinear.Config)
 The sentinel's rule lives in the parent's `forward` as an `if scale > 0` branch,
 so a caller cannot turn it off without knowing the sentinel. `ScaledLinear`
 carries the `1 / fan_in` rule with the weights it divides: the branch disappears
-and a plain `nn.Linear` drops in. Same shape as `CausalLM.Config.lm_head`.
+and a plain `nn.Linear` drops in. Same shape as `Transformer.Config.out_proj`.
 
 Two more of the same shape: a field meaningful only when another field has a
 given value belongs on the injected piece; a count beside an EXPLICIT list is
@@ -510,7 +510,7 @@ value, so a typo raises instead of building with the `-1` sentinel, while a
 child that does not implement it opts out. Never `getattr(cfg, "f", None)` --
 it bypasses the checker and hides the contract.
 
-A repeated sub-module is a template or a list (`model/causal_lm.py`,
+A repeated sub-module is a template or a list (`model/transformer/transformer.py`,
 `model/sequential.py`, `baselines/cifar10/model.py`):
 
 ```python
