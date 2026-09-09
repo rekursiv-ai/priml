@@ -258,8 +258,10 @@ class SwiGLUReluSquared(SwiGLU):
 
     """
 
-    class Config(Makes["SwiGLUReluSquared"], SwiGLU.Config, kw_only=True):
+    class Config(Makes["SwiGLUReluSquared"], SwiGLU.Config, kw_only=False):
         """:class:`SwiGLU.Config` re-defaulted; every field keeps its meaning."""
+
+        _: KW_ONLY
 
         gate: bool = False
         """Ungated: one matrix in, one out."""

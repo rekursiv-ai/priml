@@ -93,12 +93,16 @@ class SudokuTrainStep(TrainStep):
     swap, and a rate set by ``lr_scale`` rather than a curve of progress.
     """
 
-    class Config(Makes["SudokuTrainStep"], TrainStep.Config, kw_only=False):
+    class Config(
+        Makes["SudokuTrainStep"],
+        TrainStep.Config[SudokuNet.Config],
+        kw_only=True,
+    ):
         """Model, optimization, schedule, loss, and the optional ACT pool."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        model: SudokuNet.Config = field(default_factory=SudokuNet.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        model: SudokuNet.Config = field(default_factory=SudokuNet.Config)
         """Network to train."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
@@ -194,7 +198,7 @@ class SudokuTrainStep(TrainStep):
     @property
     def _ema(self) -> EMA | NoEMA:
         """The averager, under the name this recipe's own methods use."""
-        return cast("EMA | NoEMA", self.ema)
+        return cast(EMA | NoEMA, self.ema)
 
     @property
     @override

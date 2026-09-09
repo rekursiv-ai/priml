@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
     apply_activation_checkpointing,
-    checkpoint_wrapper,  # pyright: ignore[reportUnknownVariableType]  -- partial torch stub
+    checkpoint_wrapper,
 )
 
 import torch
@@ -296,7 +296,7 @@ class QuantizedActivationStorage:
             with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                 return original_forward(*args, **kwargs)
 
-        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- rebinding a live module's method; no declaration models an instance-level override
+        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- ty checks an INSTANCE assignment against the unbound signature (with `self`), though reading it back yields the bound one; pyright accepts it
 
         logger.info(
             f"Applied QuantizedActivationStorage: dtype_storage={self.dtype_storage}, "
@@ -424,10 +424,11 @@ class QuantizedModuleActivationStorage:
 
             @classmethod
             @override
-            def backward(  # ty: ignore[invalid-method-override] -- a classmethod cannot override the base's staticmethod; autograd accepts either, but no declaration expresses "one or the other"
+            def backward(
                 cls,
                 ctx: Any,
-                grad_output: Tensor,
+                /,
+                *grad_outputs: Tensor,
             ) -> tuple[
                 Tensor,
                 Tensor,
@@ -439,6 +440,7 @@ class QuantizedModuleActivationStorage:
                 None,
                 None,
             ]:
+                (grad_output,) = grad_outputs
                 saved = ctx.saved_tensors
 
                 if ctx.quantized:
@@ -509,4 +511,4 @@ class QuantizedModuleActivationStorage:
                 self.min_size,
             )
 
-        module._conv_forward = quantized_conv_forward  # noqa: SLF001  # ty: ignore[invalid-assignment] -- rebinding a live module's method; no declaration models an instance-level override
+        module._conv_forward = quantized_conv_forward  # noqa: SLF001  # ty: ignore[invalid-assignment] -- ty checks an INSTANCE assignment against the unbound signature (with `self`), though reading it back yields the bound one; pyright accepts it

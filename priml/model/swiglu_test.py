@@ -376,7 +376,7 @@ def test_tensor_parallel_style_preserves_the_logical_gate_split(
     )
     ffn = SwiGLU.Config(channels_in=4, channels_hidden=3).make()
     style = ffn.tensor_parallel_style()
-    device_mesh = cast("DeviceMesh", object())
+    device_mesh = cast(DeviceMesh, object())
     apply_style = cast(
         Callable[[ParallelStyle, nn.Module, DeviceMesh], nn.Module],
         vars(type(style))["_apply"],

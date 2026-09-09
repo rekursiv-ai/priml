@@ -277,7 +277,7 @@ def _floating_dtypes(value: object) -> set[torch.dtype]:
         return {value.dtype} if value.dtype.is_floating_point else set()
     if isinstance(value, (list, tuple)):
         found: set[torch.dtype] = set()
-        for item in cast("list[object] | tuple[object, ...]", value):
+        for item in cast(list[object] | tuple[object, ...], value):
             found |= _floating_dtypes(item)
         return found
     return set()
@@ -367,8 +367,8 @@ def _copy_back(original: object, computed: object) -> None:
         return
     if isinstance(original, (list, tuple)) and isinstance(computed, (list, tuple)):
         for o, c in zip(
-            cast("list[object] | tuple[object, ...]", original),
-            cast("list[object] | tuple[object, ...]", computed),
+            cast(list[object] | tuple[object, ...], original),
+            cast(list[object] | tuple[object, ...], computed),
             strict=True,
         ):
             _copy_back(o, c)

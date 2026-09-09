@@ -19,6 +19,17 @@ if TYPE_CHECKING:
     from torch import nn
 
 
+class _StateDict(OrderedDict[str, Any]):
+    """The mapping ``nn.Module.state_dict`` actually returns.
+
+    torch attaches ``_metadata`` to it and reads it back in ``load_state_dict``
+    for module-version migration hooks. No stub declares the attribute, so a
+    plain ``OrderedDict`` cannot carry it across a clone.
+    """
+
+    _metadata: OrderedDict[str, dict[str, Any]]
+
+
 class NoEMA:
     """No-op EMA for when EMA is disabled.
 
@@ -377,15 +388,13 @@ class EMA:
             # Clone tensors for storage independence but preserve ``_metadata``
             # so ``load_state_dict`` keeps module-version migration hooks.
             source = self.shadow_model.state_dict()
-            cloned = OrderedDict(
+            cloned = _StateDict(
                 (name, v.detach().clone() if torch.is_tensor(v) else v)
                 for name, v in source.items()
             )
             metadata = getattr(source, "_metadata", None)
             if metadata is not None:
-                # _metadata is a dynamic attr torch attaches to the state_dict
-                # OrderedDict; absent from every stub, so no checker models it.
-                cloned._metadata = metadata  # noqa: SLF001  # ty: ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
+                cloned._metadata = metadata  # noqa: SLF001
             return {
                 "shadow_model": cloned,
                 "global_step": self.global_step,
@@ -418,14 +427,13 @@ class EMA:
         self.local_step = state_dict.get("local_step", 0)
         if "shadow_model" in state_dict:
             source = state_dict["shadow_model"]
-            cloned = OrderedDict(
+            cloned = _StateDict(
                 (name, v.detach().clone() if torch.is_tensor(v) else v)
                 for name, v in source.items()
             )
             metadata = getattr(source, "_metadata", None)
             if metadata is not None:
-                # See state_dict(): _metadata is a torch dynamic attr.
-                cloned._metadata = metadata  # noqa: SLF001  # ty: ignore[unresolved-attribute]  # pyright: ignore[reportAttributeAccessIssue]
+                cloned._metadata = metadata  # noqa: SLF001
             if self.shadow_model is None:
                 self._pending_state = {"shadow_model": cloned}
             else:

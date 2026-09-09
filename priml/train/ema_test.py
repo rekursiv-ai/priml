@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
-from torch import nn
+from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
@@ -308,7 +308,9 @@ def test_ema_apply_to_raises_on_missing_tracked_param() -> None:
         pass
 
 
-def test_ema_apply_to_rolls_back_on_mid_swap_failure() -> None:
+def test_ema_apply_to_rolls_back_on_mid_swap_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """#338 regression: a mid-swap failure must leave the live model UN-swapped.
 
     The swap loop mutates live params in place. If the swap fails partway
@@ -333,13 +335,13 @@ def test_ema_apply_to_rolls_back_on_mid_swap_failure() -> None:
     real_shadow_param = ema._shadow_param
     calls = {"n": 0}
 
-    def failing_shadow_param(name: str) -> Any:
+    def failing_shadow_param(name: str) -> Tensor:
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("forced mid-swap failure")
         return real_shadow_param(name)
 
-    ema._shadow_param = failing_shadow_param  # ty: ignore[invalid-assignment] -- deliberately monkeypatches a bound method with a wrong-signature fake to force a mid-swap failure
+    monkeypatch.setattr(ema, "_shadow_param", failing_shadow_param)
 
     with pytest.raises(RuntimeError), ema.apply_to(model):
         pass

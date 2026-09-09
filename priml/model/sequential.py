@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Self, cast, override
+from typing import Self, override
 
 from configgle import Fig, Makeable, Maker
 from torch import Tensor, nn
@@ -48,9 +48,8 @@ class Sequential(nn.Sequential):
         @override
         def finalize(self) -> Self:
             elements = self.elements
-            base = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty widens the loose field's list contents to object; pyright narrows it
-                "list[Makeable[nn.Module]]",
-                list(elements) if isinstance(elements, list) else [elements],
+            base: list[Makeable[nn.Module]] = (
+                list(elements) if isinstance(elements, list) else [elements]
             )
             expanded: list[Makeable[nn.Module]] = []
             for index in range(self.repeat):

@@ -797,6 +797,8 @@ class RoPEMixed(RoPE):
     """
 
     class Config(Makes["RoPEMixed"], RoPE.Config):
+        _: KW_ONLY
+
         num_heads: int = 1
         """Attention-head count for per-head frequency scaling."""
 

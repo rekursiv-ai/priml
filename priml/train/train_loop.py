@@ -262,10 +262,14 @@ class TrainLoop:
         when a tracker is configured and the experiment left tracker notes
         empty. Set it directly to override the docstring."""
 
-        step: _StepConfigT = field(default_factory=TrainStep.Config)  # pyright: ignore[reportAssignmentType]  # ty: ignore[invalid-assignment] -- default_factory yields the TypeVar default; safe by construction
+        step: _StepConfigT = field(
+            default_factory=lambda: cast(_StepConfigT, TrainStep.Config()),
+        )
         """What one optimizer update does: model, loss, optimizer, schedule."""
 
-        dataset: _DatasetConfigT = field(default_factory=DummyDataset.Config)  # pyright: ignore[reportAssignmentType]  # ty: ignore[invalid-assignment] -- default_factory yields the TypeVar default; safe by construction
+        dataset: _DatasetConfigT = field(
+            default_factory=lambda: cast(_DatasetConfigT, DummyDataset.Config()),
+        )
         """Supplies the train and eval loaders, and owns the epoch count."""
         metrics: dict[str, Makeable[MetricProtocol]] = field(
             default_factory=dict[str, Makeable[MetricProtocol]],

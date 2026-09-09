@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Protocol
 
 import inspect
 import math
@@ -12,10 +13,16 @@ from torch import Tensor, nn
 from priml.model.custom_types import DepthIndex, flatten_depth_index
 
 
-InitFn = Callable[[Tensor], object] | Callable[[Tensor, DepthIndex], object]
+class DepthAwareInit(Protocol):
+    """An initializer that also consumes the block's depth index."""
+
+    def __call__(self, t: Tensor, /, *, depth_index: DepthIndex = ...) -> object: ...
 
 
-def call_init(fn: InitFn, t: Tensor, **kwargs: object) -> None:
+InitFn = Callable[[Tensor], object] | DepthAwareInit
+
+
+def call_init(fn: InitFn, t: Tensor, **kwargs: DepthIndex) -> None:
     """Call init fn, passing kwargs only if the fn accepts them."""
     try:
         sig = inspect.signature(fn)
@@ -35,7 +42,7 @@ def call_init(fn: InitFn, t: Tensor, **kwargs: object) -> None:
             }
     except (ValueError, TypeError):
         kwargs = {}
-    fn(t, **kwargs)  # pyright: ignore[reportCallIssue]  # ty: ignore[missing-argument]
+    fn(t, **kwargs)
 
 
 def _depth_index_scale(w: Tensor, depth_index: DepthIndex) -> None:

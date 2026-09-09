@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, cast, override
+from collections.abc import Callable
+from typing import Any, override
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
@@ -216,26 +217,23 @@ class _SyncCountingTensor(Tensor):
         return super().item()
 
 
-class _FakeDiscriminator:
-    """Minimal discriminator whose train_step returns a sync-counting loss."""
+def _counting_train_step(
+    item_calls: list[int],
+) -> Callable[..., dict[str, Tensor]]:
+    """A discriminator ``train_step`` whose loss records each ``.item()``."""
 
-    def __init__(self, item_calls: list[int]) -> None:
-        self.device = torch.device("cpu")
-        self._item_calls = item_calls
-        self.model = SimpleDiscriminator(image_size=8)
-
-    def _loss(self, batch_size: int) -> Tensor:
-        base = torch.ones(2 * batch_size)
-        counting = base.as_subclass(_SyncCountingTensor)
-        type(counting)._item_calls = self._item_calls
-        return counting
-
-    def train_step(self, *, media: Tensor, label: Tensor) -> dict[str, Tensor]:
+    def train_step(*, media: Tensor, label: Tensor) -> dict[str, Tensor]:
         del label
-        return {"loss": self._loss(media.shape[0] // 2), "model": media}
+        counting = torch.ones(media.shape[0]).as_subclass(_SyncCountingTensor)
+        type(counting)._item_calls = item_calls
+        return {"loss": counting, "model": media}
+
+    return train_step
 
 
-def test_gan_train_step_disc_loss_no_per_step_item() -> None:
+def test_gan_train_step_disc_loss_no_per_step_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """T-022: the GAN disc loop must not call ``.item()`` per discriminator step."""
     item_calls = [0]
 
@@ -255,8 +253,10 @@ def test_gan_train_step_disc_loss_no_per_step_item() -> None:
     )
     config.n_discriminator_steps = 5
     gan = config.make()
-    # Swap in a fake discriminator whose per-step loss tensor counts .item().
-    gan.discriminator = _FakeDiscriminator(item_calls)  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[invalid-assignment] -- deliberately swaps a test double (not a TrainStep) into a typed attribute
+    # Swap in a per-step loss tensor that counts .item().
+    monkeypatch.setattr(
+        gan.discriminator, "train_step", _counting_train_step(item_calls)
+    )
 
     batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
     gan.train_step(**batch)
@@ -382,13 +382,14 @@ def test_gan_discriminator_receives_media_under_consistent_key() -> None:
     gan = _make_gan()
 
     seen_keys: list[str] = []
-    real_forward = gan.discriminator.model.forward
 
-    def recording_forward(*args: Any, **kwargs: Any) -> Tensor:
+    def record(
+        module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
+        del module, args
         seen_keys.extend(kwargs.keys())
-        return cast(Tensor, real_forward(*args, **kwargs))
 
-    gan.discriminator.model.forward = recording_forward  # ty: ignore[invalid-assignment]  -- test patches a typed nn.Module attribute
+    gan.discriminator.model.register_forward_pre_hook(record, with_kwargs=True)
 
     batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
     gan.train_step(**batch)

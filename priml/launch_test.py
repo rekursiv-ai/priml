@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import field
 from pathlib import Path
-from typing import Self, cast, override
+from typing import Self, override
 
 import os
 import sys
@@ -104,8 +103,7 @@ def test_main_is_record_decorated() -> None:
     torchrun prints a root-cause summary.
     """
     assert hasattr(main, "__wrapped__"), "main() is not @record-decorated"
-    wrapped = cast(Callable[[], None], main.__wrapped__)  # pyright: ignore[reportFunctionMemberAccess] -- functools.wraps adds __wrapped__, untyped on FunctionType
-    assert wrapped.__module__ == "priml.launch"
+    assert main.__wrapped__.__module__ == "priml.launch"
 
 
 def test_main_success(monkeypatch: pytest.MonkeyPatch) -> None:

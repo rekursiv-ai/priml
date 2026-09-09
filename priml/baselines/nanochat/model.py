@@ -288,8 +288,8 @@ class NanoChatLM(nn.Module):
         # materialized later, and a table built on meta holds no values.
         self._rotation: tuple[Tensor, Tensor] | None = None
 
-    @staticmethod
-    def _value_table(config: Config, *, width: int) -> nn.Module:
+    @classmethod
+    def _value_table(cls, config: Config, *, width: int) -> nn.Module:
         """One value-embedding table, narrowed like the token table.
 
         Sized and built here rather than injected: there is one per

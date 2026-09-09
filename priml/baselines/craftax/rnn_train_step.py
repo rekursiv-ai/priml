@@ -141,12 +141,16 @@ class RecurrentRollout:
 class CraftaxRNNTrainStep(TrainStep):
     """Model, environment, and optimizer for one recurrent PPO experiment."""
 
-    class Config(Makes["CraftaxRNNTrainStep"], TrainStep.Config, kw_only=False):
+    class Config(
+        Makes["CraftaxRNNTrainStep"],
+        TrainStep.Config[ActorCriticRNN.Config],
+        kw_only=True,
+    ):
         """Model, environment, and the PPO hyperparameters."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        model: ActorCriticRNN.Config = field(default_factory=ActorCriticRNN.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        model: ActorCriticRNN.Config = field(default_factory=ActorCriticRNN.Config)
         """Recurrent policy and value network."""
 
         # ---- This recipe's own. ----

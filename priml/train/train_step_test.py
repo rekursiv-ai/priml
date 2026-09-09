@@ -233,7 +233,9 @@ def test_trainable_checkpointing():
     torch.testing.assert_close(loss_before, loss_after)
 
 
-def test_autocast_cache_enabled_is_configurable() -> None:
+def test_autocast_cache_enabled_is_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """T-045: autocast cache_enabled must be configurable (was hardcoded False)."""
     config = TrainStep.Config()
     # Field exists with a numerics-preserving default.
@@ -254,11 +256,8 @@ def test_autocast_cache_enabled_is_configurable() -> None:
         seen.append(kwargs.get("cache_enabled"))
         return orig(*args, **kwargs)
 
-    torch.amp.autocast = spy  # ty: ignore[invalid-assignment]
-    try:
-        step(x=torch.randn(4, 2))
-    finally:
-        torch.amp.autocast = orig
+    monkeypatch.setattr(torch.amp, "autocast", spy)
+    step(x=torch.randn(4, 2))
 
     assert seen == [True], seen
 

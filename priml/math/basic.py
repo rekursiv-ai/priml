@@ -139,7 +139,7 @@ def broadcast_sequences[T](*args: T | Sequence[T]) -> tuple[list[T], ...]:
     # Sequence, so the check cannot tell the two arms of the union apart and
     # both checkers widen the element type the signature already stated.
     lists: list[list[T]] = [
-        list(cast("Sequence[T]", a)) if isinstance(a, Sequence) else [a] for a in args
+        list(cast(Sequence[T], a)) if isinstance(a, Sequence) else [a] for a in args
     ]
     n = max(len(a) for a in lists)
     for a in lists:

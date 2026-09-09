@@ -250,8 +250,8 @@ def _init_tracker(
             def __init__(self, **kwargs: Any) -> None:
                 self.kwargs = kwargs
 
-        @staticmethod
-        def init(**kwargs: Any) -> _FakeRun:
+        @classmethod
+        def init(cls, **kwargs: Any) -> _FakeRun:
             captured.update(kwargs)
             return run
 
@@ -501,8 +501,8 @@ def test_wandb_startup_failure_becomes_noop_tracker(
             def __init__(self, **kwargs: Any) -> None:
                 self.kwargs = kwargs
 
-        @staticmethod
-        def init(**kwargs: Any) -> _FakeRun:
+        @classmethod
+        def init(cls, **kwargs: Any) -> _FakeRun:
             del kwargs
             raise RuntimeError("wandb unavailable")
 

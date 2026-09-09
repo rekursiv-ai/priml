@@ -64,7 +64,6 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
     class Config(
         ReadWritePassthroughMixin,
         Fig["Skip"],
-        kw_only=False,
         passthrough="inner",
     ):
         inner: Makeable[TensorModule] | None = None

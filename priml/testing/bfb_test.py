@@ -41,7 +41,7 @@ from priml.testing.bfb import (
 
 
 @pytest.fixture(autouse=True)
-def _isolate_regenerate_env(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] -- pytest invokes autouse fixtures by injection, not by name
+def isolate_regenerate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear ``BFB_REGENERATE`` so a global regen run cannot disable these tests.
 
     The drift-detection and round-trip tests mint into ``tmp_path`` and must
@@ -990,7 +990,7 @@ def _f32_leaking_ops(run: Callable[[], object]) -> set[str]:
             return value.dtype == torch.float32
         if isinstance(value, (list, tuple)):
             return any(
-                has_f32(v) for v in cast("list[object] | tuple[object, ...]", value)
+                has_f32(v) for v in cast(list[object] | tuple[object, ...], value)
             )
         return False
 

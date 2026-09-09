@@ -563,9 +563,7 @@ def _block_grid(
                 f"block list must hold {expected} configs "
                 f"({num_stages} stages x {blocks_per_stage}); got {len(block)}.",
             )
-        # ``Makeable`` is a runtime-checkable Protocol, so ty cannot rule out a
-        # config that is also a list; the cast states which arm won.
-        flat = cast(list[Makeable[nn.Module]], block)  # pyright: ignore[reportUnnecessaryCast] -- ty cannot narrow the Protocol arm; pyright can
+        flat = list(block)
     else:
         flat = [
             copy_tree(block) for _ in range(num_stages) for _ in range(blocks_per_stage)
