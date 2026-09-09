@@ -20,10 +20,7 @@ from priml.lib.userdirs import cache_dir
 
 
 if TYPE_CHECKING:
-    # safetensors ships partially-unknown stubs for this symbol.
-    from safetensors.torch import (
-        load_file,  # pyright: ignore[reportUnknownVariableType]
-    )
+    from safetensors.torch import load_file
 else:
     from wrapt import lazy_import
 
