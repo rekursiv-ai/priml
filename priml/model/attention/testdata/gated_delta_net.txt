@@ -11,5 +11,8 @@ GatedDeltaNet.Config(
                         channels_out=8,
                         eps=1e-06
                 ),
+                init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                init_conv_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                init_decay=<function priml.model.attention.gated_delta_net._init_decay at 0xdefacedeface>,
                 depth_index=()
         )

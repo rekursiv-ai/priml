@@ -39,9 +39,11 @@ from priml.baselines.sudoku.embedding import (
 from priml.baselines.sudoku.metric import GridAccuracy
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
+from priml.model.transformer.block import TransformerBlock
 from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop
 
@@ -99,6 +101,10 @@ def exp000() -> SudokuTrainLoop:
     cfg.step.model.embedding = embedding
     cfg.step.model.channels_in = 512
     cfg.step.model.num_layers = 2
+    assert isinstance(cfg.step.model.block, TransformerBlock.Config)
+    cfg.step.model.block.ffn = SwiGLU.Config(
+        init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+    )
 
     cfg.dataset.batch_size = 384
     cfg.dataset.seed = 0
@@ -218,6 +224,14 @@ def _mixer_block() -> MLPMixerBlock.Config:
     return MLPMixerBlock.Config(
         seq_len=GRID_LEN,
         prenorm=False,
-        token_mixer=SwiGLU.Config(norm=RMSNorm.Config()),
-        channel_mixer=SwiGLU.Config(norm=RMSNorm.Config()),
+        token_mixer=SwiGLU.Config(
+            norm=RMSNorm.Config(),
+            init_weight=kaiming_uniform,
+            init_weight_out=kaiming_uniform,
+        ),
+        channel_mixer=SwiGLU.Config(
+            norm=RMSNorm.Config(),
+            init_weight=kaiming_uniform,
+            init_weight_out=kaiming_uniform,
+        ),
     )

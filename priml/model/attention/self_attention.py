@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from typing import Self, override
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 from torch.distributed.tensor import DTensor
 
@@ -19,21 +19,25 @@ from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
+    Resettable,
     RotaryFactors,
 )
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.linear import EnsembleLinear, Linear
 
 
-class SelfAttention(nn.Module):
-    """Multi-head self-attention with fused QKV EnsembleLinear.
+class AttentionProjections(nn.Module):
+    """Own attention projections, normalization and rotary encoding without a kernel.
 
-    Uses a single EnsembleLinear for Q/K/V projections where each head
-    is independently orthogonalizable by Muon. Supports GQA via num_heads_kv.
+    The configuration also declares attention policies, consumed by the owner
+    applying these projections to either self-attention or joint attention.
     """
 
-    class Config(Fig["SelfAttention"], kw_only=False):
-        """Set at least two of (channels_in, num_heads, channels_head); the third is inferred."""
+    class Config(Fig["AttentionProjections"], kw_only=False):
+        """Set at least two of channels_in, num_heads and channels_head.
+
+        The third is inferred.
+        """
 
         channels_in: int = -1
         """Model width (-1 to infer from num_heads * channels_head)."""
@@ -87,11 +91,6 @@ class SelfAttention(nn.Module):
         where matching HF's operation order avoids small floating-point drift.
         """
 
-        attn_kernel: Makeable[AttentionKernel] = field(
-            default_factory=SdpaFused.Config,
-        )
-        """Attention kernel (SdpaFused or SdpaNaive)."""
-
         init_weight: InitFn = kaiming_uniform
         """Weight initialization function."""
 
@@ -121,14 +120,18 @@ class SelfAttention(nn.Module):
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        _validate_head_dims(config)
+        _validate_head_dims(
+            channels_in=config.channels_in,
+            num_heads=config.num_heads,
+            channels_head=config.channels_head,
+        )
         if (
             -1 not in (config.channels_in, config.channels_out)
             and config.channels_in != config.channels_out
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for SelfAttention."
+                f"channels_out={config.channels_out} for {type(self).__name__}."
             )
         super().__init__()
         if config.num_heads % config.num_heads_kv != 0:
@@ -182,6 +185,64 @@ class SelfAttention(nn.Module):
             self.norm_k = config.norm_qk.make()
         self.norm_out = config.norm_out.make() if config.norm_out else None
         self.rope = config.rope.make() if config.rope else None
+
+    def split_qkv(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Project Q/K/V separately while reusing the fused parameter layout.
+
+        Args:
+          x: Input tokens shaped [..., sequence, channels_in].
+
+        Returns:
+          q: Queries shaped [..., sequence, num_heads, channels_head].
+          k: Keys shaped [..., sequence, num_heads_kv, channels_head].
+          v: Values with the same shape as k.
+
+        """
+        c = self.channels_head
+        q_end = self.num_heads
+        k_end = q_end + self.num_heads_kv
+        w = self.proj_qkv.weight.to(x.dtype)
+        bias = self.proj_qkv.bias
+        b = bias.to(x.dtype) if bias is not None else None
+        q_w = w[:q_end].reshape(q_end * c, -1)
+        k_w = w[q_end:k_end].reshape(self.num_heads_kv * c, -1)
+        v_w = w[k_end:].reshape(self.num_heads_kv * c, -1)
+        q = torch.matmul(x, q_w.T)
+        k = torch.matmul(x, k_w.T)
+        v = torch.matmul(x, v_w.T)
+        if b is not None:
+            q = q + b[:q_end].reshape(q_end * c)
+            k = k + b[q_end:k_end].reshape(self.num_heads_kv * c)
+            v = v + b[k_end:].reshape(self.num_heads_kv * c)
+        q = q.reshape(*x.shape[:-1], self.num_heads, c)
+        k = k.reshape(*x.shape[:-1], self.num_heads_kv, c)
+        v = v.reshape(*x.shape[:-1], self.num_heads_kv, c)
+        return q, k, v
+
+    def reset_parameters(self) -> None:
+        self.proj_qkv.reset_parameters()
+        self.proj_out.reset_parameters()
+        seen: nn.Module | None = None
+        for norm in (self.norm_q, self.norm_k):
+            if norm is not None and norm is not seen:
+                if hasattr(norm, "reset_parameters"):
+                    norm.reset_parameters()
+                seen = norm
+        if self.norm_out and hasattr(self.norm_out, "reset_parameters"):
+            self.norm_out.reset_parameters()
+        if isinstance(self.rope, Resettable):
+            self.rope.reset_parameters()
+
+
+class SelfAttention(AttentionProjections):
+    """Multi-head self-attention with fused QKV and optional grouped-query heads."""
+
+    class Config(Makes["SelfAttention"], AttentionProjections.Config, kw_only=False):
+        attn_kernel: Makeable[AttentionKernel] = field(default_factory=SdpaFused.Config)
+        """Attention kernel shared by all heads."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
         self.attn_kernel = config.attn_kernel.make()
 
     def assert_tensor_parallel_compatible(self) -> None:
@@ -201,19 +262,6 @@ class SelfAttention(nn.Module):
                 "kernel; set attn_kernel=SdpaNaive (the fused flash kernel has "
                 "no DTensor sharding strategy).",
             )
-
-    def reset_parameters(self) -> None:
-        self.proj_qkv.reset_parameters()
-        self.proj_out.reset_parameters()
-        # Identity-check skips the shared-norm case (one reset, not two).
-        seen: nn.Module | None = None
-        for norm in (self.norm_q, self.norm_k):
-            if norm is not None and norm is not seen:
-                if hasattr(norm, "reset_parameters"):
-                    norm.reset_parameters()
-                seen = norm
-        if self.norm_out and hasattr(self.norm_out, "reset_parameters"):
-            self.norm_out.reset_parameters()
 
     def alloc_kv_cache(
         self,
@@ -299,7 +347,7 @@ class SelfAttention(nn.Module):
 
         # proj_qkv: [..., S, C] -> [..., S, num_ensemble, channels_head]
         if self.split_qkv_projection:
-            q, k, v = self._split_qkv(x)
+            q, k, v = self.split_qkv(x)
         else:
             q, k, v = (
                 t.contiguous()
@@ -362,29 +410,6 @@ class SelfAttention(nn.Module):
         out = self.proj_out(out)
         return out, cache
 
-    def _split_qkv(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Project Q/K/V separately while reusing the fused parameter layout."""
-        c = self.channels_head
-        q_end = self.num_heads
-        k_end = q_end + self.num_heads_kv
-        w = self.proj_qkv.weight.to(x.dtype)
-        bias = self.proj_qkv.bias
-        b = bias.to(x.dtype) if bias is not None else None
-        q_w = w[:q_end].reshape(q_end * c, -1)
-        k_w = w[q_end:k_end].reshape(self.num_heads_kv * c, -1)
-        v_w = w[k_end:].reshape(self.num_heads_kv * c, -1)
-        q = torch.matmul(x, q_w.T)
-        k = torch.matmul(x, k_w.T)
-        v = torch.matmul(x, v_w.T)
-        if b is not None:
-            q = q + b[:q_end].reshape(q_end * c)
-            k = k + b[q_end:k_end].reshape(self.num_heads_kv * c)
-            v = v + b[k_end:].reshape(self.num_heads_kv * c)
-        q = q.reshape(*x.shape[:-1], self.num_heads, c)
-        k = k.reshape(*x.shape[:-1], self.num_heads_kv, c)
-        v = v.reshape(*x.shape[:-1], self.num_heads_kv, c)
-        return q, k, v
-
 
 def _infer_head_dims(
     *,
@@ -412,25 +437,27 @@ def _infer_head_dims(
     return channels_in, num_heads, channels_head
 
 
-def _validate_head_dims(config: SelfAttention.Config) -> None:
+def _validate_head_dims(
+    *, channels_in: int, num_heads: int, channels_head: int
+) -> None:
     """Reject geometry that stayed unresolved after finalize.
 
     Only the inference contract, never a dimension's sign: torch raises on a
     negative extent when it builds the tensor, and re-checking here would add a
     second message for one fault (STYLE.md "Let the leaf complain").
     """
-    if config.channels_head == -1 and config.channels_in != -1:
+    if channels_head == -1 and channels_in != -1:
         raise ValueError(
-            f"channels_in={config.channels_in} not divisible by "
-            f"num_heads={config.num_heads}; set channels_head explicitly.",
+            f"channels_in={channels_in} not divisible by "
+            f"num_heads={num_heads}; set channels_head explicitly.",
         )
-    if config.num_heads == -1 and config.channels_in != -1:
+    if num_heads == -1 and channels_in != -1:
         raise ValueError(
-            f"channels_in={config.channels_in} not divisible by "
-            f"channels_head={config.channels_head}; set num_heads explicitly.",
+            f"channels_in={channels_in} not divisible by "
+            f"channels_head={channels_head}; set num_heads explicitly.",
         )
-    if -1 in (config.channels_in, config.num_heads, config.channels_head):
+    if -1 in (channels_in, num_heads, channels_head):
         raise ValueError(
-            f"Need at least two of channels_in={config.channels_in}, "
-            f"num_heads={config.num_heads}, channels_head={config.channels_head}.",
+            f"Need at least two of channels_in={channels_in}, "
+            f"num_heads={num_heads}, channels_head={channels_head}.",
         )

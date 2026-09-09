@@ -21,6 +21,7 @@ import torch
 
 from priml.math.basic import ceil_multiple
 from priml.model.custom_types import ChannelsIn, DepthIndex, TensorModule
+from priml.model.init import InitFn, call_init, kaiming_uniform
 from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
 
@@ -33,6 +34,13 @@ else:
     chunk_gated_delta_rule = lazy_import(
         "fla.ops.gated_delta_rule", "chunk_gated_delta_rule"
     )
+
+
+def _init_decay(weight: Tensor) -> None:
+    # Clamp exact zero draws before log without shifting the sampled range.
+    with torch.no_grad():
+        draw = torch.empty_like(weight).uniform_(0, 16)
+        weight.copy_(draw.clamp_(min=torch.finfo(draw.dtype).tiny).log_())
 
 
 class GatedDeltaNet(nn.Module):
@@ -65,6 +73,15 @@ class GatedDeltaNet(nn.Module):
         norm: Makeable[TensorModule] = field(default_factory=CenteredRMSNorm.Config)
         """Normalization applied per value head before the output projection."""
 
+        init_weight: InitFn = kaiming_uniform
+        """Initializer for input and output projections."""
+
+        init_conv_weight: InitFn = kaiming_uniform
+        """Initializer for the depthwise convolution."""
+
+        init_decay: InitFn = _init_decay
+        """Initializer for the log-space decay rates."""
+
         depth_index: DepthIndex = ()
         """Block depth index for depth-scaled init (-1 = no scaling)."""
 
@@ -74,11 +91,6 @@ class GatedDeltaNet(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for GatedDeltaNet."
-                )
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
                 self.norm.channels_in = self.channels_v_head
             return super().finalize()
@@ -90,7 +102,7 @@ class GatedDeltaNet(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for GatedDeltaNet."
+                f"channels_out={config.channels_out} for {type(self).__name__}."
             )
         super().__init__()
         # Every count, not just num_heads_k: a zero elsewhere builds a zero-width
@@ -112,6 +124,8 @@ class GatedDeltaNet(nn.Module):
                 f"num_heads_v={config.num_heads_v} must be an integer "
                 f"multiple of num_heads_k={config.num_heads_k}.",
             )
+        self._init_conv_weight = config.init_conv_weight
+        self._init_decay = config.init_decay
         h = config.channels_in
         self.num_heads_k = config.num_heads_k
         self.num_heads_v = config.num_heads_v
@@ -125,21 +139,25 @@ class GatedDeltaNet(nn.Module):
             channels_in=h,
             channels_out=conv_dim,
             bias=False,
+            init_weight=config.init_weight,
         ).make()
         self.in_proj_z = Linear.Config(
             channels_in=h,
             channels_out=v_dim,
             bias=False,
+            init_weight=config.init_weight,
         ).make()
         self.in_proj_b = Linear.Config(
             channels_in=h,
             channels_out=config.num_heads_v,
             bias=False,
+            init_weight=config.init_weight,
         ).make()
         self.in_proj_a = Linear.Config(
             channels_in=h,
             channels_out=config.num_heads_v,
             bias=False,
+            init_weight=config.init_weight,
         ).make()
 
         self.conv1d = nn.Conv1d(
@@ -163,6 +181,7 @@ class GatedDeltaNet(nn.Module):
             channels_out=h,
             bias=False,
             depth_index=config.depth_index,
+            init_weight=config.init_weight,
         ).make()
         self.reset_parameters()
 
@@ -174,19 +193,12 @@ class GatedDeltaNet(nn.Module):
         self.in_proj_z.reset_parameters()
         self.in_proj_b.reset_parameters()
         self.in_proj_a.reset_parameters()
-        self.conv1d.reset_parameters()
+        call_init(self._init_conv_weight, self.conv1d.weight)
         self.norm.reset_parameters()
         self.out_proj.reset_parameters()
         with torch.no_grad():
             nn.init.ones_(self.dt_bias)
-            # Clamped off zero rather than sampled from a shifted range:
-            # uniform_(0, 16) really does return exactly 0.0 (measured, once
-            # in 10M draws), and log(0) is -inf, which the forward
-            # exponentiates into a permanently closed gate. Clamping keeps the
-            # distribution the reference specifies; shifting to [1, 17) would
-            # move its mean from 1.775 to 2.007.
-            draw = torch.empty_like(self.A_log).uniform_(0, 16)
-            self.A_log.copy_(draw.clamp_(min=torch.finfo(draw.dtype).tiny).log_())
+            call_init(self._init_decay, self.A_log)
 
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:

@@ -39,9 +39,9 @@ SudokuTrainLoop(
                 │       │       │               share_qk_norm=True,
                 │       │       │               norm_out=None,
                 │       │       │               split_qkv_projection=False,
-                │       │       │               attn_kernel=SdpaFused.Config(),
                 │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │       │               depth_index=()
+                │       │       │               depth_index=(),
+                │       │       │               attn_kernel=SdpaFused.Config()
                 │       │       │       ),
                 │       │       │       ffn=SwiGLU.Config(
                 │       │       │               channels_in=512,
@@ -56,7 +56,7 @@ SudokuTrainLoop(
                 │       │       │               act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │       │       │               depth_index=(),
                 │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │       │       │               init_weight_out=None,
+                │       │       │               init_weight_out=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │       │       │               shard='colwise'
                 │       │       │       ),
                 │       │       │       norm1=RMSNorm.Config(

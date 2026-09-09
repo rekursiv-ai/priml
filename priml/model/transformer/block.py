@@ -127,9 +127,15 @@ class TransformerBlock(nn.Module):
                 f"channels_in={config.channels_in} must equal "
                 f"channels_out={config.channels_out} for TransformerBlock."
             )
-        # A child's width is the CHILD's invariant: ``finalize`` propagates into
-        # every ``-1`` slot, and a slot the caller set explicitly is rejected by
-        # that child's own ``__init__``, in its own vocabulary.
+        # A one-channel FFN would silently broadcast across the residual stream.
+        if (
+            isinstance(config.ffn, ChannelsOut)
+            and config.ffn.channels_out != config.channels_in
+        ):
+            raise ValueError(
+                f"ffn.channels_out={config.ffn.channels_out} must equal "
+                f"channels_in={config.channels_in} for TransformerBlock."
+            )
         super().__init__()
         self.prenorm = config.prenorm
         self.checkpoint = config.checkpoint

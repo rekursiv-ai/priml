@@ -34,11 +34,13 @@ from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.embedding import Embedding
 from priml.model.linear import EnsembleLinear, Linear
 from priml.model.moe import MoE, Router
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.causal_lm import CausalLM
+from priml.testing.bfb import randomize_parameters
 from priml.train.tensor_parallel import TensorParallel, apply_tensor_parallel
 
 
@@ -86,6 +88,7 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
 
 def test_causal_lm_declares_embedding_and_head_vocab() -> None:
     model = CausalLM.Config(vocab_size=64, channels_in=32, num_layers=1).make()
+    assert isinstance(model.embed, Embedding)
     assert model.embed.shard == "vocab"
     assert isinstance(model.lm_head, Linear)
     assert model.lm_head.shard == "vocab"
@@ -227,7 +230,11 @@ def _meta_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
 
 
 def _swiglu() -> tuple[nn.Module, Tensor]:
-    return SwiGLU.Config(channels_in=32, shard="colwise").make(), torch.randn(2, 5, 32)
+    config = SwiGLU.Config(
+        channels_in=32,
+        shard="colwise",
+    )
+    return config.make(), torch.randn(2, 5, 32)
 
 
 def _self_attention() -> tuple[nn.Module, Tensor]:
@@ -336,7 +343,9 @@ def _record_case(
     try:
         torch.manual_seed(0)
         model, x = build()
+        randomize_parameters(model, seed=7, std=0.2)
         dense = _first(model(x))
+        assert torch.count_nonzero(dense) > 0
         sharded = apply_tensor_parallel(model, mesh)
         # Guard against silent replication: for a case meant to shard,
         # sharded==dense is vacuous if the plan was a no-op. At least one

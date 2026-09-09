@@ -142,6 +142,24 @@ def test_projection_slot_keeps_caller_set_fields() -> None:
     assert config.proj_out.channels_out == 128
 
 
+def test_mla_mismatched_widths_validate_on_construction() -> None:
+    config, _ = _mla_config()
+    config.channels_out = 64
+
+    finalized = config.copy_tree().finalize()
+    assert (finalized.channels_in, finalized.channels_out) == (32, 64)
+    with pytest.raises(ValueError, match="for MultiHeadLatentAttention"):
+        config.make()
+    with pytest.raises(ValueError, match="for MultiHeadLatentAttention"):
+        MultiHeadLatentAttention(config)
+
+    class DerivedLatentAttention(MultiHeadLatentAttention):
+        pass
+
+    with pytest.raises(ValueError, match="for DerivedLatentAttention"):
+        DerivedLatentAttention(config)
+
+
 def test_forward_shape():
     m = _tiny()
     x = torch.randn(2, 6, 128)

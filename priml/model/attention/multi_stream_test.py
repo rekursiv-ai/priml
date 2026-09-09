@@ -7,7 +7,7 @@ from typing import cast
 
 from configgle import PartialConfig
 from configgle.testing import assert_pprint_golden
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -17,8 +17,16 @@ from priml.model.attention.kvcache import (
 )
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
+from priml.model.attention.self_attention import (
+    AttentionProjections,
+    SelfAttention,
+)
 from priml.model.norm import RMSNorm
-from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.bfb import (
+    assert_bfb_against_golden,
+    bfb_devices,
+    host_agnostic_numerics,
+)
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
@@ -52,7 +60,7 @@ def test_multi_stream_norm_qk_channels_inferred_from_channels_head():
 
     assert isinstance(config.norm_qk, RMSNorm.Config)
     assert config.norm_qk.channels_in == 16
-    streams = config.make()(list(torch.randn(2, 2, 8, 64)))
+    streams = config.make()([torch.randn(2, 8, 64), torch.randn(2, 8, 64)])
     for stream in streams:
         assert isinstance(stream, Tensor)
         assert stream.shape == (2, 8, 64)
@@ -307,6 +315,135 @@ def test_multi_stream_bfb(device: str) -> None:
         build_input=lambda: [torch.randn(2, 3, 16), torch.randn(2, 4, 16)],
         seed=0,
         run=lambda module, xs: torch.cat(cast(tuple[Tensor, ...], module(xs)), dim=1),
+    )
+
+
+def test_explicit_streams_own_norms_and_native_weights() -> None:
+    source = SelfAttention.Config()
+    source.channels_in = 8
+    source.num_heads = 2
+    source.num_heads_kv = 1
+    source.channels_head = 4
+    source.norm_qk = RMSNorm.Config()
+    source.norm_qk.elementwise_affine = True
+    source.share_qk_norm = False
+    source.norm_out = RMSNorm.Config()
+    source.norm_out.elementwise_affine = True
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = 8
+    cfg.num_heads = 2
+    cfg.num_heads_kv = 1
+    cfg.channels_head = 4
+    cfg.streams = [source.copy_tree(), source.copy_tree()]
+    model = cfg.make()
+    native = source.make()
+    model.load_stream(0, source=native)
+    model.load_stream(1, source=model.streams[0])
+    assert model.streams[0].norm_q is not model.streams[1].norm_q
+    assert model.streams[0].norm_q is not model.streams[0].norm_k
+    x = torch.randn(1, 2, 8)
+    other = torch.randn(1, 3, 8)
+    masks = [
+        torch.cat((torch.zeros(2, 2), torch.full((2, 3), float("-inf"))), -1),
+        torch.cat((torch.full((3, 2), float("-inf")), torch.zeros(3, 3)), -1),
+    ]
+    with host_agnostic_numerics():
+        actual = model([x, other], attn_mask=masks)
+        assert torch.equal(actual[0], native(x))
+        assert torch.equal(actual[1], native(other))
+    assert all(
+        torch.equal(value, native.state_dict()[key])
+        for key, value in model.streams[0].state_dict().items()
+    )
+
+
+def test_per_query_masks_isolate_unequal_streams() -> None:
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = 8
+    cfg.num_heads = 2
+    model = cfg.make()
+    x, other = torch.randn(1, 2, 8), torch.randn(1, 3, 8)
+    masks = [
+        torch.cat((torch.zeros(2, 2), torch.full((2, 3), float("-inf"))), -1),
+        None,
+    ]
+    first = model([x, other], attn_mask=masks)
+    changed = model([x, other + 10], attn_mask=masks)
+    assert torch.equal(first[0], changed[0])
+    assert not torch.equal(first[1], changed[1])
+    with pytest.raises(ValueError, match="attn_mask"):
+        model([x, other], attn_mask=[masks[0]])
+    with pytest.raises(ValueError, match="streams"):
+        model([x])
+
+
+def test_dropout_override_applies_in_training() -> None:
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = 8
+    cfg.num_heads = 2
+    cfg.dropout = 0.5
+    model = cfg.make().train()
+    xs = [torch.randn(1, 2, 8), torch.randn(1, 3, 8)]
+    actual = model(xs, dropout_p=0.0)
+    expected = model.eval()(xs)
+    assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
+
+
+@pytest.mark.parametrize("index", [-1, 1])
+def test_attention_loading_rejects_invalid_indices(index: int) -> None:
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = 8
+    cfg.num_heads = 2
+    cfg.streams = [SelfAttention.Config()]
+    source = SelfAttention.Config(channels_in=8, num_heads=2).make()
+    with pytest.raises(ValueError, match="index"):
+        cfg.make().load_stream(index, source=source)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_width_mismatch_is_rejected_only_when_building(explicit: bool) -> None:
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = 8
+    cfg.channels_out = 12
+    cfg.num_heads = 2
+    if explicit:
+        cfg.streams = [AttentionProjections.Config()]
+    finalized = cfg.copy_tree().finalize()
+    assert finalized.channels_in == 8
+    assert finalized.channels_out == 12
+    assert finalized.channels_head == 4
+    with pytest.raises(ValueError, match="MultiStreamAttention"):
+        cfg.make()
+    with pytest.raises(ValueError, match="MultiStreamAttention"):
+        MultiStreamAttention(finalized)
+
+
+@pytest.mark.parametrize("channels", [-1, 7])
+def test_joint_attention_rejects_unresolved_geometry(channels: int) -> None:
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = channels
+    cfg.num_heads = 2
+    with pytest.raises(ValueError, match=r"Need at least two|not divisible"):
+        cfg.make()
+
+
+def test_native_loading_rejects_source_kernel_state_without_partial_copy() -> None:
+    source_cfg = SelfAttention.Config()
+    source_cfg.channels_in = 8
+    source_cfg.num_heads = 2
+    source = source_cfg.make()
+    assert isinstance(source.attn_kernel, nn.Module)
+    source.attn_kernel.register_buffer("checkpoint_state", torch.ones(1))
+    cfg = MultiStreamAttention.Config()
+    cfg.channels_in = 8
+    cfg.num_heads = 2
+    cfg.streams = [AttentionProjections.Config().update(source_cfg, skip_missing=True)]
+    model = cfg.make()
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    with pytest.raises(ValueError, match="state keys"):
+        model.load_stream(0, source=source)
+    assert all(
+        torch.equal(before[name], value) for name, value in model.state_dict().items()
     )
 
 

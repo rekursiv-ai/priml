@@ -203,7 +203,7 @@ class Muon(Optimizer):
 
     @torch.no_grad()
     @override
-    def step(self, closure: Callable[[], float] | None = None) -> None:  # ty: ignore[invalid-method-override] -- narrows Optimizer.step return to None; ty rejects the narrowing
+    def step(self, closure: Callable[[], float] | None = None) -> None:  # ty: ignore[invalid-method-override] -- narrows Optimizer.step return to None; Muon ignores the closure and never returns a loss
         del closure
         for group in self.param_groups:
             lr = group["lr"]

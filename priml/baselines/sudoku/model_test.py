@@ -17,6 +17,7 @@ from priml.baselines.sudoku.model import (
     SudokuNet,
 )
 from priml.baselines.sudoku.prefix import RegisterTokens
+from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -36,14 +37,24 @@ def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config
     # tensor ends up thirty times the size of everything else in the golden.
     config.block = TransformerBlock.Config(
         prenorm=False,
-        ffn=SwiGLU.Config(round_to=16),
+        ffn=SwiGLU.Config(
+            round_to=16, init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+        ),
     )
     if mixer:
         config.block = MLPMixerBlock.Config(
             seq_len=81,
             prenorm=False,
-            token_mixer=SwiGLU.Config(norm=RMSNorm.Config()),
-            channel_mixer=SwiGLU.Config(norm=RMSNorm.Config()),
+            token_mixer=SwiGLU.Config(
+                norm=RMSNorm.Config(),
+                init_weight=kaiming_uniform,
+                init_weight_out=kaiming_uniform,
+            ),
+            channel_mixer=SwiGLU.Config(
+                norm=RMSNorm.Config(),
+                init_weight=kaiming_uniform,
+                init_weight_out=kaiming_uniform,
+            ),
         )
     if recurrent:
         config.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=2)

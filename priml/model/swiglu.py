@@ -15,9 +15,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
-import torch
-
-from priml.math.activations import relu_squared
 from priml.math.basic import ceil_multiple
 from priml.math.custom_types import TensorFn
 from priml.model.custom_types import (
@@ -26,12 +23,30 @@ from priml.model.custom_types import (
     ShardStyle,
     TensorModule,
 )
-from priml.model.init import InitFn, kaiming_uniform, unit_fan_in_uniform
+from priml.model.init import InitFn, unit_fan_in_uniform
 from priml.model.linear import Linear
 
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
+
+
+def relu_squared(x: Tensor) -> Tensor:
+    """Apply ``relu(x) ** 2``, with continuous derivative ``2 * relu(x)``.
+
+    Args:
+      x: Pre-activation values, any shape.
+
+    Returns:
+      activated: ``max(0, x) ** 2``, elementwise.
+
+    References:
+      https://arxiv.org/abs/2109.08668
+        So et al. 2021, "Primer: Searching for Efficient Transformer for
+        Language Modeling."
+
+    """
+    return nn.functional.relu(x).square()
 
 
 class SwiGLU(nn.Module):
@@ -57,8 +72,8 @@ class SwiGLU(nn.Module):
         channels_hidden: int = -1
         """Hidden dimension (-1 to compute from channels_in * expansion)."""
 
-        expansion: float = 8 / 3
-        """Hidden-to-input channel ratio when channels_hidden is inferred."""
+        expansion: float = -1
+        """Hidden-to-input ratio; -1 infers 8/3 when gated, otherwise 4."""
 
         round_to: int = 256
         """Round inferred channels_hidden up to nearest multiple of this."""
@@ -78,7 +93,11 @@ class SwiGLU(nn.Module):
         """
 
         norm: Makeable[TensorModule] | None = None
-        """Optional norm inside the gate branch, for Muon compatibility.
+        """Optional norm inside the factored activation, for Muon compatibility.
+
+        For act(x) = f(x) * x, normalize as f(g) * norm(g * x) when gated,
+        or f(x) * norm(x) when ungated. Known factors are sigmoid for silu
+        and relu for relu_squared.
 
         References:
           https://arxiv.org/abs/2601.19085
@@ -86,16 +105,16 @@ class SwiGLU(nn.Module):
         """
 
         act: TensorFn = nn.functional.silu
-        """Nonlinearity on the gate branch; ``norm`` requires it be ``silu``."""
+        """Nonlinearity; ``norm`` requires a known silu or relu_squared factorization."""
 
         depth_index: DepthIndex = ()
-        """Block depth index for depth-scaled init (-1 = no scaling)."""
+        """Block depth index for depth-scaled initializers; empty means no scaling."""
 
-        init_weight: InitFn = kaiming_uniform
+        init_weight: InitFn = unit_fan_in_uniform
         """Weight init for ``up_proj``."""
 
-        init_weight_out: InitFn | None = None
-        """Weight init for ``down_proj``; ``None`` reuses ``init_weight``."""
+        init_weight_out: InitFn = nn.init.zeros_
+        """Weight init for ``down_proj``; zero keeps the residual stream unchanged."""
 
         shard: ShardStyle | None = None
         """Tensor-parallel shard style over the mesh tp dim; ``None`` replicates."""
@@ -106,9 +125,14 @@ class SwiGLU(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if self.expansion == -1:
+                # ``4.0``, not ``4``: the field is declared ``float``, and an
+                # int literal survives as an int through pprint -- which is a
+                # golden-config diff, not a numeric one.
+                self.expansion = 8 / 3 if self.gate else 4.0
             if self.channels_hidden == -1:
-                self.channels_hidden = int(
-                    ceil_multiple(self.channels_in * self.expansion, self.round_to),
+                self.channels_hidden = ceil_multiple(
+                    self.channels_in * self.expansion, self.round_to
                 )
             # Pushed here, not in __init__: the norm is finalized with the tree,
             # so a width written afterwards never reaches pprint or a diff.
@@ -140,24 +164,24 @@ class SwiGLU(nn.Module):
             channels_out=c_out,
             bias=config.bias,
             depth_index=config.depth_index,
-            init_weight=config.init_weight_out or config.init_weight,
+            init_weight=config.init_weight_out,
         ).make()
         self.act = config.act
         if config.norm is None:
             self.norm = None
-        elif not self.gate:
-            raise ValueError("Norm can only be specified when gate is enabled.")
-        elif self.act is not nn.functional.silu:
-            raise ValueError("Norm can only be specified when act is silu.")
         else:
-            if isinstance(config.norm, ChannelsIn) and config.norm.channels_in == -1:
-                config.norm.channels_in = c_h
+            if self.act is nn.functional.silu:
+                self.act = nn.functional.sigmoid
+            elif self.act is relu_squared:
+                self.act = nn.functional.relu
+            else:
+                raise ValueError("Norm requires act to be silu or relu_squared.")
             self.norm = config.norm.make()
 
     def reset_parameters(self) -> None:
         self.up_proj.reset_parameters()
         self.down_proj.reset_parameters()
-        if self.norm and hasattr(self.norm, "reset_parameters"):
+        if self.norm is not None and hasattr(self.norm, "reset_parameters"):
             self.norm.reset_parameters()
 
     @override
@@ -171,17 +195,15 @@ class SwiGLU(nn.Module):
             if self.norm is None:
                 x = self.act(gate) * x
             else:
-                # This exists for Muon compatibility as published in,
+                # SiLU grouping for Muon compatibility:
                 #   https://arxiv.org/abs/2601.19085
                 #   https://github.com/jvdillon/sic
-                # Notice that when norm(x)=x then this path becomes the `else`,
-                #   sigmoid(gate) * norm(gate * x) =
-                #   = sigmoid(gate) * gate * x
-                #   = silu(gate) * x
-                x = torch.sigmoid(gate) * self.norm(gate * x)
+                # Factor silu(g) = sigmoid(g)*g and relu_squared(g) = relu(g)*g
+                # so identity normalization recovers the unnormalized branch.
+                x = self.act(gate) * self.norm(gate * x)
         else:
             x = self.up_proj(x)
-            x = self.act(x)
+            x = self.act(x) if self.norm is None else self.act(x) * self.norm(x)
         return self.down_proj(x)
 
     def tensor_parallel_style(self) -> ParallelStyle:
@@ -210,8 +232,8 @@ class SwiGLU(nn.Module):
         w = self.up_proj.weight.to(x.dtype)
         bias = self.up_proj.bias
         b = bias.to(x.dtype) if bias is not None else None
-        gate = torch.matmul(x, w[:c].T)
-        up = torch.matmul(x, w[c:].T)
+        gate = x @ w[:c].T
+        up = x @ w[c:].T
         if b is not None:
             gate = gate + b[:c]
             up = up + b[c:]
@@ -225,10 +247,9 @@ class SwiGLUReluSquared(SwiGLU):
     carries what the gate otherwise would. Cheaper per parameter, and the shape
     the speedrun recipes settled on.
 
-    Only the defaults differ from :class:`SwiGLU` -- no gate, ``relu**2`` for
-    the activation, a hidden width that is a plain multiple of the input (no
-    rounding), and a zero-initialized output projection, so a fresh block is the
-    identity on its residual stream and the stack deepens as training proceeds.
+    Only the gate and activation defaults differ from :class:`SwiGLU`:
+    no gate and ``relu**2``. Both use rounded hidden widths and a zero-initialized
+    output projection, so a fresh block leaves its residual stream unchanged.
 
     References:
         https://arxiv.org/abs/2109.08668
@@ -237,7 +258,7 @@ class SwiGLUReluSquared(SwiGLU):
 
     """
 
-    class Config(Makes["SwiGLUReluSquared"], SwiGLU.Config, kw_only=False):
+    class Config(Makes["SwiGLUReluSquared"], SwiGLU.Config, kw_only=True):
         """:class:`SwiGLU.Config` re-defaulted; every field keeps its meaning."""
 
         gate: bool = False
@@ -246,18 +267,6 @@ class SwiGLUReluSquared(SwiGLU):
         act: TensorFn = relu_squared
         """Carries the whole nonlinearity, in place of the gate."""
 
-        expansion: float = 4.0
-        """Hidden width as a multiple of ``channels_in``."""
-
-        round_to: int = 1
-        """Unrounded, so the hidden width is exactly ``expansion x channels_in``."""
-
-        init_weight: InitFn = unit_fan_in_uniform
-        """Input projection init."""
-
-        init_weight_out: InitFn | None = nn.init.zeros_
-        """Zeroed, so a fresh block is the identity on its residual stream."""
-
 
 class _SwiGLUParallel(ParallelStyle):
     """Split-aligned tensor-parallel style for the fused SwiGLU block.
@@ -265,7 +274,7 @@ class _SwiGLUParallel(ParallelStyle):
     Column-shards ``up_proj`` while keeping its output a DTensor sharded on
     the last dim, so the fused-gate ``chunk(2)`` in ``SwiGLU.forward`` stays
     aligned with the shard boundary (a local chunk would mis-pair gate/up).
-    Row-shards ``down_proj`` to reduce-scatter back to the residual stream.
+    Row-shards ``down_proj`` and all-reduces its output to replicated activations.
     """
 
     @override
@@ -278,6 +287,8 @@ class _SwiGLUParallel(ParallelStyle):
                     output_layouts=Shard(-1),
                     use_local_output=False,
                 ),
-                "down_proj": RowwiseParallel(input_layouts=Shard(-1)),
+                "down_proj": RowwiseParallel(
+                    input_layouts=Shard(-1),
+                ),
             },
         )

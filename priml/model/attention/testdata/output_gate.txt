@@ -15,9 +15,9 @@ OutputGate.Config(
                         share_qk_norm=True,
                         norm_out=None,
                         split_qkv_projection=False,
-                        attn_kernel=SdpaFused.Config(),
                         init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                        depth_index=()
+                        depth_index=(),
+                        attn_kernel=SdpaFused.Config()
                 ),
                 bias=False,
                 depth_index=()

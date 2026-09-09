@@ -3,6 +3,16 @@ CausalLM.Config(
                 channels_out=16,
                 vocab_size=32,
                 num_layers=1,
+                embedding=Embedding.Config(
+                        channels_out=16,
+                        num_embeddings=32,
+                        padding_idx=None,
+                        device=None,
+                        dtype=None,
+                        shard='vocab',
+                        depth_index=(),
+                        init_weight=functools.partial(<function priml.model.init.truncated_normal at 0xdefacedeface>, std=0.02)
+                ),
                 block=[
                 │       TransformerBlock.Config(
                 │               channels_in=16,
@@ -21,9 +31,9 @@ CausalLM.Config(
                 │                       share_qk_norm=True,
                 │                       norm_out=None,
                 │                       split_qkv_projection=False,
-                │                       attn_kernel=SdpaFused.Config(),
                 │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │                       depth_index=((0, 1),)
+                │                       depth_index=((0, 1),),
+                │                       attn_kernel=SdpaFused.Config()
                 │               ),
                 │               ffn=SwiGLU.Config(
                 │                       channels_in=16,
@@ -37,8 +47,8 @@ CausalLM.Config(
                 │                       norm=None,
                 │                       act=<function torch.nn.functional.silu at 0xdefacedeface>,
                 │                       depth_index=((0, 1),),
-                │                       init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                │                       init_weight_out=None,
+                │                       init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
+                │                       init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                 │                       shard='colwise'
                 │               ),
                 │               norm1=RMSNorm.Config(

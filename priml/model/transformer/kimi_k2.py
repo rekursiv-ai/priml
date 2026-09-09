@@ -42,11 +42,12 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Self, override
 
-from configgle import Makes
-from torch import Tensor
+from configgle import Makeable, Makes
+from torch import Tensor, nn
 
 import torch
 
@@ -54,7 +55,15 @@ from priml import hub
 from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, decode
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
-from priml.model.custom_types import ChannelsIn, TensorBlockConfig, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    LookupTable,
+    TensorBlockConfig,
+    TensorModule,
+    propagate_attr,
+)
+from priml.model.embedding import Embedding
+from priml.model.linear import Linear
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -93,9 +102,29 @@ class KimiK2(CausalLM):
         first_k_dense_replace: int = 1
         """Leading layers whose ``ffn`` is replaced by a dense SwiGLU."""
 
+        embedding: Makeable[LookupTable] = field(
+            default_factory=lambda: Embedding.Config(
+                init_weight=partial(nn.init.normal_, std=0.02), shard="vocab"
+            )
+        )
+        """Reference token embedding initialization."""
+
+        lm_head: Makeable[TensorModule] | None = field(
+            default_factory=lambda: Linear.Config(
+                init_weight=partial(nn.init.normal_, std=0.02), shard="vocab"
+            )
+        )
+        """Reference output-head initialization when embeddings are untied."""
+
+        final_norm: Makeable[TensorModule] = field(
+            default_factory=lambda: RMSNorm.Config(elementwise_affine=True)
+        )
+        """Learned final RMS scale, initialized to ones."""
+
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=MultiHeadLatentAttention.Config(
+                    init_weight=partial(nn.init.normal_, std=0.02),
                     num_heads=64,
                     channels_qk_nope_head=128,
                     channels_qk_rope_head=64,
@@ -106,8 +135,18 @@ class KimiK2(CausalLM):
                 ),
                 ffn=MoE.Config(
                     router=Router.Config(num_experts=384),
+                    expert=SwiGLU.Config(
+                        init_weight=partial(nn.init.normal_, std=0.02),
+                        init_weight_out=partial(nn.init.normal_, std=0.02),
+                    ),
+                    shared_expert=SwiGLU.Config(
+                        init_weight=partial(nn.init.normal_, std=0.02),
+                        init_weight_out=partial(nn.init.normal_, std=0.02),
+                    ),
                     num_shared_experts=1,
                 ),
+                norm1=RMSNorm.Config(elementwise_affine=True),
+                norm2=RMSNorm.Config(elementwise_affine=True),
                 prenorm=True,
             ),
         )
@@ -153,7 +192,15 @@ class KimiK2(CausalLM):
             rope = RoPE.Config()
             rope.frequencies = _parse_yarn(config.get("rope_scaling")) or frequencies
 
-            attn = MultiHeadLatentAttention.Config(bias=False, causal=True)
+            init_weight = partial(
+                nn.init.normal_,
+                std=FloatCodec.coerce(
+                    config.get("initializer_range", 0.02), default=None
+                ),
+            )
+            attn = MultiHeadLatentAttention.Config(
+                bias=False, causal=True, init_weight=init_weight
+            )
             attn.num_heads = int(config["num_attention_heads"])
             attn.channels_qk_nope_head = int(config.get("qk_nope_head_dim", 128))
             attn.channels_qk_rope_head = int(config.get("qk_rope_head_dim", 64))
@@ -178,7 +225,14 @@ class KimiK2(CausalLM):
             router.n_group = int(config.get("n_group", 1))
             router.topk_group = int(config.get("topk_group", 1))
 
-            moe = MoE.Config()
+            moe = MoE.Config(
+                expert=SwiGLU.Config(
+                    init_weight=init_weight, init_weight_out=init_weight
+                ),
+                shared_expert=SwiGLU.Config(
+                    init_weight=init_weight, init_weight_out=init_weight
+                ),
+            )
             moe.router = router
             moe.num_shared_experts = int(config.get("n_shared_experts", 0))
             router.num_experts = int(config.get("n_routed_experts", 0))
@@ -209,6 +263,8 @@ class KimiK2(CausalLM):
                 vocab_size=int(config["vocab_size"]),
                 channels_in=int(config["hidden_size"]),
                 num_layers=int(config["num_hidden_layers"]),
+                embedding=Embedding.Config(init_weight=init_weight, shard="vocab"),
+                lm_head=Linear.Config(init_weight=init_weight, shard="vocab"),
                 channels_hidden_dense=int(config["intermediate_size"]),
                 channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
@@ -243,15 +299,14 @@ class KimiK2(CausalLM):
                 rope = attn.rope
                 if isinstance(rope, RoPE.Config):
                     rope.channels_head = attn.channels_qk_rope_head
-            # The leading layers are dense, so their MoE template is replaced
-            # outright -- there is no routing to size.
             if layer < self.first_k_dense_replace:
-                block.ffn = SwiGLU.Config(
-                    channels_in=self.channels_in,
-                    channels_hidden=self.channels_hidden_dense,
-                    gate=True,
-                    bias=False,
-                )
+                if isinstance(block.ffn, MoE.Config) and isinstance(
+                    block.ffn.expert, SwiGLU.Config
+                ):
+                    block.ffn = block.ffn.expert.copy_tree()
+                if isinstance(block.ffn, SwiGLU.Config):
+                    block.ffn.channels_in = self.channels_in
+                    block.ffn.channels_hidden = self.channels_hidden_dense
                 return
             ffn = block.ffn
             if not isinstance(ffn, MoE.Config):
@@ -260,16 +315,10 @@ class KimiK2(CausalLM):
             ffn.channels_out = self.channels_in
             if isinstance(ffn.router, Router.Config):
                 ffn.router.channels_in = self.channels_in
-            ffn.expert = self._expert_config()
-            ffn.shared_expert = self._expert_config()
-
-        def _expert_config(self) -> SwiGLU.Config:
-            return SwiGLU.Config(
-                channels_in=self.channels_in,
-                channels_hidden=self.channels_hidden_expert,
-                gate=True,
-                bias=False,
-            )
+            for expert in (ffn.expert, ffn.shared_expert):
+                if isinstance(expert, SwiGLU.Config):
+                    expert.channels_in = self.channels_in
+                    expert.channels_hidden = self.channels_hidden_expert
 
     @classmethod
     def load(
