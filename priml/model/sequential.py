@@ -32,8 +32,8 @@ class Sequential(nn.Sequential):
     """
 
     class Config(Fig["Sequential"], kw_only=False):
-        elements: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(  # pyright: ignore[reportUnknownVariableType]
-            default_factory=list,
+        elements: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
+            default_factory=list[Makeable[nn.Module]],
         )
         """Module config(s) to compose sequentially."""
 
