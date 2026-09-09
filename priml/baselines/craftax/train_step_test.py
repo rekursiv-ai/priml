@@ -43,7 +43,7 @@ def _config(**overrides: object) -> CraftaxTrainStep.Config:
 
 
 def _step() -> CraftaxTrainStep:
-    return cast(CraftaxTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty reads `Makes[...].make()` as @Todo and needs the cast
+    return cast(CraftaxTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty resolves `Makes[...].make()` only through the class-attribute descriptor; on an INHERITED `Config` instance it is `@Todo`
 
 
 def test_it_satisfies_the_training_step_protocol() -> None:

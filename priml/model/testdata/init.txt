@@ -1,4 +1,4 @@
-call_init(fn: 'InitFn', t: 'Tensor', **kwargs: 'object') -> 'None'
+call_init(fn: 'InitFn', t: 'Tensor', **kwargs: 'DepthIndex') -> 'None'
 kaiming_uniform(w: 'Tensor', *, depth_index: 'DepthIndex' = ()) -> 'None'
 kaiming_normal(w: 'Tensor', *, depth_index: 'DepthIndex' = ()) -> 'None'
 xavier_uniform(w: 'Tensor', *, depth_index: 'DepthIndex' = ()) -> 'None'

@@ -15,6 +15,7 @@ from priml import logger as logger_module
 from priml.logger import (
     CustomFormatter,
     Timer,
+    _StdoutStreamHandler,
     bind_logging_to_current_stdout,
     replay_buffered_logs,
     setup_logging,
@@ -329,8 +330,8 @@ class TestSetupLogging:
 
         handler = root_logger.handlers[0]
         assert handler.level == logging.INFO
-        assert isinstance(handler, logging.StreamHandler)
-        assert handler.stream == sys.stdout  # pyright: ignore[reportUnknownMemberType]
+        assert isinstance(handler, _StdoutStreamHandler)
+        assert handler.stream == sys.stdout
         assert isinstance(handler.formatter, CustomFormatter)
 
     def test_bind_logging_to_current_stdout_retargets_loop_handler(

@@ -1973,7 +1973,7 @@ def _make_simple_loop_config(
     return config
 
 
-def test_no_eval_or_checkpoint_at_step_zero() -> None:
+def test_no_eval_or_checkpoint_at_step_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """T-015: no eval / checkpoint should fire before the first train step."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
@@ -1988,7 +1988,7 @@ def test_no_eval_or_checkpoint_at_step_zero() -> None:
             eval_steps.append(loop.step.global_step)
             return orig_eval()
 
-        loop.eval = spy_eval  # ty: ignore[invalid-assignment] -- test spy patches a bound method
+        monkeypatch.setattr(loop, "eval", spy_eval)
         loop.train()
 
         # No eval should have run while global_step == 0.
@@ -1997,7 +1997,9 @@ def test_no_eval_or_checkpoint_at_step_zero() -> None:
         assert not (Path(tmp) / "step_00000000.pt").exists()
 
 
-def test_resume_does_not_eval_or_checkpoint_before_first_new_step() -> None:
+def test_resume_does_not_eval_or_checkpoint_before_first_new_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cadence-step resume must advance training before save/eval side effects."""
     with tempfile.TemporaryDirectory() as tmp:
         initial = _make_simple_loop_config(tmp)
@@ -2020,7 +2022,7 @@ def test_resume_does_not_eval_or_checkpoint_before_first_new_step() -> None:
             maybe_save_steps.append(step)
             return original_maybe_save(target, step)
 
-        checkpointing.maybe_save = spy_maybe_save  # ty: ignore[invalid-assignment] -- test spy patches a bound method
+        monkeypatch.setattr(checkpointing, "maybe_save", spy_maybe_save)
         eval_steps: list[int] = []
         orig_eval = loop.eval
 
@@ -2028,7 +2030,7 @@ def test_resume_does_not_eval_or_checkpoint_before_first_new_step() -> None:
             eval_steps.append(loop.step.global_step)
             return orig_eval()
 
-        loop.eval = spy_eval  # ty: ignore[invalid-assignment] -- test spy patches a bound method
+        monkeypatch.setattr(loop, "eval", spy_eval)
         loop.train()
 
         assert loop.step.global_step == 6
@@ -2173,7 +2175,9 @@ def test_accumulation_logs_once_per_update_not_once_per_microbatch() -> None:
     assert train_steps == [1, 2, 3]
 
 
-def test_accumulation_evaluates_once_per_update_not_once_per_microbatch() -> None:
+def test_accumulation_evaluates_once_per_update_not_once_per_microbatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The eval cadence counts updates; the loop body runs per microbatch.
 
     Measured before the guard on a five-minute budget: an eval costing 23
@@ -2204,7 +2208,7 @@ def test_accumulation_evaluates_once_per_update_not_once_per_microbatch() -> Non
             evaluated.append(loop.step.global_step)
             return inner()
 
-        loop.eval = spy  # ty: ignore[invalid-assignment] -- test spy patches a bound method
+        monkeypatch.setattr(loop, "eval", spy)
         loop.train()
 
     # Step 2 on the cadence, then the final eval. The while-loop exits once
@@ -2453,7 +2457,9 @@ def test_final_post_training_eval_logs_to_tracker() -> None:
     )
 
 
-def test_cadence_eval_runs_once_per_optimizer_step() -> None:
+def test_cadence_eval_runs_once_per_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Gradient accumulation cannot repeat eval at one optimizer step."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
@@ -2471,14 +2477,14 @@ def test_cadence_eval_runs_once_per_optimizer_step() -> None:
             eval_count += 1
             return original_eval()
 
-        loop.eval = count_eval  # ty: ignore[invalid-assignment] -- bound test spy
+        monkeypatch.setattr(loop, "eval", count_eval)
         loop._maybe_eval()
         loop._maybe_eval()
 
     assert eval_count == 1
 
 
-def test_no_post_loop_eval_when_no_training() -> None:
+def test_no_post_loop_eval_when_no_training(monkeypatch: pytest.MonkeyPatch) -> None:
     """T-019: with max_steps=0, the post-loop eval must not run."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
@@ -2493,7 +2499,7 @@ def test_no_post_loop_eval_when_no_training() -> None:
             eval_count[0] += 1
             return orig_eval()
 
-        loop.eval = spy_eval  # ty: ignore[invalid-assignment] -- test spy patches a bound method
+        monkeypatch.setattr(loop, "eval", spy_eval)
         loop.train()
 
         assert loop.step.global_step == 0

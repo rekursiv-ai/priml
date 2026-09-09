@@ -179,12 +179,16 @@ class NanoChatTrainStep(TrainStep):
     warmup, and momentum and weight decay annealed against that clock.
     """
 
-    class Config(Makes["NanoChatTrainStep"], TrainStep.Config, kw_only=False):
+    class Config(
+        Makes["NanoChatTrainStep"],
+        TrainStep.Config[NanoChatLM.Config],
+        kw_only=True,
+    ):
         """Model, optimization, the budget, and the schedules it drives."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        model: NanoChatLM.Config = field(default_factory=NanoChatLM.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        model: NanoChatLM.Config = field(default_factory=NanoChatLM.Config)
         """Network to train."""
 
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(

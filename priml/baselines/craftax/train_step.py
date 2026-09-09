@@ -121,12 +121,16 @@ class Rollout:
 class CraftaxTrainStep(TrainStep):
     """Model, environment, and optimizer for one PPO experiment."""
 
-    class Config(Makes["CraftaxTrainStep"], TrainStep.Config, kw_only=False):
+    class Config(
+        Makes["CraftaxTrainStep"],
+        TrainStep.Config[ActorCritic.Config],
+        kw_only=True,
+    ):
         """Model, environment, and the PPO hyperparameters."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        model: ActorCritic.Config = field(default_factory=ActorCritic.Config)  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        model: ActorCritic.Config = field(default_factory=ActorCritic.Config)
         """Policy and value network."""
 
         # ---- This recipe's own. ----

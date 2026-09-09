@@ -46,7 +46,7 @@ class Cifar10TrainStep(TrainStep):
     warmup counted in whole steps.
     """
 
-    class Config(Makes["Cifar10TrainStep"], TrainStep.Config, kw_only=False):
+    class Config(Makes["Cifar10TrainStep"], TrainStep.Config, kw_only=True):
         """Model, optimization, schedule, and augmentation for one run."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----

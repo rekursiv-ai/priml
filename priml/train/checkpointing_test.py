@@ -284,7 +284,10 @@ def test_available_steps_ignores_malformed_names(temp_checkpoint_dir: Path) -> N
     assert ckpt.available_steps() == [100]
 
 
-def test_load_uses_weights_only(temp_checkpoint_dir: Path) -> None:
+def test_load_uses_weights_only(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Load must use ``weights_only=True`` (no arbitrary code exec)."""
     ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
     _save(ckpt, 0, {"step": torch.tensor([1, 2, 3])})
@@ -296,11 +299,8 @@ def test_load_uses_weights_only(temp_checkpoint_dir: Path) -> None:
         seen.append(f"weights_only={kwargs.get('weights_only')}")
         return orig(path, **kwargs)
 
-    torch.load = spy  # ty: ignore[invalid-assignment]
-    try:
-        ckpt.load(_DictTarget({}), max_steps=1e9, guard=False)
-    finally:
-        torch.load = orig
+    monkeypatch.setattr(torch, "load", spy)
+    ckpt.load(_DictTarget({}), max_steps=1e9, guard=False)
     assert seen == ["weights_only=True"]
 
 
@@ -462,6 +462,7 @@ def test_dtensor_state_saves_complete_directory(
 def test_distributed_save_barriers(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A distributed save must barrier so ranks stay in lockstep."""
     del single_rank_group
@@ -480,11 +481,8 @@ def test_distributed_save_barriers(
         calls.append("barrier")
         return orig(*args, **kwargs)
 
-    dist.barrier = spy  # ty: ignore[invalid-assignment]
-    try:
-        _save(ckpt, 0, {"model": fake.state_dict()})
-    finally:
-        dist.barrier = orig
+    monkeypatch.setattr(dist, "barrier", spy)
+    _save(ckpt, 0, {"model": fake.state_dict()})
     assert calls, "distributed save must call dist.barrier()"
 
 

@@ -23,7 +23,8 @@ Features:
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, cast
+from typing_extensions import TypeVar
 
 import contextlib
 import math
@@ -60,6 +61,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 
+_ModelConfigT = TypeVar(
+    "_ModelConfigT",
+    bound=Makeable[nn.Module],
+    default=Makeable[nn.Module],
+)
+
+
 class TrainStep:
     """Model plus optimization, and one step of training.
 
@@ -81,11 +89,19 @@ class TrainStep:
 
     """
 
-    class Config(Fig["TrainStep"], kw_only=False):
+    class Config(Fig["TrainStep"], Generic[_ModelConfigT], kw_only=False):
         """Configuration for TrainStep."""
 
-        model: Makeable[nn.Module] = field(default_factory=Identity.Config)
-        """The network being trained; every other slot serves it."""
+        model: _ModelConfigT = field(
+            default_factory=lambda: cast(_ModelConfigT, Identity.Config()),
+        )
+        """The network being trained; every other slot serves it.
+
+        Generic so a recipe can narrow the slot to its own model's ``Config``
+        and reach that model's fields. A mutable attribute is invariant, so a
+        subclass redeclaring it against a fixed ``Makeable[nn.Module]`` would be
+        an illegal override; parameterizing the base makes the narrowing legal.
+        """
 
         _: KW_ONLY
 
@@ -236,7 +252,9 @@ class TrainStep:
         numerics across forward calls; True trades a small numeric difference
         for reusing cast weights within a forward (perf)."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__[ModelConfigT: Makeable[nn.Module]](
+        self, config: Config[ModelConfigT]
+    ) -> None:
         self.config = config
 
         if config.gradient_clip_norm <= 0:

@@ -450,10 +450,14 @@ def random_categorical(
 
     """
     samples_size = _unpack_size(*samples_size)
-    if (probs is None) == (logits is None):
-        raise ValueError("Specify exactly one of probs or logits.")
+    # Each arm re-tests the other parameter rather than sharing one
+    # exclusive-or guard: the xor proves the invariant at runtime but leaves
+    # both names optional to the checker, so every use below needs the
+    # membership test that narrows it.
     if probs is None:
-        logits = convert_to_tensor(logits, dtype=dtype, device=device)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type]
+        if logits is None:
+            raise ValueError("Specify exactly one of probs or logits.")
+        logits = convert_to_tensor(logits, dtype=dtype, device=device)
         cmf = torch.logcumsumexp(logits, dim=-1)
         if not torch.all(torch.isfinite(cmf[..., -1:])):
             raise ValueError(
@@ -461,6 +465,8 @@ def random_categorical(
             )
         cmf = torch.exp(cmf - cmf[..., -1:])
     else:
+        if logits is not None:
+            raise ValueError("Specify exactly one of probs or logits.")
         probs = convert_to_tensor(probs, dtype=dtype, device=device)
         cmf = torch.cumsum(probs, dim=-1)
         cmf = cmf / cmf[..., -1:]

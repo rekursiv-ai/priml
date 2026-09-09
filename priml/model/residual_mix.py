@@ -22,7 +22,7 @@ import torch
 class ResidualMix(nn.Module):
     """``running[i] * x + original[i] * x0``, per layer."""
 
-    class Config(Fig["ResidualMix"], kw_only=False):
+    class Config(Fig["ResidualMix"]):
         num_layers: int = -1
         """Layers being mixed; -1 inherits from the stack."""
 

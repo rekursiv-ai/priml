@@ -144,12 +144,16 @@ class QRollout:
 class CraftaxPQNTrainStep(TrainStep):
     """Model, environment, and optimizer for one Q-learning experiment."""
 
-    class Config(Makes["CraftaxPQNTrainStep"], TrainStep.Config, kw_only=False):
+    class Config(
+        Makes["CraftaxPQNTrainStep"],
+        TrainStep.Config[RecurrentQNetwork.Config],
+        kw_only=True,
+    ):
         """Model, environment, and the Q-learning hyperparameters."""
 
         # ---- Inherited slots, re-defaulted for this recipe. ----
 
-        model: RecurrentQNetwork.Config = field(  # pyright: ignore[reportIncompatibleVariableOverride] -- narrowing a Makeable slot to its concrete Config is the priml idiom; finalize reaches this model's own fields
+        model: RecurrentQNetwork.Config = field(
             default_factory=RecurrentQNetwork.Config,
         )
         """Recurrent Q-network."""

@@ -34,17 +34,30 @@ def _binary_cross_entropy_with_logits(
     }
 
 
-class _LinearModel(nn.Linear):
-    """Simple logistic regression model for testing."""
+class _LinearModel(nn.Module):
+    """Simple logistic regression model for testing.
+
+    Owns a ``Linear`` rather than subclassing it: this model takes ``**kwargs``,
+    which ``Linear.forward`` does not declare.
+    """
 
     class Config(Fig["_LinearModel"], make_with_kwargs=True):
         in_features: int = -1
         out_features: int = -1
         bias: bool = True
 
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:  # ty: ignore[invalid-method-override]
-        return super().forward(x).squeeze(-1)
+    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
+        return self.linear(x).squeeze(-1)
+
+    def reset_parameters(self) -> None:
+        # Owner resets what it constructs: ``materialize`` allocates empty
+        # storage and calls this once, so a child left out stays uninitialized.
+        self.linear.reset_parameters()
 
 
 def test_newton_logistic_regression():

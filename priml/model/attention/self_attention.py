@@ -238,6 +238,8 @@ class SelfAttention(AttentionProjections):
     """Multi-head self-attention with fused QKV and optional grouped-query heads."""
 
     class Config(Makes["SelfAttention"], AttentionProjections.Config, kw_only=False):
+        _: KW_ONLY
+
         attn_kernel: Makeable[AttentionKernel] = field(default_factory=SdpaFused.Config)
         """Attention kernel shared by all heads."""
 

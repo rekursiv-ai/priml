@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, overload, override
 
 import math
 
@@ -201,10 +201,22 @@ class Muon(Optimizer):
         }
         super().__init__(params, defaults)
 
+    # Overloads mirror the base: ``Optimizer.step`` is overloaded, so a single
+    # signature is a narrower contract than what callers may already rely on.
+    @overload
+    def step(self, closure: None = ...) -> None: ...
+    @overload
+    def step(self, closure: Callable[[], Tensor | float]) -> Tensor | float: ...
+
     @torch.no_grad()
     @override
-    def step(self, closure: Callable[[], float] | None = None) -> None:  # ty: ignore[invalid-method-override] -- narrows Optimizer.step return to None; Muon ignores the closure and never returns a loss
-        del closure
+    def step(
+        self, closure: Callable[[], Tensor | float] | None = None
+    ) -> Tensor | float | None:
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
         for group in self.param_groups:
             lr = group["lr"]
             weight_decay = group["weight_decay"]
@@ -251,3 +263,5 @@ class Muon(Optimizer):
                     p.data.add_(msgn_g * (-adjusted_lr))
                 else:
                     p.data.add_(msgn_g, alpha=-adjusted_lr)
+
+        return loss
