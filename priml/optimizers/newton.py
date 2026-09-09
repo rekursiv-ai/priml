@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, ClassVar, override
+from typing import Any, ClassVar, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -124,8 +124,15 @@ class Newton(Optimizer):
         """
         super().__init__(params, {"lr": lr, "damping": damping})
 
+    # Overloads mirror the base: ``Optimizer.step`` is overloaded, so a single
+    # signature is a narrower contract than what callers may already rely on.
+    @overload
+    def step(self, closure: None = None) -> None: ...
+    @overload
+    def step(self, closure: Callable[[], Tensor | float]) -> Tensor | float: ...
+
     @override
-    def step(  # ty: ignore[invalid-method-override] -- single-signature override of torch's overloaded `Optimizer.step`; the union return matches `OptimizerProtocol`
+    def step(
         self,
         closure: Callable[[], Tensor | float] | None = None,
     ) -> Tensor | float | None:

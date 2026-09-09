@@ -37,6 +37,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
     HasDepthIndex,
+    LookupTable,
     TensorBlockConfig,
     TensorModule,
     propagate_attr,
@@ -65,6 +66,11 @@ class CausalLM(nn.Module):
         num_layers: int = -1
         """Number of stacked transformer blocks."""
 
+        embedding: Makeable[LookupTable] = field(
+            default_factory=lambda: Embedding.Config(shard="vocab")
+        )
+        """Token embedding table, including its initialization."""
+
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
             default_factory=TransformerBlock.Config,
         )
@@ -86,6 +92,11 @@ class CausalLM(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
+            if isinstance(self.embedding, Embedding.Config):
+                if self.embedding.channels_out == -1:
+                    self.embedding.channels_out = self.channels_in
+                if self.embedding.num_embeddings == -1:
+                    self.embedding.num_embeddings = self.vocab_size
             if isinstance(self.block, list):
                 templates = self.block
             else:
@@ -178,11 +189,7 @@ class CausalLM(nn.Module):
         self.num_layers = config.num_layers
         self.tie_embeddings = config.tie_embeddings
 
-        self.embed = Embedding.Config(
-            channels_out=config.channels_in,
-            num_embeddings=config.vocab_size,
-            shard="vocab",
-        ).make()
+        self.embed = config.embedding.make()
         blocks: list[nn.Module] = []
         for block_config in block_configs:
             block = block_config.make()

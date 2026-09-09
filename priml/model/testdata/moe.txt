@@ -25,8 +25,8 @@ MoE.Config(
                         norm=None,
                         act=<function torch.nn.functional.silu at 0xdefacedeface>,
                         depth_index=(),
-                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                        init_weight_out=None,
+                        init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
+                        init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard='colwise'
                 ),
                 num_shared_experts=0,
@@ -42,8 +42,8 @@ MoE.Config(
                         norm=None,
                         act=<function torch.nn.functional.silu at 0xdefacedeface>,
                         depth_index=(),
-                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                        init_weight_out=None,
+                        init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
+                        init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard='colwise'
                 ),
                 aux_loss_weight=0.01,

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
+from configgle import Fig, Makeable
 from torch import Tensor, nn
 
 import pytest
@@ -397,6 +399,32 @@ def test_the_rotation_table_is_rebuilt_when_the_frequencies_are() -> None:
     assert model._rotation is not None
     model.reset_parameters()
     assert model._rotation is None
+
+
+class ResetlessBlock(nn.Module):
+    """A parameterless injected block with no reset capability."""
+
+    class Config(Fig["ResetlessBlock"]):
+        attn: Makeable[nn.Module] = field(default_factory=SelfAttention.Config)
+        """Attention metadata consumed by the model config."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+
+    @override
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        return x
+
+
+def test_reset_accepts_a_resetless_injected_block() -> None:
+    config = _config()
+    config.block = ResetlessBlock.Config()
+    model = config.make()
+    assert all(isinstance(block, ResetlessBlock) for block in model.blocks)
+    model.reset_parameters()
+    assert model(_tokens()).shape == (2, SEQ, VOCAB)
 
 
 def test_forward_bfb() -> None:

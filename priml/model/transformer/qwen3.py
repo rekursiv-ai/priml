@@ -28,11 +28,12 @@ Only the dense Qwen3 family is handled here; Qwen3-MoE is a follow-up.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Self, override
 
-from configgle import Makes
-from torch import Tensor
+from configgle import Makeable, Makes
+from torch import Tensor, nn
 
 import torch
 
@@ -42,9 +43,13 @@ from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsIn,
+    LookupTable,
     TensorBlockConfig,
+    TensorModule,
     propagate_attr,
 )
+from priml.model.embedding import Embedding
+from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
@@ -66,9 +71,31 @@ class Qwen3(CausalLM):
         num_layers: int = 28
         """Blocks in the stack. Qwen3-0.6B's."""
 
+        embedding: Makeable[LookupTable] = field(
+            default_factory=lambda: Embedding.Config(
+                init_weight=partial(nn.init.normal_, std=0.02),
+                shard="vocab",
+            )
+        )
+        """Reference token embedding initialization."""
+
+        lm_head: Makeable[TensorModule] | None = field(
+            default_factory=lambda: Linear.Config(
+                init_weight=partial(nn.init.normal_, std=0.02),
+                shard="vocab",
+            )
+        )
+        """Reference output-head initialization when embeddings are untied."""
+
+        final_norm: Makeable[TensorModule] = field(
+            default_factory=lambda: RMSNorm.Config(elementwise_affine=True)
+        )
+        """Learned final RMS scale, initialized to ones."""
+
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=SelfAttention.Config(
+                    init_weight=partial(nn.init.normal_, std=0.02),
                     num_heads=16,
                     num_heads_kv=8,
                     channels_head=128,
@@ -81,6 +108,8 @@ class Qwen3(CausalLM):
                     norm_qk=RMSNorm.Config(elementwise_affine=True),
                 ),
                 ffn=SwiGLU.Config(
+                    init_weight=partial(nn.init.normal_, std=0.02),
+                    init_weight_out=partial(nn.init.normal_, std=0.02),
                     gate=True,
                     bias=False,
                     channels_hidden=3_072,
@@ -142,9 +171,19 @@ class Qwen3(CausalLM):
             attn.rope = rope
             attn.norm_qk = norm.copy_tree()
 
+            init_weight = partial(
+                nn.init.normal_,
+                std=FloatCodec.coerce(
+                    config.get("initializer_range", 0.02),
+                    default=None,
+                ),
+            )
+            attn.init_weight = init_weight
             block = TransformerBlock.Config(prenorm=True)
             block.attn = attn
             block.ffn = SwiGLU.Config(
+                init_weight=init_weight,
+                init_weight_out=init_weight,
                 gate=True,
                 bias=False,
                 channels_hidden=int(config["intermediate_size"]),
@@ -156,6 +195,8 @@ class Qwen3(CausalLM):
                 vocab_size=int(config["vocab_size"]),
                 channels_in=channels_in,
                 num_layers=int(config["num_hidden_layers"]),
+                embedding=Embedding.Config(init_weight=init_weight, shard="vocab"),
+                lm_head=Linear.Config(init_weight=init_weight, shard="vocab"),
                 block=block,
                 final_norm=norm.copy_tree(),
                 tie_embeddings=bool(config.get("tie_word_embeddings", False)),

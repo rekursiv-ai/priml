@@ -315,11 +315,6 @@ class MultiHeadLatentAttention(nn.Module):
                 self.channels_in = self.channels_out
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for MultiHeadLatentAttention."
-                )
             if (
                 self.q_lora_rank is not None
                 and isinstance(self.norm_q_lora, ChannelsIn)
@@ -389,7 +384,7 @@ class MultiHeadLatentAttention(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for MultiHeadLatentAttention."
+                f"channels_out={config.channels_out} for {type(self).__name__}."
             )
         super().__init__()
         if config.dropout < 0.0 or config.dropout > 1.0:

@@ -166,6 +166,19 @@ def test_transformer_block_rejects_width_changing_config() -> None:
         config.make()
 
 
+@pytest.mark.parametrize("channels_out", [1, 4])
+def test_transformer_block_rejects_ffn_output_width(channels_out: int) -> None:
+    config = TransformerBlock.Config()
+    config.channels_in = 8
+    assert isinstance(config.ffn, SwiGLU.Config)
+    config.ffn.channels_out = channels_out
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert "TransformerBlock.Config" in config.pformat(hide_default_values=False)
+    with pytest.raises(ValueError, match=r"ffn\.channels_out"):
+        config.make()
+
+
 def test_transformer_block_depth_propagation():
     cfg = TransformerBlock.Config(
         channels_in=64,
@@ -180,7 +193,10 @@ def test_transformer_block_preserves_explicit_child_configuration() -> None:
     config = TransformerBlock.Config(
         channels_in=16,
         norm1=RMSNorm.Config(channels_in=7, channels_out=7),
-        ffn=SwiGLU.Config(shard="rowwise", depth_index=((1, 2),)),
+        ffn=SwiGLU.Config(
+            shard="rowwise",
+            depth_index=((1, 2),),
+        ),
     )
 
     finalized = config.copy_tree().finalize()

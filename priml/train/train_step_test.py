@@ -25,17 +25,30 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
 
 
-class _LinearModel(nn.Linear):
-    """Simple logistic regression model for testing."""
+class _LinearModel(nn.Module):
+    """Simple logistic regression model for testing.
+
+    Owns a ``Linear`` rather than subclassing it: these models take ``**kwargs``
+    and (below) return a dict, neither of which ``Linear.forward`` declares.
+    """
 
     class Config(Fig["_LinearModel"], make_with_kwargs=True):
         in_features: int = -1
         out_features: int = -1
         bias: bool = True
 
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:  # ty: ignore[invalid-method-override]
-        return super().forward(x).squeeze(-1)
+    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
+        return self.linear(x).squeeze(-1)
+
+    def reset_parameters(self) -> None:
+        # Owner resets what it constructs: ``materialize`` allocates empty
+        # storage and calls this once, so a child left out stays uninitialized.
+        self.linear.reset_parameters()
 
 
 def test_trainable_logistic_regression():
@@ -274,7 +287,7 @@ def test_train_step_state_dict_records_accumulation_counters() -> None:
     assert state["accumulation_steps"] == 2
 
 
-class _DictModel(nn.Linear):
+class _DictModel(nn.Module):
     """Model returning a dict output (multi-output contract for T-047)."""
 
     class Config(Fig["_DictModel"], make_with_kwargs=True):
@@ -282,9 +295,18 @@ class _DictModel(nn.Linear):
         out_features: int = -1
         bias: bool = True
 
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> dict[str, Tensor]:  # ty: ignore[invalid-method-override] -- multi-output model returns a dict, not the nn.Linear Tensor
-        return {"logits": super().forward(x).squeeze(-1)}
+    def forward(self, x: Tensor, **_kwargs: Any) -> dict[str, Tensor]:
+        return {"logits": self.linear(x).squeeze(-1)}
+
+    def reset_parameters(self) -> None:
+        # Owner resets what it constructs: ``materialize`` allocates empty
+        # storage and calls this once, so a child left out stays uninitialized.
+        self.linear.reset_parameters()
 
 
 def _loss_from_logits_dict(
@@ -429,7 +451,7 @@ def _binary_cross_entropy_with_logits(
     }
 
 
-class _CountingModel(nn.Linear):
+class _CountingModel(nn.Module):
     """Logistic-regression model that counts its forward calls."""
 
     forward_count = 0
@@ -439,10 +461,19 @@ class _CountingModel(nn.Linear):
         out_features: int = -1
         bias: bool = True
 
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:  # ty: ignore[invalid-method-override]
+    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
         self.forward_count += 1
-        return super().forward(x).squeeze(-1)
+        return self.linear(x).squeeze(-1)
+
+    def reset_parameters(self) -> None:
+        # Owner resets what it constructs: ``materialize`` allocates empty
+        # storage and calls this once, so a child left out stays uninitialized.
+        self.linear.reset_parameters()
 
 
 def test_first_order_optimizer_runs_one_forward_per_step() -> None:

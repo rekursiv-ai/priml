@@ -66,6 +66,25 @@ def test_gated_delta_net_config_pprint() -> None:
     )
 
 
+def test_gated_delta_net_mismatched_widths_validate_on_construction() -> None:
+    config = GatedDeltaNet.Config()
+    config.channels_in = 8
+    config.channels_out = 16
+
+    finalized = config.copy_tree().finalize()
+    assert (finalized.channels_in, finalized.channels_out) == (8, 16)
+    with pytest.raises(ValueError, match="for GatedDeltaNet"):
+        config.make()
+    with pytest.raises(ValueError, match="for GatedDeltaNet"):
+        GatedDeltaNet(config)
+
+    class DerivedGatedDeltaNet(GatedDeltaNet):
+        pass
+
+    with pytest.raises(ValueError, match="for DerivedGatedDeltaNet"):
+        DerivedGatedDeltaNet(config)
+
+
 def test_gated_delta_net_forward():
     m = GatedDeltaNet.Config(
         channels_in=64,

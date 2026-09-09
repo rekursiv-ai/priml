@@ -16,8 +16,12 @@ from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import (
     KVCache,  # used in preallocated cache test
 )
+from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.attention.self_attention import (
+    AttentionProjections,
+    SelfAttention,
+)
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
@@ -37,6 +41,9 @@ class _LearnedRotary(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.scale = nn.Parameter(torch.ones(config.channels_head))
+
+    def reset_parameters(self) -> None:
+        nn.init.ones_(self.scale)
 
     @override
     def forward(self, positions: Tensor, /) -> tuple[Tensor, Tensor]:
@@ -476,6 +483,40 @@ def test_self_attention_bfb(device: str) -> None:
         build_input=lambda: torch.randn(2, 4, 16),
         seed=0,
     )
+
+
+@pytest.mark.parametrize("joint", [False, True])
+def test_projection_stage_resets_registered_rotary_parameters(joint: bool) -> None:
+    stream = AttentionProjections.Config()
+    stream.channels_in = 8
+    stream.num_heads = 2
+    stream.rope = _LearnedRotary.Config()
+    stream.rope.channels_head = 2
+    if joint:
+        cfg = MultiStreamAttention.Config()
+        cfg.channels_in = 8
+        cfg.num_heads = 2
+        cfg.streams = [stream]
+        model = cfg.make()
+    else:
+        model = stream.make()
+    model.eval().double()
+    rotary = next(m for m in model.modules() if isinstance(m, _LearnedRotary))
+    assert not rotary.training
+    assert rotary.scale.dtype == torch.float64
+    with torch.no_grad():
+        rotary.scale.fill_(9)
+    model.reset_parameters()
+    assert torch.equal(rotary.scale, torch.ones_like(rotary.scale))
+
+
+def test_projection_stage_width_error_names_the_owner() -> None:
+    cfg = AttentionProjections.Config()
+    cfg.channels_in = 8
+    cfg.channels_out = 16
+    cfg.num_heads = 2
+    with pytest.raises(ValueError, match="for AttentionProjections"):
+        cfg.make()
 
 
 if __name__ == "__main__":

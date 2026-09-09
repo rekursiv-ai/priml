@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import field
 from functools import partial
-from typing import Any, Self, override
+from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -42,6 +42,7 @@ from priml.model.custom_types import (
     HasAttention,
     HasDepthIndex,
     NumHeads,
+    Resettable,
     TensorModule,
     propagate_attr,
 )
@@ -82,7 +83,7 @@ class NanoChatLM(nn.Module):
         block: HasAttention | Sequence[HasAttention] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=ValueGatedAttention.Config(),
-                ffn=SwiGLUReluSquared.Config(),
+                ffn=SwiGLUReluSquared.Config(round_to=1),
             ),
         )
         """Block template (broadcast ``num_layers`` times) or per-layer list.
@@ -325,7 +326,8 @@ class NanoChatLM(nn.Module):
             *self.blocks,
             *self.value_embeds.values(),
         ):
-            module.reset_parameters()
+            if isinstance(module, Resettable):
+                module.reset_parameters()
         # The rotation table is derived from the rope's frequencies, which a
         # device move rebuilds (rope.py:390-393) because the transcendental
         # differs by a bit between CPU and CUDA. Dropping it here keeps a
@@ -333,7 +335,7 @@ class NanoChatLM(nn.Module):
         self._rotation = None
 
     @override
-    def forward(self, tokens: Tensor, *args: Any, **kwargs: Any) -> Tensor:
+    def forward(self, tokens: Tensor, *args: object, **kwargs: object) -> Tensor:
         """Map ``[B, S]`` token ids to ``[B, S, vocab_size]`` logits.
 
         Args:

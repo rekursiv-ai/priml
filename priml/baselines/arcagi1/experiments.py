@@ -40,9 +40,11 @@ from priml.baselines.sudoku.prefix import (
     SparsePuzzleEmbedding,
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
+from priml.model.transformer.block import TransformerBlock
 from priml.runtime import SingleProcess
 from priml.train.checkpointing import Checkpointer
 from priml.train.train_loop import TrainLoop
@@ -108,6 +110,10 @@ def exp000() -> ArcTrainLoop:
     model = cfg.step.model
     model.channels_in = 512
     model.num_layers = 2
+    assert isinstance(model.block, TransformerBlock.Config)
+    model.block.ffn = SwiGLU.Config(
+        init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+    )
     model.vocab_size = VOCAB_SIZE
 
     # Same embedding class as sudoku, a different grid: ARC pads every task to
@@ -278,6 +284,14 @@ def _mixer_block(seq_len: int) -> MLPMixerBlock.Config:
     return MLPMixerBlock.Config(
         seq_len=seq_len,
         prenorm=False,
-        token_mixer=SwiGLU.Config(norm=RMSNorm.Config()),
-        channel_mixer=SwiGLU.Config(norm=RMSNorm.Config()),
+        token_mixer=SwiGLU.Config(
+            norm=RMSNorm.Config(),
+            init_weight=kaiming_uniform,
+            init_weight_out=kaiming_uniform,
+        ),
+        channel_mixer=SwiGLU.Config(
+            norm=RMSNorm.Config(),
+            init_weight=kaiming_uniform,
+            init_weight_out=kaiming_uniform,
+        ),
     )

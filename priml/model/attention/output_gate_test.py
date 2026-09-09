@@ -34,6 +34,25 @@ def test_output_gate_config_pprint() -> None:
     )
 
 
+def test_output_gate_mismatched_widths_validate_on_construction() -> None:
+    config = OutputGate.Config()
+    config.channels_in = 8
+    config.channels_out = 16
+
+    finalized = config.copy_tree().finalize()
+    assert (finalized.channels_in, finalized.channels_out) == (8, 16)
+    with pytest.raises(ValueError, match="for OutputGate"):
+        config.make()
+    with pytest.raises(ValueError, match="for OutputGate"):
+        OutputGate(config)
+
+    class DerivedOutputGate(OutputGate):
+        pass
+
+    with pytest.raises(ValueError, match="for DerivedOutputGate"):
+        DerivedOutputGate(config)
+
+
 def test_output_gate_basic():
     m = OutputGate.Config(
         channels_in=64,

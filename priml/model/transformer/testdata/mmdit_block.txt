@@ -6,6 +6,7 @@ MMDiTBlock.Config(
                         channels_in=8,
                         channels_out=8,
                         num_streams=2,
+                        streams=[],
                         num_heads=2,
                         channels_head=4,
                         num_heads_kv=2,
@@ -20,6 +21,7 @@ MMDiTBlock.Config(
                         init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                         depth_index=()
                 ),
+                streams=[],
                 cond_dim=0,
                 ffn=SwiGLU.Config(
                         channels_in=8,
@@ -33,8 +35,8 @@ MMDiTBlock.Config(
                         norm=None,
                         act=<function torch.nn.functional.silu at 0xdefacedeface>,
                         depth_index=(),
-                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
-                        init_weight_out=None,
+                        init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
+                        init_weight_out=<function torch.nn.init.zeros_ at 0xdefacedeface>,
                         shard=None
                 ),
                 depth_index=()
