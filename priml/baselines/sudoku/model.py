@@ -352,7 +352,7 @@ class SudokuNet(nn.Module):
         # ``repeat`` builds independent copies, each finalized separately, so
         # every block draws its own weights in stack order.
         self.reasoning = Sequential.Config(
-            copy.deepcopy(config.block),
+            elements=copy.deepcopy(config.block),
             repeat=config.num_layers,
         ).make()
 

@@ -24,7 +24,7 @@ from priml.model.embedding import Embedding
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
-from priml.model.transformer import kimi_k2
+from priml.model.transformer import kimi_k2, qwen3, qwen3_test
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.kimi_k2 import KimiK2, remap_hf_state_dict
 from priml.model.transformer.transformer import Transformer
@@ -122,11 +122,11 @@ def _synth_hf(cfg: KimiK2.Config) -> dict[str, Tensor]:
     )
     lr = attn.kv_lora_rank
     sd: dict[str, Tensor] = {
-        "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
+        "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
     }
-    if cfg.out_proj != "tied":
-        sd["lm_head.weight"] = torch.randn(cfg.vocab_size, h)
+    if not qwen3._tied(cfg):
+        sd["lm_head.weight"] = torch.randn(cfg.channels_out, h)
     for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
         sd[f"{p}.input_layernorm.weight"] = torch.randn(h)
@@ -302,16 +302,14 @@ class TestSlots:
         assert isinstance(template, TransformerBlock.Config)
         assert isinstance(template.norm1, RMSNorm.Config)
         template.norm1.eps = 1e-3
-        assert isinstance(cfg.final_norm, RMSNorm.Config)
-        cfg.final_norm.eps = 1e-3
+        qwen3_test._final_norm(cfg).eps = 1e-3
         cfg = cfg.copy_tree().finalize()
         assert isinstance(cfg.block, list)
         block = cfg.block[0]
         assert isinstance(block, TransformerBlock.Config)
         assert isinstance(block.norm1, RMSNorm.Config)
         assert block.norm1.eps == 1e-3
-        assert isinstance(cfg.final_norm, RMSNorm.Config)
-        assert cfg.final_norm.eps == 1e-3
+        assert qwen3_test._final_norm(cfg).eps == 1e-3
 
     def test_each_layer_gets_its_own_norm_object(self):
         """Templates are copied, so one layer's finalize cannot edit another."""
@@ -386,15 +384,15 @@ class TestRemap:
         cfg = KimiK2.Config.from_hf(_hf_config()).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf(cfg), cfg), strict=True)
-        logits = model(torch.randint(0, cfg.vocab_size, (1, 4)))
-        assert logits.shape == (1, 4, cfg.vocab_size)
+        logits = model(torch.randint(0, cfg.channels_out, (1, 4)))
+        assert logits.shape == (1, 4, cfg.channels_out)
 
     def test_end_to_end_with_q_lora(self):
         cfg = KimiK2.Config.from_hf(_hf_config(q_lora_rank=24)).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf(cfg), cfg), strict=True)
-        logits = model(torch.randint(0, cfg.vocab_size, (1, 3)))
-        assert logits.shape == (1, 3, cfg.vocab_size)
+        logits = model(torch.randint(0, cfg.channels_out, (1, 3)))
+        assert logits.shape == (1, 3, cfg.channels_out)
 
     def test_dense_then_moe_layers(self):
         cfg = KimiK2.Config.from_hf(_hf_config(first_k_dense_replace=2)).finalize()
@@ -480,7 +478,7 @@ def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
         loop_model.load_state_dict(loop_sd, strict=True)
         loop_model = loop_model.to(torch.float32).eval()
 
-        tokens = torch.randint(0, config.vocab_size, (2, 5))
+        tokens = torch.randint(0, config.channels_out, (2, 5))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             with host_agnostic_numerics(), torch.no_grad():

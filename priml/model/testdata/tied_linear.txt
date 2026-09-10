@@ -1,0 +1,1 @@
+TiedLinear.Config(channels_in=8, channels_out=17, tied='embed', transpose=True)

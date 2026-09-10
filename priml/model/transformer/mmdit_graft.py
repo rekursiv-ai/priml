@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import field
-from typing import Literal, Self, cast, override
+from typing import Self, cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -17,13 +17,7 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
-from priml.model.custom_types import (
-    ChannelsInOutConfig,
-    Resettable,
-    TensorModule,
-    TransformerConfig,
-    has_weight,
-)
+from priml.model.custom_types import Resettable, TransformerConfig
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock, MMDiTStream
 from priml.model.transformer.transformer import Transformer
@@ -39,7 +33,7 @@ class MMDiTGraft(nn.Module):
 
     class Config(Fig["MMDiTGraft"]):
         backbone: TransformerConfig = field(default_factory=Transformer.Config)
-        """Transformer architecture exposing projections, blocks, and final norm."""
+        """Transformer architecture exposing projections and blocks."""
 
         streams: list[MMDiTStream.Config] = field(
             default_factory=lambda: [MMDiTStream.Config()]
@@ -103,20 +97,7 @@ class MMDiTGraft(nn.Module):
         self.num_streams = len(config.streams) + 1
         self.in_proj = source.in_proj.make() if source.in_proj is not None else None
         self.blocks = nn.ModuleList(block.make() for block in config.block)
-        self.final_norm = source.final_norm.make()
-        self.out_proj: TensorModule | Literal["tied"] | None = (
-            source.out_proj.make()
-            if isinstance(source.out_proj, ChannelsInOutConfig)
-            else source.out_proj
-        )
-        if self.out_proj == "tied" and (
-            not has_weight(self.in_proj)
-            or self.in_proj.weight.ndim != 2
-            or self.in_proj.weight.shape[-1] != source.block[-1].channels_out
-        ):
-            raise ValueError(
-                "A tied out_proj requires an embedding-compatible in_proj weight."
-            )
+        self.out_proj = source.out_proj.make() if source.out_proj is not None else None
 
     def load_backbone(self, source: Transformer) -> None:
         """Load native language weights, preflighting all layers before copying.
@@ -125,8 +106,6 @@ class MMDiTGraft(nn.Module):
         such as norm epsilon and rotary frequencies. Modality parameters and
         existing requires_grad flags are unchanged.
         """
-        if (self.out_proj == "tied") != (source.out_proj == "tied"):
-            raise ValueError("Source and graft must use the same embedding tying.")
         if any(
             not isinstance(block, TransformerBlock)
             or not block.prenorm
@@ -138,13 +117,17 @@ class MMDiTGraft(nn.Module):
         _validate_native_state(target, source=source)
         target.load_state_dict(source.state_dict(), strict=True)
 
+    def load_backbone_state(self, state_dict: Mapping[str, Tensor]) -> None:
+        """Load native language weights keyed as a ``Transformer`` names them."""
+        self._backbone_view().load_state_dict(state_dict, strict=True)
+
     def freeze_backbone(self, freeze: bool = True) -> None:
         """Freeze or unfreeze only the language stream, embedding, and head."""
         self._backbone_view().requires_grad_(not freeze)
 
     def reset_parameters(self) -> None:
         """Reset all owned modules using their configured initializers."""
-        for module in (self.in_proj, *self.blocks, self.final_norm, self.out_proj):
+        for module in (self.in_proj, *self.blocks, self.out_proj):
             if isinstance(module, Resettable):
                 module.reset_parameters()
 
@@ -178,14 +161,10 @@ class MMDiTGraft(nn.Module):
         hidden: tuple[Tensor, ...] = (language, *streams)
         for block in self.blocks:
             hidden = block(hidden, c=c, cos_sin=cos_sin, attn_mask=attn_mask, **kwargs)
-        language = self.final_norm(hidden[0], **kwargs)
-        if self.out_proj == "tied":
-            assert has_weight(self.in_proj)
-            logits = language @ self.in_proj.weight.T
-        elif self.out_proj is None:
-            logits = language
-        else:
-            logits = self.out_proj(language, **kwargs)
+        language = hidden[0]
+        logits = (
+            language if self.out_proj is None else self.out_proj(language, **kwargs)
+        )
         return logits, hidden[1:]
 
     def _backbone_view(self) -> nn.ModuleDict:
@@ -204,7 +183,6 @@ class MMDiTGraft(nn.Module):
         if self.in_proj is not None:
             modules["in_proj"] = cast(nn.Module, self.in_proj)
         modules["blocks"] = nn.ModuleList(blocks)
-        modules["final_norm"] = cast(nn.Module, self.final_norm)
-        if self.out_proj is not None and self.out_proj != "tied":
+        if self.out_proj is not None:
             modules["out_proj"] = cast(nn.Module, self.out_proj)
         return nn.ModuleDict(modules)

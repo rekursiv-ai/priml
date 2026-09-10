@@ -19,6 +19,8 @@ from priml.model.linear import EnsembleLinear, Linear
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import kimi_k2_test, qwen3_test
 from priml.model.transformer.block import TransformerBlock
@@ -49,8 +51,8 @@ def test_reusable_ffns_inherit_current_defaults(config: object) -> None:
 @pytest.mark.parametrize("kind", ["qwen", "kimi"])
 def test_native_reference_norm_defaults(kind: str) -> None:
     config = Qwen3.Config() if kind == "qwen" else KimiK2.Config()
-    assert isinstance(config.final_norm, RMSNorm.Config)
-    assert config.final_norm.elementwise_affine
+    final_norm = qwen3_test._final_norm(config)
+    assert final_norm.elementwise_affine
     assert isinstance(config.block, TransformerBlock.Config)
     for norm in (config.block.norm1, config.block.norm2):
         assert isinstance(norm, RMSNorm.Config)
@@ -115,10 +117,14 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
     assert isinstance(config.in_proj, Embedding.Config)
     config.in_proj.init_weight = nn.init.ones_
     config.in_proj.padding_idx = 0
-    assert isinstance(config.out_proj, Linear.Config)
-    config.out_proj.init_weight = nn.init.ones_
+    assert isinstance(config.out_proj, Sequential.Config)
+    head_elements = config.out_proj.elements
+    assert isinstance(head_elements, list)
+    head = head_elements[1]
+    assert isinstance(head, Linear.Config)
+    head.init_weight = nn.init.ones_
     if tie:
-        config.out_proj = "tied"
+        head_elements[1] = TiedLinear.Config(tied="in_proj")
     assert isinstance(config.block, TransformerBlock.Config)
     ffns = (
         (config.block.ffn.expert, config.block.ffn.shared_expert)
@@ -147,16 +153,16 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
             if isinstance(module, SwiGLU):
                 for parameter in module.parameters():
                     assert torch.equal(parameter, torch.ones_like(parameter))
+        assert isinstance(model.out_proj, Sequential)
+        built_head = model.out_proj[1]
         if tie:
-            assert model.out_proj == "tied"
+            assert isinstance(built_head, TiedLinear)
         else:
-            assert isinstance(model.out_proj, Linear)
-            assert torch.equal(
-                model.out_proj.weight, torch.ones_like(model.out_proj.weight)
-            )
-        assert model(torch.tensor([[1, 2]])).shape == (1, 2, config.vocab_size)
+            assert isinstance(built_head, Linear)
+            assert torch.equal(built_head.weight, torch.ones_like(built_head.weight))
+        assert model(torch.tensor([[1, 2]])).shape == (1, 2, config.channels_out)
     assert "in_proj.weight" in model.state_dict()
-    assert ("out_proj.weight" in model.state_dict()) is not tie
+    assert ("out_proj.1.weight" in model.state_dict()) is not tie
 
 
 @pytest.mark.parametrize(
@@ -208,7 +214,12 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             else kimi_k2_test._canonical_config()
         )
         config.in_proj = Embedding.Config(shard="vocab")
-        config.out_proj = Linear.Config(shard="vocab")
+        config.out_proj = Sequential.Config(
+            elements=[
+                RMSNorm.Config(elementwise_affine=True),
+                Linear.Config(shard="vocab"),
+            ]
+        )
         config = config.finalize()
         assert isinstance(config.block, list)
         for block in config.block:

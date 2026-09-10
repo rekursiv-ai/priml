@@ -8,6 +8,7 @@ from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.generate import generate
 from priml.model.linear import Linear
+from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import randomize_parameters
@@ -30,8 +31,7 @@ def test_optional_projections_accept_hidden_states() -> None:
     assert config.out_proj is None
     model = config.make()
     hidden = torch.randn(2, 3, 8)
-    expected = model.final_norm(model.blocks[0](hidden))
-    assert torch.equal(model(hidden), expected)
+    assert torch.equal(model(hidden), model.blocks[0](hidden))
 
 
 def test_configurable_linear_projections() -> None:
@@ -73,14 +73,17 @@ def test_generation_requires_token_input_projection() -> None:
 def test_tied_projection_reuses_input_weight() -> None:
     config = _config()
     config.in_proj = Embedding.Config(num_embeddings=17)
-    config.out_proj = "tied"
+    config.out_proj = TiedLinear.Config(tied="in_proj")
+    config.channels_out = 17
     resolved = config.copy_tree().finalize()
     assert resolved.channels_in == 8
-    assert resolved.channels_out == 17
+    assert isinstance(resolved.out_proj, TiedLinear.Config)
+    assert resolved.out_proj.channels_in == 8
+    assert resolved.out_proj.channels_out == 17
     model = config.make()
     assert isinstance(model.in_proj, Embedding)
     tokens = torch.tensor([[1, 2, 3]])
-    hidden = model.final_norm(model.blocks[0](model.in_proj(tokens)))
+    hidden = model.blocks[0](model.in_proj(tokens))
     assert torch.equal(model(tokens), hidden @ model.in_proj.weight.T)
     assert "in_proj.weight" in model.state_dict()
     assert not any(key.startswith("out_proj.") for key in model.state_dict())
@@ -91,8 +94,8 @@ def test_tied_projection_reuses_input_weight() -> None:
 
 def test_tied_projection_requires_input_weight() -> None:
     config = _config()
-    config.out_proj = "tied"
-    with pytest.raises(ValueError, match=r"tied.*in_proj"):
+    config.out_proj = TiedLinear.Config(tied="in_proj")
+    with pytest.raises(ValueError, match=r"tied='in_proj'"):
         config.make()
 
 

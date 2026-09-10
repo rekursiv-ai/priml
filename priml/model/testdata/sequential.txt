@@ -1,4 +1,6 @@
 Sequential.Config(
+                channels_in=4,
+                channels_out=4,
                 elements=[
                         Linear.Config(
                                 channels_in=4,

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
+from typing import override
 
+from configgle import Fig, Makeable
 from configgle.testing import assert_pprint_golden
+from torch import Tensor
 
 import pytest
 import torch
@@ -19,8 +23,10 @@ from priml.model.custom_types import (
     ChannelsInOut,
     ChannelsOut,
     HasDepthIndex,
+    TensorModule,
     propagate_attr,
 )
+from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import (
@@ -33,7 +39,7 @@ from priml.model.norm import (
     LayerNorm,
     RMSNorm,
 )
-from priml.model.special import Identity, Skip
+from priml.model.special import Identity, Skip, TiedLinear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock
 from priml.testing.bfb import assert_bfb_against_golden
@@ -222,6 +228,84 @@ def test_skip_reset():
 def test_skip_requires_inner():
     with pytest.raises(ValueError, match="inner"):
         Skip.Config().make()
+
+
+class _LanguageModel(torch.nn.Module):
+    """Embedding, head; one is a real table, the other borrows it."""
+
+    class Config(Fig["_LanguageModel"]):
+        embed: Makeable[TensorModule] = field(default_factory=Embedding.Config)
+        head: Makeable[TensorModule] = field(default_factory=Linear.Config)
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        # Head first: a tie at ``embed`` points at a module not yet built.
+        self.head = config.head.make()
+        self.embed = config.embed.make()
+
+    @override
+    def forward(self, tokens: Tensor) -> Tensor:
+        return self.head(self.embed(tokens))
+
+
+def test_tied_linear_config_pprint() -> None:
+    assert_pprint_golden(
+        test_file=__file__,
+        name="tied_linear",
+        config=TiedLinear.Config(8, 17, tied="embed"),
+    )
+
+
+def test_tied_linear_head_borrows_the_embedding() -> None:
+    """The head reads the table transposed; only the table is a parameter."""
+    config = _LanguageModel.Config()
+    config.embed = Embedding.Config(channels_out=8, num_embeddings=17)
+    config.head = TiedLinear.Config(tied="embed")
+    model = config.make()
+    assert isinstance(model.embed, Embedding)
+
+    tokens = torch.tensor([[1, 2, 3]])
+    logits = model(tokens)
+
+    assert torch.equal(logits, model.embed(tokens) @ model.embed.weight.T)
+    assert [name for name, _ in model.named_parameters()] == ["embed.weight"]
+    logits.square().sum().backward()
+    assert model.embed.weight.grad is not None
+
+
+def test_tied_linear_table_borrows_the_head() -> None:
+    """The reverse tie: integer input looks rows up in the head's weight."""
+    config = _LanguageModel.Config()
+    config.embed = TiedLinear.Config(tied="head", transpose=False)
+    config.head = Linear.Config(8, 17)
+    model = config.make()
+    assert isinstance(model.head, Linear)
+
+    tokens = torch.tensor([[1, 2, 3]])
+
+    assert torch.equal(model.embed(tokens), model.head.weight[tokens])
+    assert model(tokens).shape == (1, 3, 17)
+    assert [name for name, _ in model.named_parameters()] == ["head.weight"]
+
+
+def test_tied_linear_rejects_a_source_without_a_weight() -> None:
+    config = _LanguageModel.Config()
+    config.embed = Identity.Config(channels_in=8)
+    config.head = TiedLinear.Config(tied="embed")
+
+    with pytest.raises(ValueError, match="tied='embed'"):
+        config.make()
+
+
+def test_tied_linear_requires_a_path() -> None:
+    with pytest.raises(ValueError, match="tied"):
+        TiedLinear.Config().make()
+
+
+def test_tied_linear_built_alone_is_unbound() -> None:
+    """A bare make binds against the leaf itself, which owns no weight."""
+    with pytest.raises(AttributeError):
+        TiedLinear.Config(tied="embed").make()
 
 
 if __name__ == "__main__":

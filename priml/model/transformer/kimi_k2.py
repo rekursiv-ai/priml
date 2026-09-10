@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, Self, override
+from typing import Any, Self, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -57,7 +57,6 @@ from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
-    ChannelsInOutConfig,
     TensorBlockConfig,
     TensorModule,
     propagate_attr,
@@ -66,8 +65,11 @@ from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
+from priml.model.transformer.qwen3 import _tied
 from priml.model.transformer.transformer import Transformer
 
 
@@ -78,13 +80,11 @@ class KimiK2(Transformer):
     """Kimi-K2 / DeepSeek-V3 causal LM — MLA + DS-V3 MoE."""
 
     class Config(Makes["KimiK2"], Transformer.Config, kw_only=False):
-        vocab_size: int = 163_840
-        """Token vocabulary size; also the width of the output projection."""
+        """Widths come from ``from_hf``: ``channels_in`` is ``hidden_size`` and
+        ``channels_out`` the vocabulary, which sizes the embedding's rows too.
+        """
 
         _: KW_ONLY
-
-        channels_in: int = 7_168
-        """Residual-stream width. Kimi-K2's, so the defaults load it."""
 
         num_layers: int = 61
         """Blocks in the stack. Kimi-K2's."""
@@ -109,17 +109,21 @@ class KimiK2(Transformer):
         )
         """Reference token embedding initialization."""
 
-        out_proj: ChannelsInOutConfig | Literal["tied"] | None = field(
-            default_factory=lambda: Linear.Config(
-                init_weight=partial(nn.init.normal_, std=0.02), shard="vocab"
+        out_proj: Makeable[TensorModule] | None = field(
+            default_factory=lambda: Sequential.Config(
+                elements=[
+                    RMSNorm.Config(elementwise_affine=True),
+                    Linear.Config(
+                        init_weight=partial(nn.init.normal_, std=0.02),
+                        shard="vocab",
+                    ),
+                ]
             )
         )
-        """Reference output-head initialization when embeddings are untied."""
+        """Learned final RMS scale, then the reference untied head.
 
-        final_norm: Makeable[TensorModule] = field(
-            default_factory=lambda: RMSNorm.Config(elementwise_affine=True)
-        )
-        """Learned final RMS scale, initialized to ones."""
+        A tied checkpoint replaces the ``Linear`` with
+        ``TiedLinear.Config(tied="in_proj")``."""
 
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
@@ -259,21 +263,21 @@ class KimiK2(Transformer):
                     f"moe_intermediate_size must be > 0, got {channels_hidden_expert}.",
                 )
 
+            head: Makeable[TensorModule] = (
+                TiedLinear.Config(tied="in_proj")
+                if bool(config.get("tie_word_embeddings", False))
+                else Linear.Config(init_weight=init_weight, shard="vocab")
+            )
             return cls(
-                vocab_size=int(config["vocab_size"]),
                 channels_in=int(config["hidden_size"]),
+                channels_out=int(config["vocab_size"]),
                 num_layers=int(config["num_hidden_layers"]),
                 in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
-                out_proj=(
-                    "tied"
-                    if bool(config.get("tie_word_embeddings", False))
-                    else Linear.Config(init_weight=init_weight, shard="vocab")
-                ),
+                out_proj=Sequential.Config(elements=[norm.copy_tree(), head]),
                 channels_hidden_dense=int(config["intermediate_size"]),
                 channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
                 block=block,
-                final_norm=norm.copy_tree(),
             )
 
         @override
@@ -284,6 +288,9 @@ class KimiK2(Transformer):
                 self.block = [self.block.copy_tree() for _ in range(self.num_layers)]
             for layer, block in enumerate(self.block):
                 self._size_block(block, layer)
+            # The vocabulary is stated once, as the output width; the table's
+            # row count follows from it.
+            propagate_attr(self.in_proj, "num_embeddings", self.channels_out)
             return super().finalize()
 
         def _size_block(self, block: TensorBlockConfig, layer: int) -> None:
@@ -440,10 +447,10 @@ def remap_hf_state_dict(
     """Convert an HF Kimi-K2 / DSV3 state_dict to loop-native names."""
     out: dict[str, Tensor] = {
         "in_proj.weight": hf_sd["model.embed_tokens.weight"],
-        "final_norm.weight": hf_sd["model.norm.weight"],
+        "out_proj.0.weight": hf_sd["model.norm.weight"],
     }
-    if config.out_proj != "tied":
-        out["out_proj.weight"] = hf_sd["lm_head.weight"]
+    if not _tied(config):
+        out["out_proj.1.weight"] = hf_sd["lm_head.weight"]
 
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"

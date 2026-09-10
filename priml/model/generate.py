@@ -3,7 +3,6 @@
 Works with any model exposing the standard interface:
   in_proj(tokens) -> hidden
   blocks: Iterable[TransformerBlock]
-  final_norm(hidden) -> hidden
   project_to_logits(hidden) -> logits
 
 Example::
@@ -71,9 +70,6 @@ class TransformerLike(Protocol):
     @property
     def blocks(self) -> Iterable[nn.Module]: ...
 
-    @property
-    def final_norm(self) -> TensorModule: ...
-
     def project_to_logits(self, hidden: Tensor, /) -> Tensor: ...
 
 
@@ -134,7 +130,6 @@ def generate(
     x: Tensor = in_proj(prompt_ids)
     for i, block in enumerate(blocks):
         x, caches[i] = block.forward_cached(x, cache=caches[i])
-    x = model.final_norm(x)
     logits: Tensor = model.project_to_logits(x[:, -1:, :])
 
     generated: list[Tensor] = []
@@ -152,7 +147,6 @@ def generate(
         x = in_proj(next_token)
         for i, block in enumerate(blocks):
             x, caches[i] = block.forward_cached(x, cache=caches[i])
-        x = model.final_norm(x)
         logits = model.project_to_logits(x)
 
     if not generated:

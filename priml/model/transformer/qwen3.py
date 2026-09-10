@@ -3,8 +3,9 @@
 Subclasses :class:`Transformer` per the library idiom
 (``Makes[X]`` re-parents ``.make()``). ``Qwen3.Config`` carries the
 HF-shaped arch fields; ``finalize()`` wires them into the inherited
-``block``/``final_norm``/``channels_in``/``num_layers``/``out_proj``
-slots.
+``block``/``channels_in``/``num_layers``/``out_proj`` slots. The head is
+``[RMSNorm, Linear]`` -- HF's ``model.norm`` then ``lm_head`` -- or
+``[RMSNorm, TiedLinear]`` when the checkpoint ties word embeddings.
 
 Qwen3 vs. LLaMA:
   - Explicit ``head_dim`` (not ``hidden_size / num_heads``).
@@ -30,7 +31,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, Self, override
+from typing import Any, Self, override
 
 import json
 
@@ -45,7 +46,6 @@ from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsIn,
-    ChannelsInOutConfig,
     TensorBlockConfig,
     TensorModule,
     propagate_attr,
@@ -53,6 +53,8 @@ from priml.model.custom_types import (
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
@@ -62,13 +64,11 @@ class Qwen3(Transformer):
     """Qwen3 dense causal LM -- ``Transformer`` pre-wired for the Qwen3 arch."""
 
     class Config(Makes["Qwen3"], Transformer.Config, kw_only=False):
-        vocab_size: int = 151_936
-        """Token vocabulary size; also the width of the output projection."""
+        """Widths come from ``from_hf``: ``channels_in`` is ``hidden_size`` and
+        ``channels_out`` the vocabulary, which sizes the embedding's rows too.
+        """
 
         _: KW_ONLY
-
-        channels_in: int = 1_024
-        """Residual-stream width. Qwen3-0.6B's, so the defaults load it."""
 
         num_layers: int = 28
         """Blocks in the stack. Qwen3-0.6B's."""
@@ -81,18 +81,21 @@ class Qwen3(Transformer):
         )
         """Reference token embedding initialization."""
 
-        out_proj: ChannelsInOutConfig | Literal["tied"] | None = field(
-            default_factory=lambda: Linear.Config(
-                init_weight=partial(nn.init.normal_, std=0.02),
-                shard="vocab",
+        out_proj: Makeable[TensorModule] | None = field(
+            default_factory=lambda: Sequential.Config(
+                elements=[
+                    RMSNorm.Config(elementwise_affine=True),
+                    Linear.Config(
+                        init_weight=partial(nn.init.normal_, std=0.02),
+                        shard="vocab",
+                    ),
+                ]
             )
         )
-        """Reference output-head initialization when embeddings are untied."""
+        """Learned final RMS scale, then the reference untied head.
 
-        final_norm: Makeable[TensorModule] = field(
-            default_factory=lambda: RMSNorm.Config(elementwise_affine=True)
-        )
-        """Learned final RMS scale, initialized to ones."""
+        A tied checkpoint replaces the ``Linear`` with
+        ``TiedLinear.Config(tied="in_proj")``."""
 
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
@@ -193,18 +196,18 @@ class Qwen3(Transformer):
             block.norm1 = norm.copy_tree()
             block.norm2 = norm.copy_tree()
 
+            head: Makeable[TensorModule] = (
+                TiedLinear.Config(tied="in_proj")
+                if bool(config.get("tie_word_embeddings", False))
+                else Linear.Config(init_weight=init_weight, shard="vocab")
+            )
             return cls(
-                vocab_size=int(config["vocab_size"]),
                 channels_in=channels_in,
+                channels_out=int(config["vocab_size"]),
                 num_layers=int(config["num_hidden_layers"]),
                 in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
-                out_proj=(
-                    "tied"
-                    if bool(config.get("tie_word_embeddings", False))
-                    else Linear.Config(init_weight=init_weight, shard="vocab")
-                ),
+                out_proj=Sequential.Config(elements=[norm.copy_tree(), head]),
                 block=block,
-                final_norm=norm.copy_tree(),
             )
 
         @override
@@ -217,6 +220,9 @@ class Qwen3(Transformer):
                 self.block = [self.block.copy_tree() for _ in range(self.num_layers)]
             for block in self.block:
                 self._size_block(block)
+            # The vocabulary is stated once, as the output width; the table's
+            # row count follows from it.
+            propagate_attr(self.in_proj, "num_embeddings", self.channels_out)
             return super().finalize()
 
         def _size_block(self, block: TensorBlockConfig) -> None:
@@ -311,6 +317,15 @@ def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
     return attn
 
 
+def _tied(config: Transformer.Config) -> bool:
+    """Whether the head borrows the embedding, so HF ships no ``lm_head``."""
+    head = config.out_proj
+    if isinstance(head, Sequential.Config):
+        elements = head.elements
+        head = elements[-1] if isinstance(elements, list) else elements
+    return isinstance(head, TiedLinear.Config)
+
+
 def remap_hf_state_dict(
     hf_sd: dict[str, Tensor],
     config: Qwen3.Config,
@@ -326,10 +341,10 @@ def remap_hf_state_dict(
     d = attn.channels_head
     out: dict[str, Tensor] = {
         "in_proj.weight": hf_sd["model.embed_tokens.weight"],
-        "final_norm.weight": hf_sd["model.norm.weight"],
+        "out_proj.0.weight": hf_sd["model.norm.weight"],
     }
-    if config.out_proj != "tied":
-        out["out_proj.weight"] = hf_sd["lm_head.weight"]
+    if not _tied(config):
+        out["out_proj.1.weight"] = hf_sd["lm_head.weight"]
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]

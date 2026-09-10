@@ -87,8 +87,8 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
 
 
 def test_transformer_declares_embedding_and_head_vocab() -> None:
-    config = Transformer.Config(vocab_size=64, channels_in=32, num_layers=1)
-    config.in_proj = Embedding.Config(shard="vocab")
+    config = Transformer.Config(channels_in=32, channels_out=64, num_layers=1)
+    config.in_proj = Embedding.Config(num_embeddings=64, shard="vocab")
     config.out_proj = Linear.Config(shard="vocab")
     model = config.make()
     assert isinstance(model.in_proj, Embedding)
@@ -272,10 +272,10 @@ def _transformer_block() -> tuple[nn.Module, Tensor]:
 
 def _transformer() -> tuple[nn.Module, Tensor]:
     model = Transformer.Config(
-        in_proj=Embedding.Config(shard="vocab"),
+        in_proj=Embedding.Config(num_embeddings=64, shard="vocab"),
         out_proj=Linear.Config(shard="vocab"),
-        vocab_size=64,
         channels_in=32,
+        channels_out=64,
         num_layers=2,
         block=TransformerBlock.Config(
             attn=SelfAttention.Config(

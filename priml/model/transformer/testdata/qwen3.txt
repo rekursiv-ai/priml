@@ -1,7 +1,6 @@
 Qwen3.Config(
                 channels_in=16,
                 channels_out=32,
-                vocab_size=32,
                 num_layers=1,
                 in_proj=Embedding.Config(
                         channels_out=16,
@@ -86,23 +85,31 @@ Qwen3.Config(
                 │               depth_index=((0, 1),)
                 │       )
                 ],
-                final_norm=RMSNorm.Config(
-                        channels_in=16,
-                        channels_out=16,
-                        eps=1e-06,
-                        elementwise_affine=True,
-                        device=None,
-                        dtype=None
-                ),
-                out_proj=Linear.Config(
+                out_proj=Sequential.Config(
                         channels_in=16,
                         channels_out=32,
-                        bias=False,
-                        depth_index=(),
-                        device=None,
-                        dtype=None,
-                        init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
-                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
-                        shard='vocab'
+                        elements=[
+                                RMSNorm.Config(
+                                        channels_in=16,
+                                        channels_out=16,
+                                        eps=1e-06,
+                                        elementwise_affine=True,
+                                        device=None,
+                                        dtype=None
+                                ),
+                                Linear.Config(
+                                        channels_in=16,
+                                        channels_out=32,
+                                        bias=False,
+                                        depth_index=(),
+                                        device=None,
+                                        dtype=None,
+                                        init_weight=functools.partial(<function torch.nn.init.normal_ at 0xdefacedeface>, std=0.02),
+                                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                                        shard='vocab'
+                                )
+                        ],
+                        repeat=1,
+                        depth_index=()
                 )
         )
