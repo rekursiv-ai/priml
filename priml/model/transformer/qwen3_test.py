@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 from unittest.mock import Mock
 
 import importlib.util
@@ -38,7 +38,7 @@ from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _hf_config(**overrides: Any) -> dict[str, Any]:
@@ -84,7 +84,7 @@ def test_qwen3_config_pprint() -> None:
 
 def test_qwen3_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="qwen3",
         build_module=lambda: _canonical_config().make(),
         build_input=lambda: torch.tensor([[0, 1, 2]]),

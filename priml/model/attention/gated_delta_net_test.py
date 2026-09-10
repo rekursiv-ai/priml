@@ -11,6 +11,7 @@ Run regeneration through pytest so Priml's deterministic math setup applies.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 
@@ -32,7 +33,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_gated_delta_net_rejects_non_multiple_v_heads():
@@ -206,7 +207,7 @@ def test_gated_delta_net_never_initializes_a_closed_gate():
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_gated_delta_net_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="gated_delta_net",
         build_module=lambda: (
             GatedDeltaNet.Config(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import override
+from typing import Final, override
 
 from torch import Tensor, nn
 
@@ -18,7 +18,7 @@ from priml.testing.fixtures import (
 from priml.testing.golden import assert_text_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _Cache(nn.Module):
@@ -150,7 +150,7 @@ def test_kv_cache_text(request: pytest.FixtureRequest) -> None:
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_kv_cache_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="kv_cache",
         build_module=lambda: _Cache().to(device),
         build_input=lambda: torch.randn(1, 1, 4, 2),

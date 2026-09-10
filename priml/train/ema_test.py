@@ -16,7 +16,19 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.testing.fixtures import get_device
 from priml.train.ema import EMA, NoEMA, karras_decay
+
+
+@pytest.fixture(scope="module")
+def warm_device_kernels() -> None:
+    """Run one elementwise op on the test device, billed as setup.
+
+    CUDA loads a kernel family's cubin lazily on first launch (~0.6s for
+    ``mul_``); uncached that lands on the call time of the first accelerator
+    test in the module. A no-op on the CPU.
+    """
+    torch.ones(1, device=get_device()).mul_(2.0).add_(1.0)
 
 
 @pytest.fixture
@@ -749,10 +761,7 @@ def test_ema_module_apply_to_after_load_before_init_swaps_shadow() -> None:
     )
 
 
-@pytest.mark.skipif(
-    not (torch.backends.mps.is_available() or torch.cuda.is_available()),
-    reason="needs a second device to reproduce the cross-device restore",
-)
+@pytest.mark.usefixtures("warm_device_kernels")
 def test_ema_loaded_shadow_moves_to_live_param_device() -> None:
     """A shadow restored on the wrong device re-devices to the live params.
 
@@ -762,24 +771,25 @@ def test_ema_loaded_shadow_moves_to_live_param_device() -> None:
     shadow tensors with ``cuda:4`` live params and raises a cross-device
     RuntimeError. The lazy-init of a loaded shadow must re-device each tensor
     to its live counterpart.
-    """
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda")
 
+    The checkpoint is built on the CPU and the live model on ``get_device()``,
+    so the two differ whenever an accelerator exists. On a CPU-only host both
+    sides are the CPU and the device assertion holds trivially.
+    """
     cpu_model = nn.Linear(2, 2)
     src = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
     src(cpu_model)
     state = src.state_dict()  # shadow tensors live on CPU
 
-    # Live model on the accelerator; shadow restored from the CPU checkpoint.
-    dev_model = nn.Linear(2, 2).to(device)
+    live_model = nn.Linear(2, 2).to(get_device())
     dst = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
     dst.load_state_dict(state)
 
     # First update must not raise a cross-device error and must land the
     # shadow on the live device.
-    dst(dev_model)
+    dst(live_model)
     for name, tensor in dst.shadow_params.items():
-        assert tensor.device == dev_model.get_parameter(name).device
+        assert tensor.device == live_model.get_parameter(name).device
 
 
 # -- bit-for-bit regression: constant-decay CLONE path unchanged --------------

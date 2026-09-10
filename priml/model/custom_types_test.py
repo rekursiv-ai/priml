@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast, override
+from typing import Final, cast, override
 
 import ast
 
@@ -30,7 +30,7 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.golden import assert_text_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_custom_types_public_contract(request: pytest.FixtureRequest) -> None:
@@ -52,7 +52,7 @@ def test_custom_types_public_contract(request: pytest.FixtureRequest) -> None:
 
 def test_custom_types_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="custom_types",
         build_module=_FlattenDepthIndex,
         build_input=lambda: torch.tensor(

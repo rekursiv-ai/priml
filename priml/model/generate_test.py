@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast, override
+from typing import Final, cast, override
 
 from torch import Tensor, nn
 
@@ -16,7 +16,7 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.golden import assert_text_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
@@ -42,7 +42,7 @@ def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
 
 def test_generate_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="generate",
         build_module=_GenerateHarness,
         build_input=lambda: torch.tensor([[0, 1]]),

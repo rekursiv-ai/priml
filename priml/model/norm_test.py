@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from configgle.testing import assert_pprint_golden
 from torch import nn
@@ -28,7 +28,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_rmsnorm():
@@ -368,7 +368,7 @@ def test_group_norm_config_pprint() -> None:
 
 def test_rms_norm_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="rms_norm",
         build_module=lambda: RMSNorm.Config(4).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -378,7 +378,7 @@ def test_rms_norm_bfb() -> None:
 
 def test_centered_rms_norm_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="centered_rms_norm",
         build_module=lambda: CenteredRMSNorm.Config(4).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -388,7 +388,7 @@ def test_centered_rms_norm_bfb() -> None:
 
 def test_layer_norm_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="layer_norm",
         build_module=lambda: LayerNorm.Config(4).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -398,7 +398,7 @@ def test_layer_norm_bfb() -> None:
 
 def test_batch_norm_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="batch_norm",
         build_module=lambda: BatchNorm.Config(4).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -408,7 +408,7 @@ def test_batch_norm_bfb() -> None:
 
 def test_batch_renorm_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="batch_renorm",
         build_module=lambda: BatchRenorm.Config(channels_in=4).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -418,7 +418,7 @@ def test_batch_renorm_bfb() -> None:
 
 def test_batch_norm2d_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="batch_norm2d",
         build_module=lambda: BatchNorm2d.Config(4).make(),
         build_input=lambda: torch.randn(2, 4, 2, 2),
@@ -428,7 +428,7 @@ def test_batch_norm2d_bfb() -> None:
 
 def test_group_norm2d_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="group_norm2d",
         build_module=lambda: GroupNorm2d.Config(4, num_groups=2).make(),
         build_input=lambda: torch.randn(2, 4, 2, 2),
@@ -438,7 +438,7 @@ def test_group_norm2d_bfb() -> None:
 
 def test_group_norm_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="group_norm",
         build_module=lambda: GroupNorm.Config(4, num_groups=2).make(),
         build_input=lambda: torch.randn(2, 3, 4),

@@ -51,6 +51,22 @@ Inductor's 0).
 """
 
 
+@pytest.fixture(scope="module")
+def warm_dynamo() -> None:
+    """Load Dynamo once per module, billed as setup.
+
+    Dynamo's own import plus its first trace cost ~1.1s per process; a later
+    trace after ``reset()`` is ~40ms. Uncached, the whole cost lands on the
+    call time of whichever ``torch.compile`` test runs first in the module.
+    Requested by the compile tests only, so the eager tests never load it.
+    """
+    torch._dynamo.reset()
+    _ = torch.compile(rgb2float, fullgraph=True, backend=_TRACE_ONLY)(
+        torch.zeros(1, dtype=torch.float16)
+    )
+    torch._dynamo.reset()
+
+
 def test_rgb2float():
     x = torch.tensor([0, 127, 255], dtype=torch.uint8).to(torch.float16)
     result = rgb2float(x)
@@ -96,6 +112,7 @@ def test_the_pixel_pair_is_an_exact_round_trip():
         )
 
 
+@pytest.mark.usefixtures("warm_dynamo")
 def test_the_round_trip_survives_compilation_and_repetition() -> None:
     """Exactness is a property of the LATTICE, not of the arithmetic width.
 
@@ -1322,6 +1339,7 @@ def test_float2rgb_lets_torch_reject_an_inplace_grad_leaf() -> None:
     assert not float2rgb(torch.tensor([0.5])).requires_grad
 
 
+@pytest.mark.usefixtures("warm_dynamo")
 def test_rgb2float_compiles_without_a_graph_break() -> None:
     """The decode path compiles this, so a break costs the fusion it wanted.
 
@@ -1351,6 +1369,7 @@ def test_rgb2float_compiles_without_a_graph_break() -> None:
 
 
 @pytest.mark.compute_torch_compile
+@pytest.mark.usefixtures("warm_dynamo")
 def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
     """The accuracy claim in ``float2rgb``'s Notes, measured.
 
@@ -1386,6 +1405,7 @@ def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
         )
 
 
+@pytest.mark.usefixtures("warm_dynamo")
 def test_float2rgb_compiles_without_a_graph_break() -> None:
     """Widening to ``Tensorable`` must not cost the pipelines their graph.
 

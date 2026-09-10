@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from configgle.testing import assert_pprint_golden
 
@@ -31,7 +31,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_router_rejects_top_k_above_num_experts():
@@ -344,7 +344,7 @@ def test_moe_config_pprint() -> None:
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_router_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="router",
         build_module=lambda: (
             Router.Config(channels_in=4, num_experts=2, top_k=1).make().to(device)
@@ -359,7 +359,7 @@ def test_router_bfb(device: str) -> None:
 def test_moe_bfb(device: str) -> None:
     """Regenerate with ``BFB_REGENERATE=1`` against this canonical sidecar."""
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="moe",
         build_module=lambda: (
             MoE.Config(

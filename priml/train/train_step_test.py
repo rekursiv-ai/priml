@@ -17,6 +17,7 @@ import torch
 from priml import runtime
 from priml.loss.custom_types import LossOutput
 from priml.metrics.binary_accuracy import BinaryAccuracy
+from priml.testing.fixtures import get_device
 from priml.train.parallelism import NoParallel
 from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
 
@@ -89,7 +90,6 @@ def test_trainable_logistic_regression():
     assert accuracy > 0.9
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA generator")
 def test_meta_construction_draws_on_the_placement_devices_generator() -> None:
     """Under ``"meta"`` init runs where the model will live, not on the host.
 
@@ -98,19 +98,30 @@ def test_meta_construction_draws_on_the_placement_devices_generator() -> None:
     consumes a different random stream than the same recipe materialized on
     the device, and every parameter makes the trip over the bus.
     """
+    device = get_device()
     config = TrainStep.Config()
     config.model = _LinearModel.Config(in_features=4, out_features=4)
-    config.parallelism = NoParallel.Config(device="cuda")
+    config.parallelism = NoParallel.Config(device=str(device))
     config.device_init = "meta"
     config.compile = None
 
-    cpu_before = torch.get_rng_state().clone()
-    cuda_before = torch.cuda.get_rng_state().clone()
+    cpu_before = torch.get_rng_state()
+    device_before = _rng_state(device)
     step = config.make()
 
-    assert next(step.model.parameters()).device.type == "cuda"
-    assert not torch.equal(cuda_before, torch.cuda.get_rng_state())
-    assert torch.equal(cpu_before, torch.get_rng_state())
+    assert next(step.model.parameters()).device.type == device.type
+    assert not torch.equal(device_before, _rng_state(device))
+    if device.type == "cuda":
+        # When the placement device IS the host, the CPU generator is the one
+        # that must advance, so the untouched-host half only exists on CUDA.
+        assert torch.equal(cpu_before, torch.get_rng_state())
+
+
+def _rng_state(device: torch.device) -> Tensor:
+    """Snapshot the default generator state of ``device``."""
+    if device.type == "cuda":
+        return torch.cuda.get_rng_state(device)
+    return torch.get_rng_state()
 
 
 def test_eager_construction_allocates_during_the_build() -> None:

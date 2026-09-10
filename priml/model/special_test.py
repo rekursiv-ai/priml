@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import override
+from typing import Final, override
 
 from configgle import Fig, Makeable
 from configgle.testing import assert_pprint_golden
@@ -48,7 +48,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_identity_config_pprint() -> None:
@@ -71,7 +71,7 @@ def test_skip_config_pprint() -> None:
 
 def test_identity_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="identity",
         build_module=lambda: Identity.Config(channels_in=4).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -81,7 +81,7 @@ def test_identity_bfb() -> None:
 
 def test_skip_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="skip",
         build_module=lambda: Skip.Config(inner=Linear.Config(4, 4)).make(),
         build_input=lambda: torch.randn(2, 3, 4),

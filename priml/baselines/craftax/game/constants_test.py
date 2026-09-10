@@ -18,6 +18,9 @@ from priml.baselines.craftax.conftest import (
 from priml.baselines.craftax.game import constants
 
 
+pytestmark = pytest.mark.usefixtures("warm_reference")
+
+
 def test_reward_table_sums_to_the_scoring_denominator() -> None:
     # The normalized score divides by this total, so a table that does not sum
     # to it would silently rescale every reported result.

@@ -12,6 +12,7 @@ math environment before torch imports.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 
@@ -38,7 +39,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _cfg(
@@ -75,7 +76,7 @@ def test_adaln_zero_config_pprint() -> None:
 
 def test_adaln_zero_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="ada_ln_zero",
         build_module=lambda: _canonical_adaln_config().make(),
         build_input=lambda: torch.randn(2, 4),
@@ -292,7 +293,7 @@ def test_extra_batch_dims():
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_mmdit_block_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="mmdit_block",
         build_module=lambda: _canonical_mmdit_config().make().to(device),
         build_input=lambda: move_to_device(

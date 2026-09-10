@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 
@@ -17,7 +18,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_embedding_config_pprint() -> None:
@@ -31,7 +32,7 @@ def test_embedding_config_pprint() -> None:
 
 def test_embedding_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="embedding",
         build_module=lambda: Embedding.Config(4, num_embeddings=8).make(),
         build_input=lambda: torch.tensor([[0, 3, 7]]),

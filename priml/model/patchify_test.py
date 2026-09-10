@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from configgle.testing import assert_pprint_golden
 
@@ -18,7 +18,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_patchify_config_pprint() -> None:
@@ -41,7 +41,7 @@ def test_unpatchify_config_pprint() -> None:
 
 def test_patchify_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="patchify",
         build_module=lambda: Patchify.Config(
             channels_in=2,
@@ -54,7 +54,7 @@ def test_patchify_bfb() -> None:
 
 def test_unpatchify_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="unpatchify",
         build_module=lambda: Unpatchify.Config(
             channels_out=2,

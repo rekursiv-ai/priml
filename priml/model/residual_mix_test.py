@@ -9,6 +9,7 @@ applies::
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 
@@ -18,7 +19,7 @@ from priml.model.residual_mix import ResidualMix
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_residual_mix_config_pprint() -> None:
@@ -46,7 +47,7 @@ def test_residual_mix_forward_and_open_kwargs() -> None:
 
 def test_residual_mix_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="residual_mix",
         build_module=lambda: ResidualMix.Config(num_layers=2).make(),
         build_input=lambda: (

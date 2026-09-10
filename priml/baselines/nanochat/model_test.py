@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Any, override
+from typing import Any, Final, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -23,7 +23,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
 
 
-_TESTDATA_DIR = Path(__file__).parent / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 VOCAB = 32
 SEQ = 16
@@ -435,7 +435,7 @@ def test_forward_bfb() -> None:
     changes arithmetic while keeping every shape and name intact.
     """
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name="plain",
         build_module=lambda: _config().make(),
         build_input=_tokens,
@@ -450,7 +450,7 @@ def test_value_embedding_forward_bfb() -> None:
     builds no value embedding at all.
     """
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name="value_embedding",
         build_module=lambda: _config(value_embedding_stride=1).make(),
         build_input=_tokens,
@@ -491,7 +491,7 @@ def test_the_shipped_experiments_forward_bfb() -> None:
         return torch.randint(0, _model().vocab_size, (2, _model().max_seq_len))
 
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name="exp_smoke_forward",
         build_module=build,
         build_input=build_input,

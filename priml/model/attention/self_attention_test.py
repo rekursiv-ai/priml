@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import override
+from typing import Final, override
 
 from configgle import Fig, PartialConfig
 from configgle.testing import assert_pprint_golden
@@ -29,7 +29,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _LearnedRotary(nn.Module):
@@ -468,7 +468,7 @@ def test_self_attention_kernel_injection():
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_self_attention_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="self_attention",
         build_module=lambda: (
             SelfAttention.Config(

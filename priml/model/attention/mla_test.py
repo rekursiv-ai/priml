@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import functools
 import tempfile
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("name", ["latent_attention", "multi_head_latent_attention"])
@@ -428,7 +428,7 @@ def test_mla_forwards_the_open_message_bus_through_both_kernels() -> None:
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_latent_attention_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="latent_attention",
         build_module=lambda: LatentAttention.Config().make().to(device),
         build_input=lambda: {
@@ -446,7 +446,7 @@ def test_latent_attention_bfb(device: str) -> None:
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_mla_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="multi_head_latent_attention",
         build_module=lambda: (
             MultiHeadLatentAttention.Config(

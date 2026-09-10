@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from configgle import PartialConfig
 from configgle.testing import assert_pprint_golden
@@ -20,7 +20,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_value_gated_attention_config_pprint() -> None:
@@ -137,7 +137,7 @@ def test_value_gated_attention_invalid_config_prints_before_make_rejects(
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_value_gated_attention_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="value_gated_attention",
         build_module=lambda: (
             ValueGatedAttention.Config(

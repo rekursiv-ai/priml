@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, override
+from typing import Any, Final, override
 
 from configgle import PartialConfig
 from torch import Tensor, nn
@@ -22,7 +22,7 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.train.parallelism import NoParallel
 
 
-_TESTDATA_DIR = Path(__file__).parent / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 VOCAB = 32
 SEQ = 8
@@ -518,7 +518,7 @@ def test_five_steps_bfb() -> None:
         return module(batch, clock)
 
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name="five_steps",
         build_module=_SmokeSteps,
         build_input=lambda: _smoke_batch(_smoke_step()),

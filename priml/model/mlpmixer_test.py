@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from configgle.testing import assert_pprint_golden
 
@@ -18,7 +18,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_mlp_mixer_block_prenorm():
@@ -57,7 +57,7 @@ def test_mlp_mixer_block_config_pprint() -> None:
 
 def test_mlp_mixer_block_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="mlp_mixer_block",
         build_module=lambda: MLPMixerBlock.Config(channels_in=4, seq_len=2).make(),
         build_input=lambda: torch.randn(2, 2, 4),

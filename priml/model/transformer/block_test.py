@@ -12,6 +12,7 @@ math threads before torch imports. Minting from bare Python skips that setup.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 from unittest.mock import Mock, patch
 
 import warnings
@@ -38,7 +39,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _canonical_config() -> TransformerBlock.Config:
@@ -259,7 +260,7 @@ def test_block_checkpoint_wraps_under_grad():
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_transformer_block_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="transformer_block",
         build_module=lambda: _canonical_config().make().to(device),
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),

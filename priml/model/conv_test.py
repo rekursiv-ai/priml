@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 
@@ -16,7 +17,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_conv1d_config_pprint() -> None:
@@ -30,7 +31,7 @@ def test_conv1d_config_pprint() -> None:
 
 def test_conv1d_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="conv1d",
         build_module=lambda: Conv1d.Config(2, 3).make(),
         build_input=lambda: torch.randn(1, 2, 4),
@@ -49,7 +50,7 @@ def test_conv2d_config_pprint() -> None:
 
 def test_conv2d_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="conv2d",
         build_module=lambda: Conv2d.Config(2, 3).make(),
         build_input=lambda: torch.randn(1, 2, 3, 3),
@@ -68,7 +69,7 @@ def test_conv3d_config_pprint() -> None:
 
 def test_conv3d_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="conv3d",
         build_module=lambda: Conv3d.Config(2, 3).make(),
         build_input=lambda: torch.randn(1, 2, 3, 3, 3),
