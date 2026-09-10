@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast, override
+from typing import Final, cast, override
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
@@ -18,7 +18,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _Kernel(nn.Module):
@@ -120,7 +120,7 @@ def test_the_kernels_agree_on_a_windowed_forward() -> None:
 def test_kernel_bfb(device: str, name: str, kernel: object) -> None:
     assert isinstance(kernel, (SdpaFused.Config, SdpaNaive.Config))
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name=name,
         build_module=lambda: _Kernel(kernel.make()).to(device),
         build_input=lambda: tuple(torch.randn(1, 4, 2, 8) for _ in range(3)),

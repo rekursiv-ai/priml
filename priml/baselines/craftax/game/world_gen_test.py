@@ -8,6 +8,7 @@ floors connect, and each floor uses its own materials.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from priml.baselines.craftax.conftest import (
@@ -26,6 +27,8 @@ from priml.baselines.craftax.game.world_gen import (
 
 
 _DEVICE = torch.device("cpu")
+
+pytestmark = pytest.mark.usefixtures("warm_reference")
 
 
 def _world(num_envs: int = 2, seed: int = 0) -> EnvState:

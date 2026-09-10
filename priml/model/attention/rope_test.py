@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import math
 
@@ -27,7 +27,7 @@ from priml.testing.fixtures import (
 )
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize(
@@ -700,7 +700,7 @@ def test_frequency_table_bfb(device: str, name: str, frequencies: object) -> Non
         ),
     )
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name=name,
         build_module=lambda: RoPE.Config(8, frequencies=frequencies).make().to(device),
         build_input=lambda: torch.arange(4),
@@ -712,7 +712,7 @@ def test_frequency_table_bfb(device: str, name: str, frequencies: object) -> Non
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_rope_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="rope",
         build_module=lambda: RoPE.Config(8).make().to(device),
         build_input=lambda: torch.arange(4),
@@ -727,7 +727,7 @@ def test_rope_mixed_bfb(device: str) -> None:
     config.num_heads = 2
     config.learnable = True
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="rope_mixed",
         build_module=lambda: config.make().to(device),
         build_input=lambda: torch.arange(4),

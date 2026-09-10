@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 from unittest.mock import Mock
 
 import warnings
@@ -31,7 +31,7 @@ from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _hf_config(**overrides: Any) -> dict[str, Any]:
@@ -93,7 +93,7 @@ def test_kimi_k2_config_pprint() -> None:
 
 def test_kimi_k2_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="kimi_k2",
         build_module=lambda: _canonical_config().make(),
         build_input=lambda: torch.tensor([[0, 1, 2]]),

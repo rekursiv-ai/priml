@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from configgle.testing import assert_pprint_golden
 from torch.distributed.tensor import Replicate, Shard
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_linear_config_pprint() -> None:
@@ -37,7 +37,7 @@ def test_linear_config_pprint() -> None:
 
 def test_linear_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="linear",
         build_module=lambda: Linear.Config(4, 3).make(),
         build_input=lambda: torch.randn(1, 2, 4),
@@ -56,7 +56,7 @@ def test_ensemble_linear_config_pprint() -> None:
 
 def test_ensemble_linear_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="ensemble_linear",
         build_module=lambda: EnsembleLinear.Config(4, 3, num_ensemble=2).make(),
         build_input=lambda: torch.randn(1, 2, 4),

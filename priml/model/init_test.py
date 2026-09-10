@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import override
+from typing import Final, override
 
 import inspect
 
@@ -41,7 +41,7 @@ from priml.testing.fixtures import (
 from priml.testing.golden import assert_text_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 _INIT_FUNCTIONS = (
     call_init,
     kaiming_uniform,
@@ -93,7 +93,7 @@ def test_init_api_text(request: pytest.FixtureRequest) -> None:
 
 def test_init_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="init",
         build_module=_InitModule,
         build_input=lambda: torch.arange(16, dtype=torch.float32).reshape(4, 4),

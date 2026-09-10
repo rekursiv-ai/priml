@@ -109,6 +109,23 @@ def reference(module: str) -> Any:
     return importlib.import_module(f"craftax.{module}")
 
 
+@pytest.fixture(scope="module")
+def warm_reference() -> None:
+    """Import the reference package once per module, billed as setup.
+
+    ``reference`` is a lazy cache, so uncached the ~1.1s import lands on the
+    call time of whichever parity test runs first in a module and reads as a
+    slow test. Requested by parity modules only (``pytestmark =
+    pytest.mark.usefixtures("warm_reference")``), not autouse: an autouse
+    fixture here would charge every non-parity module in the package the
+    import too. Deferred, so a checkout without the optional dependency still
+    collects and skips.
+    """
+    if HAS_CRAFTAX:
+        for name in _REFERENCE_PROBES:
+            reference(name.removeprefix("craftax."))
+
+
 @functools.cache
 def _generated(num_envs: int, seed: int) -> EnvState:
     """Generate one world and keep it for the process."""

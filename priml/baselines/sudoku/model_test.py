@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from torch import Tensor, nn
 
@@ -25,7 +25,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_TESTDATA_DIR = Path(__file__).parent / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config:
@@ -176,7 +176,7 @@ def test_plain_forward_bfb() -> None:
     every shape and name intact.
     """
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name="plain",
         build_module=lambda: _config().make(),
         build_input=lambda: torch.randint(0, 11, (2, 81)),
@@ -192,7 +192,7 @@ def test_recurrent_forward_bfb() -> None:
     value, so a change to the recurrence would leave the plain golden green.
     """
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name="recurrent",
         build_module=lambda: _config(recurrent=True).make(),
         build_input=lambda: torch.randint(0, 11, (2, 81)),

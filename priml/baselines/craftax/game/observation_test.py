@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from torch import Tensor
 
+import pytest
 import torch
 
 from priml.baselines.craftax.conftest import (
@@ -14,6 +15,9 @@ from priml.baselines.craftax.conftest import (
 from priml.baselines.craftax.game import constants, observation
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
 from priml.baselines.craftax.game.state import EnvState, empty_state
+
+
+pytestmark = pytest.mark.usefixtures("warm_reference")
 
 
 def _state(num_envs: int = 2) -> EnvState:
@@ -157,6 +161,7 @@ def test_each_environment_renders_its_own_world() -> None:
 
 
 @requires_craftax
+@pytest.mark.compute_jax_jit
 def test_the_width_matches_the_reference_environment() -> None:
     """The published width, read off a reference env built at minimum size.
 
@@ -174,9 +179,10 @@ def test_the_width_matches_the_reference_environment() -> None:
 
     The small env does NOT make this fast, and shrinking it further will not:
     construction is 3e-05s and the test still takes seconds, all of it
-    ``import craftax.craftax.constants``, whose module scope runs ~51 XLA
-    compiles. Every parity test in this directory pays that once per xdist
-    worker; ``conftest.reference`` caches it within a process.
+    importing the reference env module, whose module scope runs ~51 XLA
+    compiles beyond the ``constants`` import the conftest warms. Hence the
+    ``compute_jax_jit`` marker: the JIT is the cost, so it runs in the slow
+    tier.
     """
     upstream = reference("craftax.envs.craftax_symbolic_env")
     smallest = upstream.StaticEnvParams(

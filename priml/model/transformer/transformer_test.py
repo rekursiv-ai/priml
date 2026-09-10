@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import override
+from typing import Final, override
 from unittest.mock import Mock
 
 import warnings
@@ -29,7 +29,7 @@ from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _head(tie: bool = False) -> Sequential.Config:
@@ -83,7 +83,7 @@ def test_transformer_config_pprint() -> None:
 
 def test_transformer_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name="transformer",
         build_module=lambda: _canonical_config().make(),
         build_input=lambda: torch.tensor([[0, 1, 2, 3]]),

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast, override
+from typing import Any, Final, Literal, cast, override
 
 import math
 
@@ -29,7 +29,7 @@ from priml.timer import CheckpointableStepTimer
 from priml.train.parallelism import NoParallel
 
 
-_TESTDATA_DIR = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def tiny_step(
@@ -454,7 +454,7 @@ def _assert_train_bfb(
         return _TrainStepModule(config)
 
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA_DIR,
+        golden_dir=_CWD / "testdata",
         golden_name=testdata_name,
         build_module=build,
         build_input=tiny_batch,

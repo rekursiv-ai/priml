@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Final, TypedDict, cast
 
 from torch import Tensor
 
@@ -12,7 +12,7 @@ import torch
 from priml.optimizers.adam_atan2 import AdamATan2
 
 
-_GOLDEN = Path(__file__).parent / "testdata" / "adam_atan2_0_0_3.pt"
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _AdamATan2Golden(TypedDict):
@@ -62,7 +62,11 @@ def test_adam_atan2_matches_external_package_golden() -> None:
     """Replay the ``adam-atan2==0.0.3`` package's reference oracle exactly."""
     golden = cast(
         _AdamATan2Golden,
-        torch.load(_GOLDEN, weights_only=True, map_location="cpu"),
+        torch.load(
+            _CWD / "testdata" / "adam_atan2_0_0_3.pt",
+            weights_only=True,
+            map_location="cpu",
+        ),
     )
     param = golden["initial_param"].clone()
     opt = AdamATan2(

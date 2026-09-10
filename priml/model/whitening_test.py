@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import functools
 import platform
@@ -21,7 +22,7 @@ from priml.testing.fixtures import (
 from priml.testing.golden import assert_text_golden
 
 
-_TESTDATA = Path(__file__).parent.resolve() / "testdata"
+_CWD: Final = Path(__file__).resolve().parent
 
 # ``linalg.eigh`` may choose either sign for each eigenvector. The whitening
 # layer deliberately retains both signs as [V, -V], so Linux AArch64 is
@@ -109,7 +110,7 @@ def test_whitening_text(request: pytest.FixtureRequest) -> None:
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_whitening_bfb(device: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=_TESTDATA,
+        golden_dir=_CWD / "testdata",
         golden_name=_GOLDEN_NAME,
         build_module=lambda: _whitening().to(device),
         build_input=lambda: (torch.randn(2, 1, 3, 3), torch.randn(1, 1, 3, 3)),
