@@ -22,6 +22,8 @@ from priml.model.embedding import Embedding
 from priml.model.generate import generate
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
@@ -30,11 +32,21 @@ from priml.testing.bfb import assert_bfb_against_golden
 _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
+def _head(tie: bool = False) -> Sequential.Config:
+    """The language-model head: a final norm, then the vocabulary projection."""
+    return Sequential.Config(
+        elements=[
+            RMSNorm.Config(),
+            TiedLinear.Config(tied="in_proj") if tie else Linear.Config(shard="vocab"),
+        ]
+    )
+
+
 def _tiny_config(tie: bool = False) -> Transformer.Config:
     return Transformer.Config(
-        in_proj=Embedding.Config(shard="vocab"),
-        vocab_size=128,
+        in_proj=Embedding.Config(num_embeddings=128, shard="vocab"),
         channels_in=32,
+        channels_out=128,
         num_layers=2,
         block=TransformerBlock.Config(
             attn=SelfAttention.Config(
@@ -44,22 +56,20 @@ def _tiny_config(tie: bool = False) -> Transformer.Config:
                 rope=RoPE.Config(channels_head=8),
             ),
         ),
-        final_norm=RMSNorm.Config(),
-        out_proj="tied" if tie else Linear.Config(shard="vocab"),
+        out_proj=_head(tie),
     )
 
 
 def _canonical_config() -> Transformer.Config:
     return Transformer.Config(
-        in_proj=Embedding.Config(shard="vocab"),
-        out_proj=Linear.Config(shard="vocab"),
-        vocab_size=32,
+        in_proj=Embedding.Config(num_embeddings=32, shard="vocab"),
+        out_proj=_head(),
         channels_in=16,
+        channels_out=32,
         num_layers=1,
         block=TransformerBlock.Config(
             attn=SelfAttention.Config(num_heads=2, channels_head=8, causal=True),
         ),
-        final_norm=RMSNorm.Config(),
     )
 
 
@@ -124,9 +134,13 @@ def test_model_forwards_the_open_message_bus_through_output_layers() -> None:
         def reset_parameters(self) -> None:
             self.wrapped.reset_parameters()
 
-    assert isinstance(model.out_proj, Linear)
-    model.final_norm = RecordingLayer(model.final_norm)
-    model.out_proj = RecordingLayer(model.out_proj)
+    head = model.out_proj
+    assert isinstance(head, Sequential)
+    norm, proj = head[0], head[1]
+    assert isinstance(norm, RMSNorm)
+    assert isinstance(proj, Linear)
+    head[0] = RecordingLayer(norm)
+    head[1] = RecordingLayer(proj)
     message = object()
 
     model(torch.randint(0, 128, (1, 4)), message=message)
@@ -143,7 +157,9 @@ def test_forward_shape():
 
 def test_tied_embeddings():
     m = _tiny_config(tie=True).make()
-    assert m.out_proj == "tied"
+    assert isinstance(m.out_proj, Sequential)
+    assert isinstance(m.out_proj[1], TiedLinear)
+    assert [name for name, _ in m.named_parameters() if "out_proj" in name] == []
     toks = torch.randint(0, 128, (1, 4))
     out = m(toks)
     assert out.shape == (1, 4, 128)
@@ -151,10 +167,12 @@ def test_tied_embeddings():
 
 def test_separate_out_proj():
     m = _tiny_config(tie=False).make()
-    assert isinstance(m.out_proj, Linear)
+    assert isinstance(m.out_proj, Sequential)
+    head = m.out_proj[1]
+    assert isinstance(head, Linear)
     assert isinstance(m.in_proj, Embedding)
     # Distinct parameter, not the embed matrix.
-    assert m.out_proj.weight.data_ptr() != m.in_proj.weight.data_ptr()
+    assert head.weight.data_ptr() != m.in_proj.weight.data_ptr()
 
 
 def test_explicit_out_proj_receives_model_dimensions() -> None:
@@ -165,15 +183,14 @@ def test_explicit_out_proj_receives_model_dimensions() -> None:
 
     assert isinstance(model.out_proj, Linear)
     assert model.out_proj.in_features == config.channels_in
-    assert model.out_proj.out_features == config.vocab_size
+    assert model.out_proj.out_features == config.channels_out
 
 
 def test_transformer_preserves_an_explicit_out_proj_width() -> None:
-    """The head's INPUT width is torch's to reject; its output width is not.
+    """An explicit head width survives finalize; torch rejects a wrong one.
 
-    A wrong input width fails the matmul, naming both operands. A wrong OUTPUT
-    width is silent -- it yields logits of the wrong size and forward succeeds --
-    so ``vocab_size``, a field only this config holds, is checked here.
+    A wrong input width fails the matmul, naming both operands. The output
+    width is the head's to state: the stack reports whatever it says.
     """
     config = _tiny_config()
     config.out_proj = Linear.Config(channels_in=7, channels_out=128)
@@ -185,9 +202,19 @@ def test_transformer_preserves_an_explicit_out_proj_width() -> None:
     with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
         config.make()(torch.zeros(2, 3, dtype=torch.long))
 
-    config.out_proj = Linear.Config(channels_in=32, channels_out=99)
-    with pytest.raises(ValueError, match=r"out_proj.channels_out=99"):
-        config.make()
+
+def test_transformer_reports_the_head_width_when_composed() -> None:
+    """A composed head derives its width in its own finalize; the stack reads it."""
+    config = _tiny_config()
+    config.channels_out = -1
+    config.out_proj = Sequential.Config(
+        elements=[RMSNorm.Config(), Linear.Config(32, 99)]
+    )
+
+    finalized = config.copy_tree().finalize()
+
+    assert finalized.channels_out == 99
+    assert config.make()(torch.zeros(2, 3, dtype=torch.long)).shape == (2, 3, 99)
 
 
 def test_num_layers_materialized():
@@ -230,13 +257,12 @@ def test_generate_rejects_prompt_longer_than_cache():
 
 def test_transformer_rejects_width_changing_blocks() -> None:
     config = Transformer.Config(
-        in_proj=Embedding.Config(shard="vocab"),
-        out_proj=Linear.Config(shard="vocab"),
-        vocab_size=128,
+        in_proj=Embedding.Config(num_embeddings=128, shard="vocab"),
+        out_proj=_head(),
         channels_in=32,
+        channels_out=128,
         num_layers=2,
         block=Linear.Config(32, 16),
-        final_norm=RMSNorm.Config(),
     )
 
     # A width-CHANGING block in a width-preserving slot: torch names both
@@ -261,13 +287,12 @@ def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
             raise AssertionError("leaf must remain aliased")
 
     config = Transformer.Config(
-        in_proj=Embedding.Config(shard="vocab"),
-        out_proj=Linear.Config(shard="vocab"),
-        vocab_size=128,
+        in_proj=Embedding.Config(num_embeddings=128, shard="vocab"),
+        out_proj=_head(),
         channels_in=32,
+        channels_out=128,
         num_layers=2,
         block=Linear.Config(32, 32, init_weight=Initializer()),
-        final_norm=RMSNorm.Config(),
     )
 
     config.make()
@@ -276,9 +301,9 @@ def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
 @pytest.mark.parametrize(
     "config",
     [
-        Transformer.Config(vocab_size=0, channels_in=8, num_layers=1),
-        Transformer.Config(vocab_size=8, channels_in=8, num_layers=0),
-        Transformer.Config(vocab_size=8, channels_in=0, num_layers=1),
+        Transformer.Config(channels_out=0, channels_in=8, num_layers=1),
+        Transformer.Config(channels_out=8, channels_in=8, num_layers=0),
+        Transformer.Config(channels_out=8, channels_in=0, num_layers=1),
     ],
 )
 def test_a_nonsense_width_still_prints(config: Transformer.Config) -> None:
@@ -297,7 +322,7 @@ def test_transformer_config_reports_output_width() -> None:
     assert _tiny_config().finalize().channels_out == 128
 
 
-def test_transformer_preserves_an_explicit_final_norm_width() -> None:
+def test_transformer_preserves_an_explicit_head_norm_width() -> None:
     """An explicit child width survives finalize; the child owns rejecting it.
 
     The parent does not re-derive a child's invariant: a norm built at the wrong
@@ -305,21 +330,15 @@ def test_transformer_preserves_an_explicit_final_norm_width() -> None:
     got, which the parent could not have reported.
     """
     config = _tiny_config()
-    config.final_norm = RMSNorm.Config(channels_in=7)
+    config.channels_out = -1
+    config.out_proj = RMSNorm.Config(channels_in=7)
 
     finalized = config.copy_tree().finalize()
 
-    assert isinstance(finalized.final_norm, RMSNorm.Config)
-    assert finalized.final_norm.channels_in == 7
+    assert isinstance(finalized.out_proj, RMSNorm.Config)
+    assert finalized.out_proj.channels_in == 7
+    assert finalized.channels_out == 7
     with pytest.raises(RuntimeError, match="normalized_shape"):
-        config.make()(torch.zeros(2, 3, dtype=torch.long))
-
-
-def test_transformer_rejects_width_changing_final_norm() -> None:
-    config = _tiny_config()
-    config.final_norm = Linear.Config(channels_in=32, channels_out=7)
-
-    with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
         config.make()(torch.zeros(2, 3, dtype=torch.long))
 
 
@@ -352,7 +371,7 @@ def test_transformer_reset_visits_every_parameterized_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _tiny_config().make()
-    modules = [model.in_proj, model.final_norm, *model.blocks, model.out_proj]
+    modules = [model.in_proj, *model.blocks, model.out_proj]
     resetters: list[Mock] = []
     for module in modules:
         assert module is not None

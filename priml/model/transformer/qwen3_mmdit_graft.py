@@ -68,10 +68,11 @@ class Qwen3MMDiTGraft(MMDiTGraft):
         graft.backbone = Qwen3.Config.from_hf(hf_config)
         graft.finalize()
         assert isinstance(graft.backbone, Qwen3.Config)
-        model = cls(graft)
-        model._backbone_view().load_state_dict(
-            remap_hf_state_dict(hf_state, graft.backbone), strict=True
-        )
+        # ``make``, not ``cls(graft)``: a late-bound head (a tied ``lm_head``)
+        # is resolved by ``make`` after the whole tree exists.
+        model = graft.make()
+        assert isinstance(model, cls)
+        model.load_backbone_state(remap_hf_state_dict(hf_state, graft.backbone))
         model = model.to(
             dtype=dtype
             or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16")))

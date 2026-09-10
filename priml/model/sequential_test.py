@@ -26,7 +26,7 @@ _TESTDATA = Path(__file__).parent.resolve() / "testdata"
 
 
 def test_sequential_config_pprint() -> None:
-    config = Sequential.Config(Linear.Config(4, 4), repeat=2)
+    config = Sequential.Config(elements=Linear.Config(4, 4), repeat=2)
     assert_pprint_golden(
         test_file=__file__,
         name="sequential",
@@ -39,7 +39,7 @@ def test_sequential_bfb() -> None:
         golden_dir=_TESTDATA,
         golden_name="sequential",
         build_module=lambda: Sequential.Config(
-            Linear.Config(4, 4),
+            elements=Linear.Config(4, 4),
             repeat=2,
         ).make(),
         build_input=lambda: torch.randn(2, 3, 4),
@@ -48,19 +48,19 @@ def test_sequential_bfb() -> None:
 
 
 def test_single_layer():
-    seq = Sequential.Config(Linear.Config(64, 128)).make()
+    seq = Sequential.Config(elements=Linear.Config(64, 128)).make()
     assert len(seq) == 1
     assert seq[0].weight.shape == (128, 64)
 
 
 def test_repeat():
-    seq = Sequential.Config(Linear.Config(128, 128), repeat=4).make()
+    seq = Sequential.Config(elements=Linear.Config(128, 128), repeat=4).make()
     assert len(seq) == 4
 
 
 def test_depth_index_propagation():
     """Each repeated layer gets a one-level global position."""
-    seq = Sequential.Config(Linear.Config(128, 128), repeat=4).make()
+    seq = Sequential.Config(elements=Linear.Config(128, 128), repeat=4).make()
     for i, layer in enumerate(seq):
         assert layer.depth_index == ((i, 4),), (
             f"layer {i} depth_index={layer.depth_index}"
@@ -69,8 +69,8 @@ def test_depth_index_propagation():
 
 def test_depth_propagation_nested():
     """Depth propagates through inner Sequential to Linear."""
-    block = Sequential.Config(Linear.Config(128, 128))
-    seq = Sequential.Config(block, repeat=4).make()
+    block = Sequential.Config(elements=Linear.Config(128, 128))
+    seq = Sequential.Config(elements=block, repeat=4).make()
     for i, inner in enumerate(seq):
         assert isinstance(inner, Sequential)
         linear = inner[0]
@@ -81,7 +81,7 @@ def test_depth_propagation_nested():
 
 def test_nested_depth_index_appends_local_position() -> None:
     sequence = Sequential.Config(
-        Linear.Config(128, 128),
+        elements=Linear.Config(128, 128),
         repeat=2,
         depth_index=((1, 3),),
     ).make()
@@ -92,7 +92,7 @@ def test_nested_depth_index_appends_local_position() -> None:
 
 def test_repeat_isolates_nested_config_trees() -> None:
     repeated = Sequential.Config(
-        TransformerBlock.Config(
+        elements=TransformerBlock.Config(
             channels_in=64,
             attn=SelfAttention.Config(num_heads=4, channels_head=16),
         ),
@@ -106,7 +106,7 @@ def test_repeat_isolates_nested_config_trees() -> None:
 def test_depth_based_init():
     """Later layers should have smaller weight std due to depth scaling."""
     torch.manual_seed(0)
-    seq = Sequential.Config(Linear.Config(128, 128), repeat=4).make()
+    seq = Sequential.Config(elements=Linear.Config(128, 128), repeat=4).make()
     # Index 0 is unscaled; flattened index 3 divides by sqrt(4).
     std_first = seq[0].weight.std().item()
     std_last = seq[3].weight.std().item()
@@ -116,7 +116,7 @@ def test_depth_based_init():
 def test_mup_output_with_depth():
     """MuP output init composes with depth index."""
     seq = Sequential.Config(
-        Linear.Config(128, 128, init_weight=mup_output),
+        elements=Linear.Config(128, 128, init_weight=mup_output),
         repeat=4,
     ).make()
     for i, layer in enumerate(seq):
@@ -125,7 +125,7 @@ def test_mup_output_with_depth():
 
 def test_transformer_stack():
     m = Sequential.Config(
-        TransformerBlock.Config(
+        elements=TransformerBlock.Config(
             channels_in=64,
             attn=SelfAttention.Config(num_heads=4, channels_head=16),
         ),
@@ -143,7 +143,7 @@ def test_skip_with_ffn():
 
 def test_sequential_of_norms_and_linear():
     m = Sequential.Config(
-        [
+        elements=[
             RMSNorm.Config(64),
             Linear.Config(64, 128),
         ],
@@ -154,7 +154,7 @@ def test_sequential_of_norms_and_linear():
 
 def test_sequential_reset():
     m = Sequential.Config(
-        [
+        elements=[
             Linear.Config(64, 64),
             Linear.Config(64, 64),
         ],

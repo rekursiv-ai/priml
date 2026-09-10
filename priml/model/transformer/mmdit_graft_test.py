@@ -13,6 +13,8 @@ import torch
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.linear import Linear
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import AdaLNZero, MMDiTStream
@@ -31,7 +33,9 @@ def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
     config = _canonical_config()
     config.num_layers = depth
     if tie:
-        config.out_proj = "tied"
+        assert isinstance(config.out_proj, Sequential.Config)
+        assert isinstance(config.out_proj.elements, list)
+        config.out_proj.elements[1] = TiedLinear.Config(tied="in_proj")
     assert isinstance(config.block, TransformerBlock.Config)
     assert isinstance(config.block.attn, SelfAttention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
@@ -91,12 +95,7 @@ def _assert_same_state(source: object, target: object) -> None:
 
 def _assert_transferred(source: Transformer, graft: MMDiTGraft) -> None:
     _assert_same_state(source.in_proj, graft.in_proj)
-    assert (source.out_proj == "tied") == (graft.out_proj == "tied")
-    _assert_same_state(source.final_norm, graft.final_norm)
-    if source.out_proj == "tied":
-        assert graft.out_proj == "tied"
-    else:
-        _assert_same_state(source.out_proj, graft.out_proj)
+    _assert_same_state(source.out_proj, graft.out_proj)
     assert len(source.blocks) == len(graft.blocks)
     for before, after in zip(source.blocks, graft.blocks, strict=True):
         assert isinstance(before, TransformerBlock)

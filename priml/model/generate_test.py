@@ -166,15 +166,6 @@ class _Lookup:
         return self
 
 
-class _Norm:
-    def __call__(self, x: Tensor, /, **kwargs: object) -> Tensor:
-        del kwargs
-        return x
-
-    def reset_parameters(self) -> None:
-        pass
-
-
 class _Attention:
     def __init__(self) -> None:
         self.batch: int | tuple[int, ...] | None = None
@@ -228,7 +219,6 @@ class _Transformer:
         self.in_proj = _Lookup()
         self.block = _Block()
         self.blocks: list[nn.Module] = [self.block]
-        self.final_norm = _Norm()
         self.project_calls = 0
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:

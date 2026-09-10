@@ -254,8 +254,7 @@ class TransformerConfig(ChannelsInOutConfig, Protocol):
     num_layers: int
     in_proj: Makeable[TensorModule] | None
     block: TensorBlockConfig | list[TensorBlockConfig]
-    final_norm: Makeable[TensorModule]
-    out_proj: ChannelsInOutConfig | Literal["tied"] | None
+    out_proj: Makeable[TensorModule] | None
 
 
 @runtime_checkable

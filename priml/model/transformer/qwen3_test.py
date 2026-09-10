@@ -28,6 +28,8 @@ from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import TensorBlockConfig
 from priml.model.embedding import Embedding
 from priml.model.norm import RMSNorm
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import qwen3
 from priml.model.transformer.block import TransformerBlock
@@ -99,11 +101,11 @@ def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     n_kv = attn.num_heads_kv
     d = attn.channels_head
     sd: dict[str, Tensor] = {
-        "model.embed_tokens.weight": torch.randn(cfg.vocab_size, h),
+        "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
     }
-    if cfg.out_proj != "tied":
-        sd["lm_head.weight"] = torch.randn(cfg.vocab_size, h)
+    if not qwen3._tied(cfg):
+        sd["lm_head.weight"] = torch.randn(cfg.channels_out, h)
     for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
         sd[f"{p}.input_layernorm.weight"] = torch.randn(h)
@@ -149,10 +151,20 @@ def _block(cfg: Qwen3.Config, layer: int = 0) -> TransformerBlock.Config:
     return block
 
 
+def _final_norm(cfg: Transformer.Config) -> RMSNorm.Config:
+    """The head's norm -- HF's ``model.norm``, first element of ``out_proj``."""
+    assert isinstance(cfg.out_proj, Sequential.Config)
+    elements = cfg.out_proj.elements
+    assert isinstance(elements, list)
+    norm = elements[0]
+    assert isinstance(norm, RMSNorm.Config)
+    return norm
+
+
 class TestConfig:
     def test_parse_basic(self):
         cfg = Qwen3.Config.from_hf(_hf_config())
-        assert cfg.vocab_size == 128
+        assert cfg.channels_out == 128
         assert cfg.channels_in == 64
         assert _attn(cfg).channels_head == 16
         assert _attn(cfg).num_heads_kv == 2
@@ -230,8 +242,8 @@ class TestConfig:
         ).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf_state_dict(cfg), cfg))
-        toks = torch.randint(0, cfg.vocab_size, (2, 5))
-        assert model(toks).shape == (2, 5, cfg.vocab_size)
+        toks = torch.randint(0, cfg.channels_out, (2, 5))
+        assert model(toks).shape == (2, 5, cfg.channels_out)
 
     def test_make_returns_qwen3_instance(self):
         """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
@@ -267,22 +279,20 @@ class TestSlots:
         template = _block(cfg)
         assert isinstance(template.norm1, RMSNorm.Config)
         template.norm1.eps = 1e-3
-        assert isinstance(cfg.final_norm, RMSNorm.Config)
-        cfg.final_norm.eps = 1e-3
+        _final_norm(cfg).eps = 1e-3
         cfg = cfg.copy_tree().finalize()
         assert isinstance(_block(cfg).norm1, RMSNorm.Config)
         norm1 = _block(cfg).norm1
         assert isinstance(norm1, RMSNorm.Config)
         assert norm1.eps == 1e-3
-        assert isinstance(cfg.final_norm, RMSNorm.Config)
-        assert cfg.final_norm.eps == 1e-3
+        assert _final_norm(cfg).eps == 1e-3
 
     def test_each_norm_is_its_own_object(self):
         """Templates are copied, so one consumer cannot edit another's."""
         cfg = Qwen3.Config.from_hf(_hf_config()).copy_tree().finalize()
         block = _block(cfg)
         assert block.norm1 is not block.norm2
-        assert block.norm1 is not cfg.final_norm
+        assert block.norm1 is not _final_norm(cfg)
         assert block.norm1 is not _block(cfg, 1).norm1
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
@@ -310,7 +320,7 @@ class TestLoad:
         assert isinstance(model.in_proj, Embedding)
         assert model.in_proj.weight.dtype == torch.float32
         assert model.num_layers == 1
-        assert model.in_proj.weight.shape == (cfg.vocab_size, cfg.channels_in)
+        assert model.in_proj.weight.shape == (cfg.channels_out, cfg.channels_in)
         load_local_state_dict.assert_called_once_with(tmp_path)
 
     def test_remote_load_uses_hf_model_config_and_weights(
@@ -351,9 +361,9 @@ class TestRemap:
         cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf_state_dict(cfg), cfg))
-        toks = torch.randint(0, cfg.vocab_size, (2, 5))
+        toks = torch.randint(0, cfg.channels_out, (2, 5))
         logits = model(toks)
-        assert logits.shape == (2, 5, cfg.vocab_size)
+        assert logits.shape == (2, 5, cfg.channels_out)
 
     def test_qkv_preserves_rows(self):
         """Per-head rows from HF Q/K/V land in the expected ensemble slots."""
@@ -389,10 +399,13 @@ class TestRemap:
         cfg = Qwen3.Config.from_hf(_hf_config(tie_word_embeddings=True)).finalize()
         hf_sd = _synth_hf_state_dict(cfg)
         remapped = remap_hf_state_dict(hf_sd, cfg)
-        assert "out_proj.weight" not in remapped
+        assert "out_proj.1.weight" not in remapped
         model = cfg.make()
         model.load_state_dict(remapped, strict=True)
-        assert model.out_proj == "tied"
+        assert isinstance(model.out_proj, Sequential)
+        assert isinstance(model.out_proj[1], TiedLinear)
+        tokens = torch.tensor([[1, 2, 3]])
+        assert model(tokens).shape == (1, 3, cfg.channels_out)
 
     def test_independent_qk_norms(self):
         """q_norm and k_norm weights must be independent after load."""
