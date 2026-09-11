@@ -261,7 +261,7 @@ class QuantizedActivationStorage:
             empty_marker=empty_marker,
         )
 
-        def wrapped_forward(*args: Any, **kwargs: Any) -> Any:
+        def wrapped_forward(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to ``nn.Module.forward``, whose signature is Any.
             """Forward pass with quantized activation storage hooks.
 
             Args:

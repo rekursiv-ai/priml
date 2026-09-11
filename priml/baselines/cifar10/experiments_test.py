@@ -299,7 +299,7 @@ def _deltas(parent: Cifar10TrainLoop, child: Cifar10TrainLoop) -> set[str]:
     }
 
 
-def _flatten(config: Any, prefix: str = "") -> dict[str, Any]:
+def _flatten(config: Any, prefix: str = "") -> dict[str, Any]:  # noqa: ANN401 -- forwarded to an upstream Any.
     """Return a dotted-name to value map, descending into nested Configs."""
     flat: dict[str, Any] = {}
     fields = cast(dict[str, Any], type(config).__dataclass_fields__)

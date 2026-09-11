@@ -510,7 +510,7 @@ def test_five_steps_bfb() -> None:
     budget = experiments.exp_smoke().step.train_budget_sec
     clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
 
-    def run(module: nn.Module, batch: Any) -> Tensor:
+    def run(module: nn.Module, batch: Any) -> Tensor:  # noqa: ANN401 -- forwarded to an upstream Any.
         assert isinstance(module, _SmokeSteps)
         return module(batch, clock)
 

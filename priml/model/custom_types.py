@@ -67,7 +67,7 @@ class TensorModule(Protocol):
     every call site ``Any``. This names the contract those call sites need.
     """
 
-    def __call__(self, x: Tensor, /, **kwargs: Any) -> Tensor:
+    def __call__(self, x: Tensor, /, **kwargs: Any) -> Tensor:  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
         """Apply to the input."""
         ...
 
@@ -124,7 +124,7 @@ class AttentionKernel(Protocol):
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
     ) -> Tensor:
         """Apply to the input."""
         ...
@@ -170,7 +170,7 @@ class LatentAttentionKernel(Protocol):
         *,
         w_kr: Tensor,
         w_uv: Tensor,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
     ) -> Tensor:
         """Apply to the input."""
         ...
@@ -188,7 +188,7 @@ class LookupTable(Protocol):
 
     weight: Tensor
 
-    def __call__(self, tokens: Tensor, /, **kwargs: Any) -> Tensor:
+    def __call__(self, tokens: Tensor, /, **kwargs: Any) -> Tensor:  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
         """Apply to the input."""
         ...
 

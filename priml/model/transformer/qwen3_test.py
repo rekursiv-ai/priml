@@ -593,7 +593,7 @@ def _tiny_hf_config() -> dict[str, Any]:
     }
 
 
-def _build_qwen3_hf_model(cfg_dict: dict[str, Any]) -> Any:
+def _build_qwen3_hf_model(cfg_dict: dict[str, Any]) -> Any:  # noqa: ANN401 -- forwards an upstream Any.
     transformers = pytest.importorskip("transformers")
     config = transformers.Qwen3Config(**cfg_dict, attn_implementation="eager")
     model = transformers.Qwen3ForCausalLM(config)
@@ -602,7 +602,7 @@ def _build_qwen3_hf_model(cfg_dict: dict[str, Any]) -> Any:
 
 
 def _hf_state_dict_to_loop_format(
-    hf_model: Any,
+    hf_model: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
     config: Qwen3.Config,
 ) -> dict[str, Tensor]:
     raw = {key: value.detach().cpu() for key, value in hf_model.state_dict().items()}

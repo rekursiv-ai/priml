@@ -35,7 +35,7 @@ from priml.baselines.craftax.game.state import EnvState
 # scalar formulas, so the CPU backend answers identically -- and portably on
 # a host with no GPU or a mismatched driver. ``setdefault`` leaves an
 # explicit ``JAX_PLATFORMS=cuda`` alone.
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_PLATFORMS", "cpu")  # noqa: TID251 -- test/env knob, not a provisioned cache path
 
 # The viewer under game/render is the only thing in this repo that imports
 # pygame, and SDL resolves its video driver during the FIRST init of any
@@ -46,7 +46,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 # guard at the point of use is already too late once a fixture has called
 # ``pygame.init()``. ``setdefault`` leaves an explicit
 # ``SDL_VIDEODRIVER=x11`` alone, for a human who wants to watch.
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # noqa: TID251 -- test/env knob, not a provisioned cache path
 
 _REFERENCE_PROBES: Final = (
     "craftax.craftax.constants",

@@ -39,7 +39,7 @@ class _Tiny(nn.Module):
         return self.fc(x)
 
 
-def _make(ema_config: Any) -> TrainStep:
+def _make(ema_config: Any) -> TrainStep:  # noqa: ANN401 -- forwarded to an upstream Any.
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
         optimizer=PartialConfig(torch.optim.SGD, lr=0.0),
@@ -111,7 +111,7 @@ def test_call_eval_no_ema_uses_live() -> None:
     torch.testing.assert_close(learnable.call_eval(x), live_out)
 
 
-def _learnable_with(**config_kwargs: Any) -> TrainStep:
+def _learnable_with(**config_kwargs: Any) -> TrainStep:  # noqa: ANN401 -- forwarded to an upstream Any.
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
         optimizer=PartialConfig(torch.optim.SGD, lr=0.0),
@@ -150,7 +150,7 @@ def test_parameter_remap_transforms_before_load() -> None:
     # Rename fc.weight -> renamed.weight in the checkpoint; remap puts it back.
     state["model"] = {"renamed.weight": state["model"]["fc.weight"]}
 
-    def _remap(sd: Any) -> Any:
+    def _remap(sd: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
         return {"fc.weight": sd["renamed.weight"]}
 
     target = _learnable_with()
@@ -198,7 +198,7 @@ def test_load_optimizer_true_restores_optimizer_by_default() -> None:
     assert target.optimizer.state_dict()["state"], "optimizer state not restored"
 
 
-def _scheduled(**config_kwargs: Any) -> TrainStep:
+def _scheduled(**config_kwargs: Any) -> TrainStep:  # noqa: ANN401 -- forwarded to an upstream Any.
     """Return a learnable with a nonzero rate, so a schedule has something to scale."""
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),

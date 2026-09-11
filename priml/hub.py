@@ -66,7 +66,7 @@ def load_transformers_model(
     trust_remote_code: bool = False,
     force_redownload: bool = False,
     **kwargs: object,
-) -> Any:
+) -> Any:  # noqa: ANN401 -- forwards transformers' untyped ``from_pretrained`` result.
     """Load a model from HuggingFace with consistent caching.
 
     By default, attempts to load from cache first (offline mode), then falls back

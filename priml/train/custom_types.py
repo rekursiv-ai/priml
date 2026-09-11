@@ -56,7 +56,7 @@ class ModelOutput(Protocol):
     silently mis-casting the output to ``Tensor``.
     """
 
-    def __getitem__(self, key: Any) -> Any:
+    def __getitem__(self, key: Any) -> Any:  # noqa: ANN401 -- Tensor.__getitem__ is typed Any in the torch stubs; anything narrower rejects it.
         """Index into the model output (per-key tensor or per-position tensor)."""
         ...
 
@@ -541,7 +541,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """Preprocess batch (move tensors to device, etc.)."""
         ...
 
-    def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:
+    def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.
         """Compute loss in train mode (no backprop).
 
         Args:
@@ -553,7 +553,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def eval_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:
+    def eval_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.
         """Compute loss in eval mode (no backprop).
 
         Args:
@@ -565,7 +565,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def train_step(self, **preprocessed_batch: Any) -> TrainStepOutput:
+    def train_step(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.
         """Train mode + loss + backprop + optimizer step.
 
         Args:
@@ -577,7 +577,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def call_eval(self, **preprocessed_batch: Any) -> Any:
+    def call_eval(self, **preprocessed_batch: Any) -> Any:  # noqa: ANN401 -- see the class docstring.
         """Run the evaluation forward pass.
 
         EMA if available, under inference_mode and autocast.

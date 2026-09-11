@@ -67,7 +67,7 @@ class Renderer:
         # a window on the operator's screen. ``setdefault`` so ``play`` -- which
         # wants a real window -- can export its own choice beforehand.
         if pygame.display.get_surface() is None:
-            os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+            os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # noqa: TID251 -- test/env knob, not a provisioned cache path
         if not pygame.get_init():
             pygame.init()
         # No ``set_mode``. It would MAP a window -- instantly on a local

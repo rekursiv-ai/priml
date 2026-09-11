@@ -70,8 +70,8 @@ def cap_math_threads() -> None:
         "VECLIB_MAXIMUM_THREADS",  # macOS Accelerate.
         "BLIS_NUM_THREADS",
     ):
-        os.environ.setdefault(name, "1")
-    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")
+        os.environ.setdefault(name, "1")  # noqa: TID251 -- test/env knob, not a provisioned cache path
+    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")  # noqa: TID251 -- test/env knob, not a provisioned cache path
 
 
 cap_math_threads()
