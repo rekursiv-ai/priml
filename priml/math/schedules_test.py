@@ -11,7 +11,6 @@ from collections.abc import Callable
 from functools import partial
 
 import itertools
-import math
 
 import pytest
 
@@ -162,7 +161,7 @@ def test_polynomial_power_shifts_where_the_rate_is_spent() -> None:
     """
     assert polynomial(0.5, power=1.0) == pytest.approx(0.5)
     assert polynomial(0.5, power=2.0) == pytest.approx(0.25)
-    assert polynomial(0.5, power=0.5) == pytest.approx(math.sqrt(0.5))
+    assert polynomial(0.5, power=0.5) == pytest.approx(0.5**0.5)
 
 
 def test_cosine_is_flat_at_both_ends() -> None:

@@ -213,37 +213,6 @@ def dataloader_worker_init_fn(worker_id: int) -> None:
     np.random.seed(salt("numpy_legacy_worker", worker_id, worker_seed))  # noqa: NPY002 -- deliberate legacy reseed for fork-safety
 
 
-def _local_salt(
-    *,
-    base_seed: int,
-    salt_by_rank: bool,
-    mesh: DeviceMesh | None,
-    global_rank: int,
-) -> int:
-    """Resolve the per-rank salted seed for ``set_seed_distributed``."""
-    if not salt_by_rank:
-        logger.info("seed=%d not salted.", base_seed)
-        return base_seed
-    if mesh is not None:
-        local_rank = mesh.get_local_rank()
-        this_seed = salt("rank", local_rank, base_seed)
-        logger.info(
-            "seed=%d salted by (mesh) local_rank=%d; this_seed=%d.",
-            base_seed,
-            local_rank,
-            this_seed,
-        )
-        return this_seed
-    this_seed = salt("rank", global_rank, base_seed)
-    logger.info(
-        "seed=%d salted by global_rank=%d; this_seed=%d.",
-        base_seed,
-        global_rank,
-        this_seed,
-    )
-    return this_seed
-
-
 def set_seed_distributed(
     seed: int | None = None,
     mesh: DeviceMesh | None = None,
@@ -306,26 +275,6 @@ def set_seed_distributed(
         global_rank=global_rank,
     )
     return base_seed, set_seed_local(this_seed)
-
-
-def _cuda_device_identity(index: int) -> str:
-    """Return a stable identifier for CUDA device ``index``."""
-    props = torch.cuda.get_device_properties(index)
-    for attr in ("uuid", "pci_bus_id", "name"):
-        value = getattr(props, attr, None)
-        if value:
-            return str(value)
-    return f"cuda:{index}"
-
-
-def _warn_unsupported_backend(name: str) -> None:
-    logger.warning(
-        "%s backend is active but %s RNG state is not captured by "
-        "get_rng_state; checkpoint will not round-trip %s reproducibility.",
-        name,
-        name,
-        name,
-    )
 
 
 def get_rng_state() -> RngState:
@@ -410,3 +359,54 @@ def set_rng_state(state: RngState) -> None:
                 )
         if n_devices:
             torch.cuda.set_rng_state_all(cuda_states)
+
+
+def _local_salt(
+    *,
+    base_seed: int,
+    salt_by_rank: bool,
+    mesh: DeviceMesh | None,
+    global_rank: int,
+) -> int:
+    """Resolve the per-rank salted seed for ``set_seed_distributed``."""
+    if not salt_by_rank:
+        logger.info("seed=%d not salted.", base_seed)
+        return base_seed
+    if mesh is not None:
+        local_rank = mesh.get_local_rank()
+        this_seed = salt("rank", local_rank, base_seed)
+        logger.info(
+            "seed=%d salted by (mesh) local_rank=%d; this_seed=%d.",
+            base_seed,
+            local_rank,
+            this_seed,
+        )
+        return this_seed
+    this_seed = salt("rank", global_rank, base_seed)
+    logger.info(
+        "seed=%d salted by global_rank=%d; this_seed=%d.",
+        base_seed,
+        global_rank,
+        this_seed,
+    )
+    return this_seed
+
+
+def _cuda_device_identity(index: int) -> str:
+    """Return a stable identifier for CUDA device ``index``."""
+    props = torch.cuda.get_device_properties(index)
+    for attr in ("uuid", "pci_bus_id", "name"):
+        value = getattr(props, attr, None)
+        if value:
+            return str(value)
+    return f"cuda:{index}"
+
+
+def _warn_unsupported_backend(name: str) -> None:
+    logger.warning(
+        "%s backend is active but %s RNG state is not captured by "
+        "get_rng_state; checkpoint will not round-trip %s reproducibility.",
+        name,
+        name,
+        name,
+    )

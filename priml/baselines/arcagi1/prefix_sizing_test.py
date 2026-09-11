@@ -72,7 +72,7 @@ def dataset_dir(tmp_path: Path) -> Path:
 
 
 def _table(config: experiments.ArcTrainLoop) -> SparsePuzzleEmbedding.Config:
-    """The per-task embedding config from a finalized experiment."""
+    """Return the per-task embedding config from a finalized experiment."""
     prefix = config.step.model.prefix
     assert isinstance(prefix, PrefixStack.Config)
     table = prefix.parts[0]

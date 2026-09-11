@@ -2,7 +2,7 @@
 
 Module-level ``@torch.compile`` and ``@torch.compiler.assume_constant_result``
 load ~400 torch modules (dynamo, inductor, functorch, functorch's symbolic
-shapes, ...) just to construct the lazy trampoline — about 1s each. ``lazy_compile``
+shapes, ...) just to construct the lazy trampoline -- about 1s each. ``lazy_compile``
 and ``lazy_assume_constant_result`` defer that construction to first call, so
 modules that decorate but never run in a given process pay no import-time cost.
 First call is slower by the deferred amount; subsequent calls are identical to
@@ -12,7 +12,7 @@ the non-lazy version.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, cast, overload
+from typing import cast, overload
 
 import functools
 import traceback
@@ -29,12 +29,14 @@ def lazy_torch_compile[**P, R](fn: Callable[P, R], /) -> Callable[P, R]: ...
 
 @overload
 def lazy_torch_compile[**P, R](
-    **compile_kwargs: Any,
+    **compile_kwargs: object,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
 
-def lazy_torch_compile(*compile_args: Any, **compile_kwargs: Any) -> Callable[..., Any]:
-    """Lazy ``@torch.compile`` — defers dynamo/inductor imports to first call.
+def lazy_torch_compile(
+    *compile_args: object, **compile_kwargs: object
+) -> Callable[..., object]:
+    """Lazy ``@torch.compile`` -- defers dynamo/inductor imports to first call.
 
     Mirrors ``torch.compile``'s dual calling convention: use bare
     (``@lazy_torch_compile``) or parameterized
@@ -48,6 +50,10 @@ def lazy_torch_compile(*compile_args: Any, **compile_kwargs: Any) -> Callable[..
     to construct the trampoline. This wrapper defers that to first
     call, so processes that import but never invoke pay zero cost.
 
+    Args:
+      *compile_args: Compile args.
+      **compile_kwargs: Compile kwargs.
+
     Returns:
       result: The lazily-compiled function when applied bare, otherwise a
         decorator awaiting the function to compile.
@@ -58,44 +64,32 @@ def lazy_torch_compile(*compile_args: Any, **compile_kwargs: Any) -> Callable[..
     if len(compile_args) == 1 and not compile_kwargs and callable(compile_args[0]):
         return _make_lazy_compiled(compile_args[0])
 
-    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(fn: Callable[..., object]) -> Callable[..., object]:
         return _make_lazy_compiled(fn, *compile_args, **compile_kwargs)
 
     return decorator
 
 
-def _make_lazy_compiled[**P, R](
-    fn: Callable[P, R], *compile_args: Any, **compile_kwargs: Any
-) -> Callable[P, R]:
-    """Wrap ``fn`` so ``torch.compile`` runs on first call, not at decoration."""
-    compiled: Callable[P, R] | None = None
-
-    @functools.wraps(fn)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        nonlocal compiled
-        target = compiled
-        if target is None:
-            target = cast(
-                Callable[P, R], torch.compile(*compile_args, **compile_kwargs)(fn)
-            )
-            compiled = target
-        return target(*args, **kwargs)
-
-    return wrapper
-
-
-def lazy_assume_constant_result(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Lazy ``@torch.compiler.assume_constant_result`` — defers dynamo imports to first call.
+def lazy_assume_constant_result[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Lazy ``@torch.compiler.assume_constant_result`` -- defers dynamo imports to first call.
 
     Same semantics as ``torch.compiler.assume_constant_result``; see
     its docs for what the wrapping buys you inside a compiled region.
     This version pays the dynamo import cost on first call rather
     than at module load.
+
+    Args:
+      fn: The function whose result dynamo may treat as constant.
+
+    Returns:
+      wrapper: Calls ``fn`` through ``assume_constant_result``, wrapping it on
+        first use.
+
     """
-    wrapped: Callable[..., Any] | None = None
+    wrapped: Callable[P, R] | None = None
 
     @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         nonlocal wrapped
         target = wrapped
         if target is None:
@@ -129,7 +123,7 @@ def trace_compile(
         always_print: Print the stack trace on every compile.
 
     Returns:
-        Number of compiles seen so far for this key.
+        count: Number of compiles seen so far for this key.
 
     """
     trace = "".join(traceback.format_stack()[:-1])
@@ -141,3 +135,27 @@ def trace_compile(
         traces_str = "" if always_print else ("\n" + "\n--------\n".join(traces))
         raise RuntimeError(f"Too many compiles ({len(traces)}) for {key}.{traces_str}")
     return len(traces)
+
+
+def _make_lazy_compiled[**P, R](
+    fn: Callable[P, R], *compile_args: object, **compile_kwargs: object
+) -> Callable[P, R]:
+    """Wrap ``fn`` so ``torch.compile`` runs on first call, not at decoration."""
+    compiled: Callable[P, R] | None = None
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        nonlocal compiled
+        target = compiled
+        if target is None:
+            # ``torch.compile`` is overloaded on a keyword-only signature; the
+            # forwarded splat is opaque to it, so the decorator it returns is
+            # rebuilt as the ``Callable[P, R]`` it is documented to be.
+            compile_fn = cast(
+                Callable[..., Callable[[Callable[P, R]], Callable[P, R]]], torch.compile
+            )
+            target = compile_fn(*compile_args, **compile_kwargs)(fn)
+            compiled = target
+        return target(*args, **kwargs)
+
+    return wrapper

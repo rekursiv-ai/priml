@@ -19,15 +19,6 @@ from typeguard import typechecked
 
 import numpy as np
 
-# AUTHORIZED STYLE DEVIATION -- STYLE.md forbids a non-``__init__`` module
-# re-exporting a name it does not define. Granted for ``convert_to_tensor``
-# ALONE, because it and ``Tensorable`` are one concept: the alias exists to
-# name what the converter accepts, so a caller importing the type almost
-# always wants the converter in the same breath. The aliasing predicates
-# sitting beside it in :mod:`priml.memory` have no such tie and are
-# deliberately not re-exported -- import those from the module defining them.
-from priml.memory import convert_to_tensor
-
 
 __all__ = [
     "Numeric",
@@ -36,7 +27,6 @@ __all__ = [
     "Tensorable",
     "TensorableFn",
     "TensorableNest",
-    "convert_to_tensor",
     "jaxtypechecked",
 ]
 

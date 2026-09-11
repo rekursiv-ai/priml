@@ -9,9 +9,10 @@ from torch import Tensor
 import torch
 import torch.linalg
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
 from priml.math.distributed import logmeanexp_all_to_all
 from priml.math.numeric import logmeanexp
+from priml.memory import convert_to_tensor
 
 
 type PcaDecompose = Callable[[Tensor], tuple[Tensor, Tensor]]
@@ -79,6 +80,12 @@ def entropy_logits(
 ) -> Tensor:
     """Cross-entropy H(softmax(x), softmax(y)), or entropy if y is None.
 
+    Args:
+      x: X.
+      y: Y.
+      dim: Dim.
+      keepdim: Keepdim.
+
     Returns:
       entropy: Scalar or reduced tensor.
 
@@ -100,6 +107,12 @@ def entropy_probs(
     keepdim: bool = False,
 ) -> Tensor:
     """Cross-entropy H(p, q), or entropy H(p) if q is None.
+
+    Args:
+      p: P.
+      q: Q.
+      dim: Dim.
+      keepdim: Keepdim.
 
     Returns:
       entropy: Scalar or reduced tensor.
@@ -174,6 +187,15 @@ def entropy_logits_mean_all_to_all(
     Computes H(mean_p, mean_q) where means are taken over dim_mean
     using all_gather for the log-mean. Analogous to the mean-teacher
     entropy used in semi-supervised learning.
+
+    Args:
+      x: X.
+      y: Y.
+      dim: Dim.
+      dim_mean: Dim mean.
+      keepdim: Keepdim.
+      keepdim_mean: Keepdim mean.
+      world_size: World size.
 
     Returns:
       entropy: Cross-entropy of the averaged distributions.
@@ -250,7 +272,7 @@ def pca_power(
 ) -> tuple[Tensor, Tensor]:
     """Decompose by simultaneous power iteration with QR orthogonalization.
 
-    Only uses matmul and basic arithmetic — runs natively on MPS
+    Only uses matmul and basic arithmetic -- runs natively on MPS
     (no CPU fallback). Uses Householder QR for numerical stability.
 
     Args:
@@ -300,7 +322,7 @@ def pca(
     When ``whiten=True``, eigenvectors are scaled by ``1/sqrt(λ + eps)``
     so that projecting data onto them produces unit-variance components.
 
-    This is a **fit** function — it returns the decomposition, not
+    This is a **fit** function -- it returns the decomposition, not
     transformed data. To apply::
 
         eigenvalues, eigenvectors = pca(x, whiten=True, eps=1e-5)
@@ -332,30 +354,6 @@ def pca(
     if whiten:
         eigenvectors = eigenvectors * torch.rsqrt(eigenvalues.unsqueeze(0) + eps)
     return eigenvalues, eigenvectors
-
-
-def _householder_qr(mat: Tensor) -> tuple[Tensor, Tensor]:
-    """Householder QR decomposition (MPS-native).
-
-    Returns (q, r) where q is orthogonal and r is upper triangular.
-    """
-    m, n = mat.shape
-    q = torch.eye(m, device=mat.device, dtype=mat.dtype)
-    r = mat.clone()
-    for k in range(min(m, n)):
-        x = r[k:, k]
-        alpha = -torch.sign(x[0]) * x.norm()
-        v = x.clone()
-        v[0] = v[0] - alpha
-        v_norm = v.norm()
-        # Skip the reflection when the column is already (near) axis-aligned;
-        # scale the dtype epsilon by the row count for the accumulated error.
-        if v_norm < torch.finfo(mat.dtype).eps * mat.shape[0]:
-            continue
-        v = v / v_norm
-        r[k:, k:] = r[k:, k:] - 2 * v.unsqueeze(0).T @ (v.unsqueeze(0) @ r[k:, k:])
-        q[:, k:] = q[:, k:] - 2 * (q[:, k:] @ v.unsqueeze(0).T) @ v.unsqueeze(0)
-    return q, r
 
 
 def quantile_normalize(x: Tensorable, q: float = 1e-3) -> Tensor:
@@ -415,16 +413,53 @@ class SlidingWindow:
         self.samples: list[tuple[float, float]] = []
 
     def add(self, timestamp: float, cumulative_count: float) -> None:
-        """Record an observation and prune expired entries."""
+        """Record an observation and prune expired entries.
+
+        Args:
+          timestamp: Timestamp.
+          cumulative_count: Cumulative count.
+
+        """
         self.samples.append((timestamp, cumulative_count))
         cutoff = timestamp - self.window_sec
         self.samples = [(t, c) for t, c in self.samples if t >= cutoff]
 
     def compute_rate(self, current_time: float, current_count: float) -> float:
-        """Compute items/sec over the window with Laplace smoothing."""
+        """Compute items/sec over the window with Laplace smoothing.
+
+        Args:
+          current_time: Current time.
+          current_count: Current count.
+
+        Returns:
+          result: The float.
+
+        """
         if len(self.samples) < 2:
             return 0.0
         t0, c0 = self.samples[0]
         elapsed = current_time - t0
         items = current_count - c0
         return (items + self.pseudocount) / (elapsed + self.pseudotime)
+
+
+# Returns (q, r) where q is orthogonal and r is upper triangular.
+def _householder_qr(mat: Tensor) -> tuple[Tensor, Tensor]:
+    """Householder QR decomposition (MPS-native)."""
+    m, n = mat.shape
+    q = torch.eye(m, device=mat.device, dtype=mat.dtype)
+    r = mat.clone()
+    for k in range(min(m, n)):
+        x = r[k:, k]
+        alpha = -torch.sign(x[0]) * x.norm()
+        v = x.clone()
+        v[0] = v[0] - alpha
+        v_norm = v.norm()
+        # Skip the reflection when the column is already (near) axis-aligned;
+        # scale the dtype epsilon by the row count for the accumulated error.
+        if v_norm < torch.finfo(mat.dtype).eps * mat.shape[0]:
+            continue
+        v = v / v_norm
+        r[k:, k:] = r[k:, k:] - 2 * v.unsqueeze(0).T @ (v.unsqueeze(0) @ r[k:, k:])
+        q[:, k:] = q[:, k:] - 2 * (q[:, k:] @ v.unsqueeze(0).T) @ v.unsqueeze(0)
+    return q, r

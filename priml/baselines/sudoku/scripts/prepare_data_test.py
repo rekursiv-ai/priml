@@ -52,7 +52,7 @@ def test_training_split_expands_and_test_split_does_not(
     train = np.load(out / "train" / "all__inputs.npy")
     test = np.load(out / "test" / "all__inputs.npy")
     assert train.shape == (3 * 3, 81)  # 3 puzzles x (1 original + 2 copies)
-    assert test.shape == (4, 81)  # every source puzzle, untouched
+    assert test.shape == (4, 81)  # every source puzzle, untouched.
 
 
 def test_group_indices_bound_each_puzzles_copies(tmp_path: Path, csv_dir: Path) -> None:
@@ -73,9 +73,9 @@ def test_tokens_land_in_the_documented_vocabulary(
     )
     inputs = np.load(out / "train" / "all__inputs.npy")
     labels = np.load(out / "train" / "all__labels.npy")
-    assert inputs.min() >= 1  # no padding in stored rows
+    assert inputs.min() >= 1  # no padding in stored rows.
     assert inputs.max() <= 10
-    assert set(np.unique(labels).tolist()) <= set(range(2, 11))  # solved: no empties
+    assert set(np.unique(labels).tolist()) <= set(range(2, 11))  # solved: no empties.
     assert json.loads((out / "train" / "dataset.json").read_text()) == {
         "vocab_size": 11,
         "seq_len": 81,
@@ -110,7 +110,7 @@ def test_the_clues_survive_transformation(tmp_path: Path, csv_dir: Path) -> None
     )
     inputs = np.load(out / "train" / "all__inputs.npy")
     labels = np.load(out / "train" / "all__labels.npy")
-    given = inputs > 1  # token 1 is an empty cell
+    given = inputs > 1  # token 1 is an empty cell.
     assert np.array_equal(inputs[given], labels[given])
 
 

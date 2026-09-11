@@ -44,31 +44,13 @@ from priml.train.ema import EMA, NoEMA
 from priml.train.train_step import TrainStep
 
 
-def _prefix_kwargs(batch: dict[str, Any]) -> dict[str, Any]:
-    """The batch fields a prefix module consumes, if any.
-
-    A per-puzzle prefix needs to know WHICH puzzle each row is; the grid alone
-    cannot say. Passing the whole batch would instead hand the model its own
-    labels.
-    """
-    identifiers = batch.get("puzzle_identifiers")
-    return {} if identifiers is None else {"puzzle_identifiers": identifiers}
-
-
+# Muon orthogonalizes each update, which suits the square-ish weight matrices inside the
+# reasoning blocks but not lookup tables or the output projection, so the model is
+# partitioned by name: everything Muon declares eligible EXCEPT the embeddings and heads
+# goes to Muon, and the complement to AdamW. The two selectors partition the model
+# exactly, which ``CompositeOptimizer`` verifies.
 def _default_optimizer() -> CompositeOptimizer.Config:
-    """Muon on the reasoning matrices, AdamW on embeddings and heads.
-
-    Muon orthogonalizes each update, which suits the square-ish weight matrices
-    inside the reasoning blocks but not lookup tables or the output projection,
-    so the model is partitioned by name: everything Muon declares eligible
-    EXCEPT the embeddings and heads goes to Muon, and the complement to AdamW.
-    The two selectors partition the model exactly, which
-    ``CompositeOptimizer`` verifies.
-
-    Returns:
-      config: The default two-member optimizer recipe.
-
-    """
+    """Muon on the reasoning matrices, AdamW on embeddings and heads."""
     on_muon = excluding(Muon.eligible_tensor, "embed", "head")
     config = CompositeOptimizer.Config()
     config.optimizers = [
@@ -416,7 +398,7 @@ class SudokuTrainStep(TrainStep):
         )
 
     def _carry(self) -> tuple[Tensor, Tensor] | tuple[()]:
-        """The latent state the pool carries, or nothing when ACT is off."""
+        """Return the latent state the pool carries, or nothing when ACT is off."""
         if self.act is None:
             return ()
         return self.act.latents()
@@ -432,6 +414,8 @@ class SudokuTrainStep(TrainStep):
             return out.logits, out.halt
         return self.act.rollout(self.net, media=media, prefix_kwargs=prefix_kwargs)
 
+    # Only active rows contribute, and the mean is over those rows: a pool slot holding
+    # no puzzle must not dilute the gradient.
     def _loss(
         self,
         logits: Tensor,
@@ -440,11 +424,7 @@ class SudokuTrainStep(TrainStep):
         halt: Tensor,
         active: Tensor,
     ) -> tuple[Tensor, dict[str, float | Tensor]]:
-        """Cross-entropy over cells, plus the halt term when ACT is attached.
-
-        Only active rows contribute, and the mean is over those rows: a pool
-        slot holding no puzzle must not dilute the gradient.
-        """
+        """Cross-entropy over cells, plus the halt term when ACT is attached."""
         config = self.config
         ignore = config.ignore_label_id
         per_token = functional.cross_entropy(
@@ -472,14 +452,12 @@ class SudokuTrainStep(TrainStep):
         metrics.update(halt_metrics)
         return lm_loss + halt_loss, metrics
 
+    # Strictly past: the shadow is seeded by the train step AT the warmup boundary,
+    # which runs after that step's evaluation, so an evaluation on the boundary itself
+    # would score an unseeded shadow.
     @contextmanager
     def _eval_weights(self) -> Generator[None]:
-        """Swap in the EMA shadow for the duration, once past warmup.
-
-        Strictly past: the shadow is seeded by the train step AT the warmup
-        boundary, which runs after that step's evaluation, so an evaluation on
-        the boundary itself would score an unseeded shadow.
-        """
+        """Swap in the EMA shadow for the duration, once past warmup."""
         if isinstance(self._ema, NoEMA) or self.global_step <= (
             self.config.ema_warmup_steps
         ):
@@ -501,3 +479,11 @@ class SudokuTrainStep(TrainStep):
             cache_enabled=False,
         ):
             yield
+
+
+# A per-puzzle prefix needs to know WHICH puzzle each row is; the grid alone cannot say.
+# Passing the whole batch would instead hand the model its own labels.
+def _prefix_kwargs(batch: dict[str, Any]) -> dict[str, Any]:
+    """Return the batch fields a prefix module consumes, if any."""
+    identifiers = batch.get("puzzle_identifiers")
+    return {} if identifiers is None else {"puzzle_identifiers": identifiers}

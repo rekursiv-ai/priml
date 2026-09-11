@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Literal
 
 from torch import Tensor, nn
 
 import torch
 
 from priml.math.stats import PcaDecompose, pca, pca_eigh
+
+
+if TYPE_CHECKING:
+    from torch.nn.common_types import _size_2_t
 
 
 class PCAWhiteningConv2d(nn.Conv2d):
@@ -25,8 +29,33 @@ class PCAWhiteningConv2d(nn.Conv2d):
 
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(  # noqa: PLR0917 -- mirrors nn.Conv2d's positional signature.
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t = 1,
+        padding: str | _size_2_t = 0,
+        dilation: _size_2_t = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: Literal["zeros", "reflect", "replicate", "circular"] = "zeros",
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups,
+            bias,
+            padding_mode,
+            device,
+            dtype,
+        )
         self.weight.requires_grad = False
 
     def init_whiten(

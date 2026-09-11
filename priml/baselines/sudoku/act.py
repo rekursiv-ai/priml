@@ -130,7 +130,12 @@ class ActPool:
         self.halted = torch.ones(bs, dtype=torch.bool)
 
     def to(self, device: torch.device) -> None:
-        """Move pool state to ``device`` and reseed the RNG there."""
+        """Move pool state to ``device`` and reseed the RNG there.
+
+        Args:
+          device: Device.
+
+        """
         self.device = device
         self.inputs = self.inputs.to(device)
         self.labels = self.labels.to(device)
@@ -143,7 +148,12 @@ class ActPool:
         self._generator.manual_seed(self.config.halt_exploration_seed)
 
     def latents(self) -> tuple[Tensor, Tensor]:
-        """The carried ``(z_slow, z_fast)`` for this step's forward."""
+        """Return the carried ``(z_slow, z_fast)`` for this step's forward.
+
+        Returns:
+          result: The tuple[Tensor, Tensor].
+
+        """
         return self.z_slow, self.z_fast
 
     def refill(
@@ -315,6 +325,14 @@ class ActPool:
 
         The model may revise its own guesses freely but must not overwrite what
         the puzzle told it, so clue cells are copied back verbatim.
+
+        Args:
+          decoded: Decoded.
+          media: Media.
+
+        Returns:
+          result: The Tensor.
+
         """
         given = (media >= self.config.given_low) & (media <= self.config.given_high)
         return torch.where(given, media.to(decoded.dtype), decoded)
@@ -326,11 +344,20 @@ class ActPool:
         in-flight state bound to specific puzzles, and a resumed run continues
         with the next batch rather than replaying interrupted ones. The RNG is
         saved because the exploration sequence must not restart.
+
+        Returns:
+          result: The dict[str, Any].
+
         """
         return {"halt_rng": self._generator.get_state()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the halting RNG produced by :meth:`state_dict`."""
+        """Restore the halting RNG produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         if "halt_rng" in state_dict:
             # ``set_state`` wants a CPU byte tensor; a checkpoint read onto the
             # compute device would otherwise be rejected here.
@@ -345,13 +372,11 @@ class ActPool:
             if setter is not None:
                 setter(feedback)
 
+    # A slot halts at the step cap unconditionally, or when the halt head fires AND the
+    # slot has run its sampled minimum. The draw order -- ``rand`` then ``randint`` --
+    # is a reproducibility contract.
     def _halt_mask(self, halt: Tensor) -> Tensor:
-        """Which slots stop after this step.
-
-        A slot halts at the step cap unconditionally, or when the halt head
-        fires AND the slot has run its sampled minimum. The draw order --
-        ``rand`` then ``randint`` -- is a reproducibility contract.
-        """
+        """Which slots stop after this step."""
         config = self.config
         bs = config.batch_size
         at_cap = self.steps >= config.max_steps

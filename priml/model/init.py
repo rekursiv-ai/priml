@@ -16,14 +16,23 @@ from priml.model.custom_types import DepthIndex, flatten_depth_index
 class DepthAwareInit(Protocol):
     """An initializer that also consumes the block's depth index."""
 
-    def __call__(self, t: Tensor, /, *, depth_index: DepthIndex = ...) -> object: ...
+    def __call__(self, t: Tensor, /, *, depth_index: DepthIndex = ...) -> object:
+        """Apply to the input."""
+        ...
 
 
 InitFn = Callable[[Tensor], object] | DepthAwareInit
 
 
 def call_init(fn: InitFn, t: Tensor, **kwargs: DepthIndex) -> None:
-    """Call init fn, passing kwargs only if the fn accepts them."""
+    """Call init fn, passing kwargs only if the fn accepts them.
+
+    Args:
+      fn: Fn.
+      t: T.
+      **kwargs: Kwargs.
+
+    """
     try:
         sig = inspect.signature(fn)
         accepts_kwargs = any(
@@ -45,38 +54,63 @@ def call_init(fn: InitFn, t: Tensor, **kwargs: DepthIndex) -> None:
     fn(t, **kwargs)
 
 
-def _depth_index_scale(w: Tensor, depth_index: DepthIndex) -> None:
-    flattened = flatten_depth_index(depth_index)
-    if flattened > 0:
-        w.data /= (flattened + 1) ** 0.5
-
-
 def kaiming_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Kaiming uniform, scaled by 1/sqrt(depth_index)."""
+    """Kaiming uniform, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.kaiming_uniform_(w, a=5**0.5)
     _depth_index_scale(w, depth_index)
 
 
 def kaiming_normal(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Kaiming normal, scaled by 1/sqrt(depth_index)."""
+    """Kaiming normal, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.kaiming_normal_(w, a=5**0.5)
     _depth_index_scale(w, depth_index)
 
 
 def xavier_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Xavier uniform, scaled by 1/sqrt(depth_index)."""
+    """Xavier uniform, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.xavier_uniform_(w)
     _depth_index_scale(w, depth_index)
 
 
 def xavier_normal(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Xavier normal, scaled by 1/sqrt(depth_index)."""
+    """Xavier normal, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.xavier_normal_(w)
     _depth_index_scale(w, depth_index)
 
 
 def normal(w: Tensor, *, std: float = 0.02, depth_index: DepthIndex = ()) -> None:
-    """Normal init, scaled by 1/sqrt(depth_index)."""
+    """Initialize normal, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      std: Std.
+      depth_index: Depth index.
+
+    """
     nn.init.normal_(w, std=std)
     _depth_index_scale(w, depth_index)
 
@@ -90,7 +124,7 @@ def truncated_normal(
     upper: float = 2.0,
     variance_correction: bool = False,
 ) -> None:
-    """Truncated normal, scaled by 1/sqrt(depth_index).
+    """Initialize truncated normal, scaled by 1/sqrt(depth_index).
 
     Args:
       w: Tensor to initialize in place.
@@ -116,12 +150,12 @@ def truncated_normal(
             return
         sqrt2 = 2.0**0.5
         z = (math.erf(upper / sqrt2) - math.erf(lower / sqrt2)) / 2.0
-        inv_sqrt_2pi = 1.0 / math.sqrt(2.0 * math.pi)
+        inv_sqrt_2pi = 1.0 / (2.0 * math.pi) ** 0.5
         pdf_u = inv_sqrt_2pi * math.exp(-0.5 * upper * upper)
         pdf_l = inv_sqrt_2pi * math.exp(-0.5 * lower * lower)
         # Std of N(0,1) truncated to [lower, upper].
         ratio = (pdf_u - pdf_l) / z
-        std /= math.sqrt(1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio)
+        std /= float((1.0 - (upper * pdf_u - lower * pdf_l) / z - ratio * ratio) ** 0.5)
     nn.init.trunc_normal_(w, std=std, a=lower * std, b=upper * std)
     _depth_index_scale(w, depth_index)
 
@@ -143,7 +177,13 @@ def unit_fan_in_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
 
 
 def mup_output(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """MuP output projection init: 1/fan_in, scaled by 1/sqrt(depth_index)."""
+    """MuP output projection init: 1/fan_in, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     fan_in = w.shape[1] if w.ndim >= 2 else w.shape[0]
     nn.init.normal_(w, std=1 / fan_in)
     _depth_index_scale(w, depth_index)
@@ -154,5 +194,15 @@ def dirac(w: Tensor) -> None:
 
     Sets conv weights so the layer initially acts as an identity
     (or near-identity). Requires ndim >= 3.
+
+    Args:
+      w: W.
+
     """
     nn.init.dirac_(w)
+
+
+def _depth_index_scale(w: Tensor, depth_index: DepthIndex) -> None:
+    flattened = flatten_depth_index(depth_index)
+    if flattened > 0:
+        w.data /= (flattened + 1) ** 0.5

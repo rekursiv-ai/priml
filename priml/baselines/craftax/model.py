@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from typing import override
 
-import math
-
 from configgle import Fig
 from torch import Tensor, nn
 
@@ -105,7 +103,7 @@ def _tower(
     layers: list[nn.Module] = []
     width = observation_size
     for _ in range(num_layers):
-        layers.append(_linear(width, channels_in, gain=math.sqrt(2.0)))
+        layers.append(_linear(width, channels_in, gain=2.0**0.5))
         layers.append(nn.Tanh())
         width = channels_in
     layers.append(_linear(width, output_size, gain=output_gain))

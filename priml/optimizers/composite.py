@@ -39,11 +39,22 @@ if TYPE_CHECKING:
 class Selector(Protocol):
     """Decides whether one named parameter belongs to a member optimizer."""
 
-    def __call__(self, name: str, parameter: Parameter) -> bool: ...
+    def __call__(self, name: str, parameter: Parameter) -> bool:
+        """Apply to the input."""
+        ...
 
 
 def everything(name: str, parameter: Parameter) -> bool:
-    """Select every parameter; the single-group recipe."""
+    """Select every parameter; the single-group recipe.
+
+    Args:
+      name: Name.
+      parameter: Parameter.
+
+    Returns:
+      result: The bool.
+
+    """
     del name, parameter
     return True
 
@@ -159,10 +170,94 @@ class complement:  # noqa: N801 -- reads as a combinator at the call site
         return f"complement({_name(self.select)})"
 
 
-def _name(select: Selector) -> str:
-    """Return a stable name for a selector, never an address."""
-    qualname = getattr(select, "__qualname__", None)
-    return qualname if isinstance(qualname, str) else repr(select)
+class _ChainedState(dict[Any, Any]):
+    """A live view of every member's per-parameter state.
+
+    ``Optimizer.state`` is a plain attribute, so the composite
+    cannot expose it as a property without breaking the base class contract.
+    This subclasses ``dict`` instead and refreshes from the members on each
+    read, so state a member creates lazily (on its first step) still appears.
+    """
+
+    def __init__(self, optimizers: Sequence[Optimizer]) -> None:
+        super().__init__()
+        self._optimizers = optimizers
+
+    @override
+    def __getitem__(self, key: Any) -> Any:
+        self._refresh()
+        return super().__getitem__(key)
+
+    @override
+    def __len__(self) -> int:
+        self._refresh()
+        return super().__len__()
+
+    @override
+    def __iter__(self) -> Iterator[Any]:
+        self._refresh()
+        return super().__iter__()
+
+    def _refresh(self) -> None:
+        for optimizer in self._optimizers:
+            super().update(optimizer.state)
+
+
+def _reject_shared_parameters(optimizers: Sequence[Optimizer]) -> None:
+    """Raise if any parameter belongs to more than one optimizer."""
+    seen: set[int] = set()
+    for optimizer in optimizers:
+        for group in optimizer.param_groups:
+            for parameter in group["params"]:
+                if id(parameter) in seen:
+                    raise ValueError(
+                        "A parameter belongs to more than one optimizer in the "
+                        "composite, so it would be updated twice per step.",
+                    )
+                seen.add(id(parameter))
+
+
+def _route(
+    model: nn.Module,
+    members: Sequence[Callable[..., Optimizer]],
+    selectors: Sequence[Selector],
+    *,
+    require_total: bool,
+    drop_empty: bool = False,
+) -> list[Optimizer]:
+    """Build each member over the trainable parameters its selector claims."""
+    named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    claimed: dict[int, str] = {}
+    groups: list[list[Parameter]] = []
+    kept: list[Callable[..., Optimizer]] = []
+    for index, select in enumerate(selectors):
+        group: list[Parameter] = []
+        for name, parameter in named:
+            if not select(name, parameter):
+                continue
+            owner = claimed.get(id(parameter))
+            if owner is not None:
+                raise ValueError(
+                    f"Parameter {name!r} is claimed by selector {owner} and "
+                    f"{index}; it would be updated twice per step.",
+                )
+            claimed[id(parameter)] = str(index)
+            group.append(parameter)
+        if not group:
+            if drop_empty:
+                continue
+            raise ValueError(f"Selector {index} claimed no parameters.")
+        groups.append(group)
+        kept.append(members[index])
+    members = kept
+    if require_total:
+        unclaimed = [n for n, p in named if id(p) not in claimed]
+        if unclaimed:
+            raise ValueError(
+                f"No selector claims {len(unclaimed)} trainable parameter(s), "
+                f"e.g. {unclaimed[0]!r}; they would never be updated.",
+            )
+    return [member(group) for member, group in zip(members, groups, strict=True)]
 
 
 class CompositeOptimizer(Optimizer):
@@ -360,109 +455,7 @@ class CompositeOptimizer(Optimizer):
         return f"{type(self).__name__}({members})"
 
 
-def _route(
-    model: nn.Module,
-    members: Sequence[Callable[..., Optimizer]],
-    selectors: Sequence[Selector],
-    *,
-    require_total: bool,
-    drop_empty: bool = False,
-) -> list[Optimizer]:
-    """Build each member over the trainable parameters its selector claims.
-
-    Args:
-      model: Model whose parameters to partition.
-      members: Optimizer constructors, one per selector.
-      selectors: Predicates deciding ownership, tried in order.
-      require_total: Reject a partition that leaves a parameter unclaimed.
-      drop_empty: Skip a member whose selector claims nothing rather than
-        raising, for a recipe naming a class the model may not instantiate.
-
-    Returns:
-      optimizers: One built optimizer per non-empty member, in the given order.
-
-    Raises:
-      ValueError: If a selector claims nothing and ``drop_empty`` is false, if
-        two claim the same parameter, or if ``require_total`` and a parameter
-        is unclaimed.
-
-    """
-    named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    claimed: dict[int, str] = {}
-    groups: list[list[Parameter]] = []
-    kept: list[Callable[..., Optimizer]] = []
-    for index, select in enumerate(selectors):
-        group: list[Parameter] = []
-        for name, parameter in named:
-            if not select(name, parameter):
-                continue
-            owner = claimed.get(id(parameter))
-            if owner is not None:
-                raise ValueError(
-                    f"Parameter {name!r} is claimed by selector {owner} and "
-                    f"{index}; it would be updated twice per step.",
-                )
-            claimed[id(parameter)] = str(index)
-            group.append(parameter)
-        if not group:
-            if drop_empty:
-                continue
-            raise ValueError(f"Selector {index} claimed no parameters.")
-        groups.append(group)
-        kept.append(members[index])
-    members = kept
-    if require_total:
-        unclaimed = [n for n, p in named if id(p) not in claimed]
-        if unclaimed:
-            raise ValueError(
-                f"No selector claims {len(unclaimed)} trainable parameter(s), "
-                f"e.g. {unclaimed[0]!r}; they would never be updated.",
-            )
-    return [member(group) for member, group in zip(members, groups, strict=True)]
-
-
-class _ChainedState(dict[Any, Any]):
-    """A live view of every member's per-parameter state.
-
-    ``Optimizer.state`` is a plain attribute, so the composite
-    cannot expose it as a property without breaking the base class contract.
-    This subclasses ``dict`` instead and refreshes from the members on each
-    read, so state a member creates lazily (on its first step) still appears.
-    """
-
-    def __init__(self, optimizers: Sequence[Optimizer]) -> None:
-        super().__init__()
-        self._optimizers = optimizers
-
-    @override
-    def __getitem__(self, key: Any) -> Any:
-        self._refresh()
-        return super().__getitem__(key)
-
-    @override
-    def __len__(self) -> int:
-        self._refresh()
-        return super().__len__()
-
-    @override
-    def __iter__(self) -> Iterator[Any]:
-        self._refresh()
-        return super().__iter__()
-
-    def _refresh(self) -> None:
-        for optimizer in self._optimizers:
-            super().update(optimizer.state)
-
-
-def _reject_shared_parameters(optimizers: Sequence[Optimizer]) -> None:
-    """Raise if any parameter belongs to more than one optimizer."""
-    seen: set[int] = set()
-    for optimizer in optimizers:
-        for group in optimizer.param_groups:
-            for parameter in group["params"]:
-                if id(parameter) in seen:
-                    raise ValueError(
-                        "A parameter belongs to more than one optimizer in the "
-                        "composite, so it would be updated twice per step.",
-                    )
-                seen.add(id(parameter))
+def _name(select: Selector) -> str:
+    """Return a stable name for a selector, never an address."""
+    qualname = getattr(select, "__qualname__", None)
+    return qualname if isinstance(qualname, str) else repr(select)

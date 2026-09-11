@@ -143,8 +143,10 @@ class SingleProcess:
     class Config(Fig["SingleProcess"]):
         device: torch.device | str | None = "auto"
         """Target device ("auto" = best available, None = torch default)."""
+
         deterministic: bool = False
         """Enable deterministic CUDA operations."""
+
         float32_matmul_precision: Float32MatmulPrecision | None = None
         """Float32 matmul precision override; None preserves PyTorch's default."""
 
@@ -248,12 +250,16 @@ class MultiProcess:
     class Config(Fig["MultiProcess"]):
         device: torch.device | str | None = "auto"
         """Target device ("auto" = best available, None = torch default)."""
+
         deterministic: bool = False
         """Enable deterministic CUDA operations."""
+
         float32_matmul_precision: Float32MatmulPrecision | None = None
         """Float32 matmul precision override; None preserves PyTorch's default."""
+
         backend: str | None = None
         """Distributed backend (None = auto: nccl for CUDA, gloo for CPU)."""
+
         mesh_topology: dict[str, int] = field(
             default_factory=lambda: {"dp": -1, "pp": 1, "tp": 1},
         )
@@ -305,6 +311,10 @@ def global_device_mesh() -> DeviceMesh | None:
     """Get device mesh set by TrainLoop or manual setup.
 
     Returns None if not set (single process mode).
+
+    Returns:
+      _device_mesh: The DeviceMesh | None.
+
     """
     return _device_mesh
 
@@ -353,7 +363,7 @@ def initialize_global_device_mesh(
         float32_matmul_precision: Float32 matmul precision override.
 
     Returns:
-        DeviceMesh.
+        mesh: The initialized DeviceMesh.
 
     """
     global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
@@ -435,6 +445,29 @@ def initialize_global_device_mesh(
     return device_mesh
 
 
+def destroy_global_device_mesh() -> None:
+    """Cleanup global device mesh and distributed runtime (destroy process group).
+
+    WARNING: Must be called manually before process exit in distributed training.
+    Do NOT rely on garbage collection to call this.
+
+    The process group is destroyed only when this module created it; a group
+    initialized by a launcher or an earlier same-process lifecycle survives so
+    its true owner can tear it down (see ``_process_group_owned``).
+    """
+    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
+    global _process_group_owned  # noqa: PLW0603
+    if not _runtime_initialized:
+        _process_group_owned = False
+        return
+    if _process_group_owned and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+    _device_mesh = None
+    _single_process_settings = None
+    _process_group_owned = False
+    _runtime_initialized = False
+
+
 def _resolve_mesh_topology(
     mesh_topology: dict[str, int],
     world_size_actual: int,
@@ -464,26 +497,3 @@ def _set_float32_matmul_precision(
     """Apply the requested float32 matmul precision override."""
     if precision is not None:
         torch.set_float32_matmul_precision(precision)
-
-
-def destroy_global_device_mesh() -> None:
-    """Cleanup global device mesh and distributed runtime (destroy process group).
-
-    WARNING: Must be called manually before process exit in distributed training.
-    Do NOT rely on garbage collection to call this.
-
-    The process group is destroyed only when this module created it; a group
-    initialized by a launcher or an earlier same-process lifecycle survives so
-    its true owner can tear it down (see ``_process_group_owned``).
-    """
-    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
-    global _process_group_owned  # noqa: PLW0603
-    if not _runtime_initialized:
-        _process_group_owned = False
-        return
-    if _process_group_owned and torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
-    _device_mesh = None
-    _single_process_settings = None
-    _process_group_owned = False
-    _runtime_initialized = False

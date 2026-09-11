@@ -10,11 +10,11 @@ from torch import Tensor, nn
 
 import torch
 
-from priml import image as _image
+from priml import image
 from priml.math.basic import ceil_div
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
 from priml.math.pooling import adaptive_avg_pool2d, adaptive_avg_pool3d
-from priml.memory import is_private_conversion
+from priml.memory import convert_to_tensor, is_private_conversion
 
 
 if TYPE_CHECKING:
@@ -238,6 +238,7 @@ class ImageShape(NamedTuple):
     """Image shape in (height, width) format."""
 
     height: int
+
     width: int
 
 
@@ -245,7 +246,9 @@ class VideoShape(NamedTuple):
     """Video shape in (frames, height, width) format."""
 
     frames: int
+
     height: int
+
     width: int
 
 
@@ -264,7 +267,9 @@ class ShapeBundle(NamedTuple):
     """
 
     latent: VideoShape
+
     pixel_train: VideoShape
+
     pixel_full: VideoShape
 
 
@@ -629,6 +634,96 @@ def interpolate(
     return x
 
 
+# -- bytes-to-tensor decoders ------------------------------------------
+# Thin wrappers over ``priml.image``: numpy decode → zero-copy
+# ``torch.from_numpy`` → optional stride-only channels-first rearrange.
+
+
+def decode_jpeg_turbojpeg(
+    image_bytes: bytes,
+    turbo_jpeg: TurboJPEG,
+    height: int,
+    width: int,
+    *,
+    crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
+    channels_first: bool = True,
+) -> Tensor | None:
+    """Decode JPEG → uint8 Tensor. See ``priml.image.decode_jpeg_turbojpeg``.
+
+    Args:
+      image_bytes: Image bytes.
+      turbo_jpeg: Turbo jpeg.
+      height: Height.
+      width: Width.
+      crop: Crop.
+      channels_first: Channels first.
+
+    Returns:
+      result: The Tensor | None.
+
+    """
+    return _to_tensor(
+        image.decode_jpeg_turbojpeg(image_bytes, turbo_jpeg, height, width, crop),
+        channels_first,
+    )
+
+
+def decode_webp_libwebp(
+    image_bytes: bytes,
+    height: int,
+    width: int,
+    *,
+    crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
+    channels_first: bool = True,
+) -> Tensor | None:
+    """Decode WebP → uint8 Tensor. See ``priml.image.decode_webp_libwebp``.
+
+    Args:
+      image_bytes: Image bytes.
+      height: Height.
+      width: Width.
+      crop: Crop.
+      channels_first: Channels first.
+
+    Returns:
+      result: The Tensor | None.
+
+    """
+    return _to_tensor(
+        image.decode_webp_libwebp(image_bytes, height, width, crop),
+        channels_first,
+    )
+
+
+def decode_image_pil(
+    image_bytes: bytes,
+    height: int,
+    width: int,
+    *,
+    crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
+    channels_format: Literal["rgb", "rgba"] = "rgb",
+    channels_first: bool = True,
+) -> Tensor | None:
+    """Decode via PIL → uint8 Tensor. See ``priml.image.decode_image_pil``.
+
+    Args:
+      image_bytes: Image bytes.
+      height: Height.
+      width: Width.
+      crop: Crop.
+      channels_format: Channels format.
+      channels_first: Channels first.
+
+    Returns:
+      result: The Tensor | None.
+
+    """
+    return _to_tensor(
+        image.decode_image_pil(image_bytes, height, width, crop, channels_format),
+        channels_first,
+    )
+
+
 def _process_interpolate_args(
     mode: InterpolateMode = "nearest",
     size: int | Sequence[int] = (),
@@ -704,11 +799,6 @@ def _process_interpolate_args(
     return output_rank, mode_, size_, sf_, ac_, rank_
 
 
-# -- bytes-to-tensor decoders ------------------------------------------
-# Thin wrappers over ``priml.image``: numpy decode → zero-copy
-# ``torch.from_numpy`` → optional stride-only channels-first rearrange.
-
-
 def _validate_patch_size(patch_size: tuple[int, ...]) -> None:
     """Reject a patch that cannot tile anything."""
     if not patch_size:
@@ -717,61 +807,12 @@ def _validate_patch_size(patch_size: tuple[int, ...]) -> None:
         raise ValueError(f"patch_size entries must be positive; got {patch_size}.")
 
 
+# Returns None on None input so decoder bodies can be a single line.
 def _to_tensor(arr: np.ndarray | None, channels_first: bool) -> Tensor | None:
-    """Zero-copy numpy → torch, optionally channels-first via strides.
-
-    Returns None on None input so decoder bodies can be a single line.
-    """
+    """Zero-copy numpy → torch, optionally channels-first via strides."""
     if arr is None:
         return None
     tensor = torch.from_numpy(arr)
     if channels_first:
         tensor = tensor.moveaxis(-1, -3)
     return tensor
-
-
-def decode_jpeg_turbojpeg(
-    image_bytes: bytes,
-    turbo_jpeg: TurboJPEG,
-    height: int,
-    width: int,
-    *,
-    crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
-    channels_first: bool = True,
-) -> Tensor | None:
-    """Decode JPEG → uint8 Tensor. See ``priml.image.decode_jpeg_turbojpeg``."""
-    return _to_tensor(
-        _image.decode_jpeg_turbojpeg(image_bytes, turbo_jpeg, height, width, crop),
-        channels_first,
-    )
-
-
-def decode_webp_libwebp(
-    image_bytes: bytes,
-    height: int,
-    width: int,
-    *,
-    crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
-    channels_first: bool = True,
-) -> Tensor | None:
-    """Decode WebP → uint8 Tensor. See ``priml.image.decode_webp_libwebp``."""
-    return _to_tensor(
-        _image.decode_webp_libwebp(image_bytes, height, width, crop),
-        channels_first,
-    )
-
-
-def decode_image_pil(
-    image_bytes: bytes,
-    height: int,
-    width: int,
-    *,
-    crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
-    channels_format: Literal["rgb", "rgba"] = "rgb",
-    channels_first: bool = True,
-) -> Tensor | None:
-    """Decode via PIL → uint8 Tensor. See ``priml.image.decode_image_pil``."""
-    return _to_tensor(
-        _image.decode_image_pil(image_bytes, height, width, crop, channels_format),
-        channels_first,
-    )

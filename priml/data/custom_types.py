@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
 from priml.custom_types import CheckpointableProtocol
@@ -34,20 +35,20 @@ class DatasetProtocol(CheckpointableProtocol, Protocol):
     say so (see ``NanoChatData.load_state_dict``) rather than report a count
     that silently re-walks data."""
 
-    def train_dataloader(self) -> Any:
+    def train_dataloader(self) -> Iterable[Any]:
         """Get training dataloader.
 
         Returns:
-          dataloader: Iterator yielding batches (typically dict[str, Tensor]).
+          dataloader: Iterable yielding batches (typically dict[str, Tensor]).
 
         """
         ...
 
-    def eval_dataloader(self) -> Any:
+    def eval_dataloader(self) -> Iterable[Any]:
         """Get evaluation dataloader.
 
         Returns:
-          dataloader: Iterator yielding batches (typically dict[str, Tensor]).
+          dataloader: Iterable yielding batches (typically dict[str, Tensor]).
 
         """
         ...

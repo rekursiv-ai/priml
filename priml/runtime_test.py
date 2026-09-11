@@ -199,6 +199,7 @@ def test_initialize_validates_negative_dims_before_acquiring(
     assert "init_kwargs" not in record
 
 
+# Records ``set_device`` and ``init_process_group`` arguments for assertion.
 def _patch_distributed(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -206,10 +207,7 @@ def _patch_distributed(
     preinitialized: bool = False,
     destroy_failure: BaseException | None = None,
 ) -> dict[str, object]:
-    """Stub the distributed/CUDA surface so the cuda branch runs off-GPU.
-
-    Records ``set_device`` and ``init_process_group`` arguments for assertion.
-    """
+    """Stub the distributed/CUDA surface so the cuda branch runs off-GPU."""
     record: dict[str, object] = {}
     initialized = preinitialized
     destroy_calls = 0

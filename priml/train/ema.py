@@ -19,17 +19,6 @@ if TYPE_CHECKING:
     from torch import nn
 
 
-class _StateDict(OrderedDict[str, Any]):
-    """The mapping ``nn.Module.state_dict`` actually returns.
-
-    torch attaches ``_metadata`` to it and reads it back in ``load_state_dict``
-    for module-version migration hooks. No stub declares the attribute, so a
-    plain ``OrderedDict`` cannot carry it across a clone.
-    """
-
-    _metadata: OrderedDict[str, dict[str, Any]]
-
-
 class NoEMA:
     """No-op EMA for when EMA is disabled.
 
@@ -39,8 +28,9 @@ class NoEMA:
     class Config(Fig["NoEMA"]):
         """NoEMA configuration (empty)."""
 
-    def __init__(self, _config: Config | None = None) -> None:
+    def __init__(self, config: Config | None = None) -> None:
         """Initialize NoEMA."""
+        del config
         self.shadow_model: nn.Module | None = None
         self.global_step = 0
         self.local_step = 0
@@ -52,6 +42,9 @@ class NoEMA:
     def apply_to(self, model: nn.Module) -> Generator[None]:
         """No-op swap: yields with the live model untouched.
 
+        Args:
+          model: Model.
+
         Yields:
           context: Block in which ``model`` carries its live weights.
 
@@ -60,11 +53,21 @@ class NoEMA:
         yield
 
     def state_dict(self) -> dict[str, Any]:
-        """Get empty state dict."""
+        """Get empty state dict.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"global_step": self.global_step, "local_step": self.local_step}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load step counters only."""
+        """Load step counters only.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.global_step = state_dict["global_step"]
         self.local_step = state_dict.get("local_step", 0)
 
@@ -81,7 +84,16 @@ each, and a recipe wanting a third writes it instead of editing this module.
 
 
 def constant_decay(decay: float, step: int) -> float:
-    """Hold ``decay`` flat for the whole run."""
+    """Hold ``decay`` flat for the whole run.
+
+    Args:
+      decay: Decay.
+      step: Step.
+
+    Returns:
+      decay: The float.
+
+    """
     del step
     return decay
 
@@ -91,6 +103,13 @@ def karras_decay(decay: float, step: int) -> float:
 
     Early averaging is faster, which keeps the shadow from being dominated by
     the first few steps' weights.
+
+    Args:
+      decay: Decay.
+      step: Step.
+
+    Returns:
+      result: The float.
 
     References:
       https://arxiv.org/abs/2312.02696
@@ -168,27 +187,33 @@ class EMA:
 
         decay: float = 0.9999
         """Exponential decay rate for shadow parameters."""
+
         update_after_step: int = 0
         """Warmup length: the first ``update_after_step`` calls only advance
         the step counter (no lerp). The first actual update happens AT
         ``global_step == update_after_step`` (i.e. on call index
         ``update_after_step``, 0-based), not after it."""
+
         update_every: int = 1
         """Update shadow parameters on calls where
         ``(global_step - update_after_step) % update_every == 0`` (so every
         Nth call past warmup, starting at the warmup boundary)."""
+
         track_buffers: bool = True
         """If True, copy non-parameter buffers verbatim each update.
         False (TRM-style) skips buffer copy entirely -- useful when
         buffers are derived/sentinel or too big to shadow."""
+
         shadow_kind: Literal["module", "param_dict"] = "module"
         """Shadow representation: ``"module"`` clones the source module
         (parallel-forward path); ``"param_dict"`` keeps a name-keyed dict of
         local-shard clones (FSDP/DTensor-survivable, swap-only eval)."""
+
         warmup_seed: bool = False
         """If True, copy live weights into the shadow at the warmup boundary
         before averaging begins (TRM-style). Default leaves the shadow at
         its first-call snapshot."""
+
         decay_schedule: DecaySchedule = constant_decay
         """Maps ``(decay, post-warmup step)`` to the decay used at that step.
 
@@ -332,6 +357,9 @@ class EMA:
         regardless of ``track_buffers``. The swap pattern targets
         weight-averaging only. Works for both shadow kinds.
 
+        Args:
+          model: Model.
+
         Yields:
           context: Block in which ``model.parameters()`` carry shadow values.
 
@@ -473,7 +501,7 @@ class EMA:
         return self._param_filter(name, param)
 
     def _shadow_param(self, name: str) -> Tensor:
-        """The shadow tensor for ``name`` regardless of shadow kind."""
+        """Return the shadow tensor for ``name`` regardless of shadow kind."""
         if self.shadow_model is not None:
             return self._module_params[name].data
         return self.shadow_params[name]
@@ -554,3 +582,14 @@ class EMA:
         for name, buf in self._shadow_buffers.items():
             if name in live_buffers:
                 buf.copy_(live_buffers[name].data)
+
+
+class _StateDict(OrderedDict[str, Any]):
+    """The mapping ``nn.Module.state_dict`` actually returns.
+
+    torch attaches ``_metadata`` to it and reads it back in ``load_state_dict``
+    for module-version migration hooks. No stub declares the attribute, so a
+    plain ``OrderedDict`` cannot carry it across a clone.
+    """
+
+    _metadata: OrderedDict[str, dict[str, Any]]

@@ -55,8 +55,11 @@ __all__ = [
 
 class TargetResult(NamedTuple):
     target: Tensor | None
+
     predict: Tensor | None
+
     x_clean: Tensor
+
     eps_clean: Tensor
 
 
@@ -70,7 +73,9 @@ class TargetFn(Protocol):
         *,
         x_original: Tensor | None = None,
         eps_original: Tensor | None = None,
-    ) -> TargetResult: ...
+    ) -> TargetResult:
+        """Apply to the input."""
+        ...
 
 
 def target_x(

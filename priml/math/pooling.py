@@ -193,7 +193,7 @@ def _adaptive_avg_pool(
             for s, o, st in zip(spatial, output_size, stride, strict=True)
         )
         # Unconditional: the plain-mean case returned above.
-        return _AVG_POOL[n](x, kernel, stride) * math.sqrt(math.prod(stride))
+        return _AVG_POOL[n](x, kernel, stride) * float(math.prod(stride) ** 0.5)
 
     # Per-dimension index tables.
     dims = [_dim_info(spatial[i], output_size[i], x.device) for i in range(n)]
@@ -206,8 +206,8 @@ def _adaptive_avg_pool(
     # Non-adaptive shortcut: uniform windows → mean over max_kernel_size dims.
     if not any(d.needs_irregular_kernel for d in dims):
         max_kernel_size_dims = tuple(-(2 * k + 1) for k in reversed(range(n)))
-        return vals.mean(dim=max_kernel_size_dims) * math.sqrt(
-            math.prod(vals.shape[d] for d in max_kernel_size_dims)
+        return vals.mean(dim=max_kernel_size_dims) * float(
+            math.prod(vals.shape[d] for d in max_kernel_size_dims) ** 0.5
         )
 
     # Mask out-of-window positions; accumulate per-position window sizes.
@@ -238,7 +238,7 @@ def _adaptive_avg_pool(
     assert acc is not None
     if isinstance(window, int):
         # A Python float promotes to whatever ``acc`` carries.
-        return acc / math.sqrt(window)
+        return acc / float(window**0.5)
     # Cast before the root: ``window`` is an int64 count, and ``int64 ** 0.5``
     # lands in float32 regardless of the input -- which lost 24 bits of a
     # float64 pool and returned float32 for a float16 one.

@@ -35,6 +35,7 @@ class ChildJob:
 
     class Config(Fig["ChildJob"]):
         lr: float = 1e-3
+
         steps: int = 10
 
     def __init__(self, config: Config):
@@ -50,7 +51,9 @@ class NestedJob:
 
     class Config(Fig["NestedJob"]):
         name: str = ""
+
         enabled: bool = False
+
         child: ChildJob.Config = field(default_factory=ChildJob.Config)
 
     def __init__(self, config: Config):
@@ -60,12 +63,12 @@ class NestedJob:
         del args
 
 
-# Non-callable variable for testing
+# Non-callable variable for testing.
 NonCallableConfig = 42
 
 
 def non_configurable_returner() -> int:
-    """Returns non-Makeable from callable."""
+    """Return a non-Makeable from a callable."""
     return 42
 
 
@@ -85,7 +88,7 @@ class NotAJobConfig(Fig["NotAJob"]):
 
 
 def non_job_returner() -> Makeable[NotAJob]:
-    """Returns config that creates NotAJob."""
+    """Return a config that creates NotAJob."""
     return NotAJobConfig()
 
 
@@ -108,7 +111,7 @@ def test_main_is_record_decorated() -> None:
 
 def test_main_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test successful execution of main()."""
-    # Set up command line arguments
+    # Set up command line arguments.
     test_args = [
         "prog",
         "priml.launch_test.mock_experiment",
@@ -117,11 +120,11 @@ def test_main_success(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
     monkeypatch.setattr(sys, "argv", test_args)
 
-    # Run main
+    # Run main.
     main()
 
     # Verify that the job was created and run
-    # We can't easily verify the exact job instance, but we can verify no errors
+    # We can't easily verify the exact job instance, but we can verify no errors.
 
 
 def test_main_module_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +147,7 @@ def test_main_function_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_main_not_callable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test error when target is not callable."""
-    # Create a module-level variable that's not callable
+    # Create a module-level variable that's not callable.
     test_args = ["prog", "priml.launch_test.NonCallableConfig"]
     monkeypatch.setattr(sys, "argv", test_args)
 
@@ -182,7 +185,7 @@ def test_main_with_unparsed_args(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", test_args)
 
     # Just verify it runs successfully with extra args - the important
-    # thing is that the unparsed args are passed through without error
+    # thing is that the unparsed args are passed through without error.
     main()
 
 
@@ -194,6 +197,7 @@ class _CapturingJob:
 
     class Config(Fig["_CapturingJob"]):
         name: str = ""
+
         child: ChildJob.Config = field(default_factory=ChildJob.Config)
 
     def __init__(self, config: Config):
@@ -217,9 +221,13 @@ class _LaunchableJob:
 
     class Config(Fig["_LaunchableJob"]):
         study_name: str = ""
+
         experiment_name: str = ""
+
         base_dir: Path | str | None = Path("/scratch")
+
         working_dir: Path | str = "/runs/{study_name}/{experiment_name}"
+
         doc: str = ""
 
         @override

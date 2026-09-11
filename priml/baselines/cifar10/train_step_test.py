@@ -58,7 +58,7 @@ def tiny_step(
 
 
 def _constant_half(progress: float) -> float:
-    """A schedule holding the learning rate at half its peak."""
+    """Return a schedule holding the learning rate at half its peak."""
     del progress
     return 0.5
 
@@ -182,7 +182,7 @@ def test_schedule_warms_up_then_decays() -> None:
         step._apply_schedule()
         rates.append(step.optimizer.param_groups[0]["lr"])
 
-    assert rates[0] < peak  # warming up
+    assert rates[0] < peak  # warming up.
     assert rates[1] == pytest.approx(peak, rel=0.05)
     assert rates[-1] < rates[2] < rates[1]
 
@@ -435,17 +435,15 @@ def test_muon_train_steps_bfb() -> None:
     )
 
 
+# Wrapping a train step rather than a forward is what makes the golden cover the recipe:
+# the loss, the augmentation draws, the schedule, and the optimizer arithmetic all reach
+# the post-run state the harness compares.
 def _assert_train_bfb(
     *,
     testdata_name: str,
     optimizer: Makeable[Callable[..., torch.optim.Optimizer]] | None,
 ) -> None:
-    """Pin three optimizer steps: loss, logits, and every resulting weight.
-
-    Wrapping a train step rather than a forward is what makes the golden cover
-    the recipe: the loss, the augmentation draws, the schedule, and the
-    optimizer arithmetic all reach the post-run state the harness compares.
-    """
+    """Pin three optimizer steps: loss, logits, and every resulting weight."""
 
     def build() -> nn.Module:
         config = tiny_step()

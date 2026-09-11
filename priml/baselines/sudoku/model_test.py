@@ -123,7 +123,7 @@ def test_latents_carry_between_calls() -> None:
 def test_intermediates_are_one_per_cycle() -> None:
     model = _model(recurrent=True)
     out = model(torch.randint(0, 11, (2, 81)), collect_intermediates=True)
-    assert len(out.all_logits) == 2  # slow_cycles
+    assert len(out.all_logits) == 2  # slow_cycles.
 
 
 def test_sequence_length_counts_the_prefix_before_finalize() -> None:
@@ -138,7 +138,7 @@ def test_sequence_length_counts_the_prefix_before_finalize() -> None:
     config = _config()
     registers = RegisterTokens.Config(num_tokens=4)
     config.prefix = registers
-    assert config.num_prefix_tokens == -1  # not yet finalized
+    assert config.num_prefix_tokens == -1  # not yet finalized.
     assert config.total_seq_len == 81 + 4
     # After finalize the count is materialized and agrees.
     final = config.copy_tree().finalize()
@@ -158,7 +158,7 @@ def test_prefix_tokens_reach_the_sequence() -> None:
 def test_a_prefix_without_a_token_count_is_rejected() -> None:
     """Guessing 0 would silently shift every grid position."""
     config = _config()
-    config.prefix = RMSNorm.Config(channels_in=16)  # not a prefix module
+    config.prefix = RMSNorm.Config(channels_in=16)  # not a prefix module.
     with pytest.raises(ValueError, match="declares no"):
         config.copy_tree().finalize()
 
@@ -201,7 +201,7 @@ def test_recurrent_forward_bfb() -> None:
     )
 
 
-def _logits(module: nn.Module, tokens: Any) -> Tensor:
+def _logits(module: nn.Module, tokens: object) -> Tensor:
     """Run the model and return the logits the golden compares."""
     out = module(tokens)
     assert isinstance(out, ForwardOutput)

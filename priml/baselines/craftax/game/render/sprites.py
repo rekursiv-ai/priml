@@ -15,8 +15,8 @@ from typing import Final
 
 
 BLOCK_SPRITES: Final[tuple[str, ...]] = (
-    "debug_tile.png",  # INVALID
-    "",  # OUT_OF_BOUNDS: solid grey
+    "debug_tile.png",  # INVALID.
+    "",  # OUT_OF_BOUNDS: solid grey.
     "grass.png",
     "water.png",
     "stone.png",
@@ -33,7 +33,7 @@ BLOCK_SPRITES: Final[tuple[str, ...]] = (
     "plant_on_grass.png",
     "ripe_plant_on_grass.png",
     "wall2.png",
-    "",  # DARKNESS: solid black
+    "",  # DARKNESS: solid black.
     "wall_moss.png",
     "stalagmite.png",
     "sapphire.png",
@@ -62,7 +62,7 @@ DARKNESS_COLOR: Final = (0, 0, 0)
 """Flat black for a tile the player cannot see into."""
 
 ITEM_SPRITES: Final[tuple[str, ...]] = (
-    "",  # NONE: nothing lies here
+    "",  # NONE: nothing lies here.
     "torch_in_inventory.png",
     "ladder_down.png",
     "ladder_up.png",

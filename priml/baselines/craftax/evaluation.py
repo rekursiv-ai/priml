@@ -15,7 +15,15 @@ if TYPE_CHECKING:
 
 @contextmanager
 def evaluation_mode(model: nn.Module) -> Generator[None]:
-    """Temporarily evaluate a model, restoring its incoming mode."""
+    """Temporarily evaluate a model, restoring its incoming mode.
+
+    Args:
+      model: Model.
+
+    Yields:
+      item: Each yielded value.
+
+    """
     training = model.training
     model.eval()
     try:
@@ -31,7 +39,17 @@ def evaluation_transaction[StateT](
     save: Callable[[], StateT],
     restore: Callable[[StateT], None],
 ) -> Generator[None]:
-    """Run evaluation against a snapshot and restore all training state."""
+    """Run evaluation against a snapshot and restore all training state.
+
+    Args:
+      model: Model.
+      save: Save.
+      restore: Restore.
+
+    Yields:
+      item: Each yielded value.
+
+    """
     state = copy.deepcopy(save())
     with evaluation_mode(model):
         try:

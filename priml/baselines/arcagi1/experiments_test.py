@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 from configgle.pprinting import pformat
 
@@ -29,6 +30,9 @@ from priml.baselines.sudoku.prefix import (
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.transformer.block import TransformerBlock
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 LADDER: list[tuple[str, Callable[[], ArcTrainLoop]]] = [
@@ -188,7 +192,7 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
 
     Refresh with ``--golden-overwrite`` after reading the diff.
     """
-    golden = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
+    golden = _CWD / "testdata" / "exp000.txt"
     rendered = pformat(
         experiments.exp000().copy_tree().finalize(), hide_default_values=False
     )

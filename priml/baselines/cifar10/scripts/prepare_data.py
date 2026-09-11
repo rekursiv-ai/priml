@@ -32,7 +32,12 @@ from priml.train.train_loop import TrainLoop
 
 
 def main() -> int:
-    """Prepare the dataset; return the process exit code."""
+    """Prepare the dataset; return the process exit code.
+
+    Returns:
+      result: The int.
+
+    """
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -41,6 +41,7 @@ class DummyDataset:
 
         seed: int = 0
         """Seed for the random data/labels so runs are reproducible."""
+
         num_workers: int = 0
         """DataLoader worker processes."""
 
@@ -69,7 +70,12 @@ class DummyDataset:
         self.dataset = TensorDataset(data, labels)
 
     def train_dataloader(self) -> DataLoader[Any]:
-        """Get training dataloader."""
+        """Get training dataloader.
+
+        Returns:
+          result: The DataLoader[Any].
+
+        """
         return DataLoader(
             self.dataset,
             batch_size=self.config.batch_size,
@@ -79,7 +85,12 @@ class DummyDataset:
         )
 
     def eval_dataloader(self) -> DataLoader[Any]:
-        """Get evaluation dataloader."""
+        """Get evaluation dataloader.
+
+        Returns:
+          result: The DataLoader[Any].
+
+        """
         return DataLoader(
             self.dataset,
             batch_size=self.config.batch_size,
@@ -89,24 +100,26 @@ class DummyDataset:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the pass count, the only state this dataset carries."""
+        """Return the pass count, the only state this dataset carries.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the pass count."""
+        """Restore the pass count.
+
+        Args:
+          state_dict: State dict.
+
+        """
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 
     def _collate_fn(self, batch: list[tuple[Tensor, ...]]) -> dict[str, Tensor]:
-        """Collate batch into dict format.
-
-        Args:
-          batch: List of (data, label) tuples.
-
-        Returns:
-          dict: Batch dict with 'media' and 'label' keys.
-
-        """
+        """Collate batch into dict format."""
         data_list, label_list = zip(*batch, strict=True)
         device = get_device(self.config.device)
         return {

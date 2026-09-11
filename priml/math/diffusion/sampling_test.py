@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
 from priml.math.diffusion import SampleOneStepResult
 from priml.math.diffusion.sampling import (
     SampleResult,
@@ -29,8 +29,11 @@ from priml.math.diffusion.target import (
     TargetFn,
     target_rectified_flow,
 )
+from priml.memory import convert_to_tensor
 
 
+# Direct implementation of Song et al. 2020 Eq 12 to validate the numerically stable
+# log-space version.
 def _reference_ddpm_step(
     model: Tensor,
     x_curr: Tensorable,
@@ -44,18 +47,14 @@ def _reference_ddpm_step(
     target_fn: TargetFn = target_rectified_flow,
     eta: float = 1,
 ) -> SampleOneStepResult:
-    """Reference DDPM/DDIM step in linear space.
-
-    Direct implementation of Song et al. 2020 Eq 12 to validate
-    the numerically stable log-space version.
-    """
+    """Compute the reference DDPM/DDIM step in linear space."""
     model, x_t, snr_t, snr_s = convert_to_tensor(
         model,
         x_curr,
         log_snr_curr,
         log_snr_next,
     )
-    # s = next (less noisy), t = curr (noisier)
+    # ``s`` = next (less noisy), t = curr (noisier)
     log_sig_s = corruption_fn(snr_s)
     log_sig_t = corruption_fn(snr_t)
     sigma_s = torch.exp(log_sig_s)
@@ -64,11 +63,11 @@ def _reference_ddpm_step(
     alpha_t = torch.exp(compute_log_alpha(snr_t, log_sig_t))
     predicted_x, predicted_eps = target_fn(model, x_t, snr_t, log_sig_t)[-2:]
 
-    # DDPM posterior variance
+    # DDPM posterior variance.
     snr_ratio = (alpha_t / sigma_t) ** 2 / (alpha_s / sigma_s) ** 2
     sigma_ddpm = sigma_s * (1 - snr_ratio).clamp(min=0) ** 0.5
 
-    # η interpolation
+    # η interpolation.
     sigma_stoch = eta * sigma_ddpm
     sigma_determ = (sigma_s**2 - sigma_stoch**2).clamp(min=0) ** 0.5
     posterior_mean = alpha_s * predicted_x + sigma_determ * predicted_eps
@@ -157,7 +156,7 @@ def test_ddpm_step_matches_ddpm(eta: float) -> None:
     log_snr1 = np.reshape([-3.5, 0.2, 1.8], [-1] + [1] * 3)
     log_snr0 = np.reshape([-0.7, 3.1, 4.6], [-1] + [1] * 3)
 
-    # ddpm (wrapper)
+    # ``ddpm`` (wrapper)
     x0_ddpm, mean_ddpm, log_std_ddpm = ddpm(model, x1, log_snr1, log_snr0, eta=eta)
 
     # ddpm_step (manual decompose + step)
@@ -180,7 +179,7 @@ def test_ddpm_step_matches_ddpm(eta: float) -> None:
         eta=eta,
     )
 
-    # x_clean from ddpm wrapper vs target_fn
+    # x_clean from ddpm wrapper vs target_fn.
     torch.testing.assert_close(x0_ddpm, result.x_clean)
     torch.testing.assert_close(mean_ddpm, mean_step)
     torch.testing.assert_close(log_std_ddpm, log_std_step)
@@ -321,7 +320,7 @@ def _identity_model_fn(
 
 def test_sample_wrap_steps_sees_every_step():
     """wrap_steps is applied to the per-step iterator before draining."""
-    log_snr = torch.tensor([2.0, 0.3, -1.5])  # 2 steps
+    log_snr = torch.tensor([2.0, 0.3, -1.5])  # 2 steps.
     x = torch.randn(2, 3)
     seen: list[SampleResult] = []
 
@@ -332,7 +331,7 @@ def test_sample_wrap_steps_sees_every_step():
 
     with torch.no_grad():
         sample(log_snr, _identity_model_fn, x, wrap_steps=spy)
-    assert len(seen) == 2  # one per diffusion step
+    assert len(seen) == 2  # one per diffusion step.
 
 
 def test_sample_wrap_steps_default_does_not_change_result():
@@ -358,19 +357,19 @@ def test_sample_wrap_steps_can_truncate_the_run():
     records how many steps were actually consumed, proving islice cut the
     3-step run short and the returned step is the truncation point.
     """
-    log_snr = torch.tensor([2.0, 0.3, -1.5, -3.0])  # 3 steps
+    log_snr = torch.tensor([2.0, 0.3, -1.5, -3.0])  # 3 steps.
     x = torch.randn(2, 3)
     consumed: list[SampleResult] = []
 
     def take_two(it: Iterable[SampleResult]) -> Iterable[SampleResult]:
-        for step in islice(it, 2):  # stop after the 2nd of 3 steps
+        for step in islice(it, 2):  # stop after the 2nd of 3 steps.
             consumed.append(step)
             yield step
 
     with torch.no_grad():
         result = sample(log_snr, _identity_model_fn, x, wrap_steps=take_two)
 
-    assert len(consumed) == 2  # the 3rd step was never generated
+    assert len(consumed) == 2  # the 3rd step was never generated.
     # sample() returns exactly the last step the wrapped stream yielded
     # (identity check, robust to a degenerate model_fn producing non-finite
     # values: this asserts the drain plumbing, not the diffusion numerics).

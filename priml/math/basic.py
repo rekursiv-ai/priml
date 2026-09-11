@@ -55,6 +55,14 @@ def ceil_multiple(x: Tensorable, multiple: float | None) -> Tensorable:
     ``multiple`` yields an integer-typed result. Exact multiples are returned
     unchanged (idempotent), and ``multiple * ceil(x / multiple)`` avoids the
     integer-floor representation error of the ``(x + m - 1) // m`` trick.
+
+    Args:
+      x: X.
+      multiple: Multiple.
+
+    Returns:
+      result: The Tensorable.
+
     """
     return _to_multiple(x, multiple, up=True)
 
@@ -74,6 +82,14 @@ def floor_multiple(x: Tensorable, multiple: float | None) -> Tensorable:
     leaves ``x`` unchanged. The result type follows ``multiple``: an integer
     ``multiple`` yields an integer-typed result. Exact multiples are returned
     unchanged (idempotent).
+
+    Args:
+      x: X.
+      multiple: Multiple.
+
+    Returns:
+      result: The Tensorable.
+
     """
     return _to_multiple(x, multiple, up=False)
 
@@ -85,6 +101,14 @@ def ceil_div(x: int, y: int) -> int:
     ``y``: it returns 4 for ``ceil_div(-5, -2)`` where the ceiling is 3, and -1
     for ``ceil_div(5, -2)`` where it is -2. Negating floor division is exact
     for every sign.
+
+    Args:
+      x: X.
+      y: Y.
+
+    Returns:
+      result: The int.
+
     """
     return -(-x // y)
 
@@ -92,7 +116,6 @@ def ceil_div(x: int, y: int) -> int:
 class SupportsLT(Protocol):
     """Anything ``argsort`` can order with ``<``."""
 
-    # Any follows typeshed; object rejects narrower implementations such as int.
     def __lt__(self, other: Any, /) -> bool: ...
 
 
@@ -100,7 +123,7 @@ def argsort(
     x: Sequence[SupportsLT],
     descending: bool = False,
 ) -> list[int]:
-    """Indices that would sort x, stably.
+    """Return the indices that would sort x, stably.
 
     Args:
       x: Sequence of comparable values.
@@ -149,20 +172,17 @@ def broadcast_sequences[T](*args: T | Sequence[T]) -> tuple[list[T], ...]:
     return tuple(a * n if len(a) == 1 else a for a in lists)
 
 
+# ``up`` selects ceiling (True) or floor (False). ``None`` leaves ``x`` unchanged. Float
+# division + ceil/floor (rather than the integer ``//`` trick) is correct for fractional
+# and negative ``x`` and idempotent on exact multiples; the final cast makes an integer
+# ``multiple`` yield an integer result. Each branch narrows ``x`` before arithmetic so
+# the result type is concrete (no operations on the bare ``Tensorable`` union).
 def _to_multiple(
     x: Tensorable,
     multiple: float | None,
     up: bool,
 ) -> Tensorable:
-    """``multiple * (ceil|floor)(x / multiple)``, cast back to ``multiple``'s type.
-
-    ``up`` selects ceiling (True) or floor (False). ``None`` leaves ``x``
-    unchanged. Float division + ceil/floor (rather than the integer ``//``
-    trick) is correct for fractional and negative ``x`` and idempotent on
-    exact multiples; the final cast makes an integer ``multiple`` yield an
-    integer result. Each branch narrows ``x`` before arithmetic so the result
-    type is concrete (no operations on the bare ``Tensorable`` union).
-    """
+    """``multiple * (ceil|floor)(x / multiple)``, cast back to ``multiple``'s type."""
     if multiple is None:
         return x
     # An integer ``multiple`` puts every result on an integer grid, so the

@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
 from priml.math.probability import (
     cdf_logit_normal,
     cdf_normal,
@@ -38,9 +38,10 @@ from priml.math.probability import (
     random_logit_normal,
     random_student_t,
 )
+from priml.memory import convert_to_tensor
 
 
-# scipy is the reference oracle for the special-function parity tests only; it
+# ``scipy`` is the reference oracle for the special-function parity tests only; it
 # is an optional test dependency. The lazy proxy defers the real import to
 # first attribute access, which only happens inside a parity test body -- and
 # those are skipped (not errored) when scipy is absent.
@@ -67,7 +68,7 @@ def test_cdf_normal():
     x = torch.tensor([0.0, 1.0, -1.0])
     loc, scale = 0.5, 2.0
     result = cdf_normal(x, loc, scale)
-    # Test against ndtr implementation
+    # Test against ndtr implementation.
     y = (x - loc) / scale
     expected = ndtr(y)
     torch.testing.assert_close(result, expected, atol=1e-6, rtol=1e-6)
@@ -77,7 +78,7 @@ def test_quantile_normal():
     p = torch.tensor([0.5, 0.84, 0.16])
     loc, scale = 1.0, 2.0
     result = quantile_normal(p, loc=loc, scale=scale)
-    # Check that cdf(quantile(p)) = p
+    # Check that cdf(quantile(p)) = p.
     cdf_result = cdf_normal(result, loc, scale)
     torch.testing.assert_close(cdf_result, p, atol=1e-5, rtol=1e-5)
 
@@ -162,7 +163,7 @@ def test_quantile_truncated_normal():
     loc, scale, low, high = 0.0, 1.0, -2.0, 2.0
     result = quantile_truncated_normal(p, loc=loc, scale=scale, low=low, high=high)
     assert result.shape == p.shape
-    # Results should be within bounds
+    # Results should be within bounds.
     assert torch.all(result >= low)
     assert torch.all(result <= high)
 
@@ -268,7 +269,7 @@ def test_student_t():
         atol=0.08,
         rtol=0.08,
     )
-    # Var = scale^2 * df / (df - 2) for df > 2
+    # Var = scale^2 * df / (df - 2) for df > 2.
     df_t = convert_to_tensor(df)
     expected_std = scale * torch.sqrt(df_t / (df_t - 2))
     actual_std = x.std(dim=0).squeeze(0)
@@ -276,24 +277,24 @@ def test_student_t():
 
 
 def test_random_chi2():
-    # Test basic chi2 random generation - just ensure it runs
+    # Test basic chi2 random generation - just ensure it runs.
     n = 1_000
     df = torch.tensor([2.0])
     x = random_chi2(n, df=df)
-    # Just check it returns data
+    # Just check it returns data.
     assert x.shape[0] == n
-    assert torch.all(x > 0)  # Chi2 is always positive
+    assert torch.all(x > 0)  # Chi2 is always positive.
 
 
 def test_gamma():
     n, concentration, rate = 150_000, [1.0, 2.5, 5.0], 2.0
     conc_t = torch.tensor(concentration)
     x = random_gamma(n, concentration=concentration, rate=rate)
-    # Mean = concentration / rate
+    # Mean = concentration / rate.
     mean = x.mean(dim=0)
     expected_mean = conc_t / rate
     torch.testing.assert_close(mean, expected_mean, atol=0.08, rtol=0.08)
-    # Var = concentration / rate^2
+    # Var = concentration / rate^2.
     std = x.std(dim=0)
     expected_std = torch.sqrt(conc_t / rate**2)
     torch.testing.assert_close(std, expected_std, atol=0.12, rtol=0.12)
@@ -302,7 +303,7 @@ def test_gamma():
 def test_gamma_with_rate():
     n, concentration, rate = 10_000, 2.0, 0.5
     x = random_gamma(n, concentration=concentration, rate=rate)
-    # Gamma mean = concentration / rate
+    # Gamma mean = concentration / rate.
     mean = x.mean()
     expected_mean = concentration / rate
     np.testing.assert_allclose(mean, expected_mean, atol=0, rtol=0.1)
@@ -313,11 +314,11 @@ def test_categorical(use_logits: bool):
     n = 80_000
     probs_t = torch.tensor([[0.15, 0.35, 0.5], [0.6, 0.0, 0.4]])
     if use_logits:
-        logits_t = probs_t.log()  # -inf for zero entries via torch
+        logits_t = probs_t.log()  # -inf for zero entries via torch.
         x = random_categorical(n, logits=logits_t)
     else:
         x = random_categorical(n, probs=probs_t)
-    # Compute empirical frequencies with a simple loop over categories
+    # Compute empirical frequencies with a simple loop over categories.
     freq = torch.zeros_like(probs_t)
     for row in range(probs_t.shape[0]):
         for cat in range(probs_t.shape[1]):
@@ -331,10 +332,10 @@ def test_categorical(use_logits: bool):
 
 
 def test_categorical_error():
-    # Test that providing both probs and logits raises error
+    # Test that providing both probs and logits raises error.
     with pytest.raises(ValueError, match=r".*"):
         random_categorical(100, probs=[0.5, 0.5], logits=[0.0, 0.0])
-    # Test that providing neither raises error
+    # Test that providing neither raises error.
     with pytest.raises(ValueError, match=r".*"):
         random_categorical(100)
 
@@ -365,7 +366,7 @@ def test_random_logit_normal():
 
 
 def test_random_logit_normal_with_sequence():
-    # Test with sequence input
+    # Test with sequence input.
     n = (5, 10)
     x = random_logit_normal(*n, loc=0.0, scale=1.0)
     assert x.shape == (5, 10)
@@ -397,7 +398,7 @@ def test_random_categorical_with_sequence():
 def test_random_categorical_unreachable_branch():
     # Test the unreachable AssertionError branch (line 280)
     # This should never be hit in normal operation
-    # Just test normal categorical behavior
+    # Just test normal categorical behavior.
     x = random_categorical(10, probs=[0.5, 0.5])
     assert x.shape == (10,)
 

@@ -243,6 +243,17 @@ class ScaledLinear(nn.Linear):
         return super().forward(input) * self.scale
 
 
+# An ``nn.Module`` activation satisfies ``TensorFn``; naming the callable type rather
+# than the union keeps ``self.act(x)`` inferring ``Tensor``.
+def _activation(activation: ActivationFn) -> TensorFn:
+    """Build an activation from a config, or pass a callable through."""
+    if isinstance(activation, Makeable):
+        # ``Makeable`` is runtime-checkable, so isinstance erases its type
+        # parameter: ``make`` reads as returning ``object`` without the cast.
+        return cast(TensorFn, activation.make())
+    return activation
+
+
 class ResNet(nn.Module):
     """Pre-activation residual network for 32x32 images.
 
@@ -520,41 +531,14 @@ class SpeedNet(nn.Module):
         return self.head(pooled.flatten(1))
 
 
-def _activation(activation: ActivationFn) -> TensorFn:
-    """Build an activation from a config, or pass a callable through.
-
-    An ``nn.Module`` activation satisfies ``TensorFn``; naming the callable type
-    rather than the union keeps ``self.act(x)`` inferring ``Tensor``.
-    """
-    if isinstance(activation, Makeable):
-        # ``Makeable`` is runtime-checkable, so isinstance erases its type
-        # parameter: ``make`` reads as returning ``object`` without the cast.
-        return cast(TensorFn, activation.make())
-    return activation
-
-
+# A shared config would be mutated once per stage and every block would end up carrying
+# the last stage's width.
 def _block_grid(
     block: Makeable[nn.Module] | list[Makeable[nn.Module]],
     num_stages: int,
     blocks_per_stage: int,
 ) -> list[list[Makeable[nn.Module]]]:
-    """Group block configs by stage, copying a template so each is distinct.
-
-    A shared config would be mutated once per stage and every block would end up
-    carrying the last stage's width.
-
-    Args:
-      block: One template to broadcast, or an explicit flat list.
-      num_stages: Number of stages to fill.
-      blocks_per_stage: Blocks within each stage.
-
-    Returns:
-      grid: One list of configs per stage, in stage order.
-
-    Raises:
-      ValueError: If an explicit list does not hold exactly one config per block.
-
-    """
+    """Group block configs by stage, copying a template so each is distinct."""
     flat: list[Makeable[nn.Module]]
     if isinstance(block, list):
         expected = num_stages * blocks_per_stage

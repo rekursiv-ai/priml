@@ -10,14 +10,19 @@ from torch import Tensor
 import torch
 
 from priml.math.basic import broadcast_sequences, ceil_div
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
+from priml.memory import convert_to_tensor
 
 
 def log_arctan_exp(x: Tensorable) -> Tensor:
     """Numerically stable log(arctan(exp(x))).
 
+    Args:
+      x: X.
+
     Returns:
       result: log(arctan(exp(x))).
+
 
     Derivation:
       Uses two branches, both only computing exp of non-positive
@@ -67,6 +72,10 @@ def log1mexp(x: Tensorable) -> Tensor:
 
     Adapted from tensorflow_probability:
       tensorflow_probability/python/math/generic.py::log1mexp
+
+
+    Returns:
+      result: The Tensor.
 
     References:
       Machler (2012), "Accurately computing log(1 - exp(-|a|))"
@@ -164,6 +173,12 @@ def logerfc(x: Tensorable) -> Tensor:
     For x >= 0, erfc(x) underflows; we use erfcx to avoid this:
       log(erfc(x)) = log(erfcx(x)) - x².
 
+    Args:
+      x: X.
+
+    Returns:
+      result: The Tensor.
+
     References:
       tfp.math.logerfc
 
@@ -226,6 +241,10 @@ def softplus_inverse(x: Tensorable) -> Tensor:
       x: Input tensor. The domain is x > 0 (softplus has range (0, inf));
         x <= 0 returns log(x), i.e. -inf at 0 and NaN below it.
 
+
+    Returns:
+      result: The Tensor.
+
     References:
       tfp.math.softplus_inverse
 
@@ -243,6 +262,12 @@ def log1psquare(x: Tensorable) -> Tensor:
     """log(1 + x²), numerically stable for large |x|.
 
     For large |x| (where x² overflows), uses 2*log(|x|).
+
+    Args:
+      x: X.
+
+    Returns:
+      result: The Tensor.
 
     References:
       tfp.math.log1psquare
@@ -429,7 +454,7 @@ def kahan_sum(x: Tensorable, dim: int | None = None, keepdim: bool = False) -> T
       Neumaier 1974, "Rundungsfehleranalyse einiger Verfahren zur Summation
       endlicher Summen." (the KBN variant implemented here).
       Klein 2006, "A generalized Kahan–Babuška-Summation-Algorithm."
-      (second-order; more accurate but costlier — not used.)
+      (second-order; more accurate but costlier -- not used.)
 
     """
     x = convert_to_tensor(x)
@@ -796,6 +821,10 @@ def custom_grad(*, actual: Tensor, phantom: Tensor) -> Tensor:
 
     Adapted from ``tfp.math.custom_grad`` (tensorflow/probability).
 
+    Args:
+      actual: Actual.
+      phantom: Phantom.
+
     Returns:
       result: actual.detach() + (phantom - phantom.detach()).
 
@@ -810,6 +839,13 @@ def ste_round(x: Tensorable, scale: Tensorable = 1.0) -> Tensor:
     In the forward pass, returns ``round(x * scale) / scale``.
     In the backward pass, gradients pass through as if this were
     the identity function.
+
+    Args:
+      x: X.
+      scale: Scale.
+
+    Returns:
+      result: The Tensor.
 
     References:
       Bengio et al. 2013, "Estimating or Propagating Gradients Through
@@ -831,6 +867,14 @@ def ste_clamp(
     In the backward pass, gradients pass through as if this were
     the identity function.
 
+    Args:
+      input: Input.
+      min: Min.
+      max: Max.
+
+    Returns:
+      result: The Tensor.
+
     References:
       Bengio et al. 2013, "Estimating or Propagating Gradients Through
         Stochastic Neurons for Conditional Computation."
@@ -848,9 +892,13 @@ def safe_log(input: Tensorable) -> Tensor:
     Uses the double-where trick to avoid NaN gradients.
     Adapted from tensorflow/probability.
 
+    Args:
+      input: Input.
+
     Returns:
       result: log(input) where input > 0, -inf for non-positive input, NaN
         where the input was already NaN.
+
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf
@@ -873,6 +921,10 @@ def safe_xlogy(
 
     Adapted from tensorflow/probability.
 
+    Args:
+      input: Input.
+      other: Other.
+
     Returns:
       result: x * log(y), with 0 where x == 0.
 
@@ -887,9 +939,13 @@ def safe_sqrt(input: Tensorable) -> Tensor:
     Uses the double-where trick to avoid NaN gradients.
     Adapted from tensorflow/probability.
 
+    Args:
+      input: Input.
+
     Returns:
       result: sqrt(input) where input > 0, 0 for non-positive input, NaN where
         the input was already NaN.
+
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf
@@ -918,9 +974,13 @@ def safe_rsqrt(input: Tensorable) -> Tensor:
     The forward value at ``input == 0`` is ``+inf``, but the gradient stays
     finite (the double-where keeps the autograd branch on a clamped operand).
 
+    Args:
+      input: Input.
+
     Returns:
       result: ``rsqrt(input)`` for ``input > 0``; ``+inf`` at ``0``; ``0`` for
         negative input.
+
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf
@@ -947,9 +1007,14 @@ def safe_pow(base: Tensorable, exponent: Tensorable) -> Tensor:
     - NaN in either argument: NaN, so a NaN introduced upstream surfaces
       rather than being laundered into the fallback.
 
+    Args:
+      base: Base.
+      exponent: Exponent.
+
     Returns:
       result: ``base ** exponent`` on the positive domain; ``1`` for ``0 ** 0``;
         ``0`` elsewhere; NaN where either argument is NaN.
+
 
     References:
       https://github.com/tensorflow/probability/blob/main/discussion/where-nan.pdf

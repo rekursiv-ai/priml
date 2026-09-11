@@ -127,10 +127,20 @@ class BitsPerByte:
         return {"bpb": nats / (math.log(2) * counted)}
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the accumulated sums."""
+        """Return the accumulated sums.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"nats": self.nats, "bytes": self.bytes}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore sums produced by :meth:`state_dict`."""
+        """Restore sums produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.nats = state_dict.get("nats", 0.0)
         self.bytes = state_dict.get("bytes", 0)

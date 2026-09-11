@@ -228,7 +228,7 @@ def test_pca_zca_whitens():
     mix = torch.randn(4, 4)
     x = x @ mix
     eigenvalues, V_raw = pca(x)
-    # ZCA whitening matrix: V @ diag(1/sqrt(λ)) @ V^T
+    # ZCA whitening matrix: V @ diag(1/sqrt(λ)) @ V^T.
     zca_matrix = V_raw * eigenvalues.rsqrt().unsqueeze(0) @ V_raw.T
     whitened = (x - x.mean(0)) @ zca_matrix
     c = cov(whitened, rowvar=False)
@@ -272,7 +272,7 @@ def test_sliding_window_prunes():
     w = SlidingWindow(window_sec=2.0)
     w.add(0.0, 0.0)
     w.add(1.0, 10.0)
-    w.add(3.0, 30.0)  # Should prune t=0.0
+    w.add(3.0, 30.0)  # Should prune t=0.0.
     assert len(w.samples) == 2
 
 

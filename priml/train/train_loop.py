@@ -5,7 +5,7 @@ Bundles TrainStep + dataset + metrics + training loop orchestration.
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterable, Iterator, Sized
 from dataclasses import field
 from pathlib import Path
 from typing import (
@@ -42,8 +42,6 @@ from priml.data.dummy import DummyDataset
 if TYPE_CHECKING:
     from typing import Self
 
-    from torch.utils.data import DataLoader
-
 from priml.custom_types import HasNormalizedWorkingDirPattern
 from priml.math.seed import (
     get_rng_state,
@@ -76,105 +74,6 @@ from priml.train.train_step import TrainStep
 
 
 logger = logging.getLogger(__name__)
-
-
-@contextlib.contextmanager
-def _compile_heartbeat(label: str, *, interval_s: float = 30.0) -> Generator[None]:
-    """Log a periodic heartbeat while a (possibly long-compiling) block runs.
-
-    The first ``torch.compile`` of the train step can block for minutes with no
-    output, which is indistinguishable from a true hang. This emits a rank-0
-    heartbeat every ``interval_s`` seconds reporting elapsed wall time, so a slow
-    compile (heartbeats then stops) is visibly distinct from a wedged process
-    (heartbeats forever). The thread is a daemon and is always joined on exit, so
-    it adds nothing once the block returns.
-    """
-    if not is_rank_zero():
-        yield
-        return
-    done = threading.Event()
-    start = time.perf_counter()
-
-    def beat() -> None:
-        while not done.wait(interval_s):
-            logger.info(
-                "%s: still running after %.0fs (likely torch.compile; "
-                "not hung unless this never stops)",
-                label,
-                time.perf_counter() - start,
-            )
-
-    thread = threading.Thread(target=beat, name="compile-heartbeat", daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        done.set()
-        thread.join(timeout=interval_s)
-
-
-def _current_rank() -> int:
-    """Global rank, or 0 when distributed is not initialized."""
-    if torch.distributed.is_initialized():
-        return torch.distributed.get_rank()
-    return 0
-
-
-@contextlib.contextmanager
-def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]:
-    """Log, on EVERY rank, which phase this rank is in while a block runs.
-
-    All ranks, unlike rank-0's :func:`_compile_heartbeat`, so a distributed
-    stall reports which rank is where without an external py-spy. Label names
-    the phase AND the batch (``"eval batch 54 eval_loss"``).
-
-    Two signals: a daemon thread beats every ``interval_s``, and a
-    :mod:`faulthandler` watchdog dumps every thread's C frames when that
-    thread is starved for twice as long -- the GIL-holding native hang the
-    Python beat cannot observe. The beat re-arms the watchdog, so the dump
-    never fires against a RUNNING interpreter, where walking mutating frames
-    without the GIL read garbage and then segfaulted a healthy eval.
-
-    An infinite ``interval_s`` disables both and emits nothing.
-    """
-    if interval_s == math.inf:
-        yield
-        return
-    rank = _current_rank()
-    done = threading.Event()
-    start = time.perf_counter()
-
-    def beat() -> None:
-        while not done.wait(interval_s):
-            # Re-arming resets the watchdog deadline to now + 2*interval_s:
-            # while this pure-Python thread can run, the process is not
-            # GIL-wedged and the dump (unsafe against running threads, see
-            # docstring) stays disarmed.
-            faulthandler.dump_traceback_later(
-                2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
-            )
-            logger.warning(
-                "[rank %d] STILL IN PHASE %r after %.0fs "
-                "(if this never advances, this rank is stuck HERE)",
-                rank,
-                label,
-                time.perf_counter() - start,
-            )
-
-    # faulthandler watchdog: dumps ALL thread stacks (C + Python) to stderr if
-    # the beat thread stalls for 2*interval_s (a GIL-holding native hang the
-    # Python beat cannot observe). ``repeat=True`` keeps a long wedge emitting.
-    faulthandler.dump_traceback_later(
-        2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
-    )
-    thread = threading.Thread(target=beat, name="phase-heartbeat", daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        faulthandler.cancel_dump_traceback_later()
-        done.set()
-        thread.join(timeout=interval_s)
 
 
 # Defaults are ``Any`` so a bare, unparameterized ``TrainLoop.Config`` accepts
@@ -271,6 +170,7 @@ class TrainLoop:
             default_factory=lambda: cast(_DatasetConfigT, DummyDataset.Config()),
         )
         """Supplies the train and eval loaders, and owns the epoch count."""
+
         metrics: dict[str, Makeable[MetricProtocol]] = field(
             default_factory=dict[str, Makeable[MetricProtocol]],
         )
@@ -297,12 +197,14 @@ class TrainLoop:
         conditions (``max_epochs``/``max_time``); every experiment is expected to
         set an explicit bound. The LR schedule horizon is separate
         (``step.train_budget_steps``), so this does not affect LR defaults."""
+
         max_epochs: float = math.inf
         """Passes over the training data before stopping."""
 
         max_time: float = math.inf
         """Time limit in seconds (clock chosen by ``max_time_kind``). Training
         stops if exceeded."""
+
         max_time_kind: Literal["wall", "train"] = "wall"
         """Which clock ``max_time`` caps.
 
@@ -314,15 +216,18 @@ class TrainLoop:
         excluded, and every mid-loop eval's duration is excluded too. The warm
         eval compile is excluded in both. The budget is per-process -- it is not
         checkpointed, so a resumed run starts a fresh cap."""
+
         max_eval_time: float = math.inf
         """Wall-clock cap in seconds for a single eval pass. A run that exceeds
         it fails (``EvalTimeLimitError``) rather than silently producing an
         over-budget score."""
+
         eval_stop_on_time_limit: bool = False
         """If True, stop eval at ``max_eval_time`` and publish partial metrics.
 
         Default False preserves score integrity: over-budget eval raises. Enable
         only for data-generation jobs where partial artifacts are useful."""
+
         num_steps_eval: float = 1_000
         """Optimizer steps between evals.
 
@@ -341,8 +246,10 @@ class TrainLoop:
 
         num_steps_log: int = 10
         """Optimizer steps between train-metric logs, after startup."""
+
         early_train_log_steps: int = 100
         """Log every optimizer step up to this step for startup diagnostics."""
+
         phase_heartbeat_sec: float = 20.0
         """Seconds a phase may run before every rank reports where it is.
 
@@ -350,8 +257,10 @@ class TrainLoop:
         stuck WHERE, and arms a ``faulthandler`` dump at twice this for a
         GIL-holding native hang. ``inf`` disables both -- right for a
         single-process run, which has no collective to deadlock on."""
+
         eval_every_epoch: bool = True
         """Run eval at epoch boundaries. Disable to save time."""
+
         eval_extras_every_eval: bool = False
         """Forward the full eval payload (non-scalar ``extras``) on every eval.
 
@@ -364,8 +273,10 @@ class TrainLoop:
         retention (e.g. ``SignalDumpTracker.keep_last_n``, mirroring
         ``Checkpointer.keep_last_n``), or per-eval artifacts grow unboundedly
         at eval cadence."""
+
         eval_warmup_batches: int = 0
         """Eval batches to run once before training timers start."""
+
         eval_only: bool = False
         """Run a single full-dataset eval on a loaded checkpoint, then exit.
 
@@ -374,6 +285,7 @@ class TrainLoop:
         -- eval_only does not dictate checkpoint reads. The loop evaluates over
         the full eval set, logs ``eval/*`` at the checkpoint's ``global_step``,
         and returns. With ``resume`` off, eval scores fresh weights (warned)."""
+
         restore_rng_state: bool = True
         """Restore checkpoint RNG state when loading.
 
@@ -382,6 +294,7 @@ class TrainLoop:
         RNG state is irrelevant to deterministic eval and CUDA device counts can
         differ.
         """
+
         seed: int | None = None
         """Base seed for every RNG; ``None`` draws one from OS entropy."""
 
@@ -493,7 +406,7 @@ class TrainLoop:
         # Strategy for seeding:
         #   runtime.initialize() →
         #   → Salt by mesh_dim_model_seed → Load model
-        #   → Salt by mesh_dim_data_seed → Load dataset
+        #   → Salt by mesh_dim_data_seed → Load dataset.
 
         self.runtime = config.runtime.make()
         self._owns_runtime = not runtime_initialized()
@@ -568,7 +481,7 @@ class TrainLoop:
             )
             logger.info("TrainLoop startup: checkpointer ready.")
 
-            # Store training hyperparameters
+            # Store training hyperparameters.
             self.working_dir = config.working_dir
             """This run's resolved directory; its identity, and what a re-run
             of a finished experiment must be told to change."""
@@ -622,14 +535,14 @@ class TrainLoop:
             logger.info("TrainLoop startup: tracker ready.")
             _barrier_if_distributed("tracker startup")
 
-            # Setup profiling
+            # Setup profiling.
             logger.info("TrainLoop startup: creating profiler.")
             self.profiling: ProfileProtocol | None = (
                 config.profiling.make() if config.profiling else None
             )
             logger.info("TrainLoop startup: profiler ready.")
 
-            # Garbage collection control
+            # Garbage collection control.
             if math.isfinite(config.num_steps_garbage_collect):
                 gc.disable()
 
@@ -658,8 +571,8 @@ class TrainLoop:
             # accumulation cannot score the same weights repeatedly.
             self._last_eval_step = self.step.global_step
 
-            self.train_loader = None
-            self.train_iter = None
+            self.train_loader: Iterable[Any] | None = None
+            self.train_iter: Iterator[Any] | None = None
             self._time_limit_latched = False
             logger.info(
                 "TrainLoop startup: warm eval compile begin "
@@ -787,23 +700,20 @@ class TrainLoop:
         """
         return self.dataset.timer_epoch.global_count
 
+    # ``max_time_kind`` selects the measured clock: wall seconds since ``_start_time``,
+    # or the pure-train clock (first-step compile and mid-loop evals excluded). Ranks
+    # have slightly different clocks and step pace, so a purely local check lets them
+    # disagree on which step is the last: one rank exits the loop and enters the
+    # collective final ``eval()`` while another keeps training, and the eval's all-
+    # reduce deadlocks (GPUs hang, no timeout).
+    #
+    # Rank 0 is authoritative -- it reads the clock and broadcasts the stop flag, so
+    # every rank adopts the same decision regardless of skew. We broadcast only every
+    # ``num_steps_log`` steps (and latch true once set), not every step: ``max_time`` is
+    # a soft cap, so overshooting by up to a few steps is fine, and this keeps the extra
+    # collective off the hot path.
     def _time_limit_reached(self) -> bool:
-        """Whether the ``max_time`` cap has elapsed, agreed by all ranks.
-
-        ``max_time_kind`` selects the measured clock: wall seconds since
-        ``_start_time``, or the pure-train clock (first-step compile and
-        mid-loop evals excluded). Ranks have slightly different clocks and step
-        pace, so a purely local check lets them disagree on which step is the
-        last: one rank exits the loop and enters the collective final ``eval()``
-        while another keeps training, and the eval's all-reduce deadlocks (GPUs
-        hang, no timeout).
-
-        Rank 0 is authoritative -- it reads the clock and broadcasts the stop
-        flag, so every rank adopts the same decision regardless of skew. We
-        broadcast only every ``num_steps_log`` steps (and latch true once set),
-        not every step: ``max_time`` is a soft cap, so overshooting by up to a
-        few steps is fine, and this keeps the extra collective off the hot path.
-        """
+        """Whether the ``max_time`` cap has elapsed, agreed by all ranks."""
         if self.max_time == math.inf:
             return False
         if not torch.distributed.is_initialized():
@@ -832,46 +742,33 @@ class TrainLoop:
             return self._train_elapsed()
         return time.perf_counter() - self._start_time
 
+    # The loop's own measurement, kept separate from ``_train_elapsed`` so a subclass
+    # that redefines the budget clock cannot make the two identical -- their DIFFERENCE
+    # is the seconds a recipe declined to charge, and a term that collapses to zero by
+    # construction audits nothing.
     def _pure_train_sec(self) -> float:
-        """Wall seconds spent training: first-step compile and evals excluded.
-
-        The loop's own measurement, kept separate from ``_train_elapsed`` so a
-        subclass that redefines the budget clock cannot make the two identical
-        -- their DIFFERENCE is the seconds a recipe declined to charge, and a
-        term that collapses to zero by construction audits nothing.
-        """
+        """Wall seconds spent training: first-step compile and evals excluded."""
         return time.perf_counter() - self._train_clock_base
 
     def _train_elapsed(self) -> float:
         """Pure-train seconds: first-step compile and mid-loop evals excluded."""
         return self._pure_train_sec()
 
+    # A budgeted recipe (nanochat) excludes leading steps so compile time cannot decide
+    # how much training a run buys; it exposes what it DID charge as ``elapsed_sec``. A
+    # recipe without that distinction charges every training second, which is the pure-
+    # train clock.
     def _billed_train_sec(self) -> float:
-        """Seconds the recipe's own schedule charged against its budget.
-
-        A budgeted recipe (nanochat) excludes leading steps so compile time
-        cannot decide how much training a run buys; it exposes what it DID
-        charge as ``elapsed_sec``. A recipe without that distinction charges
-        every training second, which is the pure-train clock.
-        """
+        """Seconds the recipe's own schedule charged against its budget."""
         billed = getattr(self.step, "elapsed_sec", None)
         return self._pure_train_sec() if billed is None else float(billed)
 
+    # The four terms sum to ``elapsed`` by construction, which is the point: a lever
+    # that moves training out of the charged bucket -- a longer warmup exclusion, work
+    # hoisted outside the timed region -- has to put those seconds in another term
+    # rather than dissolve them.
     def _time_account(self, elapsed: float) -> list[str]:
-        """Decompose wall time so no clock can be moved without showing.
-
-        The four terms sum to ``elapsed`` by construction, which is the point:
-        a lever that moves training out of the charged bucket -- a longer
-        warmup exclusion, work hoisted outside the timed region -- has to put
-        those seconds in another term rather than dissolve them.
-
-        Args:
-          elapsed: Wall seconds since training began.
-
-        Returns:
-          fields: ``key=value`` strings for the RESULT line.
-
-        """
+        """Decompose wall time so no clock can be moved without showing."""
         # ``_pure_train_sec`` already excludes eval -- the clock base is
         # advanced past each one -- so eval is subtracted here exactly once, via
         # its own term rather than again out of the residual. It is the loop's
@@ -890,18 +787,16 @@ class TrainLoop:
             f"other_sec={other:.1f}s",
         ]
 
+    # No-op in the base loop (always ``False``). A subclass overrides it to end the run
+    # once its objective is met -- e.g. a time-to-target loop stops once the watched
+    # metric has crossed its target, since further training cannot improve the already-
+    # latched score and only burns compute. An override MUST return a rank-agreed
+    # verdict (broadcast rank 0's decision, like :meth:`_time_limit_reached`): the latch
+    # may be computed on rank 0 only (the eval payload that sets it runs under the
+    # rank-0 tracker), so a purely local read would desync ranks and deadlock the next
+    # collective eval.
     def _should_stop_early(self) -> bool:
-        """Whether training should stop before ``max_steps`` / ``max_time``.
-
-        No-op in the base loop (always ``False``). A subclass overrides it to end
-        the run once its objective is met -- e.g. a time-to-target loop stops once
-        the watched metric has crossed its target, since further training cannot
-        improve the already-latched score and only burns compute. An override MUST
-        return a rank-agreed verdict (broadcast rank 0's decision, like
-        :meth:`_time_limit_reached`): the latch may be computed on rank 0 only
-        (the eval payload that sets it runs under the rank-0 tracker), so a purely
-        local read would desync ranks and deadlock the next collective eval.
-        """
+        """Whether training should stop before ``max_steps`` / ``max_time``."""
         return False
 
     def _eval_time_limit_reached(self, eval_start: float) -> bool:
@@ -920,16 +815,13 @@ class TrainLoop:
         torch.distributed.broadcast(flag, src=0)
         return bool(flag.item() > 0.0)
 
+    # The checkpoint is loaded in ``__init__`` by the checkpointer's own resume policy
+    # (``resume`` defaults on); eval_only does not dictate checkpoint reads. This runs a
+    # single eval over the eval set as the run's final eval -- logging ``eval/*`` and
+    # emitting the ``RESULT`` line -- via the same path as the end-of-training eval. No
+    # training step, optimizer step, or checkpoint write occurs.
     def _run_eval_only(self) -> None:
-        """Score the loaded checkpoint with one eval, then return.
-
-        The checkpoint is loaded in ``__init__`` by the checkpointer's own resume
-        policy (``resume`` defaults on); eval_only does not dictate checkpoint
-        reads. This runs a single eval over the eval set as the run's final eval
-        -- logging ``eval/*`` and emitting the ``RESULT`` line -- via the same
-        path as the end-of-training eval. No training step, optimizer step, or
-        checkpoint write occurs.
-        """
+        """Score the loaded checkpoint with one eval, then return."""
         if self.step.global_step == 0:
             logger.warning(
                 "eval_only at global_step=0: no checkpoint was loaded "
@@ -937,6 +829,10 @@ class TrainLoop:
             )
         self._maybe_eval(is_final=True, force=True)
 
+    # On the final eval the full ``eval_metrics`` (including any non-scalar ``extras``
+    # payload) is forwarded so payload-consuming child trackers see it; cadence evals
+    # forward scalars only, unless ``eval_extras_every_eval`` opts the run into per-eval
+    # payload forwarding. Each child tracker keeps only the keys it understands.
     def _publish_eval_metrics(
         self,
         eval_metrics: dict[str, Any],
@@ -945,14 +841,7 @@ class TrainLoop:
         step: int,
         is_final: bool,
     ) -> dict[str, float]:
-        """Publish eval metrics to the tracker; final-ness is expressed as data.
-
-        On the final eval the full ``eval_metrics`` (including any non-scalar
-        ``extras`` payload) is forwarded so payload-consuming child trackers see
-        it; cadence evals forward scalars only, unless ``eval_extras_every_eval``
-        opts the run into per-eval payload forwarding. Each child tracker keeps
-        only the keys it understands.
-        """
+        """Publish eval metrics to the tracker; final-ness is expressed as data."""
         eval_scalar_metrics = scalar_metrics(eval_metrics)
         if self.tracker:
             payload: dict[str, Any] = (
@@ -967,6 +856,9 @@ class TrainLoop:
             self.tracker.log_metrics(payload, step, prefix="eval/")
         return eval_scalar_metrics
 
+    # Empty in the base loop. Subclasses (e.g. a time-to-target loop) override this to
+    # inject objective-specific scalars derived from the eval; it is called once per
+    # published eval, after the scalar metrics are computed.
     def _extra_eval_payload(
         self,
         eval_scalar_metrics: dict[str, float],
@@ -974,22 +866,12 @@ class TrainLoop:
         *,
         is_final: bool,
     ) -> dict[str, Any]:
-        """Extra ``eval/``-prefixed keys to merge into the eval payload.
-
-        Empty in the base loop. Subclasses (e.g. a time-to-target loop) override
-        this to inject objective-specific scalars derived from the eval; it is
-        called once per published eval, after the scalar metrics are computed.
-        """
+        """Extra ``eval/``-prefixed keys to merge into the eval payload."""
         del eval_scalar_metrics, step, is_final
         return {}
 
     def _get_next_batch(self) -> dict[str, Any]:
-        """Get next batch, handle epoch boundary and eval at end of epoch.
-
-        Returns:
-            batch: Next training batch
-
-        """
+        """Get next batch, handle epoch boundary and eval at end of epoch."""
         batch_start = time.perf_counter()
         if self.train_loader is None:
             logger.info(
@@ -1058,24 +940,19 @@ class TrainLoop:
                 self.train_iter = iter(self.train_loader)
         raise RuntimeError("Failed to get next batch after epoch reset")
 
+    # No-op in the base loop, whose clocks bracket the whole run. A subclass charging a
+    # wall-clock BUDGET overrides it, because loading is training time under any budget
+    # its reference also charges -- and it happens here, where the step cannot see it.
     def _on_batch_ready(self, fetch_time: float) -> None:
-        """Hook called with the seconds spent producing one training batch.
-
-        No-op in the base loop, whose clocks bracket the whole run. A subclass
-        charging a wall-clock BUDGET overrides it, because loading is training
-        time under any budget its reference also charges -- and it happens
-        here, where the step cannot see it.
-        """
+        """Record the seconds spent producing one training batch."""
         del fetch_time
 
+    # No-op in the base loop. Subclasses override it to accumulate training wall-clock
+    # for a time-to-target objective. ``is_first`` marks this process's first step,
+    # whose ``step_time`` includes the backward-graph compile and is therefore excluded
+    # from "training time".
     def _on_train_step_timed(self, step_time: float, *, is_first: bool) -> None:
-        """Hook called after each train step with its wall-clock duration.
-
-        No-op in the base loop. Subclasses override it to accumulate training
-        wall-clock for a time-to-target objective. ``is_first`` marks this
-        process's first step, whose ``step_time`` includes the backward-graph
-        compile and is therefore excluded from "training time".
-        """
+        """Record each train step's wall-clock duration."""
         del step_time, is_first
 
     def _do_train_step(self, batch: dict[str, Any]) -> None:
@@ -1215,25 +1092,17 @@ class TrainLoop:
         gc_time = time.perf_counter() - gc_start
         logger.info(f"GC at local_step {self.local_step} (gc_time={gc_time:.3f}s)")
 
+    # The single eval-and-report path. In the training loop it fires on the step cadence
+    # (``global_step % num_steps_eval == 0``, before the train step for online-learning
+    # semantics). At the end of training it is called once with ``is_final=True``: that
+    # eval emits the ``RESULT`` line and forwards the full payload (including any
+    # ``extras``), since the cadence eval never lands on the final step and forwards
+    # scalars only (unless ``eval_extras_every_eval`` opts cadence evals into the full
+    # payload). ``num_steps_eval`` selects the regime (see its docstring); ``force``
+    # overrides it for the ``eval_only`` path, whose single eval is always the final one
+    # regardless of step or cadence.
     def _maybe_eval(self, *, is_final: bool = False, force: bool = False) -> None:
-        """Run validation and publish it; the final eval also writes metrics.
-
-        The single eval-and-report path. In the training loop it fires on the
-        step cadence (``global_step % num_steps_eval == 0``, before the train
-        step for online-learning semantics). At the end of training it is called
-        once with ``is_final=True``: that eval emits the ``RESULT`` line and
-        forwards the full payload (including any ``extras``), since the cadence
-        eval never lands on the final step and forwards scalars only (unless
-        ``eval_extras_every_eval`` opts cadence evals into the full payload).
-        ``num_steps_eval`` selects the regime (see its docstring); ``force``
-        overrides it for the ``eval_only`` path, whose single eval is always
-        the final one regardless of step or cadence.
-
-        Args:
-            is_final: This is the run's last eval; emit RESULT and write metrics.
-            force: Run regardless of the step/cadence gate (``eval_only``).
-
-        """
+        """Run validation and publish it; the final eval also writes metrics."""
         # eval_only (force) always runs. Otherwise the three regimes: never,
         # final-only, or a cadence plus the final. A cadence eval never fires
         # on step 0, nor twice on the step it already scored.
@@ -1296,13 +1165,11 @@ class TrainLoop:
             gc.enable()
         self._destroy_runtime_once()
 
+    # Reached from both ``_cleanup`` and the startup failure path, either of which may
+    # run first: a component in the startup body can reach ``_cleanup`` before the
+    # failure handler sees the exception.
     def _destroy_runtime_once(self) -> None:
-        """Tear down an owned runtime, at most once.
-
-        Reached from both ``_cleanup`` and the startup failure path, either of
-        which may run first: a component in the startup body can reach
-        ``_cleanup`` before the failure handler sees the exception.
-        """
+        """Tear down an owned runtime, at most once."""
         if self._owns_runtime and not self._runtime_destroyed:
             self.runtime.destroy()
             self._runtime_destroyed = True
@@ -1371,7 +1238,12 @@ class TrainLoop:
         self.phase_timer.record_cuda_events(name, *events)
 
     def eval(self) -> dict[str, Any]:
-        """Run validation."""
+        """Run validation.
+
+        Returns:
+          results: The dict[str, Any].
+
+        """
         for metric in self.metrics.values():
             metric.reset()
 
@@ -1381,10 +1253,7 @@ class TrainLoop:
         total_step_metrics: dict[str, float] = {}
         num_batches = 0
         total_weight = 0
-        try:
-            total_batches = len(eval_loader)
-        except TypeError:
-            total_batches = 0
+        total_batches = len(eval_loader) if isinstance(eval_loader, Sized) else 0
         narrate = is_rank_zero()
         log_every = max(1, total_batches // 20) if total_batches else 50
 
@@ -1485,10 +1354,10 @@ class TrainLoop:
                 )
             batch_start = time.perf_counter()
 
-        # Collect results with metric name prefix
+        # Collect results with metric name prefix.
         results: dict[str, Any] = {}
 
-        # Only add eval total_loss if we processed any batches
+        # Only add eval total_loss if we processed any batches.
         if total_weight > 0:
             results["total_loss"] = total_loss / total_weight
             results["mean_batch_time"] = total_batch_time / num_batches
@@ -1505,12 +1374,22 @@ class TrainLoop:
         return results
 
     def run(self, *args: str) -> None:
-        """Run training (entry point for experimental.lib.launch)."""
+        """Run training (entry point for experimental.lib.launch).
+
+        Args:
+          *args: Args.
+
+        """
         del args
         self.train()
 
     def state_dict(self) -> dict[str, Any]:
-        """Get training state for checkpointing."""
+        """Get training state for checkpointing.
+
+        Returns:
+          state: The dict[str, Any].
+
+        """
         state: dict[str, Any] = {
             "step": self.step.state_dict(),
             "dataset": self.dataset.state_dict(),
@@ -1522,7 +1401,12 @@ class TrainLoop:
         return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load training state from checkpoint (full restore for resume)."""
+        """Load training state from checkpoint (full restore for resume).
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.step.load_state_dict(state_dict["step"])
         self.dataset.load_state_dict(state_dict["dataset"])
         for name, metric_state in state_dict["metrics"].items():
@@ -1531,7 +1415,7 @@ class TrainLoop:
         # No epoch to restore here: it rode the dataset's own state above.
         self.local_step = 0
 
-        # Restore RNG states
+        # Restore RNG states.
         if self.restore_rng_state and "rng" in state_dict:
             set_rng_state(state_dict["rng"])
 
@@ -1561,21 +1445,13 @@ class _SupportsBindStep(Protocol):
     def bind_step(self, step: TrainStepProtocol) -> None: ...
 
 
+# A supervised dataset reads a corpus, so it needs nothing from the model. An on-policy
+# dataset IS the model acting: its next batch is a rollout of the current policy, which
+# lives on the train step. Binding here -- once, before the first batch -- is what lets
+# such a dataset satisfy the ordinary ``train_dataloader`` contract instead of inverting
+# the loop. A dataset that does not implement ``bind_step`` is left alone.
 def _bind_dataset_step(dataset: DatasetProtocol, step: TrainStepProtocol) -> None:
-    """Give a dataset that generates its own data the step that produces it.
-
-    A supervised dataset reads a corpus, so it needs nothing from the model.
-    An on-policy dataset IS the model acting: its next batch is a rollout of
-    the current policy, which lives on the train step. Binding here -- once,
-    before the first batch -- is what lets such a dataset satisfy the ordinary
-    ``train_dataloader`` contract instead of inverting the loop. A dataset
-    that does not implement ``bind_step`` is left alone.
-
-    Args:
-      dataset: The dataset just built from config.
-      step: The train step whose model the dataset may need to act with.
-
-    """
+    """Give a dataset that generates its own data the step that produces it."""
     if isinstance(dataset, _SupportsBindStep):
         dataset.bind_step(step)
 
@@ -1593,19 +1469,12 @@ class _SupportsBindEpochTimer(Protocol):
     def bind_epoch_timer(self, timer: CheckpointableStepTimer) -> None: ...
 
 
-def _set_loader_epoch(loader: DataLoader[Any], epoch: int) -> None:
-    """Inform the loader's dataset of the current epoch before (re)iteration.
-
-    Epoch state must originate in the main process: a ``num_workers>0`` loader
-    re-forks fresh per-worker sources each epoch, so the dataset wrapper folds
-    this epoch into the per-worker shuffle seed. Loaders whose dataset does not
-    support ``set_epoch`` (cached lists, third-party datasets) are left as-is.
-
-    Args:
-      loader: The training DataLoader about to be (re)iterated.
-      epoch: Zero-based epoch index.
-
-    """
+# Epoch state must originate in the main process: a ``num_workers>0`` loader re-forks
+# fresh per-worker sources each epoch, so the dataset wrapper folds this epoch into the
+# per-worker shuffle seed. Loaders whose dataset does not support ``set_epoch`` (cached
+# lists, third-party datasets) are left as-is.
+def _set_loader_epoch(loader: object, epoch: int) -> None:
+    """Inform the loader's dataset of the current epoch before (re)iteration."""
     dataset = getattr(loader, "dataset", None)
     if isinstance(dataset, _SupportsSetEpoch):
         dataset.set_epoch(epoch)
@@ -1618,3 +1487,96 @@ def _barrier_if_distributed(stage: str) -> None:
     logger.info("TrainLoop startup: waiting after %s.", stage)
     torch.distributed.barrier()
     logger.info("TrainLoop startup: all ranks passed %s.", stage)
+
+
+# The first ``torch.compile`` of the train step can block for minutes with no output,
+# which is indistinguishable from a true hang. This emits a rank-0 heartbeat every
+# ``interval_s`` seconds reporting elapsed wall time, so a slow compile (heartbeats then
+# stops) is visibly distinct from a wedged process (heartbeats forever). The thread is a
+# daemon and is always joined on exit, so it adds nothing once the block returns.
+@contextlib.contextmanager
+def _compile_heartbeat(label: str, *, interval_s: float = 30.0) -> Generator[None]:
+    """Log a periodic heartbeat while a (possibly long-compiling) block runs."""
+    if not is_rank_zero():
+        yield
+        return
+    done = threading.Event()
+    start = time.perf_counter()
+
+    def beat() -> None:
+        while not done.wait(interval_s):
+            logger.info(
+                "%s: still running after %.0fs (likely torch.compile; "
+                "not hung unless this never stops)",
+                label,
+                time.perf_counter() - start,
+            )
+
+    thread = threading.Thread(target=beat, name="compile-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        done.set()
+        thread.join(timeout=interval_s)
+
+
+def _current_rank() -> int:
+    """Global rank, or 0 when distributed is not initialized."""
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+# All ranks, unlike rank-0's :func:`_compile_heartbeat`, so a distributed stall reports
+# which rank is where without an external py-spy. Label names the phase AND the batch
+# (``"eval batch 54 eval_loss"``).
+#
+# Two signals: a daemon thread beats every ``interval_s``, and a :mod:`faulthandler`
+# watchdog dumps every thread's C frames when that thread is starved for twice as long
+# -- the GIL-holding native hang the Python beat cannot observe. The beat re-arms the
+# watchdog, so the dump never fires against a RUNNING interpreter, where walking
+# mutating frames without the GIL read garbage and then segfaulted a healthy eval.
+#
+# An infinite ``interval_s`` disables both and emits nothing.
+@contextlib.contextmanager
+def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]:
+    """Log, on EVERY rank, which phase this rank is in while a block runs."""
+    if interval_s == math.inf:
+        yield
+        return
+    rank = _current_rank()
+    done = threading.Event()
+    start = time.perf_counter()
+
+    def beat() -> None:
+        while not done.wait(interval_s):
+            # Re-arming resets the watchdog deadline to now + 2*interval_s:
+            # while this pure-Python thread can run, the process is not
+            # GIL-wedged and the dump (unsafe against running threads, see
+            # docstring) stays disarmed.
+            faulthandler.dump_traceback_later(
+                2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
+            )
+            logger.warning(
+                "[rank %d] STILL IN PHASE %r after %.0fs "
+                "(if this never advances, this rank is stuck HERE)",
+                rank,
+                label,
+                time.perf_counter() - start,
+            )
+
+    # ``faulthandler`` watchdog: dumps ALL thread stacks (C + Python) to stderr if
+    # the beat thread stalls for 2*interval_s (a GIL-holding native hang the
+    # Python beat cannot observe). ``repeat=True`` keeps a long wedge emitting.
+    faulthandler.dump_traceback_later(
+        2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
+    )
+    thread = threading.Thread(target=beat, name="phase-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        done.set()
+        thread.join(timeout=interval_s)

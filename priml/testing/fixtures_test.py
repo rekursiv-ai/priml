@@ -40,7 +40,7 @@ def test_cleanup_cuda_with_cuda():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    # Test that CUDA operations work
+    # Test that CUDA operations work.
     x = torch.tensor([1.0, 2.0, 3.0], device="cuda")
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
@@ -49,7 +49,7 @@ def test_cleanup_cuda_with_cuda():
 
 def test_cleanup_cuda_without_cuda():
     """Test that code works when CUDA is not available."""
-    # Just verify CPU tensors work fine
+    # Just verify CPU tensors work fine.
     x = torch.tensor([1.0, 2.0, 3.0], device="cpu")
     assert x.device.type == "cpu"
 
@@ -152,18 +152,18 @@ def test_test_main_calls_pytest():
     ):
         test_main("/path/to/test_file.py")
 
-        # Verify pytest.main was called
+        # Verify pytest.main was called.
         assert mock_pytest.called
         call_args = mock_pytest.call_args[0][0]
 
-        # Verify the test file is in the arguments
+        # Verify the test file is in the arguments.
         assert "/path/to/test_file.py" in call_args
         assert "-v" in call_args
         assert "-s" in call_args
         assert "-W" in call_args
         assert "ignore::pytest.PytestAssertRewriteWarning" in call_args
 
-        # Verify sys.exit was called with the return value
+        # Verify sys.exit was called with the return value.
         mock_exit.assert_called_once_with(0)
 
 
@@ -183,7 +183,7 @@ def test_test_main_passes_through_argv():
 
             call_args = mock_pytest.call_args[0][0]
 
-            # Verify extra args were passed through
+            # Verify extra args were passed through.
             assert "-k" in call_args
             assert "test_foo" in call_args
             assert "--verbose" in call_args

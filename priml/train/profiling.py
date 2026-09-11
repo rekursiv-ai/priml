@@ -126,7 +126,7 @@ class TorchProfiling:
                 "Set memory_profile=False or run on a CUDA-enabled device.",
             )
 
-        # copy fields; don't retain the whole config
+        # Copy fields; don't retain the whole config.
         self.torch_profile = config.torch_profile
         self.torch_profile_start = config.torch_profile_start
         self.torch_profile_end = config.torch_profile_end
@@ -169,21 +169,21 @@ class TorchProfiling:
         self._profiler_started = False
 
     def _should_profile(self) -> bool:
-        """Check if profiling should run on current rank.
-
-        Returns:
-          should_profile: True if profiling should run on this rank.
-
-        """
+        """Check if profiling should run on current rank."""
         if not torch.distributed.is_initialized():
-            return True  # Non-distributed, always profile
+            return True  # Non-distributed, always profile.
 
         if self.ranks is None:
             return True
         return torch.distributed.get_rank() in self.ranks
 
     def on_step_start(self, step: int) -> None:
-        """Called at the start of each training step."""
+        """Run at the start of each training step.
+
+        Args:
+          step: Step.
+
+        """
         if not self._should_profile():
             return
 
@@ -203,7 +203,12 @@ class TorchProfiling:
             torch.cuda.memory._record_memory_history()  # noqa: SLF001
 
     def on_step_end(self, step: int) -> None:
-        """Called at the end of each training step."""
+        """Run at the end of each training step.
+
+        Args:
+          step: Step.
+
+        """
         if not self._should_profile():
             return
 
@@ -251,19 +256,14 @@ class TorchProfiling:
             logger.info(f"Saved memory snapshot to {snapshot_path}")
 
     def _get_rank_suffix(self) -> str:
-        """Get rank suffix for output filenames.
-
-        Returns:
-          suffix: Empty string if profiling single rank, "_rank_N" if profiling multiple.
-
-        """
+        """Get rank suffix for output filenames."""
         if not torch.distributed.is_initialized():
-            return ""  # Non-distributed, no suffix needed
+            return ""  # Non-distributed, no suffix needed.
 
         if self.ranks is None:
             return f"_rank_{torch.distributed.get_rank()}"
         if len(self.ranks) == 1:
-            return ""  # Single rank, no suffix needed
+            return ""  # Single rank, no suffix needed.
 
         return f"_rank_{torch.distributed.get_rank()}"
 
@@ -359,19 +359,43 @@ class PhaseTimer:
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Generator[None, None, None]:
-        """Measure and narrate one potentially long phase."""
+        """Measure and narrate one potentially long phase.
+
+        Args:
+          name: Name.
+
+        Yields:
+          item: Each yielded value.
+
+        """
         with self._timed(name, narrate=True):
             yield
 
     @contextlib.contextmanager
     def measure(self, name: str) -> Generator[None, None, None]:
-        """Measure a frequent phase without per-call boundary logs."""
+        """Measure a frequent phase without per-call boundary logs.
+
+        Args:
+          name: Name.
+
+        Yields:
+          item: Each yielded value.
+
+        """
         with self._timed(name, narrate=False):
             yield
 
     @contextlib.contextmanager
     def measure_cuda(self, name: str) -> Generator[None, None, None]:
-        """Record asynchronous GPU stream time without a hot-path sync."""
+        """Record asynchronous GPU stream time without a hot-path sync.
+
+        Args:
+          name: Name.
+
+        Yields:
+          item: Each yielded value.
+
+        """
         if not self.cuda_events_enabled or not torch.cuda.is_available():
             yield
             return
@@ -391,6 +415,13 @@ class PhaseTimer:
         return self._enabled and self._cuda_events_enabled
 
     def record(self, name: str, elapsed: float) -> None:
+        """Record one timing sample.
+
+        Args:
+          name: Name.
+          elapsed: Elapsed.
+
+        """
         if not self._enabled:
             return
         path = f"{self._stack[-1].path}/{name}" if self._stack else name
@@ -404,13 +435,26 @@ class PhaseTimer:
         start: CudaEventProtocol,
         end: CudaEventProtocol,
     ) -> None:
-        """Record a CUDA event pair for deferred elapsed-time reporting."""
+        """Record a CUDA event pair for deferred elapsed-time reporting.
+
+        Args:
+          name: Name.
+          start: Start.
+          end: End.
+
+        """
         if not self.cuda_events_enabled:
             return
         self._cuda_events.setdefault(name, []).append((start, end))
         self._cuda_summary = None
 
     def summary(self) -> dict[str, float]:
+        """Summarize recorded timings.
+
+        Returns:
+          result: The dict[str, float].
+
+        """
         total = time.perf_counter() - self._start_time
         return {**self._phases, "total": total}
 
@@ -427,7 +471,16 @@ class PhaseTimer:
         *,
         step: int,
     ) -> dict[str, float]:
-        """Publish and reset one hierarchical timing interval."""
+        """Publish and reset one hierarchical timing interval.
+
+        Args:
+          tracker: Tracker.
+          step: Step.
+
+        Returns:
+          metrics: The dict[str, float].
+
+        """
         if not self._enabled:
             return {}
         metrics = self._timing_metrics(
@@ -453,7 +506,16 @@ class PhaseTimer:
         *,
         step: int,
     ) -> dict[str, float]:
-        """Publish one cumulative hierarchical timing summary."""
+        """Publish one cumulative hierarchical timing summary.
+
+        Args:
+          tracker: Tracker.
+          step: Step.
+
+        Returns:
+          metrics: The dict[str, float].
+
+        """
         if not self._enabled:
             return {}
         metrics = self._timing_metrics(
@@ -477,6 +539,7 @@ class PhaseTimer:
         return metrics
 
     def log_summary(self) -> None:
+        """Log the timing summary."""
         if not self._enabled or self._summary_logged:
             return
         self._summary_logged = True
@@ -715,7 +778,9 @@ class _PhaseFrame:
     """One active phase and the inclusive time consumed by nested children."""
 
     path: str
+
     started_at: float
+
     child_sec: float = 0.0
 
 

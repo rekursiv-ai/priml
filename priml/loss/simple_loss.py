@@ -48,8 +48,10 @@ class SimpleLoss:
 
         loss_fn: SimpleLossFn = functional.binary_cross_entropy_with_logits
         """PyTorch loss function to use."""
+
         target_key: str = "label"
         """Batch key containing the target tensor."""
+
         kwargs: dict[str, Any] = field(
             default_factory=lambda: {"reduction": "none"},
         )

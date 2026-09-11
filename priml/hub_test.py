@@ -24,7 +24,7 @@ from priml.lib.userdirs import cache_dir
 
 
 @contextmanager
-def _mock_transformers(mock_auto_model: Any) -> Generator[MagicMock]:
+def _mock_transformers(mock_auto_model: object) -> Generator[MagicMock]:
     """Inject a fake transformers module to avoid the ~3s real import."""
     fake = MagicMock()
     fake.AutoModel = mock_auto_model
@@ -206,7 +206,7 @@ def test_load_transformers_model_no_global_env_mutation() -> None:
     # observable mid-call.
     observed: dict[str, Any] = {}
 
-    def _capture(*_args: Any, **_kwargs: Any) -> MagicMock:
+    def _capture(*_args: object, **_kwargs: object) -> MagicMock:
         observed["env"] = os.environ.get("HF_HUB_OFFLINE")
         observed["level"] = transformers_logger.level
         return MagicMock()

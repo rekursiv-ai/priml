@@ -30,7 +30,7 @@ def compute_hessian(
         hessian: Hessian matrix (n_params x n_params).
 
     """
-    # Get gradients with create_graph=True for second derivatives
+    # Get gradients with create_graph=True for second derivatives.
     grads_list = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
     grad_tensor = torch.cat([g.view(-1) for g in grads_list])
     n_params = grad_tensor.shape[0]
@@ -44,7 +44,7 @@ def compute_hessian(
         dtype=grad_tensor.dtype,
     )
     for i in range(n_params):
-        # Compute gradient of grad[i] w.r.t. all params
+        # Compute gradient of grad[i] w.r.t. all params.
         retain = i < n_params - 1
         hess_row = torch.autograd.grad(
             grad_tensor[i],

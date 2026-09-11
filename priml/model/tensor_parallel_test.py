@@ -68,7 +68,7 @@ def test_swiglu_declares_shard_via_transformer_block() -> None:
     block = TransformerBlock.Config(channels_in=32).make()
     assert isinstance(block.ffn, SwiGLU)
     assert block.ffn.shard == "colwise"
-    assert block.ffn.up_proj.shard is None  # the SwiGLU style shards children
+    assert block.ffn.up_proj.shard is None  # the SwiGLU style shards children.
     assert block.ffn.down_proj.shard is None
 
 
@@ -97,14 +97,12 @@ def test_transformer_declares_embedding_and_head_vocab() -> None:
     assert model.out_proj.shard == "vocab"
 
 
+# ``result_dir_str`` is bound via ``functools.partial`` and pickled with the worker, so
+# it survives a forkserver started by an earlier test (an env var would be stale in that
+# forkserver's snapshotted environment). Writes ``ok`` or ``FAIL:<reason>`` to
+# ``rank_<r>`` under it.
 def _ensemble_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
-    """Worker: sharded EnsembleLinear output must equal the dense output.
-
-    ``result_dir_str`` is bound via ``functools.partial`` and pickled with the
-    worker, so it survives a forkserver started by an earlier test (an env var
-    would be stale in that forkserver's snapshotted environment). Writes ``ok``
-    or ``FAIL:<reason>`` to ``rank_<r>`` under it.
-    """
+    """Worker: sharded EnsembleLinear output must equal the dense output."""
     result_dir = Path(result_dir_str)
     rank = mesh.get_rank()
     try:
@@ -187,14 +185,12 @@ class _ColwiseRowwisePair(nn.Module):
         return self.down(self.up(x))
 
 
+# The strategy's placement and the applier's sharding meet only here. A single-rank run
+# exercises the materialize branch but returns before any plan is built (``tp=1`` is a
+# structural no-op), so it cannot see a materialized tensor reaching
+# ``parallelize_module``.
 def _meta_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
-    """Worker: a meta-built model materializes AND shards, and still matches.
-
-    The strategy's placement and the applier's sharding meet only here. A
-    single-rank run exercises the materialize branch but returns before any
-    plan is built (``tp=1`` is a structural no-op), so it cannot see a
-    materialized tensor reaching ``parallelize_module``.
-    """
+    """Worker: a meta-built model materializes AND shards, and still matches."""
     result_dir = Path(result_dir_str)
     rank = mesh.get_rank()
     try:
@@ -315,16 +311,13 @@ def _first(out: Tensor | tuple[Tensor, object]) -> Tensor:
     return out[0] if isinstance(out, tuple) else out
 
 
+# Each ``WorkerPool`` spawn is expensive and repeated spawns in a single process corrupt
+# the multiprocessing forkserver, so all cases share one pool. ``result_dir_str`` is
+# bound via ``functools.partial`` and pickled with the worker, so it survives a
+# forkserver started by an earlier test (an env var would be stale in that forkserver's
+# snapshotted environment). Writes ``<case>_rank<r>`` files the parent collates.
 def _all_cases_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
-    """Run every sharded==dense case plus the fused-kernel guard in one pool.
-
-    Each ``WorkerPool`` spawn is expensive and repeated spawns in a single
-    process corrupt the multiprocessing forkserver, so all cases share one
-    pool. ``result_dir_str`` is bound via ``functools.partial`` and pickled
-    with the worker, so it survives a forkserver started by an earlier test
-    (an env var would be stale in that forkserver's snapshotted environment).
-    Writes ``<case>_rank<r>`` files the parent collates.
-    """
+    """Run every sharded==dense case plus the fused-kernel guard in one pool."""
     result_dir = Path(result_dir_str)
     rank = mesh.get_rank()
     runtime._device_mesh = mesh
@@ -371,19 +364,23 @@ def _record_case(
         target.write_text(f"FAIL:{e!r}")
 
 
+def _fused_guard_outcome(attn: nn.Module, mesh: DeviceMesh) -> str:
+    """``ok`` when sharding raises the kernel guard, else a FAIL record."""
+    try:
+        apply_tensor_parallel(attn, mesh)
+    except RuntimeError as e:
+        ok = "DTensor-compatible attention kernel" in str(e)
+        return "ok" if ok else f"FAIL:{e!r}"
+    return "FAIL:no-raise"
+
+
 def _record_fused_kernel_guard(result_dir: Path, rank: int, mesh: DeviceMesh) -> None:
-    """A sharded SelfAttention with the fused flash kernel must raise clearly."""
+    """Return a sharded SelfAttention with the fused flash kernel must raise clearly."""
     target = result_dir / f"fused_guard_rank{rank}"
     try:
         torch.manual_seed(0)
         attn = SelfAttention.Config(channels_in=32, num_heads=4, num_heads_kv=2).make()
-        try:
-            apply_tensor_parallel(attn, mesh)
-        except RuntimeError as e:
-            ok = "DTensor-compatible attention kernel" in str(e)
-            target.write_text("ok" if ok else f"FAIL:{e!r}")
-        else:
-            target.write_text("FAIL:no-raise")
+        target.write_text(_fused_guard_outcome(attn, mesh))
     except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
         target.write_text(f"FAIL:{e!r}")
 

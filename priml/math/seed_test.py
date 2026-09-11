@@ -33,12 +33,13 @@ def test_make_seed_returns_nonzero():
     seed = make_seed()
     assert seed > 0
     assert isinstance(seed, int)
-    assert seed < 2**63  # PyTorch / numpy accept 64-bit seeds
+    assert seed < 2**63  # PyTorch / numpy accept 64-bit seeds.
 
 
 def test_make_seed_distinct_consecutive_calls():
-    """Successive calls must differ. OS entropy makes this overwhelmingly
-    likely; the failure probability is ~2^-63.
+    """Successive calls must differ.
+
+    OS entropy makes this overwhelmingly likely; the failure probability is ~2^-63.
     """
     seeds = {make_seed() for _ in range(100)}
     assert len(seeds) == 100
@@ -74,11 +75,11 @@ def test_set_seed_reproducibility():
 
 @pytest.mark.gpu_torch_cuda
 def test_set_seed_reproducibility_on_cuda() -> None:
-    """The CPU reproducibility check above misses the case readers
-    actually rely on -- CUDA RNG reproducibility. Cover at least the
-    single-device path so a regression in the per-device seeding loop
-    fires here, not only in the ``device_count() >= 2`` test that
-    skips on most CI.
+    """The CPU reproducibility check above misses the case readers actually rely on.
+
+    -- CUDA RNG reproducibility. Cover at least the single-device path so a regression
+    in the per-device seeding loop fires here, not only in the ``device_count() >= 2``
+    test that skips on most CI.
     """
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
@@ -244,7 +245,7 @@ def test_set_seed_distributed_returns_base_then_local(
         salt_by_rank=False,
     )
     assert base == 100
-    assert local == 100  # salt_by_rank=False means equal here
+    assert local == 100  # salt_by_rank=False means equal here.
 
 
 def test_set_seed_distributed_rank0_generates_when_seed_none(
@@ -279,10 +280,10 @@ def test_set_seed_distributed_broadcast_carries_user_seed(
 def test_set_seed_distributed_broadcast_tensor_shape_matches_across_ranks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Rank 0 and rank>0 must produce a broadcast tensor of identical
-    shape, dtype, and device. NCCL rejects shape/device mismatch; this
-    is the bug pattern reviewers caught -- mocks accepted any tensor,
-    so a 0-d vs 1-d mismatch shipped.
+    """Rank 0 and rank>0 must produce a broadcast tensor of identical shape, dtype.
+
+    And device. NCCL rejects shape/device mismatch; this is the bug pattern reviewers
+    caught -- mocks accepted any tensor, so a 0-d vs 1-d mismatch shipped.
     """
     sink0 = _patch_dist(monkeypatch, rank=0)
     set_seed_distributed(seed=42, mesh=None, salt_by_rank=False)
@@ -300,10 +301,11 @@ def test_set_seed_distributed_broadcast_tensor_shape_matches_across_ranks(
 def test_set_seed_distributed_raises_on_nccl_without_cuda(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NCCL backend requires CUDA. If a caller declares ``backend=nccl``
-    on a host with no CUDA devices, fail explicitly instead of letting
-    ``torch.cuda.current_device()`` raise the opaque "No CUDA GPUs are
-    available" error.
+    """NCCL backend requires CUDA.
+
+    If a caller declares ``backend=nccl`` on a host with no CUDA devices, fail
+    explicitly instead of letting ``torch.cuda.current_device()`` raise the opaque "No
+    CUDA GPUs are available" error.
     """
     _patch_dist(monkeypatch, rank=0, backend="nccl")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -315,10 +317,11 @@ def test_set_seed_distributed_raises_on_nccl_without_cuda(
 def test_set_seed_distributed_uses_cuda_tensor_on_nccl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NCCL requires CUDA tensors. ``dist.broadcast(<cpu>)`` on a NCCL
-    process group raises 'Tensors must be CUDA and dense'. The
-    construction must consult ``dist.get_backend()`` and place the
-    tensor on the current CUDA device when backend is nccl.
+    """NCCL requires CUDA tensors.
+
+    ``dist.broadcast(<cpu>)`` on a NCCL process group raises 'Tensors must be CUDA and
+    dense'. The construction must consult ``dist.get_backend()`` and place the tensor on
+    the current CUDA device when backend is nccl.
     """
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
@@ -339,9 +342,10 @@ def test_set_seed_distributed_uses_cpu_tensor_on_gloo(
 def test_set_seed_distributed_asserts_initialized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Calling without an initialized process group is a programmer
-    error. ``dist.get_rank()`` would raise an opaque RuntimeError mid-
-    function; surface the precondition at the boundary instead.
+    """Calling without an initialized process group is a programmer error.
+
+    ``dist.get_rank()`` would raise an opaque RuntimeError mid- function; surface the
+    precondition at the boundary instead.
     """
     _patch_dist(monkeypatch, rank=0, initialized=False)
     with pytest.raises(
@@ -354,9 +358,10 @@ def test_set_seed_distributed_asserts_initialized(
 def test_set_seed_distributed_rank_n_does_not_use_user_seed_arg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On rank>0 the broadcast result wins; the user-supplied seed
-    argument is informational only. Pin that contract so the renamed
-    ``base_seed`` (vs the original shadowed ``seed``) stays correct.
+    """On rank>0 the broadcast result wins; the user-supplied seed argument is.
+
+    Informational only. Pin that contract so the renamed ``base_seed`` (vs the original
+    shadowed ``seed``) stays correct.
     """
     _patch_dist(monkeypatch, rank=1, broadcast=_mock_broadcast_fill)
     base_seed, local_seed = set_seed_distributed(
@@ -447,10 +452,10 @@ def test_set_rng_state_raises_when_cuda_states_exceed_devices(
 def test_set_rng_state_raises_when_cuda_states_below_devices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Symmetric to the over-count case: silent partial restore is the
-    deeper bug, not just truncation. A short list leaves the tail
-    devices on whatever startup state they had, which is the same kind
-    of silent footgun.
+    """Symmetric to the over-count case: silent partial restore is the deeper bug.
+
+    Not just truncation. A short list leaves the tail devices on whatever startup state
+    they had, which is the same kind of silent footgun.
     """
     set_all_calls: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -552,7 +557,7 @@ def test_set_rng_state_without_numpy_key_restores_the_rest() -> None:
 
     set_rng_state(legacy)
 
-    # numpy is untouched rather than restored: the state simply is not there.
+    # ``numpy`` is untouched rather than restored: the state simply is not there.
     assert numpy_rng.bit_generator.state == pre_numpy
 
 
@@ -579,9 +584,10 @@ def test_enable_determinism_warns_on_cublas_env_overwrite(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """If the caller already set ``CUBLAS_WORKSPACE_CONFIG`` to a
-    different value, ``enable_determinism`` must not silently clobber
-    it. Log a warning so the divergence is visible.
+    """If the caller already set ``CUBLAS_WORKSPACE_CONFIG`` to a different value.
+
+    ``enable_determinism`` must not silently clobber it. Log a warning so the divergence
+    is visible.
     """
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":16:8")
@@ -607,10 +613,10 @@ def test_enable_determinism_warns_when_called_after_cuda_init(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``CUBLAS_WORKSPACE_CONFIG`` must be set before CUDA context
-    creation or it has no effect. Surface the precondition violation
-    as a warning so the operator sees that determinism may not have
-    taken effect.
+    """``CUBLAS_WORKSPACE_CONFIG`` must be set before CUDA context creation or it.
+
+    Has no effect. Surface the precondition violation as a warning so the operator sees
+    that determinism may not have taken effect.
     """
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -631,9 +637,10 @@ def test_enable_determinism_warns_when_called_after_cuda_init(
 
 
 def test_enable_determinism_disables_sdpa_by_default() -> None:
-    """The default must be deterministic. ``sdpa=False`` (i.e. don't
-    disable the nondeterministic SDPA backends) contradicted every
-    explicit caller in the codebase, so flip the default to ``True``.
+    """The default must be deterministic.
+
+    ``sdpa=False`` (i.e. don't disable the nondeterministic SDPA backends) contradicted
+    every explicit caller in the codebase, so flip the default to ``True``.
     """
     sig = inspect.signature(enable_determinism)
     assert sig.parameters["sdpa"].default is True
@@ -642,8 +649,9 @@ def test_enable_determinism_disables_sdpa_by_default() -> None:
 def test_enable_determinism_sets_cublas_env_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the env var is unset, ``enable_determinism`` sets it to
-    the deterministic value. No warning needed.
+    """When the env var is unset, ``enable_determinism`` sets it to the.
+
+    Deterministic value. No warning needed.
     """
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
@@ -660,9 +668,10 @@ def test_enable_determinism_sets_cublas_env_when_unset(
 
 
 def test_dataloader_worker_init_fn_decorrelates_numpy_streams() -> None:
-    """Module-level ``numpy_rng`` (and ``random`` / legacy ``np.random``)
-    inherits identical state across forked DataLoader workers. Provide
-    a ``dataloader_worker_init_fn`` helper that reseeds per worker.
+    """Module-level ``numpy_rng`` (and ``random`` / legacy ``np.random``) inherits.
+
+    Identical state across forked DataLoader workers. Provide a
+    ``dataloader_worker_init_fn`` helper that reseeds per worker.
     """
     set_seed_local(seed=100)
     pristine_numpy = numpy_rng.bit_generator.state
@@ -698,10 +707,10 @@ def test_get_rng_state_warns_when_mps_backend_active(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """When MPS (Apple Silicon) is the active backend, MPS RNG state is
-    NOT captured by ``get_rng_state``. Surface that as a warning so the
-    operator can't silently rely on a checkpoint that doesn't actually
-    round-trip MPS reproducibility.
+    """When MPS (Apple Silicon) is the active backend, MPS RNG state is NOT captured.
+
+    By ``get_rng_state``. Surface that as a warning so the operator can't silently rely
+    on a checkpoint that doesn't actually round-trip MPS reproducibility.
     """
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
@@ -752,11 +761,12 @@ def test_get_rng_state_no_warning_when_only_cpu(
 
 
 def test_set_rng_state_raises_on_missing_required_key() -> None:
-    """``RngState`` declares python/numpy/torch as required. A malformed
-    state missing one of those keys must fail loudly, not silently
-    skip restoration. KeyError is the correct failure shape -- the
-    contract is "all keys must be present"; we previously guarded each
-    one with ``if "x" in state:`` which weakened the TypedDict contract.
+    """``RngState`` declares python/numpy/torch as required.
+
+    A malformed state missing one of those keys must fail loudly, not silently skip
+    restoration. KeyError is the correct failure shape -- the contract is "all keys must
+    be present"; we previously guarded each one with ``if "x" in state:`` which weakened
+    the TypedDict contract.
     """
     # Deliberately malformed: missing the required "torch" key. Cast
     # to bypass the TypedDict check; the runtime must catch what the
@@ -777,10 +787,10 @@ def test_set_rng_state_warns_on_cuda_device_identity_mismatch(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Count-match alone doesn't detect a CUDA_VISIBLE_DEVICES remap.
-    When the checkpoint carries device UUIDs and they don't match the
-    current devices, log a warning so the operator can confirm intent.
-    Backward-compatible: checkpoints without ``cuda_uuids`` are accepted
-    silently.
+
+    When the checkpoint carries device UUIDs and they don't match the current devices,
+    log a warning so the operator can confirm intent. Backward-compatible: checkpoints
+    without ``cuda_uuids`` are accepted silently.
     """
     sink: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -794,7 +804,8 @@ def test_set_rng_state_warns_on_cuda_device_identity_mismatch(
     class FakeProps:
         uuid = "GPU-CURRENT"
 
-    def _fake_props(_i: int) -> FakeProps:
+    def _fake_props(i: int) -> FakeProps:
+        del i
         return FakeProps()
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", _fake_props)
@@ -820,8 +831,9 @@ def test_set_rng_state_no_warning_when_cuda_uuids_absent(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Legacy checkpoints have no ``cuda_uuids`` key. Accept them
-    silently; the warning only fires when we have something to compare.
+    """Legacy checkpoints have no ``cuda_uuids`` key.
+
+    Accept them silently; the warning only fires when we have something to compare.
     """
     sink: list[list[Tensor]] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -844,10 +856,10 @@ def test_set_rng_state_no_warning_when_cuda_uuids_absent(
 
 
 def test_make_seed_uses_os_entropy() -> None:
-    """``make_seed`` should draw from OS entropy (``secrets.randbits``),
-    not a timestamp/PID hash with hand-rolled "mixing." The folklore
-    docstring is gone; the implementation now uses a 63-bit value the
-    way torch and numpy both accept.
+    """``make_seed`` should draw from OS entropy (``secrets.randbits``), not a.
+
+    Timestamp/PID hash with hand-rolled "mixing." The folklore docstring is gone; the
+    implementation now uses a 63-bit value the way torch and numpy both accept.
     """
     import inspect  # noqa: PLC0415
 
@@ -858,8 +870,9 @@ def test_make_seed_uses_os_entropy() -> None:
 
 
 def test_make_seed_64_bit_range() -> None:
-    """The 32-bit narrowing was unmotivated; torch/numpy accept 64-bit
-    seeds. Verify the output fits the wider range.
+    """The 32-bit narrowing was unmotivated; torch/numpy accept 64-bit seeds.
+
+    Verify the output fits the wider range.
     """
     seeds = {make_seed() for _ in range(1_000)}
     assert max(seeds) > 2**32, f"make_seed narrowed to 32-bit: max={max(seeds)}"
@@ -869,9 +882,10 @@ def test_set_seed_local_does_not_force_cuda_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``set_seed_local`` should not initialize CUDA as a side effect.
-    A CPU-only run that imports any seeding caller should not allocate
-    a CUDA context. Seed the per-device RNGs lazily instead -- torch's
-    ``manual_seed`` already supports this via ``_lazy_call``.
+
+    A CPU-only run that imports any seeding caller should not allocate a CUDA context.
+    Seed the per-device RNGs lazily instead -- torch's ``manual_seed`` already supports
+    this via ``_lazy_call``.
     """
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
@@ -889,10 +903,10 @@ def test_set_seed_local_does_not_force_cuda_init(
 
 def test_set_seed_local_seeds_legacy_numpy_global() -> None:
     """Many ML codepaths still call ``np.random.rand`` / ``randn`` etc.
-    (the legacy module-level API). ``set_seed_local``'s docstring says
-    it "sets the random seed for ... NumPy" -- enforce that this
-    includes the legacy global, not just the module-level
-    ``numpy_rng`` Generator.
+
+    (the legacy module-level API). ``set_seed_local``'s docstring says it "sets the
+    random seed for ... NumPy" -- enforce that this includes the legacy global, not just
+    the module-level ``numpy_rng`` Generator.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -904,11 +918,11 @@ def test_set_seed_local_seeds_legacy_numpy_global() -> None:
 
 
 def test_salt_rejects_objects_with_default_repr() -> None:
-    """``salt(*args)`` uses ``str(args)`` for hashing. Objects whose
-    ``__repr__`` includes an address (default object repr) produce
-    non-deterministic salts across runs. The function advertises
-    determinism; enforce by rejecting anything that isn't a stable
-    primitive.
+    """``salt(*args)`` uses ``str(args)`` for hashing.
+
+    Objects whose ``__repr__`` includes an address (default object repr) produce non-
+    deterministic salts across runs. The function advertises determinism; enforce by
+    rejecting anything that isn't a stable primitive.
     """
 
     class Opaque:
@@ -919,8 +933,9 @@ def test_salt_rejects_objects_with_default_repr() -> None:
 
 
 def test_salt_accepts_stable_primitives() -> None:
-    """``str``, ``int``, ``bytes``, ``bool``, ``None``, and ``float``
-    have stable reprs across processes. They must remain accepted.
+    """``str``, ``int``, ``bytes``, ``bool``, ``None``, and ``float`` have stable.
+
+    Reprs across processes. They must remain accepted.
     """
     # No exception means the contract is preserved.
     salt("torch", 42)

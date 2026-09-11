@@ -155,15 +155,15 @@ def test_sparse_embedding_routing_requires_explicit_flag() -> None:
     """A 3-param group of plain dense tensors must NOT be sparse-routed.
 
     Currently ``_sparse_embedding_parts`` matches any group with exactly
-    3 params, one requires_grad, one 1-D, one 2-D — collidable by any
+    3 params, one requires_grad, one 1-D, one 2-D -- collidable by any
     user passing ``[2D_weight, 1D_bias, 2D_other]`` or similar. The fix
     is an explicit ``{"sparse_embedding": True}`` flag; without it, the
     group is treated as a dense group.
     """
-    matrix_a = torch.randn(4, 3, requires_grad=True)  # 2D with grad
+    matrix_a = torch.randn(4, 3, requires_grad=True)  # 2D with grad.
     matrix_a.grad = torch.randn(4, 3)
-    bias = torch.randn(3)  # 1D, no grad
-    matrix_b = torch.randn(4, 3)  # 2D, no grad
+    bias = torch.randn(3)  # 1D, no grad.
+    matrix_b = torch.randn(4, 3)  # 2D, no grad.
 
     pre = matrix_a.clone()
     opt = SignSGD(
@@ -218,7 +218,7 @@ def test_sparse_distributed_step_rejects_noncontiguous_params() -> None:
     discarded. The guarded behaviour is to raise so the caller fixes the
     layout.
     """
-    weights = torch.randn(4, 3, 2).transpose(0, 1)  # non-contiguous
+    weights = torch.randn(4, 3, 2).transpose(0, 1)  # non-contiguous.
     assert not weights.is_contiguous()
     local_weights = torch.zeros(2, 6, requires_grad=True)
     local_weights.grad = torch.randn(2, 6)
@@ -233,3 +233,9 @@ def test_sparse_distributed_step_rejects_noncontiguous_params() -> None:
             lr=0.1,
             weight_decay=0.0,
         )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

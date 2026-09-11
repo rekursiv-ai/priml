@@ -76,6 +76,7 @@ def test_head_capabilities_are_direct_attributes() -> None:
     @dataclass(slots=True, kw_only=True)
     class Attention:
         num_heads: int
+
         channels_head: int
 
     attention = Attention(num_heads=4, channels_head=32)
@@ -149,7 +150,7 @@ def test_propagate_missing_attr_raises():
 
 
 def test_channel_config_fields_are_uniform() -> None:
-    root = Path(__file__).resolve().parent.parent
+    root = _CWD.parent
     violations: list[str] = []
     for path in sorted(root.rglob("*.py")):
         if path.name.endswith("_test.py"):

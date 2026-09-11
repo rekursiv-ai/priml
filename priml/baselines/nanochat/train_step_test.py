@@ -28,7 +28,7 @@ VOCAB = 32
 SEQ = 8
 
 
-def _step(**overrides: Any) -> NanoChatTrainStep:
+def _step(**overrides: object) -> NanoChatTrainStep:
     config = NanoChatTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.dtype_autocast = None
@@ -103,11 +103,11 @@ def test_an_optimizer_step_waits_for_the_whole_token_batch() -> None:
     the recipe was tuned for, and the budget comparison would be against a
     different experiment.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update.
     assert step.accumulate_passes == 2
     batch = _batch()
     step.train_step(**batch)
-    assert step.global_step == 0  # accumulated, not yet applied
+    assert step.global_step == 0  # accumulated, not yet applied.
     step.train_step(**batch)
     assert step.global_step == 1
 
@@ -190,7 +190,7 @@ def test_the_warmup_is_counted_in_steps_not_passes() -> None:
     step = _step(tokens_per_optimizer_step=4 * SEQ, budget_warmup_steps=1)
     assert step.accumulate_passes == 2
     batch = _batch()
-    for _ in range(2):  # one whole optimizer step: the warmup
+    for _ in range(2):  # one whole optimizer step: the warmup.
         step.train_step(**batch)
     assert step.global_step == 1
     assert step.elapsed_sec == 0.0
@@ -210,9 +210,9 @@ def test_loop_side_work_is_charged_to_the_budget_past_warmup() -> None:
     step = _step(budget_warmup_steps=1)
     batch = _batch()
     step.charge_budget(5.0)
-    assert step.elapsed_sec == 0.0  # warmup: not yet charged
-    step.train_step(**batch)  # the warmup step
-    step.train_step(**batch)  # past it, and itself charged
+    assert step.elapsed_sec == 0.0  # warmup: not yet charged.
+    step.train_step(**batch)  # the warmup step.
+    step.train_step(**batch)  # past it, and itself charged.
     charged = step.elapsed_sec
     step.charge_budget(5.0)
     assert step.elapsed_sec >= charged + 5.0
@@ -228,7 +228,7 @@ def test_resuming_does_not_rerun_the_budget_warmup() -> None:
     """
     step = _step(budget_warmup_steps=2)
     batch = _batch()
-    for _ in range(4):  # two warmup, two charged
+    for _ in range(4):  # two warmup, two charged.
         step.train_step(**batch)
     charged = step.elapsed_sec
     assert charged > 0.0
@@ -315,9 +315,9 @@ def test_a_diverged_pass_is_caught_at_the_batch_it_belongs_to() -> None:
     is the same guarantee -- that update ran on gradients whose loss was
     finite, and the diverged batch never reaches a second one.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update.
     step.config.divergence_threshold = 1e-6
-    step.train_step(**_batch())  # the diverged pass, mid-batch
+    step.train_step(**_batch())  # the diverged pass, mid-batch.
     assert step.global_step == 0
     with pytest.raises(RuntimeError, match="diverged"):
         step.train_step(**_batch())
@@ -332,7 +332,7 @@ def test_divergence_clears_the_pending_accumulation() -> None:
     smaller than the one the recipe is tuned against -- the invariant the
     divisibility check in ``finalize`` exists to hold.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update.
     step.train_step(**_batch())
     assert step._pending_passes == 1
 
@@ -343,9 +343,7 @@ def test_divergence_clears_the_pending_accumulation() -> None:
 
 
 def test_eval_returns_per_token_loss_for_the_metric() -> None:
-    """The metric weights each token by its byte length, so it needs them
-    unreduced.
-    """
+    """The metric weights each token by its byte length, so it needs them unreduced."""
     step = _step()
     out = step.eval_loss(**_batch())
     assert out["model"].shape == (2, SEQ)
@@ -434,20 +432,19 @@ def test_the_recipes_schedule_holds_then_decays_to_zero() -> None:
 
 
 def test_the_selector_is_comparable_not_a_closure() -> None:
-    """A closure's repr carries an address, so a config holding one never
-    equals its parent and every experiment diff shows a change.
+    """A closure's repr carries an address, so a config holding one never equals its.
+
+    Parent and every experiment diff shows a change.
     """
     assert matrix_parameters() == matrix_parameters()
 
 
+# The EXPERIMENT's config, not a hand-built one: a golden over a config assembled here
+# would freeze whatever this file happens to say, and the ladder could then change
+# underneath it without the golden noticing. Only the device is pinned, because the
+# harness is CPU-only.
 def _smoke_step() -> NanoChatTrainStep:
-    """``exp_smoke``'s step, built for a golden.
-
-    The EXPERIMENT's config, not a hand-built one: a golden over a config
-    assembled here would freeze whatever this file happens to say, and the
-    ladder could then change underneath it without the golden noticing. Only
-    the device is pinned, because the harness is CPU-only.
-    """
+    """``exp_smoke``'s step, built for a golden."""
     config = experiments.exp_smoke().step
     config.parallelism = NoParallel.Config(device="cpu")
     torch.manual_seed(0)

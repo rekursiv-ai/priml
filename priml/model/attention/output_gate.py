@@ -34,7 +34,20 @@ class CachedAttention(Protocol):
         max_seq: int,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
-    ) -> KVCache: ...
+    ) -> KVCache:
+        """Alloc kv cache.
+
+        Args:
+          batch: Batch.
+          max_seq: Max seq.
+          device: Device.
+          dtype: Dtype.
+
+        Returns:
+          result: The KVCache.
+
+        """
+        ...
 
     def forward_cached(
         self,
@@ -42,7 +55,19 @@ class CachedAttention(Protocol):
         *,
         cache: KVCache,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache]: ...
+    ) -> tuple[Tensor, KVCache]:
+        """Forward cached.
+
+        Args:
+          x: X.
+          cache: Cache.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
+        ...
 
 
 class OutputGate(nn.Module):
@@ -127,6 +152,7 @@ class OutputGate(nn.Module):
         ).make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         if hasattr(self.inner, "reset_parameters"):
             self.inner.reset_parameters()
         self.gate_proj.reset_parameters()
@@ -139,7 +165,18 @@ class OutputGate(nn.Module):
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> KVCache:
-        """Allocate the wrapped attention's cache."""
+        """Allocate the wrapped attention's cache.
+
+        Args:
+          batch: Batch.
+          max_seq: Max seq.
+          device: Device.
+          dtype: Dtype.
+
+        Returns:
+          result: The KVCache.
+
+        """
         inner = cast(CachedAttention, self.inner)
         return inner.alloc_kv_cache(
             batch=batch,
@@ -164,7 +201,17 @@ class OutputGate(nn.Module):
         cache: KVCache,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Apply the gate while updating the wrapped attention's cache."""
+        """Apply the gate while updating the wrapped attention's cache.
+
+        Args:
+          x: X.
+          cache: Cache.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
         gate = torch.sigmoid(self.gate_proj(x))
         inner = cast(CachedAttention, self.inner)
         out, updated = inner.forward_cached(x, cache=cache, **kwargs)

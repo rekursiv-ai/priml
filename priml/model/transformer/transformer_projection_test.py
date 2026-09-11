@@ -125,3 +125,9 @@ def test_attention_owns_causality(causal: bool) -> None:
     changed[:, -1] += torch.arange(8)
     before, after = model(hidden), model(changed)
     assert torch.equal(before[:, 0], after[:, 0]) == causal
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

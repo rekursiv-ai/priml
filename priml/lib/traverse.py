@@ -89,7 +89,7 @@ def recursively_iterate_over_object_descendants(
                 path=(*path, i),
             )
     else:
-        # Handle objects with __slots__ and/or __dict__
+        # Handle objects with __slots__ and/or __dict__.
         if hasattr(type(value), "__slots__"):
             seen_slots = set[str]()
             for cls in type(value).__mro__:

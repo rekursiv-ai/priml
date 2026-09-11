@@ -53,29 +53,53 @@ class SmoothWorldConfig:
     """
 
     default_block: int
+
     sea_block: int
+
     coast_block: int
+
     mountain_block: int
+
     path_block: int
+
     inner_mountain_block: int
+
     ore_requirement_blocks: tuple[int, ...]
+
     ores: tuple[int, ...]
+
     ore_chances: tuple[float, ...]
+
     tree_requirement_block: int
+
     tree: int
+
     lava: int
+
     player_spawn: int
+
     valid_ladder: int
+
     ladder_up: bool
+
     ladder_down: bool
+
     player_proximity_map_water_strength: float
+
     player_proximity_map_water_max: float
+
     player_proximity_map_mountain_strength: float
+
     player_proximity_map_mountain_max: float
+
     default_light: float
+
     water_threshold: float
+
     sand_threshold: float
+
     tree_threshold_uniform: float
+
     tree_threshold_perlin: float
 
 
@@ -92,7 +116,9 @@ class DungeonConfig:
     """
 
     special_block: int
+
     fountain_block: int
+
     rare_path_replacement_block: int
 
 

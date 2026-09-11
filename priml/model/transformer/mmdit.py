@@ -43,14 +43,6 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 
 
-class _MultiStreamModule(Protocol):
-    def __call__(
-        self,
-        xs: Sequence[Tensor],
-        **kwargs: object,
-    ) -> tuple[Tensor, ...]: ...
-
-
 class AdaLNZero(nn.Module):
     """Adaptive LayerNorm-Zero modulation.
 
@@ -63,10 +55,15 @@ class AdaLNZero(nn.Module):
         """Six modulation parameters from AdaLN-Zero."""
 
         attn_scale: Tensor
+
         attn_shift: Tensor
+
         attn_gate: Tensor
+
         ffn_scale: Tensor
+
         ffn_shift: Tensor
+
         ffn_gate: Tensor
 
     class Config(Fig["AdaLNZero"], kw_only=False):
@@ -105,6 +102,7 @@ class AdaLNZero(nn.Module):
         self.proj = config.proj.make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         self.proj.reset_parameters()
 
     @override
@@ -340,6 +338,7 @@ class MMDiTBlock(nn.Module):
             )
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         self.attn.reset_parameters()
         for modules in (self.norms1, self.norms2, self.ffns):
             for m in modules:
@@ -463,3 +462,11 @@ class MMDiTBlock(nn.Module):
             results.append(y + ffn_out)
 
         return tuple(results)
+
+
+class _MultiStreamModule(Protocol):
+    def __call__(
+        self,
+        xs: Sequence[Tensor],
+        **kwargs: object,
+    ) -> tuple[Tensor, ...]: ...

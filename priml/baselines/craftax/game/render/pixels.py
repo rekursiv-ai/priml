@@ -113,7 +113,7 @@ class Renderer:
         self._draw_player(surface, state, index)
         self._shade(surface, state, index)
 
-        # pygame is column-major in its array view; transpose back to the
+        # ``pygame`` is column-major in its array view; transpose back to the
         # row-major convention every image tool expects.
         return np.transpose(pygame.surfarray.array3d(surface), (1, 0, 2))
 

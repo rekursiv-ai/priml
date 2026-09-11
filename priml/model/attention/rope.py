@@ -124,6 +124,13 @@ class HuggingFaceFrequencies:
         return 1.0 / (self.base ** (index / channels)), 1.0
 
 
+def _validated_base(base: float) -> float:
+    """Reject a base that builds an all-NaN or degenerate table."""
+    if not math.isfinite(base) or base <= 0:
+        raise ValueError(f"base must be finite and positive; got {base}.")
+    return base
+
+
 class YarnScaling:
     """YaRN (Yet another RoPE extensioN) frequency scaling.
 
@@ -360,10 +367,22 @@ class RoPE(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
+        """Dtype.
+
+        Returns:
+          result: The torch.dtype.
+
+        """
         return self._dtype.dtype
 
     @property
     def device(self) -> torch.device:
+        """Device.
+
+        Returns:
+          result: The torch.device.
+
+        """
         return self._dtype.device
 
     @override
@@ -548,22 +567,19 @@ class RoPE(nn.Module):
             bases.append(((m - 1) / (2 * math.pi)) ** (c / (c - 2)))
         return bases[0] if len(bases) == 1 else tuple(bases)
 
+    # Builds the output OUT-OF-PLACE (no ``torch.empty_like`` + strided in-place
+    # writes). The earlier in-place form (``out = empty_like(x); out[..., 0::2] = ...``)
+    # hung a compiled, ``torch.inference_mode`` eval on CUDA: a strided in-place write
+    # into uninitialized ``empty_like`` memory under ``torch.compile`` +
+    # ``inference_mode`` produced a wedged kernel (observed: an eval-only resume froze
+    # mid-pass, GPUs pinned, the next launch stuck at the eager cos/sin build). The out-
+    # of-place ``stack``/``cat`` assembly is numerically bit-identical (guarded by
+    # ``test_rotate_matches_stack_reference_*``) and still avoids the input
+    # ``aten.reshape`` that torchao fp8 axiswise scaling cannot trace -- the reason the
+    # reshape+stack original was replaced.
     @classmethod
     def _rotate(cls, x: Tensor, cos: Tensor, sin: Tensor, interleave: bool) -> Tensor:
-        """Apply 2D rotation to a single tensor using half-dim cos/sin.
-
-        Builds the output OUT-OF-PLACE (no ``torch.empty_like`` + strided
-        in-place writes). The earlier in-place form
-        (``out = empty_like(x); out[..., 0::2] = ...``) hung a compiled,
-        ``torch.inference_mode`` eval on CUDA: a strided in-place write into
-        uninitialized ``empty_like`` memory under ``torch.compile`` +
-        ``inference_mode`` produced a wedged kernel (observed: an eval-only resume
-        froze mid-pass, GPUs pinned, the next launch stuck at the eager cos/sin
-        build). The out-of-place ``stack``/``cat`` assembly is numerically
-        bit-identical (guarded by ``test_rotate_matches_stack_reference_*``) and
-        still avoids the input ``aten.reshape`` that torchao fp8 axiswise scaling
-        cannot trace -- the reason the reshape+stack original was replaced.
-        """
+        """Apply 2D rotation to a single tensor using half-dim cos/sin."""
         dtype = x.dtype
         x = x.float()
         if interleave:
@@ -596,14 +612,12 @@ class RoPE(nn.Module):
         self._build_inv_freqs(self._dtype.device)
         return self
 
+    # Rebuilt on a move rather than copied there: ``base ** x`` is a transcendental
+    # whose last bit differs between CPU and CUDA (measured, 4 of 64 frequencies at
+    # head_dim 128), so a reference that constructs its table on the accelerator cannot
+    # be matched by moving a CPU-built one.
     def _build_inv_freqs(self, device: torch.device) -> None:
-        """Build the inverse frequencies on ``device``.
-
-        Rebuilt on a move rather than copied there: ``base ** x`` is a
-        transcendental whose last bit differs between CPU and CUDA (measured, 4
-        of 64 frequencies at head_dim 128), so a reference that constructs its
-        table on the accelerator cannot be matched by moving a CPU-built one.
-        """
+        """Build the inverse frequencies on ``device``."""
         self._inv_freqs = [torch.empty(0, device=device) for _ in self.channels_head]
         mscales: set[float] = set()
         for i, (table, c) in enumerate(
@@ -634,12 +648,10 @@ class RoPE(nn.Module):
         if c % 2 == 1:
             raise ValueError(f"Dim {c} must be even.")
 
+    # E.g. _split_dim(128, 3) -> [44, 42, 42].
     @classmethod
     def _split_dim(cls, total: int, naxes: int) -> list[int]:
-        """Split total channels across axes, each even, front-loaded.
-
-        E.g. _split_dim(128, 3) -> [44, 42, 42].
-        """
+        """Split total channels across axes, each even, front-loaded."""
         if total % 2:
             raise ValueError(f"Total dim={total} must be even.")
         if total < 2 * naxes:
@@ -685,92 +697,6 @@ def rotate_conjugate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
         [first * cos + second * sin, first * (-sin) + second * cos],
         dim=-1,
     )
-
-
-def _validated_base(base: float) -> float:
-    """Reject a base that builds an all-NaN or degenerate table."""
-    if not math.isfinite(base) or base <= 0:
-        raise ValueError(f"base must be finite and positive; got {base}.")
-    return base
-
-
-def _yarn_mscale(scale: float, mscale: float) -> float:
-    """YaRN attention scale: m = 0.1 * ln(factor) * mscale + 1 (for factor > 1)."""
-    if scale <= 1.0:
-        return 1.0
-    return 0.1 * math.log(scale) * mscale + 1.0
-
-
-def _yarn_correction_dim(
-    num_rot: float,
-    dim: int,
-    base: float,
-    max_position: int,
-) -> float:
-    """Channel index whose frequency completes ``num_rot`` rotations."""
-    return dim * math.log(max_position / (num_rot * 2 * math.pi)) / (2 * math.log(base))
-
-
-def _yarn_correction_range(
-    low_rot: float,
-    high_rot: float,
-    dim: int,
-    base: float,
-    max_position: int,
-) -> tuple[float, float]:
-    """Return the per-channel indices marking the YaRN ramp region."""
-    low = math.floor(_yarn_correction_dim(low_rot, dim, base, max_position))
-    high = math.ceil(_yarn_correction_dim(high_rot, dim, base, max_position))
-    return max(low, 0), min(high, dim - 1)
-
-
-def _yarn_apply(
-    inv_freq: Tensor,
-    base: float,
-    dim: int,
-    yarn: YarnScaling,
-) -> tuple[Tensor, float]:
-    """Apply YaRN frequency scaling and return (scaled_inv_freq, mscale).
-
-    Matches HF's DeepSeek-V3 convention. Low-rotation (low-frequency,
-    high index) channels get linear interpolation (``inv_freq /
-    factor``); high-rotation (high-frequency, low index) channels stay
-    on their original base (extrapolation). A linear ramp on channel
-    indices between ``low`` and ``high`` blends the two.
-    """
-    low_idx, high_idx = _yarn_correction_range(
-        yarn.beta_fast,
-        yarn.beta_slow,
-        dim,
-        base,
-        yarn.original_max_position_embeddings,
-    )
-    low_f = float(low_idx)
-    high_f = float(high_idx)
-    if high_f == low_f:
-        # beta_fast == beta_slow collapses the ramp to a step function.
-        high_f = low_f + 1e-3
-    ramp = torch.arange(dim // 2, dtype=torch.float32, device=inv_freq.device)
-    ramp = ((ramp - low_f) / (high_f - low_f)).clamp(0.0, 1.0)
-    # HF's ``inv_freq_mask = 1 - ramp``; so at low index (high freq,
-    # ramp=0, mask=1) we use original (extrapolation), and at high
-    # index (low freq, ramp=1, mask=0) we use ``inv_freq / factor``
-    # (interpolation). inv_freq = extra * mask + inter * (1 - mask).
-    inv_freq_mask = 1.0 - ramp
-    inv_freq_interp = inv_freq / yarn.factor
-    inv_freq_yarn = inv_freq * inv_freq_mask + inv_freq_interp * (1.0 - inv_freq_mask)
-    # DSV3 mscale: if mscale_all_dim is 0, the correction is just
-    # ``0.1 log(factor) * mscale + 1``. If nonzero, DSV3 uses the
-    # ratio of two mscale formulas, one per ``mscale`` and one per
-    # ``mscale_all_dim``. Kimi-K2 sets both to 1.0 → ratio = 1.0.
-    if yarn.mscale_all_dim != 0:
-        m = _yarn_mscale(yarn.factor, yarn.mscale) / _yarn_mscale(
-            yarn.factor,
-            yarn.mscale_all_dim,
-        )
-    else:
-        m = _yarn_mscale(yarn.factor, yarn.mscale)
-    return inv_freq_yarn, m
 
 
 class RoPEMixed(RoPE):
@@ -838,6 +764,7 @@ class RoPEMixed(RoPE):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         # Sole source of the per-head frequency init: draw fresh random
         # directions on the N-sphere and scale the base frequencies by them.
         directions = None
@@ -858,20 +785,17 @@ class RoPEMixed(RoPE):
                     param.copy_(scaled.to(param))
                     j += 1
 
+    # Reaches past ``RoPE._apply`` to the grandparent deliberately. The parent rebuilds
+    # ``_inv_freqs`` from the frequency tables, which is right when they are a
+    # deterministic function of the config and wrong here, where they are per-head
+    # PARAMETERS an optimizer may have trained. It does not merely overwrite them
+    # either: the rebuild assigns a plain ``list`` where this class holds an
+    # ``nn.ParameterList``, which torch rejects outright (measured: ``TypeError: cannot
+    # assign 'list' as child module '_inv_freqs'``), so ``super()`` here breaks every
+    # ``.to(device)``.
     @override
     def _apply(self, fn: Callable[..., Any], recurse: bool = True) -> Self:
-        """Move the module, carrying the LEARNED frequencies across.
-
-        Reaches past ``RoPE._apply`` to the grandparent deliberately. The
-        parent rebuilds ``_inv_freqs`` from the frequency tables, which is
-        right when they are a deterministic function of the config and wrong
-        here, where they are per-head PARAMETERS an optimizer may have
-        trained. It does not merely overwrite them either: the rebuild assigns
-        a plain ``list`` where this class holds an ``nn.ParameterList``, which
-        torch rejects outright (measured: ``TypeError: cannot assign 'list' as
-        child module '_inv_freqs'``), so ``super()`` here breaks every
-        ``.to(device)``.
-        """
+        """Move the module, carrying the LEARNED frequencies across."""
         freqs = [f.data.clone() for f in self._inv_freqs]
         # The grandparent's ``_apply`` is the only route that moves the module
         # without the parent's rebuild; see the docstring for what that costs.
@@ -879,3 +803,79 @@ class RoPEMixed(RoPE):
         for i, f in enumerate(freqs):
             self._inv_freqs[i].data = f.to(device=self._dtype.device)
         return self
+
+
+def _yarn_mscale(scale: float, mscale: float) -> float:
+    """YaRN attention scale: m = 0.1 * ln(factor) * mscale + 1 (for factor > 1)."""
+    if scale <= 1.0:
+        return 1.0
+    return 0.1 * math.log(scale) * mscale + 1.0
+
+
+def _yarn_correction_dim(
+    num_rot: float,
+    dim: int,
+    base: float,
+    max_position: int,
+) -> float:
+    """Channel index whose frequency completes ``num_rot`` rotations."""
+    return dim * math.log(max_position / (num_rot * 2 * math.pi)) / (2 * math.log(base))
+
+
+def _yarn_correction_range(
+    low_rot: float,
+    high_rot: float,
+    dim: int,
+    base: float,
+    max_position: int,
+) -> tuple[float, float]:
+    """Return the per-channel indices marking the YaRN ramp region."""
+    low = math.floor(_yarn_correction_dim(low_rot, dim, base, max_position))
+    high = math.ceil(_yarn_correction_dim(high_rot, dim, base, max_position))
+    return max(low, 0), min(high, dim - 1)
+
+
+# Matches HF's DeepSeek-V3 convention. Low-rotation (low-frequency, high index) channels
+# get linear interpolation (``inv_freq / factor``); high-rotation (high-frequency, low
+# index) channels stay on their original base (extrapolation). A linear ramp on channel
+# indices between ``low`` and ``high`` blends the two.
+def _yarn_apply(
+    inv_freq: Tensor,
+    base: float,
+    dim: int,
+    yarn: YarnScaling,
+) -> tuple[Tensor, float]:
+    """Apply YaRN frequency scaling and return (scaled_inv_freq, mscale)."""
+    low_idx, high_idx = _yarn_correction_range(
+        yarn.beta_fast,
+        yarn.beta_slow,
+        dim,
+        base,
+        yarn.original_max_position_embeddings,
+    )
+    low_f = float(low_idx)
+    high_f = float(high_idx)
+    if high_f == low_f:
+        # beta_fast == beta_slow collapses the ramp to a step function.
+        high_f = low_f + 1e-3
+    ramp = torch.arange(dim // 2, dtype=torch.float32, device=inv_freq.device)
+    ramp = ((ramp - low_f) / (high_f - low_f)).clamp(0.0, 1.0)
+    # HF's ``inv_freq_mask = 1 - ramp``; so at low index (high freq,
+    # ramp=0, mask=1) we use original (extrapolation), and at high
+    # index (low freq, ramp=1, mask=0) we use ``inv_freq / factor``
+    # (interpolation). inv_freq = extra * mask + inter * (1 - mask).
+    inv_freq_mask = 1.0 - ramp
+    inv_freq_interp = inv_freq / yarn.factor
+    inv_freq_yarn = inv_freq * inv_freq_mask + inv_freq_interp * (1.0 - inv_freq_mask)
+    # DSV3 mscale: if mscale_all_dim is 0, the correction is just
+    # ``0.1 log(factor) * mscale + 1``. If nonzero, DSV3 uses the
+    # ratio of two mscale formulas, one per ``mscale`` and one per
+    # ``mscale_all_dim``. Kimi-K2 sets both to 1.0 → ratio = 1.0.
+    if yarn.mscale_all_dim != 0:
+        m = _yarn_mscale(yarn.factor, yarn.mscale) / _yarn_mscale(
+            yarn.factor,
+            yarn.mscale_all_dim,
+        )
+    else:
+        m = _yarn_mscale(yarn.factor, yarn.mscale)
+    return inv_freq_yarn, m

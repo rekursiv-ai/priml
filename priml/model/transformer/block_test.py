@@ -214,13 +214,14 @@ def test_transformer_block_preserves_explicit_child_configuration() -> None:
 
 
 def test_block_checkpoint_skipped_under_eval():
-    """``checkpoint=True`` must NOT wrap the block in ``torch.utils.checkpoint``
-    when grad is off (eval / ``no_grad`` / ``inference_mode``).
+    """``checkpoint=True`` must NOT wrap the block in ``torch.utils.checkpoint``.
 
-    Wrapping a block in ``torch.utils.checkpoint`` under ``inference_mode`` can
-    deadlock a multi-rank eval, and checkpointing saves no memory without a
-    backward, so the grad-mode gate must skip it. Patches ``torch_checkpoint`` to
-    fail if called, then forwards under both eval contexts.
+    When grad is off (eval / ``no_grad`` / ``inference_mode``).
+
+        Wrapping a block in ``torch.utils.checkpoint`` under ``inference_mode`` can
+        deadlock a multi-rank eval, and checkpointing saves no memory without a
+        backward, so the grad-mode gate must skip it. Patches ``torch_checkpoint`` to
+        fail if called, then forwards under both eval contexts.
     """
     m = TransformerBlock.Config(
         channels_in=64,

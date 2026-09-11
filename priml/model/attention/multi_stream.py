@@ -252,6 +252,7 @@ class MultiStreamAttention(nn.Module):
             )
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         if self.streams:
             for stream in self.streams:
                 stream.reset_parameters()
@@ -344,7 +345,22 @@ class MultiStreamAttention(nn.Module):
         attn_mask: Tensor | Sequence[Tensor | None] | None = None,
         **kwargs: object,
     ) -> tuple[tuple[Tensor, ...], list[KVCache]]:
-        """Attend jointly using and updating per-stream caches."""
+        """Attend jointly using and updating per-stream caches.
+
+        Args:
+          xs: Xs.
+          cache: Cache.
+          positions: Positions.
+          cos_sin: Cos sin.
+          dropout_p: Dropout p.
+          is_causal: Is causal.
+          attn_mask: Attn mask.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[tuple[Tensor, ...], list[KVCache]].
+
+        """
         outputs, updated = self._forward(
             xs,
             positions=positions,

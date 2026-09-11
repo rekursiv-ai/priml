@@ -34,7 +34,7 @@ def test_path_matches_pattern_prefix():
 
 
 def test_path_matches_pattern_direct_wildcard():
-    """Test direct child wildcard matching with .*"""
+    """Test direct child wildcard matching with .*."""
     assert path_matches_pattern("key.0", "key.*")
     assert path_matches_pattern("key.child", "key.*")
     assert not path_matches_pattern("key", "key.*")
@@ -308,7 +308,7 @@ def test_set_traversal():
         for p, v in recursively_iterate_over_object_descendants(data)
         if isinstance(v, int)
     ]
-    # Sets are unordered, but each element should appear once with index
+    # Sets are unordered, but each element should appear once with index.
     assert len(results) == 3
     assert {v for _, v in results} == {1, 2, 3}
 
@@ -316,14 +316,14 @@ def test_set_traversal():
 def test_cycle_detection():
     """Test that circular references are handled correctly."""
     data: list[int | list[Any]] = [1, 2]
-    data.append(data)  # Create cycle
+    data.append(data)  # Create cycle.
 
     results = [
         (p, v)
         for p, v in recursively_iterate_over_object_descendants(data)
         if isinstance(v, int)
     ]
-    # Should find 1 and 2, but not loop infinitely
+    # Should find 1 and 2, but not loop infinitely.
     assert results == [((0,), 1), ((1,), 2)]
 
 
@@ -343,7 +343,7 @@ def test_recurse_matches_containers():
         if isinstance(v, list)
     ]
     assert len(results) == 2
-    # Lists are found; convert to tuples for comparison
+    # Lists are found; convert to tuples for comparison.
     assert {tuple(v) for _, v in results} == {(1, 2), (3, 4)}
 
 
@@ -385,7 +385,7 @@ def test_object_with_slots():
         for p, v in recursively_iterate_over_object_descendants(obj)
         if isinstance(v, int)
     ]
-    # Results should include both x and y
+    # Results should include both x and y.
     assert set(results) == {(("x",), 1), (("y",), 2)}
 
 
@@ -455,7 +455,7 @@ def test_slots_with_mro():
         for p, v in recursively_iterate_over_object_descendants(obj)
         if isinstance(v, int)
     ]
-    # Should find both x and y
+    # Should find both x and y.
     assert set(results) == {(("x",), 1), (("y",), 2)}
 
 
@@ -463,7 +463,7 @@ def test_slots_string_format():
     """Test handling of __slots__ as a string instead of tuple."""
 
     class StringSlotObject:
-        __slots__ = ("x",)  # Intentionally using single-element tuple
+        __slots__ = ("x",)  # Intentionally using single-element tuple.
 
         def __init__(self, x: int):
             self.x = x
@@ -485,7 +485,7 @@ def test_skip_dict_slot():
 
         def __init__(self, x: int, y: int):
             self.x = x
-            self.y = y  # Goes into __dict__
+            self.y = y  # Goes into __dict__.
 
     obj = WithDictSlot(1, 2)
     results = [
@@ -493,7 +493,7 @@ def test_skip_dict_slot():
         for p, v in recursively_iterate_over_object_descendants(obj)
         if isinstance(v, int)
     ]
-    # Should find both x and y, but not try to access __dict__ as a slot
+    # Should find both x and y, but not try to access __dict__ as a slot.
     assert set(results) == {(("x",), 1), (("y",), 2)}
 
 
@@ -505,7 +505,7 @@ def test_attribute_error_handling():
 
         def __init__(self):
             self.x = 1
-            # y is not set, will raise AttributeError
+            # ``y`` is not set, will raise AttributeError.
 
     obj = LazySlotObject()
     results = [
@@ -513,7 +513,7 @@ def test_attribute_error_handling():
         for p, v in recursively_iterate_over_object_descendants(obj)
         if isinstance(v, int)
     ]
-    # Should find x but gracefully skip y
+    # Should find x but gracefully skip y.
     assert results == [(("x",), 1)]
 
 
@@ -534,7 +534,7 @@ def test_property_attribute_error():
         for p, v in recursively_iterate_over_object_descendants(obj)
         if isinstance(v, int)
     ]
-    # Should find x but skip the bad property
+    # Should find x but skip the bad property.
     assert results == [(("x",), 42)]
 
 
@@ -576,6 +576,7 @@ def test_namedtuple():
 
     class Point(NamedTuple):
         x: int
+
         y: int
 
     data = Point(1, 2)
@@ -591,7 +592,7 @@ def test_custom_filtering():
     """Test with custom filtering in user code."""
     data = {"a": 1, "b": "hello", "c": 3.14, "d": [1, 2]}
 
-    # Find only strings
+    # Find only strings.
     results = [
         (p, v)
         for p, v in recursively_iterate_over_object_descendants(data)
@@ -599,7 +600,7 @@ def test_custom_filtering():
     ]
     assert results == [(("b",), "hello")]
 
-    # Find only floats
+    # Find only floats.
     results = [
         (p, v)
         for p, v in recursively_iterate_over_object_descendants(data)
@@ -630,7 +631,7 @@ def test_seen_parameter():
 
     seen: set[int] = set()
 
-    # First traversal
+    # First traversal.
     results1 = [
         (p, v)
         for p, v in recursively_iterate_over_object_descendants(data1, seen=seen)
@@ -639,7 +640,7 @@ def test_seen_parameter():
     assert len(results1) == 2
 
     # Second traversal with same seen set should skip data1 if it was a child
-    # But since data1 is not a child of data2, both should be found
+    # But since data1 is not a child of data2, both should be found.
     results2 = [
         (p, v)
         for p, v in recursively_iterate_over_object_descendants(data2, seen=seen)
@@ -671,7 +672,7 @@ def test_complex_nested_structure():
         if isinstance(v, int)
     ]
 
-    # Should find all integers 1-10
+    # Should find all integers 1-10.
     values = {v for _, v in results}
     assert values == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 
@@ -680,22 +681,22 @@ def test_all_descendants():
     """Test yielding all descendants."""
     data = [1, 2, 3]
     results = list(recursively_iterate_over_object_descendants(data))
-    # Should yield the list itself and all integers
-    assert len(results) == 4  # [1, 2, 3] + 1 + 2 + 3
+    # Should yield the list itself and all integers.
+    assert len(results) == 4  # [1, 2, 3] + 1 + 2 + 3.
 
 
 def test_recurse_depth_limit():
     """Test recurse parameter to limit depth."""
     data = {"a": [1, 2], "b": {"c": 3}}
 
-    # Only traverse root and direct children
+    # Only traverse root and direct children.
     results = list(
         recursively_iterate_over_object_descendants(
             data,
             recurse=lambda path, _: len(path) <= 1,
         ),
     )
-    # Should yield dict itself, list [1, 2], and nested dict {"c": 3}
+    # Should yield dict itself, list [1, 2], and nested dict {"c": 3}.
     assert len(results) == 3
     paths = {path for path, _ in results}
     assert paths == {(), ("a",), ("b",)}
@@ -705,7 +706,7 @@ def test_recurse_depth_limit_with_filtering():
     """Test recurse parameter with additional filtering."""
     data = {"a": [1, 2], "b": {"c": 3}}
 
-    # Traverse up to depth 2 and filter for ints
+    # Traverse up to depth 2 and filter for ints.
     results = [
         (p, v)
         for p, v in recursively_iterate_over_object_descendants(
@@ -714,7 +715,7 @@ def test_recurse_depth_limit_with_filtering():
         )
         if isinstance(v, int)
     ]
-    # Should yield integers at depth 2
+    # Should yield integers at depth 2.
     assert set(results) == {(("a", 0), 1), (("a", 1), 2), (("b", "c"), 3)}
 
 
@@ -727,7 +728,7 @@ def test_recurse_root_only():
             recurse=lambda path, _: len(path) == 0,
         ),
     )
-    # Should only yield the root dict
+    # Should only yield the root dict.
     assert results == [((), data)]
 
 
@@ -783,22 +784,22 @@ def test_traverse_dict_attr_raises():
             return super().__getattribute__(name)
 
     obj = Tricky()
-    # Put a key in __dict__ that __getattribute__ blocks
+    # Put a key in __dict__ that __getattribute__ blocks.
     obj.__dict__["broken_key"] = 42
     results = list(recursively_iterate_over_object_descendants(obj))
     paths = {path for path, _ in results}
-    # "normal" should be traversed, "broken_key" should be skipped
+    # "normal" should be traversed, "broken_key" should be skipped.
     assert ("normal",) in paths
     assert ("broken_key",) not in paths
 
 
 def test_could_path_lead_to_pattern_wildcard_no_match():
     """Test could_path_lead_to_pattern returns False for non-matching wildcard."""
-    # Path longer than pattern with wildcards, where no ancestor matches
+    # Path longer than pattern with wildcards, where no ancestor matches.
     assert not could_path_lead_to_pattern("a.b.c.d.e", "x.*.z")
 
 
 if __name__ == "__main__":
-    import pytest
+    from priml.lib.testing.main import test_main
 
-    pytest.main([__file__, "-v"])
+    test_main(__file__)

@@ -38,12 +38,11 @@ RESERVED = tuple(f"<|reserved_{index}|>" for index in range(16))
 VOCAB = 256 + len(RESERVED)
 
 
+# Byte-level so a document's token count is its byte count, which is what lets a test
+# say which document the packer should have chosen.
+# set.
 def _encoding() -> tiktoken.Encoding:
-    """A byte-level vocabulary: every token is one byte, plus the reserved set.
-
-    Byte-level so a document's token count is its byte count, which is what
-    lets a test say which document the packer should have chosen.
-    """
+    """Return a byte-level vocabulary: every token is one byte, plus the reserved."""
     ranks = {bytes([value]): value for value in range(256)}
     return tiktoken.Encoding(
         name="test",
@@ -92,7 +91,7 @@ def _write_shard(root: Path, index: int, documents: list[str]) -> None:
 
 @pytest.fixture
 def corpus(tmp_path: Path) -> Path:
-    """A two-shard corpus of documents whose lengths are distinguishable."""
+    """Return a two-shard corpus of documents whose lengths are distinguishable."""
     _write_tokenizer(tmp_path)
     # Lengths 1..8 encoded as repeated distinct characters, so a row states
     # which documents it took and in what order.
@@ -273,7 +272,7 @@ def test_a_byte_table_that_does_not_match_its_fingerprint_is_rejected(
     to tell them apart.
     """
     lengths = np.load(corpus / "tokenizer" / "token_bytes.npy")
-    lengths[3] = 7  # same shape, different accounting
+    lengths[3] = 7  # same shape, different accounting.
     np.save(corpus / "tokenizer" / "token_bytes.npy", lengths)
     with pytest.raises(ValueError, match="fingerprint"):
         _data(corpus)
@@ -375,12 +374,10 @@ def test_the_tokenizer_prepends_the_document_marker(corpus: Path) -> None:
     assert [len(row) for row in encoded] == [3, 2]
 
 
+# Without this the fingerprint check fires first and the test proves only that, never
+# reaching the property it means to pin.
 def _refingerprint(directory: Path, table: np.ndarray) -> None:
-    """Rewrite the recipe so the fingerprint matches a replaced table.
-
-    Without this the fingerprint check fires first and the test proves only
-    that, never reaching the property it means to pin.
-    """
+    """Rewrite the recipe so the fingerprint matches a replaced table."""
     np.save(directory / "token_bytes.npy", table)
     recipe = json.loads((directory / "tokenizer_recipe.json").read_text())
     recipe["token_bytes_sha256"] = token_bytes_fingerprint(table)

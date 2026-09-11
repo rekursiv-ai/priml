@@ -93,7 +93,7 @@ def test_naive_causal_masking():
     k = torch.randn(1, 1, 4, 8)
     v = torch.randn(1, 1, 4, 8)
     out_full = kernel(q, k, v, is_causal=True)
-    # Changing k/v at position 3 shouldn't affect output at position 0
+    # Changing k/v at position 3 shouldn't affect output at position 0.
     k2, v2 = k.clone(), v.clone()
     k2[:, :, 3, :] = 999.0
     v2[:, :, 3, :] = 999.0
@@ -102,8 +102,9 @@ def test_naive_causal_masking():
 
 
 def test_the_kernels_agree_on_a_windowed_forward() -> None:
-    """The fused and manual kernels are one algorithm, so a window cannot
-    change only one of them.
+    """The fused and manual kernels are one algorithm.
+
+    A window cannot change only one of them.
     """
     torch.manual_seed(0)
     q, k, v = (torch.randn(2, 16, 4, 8) for _ in range(3))

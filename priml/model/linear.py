@@ -143,6 +143,7 @@ class EnsembleLinear(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         for i in range(self.weight.shape[0]):
             call_init(
                 self._init_weight, self.weight.data[i], depth_index=self.depth_index
@@ -169,6 +170,10 @@ class EnsembleLinear(nn.Module):
         Tensor/DTensor ``bmm``). The style shards the ensemble (head) dim of
         the weight, replicates the input, and leaves the output sharded on
         the ensemble dim so downstream per-head splits stay consistent.
+
+        Returns:
+          result: The ParallelStyle.
+
         """
         return _EnsembleParallel()
 

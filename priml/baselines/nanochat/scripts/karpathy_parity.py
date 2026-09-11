@@ -54,13 +54,11 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch
 
 from priml.baselines.nanochat.experiments import exp001
+from priml.baselines.nanochat.train_step import NanoChatTrainStep
 from priml.math.seed import RngState, get_rng_state, set_rng_state
 from priml.model.attention.value_gated_attention import sdpa_attention
+from priml.optimizers.composite import CompositeOptimizer
 from priml.train.parallelism import NoParallel
-
-
-class _StopModuleScopeError(Exception):
-    """Ends ``train.py``'s training loop from the dataloader it asks us for."""
 
 
 def their_attention(
@@ -143,7 +141,7 @@ def build_theirs(
     rows: int,
     rng: dict[str, Any],
 ) -> tuple[nn.Module, torch.optim.Optimizer, types.ModuleType]:
-    """The reference's own model and optimizer, built by its own module scope.
+    """Return the reference's own model and optimizer, built by its own module scope.
 
     Neither is constructed here. Their script derives the geometry from its
     ``DEPTH`` and its context length from its own ``constants``, and builds
@@ -296,45 +294,7 @@ def load_upstream(
     return module
 
 
-@contextlib.contextmanager
-def _capture_rng_after_seeding(rng: dict[str, Any]) -> Generator[None]:
-    """Record the RNG state their module scope seeds, before it draws.
-
-    Their ``torch.manual_seed(42)`` (``train.py:456``) is followed by the CUDA
-    seed and then by every draw their model makes. Wrapping the CUDA call is
-    what puts the capture between the two: after both seeds are set, and before
-    ``GPT(config)`` consumes any of it.
-
-    Their init draws on the CUDA generator -- the model is materialized on the
-    device (``train.py:482``) before ``init_weights`` runs -- so that generator
-    is the one the comparison must rewind. ``torch.cuda.manual_seed`` does NOT
-    initialize CUDA, and ``get_rng_state`` omits the CUDA entries until it is
-    (``seed.py:353``), so the context is forced up first. Without it the capture
-    holds CPU state only, the restore leaves the CUDA generator wherever their
-    draws left it, and the init comparison reports differences it manufactured.
-
-    Args:
-      rng: Filled with the captured state under ``"state"``.
-
-    Yields:
-      context: Block in which their seeding is observed.
-
-    """
-    real_cuda_seed = torch.cuda.manual_seed
-
-    def capture(seed: int) -> None:
-        torch.cuda.init()
-        real_cuda_seed(seed)
-        rng.setdefault("state", get_rng_state())
-
-    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- observes their seeding; restored below
-    try:
-        yield
-    finally:
-        torch.cuda.manual_seed = real_cuda_seed
-
-
-def build_ours(*, device: str) -> Any:
+def build_ours(*, device: str) -> NanoChatTrainStep:
     """``exp001``, unmodified.
 
     Not one field of the recipe is set here. ``exp001`` already IS ``exp000``
@@ -351,7 +311,9 @@ def build_ours(*, device: str) -> Any:
     """
     config = exp001().step
     config.parallelism = NoParallel.Config(device=device)
-    return config.make()
+    step = config.make()
+    assert isinstance(step, NanoChatTrainStep)
+    return step
 
 
 def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
@@ -403,26 +365,6 @@ def name_map(theirs: nn.Module, *, layers: int) -> dict[str, str]:
         elif bare.endswith("attn.ve_gate.weight"):
             mapping[f"blocks.{bare.split('.')[2]}.attn.value_gate.weight"] = name
     return mapping
-
-
-def _progress_at(index: int, *, warmup: int, budget_steps: int) -> float:
-    """Budget progress a real run sits at on its ``index``-th update.
-
-    The first ``warmup`` updates are unbilled on both sides, so progress is
-    zero across them; each update after charges one step's share of a run
-    that lasts ``budget_steps`` billed updates.
-
-    Args:
-      index: One-based update number.
-      warmup: Updates excluded from the budget clock.
-      budget_steps: Billed updates the whole run is expected to last.
-
-    Returns:
-      progress: Fraction of the budget spent, in ``[0, 1]``.
-
-    """
-    billed = max(0, index - 1 - warmup)
-    return min(billed / budget_steps, 1.0)
 
 
 def copy_weights(theirs: nn.Module, ours: nn.Module, mapping: dict[str, str]) -> None:
@@ -514,7 +456,7 @@ def compare_all(
 def compare_state(
     theirs: nn.Module,
     their_optimizer: torch.optim.Optimizer,
-    ours: Any,
+    ours: NanoChatTrainStep,
     mapping: dict[str, str],
 ) -> list[str]:
     """Compare the optimizers' own state, tensor by tensor.
@@ -540,6 +482,8 @@ def compare_state(
     }
     src = dict(theirs.named_parameters())
     dst = dict(ours.model.named_parameters())
+    # The recipe runs two optimizers; the state lives on each member.
+    assert isinstance(ours.optimizer, CompositeOptimizer)
     problems: list[str] = []
     for our_name, their_name in mapping.items():
         mine: dict[str, Any] = {}
@@ -561,7 +505,12 @@ def compare_state(
 
 
 def main() -> int:
-    """Step both implementations together and report every difference."""
+    """Step both implementations together and report every difference.
+
+    Returns:
+      result: The int.
+
+    """
     args = _parse_args()
     root = clone_upstream(args.clone)
 
@@ -723,7 +672,7 @@ def main() -> int:
 
 def compare_eval(
     theirs: nn.Module,
-    ours: Any,
+    ours: NanoChatTrainStep,
     upstream: types.ModuleType,
     prepare: types.ModuleType,
     *,
@@ -822,7 +771,7 @@ def _git(root: Path, *arguments: str) -> str:
 
 
 def _kernels_stub() -> types.ModuleType:
-    """A ``kernels`` module whose ``get_kernel`` yields ``exp001``'s kernel."""
+    """Return a ``kernels`` module whose ``get_kernel`` yields ``exp001``'s kernel."""
     module = types.ModuleType("kernels")
 
     def get_kernel(name: str) -> types.SimpleNamespace:
@@ -837,44 +786,41 @@ def _kernels_stub() -> types.ModuleType:
     return module
 
 
+# Their own module, not a stub: the packer it holds is a stateful stream -- best-fit out
+# of a document buffer refilled a fixed number at a time -- so it is part of the recipe
+# being reproduced, and the rows it emits are what both sides must be stepped on. Only
+# the two directories are rebound, since their file computes both from ``~/.cache`` at
+# import.
+#
+# ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of ``Tokenizer.from_directory``, bound at
+# definition and so unaffected by the rebinding; their ``train.py`` calls it with no
+# argument, so the default is replaced too.
+#
+# Their ``make_dataloader`` is wrapped rather than replaced: the real one is called, its
+# generator handed to ``loader``, and module scope then ended before their training loop
+# -- so the comparison drives their own packer while their weights stay untouched.
 def _prepare_module(corpus: Path, loader: dict[str, Any]) -> types.ModuleType:
-    """THEIR ``prepare``, pointed at the prepared corpus.
-
-    Their own module, not a stub: the packer it holds is a stateful stream --
-    best-fit out of a document buffer refilled a fixed number at a time -- so
-    it is part of the recipe being reproduced, and the rows it emits are what
-    both sides must be stepped on. Only the two directories are rebound, since
-    their file computes both from ``~/.cache`` at import.
-
-    ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of ``Tokenizer.from_directory``,
-    bound at definition and so unaffected by the rebinding; their ``train.py``
-    calls it with no argument, so the default is replaced too.
-
-    Their ``make_dataloader`` is wrapped rather than replaced: the real one is
-    called, its generator handed to ``loader``, and module scope then ended
-    before their training loop -- so the comparison drives their own packer
-    while their weights stay untouched.
-
-    Args:
-      corpus: Directory holding the shards and ``tokenizer/``.
-      loader: Filled with the built dataloader under ``"train"``.
-
-    Returns:
-      module: Their ``prepare`` module.
-
-    """
+    """THEIR ``prepare``, pointed at the prepared corpus."""
     module = importlib.import_module("prepare")
     module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
     module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
     module.Tokenizer.from_directory.__func__.__defaults__ = (str(corpus / "tokenizer"),)
     real_make_dataloader = module.make_dataloader
 
-    def make_dataloader(*args: Any, **kwargs: Any) -> Any:
+    def make_dataloader(*args: object, **kwargs: object) -> None:
         """Build their loader, keep it, and end their module scope.
 
         Restores their own function first: their ``evaluate_bpb`` builds a
         VALIDATION loader through the same name (``prepare.py:337``), and a
         wrapper still in place would end the scoring run instead.
+
+        Args:
+          *args: Their positional loader arguments, forwarded verbatim.
+          **kwargs: Their keyword loader arguments, forwarded verbatim.
+
+        Raises:
+          _StopModuleScopeError: Always, once the loader is captured.
+
         """
         module.make_dataloader = real_make_dataloader  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
         loader["train"] = real_make_dataloader(*args, **kwargs)
@@ -933,6 +879,48 @@ def _parse_args() -> argparse.Namespace:
         help="Prepared shards and tokenizer, read by THEIR loader.",
     )
     return parser.parse_args()
+
+
+class _StopModuleScopeError(Exception):
+    """Ends ``train.py``'s training loop from the dataloader it asks us for."""
+
+
+# Their ``torch.manual_seed(42)`` (``train.py:456``) is followed by the CUDA seed and
+# then by every draw their model makes. Wrapping the CUDA call is what puts the capture
+# between the two: after both seeds are set, and before ``GPT(config)`` consumes any of
+# it.
+#
+# Their init draws on the CUDA generator -- the model is materialized on the device
+# (``train.py:482``) before ``init_weights`` runs -- so that generator is the one the
+# comparison must rewind. ``torch.cuda.manual_seed`` does NOT initialize CUDA, and
+# ``get_rng_state`` omits the CUDA entries until it is (``seed.py:353``), so the context
+# is forced up first. Without it the capture holds CPU state only, the restore leaves
+# the CUDA generator wherever their draws left it, and the init comparison reports
+# differences it manufactured.
+@contextlib.contextmanager
+def _capture_rng_after_seeding(rng: dict[str, Any]) -> Generator[None]:
+    """Record the RNG state their module scope seeds, before it draws."""
+    real_cuda_seed = torch.cuda.manual_seed
+
+    def capture(seed: int) -> None:
+        torch.cuda.init()
+        real_cuda_seed(seed)
+        rng.setdefault("state", get_rng_state())
+
+    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- observes their seeding; restored below
+    try:
+        yield
+    finally:
+        torch.cuda.manual_seed = real_cuda_seed
+
+
+# The first ``warmup`` updates are unbilled on both sides, so progress is zero across
+# them; each update after charges one step's share of a run that lasts ``budget_steps``
+# billed updates.
+def _progress_at(index: int, *, warmup: int, budget_steps: int) -> float:
+    """Budget progress a real run sits at on its ``index``-th update."""
+    billed = max(0, index - 1 - warmup)
+    return min(billed / budget_steps, 1.0)
 
 
 if __name__ == "__main__":

@@ -91,6 +91,9 @@ def exp000() -> Cifar10TrainLoop:
       augmentation is the strongest recipe that uses nothing exotic -- the
       bar any additional mechanism must clear to earn its complexity.
 
+    Returns:
+      cfg: The Cifar10TrainLoop.
+
     References:
       https://arxiv.org/abs/1603.05027
       He et al. 2016. Identity mappings in deep residual networks.
@@ -132,6 +135,9 @@ def exp001() -> Cifar10TrainLoop:
       comparable accuracy in far fewer steps. The budget moves with the
       architecture because reaching accuracy quickly is the claim.
 
+    Returns:
+      cfg: The Cifar10TrainLoop.
+
     References:
       https://github.com/KellerJordan/cifar10-airbench
       Jordan 2024. 94% on CIFAR-10 in 3.29 seconds on a single A100.
@@ -158,6 +164,9 @@ def exp002() -> Cifar10TrainLoop:
       is meaningless, so the head and norms stay on SGD with Nesterov
       momentum. The schedule anneals polynomially, as Muon's recipe
       prescribes, so the two travel together as one change.
+
+    Returns:
+      cfg: The Cifar10TrainLoop.
 
     References:
       https://kellerjordan.github.io/posts/muon/
@@ -208,6 +217,9 @@ def exp003() -> Cifar10TrainLoop:
       make. Training is untouched, so any gain is bought with evaluation
       time alone.
 
+    Returns:
+      cfg: The Cifar10TrainLoop.
+
     References:
       https://arxiv.org/abs/1409.4842
       Szegedy et al. 2014. Going deeper with convolutions, section 7.
@@ -232,6 +244,9 @@ def exp004() -> Cifar10TrainLoop:
       time to recover from a poor start -- hence testing it on the 8-epoch
       chain rather than on exp000.
 
+    Returns:
+      cfg: The Cifar10TrainLoop.
+
     References:
       https://arxiv.org/abs/1511.06856
       Zagoruyko & Komodakis 2015. Diracnets: training very deep neural
@@ -255,6 +270,10 @@ def exp_smoke() -> Cifar10TrainLoop:
     loop run -- so it is cut on every axis that costs time without bearing on
     that answer: one epoch, and a network narrow and shallow enough to finish
     in seconds. Accuracy will be poor, which is expected.
+
+    Returns:
+      cfg: The Cifar10TrainLoop.
+
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"

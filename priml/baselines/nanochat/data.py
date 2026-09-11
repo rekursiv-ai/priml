@@ -85,222 +85,6 @@ document that fits out of whatever the buffer currently holds, so how many
 arrive at a time decides which document that is."""
 
 
-class NanoChatData:
-    """Prepared shards and vocabulary, served as packed ``media`` batches.
-
-    Batches carry ``media`` (inputs) and ``label`` (the same rows shifted by
-    one). The training stream is infinite and the evaluation stream is capped at
-    a fixed token count, so every candidate is scored on the identical prefix of
-    the pinned validation shard.
-
-    Raises:
-      FileNotFoundError: If the shards or the vocabulary are absent. Run
-        ``uv --quiet run --frozen python -m
-        priml.baselines.nanochat.scripts.prepare_data`` first.
-
-    """
-
-    class Config(Fig["NanoChatData"]):
-        """Where the corpus lives, and how batches are drawn from it."""
-
-        base_dir: Path | str | None = None
-        """Resource root supplied during parent finalization."""
-
-        working_dir: Path | str = "/datasets/nanochat"
-        """Directory holding the ``shard_*.parquet`` files.
-
-        Resolved beneath ``base_dir`` at finalize, so it names a location within
-        the resource root rather than an absolute filesystem path."""
-
-        tokenizer_dir: Path | str = ""
-        """Directory holding the fitted vocabulary; empty is ``<data>/tokenizer``."""
-
-        num_train_shards: int = 7
-        """Shards forming the training split, numbered from zero."""
-
-        val_shard: int = 7
-        """The pinned validation shard; no run trains on it."""
-
-        batch_size: int = 32
-        """Rows per training batch."""
-
-        eval_batch_size: int = 128
-        """Rows per evaluation batch.
-
-        Fixed rather than tracking ``batch_size``: the scored token count is
-        fixed, so the batch width decides HOW MANY batches are scored and, with
-        the packer's stream, which rows fall in them. Training's batch follows
-        device memory, and a score whose row set moved with the card it ran on
-        would not be the comparison this baseline exists to make."""
-
-        eval_tokens: int = 40 * 524_288
-        """Validation tokens to score; the reference's fixed evaluation size."""
-
-        buffer_size: int = 1_000
-        """Documents held for best-fit selection before a row is packed."""
-
-        device: torch.device | str | None = "auto"
-        """Device batches land on.
-
-        ``"auto"`` probes the hardware, ``None`` defers to
-        ``torch.get_default_device()``; see :func:`get_device`."""
-
-        vocab_size: int = -1
-        """Vocabulary the fitted tokenizer must report; -1 skips the check.
-
-        Declared rather than read from disk: a config must build without
-        touching the filesystem. The model pushes its own value down, and
-        ``__init__`` verifies the tokenizer against it -- so a prepared
-        directory that disagrees fails at load, naming both numbers, instead of
-        surfacing later as an out-of-range embedding index."""
-
-        max_seq_len: int = 2_048
-        """Tokens per packed row.
-
-        A row is packed to ``max_seq_len + 1`` tokens, since the inputs and the
-        targets are the row offset by one."""
-
-        @override
-        def finalize(self) -> Self:
-            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
-            if not self.tokenizer_dir:
-                self.tokenizer_dir = Path(self.working_dir) / "tokenizer"
-            return super().finalize()
-
-    def __init__(self, config: Config) -> None:
-        if config.batch_size <= 0:
-            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
-        if config.eval_batch_size <= 0:
-            raise ValueError(
-                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
-            )
-        if config.max_seq_len < 2:
-            raise ValueError(
-                f"max_seq_len must be at least two; got {config.max_seq_len}.",
-            )
-        if config.buffer_size <= 0:
-            raise ValueError(f"buffer_size must be positive; got {config.buffer_size}.")
-        tokens_per_eval_batch = config.eval_batch_size * config.max_seq_len
-        if config.eval_tokens <= 0 or config.eval_tokens % tokens_per_eval_batch:
-            raise ValueError(
-                f"eval_tokens={config.eval_tokens} must be positive and a whole "
-                f"number of eval batches of {tokens_per_eval_batch} tokens; "
-                "otherwise the reported score covers a different token count "
-                "than it names.",
-            )
-        self.config = config
-        self.device = get_device(config.device)
-        self.dataset_dir = Path(config.working_dir)
-        self.batch_size = config.batch_size
-        self.eval_batch_size = config.eval_batch_size
-        self.timer_epoch = CheckpointableStepTimer()
-        """Passes over the corpus; ticked by the loop when the shards wrap.
-
-        A budgeted run rarely reaches one -- the stream wraps rather than
-        ending, and the recipe stops on time long before the corpus is
-        exhausted."""
-
-        self.train_paths = _shard_paths(
-            self.dataset_dir,
-            indices=range(config.num_train_shards),
-        )
-        self.val_paths = _shard_paths(self.dataset_dir, indices=[config.val_shard])
-        self.tokenizer = Tokenizer.from_directory(Path(config.tokenizer_dir))
-        if 0 < config.vocab_size != self.tokenizer.vocab_size:
-            raise ValueError(
-                f"the fitted vocabulary holds {self.tokenizer.vocab_size} tokens "
-                f"but the model declares vocab_size {config.vocab_size}; prepare "
-                f"with --vocab-size {config.vocab_size}, or set the model to "
-                f"{self.tokenizer.vocab_size}.",
-            )
-        self.token_bytes: Tensor = torch.from_numpy(
-            self.tokenizer.token_bytes.astype(np.int32),
-        ).to(self.device)
-        # The live training stream, held so ``state_dict`` reports how far the
-        # corpus was actually consumed. Read from the stream rather than
-        # mirrored into a counter here: a copy updated at the call sites would
-        # be right only where someone remembered to update it, and the resume
-        # guard that reads it would then pass on exactly the runs it exists to
-        # refuse.
-        self._live: _PackedStream | None = None
-        logger.info(
-            "nanochat: %d train shards, val shard %d, vocab %d",
-            len(self.train_paths),
-            config.num_train_shards,
-            self.tokenizer.vocab_size,
-        )
-
-    def train_dataloader(self) -> _PackedStream:
-        """Build the training stream: the corpus, packed, without end.
-
-        Unbounded because the run stops on its time budget rather than on a pass
-        over the data. A row is a full context by construction, so a pass is not
-        a meaningful boundary -- and cutting the stream at one would end the
-        packer's document buffer mid-row, which is a different row than the
-        reference produces there.
-        """
-        self._live = _PackedStream(
-            paths=self.train_paths,
-            tokenizer=self.tokenizer,
-            token_bytes=self.token_bytes,
-            batch_size=self.batch_size,
-            max_seq_len=self.config.max_seq_len,
-            buffer_size=self.config.buffer_size,
-            device=self.device,
-            max_batches=None,
-            prefetch=True,
-        )
-        return self._live
-
-    def eval_dataloader(self) -> _PackedStream:
-        """Build the evaluation stream: the pinned shard, from its start.
-
-        Rebuilt per evaluation rather than continued, so every score covers the
-        identical tokens: a stream that carried on would score a later part of
-        the shard each time and report the difference as progress.
-        """
-        return _PackedStream(
-            paths=self.val_paths,
-            tokenizer=self.tokenizer,
-            token_bytes=self.token_bytes,
-            batch_size=self.eval_batch_size,
-            max_seq_len=self.config.max_seq_len,
-            buffer_size=self.config.buffer_size,
-            device=self.device,
-            max_batches=self.config.eval_tokens
-            // (self.eval_batch_size * self.config.max_seq_len),
-        )
-
-    def state_dict(self) -> dict[str, Any]:
-        """Snapshot how far the training stream has advanced."""
-        return {
-            "batches": self._live.served if self._live is not None else 0,
-            "timer_epoch": self.timer_epoch.state_dict(),
-        }
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Refuse to resume a stream that cannot be positioned.
-
-        The packer's state is a document buffer built by tokenizing the corpus
-        from its start, so there is no seek: reaching batch N means re-doing the
-        work of N batches. Restarting instead would silently retrain on the
-        opening of the corpus while the schedules carried on from where the
-        checkpoint left them.
-
-        Raises:
-          ValueError: The checkpoint had advanced the stream.
-
-        """
-        served = int(state_dict.get("batches", 0))
-        if served:
-            raise ValueError(
-                f"this checkpoint had served {served} batches, and the packed "
-                "stream cannot be positioned without re-tokenizing the corpus "
-                "up to that point; resuming would silently replay the start of "
-                "the data. Start a fresh run.",
-            )
-
-
 def token_bytes_fingerprint(token_bytes: np.ndarray) -> str:
     """Return the identity of one byte-length table.
 
@@ -486,16 +270,14 @@ class _PackedStream:
         self.served = 0
         """Batches drawn from this stream, across every iteration of it."""
 
+    # Pinning is what makes the host-to-device copy asynchronous, so it is also the
+    # precondition for overlapping the copy with compute. Only CUDA supports it here,
+    # and the prefetch path is built around it -- keep this the single source of that
+    # answer so the staging allocation, the resident buffer, and the prefetch decision
+    # cannot disagree.
     @property
     def _pins_host_memory(self) -> bool:
-        """Whether batches stage through pinned host memory before the device.
-
-        Pinning is what makes the host-to-device copy asynchronous, so it is
-        also the precondition for overlapping the copy with compute. Only CUDA
-        supports it here, and the prefetch path is built around it -- keep this
-        the single source of that answer so the staging allocation, the resident
-        buffer, and the prefetch decision cannot disagree.
-        """
+        """Whether batches stage through pinned host memory before the device."""
         return self.device.type == "cuda"
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
@@ -571,19 +353,16 @@ class _PackedStream:
                 "valid_count": self.batch_size,
             }
 
+    # The worker packs and stages into PINNED memory; this thread issues the device copy
+    # and yields. Two staging slots, alternating, so the worker fills one while the step
+    # consumes the other -- and a queue of depth one, so it can never run more than a
+    # batch ahead and the packing order is the serial one.
+    #
+    # The packing is pure Python over a document buffer, so it releases the GIL only
+    # inside the tokenizer; what it overlaps is the DEVICE, which is where the step's
+    # 1.5 s/step lives.
     def _prefetched(self) -> Iterator[dict[str, Any]]:
-        """Pack on a worker thread, one batch ahead. See :meth:`__iter__`.
-
-        The worker packs and stages into PINNED memory; this thread issues the
-        device copy and yields. Two staging slots, alternating, so the worker
-        fills one while the step consumes the other -- and a queue of depth one,
-        so it can never run more than a batch ahead and the packing order is the
-        serial one.
-
-        The packing is pure Python over a document buffer, so it releases the
-        GIL only inside the tokenizer; what it overlaps is the DEVICE, which is
-        where the step's 1.5 s/step lives.
-        """
+        """Pack on a worker thread, one batch ahead. See :meth:`__iter__`."""
         rows = self.max_seq_len + 1
         width = self.batch_size * self.max_seq_len
         pinned = self._pins_host_memory
@@ -681,7 +460,7 @@ class _PackedStream:
             # early does not leave it alive holding the corpus.
             done.set()
             for event in copied:
-                event.set()  # unblock a worker parked on a slot it cannot refill
+                event.set()  # unblock a worker parked on a slot it cannot refill.
             with contextlib.suppress(queue.Empty):
                 ready.get_nowait()
 
@@ -700,18 +479,7 @@ class _PackedStream:
 
 
 def _pack_row(row: Tensor, buffer: list[list[int]], *, position: int) -> int:
-    """Place one document into ``row`` at ``position``; return the new position.
-
-    Args:
-      row: The row being filled, ``max_seq_len + 1`` wide.
-      buffer: Encoded documents available for selection; the chosen one is
-        removed.
-      position: Where the next document starts.
-
-    Returns:
-      position: Where the document after it starts.
-
-    """
+    """Place one document into ``row`` at ``position``; return the new position."""
     remaining = row.numel() - position
     best_index = -1
     best_length = 0
@@ -738,12 +506,10 @@ def _pack_row(row: Tensor, buffer: list[list[int]], *, position: int) -> int:
     return position + remaining
 
 
+# Unbounded: the stream is what a budgeted run draws from, and a run that outlasts the
+# corpus continues from its start rather than ending.
 def _document_batches(paths: list[Path]) -> Iterator[list[str]]:
-    """Yield document batches from parquet shards, wrapping at the end.
-
-    Unbounded: the stream is what a budgeted run draws from, and a run that
-    outlasts the corpus continues from its start rather than ending.
-    """
+    """Yield document batches from parquet shards, wrapping at the end."""
     # Imported here rather than at module scope: parquet is the corpus's own
     # format, and nothing but this reader touches it.
     from pyarrow import parquet  # noqa: PLC0415 -- corpus-only dependency
@@ -760,22 +526,240 @@ def _document_batches(paths: list[Path]) -> Iterator[list[str]]:
                     yield texts[start : start + DOCUMENTS_PER_REFILL]
 
 
-def _shard_paths(directory: Path, *, indices: range | list[int]) -> list[Path]:
-    """Return the named shards, in index order.
+class NanoChatData:
+    """Prepared shards and vocabulary, served as packed ``media`` batches.
 
-    Args:
-      directory: Where the corpus was prepared.
-      indices: Shard numbers the split is made of.
-
-    Returns:
-      paths: One path per index.
+    Batches carry ``media`` (inputs) and ``label`` (the same rows shifted by
+    one). The training stream is infinite and the evaluation stream is capped at
+    a fixed token count, so every candidate is scored on the identical prefix of
+    the pinned validation shard.
 
     Raises:
-      FileNotFoundError: A named shard is absent, reported by name so the
-        missing one is identifiable rather than the directory merely being
-        called unprepared.
+      FileNotFoundError: If the shards or the vocabulary are absent. Run
+        ``uv --quiet run --frozen python -m
+        priml.baselines.nanochat.scripts.prepare_data`` first.
 
     """
+
+    class Config(Fig["NanoChatData"]):
+        """Where the corpus lives, and how batches are drawn from it."""
+
+        base_dir: Path | str | None = None
+        """Resource root supplied during parent finalization."""
+
+        working_dir: Path | str = "/datasets/nanochat"
+        """Directory holding the ``shard_*.parquet`` files.
+
+        Resolved beneath ``base_dir`` at finalize, so it names a location within
+        the resource root rather than an absolute filesystem path."""
+
+        tokenizer_dir: Path | str = ""
+        """Directory holding the fitted vocabulary; empty is ``<data>/tokenizer``."""
+
+        num_train_shards: int = 7
+        """Shards forming the training split, numbered from zero."""
+
+        val_shard: int = 7
+        """The pinned validation shard; no run trains on it."""
+
+        batch_size: int = 32
+        """Rows per training batch."""
+
+        eval_batch_size: int = 128
+        """Rows per evaluation batch.
+
+        Fixed rather than tracking ``batch_size``: the scored token count is
+        fixed, so the batch width decides HOW MANY batches are scored and, with
+        the packer's stream, which rows fall in them. Training's batch follows
+        device memory, and a score whose row set moved with the card it ran on
+        would not be the comparison this baseline exists to make."""
+
+        eval_tokens: int = 40 * 524_288
+        """Validation tokens to score; the reference's fixed evaluation size."""
+
+        buffer_size: int = 1_000
+        """Documents held for best-fit selection before a row is packed."""
+
+        device: torch.device | str | None = "auto"
+        """Device batches land on.
+
+        ``"auto"`` probes the hardware, ``None`` defers to
+        ``torch.get_default_device()``; see :func:`get_device`."""
+
+        vocab_size: int = -1
+        """Vocabulary the fitted tokenizer must report; -1 skips the check.
+
+        Declared rather than read from disk: a config must build without
+        touching the filesystem. The model pushes its own value down, and
+        ``__init__`` verifies the tokenizer against it -- so a prepared
+        directory that disagrees fails at load, naming both numbers, instead of
+        surfacing later as an out-of-range embedding index."""
+
+        max_seq_len: int = 2_048
+        """Tokens per packed row.
+
+        A row is packed to ``max_seq_len + 1`` tokens, since the inputs and the
+        targets are the row offset by one."""
+
+        @override
+        def finalize(self) -> Self:
+            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+            if not self.tokenizer_dir:
+                self.tokenizer_dir = Path(self.working_dir) / "tokenizer"
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        if config.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
+        if config.eval_batch_size <= 0:
+            raise ValueError(
+                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
+            )
+        if config.max_seq_len < 2:
+            raise ValueError(
+                f"max_seq_len must be at least two; got {config.max_seq_len}.",
+            )
+        if config.buffer_size <= 0:
+            raise ValueError(f"buffer_size must be positive; got {config.buffer_size}.")
+        tokens_per_eval_batch = config.eval_batch_size * config.max_seq_len
+        if config.eval_tokens <= 0 or config.eval_tokens % tokens_per_eval_batch:
+            raise ValueError(
+                f"eval_tokens={config.eval_tokens} must be positive and a whole "
+                f"number of eval batches of {tokens_per_eval_batch} tokens; "
+                "otherwise the reported score covers a different token count "
+                "than it names.",
+            )
+        self.config = config
+        self.device = get_device(config.device)
+        self.dataset_dir = Path(config.working_dir)
+        self.batch_size = config.batch_size
+        self.eval_batch_size = config.eval_batch_size
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the corpus; ticked by the loop when the shards wrap.
+
+        A budgeted run rarely reaches one -- the stream wraps rather than
+        ending, and the recipe stops on time long before the corpus is
+        exhausted."""
+
+        self.train_paths = _shard_paths(
+            self.dataset_dir,
+            indices=range(config.num_train_shards),
+        )
+        self.val_paths = _shard_paths(self.dataset_dir, indices=[config.val_shard])
+        self.tokenizer = Tokenizer.from_directory(Path(config.tokenizer_dir))
+        if 0 < config.vocab_size != self.tokenizer.vocab_size:
+            raise ValueError(
+                f"the fitted vocabulary holds {self.tokenizer.vocab_size} tokens "
+                f"but the model declares vocab_size {config.vocab_size}; prepare "
+                f"with --vocab-size {config.vocab_size}, or set the model to "
+                f"{self.tokenizer.vocab_size}.",
+            )
+        self.token_bytes: Tensor = torch.from_numpy(
+            self.tokenizer.token_bytes.astype(np.int32),
+        ).to(self.device)
+        # The live training stream, held so ``state_dict`` reports how far the
+        # corpus was actually consumed. Read from the stream rather than
+        # mirrored into a counter here: a copy updated at the call sites would
+        # be right only where someone remembered to update it, and the resume
+        # guard that reads it would then pass on exactly the runs it exists to
+        # refuse.
+        self._live: _PackedStream | None = None
+        logger.info(
+            "nanochat: %d train shards, val shard %d, vocab %d",
+            len(self.train_paths),
+            config.num_train_shards,
+            self.tokenizer.vocab_size,
+        )
+
+    def train_dataloader(self) -> _PackedStream:
+        """Build the training stream: the corpus, packed, without end.
+
+        Unbounded because the run stops on its time budget rather than on a pass
+        over the data. A row is a full context by construction, so a pass is not
+        a meaningful boundary -- and cutting the stream at one would end the
+        packer's document buffer mid-row, which is a different row than the
+        reference produces there.
+
+        Returns:
+          result: The _PackedStream.
+
+        """
+        self._live = _PackedStream(
+            paths=self.train_paths,
+            tokenizer=self.tokenizer,
+            token_bytes=self.token_bytes,
+            batch_size=self.batch_size,
+            max_seq_len=self.config.max_seq_len,
+            buffer_size=self.config.buffer_size,
+            device=self.device,
+            max_batches=None,
+            prefetch=True,
+        )
+        return self._live
+
+    def eval_dataloader(self) -> _PackedStream:
+        """Build the evaluation stream: the pinned shard, from its start.
+
+        Rebuilt per evaluation rather than continued, so every score covers the
+        identical tokens: a stream that carried on would score a later part of
+        the shard each time and report the difference as progress.
+
+        Returns:
+          result: The _PackedStream.
+
+        """
+        return _PackedStream(
+            paths=self.val_paths,
+            tokenizer=self.tokenizer,
+            token_bytes=self.token_bytes,
+            batch_size=self.eval_batch_size,
+            max_seq_len=self.config.max_seq_len,
+            buffer_size=self.config.buffer_size,
+            device=self.device,
+            max_batches=self.config.eval_tokens
+            // (self.eval_batch_size * self.config.max_seq_len),
+        )
+
+    def state_dict(self) -> dict[str, Any]:
+        """Snapshot how far the training stream has advanced.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
+        return {
+            "batches": self._live.served if self._live is not None else 0,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Refuse to resume a stream that cannot be positioned.
+
+        The packer's state is a document buffer built by tokenizing the corpus
+        from its start, so there is no seek: reaching batch N means re-doing the
+        work of N batches. Restarting instead would silently retrain on the
+        opening of the corpus while the schedules carried on from where the
+        checkpoint left them.
+
+        Args:
+          state_dict: State dict.
+
+        Raises:
+          ValueError: The checkpoint had advanced the stream.
+
+        """
+        served = int(state_dict.get("batches", 0))
+        if served:
+            raise ValueError(
+                f"this checkpoint had served {served} batches, and the packed "
+                "stream cannot be positioned without re-tokenizing the corpus "
+                "up to that point; resuming would silently replay the start of "
+                "the data. Start a fresh run.",
+            )
+
+
+def _shard_paths(directory: Path, *, indices: range | list[int]) -> list[Path]:
+    """Return the named shards, in index order."""
     paths = [directory / f"shard_{index:05d}.parquet" for index in indices]
     missing = [path.name for path in paths if not path.is_file()]
     if missing:

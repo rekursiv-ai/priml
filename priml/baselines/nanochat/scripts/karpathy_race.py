@@ -172,7 +172,12 @@ def clone_upstream(
 
 
 def main() -> int:
-    """Run their script to completion and report what it scored."""
+    """Run their script to completion and report what it scored.
+
+    Returns:
+      result: The int.
+
+    """
     args = _parse_args()
     root = clone_upstream(args.clone)
 
@@ -218,30 +223,15 @@ def main() -> int:
     return 0
 
 
+# Their script assigns it at module scope, so it cannot be injected: any value handed in
+# beforehand is overwritten the moment the line runs. It is replaced in the source text
+# instead, and the substitution is asserted -- a silent miss would OOM 128 rows into 31
+# GiB, which is exactly the failure this exists to avoid.
+#
+# The TOKEN batch per optimizer step is untouched (their ``TOTAL_BATCH_SIZE`` is
+# unchanged), so this buys passes, not gradient.
 def _resize_microbatch(source: str, *, rows: int) -> str:
-    """Rewrite their ``DEVICE_BATCH_SIZE`` constant to what this card holds.
-
-    Their script assigns it at module scope, so it cannot be injected: any
-    value handed in beforehand is overwritten the moment the line runs. It is
-    replaced in the source text instead, and the substitution is asserted --
-    a silent miss would OOM 128 rows into 31 GiB, which is exactly the failure
-    this exists to avoid.
-
-    The TOKEN batch per optimizer step is untouched (their ``TOTAL_BATCH_SIZE``
-    is unchanged), so this buys passes, not gradient.
-
-    Args:
-      source: Their ``train.py``, verbatim.
-      rows: Rows per forward/backward pass.
-
-    Returns:
-      source: The same text, with that one constant changed.
-
-    Raises:
-      RuntimeError: The constant is not where this expects it, so the clone is
-        not the revision this script was written against.
-
-    """
+    """Rewrite their ``DEVICE_BATCH_SIZE`` constant to what this card holds."""
     pattern = re.compile(r"^DEVICE_BATCH_SIZE = \d+", re.MULTILINE)
     patched, count = pattern.subn(f"DEVICE_BATCH_SIZE = {rows}", source)
     if count != 1:
@@ -251,25 +241,15 @@ def _resize_microbatch(source: str, *, rows: int) -> str:
     return patched
 
 
+# Their file computes both directories at import from ``~/.cache``. They are rebound
+# afterwards -- and only they -- so both sides of the race read the identical shards and
+# the identical vocabulary.
+#
+# ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of their ``Tokenizer.from_directory``,
+# bound at definition and so unaffected by the rebinding; the default is replaced too,
+# since their ``train.py`` calls it with no argument.
 def _import_prepare(corpus: Path) -> types.ModuleType:
-    """Import their ``prepare`` module, pointed at the shared corpus.
-
-    Their file computes both directories at import from ``~/.cache``. They are
-    rebound afterwards -- and only they -- so both sides of the race read the
-    identical shards and the identical vocabulary.
-
-    ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of their
-    ``Tokenizer.from_directory``, bound at definition and so unaffected by the
-    rebinding; the default is replaced too, since their ``train.py`` calls it
-    with no argument.
-
-    Args:
-      corpus: Directory holding the shards and ``tokenizer/``.
-
-    Returns:
-      module: Their ``prepare`` module.
-
-    """
+    """Import their ``prepare`` module, pointed at the shared corpus."""
     import importlib  # noqa: PLC0415 -- imported after sys.path is prepared
 
     prepare = importlib.import_module("prepare")
@@ -282,7 +262,7 @@ def _import_prepare(corpus: Path) -> types.ModuleType:
 
 
 def _kernels_stub() -> types.ModuleType:
-    """A ``kernels`` module whose ``get_kernel`` yields the portable kernel."""
+    """Return a ``kernels`` module whose ``get_kernel`` yields the portable kernel."""
     module = types.ModuleType("kernels")
 
     def get_kernel(name: str) -> types.SimpleNamespace:

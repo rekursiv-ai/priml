@@ -86,7 +86,12 @@ class GridAccuracy:
         self.cells += int(per_puzzle.sum().item())
 
     def compute(self) -> dict[str, float]:
-        """Return exact and cell accuracy, summed across ranks first."""
+        """Return exact and cell accuracy, summed across ranks first.
+
+        Returns:
+          result: The dict[str, float].
+
+        """
         counts = torch.tensor(
             [self.solved, self.puzzles, self.cells_correct, self.cells],
             dtype=torch.float64,
@@ -105,7 +110,12 @@ class GridAccuracy:
         }
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the accumulated counts."""
+        """Return the accumulated counts.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "solved": self.solved,
             "puzzles": self.puzzles,
@@ -114,7 +124,12 @@ class GridAccuracy:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore counts produced by :meth:`state_dict`."""
+        """Restore counts produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.solved = state_dict.get("solved", 0)
         self.puzzles = state_dict.get("puzzles", 0)
         self.cells_correct = state_dict.get("cells_correct", 0)

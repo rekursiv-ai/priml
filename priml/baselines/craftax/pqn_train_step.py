@@ -141,6 +141,13 @@ class QRollout:
             yield minibatch
 
 
+def _split_environments(value: Tensor, *, order: Tensor, count: int) -> Tensor:
+    """Shuffle whole trajectories and expose a leading minibatch axis."""
+    shuffled = value[:, order]
+    grouped = shuffled.reshape(value.shape[0], count, -1, *value.shape[2:])
+    return grouped.transpose(0, 1)
+
+
 class CraftaxPQNTrainStep(TrainStep):
     """Model, environment, and optimizer for one Q-learning experiment."""
 
@@ -498,7 +505,12 @@ class CraftaxPQNTrainStep(TrainStep):
             return self.model.forward(observation)
 
     def make_evaluation_actor(self) -> EvaluationActor:
-        """Build a greedy actor with isolated LSTM state."""
+        """Build a greedy actor with isolated LSTM state.
+
+        Returns:
+          result: The EvaluationActor.
+
+        """
         return _EvaluationActor(
             self.model,
             observation_size=self.env.observation_size,
@@ -680,53 +692,15 @@ class _EvaluationActor:
 
 
 def _compiled(function: _StepFn, *, enabled: bool) -> _StepFn:
-    """Compile one bound method, or return it untouched.
-
-    Args:
-      function: The bound method to compile.
-      enabled: Whether to compile at all.
-
-    Returns:
-      callable: The compiled function, or the original.
-
-    """
+    """Compile one bound method, or return it untouched."""
     return torch.compile(function) if enabled else function
 
 
-def _tensor(value: Any) -> Tensor:
-    """Narrow one checkpoint entry to a tensor.
-
-    A state dict is untyped by construction, and assigning straight from it
-    would widen every restored attribute to ``Any`` -- erasing the shapes the
-    rest of this file depends on.
-
-    Args:
-      value: The checkpoint entry.
-
-    Returns:
-      tensor: The same value, typed.
-
-    Raises:
-      TypeError: The entry is not a tensor.
-
-    """
+# A state dict is untyped by construction, and assigning straight from it would widen
+# every restored attribute to ``Any`` -- erasing the shapes the rest of this file
+# depends on.
+def _tensor(value: object) -> Tensor:
+    """Narrow one checkpoint entry to a tensor."""
     if not isinstance(value, Tensor):
         raise TypeError(f"checkpoint entry must be a tensor, got {type(value)}")
     return value
-
-
-def _split_environments(value: Tensor, *, order: Tensor, count: int) -> Tensor:
-    """Shuffle whole trajectories and expose a leading minibatch axis.
-
-    Args:
-      value: Time-major tensor, ``[time, envs, ...]``.
-      order: Permutation of the worker axis.
-      count: Minibatches to split the workers into.
-
-    Returns:
-      split: ``[count, time, envs / count, ...]``.
-
-    """
-    shuffled = value[:, order]
-    grouped = shuffled.reshape(value.shape[0], count, -1, *value.shape[2:])
-    return grouped.transpose(0, 1)

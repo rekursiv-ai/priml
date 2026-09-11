@@ -11,8 +11,6 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from typing import TYPE_CHECKING, Self, override
 
-import math
-
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 from torch.nn import functional as f
@@ -186,6 +184,7 @@ class GatedDeltaNet(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         # This module made every child below, so it owns re-initializing them
         # (and its own raw params). dt_bias and A_log carry deliberate
         # Mamba-style inits that meta materialization must reproduce.
@@ -290,7 +289,7 @@ def _torch_chunk_gated_delta_rule(
     beta = f.pad(beta, (0, pad))
     g = f.pad(g, (0, pad))
     S_total = S + pad
-    scale = 1.0 / math.sqrt(dk)
+    scale = 1.0 / float(dk**0.5)
     query = query * scale
     v_beta = value * beta.unsqueeze(-1)
     k_beta = key * beta.unsqueeze(-1)

@@ -97,7 +97,7 @@ def test_default_activation_storage_apply():
     module = SimpleModule()
     strategy(module)
 
-    # Just verify it doesn't raise
+    # Just verify it doesn't raise.
     x = torch.randn(4, 10)
     output = module(x)
     assert output.shape == (4, 10)
@@ -125,7 +125,7 @@ def test_layer_activation_checkpointing_apply():
     module = NestedModule()
     strategy(module)
 
-    # Verify forward still works
+    # Verify forward still works.
     x = torch.randn(4, 10)
     output = module(x)
     assert output.shape == (4, 10)
@@ -139,7 +139,7 @@ def test_layer_activation_checkpointing_interval():
     module = NestedModule()
     strategy(module)
 
-    # Just verify it works
+    # Just verify it works.
     x = torch.randn(4, 10, requires_grad=True)
     output = module(x)
     assert output.shape == (4, 10)
@@ -156,7 +156,7 @@ def test_layer_activation_checkpointing_forward_works():
     x = torch.randn(4, 10, requires_grad=True)
     output = module(x)
 
-    # Verify backward works
+    # Verify backward works.
     loss = output.sum()
     loss.backward()
     assert module.layer1.weight.grad is not None
@@ -184,7 +184,7 @@ def test_selective_activation_checkpointing_apply():
     module = TransformerModel(num_blocks=3)
     strategy(module)
 
-    # Verify forward still works
+    # Verify forward still works.
     x = torch.randn(4, 10)
     output = module(x)
     assert output.shape == (4, 10)
@@ -201,12 +201,12 @@ def test_selective_activation_checkpointing_checkpoint_fraction():
     module = TransformerModel(num_blocks=4)
     strategy(module)
 
-    # Verify forward still works
+    # Verify forward still works.
     x = torch.randn(4, 10, requires_grad=True)
     output = module(x)
     assert output.shape == (4, 10)
 
-    # Verify backward works
+    # Verify backward works.
     loss = output.sum()
     loss.backward()
 
@@ -222,7 +222,7 @@ def test_selective_activation_checkpointing_forward_works():
     x = torch.randn(4, 10, requires_grad=True)
     output = module(x)
 
-    # Verify backward works
+    # Verify backward works.
     loss = output.sum()
     loss.backward()
     assert module.output.weight.grad is not None
@@ -251,7 +251,7 @@ def test_layer_activation_checkpointing_gradient_checkpointing():
     loss = output.sum()
     loss.backward()
 
-    # Verify gradients exist
+    # Verify gradients exist.
     assert module.layer1.weight.grad is not None
     assert module.layer2.weight.grad is not None
     assert module.layer3.weight.grad is not None
@@ -303,7 +303,7 @@ def test_quantized_activation_storage_apply():
     module = SimpleModule()
     strategy(module)
 
-    # Verify forward still works
+    # Verify forward still works.
     x = torch.randn(4, 10)
     output = module(x)
     assert output.shape == (4, 10)
@@ -474,7 +474,7 @@ def test_quantized_activation_storage_with_learnable():
     config.activation_memoization = QuantizedActivationStorage.Config()
     config.activation_memoization.min_size = 10
     config.compile = None
-    # FP8 not supported on MPS; force CPU when CUDA unavailable
+    # FP8 not supported on MPS; force CPU when CUDA unavailable.
     if not torch.cuda.is_available():
         config.parallelism = NoParallel.Config(device="cpu")
 
@@ -535,7 +535,8 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
     out = conv(x)
     Tensor.to = spy_to
     try:
-        with contextlib.suppress(RuntimeError):  # bf16 conv backward may be unsupported
+        # bf16 conv backward may be unsupported.
+        with contextlib.suppress(RuntimeError):
             out.sum().backward()
     finally:
         Tensor.to = orig_to
@@ -561,7 +562,7 @@ def test_quantized_activation_storage_all_zero_no_nan() -> None:
             return self.linear(x) * 0.0
 
     config = QuantizedActivationStorage.Config()
-    config.min_size = 4  # ensure the zero activation crosses the quantize path
+    config.min_size = 4  # ensure the zero activation crosses the quantize path.
 
     module = ZeroOutModule()
     config.make()(module)

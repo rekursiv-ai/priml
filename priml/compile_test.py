@@ -16,7 +16,7 @@ def _identity(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
-def _identity_compile(*_args: Any, **_kwargs: Any) -> Callable[..., Any]:
+def _identity_compile(*_args: object, **_kwargs: object) -> Callable[..., Any]:
     """Stand-in for torch.compile: returns a no-op decorator."""
     return _identity
 
@@ -45,7 +45,7 @@ class TestLazyTorchCompile:
     def test_compile_deferred_to_first_call(self) -> None:
         calls: list[int] = []
 
-        def _tracking_compile(*_args: Any, **_kwargs: Any) -> Callable[..., Any]:
+        def _tracking_compile(*_args: object, **_kwargs: object) -> Callable[..., Any]:
             calls.append(1)
             return _identity
 
@@ -55,11 +55,11 @@ class TestLazyTorchCompile:
             def f(x: int) -> int:
                 return x
 
-            assert calls == []  # not compiled at decoration time
+            assert calls == []  # not compiled at decoration time.
             assert f(5) == 5
             assert len(calls) == 1
             f(6)
-            assert len(calls) == 1  # compiled exactly once
+            assert len(calls) == 1  # compiled exactly once.
 
 
 class TestLazyAssumeConstantResult:

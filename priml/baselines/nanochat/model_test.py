@@ -29,7 +29,7 @@ VOCAB = 32
 SEQ = 16
 
 
-def _config(**overrides: Any) -> NanoChatLM.Config:
+def _config(**overrides: object) -> NanoChatLM.Config:
     config = NanoChatLM.Config()
     config.vocab_size = VOCAB
     config.max_seq_len = SEQ
@@ -46,19 +46,17 @@ def _config(**overrides: Any) -> NanoChatLM.Config:
     return config
 
 
-def _model(**overrides: Any) -> NanoChatLM:
+def _model(**overrides: object) -> NanoChatLM:
     torch.manual_seed(0)
     return _config(**overrides).make()
 
 
-def _mixing_model(**overrides: Any) -> NanoChatLM:
-    """A model whose blocks actually mix positions.
-
-    Every output projection is zero-initialized -- that is the recipe, so a
-    fresh block is the identity on its residual stream. A test of MIXING
-    (causality, windowing) would therefore pass on a model that never attends
-    at all, so the weights are randomized before asking.
-    """
+# Every output projection is zero-initialized -- that is the recipe, so a fresh block is
+# the identity on its residual stream. A test of MIXING (causality, windowing) would
+# therefore pass on a model that never attends at all, so the weights are randomized
+# before asking.
+def _mixing_model(**overrides: object) -> NanoChatLM:
+    """Return a model whose blocks actually mix positions."""
     model = _model(**overrides)
     randomize_parameters(model, seed=1, std=0.5)
     return model
@@ -148,8 +146,9 @@ def test_a_window_hides_distant_positions() -> None:
 
 
 def test_value_embeddings_add_parameters_only_where_named() -> None:
-    """A layer not listed must not carry a table, or the ladder confounds
-    the mechanism with capacity.
+    """A layer not listed must not carry a table.
+
+    Or the ladder confounds the mechanism with capacity.
     """
     plain = sum(p.numel() for p in _model().parameters())
     gated = sum(p.numel() for p in _model(value_embedding_stride=2).parameters())
@@ -176,17 +175,19 @@ def test_the_value_gate_starts_transparent() -> None:
 
 
 def test_a_negative_stride_is_rejected() -> None:
-    """The stride is the ONLY way to name the gated layers, so a bad one has
-    no list to fall back to and would silently gate nothing.
+    """The stride is the ONLY way to name the gated layers.
+
+    A bad one has no list to fall back to and would silently gate nothing.
     """
     with pytest.raises(ValueError, match="value_embedding_stride"):
         _config(value_embedding_stride=-1).copy_tree().finalize()
 
 
 def test_the_gated_layers_count_back_from_the_last() -> None:
-    """The deepest layer always gets a table: the embedding is a path from the
-    raw tokens to the output, worth the most where the stream is most
-    processed. Counting FORWARD would gate layer 0 and skip the last.
+    """The deepest layer always gets a table.
+
+    The embedding is a path from the raw tokens to the output, worth the most where the
+    stream is most processed. Counting FORWARD would gate layer 0 and skip the last.
     """
     config = _config(num_layers=4, value_embedding_stride=2)
     assert config.value_embedding_layers == [1, 3]
@@ -206,7 +207,7 @@ def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
     template.num_heads = 2
 
     blocks: list[Any] = []
-    for num_heads in (2, 4):  # 2 * 8 = 16 inner, against 4 * 8 = 32
+    for num_heads in (2, 4):  # 2 * 8 = 16 inner, against 4 * 8 = 32.
         block = config.template.copy_tree()
         attention = block.attn
         assert isinstance(attention, ValueGatedAttention.Config)

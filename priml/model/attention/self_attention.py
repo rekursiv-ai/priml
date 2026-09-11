@@ -220,6 +220,7 @@ class AttentionProjections(nn.Module):
         return q, k, v
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         self.proj_qkv.reset_parameters()
         self.proj_out.reset_parameters()
         seen: nn.Module | None = None
@@ -232,6 +233,56 @@ class AttentionProjections(nn.Module):
             self.norm_out.reset_parameters()
         if isinstance(self.rope, Resettable):
             self.rope.reset_parameters()
+
+
+# Only the inference contract, never a dimension's sign: torch raises on a negative
+# extent when it builds the tensor, and re-checking here would add a second message for
+# one fault (STYLE.md "Let the leaf complain").
+def _validate_head_dims(
+    *, channels_in: int, num_heads: int, channels_head: int
+) -> None:
+    """Reject geometry that stayed unresolved after finalize."""
+    if channels_head == -1 and channels_in != -1:
+        raise ValueError(
+            f"channels_in={channels_in} not divisible by "
+            f"num_heads={num_heads}; set channels_head explicitly.",
+        )
+    if num_heads == -1 and channels_in != -1:
+        raise ValueError(
+            f"channels_in={channels_in} not divisible by "
+            f"channels_head={channels_head}; set num_heads explicitly.",
+        )
+    if -1 in (channels_in, num_heads, channels_head):
+        raise ValueError(
+            f"Need at least two of channels_in={channels_in}, "
+            f"num_heads={num_heads}, channels_head={channels_head}.",
+        )
+
+
+def _infer_head_dims(
+    *,
+    channels_in: int,
+    num_heads: int,
+    channels_head: int,
+) -> tuple[int, int, int]:
+    """Infer one missing boundary or uniform-head dimension."""
+    if channels_in == -1 and num_heads > 0 and channels_head > 0:
+        channels_in = num_heads * channels_head
+    if (
+        channels_head == -1
+        and channels_in != -1
+        and num_heads > 0
+        and channels_in % num_heads == 0
+    ):
+        channels_head = channels_in // num_heads
+    if (
+        num_heads == -1
+        and channels_in != -1
+        and channels_head > 0
+        and channels_in % channels_head == 0
+    ):
+        num_heads = channels_in // channels_head
+    return channels_in, num_heads, channels_head
 
 
 class SelfAttention(AttentionProjections):
@@ -273,7 +324,18 @@ class SelfAttention(AttentionProjections):
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> KVCache:
-        """Allocate a KV cache sized for this attention block."""
+        """Allocate a KV cache sized for this attention block.
+
+        Args:
+          batch: Batch.
+          max_seq: Max seq.
+          device: Device.
+          dtype: Dtype.
+
+        Returns:
+          result: The KVCache.
+
+        """
         return KVCache.alloc(
             batch=batch,
             num_heads=self.num_heads_kv,
@@ -319,7 +381,22 @@ class SelfAttention(AttentionProjections):
         attn_mask: Tensor | None = None,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Attend using and updating ``cache``."""
+        """Attend using and updating ``cache``.
+
+        Args:
+          x: X.
+          cache: Cache.
+          positions: Positions.
+          cos_sin: Cos sin.
+          dropout_p: Dropout p.
+          is_causal: Is causal.
+          attn_mask: Attn mask.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
         out, updated = self._forward(
             x,
             positions=positions,
@@ -347,7 +424,7 @@ class SelfAttention(AttentionProjections):
     ) -> tuple[Tensor, KVCache | None]:
         S = x.shape[-2]
 
-        # proj_qkv: [..., S, C] -> [..., S, num_ensemble, channels_head]
+        # proj_qkv: [..., S, C] -> [..., S, num_ensemble, channels_head].
         if self.split_qkv_projection:
             q, k, v = self.split_qkv(x)
         else:
@@ -405,61 +482,9 @@ class SelfAttention(AttentionProjections):
             **kwargs,
         )
 
-        # [..., S, H, D] -> [..., S, H*D]
+        # [..., S, H, D] -> [..., S, H*D].
         out = out.flatten(-2)
         if self.norm_out is not None:
             out = self.norm_out(out)
         out = self.proj_out(out)
         return out, cache
-
-
-def _infer_head_dims(
-    *,
-    channels_in: int,
-    num_heads: int,
-    channels_head: int,
-) -> tuple[int, int, int]:
-    """Infer one missing boundary or uniform-head dimension."""
-    if channels_in == -1 and num_heads > 0 and channels_head > 0:
-        channels_in = num_heads * channels_head
-    if (
-        channels_head == -1
-        and channels_in != -1
-        and num_heads > 0
-        and channels_in % num_heads == 0
-    ):
-        channels_head = channels_in // num_heads
-    if (
-        num_heads == -1
-        and channels_in != -1
-        and channels_head > 0
-        and channels_in % channels_head == 0
-    ):
-        num_heads = channels_in // channels_head
-    return channels_in, num_heads, channels_head
-
-
-def _validate_head_dims(
-    *, channels_in: int, num_heads: int, channels_head: int
-) -> None:
-    """Reject geometry that stayed unresolved after finalize.
-
-    Only the inference contract, never a dimension's sign: torch raises on a
-    negative extent when it builds the tensor, and re-checking here would add a
-    second message for one fault (STYLE.md "Let the leaf complain").
-    """
-    if channels_head == -1 and channels_in != -1:
-        raise ValueError(
-            f"channels_in={channels_in} not divisible by "
-            f"num_heads={num_heads}; set channels_head explicitly.",
-        )
-    if num_heads == -1 and channels_in != -1:
-        raise ValueError(
-            f"channels_in={channels_in} not divisible by "
-            f"channels_head={channels_head}; set num_heads explicitly.",
-        )
-    if -1 in (channels_in, num_heads, channels_head):
-        raise ValueError(
-            f"Need at least two of channels_in={channels_in}, "
-            f"num_heads={num_heads}, channels_head={channels_head}.",
-        )

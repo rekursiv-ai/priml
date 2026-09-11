@@ -31,7 +31,7 @@ so both terms meet in the latent space::
     out    = (softmax(logits) @ c_kv) @ W_UV            [B, S, n, V]
                                             ⟶ o_proj ⟶ [B, S, hidden]
 
-**Cache layout.** Only ``(c_kv, k_pe)`` are cached — not the expanded
+**Cache layout.** Only ``(c_kv, k_pe)`` are cached -- not the expanded
 K/V. For Kimi-K2 (n=64, D+V=256, L=512, R=64) this cuts cache memory
 ~25× (576 dims/token vs 16384).
 
@@ -298,6 +298,12 @@ class MultiHeadLatentAttention(nn.Module):
 
         @property
         def channels_qk_head(self) -> int:
+            """Channels qk head.
+
+            Returns:
+              result: The int.
+
+            """
             return self.channels_qk_nope_head + self.channels_qk_rope_head
 
         @property
@@ -329,16 +335,14 @@ class MultiHeadLatentAttention(nn.Module):
             self._size_projections()
             return super().finalize()
 
+        # Every width here is DERIVED -- a head count times a per-head width, or a LoRA
+        # rank -- so a caller states the shape once and swaps the projection class
+        # without restating any of it. Only the sentinel fields are filled: a slot
+        # carrying a width, a bias, or an init the caller chose deliberately is left
+        # alone, since overwriting it would build a model that differs from the
+        # configured one.
         def _size_projections(self) -> None:
-            """Fill each projection slot's widths from the shape fields.
-
-            Every width here is DERIVED -- a head count times a per-head width,
-            or a LoRA rank -- so a caller states the shape once and swaps the
-            projection class without restating any of it. Only the sentinel
-            fields are filled: a slot carrying a width, a bias, or an init the
-            caller chose deliberately is left alone, since overwriting it would
-            build a model that differs from the configured one.
-            """
+            """Fill each projection slot's widths from the shape fields."""
             qk_out = self.num_heads * self.channels_qk_head
             # ``object`` because the slots differ in what they BUILD (a plain
             # module, or one whose call shape is named); this loop only sets
@@ -443,6 +447,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.attn_kernel = config.attn_kernel.make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         for m in (
             self.q_proj,
             self.q_a_proj,
@@ -471,6 +476,16 @@ class MultiHeadLatentAttention(nn.Module):
         ``KVCache.k`` stores the per-token ``c_kv`` latent;
         ``KVCache.v`` stores the per-token ``k_pe``. Both have a
         single "head" axis of size 1 (the latent is head-shared).
+
+        Args:
+          batch: Batch.
+          max_seq: Max seq.
+          device: Device.
+          dtype: Dtype.
+
+        Returns:
+          result: The KVCache.
+
         """
         return KVCache.alloc(
             batch=batch,
@@ -521,7 +536,23 @@ class MultiHeadLatentAttention(nn.Module):
         attn_mask: Tensor | None = None,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Attend using and updating the compressed latent cache."""
+        """Attend using and updating the compressed latent cache.
+
+        Args:
+          x: X.
+          cache: Cache.
+          positions: Positions.
+          cos_sin: Cos sin.
+          scale: Scale.
+          is_causal: Is causal.
+          dropout_p: Dropout p.
+          attn_mask: Attn mask.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
         out, updated = self._forward(
             x,
             positions=positions,
@@ -557,7 +588,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         compressed = self.kv_a_proj(x)
         c_kv_new = self.kv_a_layernorm(compressed[..., : self.kv_lora_rank])
-        k_pe_new = compressed[..., self.kv_lora_rank :].unsqueeze(-2)  # [*, S, 1, R]
+        k_pe_new = compressed[..., self.kv_lora_rank :].unsqueeze(-2)  # [*, S, 1, R].
 
         if cos_sin is None and self.rope is not None:
             if positions is None:
@@ -583,8 +614,8 @@ class MultiHeadLatentAttention(nn.Module):
         else:
             c_kv_full_c, k_pe_full_c = c_kv_cache_in, k_pe_cache_in
 
-        c_kv_full = c_kv_full_c.squeeze(-3)  # [*, T, L]
-        k_pe_full = k_pe_full_c.squeeze(-3)  # [*, T, R]
+        c_kv_full = c_kv_full_c.squeeze(-3)  # [*, T, L].
+        k_pe_full = k_pe_full_c.squeeze(-3)  # [*, T, R].
 
         causal = self.causal if is_causal is None else is_causal
         if attn_mask is None and causal:
@@ -606,14 +637,12 @@ class MultiHeadLatentAttention(nn.Module):
             **kwargs,
         ), cache
 
+    # Under tensor parallelism the q-path is colwise-sharded over the head dim, so
+    # ``q_proj``/``q_b_proj`` emit only this rank's ``heads_local = num_heads // tp``
+    # heads as a plain local tensor; the view reshapes by ``heads_local`` (``=
+    # num_heads`` when replicated).
     def _project_q(self, x: Tensor) -> Tensor:
-        """Return Q as ``[..., S, heads_local, channels_qk_head]``.
-
-        Under tensor parallelism the q-path is colwise-sharded over the head
-        dim, so ``q_proj``/``q_b_proj`` emit only this rank's
-        ``heads_local = num_heads // tp`` heads as a plain local tensor; the view
-        reshapes by ``heads_local`` (``= num_heads`` when replicated).
-        """
+        """Return Q as ``[..., S, heads_local, channels_qk_head]``."""
         if self.q_proj is not None:
             q = self.q_proj(x)
         else:
@@ -624,6 +653,13 @@ class MultiHeadLatentAttention(nn.Module):
         assert isinstance(q, Tensor)
         return q.view(*q.shape[:-1], self._heads_local, self.channels_qk_head)
 
+    # The slicing lives here rather than in any kernel because it is where the tensor-
+    # parallel correctness argument is: ``kv_b_proj`` stays **replicated** (the latent
+    # it expands is head-shared, so sharding it over the head dim is a bug), and this
+    # rank expands only its ``heads_local`` heads -- rows ``[head_offset, head_offset +
+    # heads_local)`` -- so the views align with the rank-local ``q_nope``/``q_pe`` from
+    # :meth:`_project_q`. A kernel receiving the views cannot get that wrong; one
+    # receiving the module could.
     def _attend(
         self,
         q_nope: Tensor,
@@ -636,17 +672,7 @@ class MultiHeadLatentAttention(nn.Module):
         dropout_p: float,
         **kwargs: object,
     ) -> Tensor:
-        """Slice this rank's per-head projections, then run the kernel.
-
-        The slicing lives here rather than in any kernel because it is where
-        the tensor-parallel correctness argument is: ``kv_b_proj`` stays
-        **replicated** (the latent it expands is head-shared, so sharding it
-        over the head dim is a bug), and this rank expands only its
-        ``heads_local`` heads -- rows ``[head_offset, head_offset +
-        heads_local)`` -- so the views align with the rank-local
-        ``q_nope``/``q_pe`` from :meth:`_project_q`. A kernel receiving the
-        views cannot get that wrong; one receiving the module could.
-        """
+        """Slice this rank's per-head projections, then run the kernel."""
         h_local = self._heads_local
         qk_nope = self.channels_qk_nope_head
 
@@ -674,15 +700,13 @@ class MultiHeadLatentAttention(nn.Module):
         assert isinstance(out_per_head, Tensor)
         return self.o_proj(self._to_o_proj_input(out_per_head.flatten(-2)))
 
+    # Replicated: a plain ``[..., num_heads * v]`` tensor. Under tensor parallelism
+    # ``o_proj`` is rowwise-sharded and expects its input sharded on the last (head*v)
+    # dim, so wrap this rank's local ``[..., heads_local * v]`` slice as a ``Shard(-1)``
+    # DTensor; ``RowwiseParallel`` then all-reduces the partial outputs into the
+    # replicated result.
     def _to_o_proj_input(self, out: Tensor) -> Tensor:
-        """Present the per-head output to ``o_proj`` in its expected layout.
-
-        Replicated: a plain ``[..., num_heads * v]`` tensor. Under tensor
-        parallelism ``o_proj`` is rowwise-sharded and expects its input sharded
-        on the last (head*v) dim, so wrap this rank's local ``[..., heads_local
-        * v]`` slice as a ``Shard(-1)`` DTensor; ``RowwiseParallel`` then
-        all-reduces the partial outputs into the replicated result.
-        """
+        """Present the per-head output to ``o_proj`` in its expected layout."""
         if self._tp_mesh is None:
             return out
         return DTensor.from_local(out, self._tp_mesh, [Shard(-1)], run_check=False)
@@ -699,6 +723,9 @@ class MultiHeadLatentAttention(nn.Module):
         (``kv_a_proj``/``kv_b_proj``/``q_a_proj``/``kv_a_layernorm``)
         replicated -- sharding the latent over the head axis is a correctness
         bug, not merely wasteful.
+
+        Returns:
+          result: The ParallelStyle.
 
         Raises:
           ValueError: If ``tp`` does not divide ``num_heads`` (the per-rank head
@@ -800,13 +827,11 @@ class MultiHeadLatentAttention(nn.Module):
         }
 
 
+# A field left at its declared default inherits the parent's value; anything else the
+# caller chose outranks it. A field set to exactly the default is indistinguishable from
+# an untouched one.
 def _fill_unset(config: Linear.Config, name: str, value: object) -> None:
-    """Push ``value`` onto ``config.name`` unless the caller set it.
-
-    A field left at its declared default inherits the parent's value; anything
-    else the caller chose outranks it. A field set to exactly the default is
-    indistinguishable from an untouched one.
-    """
+    """Push ``value`` onto ``config.name`` unless the caller set it."""
     # Read off the dataclass field: slots=True makes the class attribute a
     # descriptor rather than the default value.
     default = next(f for f in fields(config) if f.name == name).default

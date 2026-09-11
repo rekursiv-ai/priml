@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, override
 
 import functools
 import importlib
@@ -46,7 +46,9 @@ class _FakeMesh:
     """
 
     device_type = "cpu"
+
     mesh_dim_names = ("dp", "tp")
+
     shape = (1, 1)
 
     def __getitem__(self, key: object) -> _FakeMesh:
@@ -232,7 +234,7 @@ def test_distributed_strategies_place_an_eager_model(
     device and a batch on another.
     """
 
-    def replicate_in_place(model: nn.Module, **kwargs: Any) -> nn.Module:
+    def replicate_in_place(model: nn.Module, **kwargs: object) -> nn.Module:
         """Stand in for DDP's ``replicate``, which needs a process group."""
         del kwargs
         return model
@@ -257,19 +259,17 @@ def test_distributed_strategies_place_an_eager_model(
     )
     for config in configs:
         strategy = config.make()
-        strategy.device = torch.device("meta")  # a device the model is NOT on
+        strategy.device = torch.device("meta")  # a device the model is NOT on.
         placed = strategy(SimpleModel())
         assert next(placed.parameters()).is_meta, type(config).__qualname__
 
 
+# ``result_dir`` is bound via ``functools.partial`` and pickled with the worker, so it
+# survives a forkserver started by an earlier test (an env var would be stale in that
+# forkserver's snapshotted environment). Writes ``ok`` or ``FAIL:<reason>`` to
+# ``rank_<r>`` under ``result_dir``.
 def _fsdp_materialize_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Worker: shard a meta model under FSDP, record materialize outcome.
-
-    ``result_dir`` is bound via ``functools.partial`` and pickled with the
-    worker, so it survives a forkserver started by an earlier test (an env
-    var would be stale in that forkserver's snapshotted environment).
-    Writes ``ok`` or ``FAIL:<reason>`` to ``rank_<r>`` under ``result_dir``.
-    """
+    """Worker: shard a meta model under FSDP, record materialize outcome."""
     result_path = Path(result_dir)
     rank = mesh.get_rank()
     try:
@@ -406,21 +406,24 @@ def test_tensor_parallel_lives_in_lib() -> None:
 
 
 def test_materialize_meta_initializes_centered_rmsnorm() -> None:
-    """CenteredRMSNorm.weight (custom param, no torch reset) must init, not stay
-    as ``to_empty`` garbage, after meta materialization.
+    """CenteredRMSNorm.weight (custom param, no torch reset) must init.
+
+    Stay as ``to_empty`` garbage, after meta materialization.
     """
     with torch.device("meta"):
         norm = CenteredRMSNorm(CenteredRMSNorm.Config(channels_in=8))
     materialize_meta(norm, torch.device("cpu"))
     assert torch.isfinite(norm.weight).all()
-    # weight is used as ``1.0 + weight``; its init is zeros.
+    # Weight is used as ``1.0 + weight``; its init is zeros.
     # torch.equal not assert_close: to_empty garbage can be near-zero.
     assert torch.equal(norm.weight, torch.zeros(8))
 
 
 def test_materialize_meta_initializes_gated_delta_net_raw_params() -> None:
-    """GatedDeltaNet.dt_bias / A_log (raw nn.Parameters, no reset) must hold
-    their intended init after meta materialization, not garbage.
+    """GatedDeltaNet.dt_bias / A_log.
+
+    Raw nn.Parameters, no reset) must hold their intended init after meta
+    materialization, not garbage.
     """
     with torch.device("meta"):
         gdn = GatedDeltaNet(
@@ -441,14 +444,15 @@ def test_materialize_meta_initializes_gated_delta_net_raw_params() -> None:
 
 
 def test_materialize_meta_raises_on_uninitialized_param() -> None:
-    """A param-bearing module whose params are never reset must fail loudly,
-    not silently keep ``to_empty`` garbage.
+    """A param-bearing module whose params are never reset must fail loudly.
+
+    Silently keep ``to_empty`` garbage.
     """
 
     class _Uninit(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.weight = nn.Parameter(torch.zeros(4))  # no reset_parameters
+            self.weight = nn.Parameter(torch.zeros(4))  # no reset_parameters.
 
     with torch.device("meta"):
         mod = _Uninit()
@@ -457,8 +461,9 @@ def test_materialize_meta_raises_on_uninitialized_param() -> None:
 
 
 def test_materialize_meta_raises_on_uninitialized_buffer() -> None:
-    """A registered buffer left unwritten by reset_parameters must fail loudly,
-    not ship ``to_empty`` garbage. The audit covers buffers, not just params.
+    """A registered buffer left unwritten by reset_parameters must fail loudly.
+
+    Ship ``to_empty`` garbage. The audit covers buffers, not just params.
     """
 
     class _UninitBuf(nn.Module):
@@ -468,7 +473,7 @@ def test_materialize_meta_raises_on_uninitialized_buffer() -> None:
             self.register_buffer("stat", torch.zeros(4))
 
         def reset_parameters(self) -> None:
-            nn.init.ones_(self.weight)  # writes the param, forgets the buffer
+            nn.init.ones_(self.weight)  # writes the param, forgets the buffer.
 
     with torch.device("meta"):
         mod = _UninitBuf()
@@ -477,8 +482,9 @@ def test_materialize_meta_raises_on_uninitialized_buffer() -> None:
 
 
 def test_materialize_meta_raises_on_partial_param_init() -> None:
-    """A reset that writes only a slice leaves the rest as poison NaN; the
-    ``.any()`` audit must catch the partial write, not pass it as initialized.
+    """A reset that writes only a slice leaves the rest as poison NaN.
+
+    The ``.any()`` audit must catch the partial write, not pass it as initialized.
     """
 
     class _Partial(nn.Module):
@@ -488,7 +494,7 @@ def test_materialize_meta_raises_on_partial_param_init() -> None:
 
         def reset_parameters(self) -> None:
             with torch.no_grad():
-                self.weight[:2] = 1.0  # only half written
+                self.weight[:2] = 1.0  # only half written.
 
     with torch.device("meta"):
         mod = _Partial()
@@ -497,8 +503,10 @@ def test_materialize_meta_raises_on_partial_param_init() -> None:
 
 
 def test_materialize_meta_allows_integer_buffer() -> None:
-    """Integer buffers (e.g. counters) cannot hold NaN and must not trip the
-    float-only poison audit; a valid module with one must materialize cleanly.
+    """Integer buffers (e.g.
+
+    counters) cannot hold NaN and must not trip the float-only poison audit; a valid
+    module with one must materialize cleanly.
     """
 
     class _IntBuf(nn.Module):

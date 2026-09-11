@@ -12,7 +12,15 @@ import torch
 
 
 def flip_lr(images: Tensor) -> Tensor:
-    """Random horizontal flip per image (50% probability)."""
+    """Random horizontal flip per image (50% probability).
+
+    Args:
+      images: Images.
+
+    Returns:
+      result: The Tensor.
+
+    """
     mask = torch.rand(len(images), device=images.device) < 0.5
     return torch.where(mask.view(-1, 1, 1, 1), images.flip(-1), images)
 
@@ -84,7 +92,7 @@ def pad_crop_flip(
     flip: bool | None = None,
     cutout_size: int = 0,
 ) -> Tensor:
-    """Common training augmentation: pad, random-crop, flip, then cutout.
+    """Apply the common training augmentation: pad, random-crop, flip, then cutout.
 
     The input is padded by ``pad`` on all sides, so ``crop_size`` may equal
     the original spatial size while still leaving ``2 * pad`` slack to crop.

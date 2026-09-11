@@ -52,6 +52,13 @@ def scalar_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
     A value is scalar when it is a real number or a single-element ``Tensor``;
     everything else (dicts, payloads, multi-element tensors) is dropped so a
     tracker never has to flatten or reject an opaque value.
+
+    Args:
+      metrics: Metrics.
+
+    Returns:
+      scalars: The dict[str, float].
+
     """
     scalars: dict[str, float] = {}
     for key, value in metrics.items():
@@ -134,15 +141,33 @@ class FileTracker:
         logger.info("Wrote metrics to %s", path)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """No-op image logging; a metrics file holds scalars only."""
+        """No-op image logging; a metrics file holds scalars only.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
-        """No-op; a metrics file has no notes concept."""
+        """No-op; a metrics file has no notes concept.
+
+        Args:
+          notes: Notes.
+
+        """
         del notes
 
     def close(self) -> None:
         """No resources to release."""
+
+
+class _Writer(Protocol):
+    """Minimal scalar-logging writer interface (satisfied by SummaryWriter)."""
+
+    def add_scalar(self, tag: str, scalar_value: float, global_step: int) -> None: ...
 
 
 class _WriterFactory(Protocol):
@@ -155,7 +180,9 @@ _summary_writer_cls: _WriterFactory | None
 try:
     from torch.utils.tensorboard import SummaryWriter
 
-    _summary_writer_cls = SummaryWriter
+    # ``SummaryWriter`` is unannotated upstream, so it only ASSIGNS to the
+    # protocol; the cast states the conformance the constructor call relies on.
+    _summary_writer_cls = cast(_WriterFactory, SummaryWriter)
 except ImportError:
     _summary_writer_cls = None
 
@@ -207,11 +234,23 @@ class TensorBoardTracker:
             self.writer.add_scalar(f"{prefix}{name}", value, step)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """No-op image logging fallback for scalar-only TensorBoard tracker."""
+        """No-op image logging fallback for scalar-only TensorBoard tracker.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
-        """No-op; TensorBoard has no run-notes concept."""
+        """No-op; TensorBoard has no run-notes concept.
+
+        Args:
+          notes: Notes.
+
+        """
         del notes
 
     def close(self) -> None:
@@ -275,8 +314,10 @@ class WandbTracker:
 
         project: str = "loop"
         """W&B project the run is logged under."""
+
         name: str = ""
         """Run name; empty lets W&B auto-generate one."""
+
         run_id: str = ""
         """Existing W&B run id to resume; empty opens a fresh run.
 
@@ -285,33 +326,44 @@ class WandbTracker:
         checkpoint) instead of creating a separate run. Resumes with
         ``resume="allow"``, so a non-existent id still starts a run under that
         id rather than erroring."""
+
         group: str = ""
         """Optional run group (e.g. an experiment family); empty disables it."""
+
         mode: str = "online"
         """W&B mode: "online", "offline", or "disabled"."""
+
         base_dir: Path | str | None = None
         """Owner directory supplied during parent finalization."""
+
         working_dir: Path | str = "/wandb"
         """Logical directory for local W&B run files."""
+
         capture_console: bool = True
         """Whether W&B captures rank-0 stdout/stderr into its console log.
 
         Only global rank 0 initializes W&B, so distributed jobs produce one
         W&B console stream instead of one stream per rank. Set false to keep
         W&B on structured metrics only while job logs remain authoritative."""
+
         replay_startup_logs: bool = False
         """Replay buffered pre-init logs into W&B's wrapped stdout.
 
         Only meaningful when ``capture_console`` is enabled. The default is off
         to keep tracker setup off the critical path for distributed jobs."""
+
         allow_startup_failure: bool = True
         """Continue with a no-op tracker if W&B startup raises an exception."""
+
         ingestion: WandbIngestion = field(default_factory=WandbIngestion)
         """Startup timeouts and history-volume knobs; see :class:`WandbIngestion`."""
+
         metric_step_metrics: dict[str, str] = field(default_factory=dict[str, str])
         """Metric paths mapped to the metric path used as their W&B x-axis."""
+
         run_config: dict[str, Any] = field(default_factory=dict[str, Any])
         """Hyperparameters recorded on the run (shown in the W&B config tab)."""
+
         notes: str = ""
         """Free-text run notes (shown in the W&B run overview).
 
@@ -436,7 +488,14 @@ class WandbTracker:
         )
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """Log images to W&B at ``step``."""
+        """Log images to W&B at ``step``.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         if self._run is None:
             return
         self._run.log({key: [wandb.Image(image) for image in images]}, step=step)
@@ -447,6 +506,10 @@ class WandbTracker:
         Rank-0 only (no run elsewhere). An explicitly-configured note (set via
         ``Config.notes`` and passed to ``wandb.init``) wins, so the launcher's
         docstring only fills an otherwise-empty overview.
+
+        Args:
+          notes: Notes.
+
         """
         if self._run is None or not notes:
             return
@@ -486,6 +549,7 @@ class AsyncTracker:
 
         tracker: Makeable[TrackerProtocol] | None = None
         """Child tracker driven by the worker."""
+
         enabled: bool = True
         """Use the worker; false preserves synchronous child delivery."""
 
@@ -509,17 +573,36 @@ class AsyncTracker:
         *,
         prefix: str = "",
     ) -> None:
-        """Queue a shallow call-time snapshot of one metric batch."""
+        """Queue a shallow call-time snapshot of one metric batch.
+
+        Args:
+          metrics: Metrics.
+          step: Step.
+          prefix: Prefix.
+
+        """
         payload = dict(metrics) if self._executor is not None else metrics
         self._submit(self.tracker.log_metrics, payload, step, prefix=prefix)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """Queue a shallow call-time snapshot of one image batch."""
+        """Queue a shallow call-time snapshot of one image batch.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         payload = list(images) if self._executor is not None else images
         self._submit(self.tracker.log_images, key, payload, step)
 
     def log_notes(self, notes: str) -> None:
-        """Set run notes synchronously before training starts."""
+        """Set run notes synchronously before training starts.
+
+        Args:
+          notes: Notes.
+
+        """
         if self._closed:
             raise RuntimeError("AsyncTracker is closed.")
         self.tracker.log_notes(notes)
@@ -574,8 +657,10 @@ class TrackerList:
             default_factory=dict[str, Makeable[TrackerProtocol]],
         )
         """Child trackers, built and driven in insertion order."""
+
         base_dir: Path | str | None = None
         """Owner directory supplied during parent finalization."""
+
         working_dir: Path | str = "/"
         """Logical root inherited by child trackers."""
 
@@ -602,17 +687,36 @@ class TrackerList:
         *,
         prefix: str = "",
     ) -> None:
-        """Forward metrics to every child tracker."""
+        """Forward metrics to every child tracker.
+
+        Args:
+          metrics: Metrics.
+          step: Step.
+          prefix: Prefix.
+
+        """
         for tracker in self.trackers.values():
             tracker.log_metrics(metrics, step, prefix=prefix)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """Forward images to every child tracker."""
+        """Forward images to every child tracker.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         for tracker in self.trackers.values():
             tracker.log_images(key, images, step)
 
     def log_notes(self, notes: str) -> None:
-        """Forward run notes to every child tracker."""
+        """Forward run notes to every child tracker.
+
+        Args:
+          notes: Notes.
+
+        """
         for tracker in self.trackers.values():
             tracker.log_notes(notes)
 
@@ -625,6 +729,36 @@ class TrackerList:
         """Close every child tracker."""
         for tracker in self.trackers.values():
             tracker.close()
+
+
+def flush_tracker(tracker: TrackerProtocol) -> None:
+    """Flush a deferred tracker; synchronous trackers need no barrier.
+
+    Args:
+      tracker: Tracker.
+
+    """
+    if isinstance(tracker, (AsyncTracker, TrackerList)):
+        tracker.flush()
+
+
+def unwrap_tracker_config(
+    config: Makeable[TrackerProtocol],
+) -> Makeable[TrackerProtocol]:
+    """Return the one child beneath an asynchronous tracker wrapper.
+
+    Args:
+      config: Config.
+
+    Returns:
+      config: The Makeable[TrackerProtocol].
+
+    """
+    if not isinstance(config, AsyncTracker.Config):
+        return config
+    if config.tracker is None:
+        raise ValueError("AsyncTracker requires a child tracker config.")
+    return config.tracker
 
 
 def default_metrics_tracker(
@@ -653,26 +787,3 @@ def default_metrics_tracker(
     tracker = TrackerList.Config()
     tracker.trackers = {"metrics": metrics}
     return tracker
-
-
-class _Writer(Protocol):
-    """Minimal scalar-logging writer interface (satisfied by SummaryWriter)."""
-
-    def add_scalar(self, tag: str, scalar_value: Any, global_step: int) -> None: ...
-
-
-def unwrap_tracker_config(
-    config: Makeable[TrackerProtocol],
-) -> Makeable[TrackerProtocol]:
-    """Return the one child beneath an asynchronous tracker wrapper."""
-    if not isinstance(config, AsyncTracker.Config):
-        return config
-    if config.tracker is None:
-        raise ValueError("AsyncTracker requires a child tracker config.")
-    return config.tracker
-
-
-def flush_tracker(tracker: TrackerProtocol) -> None:
-    """Flush a deferred tracker; synchronous trackers need no barrier."""
-    if isinstance(tracker, (AsyncTracker, TrackerList)):
-        tracker.flush()

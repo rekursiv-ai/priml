@@ -28,11 +28,11 @@ def test_flip_lr_stochastic():
     images = torch.arange(16).float().view(1, 1, 4, 4).expand(100, 1, 4, 4).clone()
     out = flip_lr(images)
     flipped = (out[:, 0, 0, 0] != images[:, 0, 0, 0]).sum().item()
-    assert 20 < flipped < 80  # ~50% should flip
+    assert 20 < flipped < 80  # ~50% should flip.
 
 
 def test_random_crop_shape():
-    images = torch.randn(8, 3, 36, 36)  # Pre-padded
+    images = torch.randn(8, 3, 36, 36)  # Pre-padded.
     out = random_crop(images, 32)
     assert out.shape == (8, 3, 32, 32)
 

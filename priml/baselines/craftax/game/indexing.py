@@ -30,16 +30,6 @@ from torch import Tensor
 import torch
 
 
-@functools.cache
-def _rows(envs: int, device: torch.device) -> Tensor:
-    """Return ``arange(envs)``, built once per batch size and device.
-
-    Cached because a game step does a few hundred of these on four-element
-    tensors, where allocating the index costs more than the indexing.
-    """
-    return torch.arange(envs, device=device)
-
-
 def gather_tiles(grid: Tensor, positions: Tensor) -> Tensor:
     """Read one tile per environment; negatives wrap and overflow clamps.
 
@@ -163,13 +153,11 @@ def local_view(
     return torch.where(inside, gathered, torch.full_like(gathered, outside))
 
 
+# Arithmetic rather than ``torch.where``: a compare-plus-select is three kernel launches
+# per axis, and launch overhead is the entire cost on the four-element tensors this runs
+# on a few hundred times per game step.
 def _clamped(positions: Tensor, height: int, width: int) -> tuple[Tensor, Tensor]:
-    """Return usable row and column indices: negatives wrap, overflow clamps.
-
-    Arithmetic rather than ``torch.where``: a compare-plus-select is three
-    kernel launches per axis, and launch overhead is the entire cost on the
-    four-element tensors this runs on a few hundred times per game step.
-    """
+    """Return usable row and column indices: negatives wrap, overflow clamps."""
     rows = positions[..., 0].long()
     columns = positions[..., 1].long()
     rows = (rows + height * (rows < 0)).clamp_(0, height - 1)
@@ -181,3 +169,11 @@ def _inside(positions: Tensor, height: int, width: int) -> Tensor:
     """Return whether each position addresses a tile once negatives wrap."""
     rows, columns = positions[..., 0], positions[..., 1]
     return (rows >= -height) & (rows < height) & (columns >= -width) & (columns < width)
+
+
+# Cached because a game step does a few hundred of these on four-element tensors, where
+# allocating the index costs more than the indexing.
+@functools.cache
+def _rows(envs: int, device: torch.device) -> Tensor:
+    """Return ``arange(envs)``, built once per batch size and device."""
+    return torch.arange(envs, device=device)

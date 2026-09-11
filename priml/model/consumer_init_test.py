@@ -2,6 +2,7 @@
 
 from functools import partial
 from pathlib import Path
+from typing import Final
 
 from torch import Tensor, nn
 
@@ -28,6 +29,9 @@ from priml.model.transformer.kimi_k2 import KimiK2
 from priml.model.transformer.mmdit import MMDiTBlock, MMDiTStream
 from priml.model.transformer.qwen3 import Qwen3
 from priml.testing.bfb import assert_bfb_against_golden
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize(
@@ -170,7 +174,7 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
 )
 def test_legacy_composite_constructor_bfb(kind: str) -> None:
     assert_bfb_against_golden(
-        golden_dir=Path(__file__).parent / "testdata",
+        golden_dir=_CWD / "testdata",
         golden_name=f"consumer_init_{kind}",
         build_module=nn.Identity,
         build_input=lambda: torch.empty(0),

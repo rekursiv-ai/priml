@@ -208,7 +208,7 @@ def test_rope_rotate_padding() -> None:
     """cos/sin shorter than seq_len should be padded with identity."""
     q = torch.randn(2, 16, 1, 32)
     k = torch.randn(2, 16, 1, 32)
-    cos = torch.randn(8, 1, 16)  # shorter than seq_len=16
+    cos = torch.randn(8, 1, 16)  # shorter than seq_len=16.
     sin = torch.randn(8, 1, 16)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
     assert torch.equal(q_rot[:, 8:], q[:, 8:])
@@ -219,7 +219,7 @@ def test_rope_sum_mode():
     m = RoPE.Config([16, 16], reduction_mode="sum").make()
     pos = torch.stack([torch.arange(8), torch.arange(8)], dim=-1)
     cos, _sin = m(pos)
-    assert cos.shape == (8, 1, 8)  # sum reduces to single set
+    assert cos.shape == (8, 1, 8)  # sum reduces to single set.
 
 
 def test_rope_auto_split_dim():
@@ -270,12 +270,12 @@ def test_rope_mixed_basic():
     m = RoPEMixed.Config(32, num_heads=4).make()
     pos = torch.arange(8)
     cos, _sin = m(pos)
-    assert cos.shape[-2] == 4  # per-head
+    assert cos.shape[-2] == 4  # per-head.
 
 
 def test_rope_mixed_learnable():
     m = RoPEMixed.Config(32, num_heads=4, learnable=True).make()
-    # Learnable freqs should be parameters
+    # Learnable freqs should be parameters.
     param_count = sum(1 for p in m.parameters() if p.requires_grad)
     assert param_count > 0
 
@@ -419,7 +419,7 @@ def test_hf_inv_freq_cos_sin_exact():
         channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
     ).make()
     cos, sin = m(torch.arange(8))
-    # Reproduce HF's computation manually
+    # Reproduce HF's computation manually.
     inv_freq = 1.0 / (
         base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
     )
@@ -433,7 +433,7 @@ def test_rope_rotate_partial():
     """Partial rotation: cos/sin covers fewer channels than q/k."""
     q = torch.randn(2, 8, 4, 32)
     k = torch.randn(2, 8, 4, 32)
-    cos = torch.randn(8, 1, 4)  # half-dim for rot_dim=8 out of D=32
+    cos = torch.randn(8, 1, 4)  # half-dim for rot_dim=8 out of D=32.
     sin = torch.randn(8, 1, 4)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
     assert q_rot.shape == q.shape
@@ -460,10 +460,10 @@ def test_rope_rotate_partial_full_coverage():
     """When cos covers all channels, partial path is not taken."""
     q = torch.randn(2, 8, 1, 32)
     k = torch.randn(2, 8, 1, 32)
-    cos = torch.randn(8, 1, 16)  # half-dim = D/2
+    cos = torch.randn(8, 1, 16)  # half-dim = D/2.
     sin = torch.randn(8, 1, 16)
     q_full, _k_full = RoPE.rotate(q, k, cos, sin)
-    # No unrotated suffix — full rotation.
+    # No unrotated suffix -- full rotation.
     assert not torch.equal(q_full, q)
 
 

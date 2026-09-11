@@ -16,7 +16,7 @@ def test_matches_hand_computed_recursion() -> None:
     # Two steps, one env, no terminal. Backwards:
     #   delta_1 = 2.0 + 0.5*0.1 - 0.2 = 1.85, trace_1 = 1.85
     #   delta_0 = 1.0 + 0.5*0.2 - 0.4 = 0.70
-    #   trace_0 = 0.70 + 0.5*0.5*1.85 = 1.1625
+    #   trace_0 = 0.70 + 0.5*0.5*1.85 = 1.1625.
     advantages, targets = generalized_advantage(
         rewards=torch.tensor([[1.0], [2.0]]),
         values=torch.tensor([[0.4], [0.2]]),

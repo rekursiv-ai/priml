@@ -25,7 +25,7 @@ def dataset_dir(tmp_path: Path) -> Path:
         rows = puzzles * copies
         # Token 1 is the empty cell; 2..10 are digits, so a row of 2s is valid.
         inputs = np.full((rows, 81), 2, dtype=np.int32)
-        inputs[:, 0] = np.arange(rows) % 9 + 2  # make rows distinguishable
+        inputs[:, 0] = np.arange(rows) % 9 + 2  # make rows distinguishable.
         np.save(directory / "all__inputs.npy", inputs)
         np.save(directory / "all__labels.npy", inputs)
         np.save(
@@ -149,8 +149,8 @@ def test_augmentation_moves_the_label_with_the_input() -> None:
 def test_augmentation_preserves_empties_and_padding() -> None:
     """Tokens 0 and 1 are not digits and must survive relabeling."""
     torch.manual_seed(0)
-    grid = torch.full((2, 81), 1, dtype=torch.long)  # every cell empty
-    grid[:, :5] = 0  # padding
+    grid = torch.full((2, 81), 1, dtype=torch.long)  # every cell empty.
+    grid[:, :5] = 0  # padding.
     inputs, _ = augment_sudoku(grid, grid.clone())
     assert set(inputs.unique().tolist()) <= {0, 1}
 

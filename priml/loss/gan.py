@@ -28,6 +28,7 @@ class AdversarialLoss:
 
         adversarial_weight: float = 1.0
         """Weight for adversarial (fool discriminator) loss."""
+
         content_weight: float = 100.0
         """Weight for L1 content reconstruction loss."""
 
@@ -70,14 +71,14 @@ class AdversarialLoss:
             fake_logits,
             torch.ones_like(fake_logits),
             reduction="none",
-        ).mean(dim=1)  # [B, 1] -> [B]
+        ).mean(dim=1)  # [B, 1] -> [B].
 
         # Content loss: L1 reconstruction (pointwise, flatten all dims except batch)
         content_loss = (
             nn.functional.l1_loss(fake_media, real_media, reduction="none")
             .flatten(1)
             .mean(dim=1)
-        )  # [B, ...] -> [B]
+        )  # [B, ...] -> [B].
 
         loss = self.adversarial_weight * adv_loss + self.content_weight * content_loss
         return {"loss": loss}

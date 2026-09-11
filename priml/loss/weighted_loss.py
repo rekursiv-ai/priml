@@ -28,6 +28,7 @@ class WeightedSum(nn.Module):
             default_factory=list["Makeable[LossFn]"],
         )
         """Loss functions to combine; ``nn.Module`` or plain callable."""
+
         weights: Sequence[float] = field(default_factory=list[float])
         """Weight for each loss function."""
 
@@ -55,19 +56,19 @@ class WeightedSum(nn.Module):
             fn(*args, **kwargs) for fn in self.fns
         ]
 
-        # Extract loss tensors and merge extra keys
+        # Extract loss tensors and merge extra keys.
         result: dict[str, Tensor] = {}
         loss_tensors: list[Tensor] = []
 
         for i, individual in enumerate(individual_results):
-            # Handle both LossOutput dict and plain Tensor returns
+            # Handle both LossOutput dict and plain Tensor returns.
             if isinstance(individual, dict):
-                # Cast to dict[str, Tensor] for proper type handling
+                # Cast to dict[str, Tensor] for proper type handling.
                 individual_dict = cast(dict[str, Tensor], individual)
                 loss_tensors.append(individual_dict["loss"])
-                # Add unscaled loss with index
+                # Add unscaled loss with index.
                 result[f"loss_{i}"] = individual_dict["loss"]
-                # Merge other keys
+                # Merge other keys.
                 for key, value in individual_dict.items():
                     if key != "loss":
                         result[f"{key}_{i}"] = value
@@ -77,7 +78,7 @@ class WeightedSum(nn.Module):
                 loss_tensors.append(individual)
                 result[f"loss_{i}"] = individual
 
-        # Compute weighted sum
+        # Compute weighted sum.
         if len(self.weights) != len(loss_tensors):
             msg = f"Weights ({len(self.weights)}) and losses ({len(loss_tensors)}) count mismatch"
             raise ValueError(msg)

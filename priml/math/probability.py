@@ -10,12 +10,9 @@ from torch import Tensor, distributions
 
 import torch
 
-from priml.math.custom_types import (
-    Tensorable,
-    TensorableFn,
-    convert_to_tensor,
-)
+from priml.math.custom_types import Tensorable, TensorableFn
 from priml.math.numeric import logsubexp
+from priml.memory import convert_to_tensor
 
 
 # Adapted from tensorflow/probability.
@@ -25,6 +22,11 @@ def pdf_normal(
     scale: Tensorable = 1.0,
 ) -> Tensor:
     """PDF of a normal distribution.
+
+    Args:
+      x: X.
+      loc: Loc.
+      scale: Scale.
 
     Returns:
       pdf: Probability density at x.
@@ -41,6 +43,11 @@ def cdf_normal(
     scale: Tensorable = 1.0,
 ) -> Tensor:
     """CDF of a normal distribution.
+
+    Args:
+      x: X.
+      loc: Loc.
+      scale: Scale.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -59,6 +66,11 @@ def quantile_normal(
 ) -> Tensor:
     """Quantile function ("inverse CDF") of a normal distribution.
 
+    Args:
+      p: P.
+      loc: Loc.
+      scale: Scale.
+
     Returns:
       quantile: Value at which CDF equals p.
 
@@ -73,6 +85,11 @@ def pdf_uniform(
     high: Tensorable = 1.0,
 ) -> Tensor:
     """PDF of a uniform distribution.
+
+    Args:
+      x: X.
+      low: Low.
+      high: High.
 
     Returns:
       pdf: Probability density at x.
@@ -92,6 +109,11 @@ def cdf_uniform(
     high: Tensorable = 1.0,
 ) -> Tensor:
     """CDF of a uniform distribution.
+
+    Args:
+      x: X.
+      low: Low.
+      high: High.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -113,6 +135,11 @@ def quantile_uniform(
 ) -> Tensor:
     """Quantile function of a uniform distribution.
 
+    Args:
+      p: P.
+      low: Low.
+      high: High.
+
     Returns:
       quantile: Value at which CDF equals p.
 
@@ -130,6 +157,11 @@ def pdf_logit_normal(
 ) -> Tensor:
     """PDF of a logit-normal distribution.
 
+    Args:
+      x: X.
+      loc: Loc.
+      scale: Scale.
+
     Returns:
       pdf: Probability density at x.
 
@@ -146,6 +178,11 @@ def cdf_logit_normal(
 ) -> Tensor:
     """CDF of a logit-normal distribution.
 
+    Args:
+      x: X.
+      loc: Loc.
+      scale: Scale.
+
     Returns:
       cdf: Cumulative probability at x.
 
@@ -161,6 +198,11 @@ def quantile_logit_normal(
     scale: Tensorable = 1.0,
 ) -> Tensor:
     """Quantile function of a logit-normal distribution.
+
+    Args:
+      x: X.
+      loc: Loc.
+      scale: Scale.
 
     Returns:
       quantile: Value at which CDF equals p.
@@ -180,6 +222,13 @@ def cdf_truncated_normal(
     high: Tensorable = math.inf,
 ) -> Tensor:
     """CDF of a truncated normal distribution.
+
+    Args:
+      x: X.
+      loc: Loc.
+      scale: Scale.
+      low: Low.
+      high: High.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -259,6 +308,13 @@ def quantile_truncated_normal(
     Adapted from tensorflow_probability:
       tensorflow_probability/python/distributions/truncated_normal.py::_quantile
 
+    Args:
+      p: P.
+      loc: Loc.
+      scale: Scale.
+      low: Low.
+      high: High.
+
     Returns:
       quantile: Value at which CDF equals p.
 
@@ -309,6 +365,10 @@ def cdf_logit_distribution(
 ) -> Tensor:
     """CDF of Y = sigmoid(X), given CDF of X.
 
+    Args:
+      x: X.
+      base_cdf: Base cdf.
+
     Returns:
       cdf: base_cdf(logit(x)).
 
@@ -327,6 +387,10 @@ def quantile_logit_distribution(
     base_quantile: TensorableFn,
 ) -> Tensor:
     """Quantile function of Y = sigmoid(X), given quantile of X.
+
+    Args:
+      x: X.
+      base_quantile: Base quantile.
 
     Returns:
       quantile: sigmoid(base_quantile(x)).
@@ -348,6 +412,14 @@ def random_student_t(
 
     Adapted from tensorflow_probability:
       tensorflow_probability/python/distributions/student_t.py::sample_n
+
+    Args:
+      df: Df.
+      loc: Loc.
+      scale: Scale.
+      dtype: Dtype.
+      device: Device.
+      *samples_size: Samples size.
 
     Returns:
       samples: Tensor of shape (*samples_size, *params_size).
@@ -379,6 +451,12 @@ def random_chi2(
 ) -> Tensor:
     """Sample from chi-squared distribution. Non-differentiable wrt df.
 
+    Args:
+      df: Df.
+      dtype: Dtype.
+      device: Device.
+      *samples_size: Samples size.
+
     Returns:
       samples: Tensor of shape (*samples_size, *df.shape).
 
@@ -392,7 +470,7 @@ def random_chi2(
 
 
 # Adapted from tensorflow_probability:
-#   tensorflow_probability/python/distributions/gamma.py::random_gamma
+#   tensorflow_probability/python/distributions/gamma.py::random_gamma.
 def random_gamma(
     *samples_size: int,
     concentration: Tensorable,
@@ -401,6 +479,13 @@ def random_gamma(
     device: torch.device | None = None,
 ) -> Tensor:
     """Sample from Gamma(concentration, rate). Non-differentiable wrt concentration.
+
+    Args:
+      concentration: Concentration.
+      rate: Rate.
+      dtype: Dtype.
+      device: Device.
+      *samples_size: Samples size.
 
     Returns:
       samples: Tensor of shape (*samples_size, *params_size).
@@ -418,14 +503,14 @@ def random_gamma(
         rate.shape,
     )
     concentration = torch.broadcast_to(concentration, samples_size + params_size)
-    # detach: _standard_gamma's gradient is incorrect (not reparameterizable).
+    # Detach: _standard_gamma's gradient is incorrect (not reparameterizable).
     y = torch._standard_gamma(concentration).detach() / rate  # noqa: SLF001
     y = y.clamp_(min=torch.finfo(y.dtype).tiny)
     return y
 
 
 # Adapted from tensorflow_probability:
-#   tensorflow_probability/python/distributions/categorical.py::_sample_n
+#   tensorflow_probability/python/distributions/categorical.py::_sample_n.
 def random_categorical(
     *samples_size: int,
     probs: Tensorable | None = None,
@@ -483,6 +568,13 @@ def random_logit_normal(
 ) -> Tensor:
     """Sample from a logit-normal distribution.
 
+    Args:
+      loc: Loc.
+      scale: Scale.
+      dtype: Dtype.
+      device: Device.
+      *samples_size: Samples size.
+
     Returns:
       samples: Tensor in (0, 1) of shape (*samples_size, *params_size).
 
@@ -502,11 +594,14 @@ def random_logit_normal(
 
 
 def ndtr(x: Tensorable) -> Tensor:
-    """Normal distribution function.
+    """Evaluate the normal distribution function.
 
     Adapted from tensorflow_probability, which reformulates the piecewise
     erf/erfc split for tail accuracy:
       tensorflow_probability/python/internal/special_math.py::ndtr
+
+    Args:
+      x: X.
 
     Returns:
       ndtr: Φ(x) = 0.5 (1 + erf(x / √2)).
@@ -514,6 +609,7 @@ def ndtr(x: Tensorable) -> Tensor:
     Note: torch.special.ndtr exists but loses precision at extreme
     values. This piecewise erf/erfc formulation is more accurate
     in the tails.
+
 
     References:
       tfp.math.ndtr
@@ -530,13 +626,17 @@ def ndtr(x: Tensorable) -> Tensor:
 
 
 def ndtri(p: Tensorable) -> Tensor:
-    """Function inverse of ndtr.
+    """Evaluate the function inverse of ndtr.
+
+    Args:
+      p: P.
 
     Returns:
       x: Value such that ndtr(x) = p.
 
     Note: torch.special.ndtri exists but is less accurate in the
     tails than erfinv(2p - 1) * √2.
+
 
     References:
       tfp.math.ndtri
@@ -546,29 +646,18 @@ def ndtri(p: Tensorable) -> Tensor:
     return torch.erfinv(2 * p - 1) * 2**0.5
 
 
-def _normal_cdf_difference(a: Tensorable, b: Tensorable) -> Tensor:
-    """Computes ndtr(a) - ndtr(b) assuming a >= b.
-
-    Adapted from tensorflow_probability:
-      tensorflow_probability/python/distributions/truncated_normal.py::_normal_cdf_difference
-
-    When both a, b > 0, ndtr values are near 1 so subtraction suffers
-    cancellation. Using ndtr(-z) = 1 - ndtr(z), rewrite as
-    ndtr(-b) - ndtr(-a), where both values are near 0.
-    """
-    a, b = convert_to_tensor(a, b)
-    flip = b >= 0
-    hi = torch.where(flip, -b, a)
-    lo = torch.where(flip, -a, b)
-    return ndtr(hi) - ndtr(lo)
-
-
 def log_gamma_correction(x: Tensorable) -> Tensor:
     """Error of the Stirling approximation to lgamma(x) for x >= 8.
 
     lgamma(x) ≈ (x-0.5)*log(x) - x + 0.5*log(2π) + log_gamma_correction(x).
 
     Uses a rational minimax approximation (DiDonato & Morris 1988).
+
+    Args:
+      x: X.
+
+    Returns:
+      result: The Tensor.
 
     References:
       DiDonato & Morris, "Significant Digit Computation of the
@@ -605,6 +694,13 @@ def log_gamma_difference(x: Tensorable, y: Tensorable) -> Tensor:
     For y >= 8, cancels Stirling terms analytically, leaving only
     the small correction terms.
 
+    Args:
+      x: X.
+      y: Y.
+
+    Returns:
+      result: The Tensor.
+
     References:
       DiDonato & Morris, "Significant Digit Computation of the
       Incomplete Beta Function Ratios", 1988. NSWC TR 88-365.
@@ -624,6 +720,13 @@ def lbeta(x: Tensorable, y: Tensorable) -> Tensor:
     Naive lgamma(x) + lgamma(y) - lgamma(x+y) suffers catastrophic
     cancellation when x, y are large. This uses Stirling decomposition
     to cancel the large terms analytically.
+
+    Args:
+      x: X.
+      y: Y.
+
+    Returns:
+      result: The Tensor.
 
     References:
       DiDonato & Morris, "Significant Digit Computation of the
@@ -663,3 +766,17 @@ def _unpack_size(*samples_size: int) -> tuple[int, ...]:
     if len(samples_size) == 1 and isinstance(samples_size[0], Sequence):
         return tuple(cast(Sequence[int], samples_size[0]))
     return samples_size
+
+
+# Adapted from tensorflow_probability: tensorflow_probability/python/distributions/trunc
+# ated_normal.py::_normal_cdf_difference
+#
+# When both a, b > 0, ndtr values are near 1 so subtraction suffers cancellation. Using
+# ndtr(-z) = 1 - ndtr(z), rewrite as ndtr(-b) - ndtr(-a), where both values are near 0.
+def _normal_cdf_difference(a: Tensorable, b: Tensorable) -> Tensor:
+    """Compute ndtr(a) - ndtr(b) assuming a >= b."""
+    a, b = convert_to_tensor(a, b)
+    flip = b >= 0
+    hi = torch.where(flip, -b, a)
+    lo = torch.where(flip, -a, b)
+    return ndtr(hi) - ndtr(lo)

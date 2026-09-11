@@ -39,7 +39,20 @@ class AttentionLike(Protocol):
         max_seq: int,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
-    ) -> KVCache: ...
+    ) -> KVCache:
+        """Alloc kv cache.
+
+        Args:
+          batch: Batch.
+          max_seq: Max seq.
+          device: Device.
+          dtype: Dtype.
+
+        Returns:
+          result: The KVCache.
+
+        """
+        ...
 
 
 class BlockLike(Protocol):
@@ -53,7 +66,18 @@ class BlockLike(Protocol):
         /,
         *,
         cache: KVCache,
-    ) -> tuple[Tensor, KVCache]: ...
+    ) -> tuple[Tensor, KVCache]:
+        """Forward cached.
+
+        Args:
+          x: X.
+          cache: Cache.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
+        ...
 
 
 class TransformerLike(Protocol):
@@ -65,12 +89,26 @@ class TransformerLike(Protocol):
     """
 
     @property
-    def in_proj(self) -> TensorModule | None: ...
+    def in_proj(self) -> TensorModule | None:
+        """In proj."""
+        ...
 
     @property
-    def blocks(self) -> Iterable[nn.Module]: ...
+    def blocks(self) -> Iterable[nn.Module]:
+        """Blocks."""
+        ...
 
-    def project_to_logits(self, hidden: Tensor, /) -> Tensor: ...
+    def project_to_logits(self, hidden: Tensor, /) -> Tensor:
+        """Project to logits.
+
+        Args:
+          hidden: Hidden.
+
+        Returns:
+          result: The Tensor.
+
+        """
+        ...
 
 
 @torch.inference_mode()
@@ -160,18 +198,7 @@ def _sample(
     top_k: int,
     top_p: float,
 ) -> Tensor:
-    """Sample a token from logits with temperature, top-k, and top-p.
-
-    Args:
-      logits: (B, V) unnormalized logits.
-      temperature: Sampling temperature. 0 = greedy.
-      top_k: Keep only top-k logits (0 = disabled).
-      top_p: Nucleus sampling threshold (1.0 = disabled).
-
-    Returns:
-      token: (B, 1) sampled token ids.
-
-    """
+    """Sample a token from logits with temperature, top-k, and top-p."""
     if temperature == 0:
         return logits.argmax(dim=-1, keepdim=True)
 
@@ -189,24 +216,12 @@ def _sample(
     return torch.multinomial(probs, num_samples=1)
 
 
+# Keeps the smallest token set whose cumulative mass reaches ``top_p`` and sets the rest
+# to ``-1e10`` (which softmaxes to 0). Removes tokens whose EXCLUSIVE cumulative
+# probability already exceeds ``top_p`` (HF convention; strict ``>`` keeps the boundary
+# token that brings the running mass exactly to ``top_p``).
 def _topp_filter(logits: Tensor, top_p: float) -> Tensor:
-    """Mask logits outside the top-p nucleus, in original vocab order.
-
-    Keeps the smallest token set whose cumulative mass reaches ``top_p`` and
-    sets the rest to ``-1e10`` (which softmaxes to 0). Removes tokens whose
-    EXCLUSIVE cumulative probability already exceeds ``top_p`` (HF convention;
-    strict ``>`` keeps the boundary token that brings the running mass exactly
-    to ``top_p``).
-
-    Args:
-      logits: (B, V) logits, already temperature- and top-k-adjusted.
-      top_p: Nucleus threshold in (0, 1).
-
-    Returns:
-      filtered: (B, V) logits with out-of-nucleus positions set to ``-1e10``,
-        in original vocab order.
-
-    """
+    """Mask logits outside the top-p nucleus, in original vocab order."""
     sorted_logits, sorted_idx = logits.sort(dim=-1, descending=True)
     probs = sorted_logits.softmax(dim=-1)
     mask = probs.cumsum(dim=-1) - probs > top_p

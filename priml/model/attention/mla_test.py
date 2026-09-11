@@ -202,8 +202,8 @@ def test_prealloc_cache_decode():
     m = _tiny()
     cache = m.alloc_kv_cache(batch=2, max_seq=16)
     # Latent cache shapes: [B, 1, max_seq, feat].
-    assert cache.k.shape == (2, 1, 16, 32)  # c_kv, kv_lora_rank=32
-    assert cache.v.shape == (2, 1, 16, 8)  # k_pe, qk_rope=8
+    assert cache.k.shape == (2, 1, 16, 32)  # c_kv, kv_lora_rank=32.
+    assert cache.v.shape == (2, 1, 16, 8)  # k_pe, qk_rope=8.
     prompt = torch.randn(2, 5, 128)
     out, cache = m.forward_cached(prompt, cache=cache)
     assert out.shape == (2, 5, 128)
@@ -674,15 +674,19 @@ def _record_indivisible_guard(
             kv_lora_rank=8,
             shard="colwise",
         ).make()
-        try:
-            apply_tensor_parallel(module, mesh)
-        except ValueError as error:
-            valid = "num_heads" in str(error) and "divis" in str(error).lower()
-            target.write_text("ok" if valid else f"FAIL:{error!r}")
-        else:
-            target.write_text("FAIL:no-raise")
+        target.write_text(_outcome_of_apply(module, mesh))
     except Exception as error:  # noqa: BLE001 -- surface worker errors to parent
         target.write_text(f"FAIL:{error!r}")
+
+
+def _outcome_of_apply(module: nn.Module, mesh: DeviceMesh) -> str:
+    """``ok`` when sharding raises the divisibility error, else a FAIL record."""
+    try:
+        apply_tensor_parallel(module, mesh)
+    except ValueError as error:
+        valid = "num_heads" in str(error) and "divis" in str(error).lower()
+        return "ok" if valid else f"FAIL:{error!r}"
+    return "FAIL:no-raise"
 
 
 def _mla_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
@@ -698,18 +702,11 @@ def _mla_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
         runtime._device_mesh = None
 
 
+# Returns the kernel config too: the slot is typed by the PROTOCOL, so reaching a
+# concrete field through it needs narrowing, and handing back the value already narrowed
+# keeps that out of every caller.
 def _mla_config() -> tuple[MultiHeadLatentAttention.Config, LatentAttention.Config]:
-    """A tiny MLA whose every width differs, so a swapped axis cannot pass.
-
-    Returns the kernel config too: the slot is typed by the PROTOCOL, so
-    reaching a concrete field through it needs narrowing, and handing back the
-    value already narrowed keeps that out of every caller.
-
-    Returns:
-      config: The MLA config.
-      kernel: Its latent attention kernel, narrowed to the concrete class.
-
-    """
+    """Return a tiny MLA whose every width differs, so a swapped axis cannot pass."""
     config = MultiHeadLatentAttention.Config(
         channels_in=32,
         num_heads=4,

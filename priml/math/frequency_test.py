@@ -46,7 +46,7 @@ def test_dctnd_normalized():
         atol=1e-5,
         rtol=1e-4,
     )
-    # Verify inverse works with normalization
+    # Verify inverse works with normalization.
     torch.testing.assert_close(
         x,
         idctnd(dctnd(x, normalize=True), normalize=True),

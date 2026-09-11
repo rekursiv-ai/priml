@@ -102,6 +102,14 @@ def causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     bottom-right-aligned mask so query ``i`` (absolute position
     ``T - S + i``) attends to keys ``0..T - S + i`` -- never to later
     tokens in the same chunk.
+
+    Args:
+      q: Q.
+      k: K.
+
+    Returns:
+      result: The Tensor | None.
+
     """
     s, t = q.shape[-3], k.shape[-3]
     if s == t:

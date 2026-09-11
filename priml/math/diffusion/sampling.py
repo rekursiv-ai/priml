@@ -11,13 +11,14 @@ from torch import Tensor
 
 import torch
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
     log_sigma_from_log_snr_per_rectified_flow,
 )
 from priml.math.diffusion.target import TargetFn, target_rectified_flow
 from priml.math.numeric import log1mexp
+from priml.memory import convert_to_tensor
 
 
 __all__ = [
@@ -36,15 +37,21 @@ __all__ = [
 
 class SampleOneStepResult(NamedTuple):
     x_clean: Tensor
+
     mean: Tensor
+
     log_std: Tensor
 
 
 class SampleResult(NamedTuple):
     x_curr: Tensor
+
     x_clean: Tensor
+
     mean: Tensor
+
     log_std: Tensor
+
     model: Tensor
 
 
@@ -55,7 +62,9 @@ class SampleOneStepFn(Protocol):
         x_curr: Tensorable,
         log_snr_curr: Tensorable,
         log_snr_next: Tensorable,
-    ) -> SampleOneStepResult: ...
+    ) -> SampleOneStepResult:
+        """Apply to the input."""
+        ...
 
 
 class SampleModelFn(Protocol):
@@ -66,7 +75,9 @@ class SampleModelFn(Protocol):
         it: Tensor,
         num_steps: int,
         log_snr_next: Tensor,
-    ) -> Tensor: ...
+    ) -> Tensor:
+        """Apply to the input."""
+        ...
 
 
 def ddpm_ddim_step(
@@ -244,7 +255,7 @@ def ddpm_ddim(
     target_fn: TargetFn = target_rectified_flow,
     eta: float = 1,
 ) -> SampleOneStepResult:
-    """Convenience wrapper: decompose model output, then step.
+    """Decompose the model output, then step.
 
     Calls corruption_fn → target_fn → ddpm_ddim_step.
 
@@ -455,7 +466,7 @@ def rescale_classifier_free_guidance(
       spatial_dims: Dimensions over which to compute std (excluding batch).
 
     Returns:
-      The rescaled guided prediction.
+      rescaled: The rescaled guided prediction.
 
     References:
       https://arxiv.org/abs/2305.08891

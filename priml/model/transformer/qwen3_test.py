@@ -41,7 +41,7 @@ from priml.testing.bfb import assert_bfb_against_golden
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _hf_config(**overrides: Any) -> dict[str, Any]:
+def _hf_config(**overrides: object) -> dict[str, Any]:
     base: dict[str, Any] = {
         "model_type": "qwen3",
         "vocab_size": 128,
@@ -122,12 +122,10 @@ def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     return sd
 
 
+# Accepts a template or a finalized per-layer list, so a caller need not know which side
+# of ``finalize`` it is on.
 def _attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
-    """One layer's attention -- where the head geometry lives now.
-
-    Accepts a template or a finalized per-layer list, so a caller need not
-    know which side of ``finalize`` it is on.
-    """
+    """One layer's attention -- where the head geometry lives now."""
     block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
     assert isinstance(block, TransformerBlock.Config)
     attn = block.attn
@@ -152,7 +150,7 @@ def _block(cfg: Qwen3.Config, layer: int = 0) -> TransformerBlock.Config:
 
 
 def _final_norm(cfg: Transformer.Config) -> RMSNorm.Config:
-    """The head's norm -- HF's ``model.norm``, first element of ``out_proj``."""
+    """Return the head's norm -- HF's ``model.norm``, first element of ``out_proj``."""
     assert isinstance(cfg.out_proj, Sequential.Config)
     elements = cfg.out_proj.elements
     assert isinstance(elements, list)

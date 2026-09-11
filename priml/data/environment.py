@@ -46,8 +46,11 @@ class EnvironmentStep(Protocol):
     """
 
     observation: Tensor
+
     reward: Tensor
+
     done: Tensor
+
     info: dict[str, Tensor]
 
 
@@ -64,7 +67,9 @@ class BatchedEnvironmentProtocol(Protocol):
     """
 
     num_actions: int
+
     observation_size: int
+
     reward_ceiling: float
 
     def reset(self, num_envs: int) -> Tensor:
@@ -92,9 +97,19 @@ class BatchedEnvironmentProtocol(Protocol):
         ...
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the simulator state required to resume mid-rollout."""
+        """Return the simulator state required to resume mid-rollout.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         ...
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore simulator state produced by :meth:`state_dict`."""
+        """Restore simulator state produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         ...

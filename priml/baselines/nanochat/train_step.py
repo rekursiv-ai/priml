@@ -361,8 +361,10 @@ class NanoChatTrainStep(TrainStep):
                     # ``sqrt(tuned_at / width)``: the two round differently
                     # (0.6 at width 512 gives ...9535 against ...9533), and
                     # this is the spelling the rates were measured under.
-                    member.lr = rate / math.sqrt(
-                        self.model.channels_in / self.adam_lr_tuned_at_channels
+                    member.lr = (
+                        rate
+                        / (self.model.channels_in / self.adam_lr_tuned_at_channels)
+                        ** 0.5
                     )
             self.adam_lr_tuned_at_channels = self.model.channels_in
             return super().finalize()
@@ -395,14 +397,12 @@ class NanoChatTrainStep(TrainStep):
             group.setdefault("initial_weight_decay", group.get("weight_decay", 0.0))
         self.schedule = config.schedule.make()
 
+    # Model and loss in ONE function so the two compile together; see
+    # :attr:`Config.compile`. Unreduced because the metric weights each token by its
+    # byte length, and measured to fuse exactly as well as a reduced one (54.44 against
+    # 54.49 ms/pass).
     def _forward(self, media: Tensor, label: Tensor) -> Tensor:
-        """Score one batch, returning the per-token loss.
-
-        Model and loss in ONE function so the two compile together; see
-        :attr:`Config.compile`. Unreduced because the metric weights each token
-        by its byte length, and measured to fuse exactly as well as a reduced
-        one (54.44 against 54.49 ms/pass).
-        """
+        """Score one batch, returning the per-token loss."""
         logits = self.model(media)
         assert isinstance(logits, Tensor)
         return self.loss(logits, media=media, label=label)["loss"]
@@ -627,16 +627,7 @@ class NanoChatTrainStep(TrainStep):
             self.elapsed_sec += seconds
 
     def _assert_not_diverged(self) -> None:
-        """Refuse a token batch whose worst pass diverged, discarding it.
-
-        Raises:
-          RuntimeError: A pass was non-finite or above ``divergence_threshold``.
-            The gradients are zeroed first, so the passes accumulated behind it
-            are gone -- leaving their COUNT would make the next update fire on
-            a short token batch, which is the one thing accumulation exists to
-            prevent.
-
-        """
+        """Refuse a token batch whose worst pass diverged, discarding it."""
         if self._pending_worst is None:
             return
         worst = float(self._pending_worst)
@@ -700,19 +691,10 @@ class NanoChatTrainStep(TrainStep):
             yield
 
 
+# A composite holds every member's groups in one flat list, so a group's position says
+# nothing about which algorithm owns it.
 def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
-    """Return one rate per optimizer member, keyed by its class name.
-
-    A composite holds every member's groups in one flat list, so a group's
-    position says nothing about which algorithm owns it.
-
-    Args:
-      optimizer: The step's optimizer, composite or not.
-
-    Returns:
-      rates: Class name (lowercased) to that member's first group rate.
-
-    """
+    """Return one rate per optimizer member, keyed by its class name."""
     if not isinstance(optimizer, CompositeOptimizer):
         return {"all": float(optimizer.param_groups[0]["lr"])}
     return {

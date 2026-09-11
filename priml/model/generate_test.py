@@ -137,14 +137,12 @@ def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
     assert torch.equal(model.in_proj.inputs[1], torch.tensor([[2]]))
 
 
+# The nucleus filter sets out-of-nucleus logits to ``-1e10``, which softmaxes to exactly
+# 0, so the filtered softmax IS the kept distribution -- the same distribution
+# ``_sample`` draws from, but without the 20k-iteration Monte-Carlo loop (or its
+# sampling flakiness).
 def _topp_probs(logits: Tensor, *, top_p: float) -> Tensor:
-    """Recover the kept-token distribution under top-p, deterministically.
-
-    The nucleus filter sets out-of-nucleus logits to ``-1e10``, which softmaxes
-    to exactly 0, so the filtered softmax IS the kept distribution -- the same
-    distribution ``_sample`` draws from, but without the 20k-iteration
-    Monte-Carlo loop (or its sampling flakiness).
-    """
+    """Recover the kept-token distribution under top-p, deterministically."""
     return _topp_filter(logits, top_p).softmax(dim=-1)
 
 

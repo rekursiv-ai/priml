@@ -65,11 +65,11 @@ def test_parse_shard_spec_deduplication() -> None:
 
 def test_parse_shard_spec_clamping() -> None:
     """Test that indices are clamped to valid range."""
-    # Out of bounds positive indices
+    # Out of bounds positive indices.
     assert parse_shard_spec("100", 10) == {9}
     assert parse_shard_spec("50:", 10) == set()
 
-    # Very negative indices
+    # Very negative indices.
     assert parse_shard_spec("-100:", 10) == set(range(10))
     assert parse_shard_spec("-100", 10) == {0}
 
@@ -88,11 +88,11 @@ def test_parse_shard_spec_whitespace() -> None:
 
 def test_parse_shard_spec_edge_cases() -> None:
     """Test edge cases."""
-    # Single shard dataset
+    # Single shard dataset.
     assert parse_shard_spec("0", 1) == {0}
     assert parse_shard_spec(":", 1) == {0}
 
-    # Empty range
+    # Empty range.
     assert parse_shard_spec("5:5", 10) == set()
     assert parse_shard_spec("5:3", 10) == set()
 

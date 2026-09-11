@@ -13,9 +13,9 @@ import tempfile
 from configgle import Fig
 from wandb.sdk.wandb_run import Run
 
+import pytest
 import torch
 
-from priml.train import tracker as tracker_mod
 from priml.train.tracker import (
     AsyncTracker,
     FileTracker,
@@ -25,6 +25,8 @@ from priml.train.tracker import (
     WandbTracker,
     default_metrics_tracker,
 )
+
+import priml.train.tracker
 
 
 if TYPE_CHECKING:
@@ -38,7 +40,7 @@ class _FakeWriter:
         self.scalars: list[tuple[str, Any, int]] = []
         self.close_count = 0
 
-    def add_scalar(self, tag: str, scalar_value: Any, global_step: int) -> None:
+    def add_scalar(self, tag: str, scalar_value: object, global_step: int) -> None:
         self.scalars.append((tag, scalar_value, global_step))
 
     def close(self) -> None:
@@ -63,7 +65,7 @@ def test_del_safe_when_writer_missing() -> None:
     """T-029: __del__ must not raise when __init__ never set self.writer."""
     tracker = TensorBoardTracker.__new__(TensorBoardTracker)
     # Simulate a partially-constructed tracker (writer never assigned).
-    tracker.__del__()  # must not raise AttributeError
+    tracker.__del__()  # must not raise AttributeError.
 
 
 def test_del_does_not_double_close_after_explicit_close() -> None:
@@ -104,7 +106,7 @@ def test_tensorboard_working_dir_is_scoped_to_the_run(
         observed.append(log_dir)
         return _FakeWriter()
 
-    monkeypatch.setattr(tracker_mod, "_summary_writer_cls", writer_factory)
+    monkeypatch.setattr(priml.train.tracker, "_summary_writer_cls", writer_factory)
     config = TensorBoardTracker.Config()
     config.base_dir = tmp_path
 
@@ -174,13 +176,13 @@ def test_wandb_logs_images(monkeypatch: pytest.MonkeyPatch) -> None:
     tracker, run = _wandb_tracker_with_fake_run()
 
     class _FakeImage:
-        def __init__(self, image: Any) -> None:
+        def __init__(self, image: object) -> None:
             self.image = image
 
     class _FakeWandbImage:
         Image = _FakeImage
 
-    monkeypatch.setattr(tracker_mod, "wandb", _FakeWandbImage)
+    monkeypatch.setattr(priml.train.tracker, "wandb", _FakeWandbImage)
     tracker.log_images("eval/samples", ["samples.png"], step=5)
     logged, step = run.logged[0]
     assert step == 5
@@ -199,7 +201,7 @@ def test_wandb_close_idempotent_and_del_safe() -> None:
 def test_wandb_del_safe_when_run_missing() -> None:
     """__del__ must not raise when __init__ never set self._run."""
     tracker = WandbTracker.__new__(WandbTracker)
-    tracker.__del__()  # must not raise AttributeError
+    tracker.__del__()  # must not raise AttributeError.
 
 
 def test_wandb_log_notes_sets_run_notes() -> None:
@@ -221,7 +223,7 @@ def test_wandb_log_notes_noop_without_run() -> None:
     """Off rank 0 (no run) log_notes is a no-op, not a crash."""
     tracker = WandbTracker.__new__(WandbTracker)
     tracker._run = None
-    tracker.log_notes("anything")  # must not raise
+    tracker.log_notes("anything")  # must not raise.
 
 
 def test_wandb_non_rank_zero_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,11 +233,11 @@ def test_wandb_non_rank_zero_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     ``wandb.init`` is never imported on a non-rank-0 process, so a missing
     wandb install would not even matter there.
     """
-    monkeypatch.setattr(tracker_mod, "is_rank_zero", lambda: False)
+    monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: False)
     tracker = WandbTracker(WandbTracker.Config(project="trm"))
     assert tracker._run is None
-    tracker.log_metrics({"loss": torch.tensor(1.0)}, step=0)  # no-op, no raise
-    tracker.close()  # no-op, no raise
+    tracker.log_metrics({"loss": torch.tensor(1.0)}, step=0)  # no-op, no raise.
+    tracker.close()  # no-op, no raise.
 
 
 def _init_tracker(
@@ -247,16 +249,16 @@ def _init_tracker(
 
     class _FakeWandb:
         class Settings:
-            def __init__(self, **kwargs: Any) -> None:
+            def __init__(self, **kwargs: object) -> None:
                 self.kwargs = kwargs
 
         @classmethod
-        def init(cls, **kwargs: Any) -> _FakeRun:
+        def init(cls, **kwargs: object) -> _FakeRun:
             captured.update(kwargs)
             return run
 
-    monkeypatch.setattr(tracker_mod, "is_rank_zero", lambda: True)
-    monkeypatch.setattr(tracker_mod, "wandb", _FakeWandb)
+    monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: True)
+    monkeypatch.setattr(priml.train.tracker, "wandb", _FakeWandb)
     if config.working_dir == "/wandb":
         config.working_dir = Path(tempfile.mkdtemp())
     WandbTracker(config)
@@ -375,7 +377,7 @@ def test_wandb_capture_console_rebinds_logging_stdout(
         called = True
 
     monkeypatch.setattr(
-        tracker_mod,
+        priml.train.tracker,
         "bind_logging_to_current_stdout",
         _bind_logging_to_current_stdout,
     )
@@ -396,7 +398,7 @@ def test_wandb_capture_console_disabled_does_not_rebind_logging_stdout(
         called = True
 
     monkeypatch.setattr(
-        tracker_mod,
+        priml.train.tracker,
         "bind_logging_to_current_stdout",
         _bind_logging_to_current_stdout,
     )
@@ -498,16 +500,16 @@ def test_wandb_startup_failure_becomes_noop_tracker(
 
     class _FailingWandb:
         class Settings:
-            def __init__(self, **kwargs: Any) -> None:
+            def __init__(self, **kwargs: object) -> None:
                 self.kwargs = kwargs
 
         @classmethod
-        def init(cls, **kwargs: Any) -> _FakeRun:
+        def init(cls, **kwargs: object) -> _FakeRun:
             del kwargs
             raise RuntimeError("wandb unavailable")
 
-    monkeypatch.setattr(tracker_mod, "is_rank_zero", lambda: True)
-    monkeypatch.setattr(tracker_mod, "wandb", _FailingWandb)
+    monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: True)
+    monkeypatch.setattr(priml.train.tracker, "wandb", _FailingWandb)
 
     config = WandbTracker.Config(project="trm")
     config.working_dir = Path(tempfile.mkdtemp())
@@ -563,7 +565,7 @@ def test_file_tracker_ignores_non_capture_prefix(tmp_path: Path) -> None:
     tracker.log_metrics({"batch_time": 1.25}, 1, prefix="train/")
     assert not target.exists()
     tracker.log_metrics({"score": 0.9}, 2, prefix="eval/")
-    tracker.log_metrics({"batch_time": 1.30}, 3, prefix="train/")  # must not clobber
+    tracker.log_metrics({"batch_time": 1.30}, 3, prefix="train/")  # must not clobber.
     assert json.loads(target.read_text()) == {"eval/score": 0.9}
 
 
@@ -581,7 +583,7 @@ def test_file_tracker_non_rank_zero_is_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Off rank 0, FileTracker writes nothing (one file per job, not per rank)."""
-    monkeypatch.setattr(tracker_mod, "is_rank_zero", lambda: False)
+    monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: False)
     target = tmp_path / "metrics.json"
     FileTracker.Config(working_dir=str(target)).make().log_metrics(
         {"score": 1.0}, 0, prefix="eval/"

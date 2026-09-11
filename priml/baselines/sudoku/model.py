@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 def corrected_fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
-    """Truncated normal at ``std = 1/sqrt(fan_in)``, variance-corrected.
+    """Initialize truncated normal at ``std = 1/sqrt(fan_in)``, variance-corrected.
 
     The initialization every projection in this baseline uses. ``depth`` is
     accepted and discarded: priml's layers pass it to every ``init_weight`` so
@@ -72,10 +72,13 @@ class CoreOutput(NamedTuple):
 
     logits: Tensor
     """``[B, S, V]`` token logits over the whole sequence."""
+
     halt: Tensor
     """``[B]`` halt logit read at the readout position."""
+
     z_slow: Tensor
     """``[B, S, C]`` updated slow latent."""
+
     z_fast: Tensor
     """``[B, S, C]`` updated fast latent."""
 
@@ -85,12 +88,16 @@ class ForwardOutput(NamedTuple):
 
     logits: Tensor
     """``[B, grid_len, V]`` final logits, prefix tokens stripped."""
+
     halt: Tensor
     """``[B]`` final halt logit."""
+
     z_slow: Tensor
     """``[B, S, C]`` final slow latent, detached for carrying."""
+
     z_fast: Tensor
     """``[B, S, C]`` final fast latent, detached for carrying."""
+
     all_logits: tuple[Tensor, ...] = ()
     """Per-cycle logits when the caller asked for intermediates."""
 
@@ -107,6 +114,20 @@ class HasParts(Protocol):
     """A prefix config composed of other prefix configs."""
 
     parts: list[Makeable[nn.Module]]
+
+
+class CoreFn(Protocol):
+    """One application of the reasoning core."""
+
+    def __call__(
+        self,
+        input_emb: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        cos_sin: tuple[Tensor, Tensor] | None = None,
+    ) -> CoreOutput:
+        """Apply to the input."""
+        ...
 
 
 @runtime_checkable
@@ -128,20 +149,21 @@ class Recurrence(Protocol):
         *,
         collect_intermediates: bool,
     ) -> ForwardOutput:
-        """Run the core to completion for one forward pass."""
+        """Run the core to completion for one forward pass.
+
+        Args:
+          core: Core.
+          input_emb: Input emb.
+          z_slow: Z slow.
+          z_fast: Z fast.
+          cos_sin: Cos sin.
+          collect_intermediates: Collect intermediates.
+
+        Returns:
+          result: The ForwardOutput.
+
+        """
         ...
-
-
-class CoreFn(Protocol):
-    """One application of the reasoning core."""
-
-    def __call__(
-        self,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None = None,
-    ) -> CoreOutput: ...
 
 
 class DeepRecurrence(nn.Module):
@@ -376,7 +398,15 @@ class SudokuNet(nn.Module):
         return self._dummy.device
 
     def init_latents(self, batch_size: int) -> tuple[Tensor, Tensor]:
-        """Return the initial ``(z_slow, z_fast)`` for a batch."""
+        """Return the initial ``(z_slow, z_fast)`` for a batch.
+
+        Args:
+          batch_size: Batch size.
+
+        Returns:
+          result: The tuple[Tensor, Tensor].
+
+        """
         s = self.config.total_seq_len
         z_slow = self.slow_init[0].expand(batch_size, s, -1).contiguous()
         z_fast = self.fast_init[0].expand(batch_size, s, -1).contiguous()
@@ -496,37 +526,21 @@ class SudokuNet(nn.Module):
         return out
 
 
+# Without a recurrence the core runs its inner loop exactly once, which makes the plain
+# model a single pass over the block stack. A recurrence that declares ``fast_cycles``
+# overrides it -- read from the config so the core stays a plain method the recurrence
+# can call.
 def _fast_cycles(recurrence: Recurrence | None) -> int:
-    """Inner-loop count for one core application.
-
-    Without a recurrence the core runs its inner loop exactly once, which makes
-    the plain model a single pass over the block stack. A recurrence that
-    declares ``fast_cycles`` overrides it -- read from the config so the core
-    stays a plain method the recurrence can call.
-    """
+    """Inner-loop count for one core application."""
     if isinstance(recurrence, DeepRecurrence):
         return recurrence.config.fast_cycles
     return 1
 
 
+# Read from the config rather than by constructing the module: ``finalize`` runs during
+# ``pprint`` too, where building a large table would be both slow and surprising.
 def _count_prefix_tokens(prefix: Makeable[nn.Module] | None) -> int:
-    """How many tokens a prefix config contributes, before it is built.
-
-    Read from the config rather than by constructing the module: ``finalize``
-    runs during ``pprint`` too, where building a large table would be both slow
-    and surprising.
-
-    Args:
-      prefix: The prefix slot's config, or None.
-
-    Returns:
-      tokens: Prefix width, 0 when there is no prefix.
-
-    Raises:
-      ValueError: A prefix config that declares no token count. Falling back to
-        0 would strip nothing and silently shift every grid position.
-
-    """
+    """How many tokens a prefix config contributes, before it is built."""
     if prefix is None:
         return 0
     if isinstance(prefix, HasParts):
@@ -548,7 +562,7 @@ def _detach_pair(
 
 
 def _latent_init(channels_in: int) -> Tensor:
-    """A ``[1, C]`` learned-ish starting latent, unit-scaled."""
+    """Return a ``[1, C]`` learned-ish starting latent, unit-scaled."""
     w = torch.empty(1, channels_in)
     truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
     return w

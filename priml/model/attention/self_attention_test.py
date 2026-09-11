@@ -14,7 +14,7 @@ import torch
 
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import (
-    KVCache,  # used in preallocated cache test
+    KVCache,  # used in preallocated cache test.
 )
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
@@ -104,7 +104,7 @@ def test_self_attention_preallocated_cache():
     out, cache = m.forward_cached(x, cache=cache)
     assert out.shape == (2, 8, 64)
     assert cache.length == 8
-    # Second step
+    # Second step.
     x2 = torch.randn(2, 1, 64)
     out2, cache = m.forward_cached(x2, cache=cache)
     assert out2.shape == (2, 1, 64)

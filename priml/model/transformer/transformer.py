@@ -159,12 +159,22 @@ class Transformer(nn.Module):
         self.out_proj = config.out_proj.make() if config.out_proj is not None else None
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         for module in (self.in_proj, *self.blocks, self.out_proj):
             if isinstance(module, Resettable):
                 module.reset_parameters()
 
     def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
-        """Apply the head, or return hidden states when absent."""
+        """Apply the head, or return hidden states when absent.
+
+        Args:
+          hidden: Hidden.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The Tensor.
+
+        """
         return hidden if self.out_proj is None else self.out_proj(hidden, **kwargs)
 
     @override

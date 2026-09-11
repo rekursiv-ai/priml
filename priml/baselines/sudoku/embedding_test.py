@@ -84,7 +84,7 @@ def test_feedback_is_inert_until_stashed_and_consumed_once() -> None:
     base = embedding(tokens)
 
     feedback.set_feedback(torch.randint(0, 11, (2, 81)))
-    assert torch.equal(embedding(tokens), base)  # zero table: no contribution
+    assert torch.equal(embedding(tokens), base)  # zero table: no contribution.
     assert feedback._feedback_ids is None
 
     # A trained table does contribute, and only for the step it was stashed on.
@@ -92,7 +92,7 @@ def test_feedback_is_inert_until_stashed_and_consumed_once() -> None:
         feedback.embed_feedback.fill_(0.5)
     feedback.set_feedback(torch.randint(0, 11, (2, 81)))
     assert not torch.equal(embedding(tokens), base)
-    assert torch.equal(embedding(tokens), base)  # stash already consumed
+    assert torch.equal(embedding(tokens), base)  # stash already consumed.
 
 
 def test_channel_order_changes_the_result() -> None:

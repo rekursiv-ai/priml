@@ -33,7 +33,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def _head(tie: bool = False) -> Sequential.Config:
-    """The language-model head: a final norm, then the vocabulary projection."""
+    """Return the language-model head: a final norm, then the vocabulary projection."""
     return Sequential.Config(
         elements=[
             RMSNorm.Config(),

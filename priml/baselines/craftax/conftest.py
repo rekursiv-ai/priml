@@ -10,7 +10,8 @@ itself imports it, so running the environment never touches JAX.
 
 from __future__ import annotations
 
-from typing import Any, Final
+from types import ModuleType
+from typing import Final
 
 import copy
 import functools
@@ -59,13 +60,11 @@ that installed. The tests then run and fail at import instead of skipping.
 """
 
 
+# ``find_spec`` returns ``None`` for a missing leaf but RAISES ``ModuleNotFoundError``
+# when an intermediate parent is gone -- which is the wholly-absent case this guard
+# exists to answer, so it cannot propagate.
 def _reference_is_installed() -> bool:
-    """Whether every reference root the parity tests read is importable.
-
-    ``find_spec`` returns ``None`` for a missing leaf but RAISES
-    ``ModuleNotFoundError`` when an intermediate parent is gone -- which is the
-    wholly-absent case this guard exists to answer, so it cannot propagate.
-    """
+    """Whether every reference root the parity tests read is importable."""
     try:
         return all(
             importlib.util.find_spec(name) is not None for name in _REFERENCE_PROBES
@@ -85,7 +84,7 @@ requires_craftax: Final = pytest.mark.skipif(
 
 
 @functools.cache
-def reference(module: str) -> Any:
+def reference(module: str) -> ModuleType:
     """Import a module of the reference implementation by name.
 
     Imported dynamically rather than at module scope so that a checkout

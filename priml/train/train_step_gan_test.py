@@ -23,6 +23,7 @@ class SimpleGenerator(nn.Module):
 
     class Config(Fig["SimpleGenerator"], make_with_kwargs=True):
         latent_dim: int = -1
+
         image_size: int = -1
 
     def __init__(self, latent_dim: int, image_size: int):
@@ -59,7 +60,7 @@ def test_gan_train_step_basic():
     """Test GANTrainStep basic functionality."""
     torch.manual_seed(42)
 
-    # Create GAN config
+    # Create GAN config.
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
         model=SimpleGenerator.Config(latent_dim=10, image_size=8),
@@ -78,19 +79,19 @@ def test_gan_train_step_basic():
 
     gan = config.make()
 
-    # Create batch
+    # Create batch.
     batch = {
         "noise": torch.randn(4, 10),
         "media": torch.randn(4, 3, 8, 8),
     }
 
-    # Run train step
+    # Run train step.
     result = gan.train_step(**batch)
 
     assert "loss" in result
     assert "model" in result
-    assert result["loss"].shape == (4,)  # Per-sample loss
-    assert result["model"].shape == (4, 3, 8, 8)  # Generated images
+    assert result["loss"].shape == (4,)  # Per-sample loss.
+    assert result["model"].shape == (4, 3, 8, 8)  # Generated images.
 
 
 def test_gan_train_loss():
@@ -123,7 +124,7 @@ def test_gan_train_loss():
 
     assert "loss" in result
     assert "model" in result
-    assert result["loss"].shape == (4,)  # Per-sample loss
+    assert result["loss"].shape == (4,)  # Per-sample loss.
     assert result["loss"].mean().item() > 0
 
 
@@ -157,7 +158,7 @@ def test_gan_eval_loss():
 
     assert "loss" in result
     assert "model" in result
-    assert result["loss"].shape == (4,)  # Per-sample loss
+    assert result["loss"].shape == (4,)  # Per-sample loss.
     assert result["loss"].mean().item() > 0
 
 
@@ -187,18 +188,18 @@ def test_gan_checkpointing():
         "media": torch.randn(4, 3, 8, 8),
     }
 
-    # Train for a few steps
+    # Train for a few steps.
     for _ in range(5):
         gan1.train_step(**batch)
 
-    # Save state
+    # Save state.
     state = gan1.state_dict()
 
-    # Create new GAN and load state
+    # Create new GAN and load state.
     gan2 = config.make()
     gan2.load_state_dict(state)
 
-    # Check that outputs match
+    # Check that outputs match.
     result1 = gan1.eval_loss(**batch)
     result2 = gan2.eval_loss(**batch)
 
@@ -220,7 +221,7 @@ class _SyncCountingTensor(Tensor):
 def _counting_train_step(
     item_calls: list[int],
 ) -> Callable[..., dict[str, Tensor]]:
-    """A discriminator ``train_step`` whose loss records each ``.item()``."""
+    """Return a discriminator ``train_step`` whose loss records each ``.item()``."""
 
     def train_step(*, media: Tensor, label: Tensor) -> dict[str, Tensor]:
         del label
@@ -430,7 +431,7 @@ def test_gan_train_step_preserves_generator_aux_losses() -> None:
 
     real_loss = gan.generator.loss
 
-    def loss_with_aux(prediction: Any, **batch: object) -> LossOutput:
+    def loss_with_aux(prediction: object, **batch: object) -> LossOutput:
         loss = real_loss(prediction, **batch)["loss"]
         # ``adversarial`` is an auxiliary key the trainer must preserve.
         return {"loss": loss, "adversarial": loss.detach() * 2.0}

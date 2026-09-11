@@ -205,7 +205,7 @@ def test_bool_dtype():
 
 def test_as_tensors_while_compiling():
     """Test convert_to_tensor behavior during compilation (lines 147-149)."""
-    # Simulate compilation context
+    # Simulate compilation context.
     with patch.object(torch.compiler, "is_compiling", return_value=True):
         x = torch.tensor([1.0, 2.0])
         y = torch.tensor([3.0, 4.0])
@@ -303,7 +303,7 @@ def _pairs() -> list[tuple[str, Tensorable, Tensorable, bool]]:
         ("overlapping slices", parent[0:5], parent[4:8], True),
         ("disjoint numpy slices", arr[0:2], arr[4:6], False),
         ("disjoint across containers", wrapped[0:2], arr[4:6], False),
-        # numpy reverses by negating the stride and pointing at the LAST
+        # ``numpy`` reverses by negating the stride and pointing at the LAST
         # element, so the span runs backwards from there; counting only the
         # forward reach would place it past the end of the buffer.
         ("negative-stride numpy", arr[::-1], arr, True),

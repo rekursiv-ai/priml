@@ -63,12 +63,12 @@ class TopK:
         # k beyond that is trivially perfect, so clamp the requested width.
         max_k = min(max(self.k_values), num_classes)
 
-        # Get top-k predictions
-        _, pred_topk = logits.topk(max_k, dim=1)  # [B, max_k]
+        # Get top-k predictions.
+        _, pred_topk = logits.topk(max_k, dim=1)  # [B, max_k].
 
-        # Check correctness for each k
+        # Check correctness for each k.
         for k in self.k_values:
-            pred_k = pred_topk[:, : min(k, num_classes)]  # [B, min(k, C)]
+            pred_k = pred_topk[:, : min(k, num_classes)]  # [B, min(k, C)].
             correct_k = (pred_k == targets.unsqueeze(1)).any(dim=1)
             self.correct[k] += int(correct_k.sum().item())
 
@@ -87,13 +87,23 @@ class TopK:
         return {f"top{k}": self.correct[k] / self.total for k in self.k_values}
 
     def state_dict(self) -> dict[str, Any]:
-        """Get metric state for checkpointing."""
+        """Get metric state for checkpointing.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "correct": self.correct,
             "total": self.total,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load metric state from checkpoint."""
+        """Load metric state from checkpoint.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.correct = state_dict.get("correct", dict.fromkeys(self.k_values, 0))
         self.total = state_dict.get("total", 0)

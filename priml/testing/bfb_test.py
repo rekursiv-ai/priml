@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import ast
 import os
@@ -38,6 +38,10 @@ from priml.testing.bfb import (
     regenerate_golden,
     state_differs,
 )
+
+
+_THIS: Final = Path(__file__).resolve()
+_CWD: Final = _THIS.parent
 
 
 @pytest.fixture(autouse=True)
@@ -83,12 +87,19 @@ class _TorchProcessState:
     """Independent snapshot used to verify BFB process-state restoration."""
 
     algorithms_enabled: bool
+
     warn_only_enabled: bool
+
     cudnn_benchmark: bool
+
     cudnn_deterministic: bool
+
     flash_sdp_enabled: bool
+
     memory_efficient_sdp_enabled: bool
+
     rng_state: Tensor
+
     cublas_workspace_config: str | None
 
 
@@ -201,9 +212,9 @@ def test_bfb_devices_is_cpu_only() -> None:
 
 def test_bfb_files_do_not_use_typing_any() -> None:
     paths = [
-        Path(__file__),
-        Path(__file__).with_name("bfb.py"),
-        Path(__file__).parents[1] / "model" / "transformer" / "block_test.py",
+        _THIS,
+        _CWD / ("bfb.py"),
+        _CWD.parents[0] / "model" / "transformer" / "block_test.py",
     ]
     offenders = list[str]()
     for path in paths:
@@ -507,7 +518,7 @@ def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
     read a size diff. A guard that only stops new violations leaves the
     existing ones invisible forever.
     """
-    goldens = sorted(Path(__file__).resolve().parent.parent.rglob("*.pt"))
+    goldens = sorted(_CWD.parent.rglob("*.pt"))
     assert goldens, "no goldens found; the glob no longer matches the layout"
     stale: list[Path] = []
     for path in goldens:
@@ -523,14 +534,12 @@ def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
     )
 
 
+# ``torch.load`` is untyped, so the shape is narrowed once here rather than cast at each
+# use. Only the state entries are typed: a golden also holds an input, an output, and a
+# seed, and claiming those are state dicts to satisfy one reader would be a false
+# annotation.
 def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
-    """Read a golden's two state dicts, which are all this check reads.
-
-    ``torch.load`` is untyped, so the shape is narrowed once here rather than
-    cast at each use. Only the state entries are typed: a golden also holds an
-    input, an output, and a seed, and claiming those are state dicts to
-    satisfy one reader would be a false annotation.
-    """
+    """Read a golden's two state dicts, which are all this check reads."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
     assert isinstance(payload, dict)
     return {
@@ -744,20 +753,19 @@ def test_regenerate_round_trip_passes_for_clean_module(tmp_path: Path) -> None:
     )
 
 
+# An exact-allowlist op must be host-independent: computing it in float64 and narrowing
+# back to float32 must reproduce the native float32 result bit-for- bit. An op that
+# fails this (e.g. a fused multiply-add rounding differently, or a vector-width-
+# dependent reduction) must NOT be allowlisted -- it has to be upcast like every other
+# arithmetic op.
+#
+# Each probe applies exactly ONE allowlisted op to its float32 input; any auxiliary
+# operand must be exactly float32-representable (an integer, a power of two, or a
+# flip/copy of the input) so the probe isolates the op under test rather than folding in
+# a second op's rounding.
+# result.
 def _f32_equals_f64_downcast(op: TensorFn) -> bool:
-    """True if ``op``'s float32 result equals its float64-then-downcast result.
-
-    An exact-allowlist op must be host-independent: computing it in float64 and
-    narrowing back to float32 must reproduce the native float32 result bit-for-
-    bit. An op that fails this (e.g. a fused multiply-add rounding differently,
-    or a vector-width-dependent reduction) must NOT be allowlisted -- it has to
-    be upcast like every other arithmetic op.
-
-    Each probe applies exactly ONE allowlisted op to its float32 input; any
-    auxiliary operand must be exactly float32-representable (an integer, a power
-    of two, or a flip/copy of the input) so the probe isolates the op under test
-    rather than folding in a second op's rounding.
-    """
+    """Report whether ``op``'s float32 result equals its float64-then-downcast."""
     gen = torch.Generator().manual_seed(0)
     a = torch.randn(4096, dtype=torch.float32, generator=gen)
     return torch.equal(op(a), op(a.double()).float())
@@ -907,15 +915,13 @@ _ALLOCATION_OPS = frozenset(
 )
 
 
+# Only allowlisted names can invalidate this guard. Calling unrelated Aten packets is
+# both unnecessary and unsafe: some nominally single-tensor defaults initialize platform
+# backends before argument validation, and PyTorch's MPS ``pin_memory`` packet can
+# segfault the interpreter. Probe the exact policy surface with a fixed seeded input
+# instead.
 def _divergent_allowlisted_single_tensor_ops() -> set[str]:
-    """Allowlisted Aten ops that differ from their float64 recomputation.
-
-    Only allowlisted names can invalidate this guard. Calling unrelated Aten
-    packets is both unnecessary and unsafe: some nominally single-tensor
-    defaults initialize platform backends before argument validation, and
-    PyTorch's MPS ``pin_memory`` packet can segfault the interpreter. Probe the
-    exact policy surface with a fixed seeded input instead.
-    """
+    """Allowlisted Aten ops that differ from their float64 recomputation."""
     divergent: set[str] = set()
     for name in sorted(_EXACT_F32_OPS):
         if name in _ALLOCATION_OPS:
@@ -971,18 +977,15 @@ def test_no_allowlisted_op_is_width_divergent() -> None:
     )
 
 
+# The trace mode is entered OUTSIDE ``host_agnostic_numerics`` so it observes each op's
+# arguments AFTER the upcast dispatch has run -- i.e. the dtype the real kernel actually
+# computes on. Invariant the harness guarantees: every op is either allowlisted (runs
+# native float32, proven host-independent) or upcast to float64. So a non-allowlisted op
+# still seeing a float32 argument here ran native float32 without being upcast -- a
+# cross-host-divergence leak (the failure mode the flash-attention kernel exhibited
+# before the SDPA-math pin).
 def _f32_leaking_ops(run: Callable[[], object]) -> set[str]:
-    """Names of non-allowlisted ops that still receive float32 under the harness.
-
-    The trace mode is entered OUTSIDE ``host_agnostic_numerics`` so it observes
-    each op's arguments AFTER the upcast dispatch has run -- i.e. the dtype the
-    real kernel actually computes on. Invariant the harness guarantees: every
-    op is either allowlisted (runs native float32, proven host-independent) or
-    upcast to float64. So a non-allowlisted op still seeing a float32 argument
-    here ran native float32 without being upcast -- a cross-host-divergence leak
-    (the failure mode the flash-attention kernel exhibited before the SDPA-math
-    pin).
-    """
+    """Names of non-allowlisted ops that still receive float32 under the harness."""
     leaks: set[str] = set()
 
     def has_f32(value: object) -> bool:
@@ -1195,7 +1198,7 @@ def test_host_agnostic_numerics_upcasts_foreach_norm() -> None:
     """
     x = torch.tensor([1e20, 1.0, -1e20, 3.0], dtype=torch.float32)
     expected = torch.linalg.vector_norm(x.double(), ord=2).float()
-    # torch stubs omit _foreach_norm; resolve it through a typed Callable so
+    # ``torch`` stubs omit _foreach_norm; resolve it through a typed Callable so
     # both type checkers see a known signature for this public foreach op.
     foreach_norm = cast(
         Callable[[list[Tensor], float], list[Tensor]],
@@ -1221,7 +1224,7 @@ def test_host_agnostic_foreach_inplace_writes_back_list_targets() -> None:
         (x.double() * y.double()).float()
         for x, y in zip([torch.full((3,), 0.5) for _ in range(2)], ys, strict=True)
     ]
-    # torch stubs omit the in-place foreach ops; resolve through a typed Callable.
+    # ``torch`` stubs omit the in-place foreach ops; resolve through a typed Callable.
     foreach_mul_ = cast(
         Callable[[list[Tensor], list[Tensor]], None],
         getattr(torch, "_foreach_mul_"),  # noqa: B009 -- stub-less torch member

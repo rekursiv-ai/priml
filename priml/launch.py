@@ -1,4 +1,4 @@
-"""Example Usage
+"""Example Usage.
 
 ```python
 # foo.py
@@ -83,7 +83,12 @@ from priml.logger import setup_logging
 
 @record
 def main() -> int:
-    """The main function. Return the process exit code."""
+    """Run the program; return the process exit code.
+
+    Returns:
+      result: The int.
+
+    """
     t0 = time.perf_counter()
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").strip(),
@@ -92,7 +97,7 @@ def main() -> int:
     )
     args, unparsed = _parse_args(parser)
 
-    # Setup logging with specified level
+    # Setup logging with specified level.
     setup_logging(level=args.loglevel)
 
     _log_hardware()
@@ -136,17 +141,15 @@ def main() -> int:
     return 0
 
 
+# The launcher owns only ``config`` / ``--loglevel`` / ``--override``; every other
+# argument is forwarded verbatim to ``job.run`` so a job parses its own flags (hence
+# ``parse_known_args``, and ``add_help=False`` on the parser -- a job may define its own
+# ``--help``).
 def _parse_args(
     parser: argparse.ArgumentParser,
     argv: list[str] | None = None,
 ) -> tuple[argparse.Namespace, list[str]]:
-    """Register the launcher's flags; return ``(parsed, leftover)`` for the job.
-
-    The launcher owns only ``config`` / ``--loglevel`` / ``--override``; every
-    other argument is forwarded verbatim to ``job.run`` so a job parses its own
-    flags (hence ``parse_known_args``, and ``add_help=False`` on the parser --
-    a job may define its own ``--help``).
-    """
+    """Register the launcher's flags; return ``(parsed, leftover)`` for the job."""
     _ = parser.add_argument(
         "config",
         type=str,
@@ -170,13 +173,11 @@ def _parse_args(
     return parser.parse_known_args(argv)
 
 
+# Logs every field (defaults included) of the launched config so a run's exact setup is
+# recoverable from its log alone. ``pformat`` is a configgle ``Fig`` method; a non-Fig
+# ``Makeable`` falls back to ``repr``.
 def _log_config(config_str: str, config: Makeable[object]) -> None:
-    """Pretty-print the full resolved experiment config to the log.
-
-    Logs every field (defaults included) of the launched config so a run's
-    exact setup is recoverable from its log alone. ``pformat`` is a configgle
-    ``Fig`` method; a non-Fig ``Makeable`` falls back to ``repr``.
-    """
+    """Pretty-print the full resolved experiment config to the log."""
     pformat = getattr(config, "pformat", None)
     if callable(pformat):
         body = pformat(finalize=True, hide_default_values=False)
@@ -185,32 +186,28 @@ def _log_config(config_str: str, config: Makeable[object]) -> None:
     logging.getLogger(__name__).info("experiment config %s:\n%s", config_str, body)
 
 
+# ``experiment_name`` defaults to the factory function name; ``study_name`` to the run-
+# family prefix derived from the module path (see :func:`_derive_study_name`). An
+# explicit value on either field wins -- this only fills a blank, so the experiment
+# stays the source of truth. The config's own ``finalize`` then keys its paths off these
+# fields.
 def _stamp_run_identity(
     config: LaunchableExperiment,
     *,
     module_name: str,
     function_name: str,
 ) -> None:
-    """Fill a launchable experiment's run-identity fields when left unset.
-
-    ``experiment_name`` defaults to the factory function name; ``study_name`` to
-    the run-family prefix derived from the module path (see
-    :func:`_derive_study_name`). An explicit value on either field wins -- this
-    only fills a blank, so the experiment stays the source of truth. The
-    config's own ``finalize`` then keys its paths off these fields.
-    """
+    """Fill a launchable experiment's run-identity fields when left unset."""
     if not config.experiment_name:
         config.experiment_name = function_name
     if not config.study_name:
         config.study_name = _derive_study_name(module_name)
 
 
+# ``<pkg>.experimental.<a>.<b>.experiments`` -> ``"<a>/<b>/"``. A path without the
+# ``experimental``/``experiments`` markers yields ``""`` (no prefix).
 def _derive_study_name(module_name: str) -> str:
-    """Derive the ``study_name`` prefix from an ``experimental`` module path.
-
-    ``<pkg>.experimental.<a>.<b>.experiments`` -> ``"<a>/<b>/"``. A path without
-    the ``experimental``/``experiments`` markers yields ``""`` (no prefix).
-    """
+    """Derive the ``study_name`` prefix from an ``experimental`` module path."""
     parts = module_name.split(".")
     try:
         exp_idx = parts.index("experimental")
@@ -221,13 +218,11 @@ def _derive_study_name(module_name: str) -> str:
     return f"{study}/" if study else ""
 
 
+# The docstring is the experiment's contract -- hypothesis, changes, and (once finished)
+# outcome. Printing it at launch makes a job log self-describing: a reader sees the
+# intent next to the metrics, not just an opaque config.
 def _log_docstring(config_str: str, docstring: str) -> None:
-    """Print the experiment function's docstring so the run log says WHAT it is.
-
-    The docstring is the experiment's contract -- hypothesis, changes, and (once
-    finished) outcome. Printing it at launch makes a job log self-describing: a
-    reader sees the intent next to the metrics, not just an opaque config.
-    """
+    """Print the experiment function's docstring so the run log says WHAT it is."""
     if not docstring:
         logging.getLogger(__name__).info(
             "experiment %s: no docstring (add hypothesis/changes/outcome)",
@@ -239,23 +234,20 @@ def _log_docstring(config_str: str, docstring: str) -> None:
     )
 
 
+# A scheduler stops a job with SIGTERM, whose default action is an immediate process
+# exit -- skipping the job's ``try/finally`` cleanup. That cleanup is what flushes
+# buffered tracker state (e.g. ``WandbTracker.close`` -> ``run.finish``, which transmits
+# history not yet sent under the W&B flush interval), so a hard SIGTERM silently drops
+# the run's last metrics. Raising ``KeyboardInterrupt`` from the handler instead unwinds
+# through the job's ``finally``, flushing before exit. Only rank-aware code below the
+# job runs; the handler itself is reentrant-safe (it just raises). Restores the prior
+# handler on exit so nested/repeat launches are unaffected.
 @contextmanager
 def _graceful_sigterm() -> Generator[None]:
-    """Turn SIGTERM into KeyboardInterrupt so the job's cleanup can run.
+    """Turn SIGTERM into KeyboardInterrupt so the job's cleanup can run."""
 
-    A scheduler stops a job with SIGTERM, whose default action is an immediate
-    process exit -- skipping the job's ``try/finally`` cleanup. That cleanup is
-    what flushes buffered tracker state (e.g. ``WandbTracker.close`` ->
-    ``run.finish``, which transmits history not yet sent under the W&B flush
-    interval), so a hard SIGTERM silently drops the run's last metrics. Raising
-    ``KeyboardInterrupt`` from the handler instead unwinds through the job's
-    ``finally``, flushing before exit. Only rank-aware code below the job runs;
-    the handler itself is reentrant-safe (it just raises). Restores the prior
-    handler on exit so nested/repeat launches are unaffected.
-    """
-
-    def _raise_on_sigterm(signum: int, _frame: object) -> None:
-        del _frame
+    def _raise_on_sigterm(signum: int, frame: object) -> None:
+        del frame
         logging.getLogger(__name__).info(
             "received signal %d; raising to run cleanup before exit", signum
         )

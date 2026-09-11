@@ -67,6 +67,34 @@ def interact(
     return _damage_boss(state, block=block, acting=acting)
 
 
+def item_at(state: EnvState, position: Tensor) -> Tensor:
+    """Return the item lying on ``position`` of the player's floor, ``[envs]``.
+
+    Args:
+      state: State.
+      position: Position.
+
+    Returns:
+      result: The Tensor.
+
+    """
+    return gather_tiles(mechanics.current_items(state), position)
+
+
+def is_ladder(item: Tensor, kind: ItemType) -> Tensor:
+    """Whether ``item`` is the named ladder.
+
+    Args:
+      item: Item.
+      kind: Kind.
+
+    Returns:
+      result: The Tensor.
+
+    """
+    return item == int(kind)
+
+
 def _strike_whatever_stands_there(
     state: EnvState,
     *,
@@ -335,13 +363,3 @@ def _replace_block(
         applies,
     )
     return state
-
-
-def item_at(state: EnvState, position: Tensor) -> Tensor:
-    """The item lying on ``position`` of the player's floor, ``[envs]``."""
-    return gather_tiles(mechanics.current_items(state), position)
-
-
-def is_ladder(item: Tensor, kind: ItemType) -> Tensor:
-    """Whether ``item`` is the named ladder."""
-    return item == int(kind)

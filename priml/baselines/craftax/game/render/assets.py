@@ -26,21 +26,6 @@ import urllib.request
 from priml.lib.userdirs import cache_dir
 
 
-def asset_dir(*, revision: str = "v1.6.1") -> Path:
-    """Return the directory the sprites are cached in.
-
-    Args:
-      revision: Upstream release the sprites come from. Matches the
-        ``craftax>=1.6.1`` dependency the parity tests compare against, so the
-        pixels and the rules come from one version of the game.
-
-    Returns:
-      directory: Per-user cache path for this revision's sprites.
-
-    """
-    return cache_dir() / "rekursiv-ai" / "craftax" / "assets" / revision
-
-
 def fetch(
     name: str,
     *,
@@ -55,7 +40,7 @@ def fetch(
 
     Args:
       name: File name, for example ``"zombie.png"``.
-      directory: Cache directory; defaults to :func:`asset_dir`.
+      directory: Cache directory; defaults to the per-user sprite cache.
       revision: Upstream release to fetch from. A tag rather than a branch:
         ``main`` would let a texture change under a cache that has no reason
         to re-fetch it.
@@ -68,7 +53,9 @@ def fetch(
       RuntimeError: The download failed.
 
     """
-    directory = directory or asset_dir(revision=revision)
+    directory = (
+        directory or cache_dir() / "rekursiv-ai" / "craftax" / "assets" / revision
+    )
     path = directory / name
     if path.exists():
         return path
@@ -100,13 +87,15 @@ def digest(directory: Path | None = None) -> str:
     """Return one hash over every cached sprite.
 
     Args:
-      directory: Cache directory; defaults to :func:`asset_dir`.
+      directory: Cache directory; defaults to the per-user sprite cache.
 
     Returns:
       digest: Hex SHA-256 over the sorted name/content pairs.
 
     """
-    directory = directory or asset_dir()
+    directory = (
+        directory or cache_dir() / "rekursiv-ai" / "craftax" / "assets" / "v1.6.1"
+    )
     accumulator = hashlib.sha256()
     for path in sorted(directory.glob("*.png")):
         accumulator.update(path.name.encode())

@@ -48,6 +48,7 @@ class _TpOneSubmesh:
 
 class _TpOneMesh:
     device_type = "cpu"
+
     mesh_dim_names = ("tp",)
 
     def __getitem__(self, name: str) -> _TpOneSubmesh:
