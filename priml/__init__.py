@@ -1,1 +1,1 @@
-"""priml — malleable ML building blocks for training experiments."""
+"""priml -- malleable ML building blocks for training experiments."""

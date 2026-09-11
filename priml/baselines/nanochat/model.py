@@ -288,16 +288,13 @@ class NanoChatLM(nn.Module):
         # materialized later, and a table built on meta holds no values.
         self._rotation: tuple[Tensor, Tensor] | None = None
 
+    # Sized and built here rather than injected: there is one per PARTICIPATING layer,
+    # and which layers those are is derived from the stride, so the count is not
+    # something a config can state ahead of the depth. The narrowing follows the token
+    # table's, since both are read as lookups into the same stream.
     @classmethod
     def _value_table(cls, config: Config, *, width: int) -> nn.Module:
-        """One value-embedding table, narrowed like the token table.
-
-        Sized and built here rather than injected: there is one per
-        PARTICIPATING layer, and which layers those are is derived from the
-        stride, so the count is not something a config can state ahead of the
-        depth. The narrowing follows the token table's, since both are read as
-        lookups into the same stream.
-        """
+        """One value-embedding table, narrowed like the token table."""
         table = NarrowEmbedding.Config(
             inner=Embedding.Config(init_weight=unit_fan_in_uniform),
         )
@@ -371,21 +368,18 @@ class NanoChatLM(nn.Module):
             x = out
         return self.lm_head(self.norm_out(x))
 
+    # Held for ``max_seq_len`` and SLICED, so a short batch reads a prefix of the same
+    # table rather than minting another. That is the reference's own arrangement
+    # (train.py:143-145, 269) and it matters for more than speed: the factors come from
+    # a transcendental, so a table built at one length and one built at another need not
+    # agree bit for bit in their common prefix.
     def _rotation_table(
         self,
         length: int,
         *,
         device: torch.device,
     ) -> tuple[Tensor, Tensor]:
-        """The rotation factors for ``length`` positions, built once.
-
-        Held for ``max_seq_len`` and SLICED, so a short batch reads a prefix of
-        the same table rather than minting another. That is the reference's own
-        arrangement (train.py:143-145, 269) and it matters for more than speed:
-        the factors come from a transcendental, so a table built at one length
-        and one built at another need not agree bit for bit in their common
-        prefix.
-        """
+        """Return the rotation factors for ``length`` positions, built once."""
         if self._rotation is None or self._rotation[0].device != device:
             # REBUILT on a device change, never moved there: the factors come
             # from a transcendental whose last bit differs between CPU and CUDA
@@ -430,19 +424,7 @@ class NanoChatLM(nn.Module):
 
 
 def _window(block: nn.Module) -> int:
-    """How far back a built block attends.
-
-    Args:
-      block: One layer of the stack.
-
-    Returns:
-      window: Keys its queries reach over.
-
-    Raises:
-      TypeError: The block's attention declares no window, so its cost cannot
-        be attributed and a guess would be reported as a measurement.
-
-    """
+    """How far back a built block attends."""
     attention = getattr(block, "attn", None)
     config = getattr(attention, "config", None)
     window = getattr(config, "window", None)
@@ -463,18 +445,7 @@ def _reject_ragged_heads(
     *,
     channels_in: int,
 ) -> None:
-    """Raise unless every block agrees on its attention's head geometry.
-
-    Args:
-      blocks: The per-layer block configs.
-      channels_in: Model width, the fallback for a block declaring no num_heads.
-
-    Raises:
-      ValueError: Two layers declare different head shapes. The model sizes its
-        shared tensors from layer 0, so the disagreement is unbuildable -- and
-        naming it here beats a reshape error deep inside the forward.
-
-    """
+    """Raise unless every block agrees on its attention's head geometry."""
     shapes = {_head_shape(block, channels_in) for block in blocks}
     if len(shapes) > 1:
         raise ValueError(

@@ -85,7 +85,7 @@ def test_simple_loss_mse():
     result = loss(prediction, **batch)
 
     assert "loss" in result
-    # Perfect match should have zero loss
+    # Perfect match should have zero loss.
     assert torch.allclose(result["loss"], torch.zeros(2))
 
 
@@ -100,7 +100,7 @@ def test_simple_loss_reduction_mean():
     result = loss(prediction, **batch)
 
     assert "loss" in result
-    assert result["loss"].ndim == 0  # Scalar
+    assert result["loss"].ndim == 0  # Scalar.
 
 
 if __name__ == "__main__":

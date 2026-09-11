@@ -229,15 +229,13 @@ class SparsePuzzleEmbedding(nn.Module):
             else self.local_weights.to(config.dtype)
         )
 
+    # ``nn.Module._apply`` replaces buffers with transformed copies, and a copy does not
+    # carry ``requires_grad`` -- so without this the local buffer stops receiving
+    # gradients the moment the model moves to a GPU, and the table silently never
+    # trains.
     @override
     def _apply(self, fn: Any, recurse: bool = True) -> Self:
-        """Re-establish the gradient buffer after a device or dtype move.
-
-        ``nn.Module._apply`` replaces buffers with transformed copies, and a
-        copy does not carry ``requires_grad`` -- so without this the local
-        buffer stops receiving gradients the moment the model moves to a GPU,
-        and the table silently never trains.
-        """
+        """Re-establish the gradient buffer after a device or dtype move."""
         module = super()._apply(fn, recurse=recurse)
         self.local_weights = nn.Buffer(
             self.local_weights.detach().requires_grad_(True),

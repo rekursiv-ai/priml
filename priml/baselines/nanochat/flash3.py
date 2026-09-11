@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 import errno
 import hashlib
@@ -58,7 +58,21 @@ class Flash3Interface(Protocol):
         *,
         causal: bool,
         window_size: tuple[int, int],
-    ) -> Tensor: ...
+    ) -> Tensor:
+        """Flash attn func.
+
+        Args:
+          q: Q.
+          k: K.
+          v: V.
+          causal: Causal.
+          window_size: Window size.
+
+        Returns:
+          result: The Tensor.
+
+        """
+        ...
 
 
 class Flash3Attention:
@@ -107,7 +121,7 @@ class Flash3Attention:
         v: Tensor,
         *,
         window: int = -1,
-        **kwargs: Any,
+        **kwargs: object,
     ) -> Tensor:
         """Attend over the last ``window`` positions, causally.
 
@@ -127,17 +141,32 @@ class Flash3Attention:
 
 
 def source_revision() -> str:
-    """Return the immutable FA3 source revision."""
+    """Return the immutable FA3 source revision.
+
+    Returns:
+      result: The str.
+
+    """
     return "3da5f873029162763568db56546fee70a779fade"
 
 
 def cutlass_revision() -> str:
-    """Return the CUTLASS submodule revision pinned by the FA3 source."""
+    """Return the CUTLASS submodule revision pinned by the FA3 source.
+
+    Returns:
+      result: The str.
+
+    """
     return "dc4817921edda44a549197ff3a9dcf5df0636e7b"
 
 
 def hf_reference_revision() -> str:
-    """Return the previously qualified HF binary revision."""
+    """Return the previously qualified HF binary revision.
+
+    Returns:
+      result: The str.
+
+    """
     return "de87b9b5af06dd9984df595bef90b2eba44b181a"
 
 

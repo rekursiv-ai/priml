@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 import torch
 
@@ -71,7 +69,7 @@ def test_weights_are_orthogonally_initialized() -> None:
     # they pass through a deep tanh stack.
     weight = _model(channels_in=32, observation_size=32).policy[0].weight.detach()
     product = weight @ weight.T
-    identity = torch.eye(product.shape[0]) * (math.sqrt(2.0) ** 2)
+    identity = torch.eye(product.shape[0]) * ((2.0**0.5) ** 2)
     assert torch.allclose(product, identity, atol=1e-5)
 
 

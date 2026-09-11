@@ -324,17 +324,18 @@ _BUILDERS: dict[str, Callable[[], nn.Module]] = {
 
 @pytest.mark.parametrize("name", list(_BUILDERS))
 def test_reset_parameters_reinitializes_every_param(name: str) -> None:
-    """After wiping every param and float buffer to NaN, one ``reset_parameters``
-    restores all of them to finite values.
+    """After wiping every param and float buffer to NaN.
 
-    A param or float buffer left NaN means a module owns state that
-    ``reset_parameters`` does not initialize -- so it is not the complete single
-    source of truth and would ship ``to_empty`` garbage on the meta path. This
-    mirrors the production ``materialize_meta`` audit, which poisons and checks
-    params AND float buffers (integer buffers cannot hold NaN and are skipped).
+    One ``reset_parameters`` restores all of them to finite values.
+
+        A param or float buffer left NaN means a module owns state that
+        ``reset_parameters`` does not initialize -- so it is not the complete single
+        source of truth and would ship ``to_empty`` garbage on the meta path. This
+        mirrors the production ``materialize_meta`` audit, which poisons and checks
+        params AND float buffers (integer buffers cannot hold NaN and are skipped).
     """
     model = _BUILDERS[name]()
-    # name -> tensor over params + buffers, matching the materialize audit.
+    # Name -> tensor over params + buffers, matching the materialize audit.
     state = [*model.named_parameters(), *model.named_buffers()]
     with torch.no_grad():
         for _, tensor in state:

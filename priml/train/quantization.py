@@ -30,6 +30,7 @@ class NoModelQuantization:
         pass
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         return model
 
 
@@ -45,8 +46,10 @@ class Float8ModelQuantization:
     class Config(Fig["Float8ModelQuantization"]):
         recipe: str = "tensorwise"
         """Quantization recipe ("tensorwise", "rowwise", "rowwise_gw_hp")."""
+
         module_filter: Callable[[nn.Module, str], bool] | None = None
         """Optional filter to select which modules to quantize."""
+
         enable_fsdp_float8_all_gather: bool = False
         """Use float8 all-gather in FSDP (tensorwise only)."""
 
@@ -106,23 +109,21 @@ class Float8ModelQuantization:
             f"fsdp_all_gather={config.enable_fsdp_float8_all_gather}",
         )
 
-    def _default_module_filter(self, mod: nn.Module, _fqn: str) -> bool:
-        """Default filter: all nn.Linear with shapes divisible by 16.
-
-        Pure predicate -- conversion counting happens in ``__call__``.
-        """
+    # Pure predicate -- conversion counting happens in ``__call__``.
+    def _default_module_filter(self, mod: nn.Module, fqn: str) -> bool:
+        """Default filter: all nn.Linear with shapes divisible by 16."""
+        del fqn
         if not isinstance(mod, nn.Linear):
             return False
         # Float8 matmul requires dimensions divisible by 16 (hardware constraint).
         return mod.weight.shape[0] % 16 == 0 and mod.weight.shape[1] % 16 == 0
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         if not self.enabled:
             return model
 
-        from torchao.float8 import (
-            convert_to_float8_training,
-        )
+        from torchao.float8 import convert_to_float8_training
 
         filter_fn = self.module_filter or self._default_module_filter
         # Count conversions by applying the (pure) filter ourselves, so the

@@ -179,6 +179,7 @@ class SwiGLU(nn.Module):
             self.norm = config.norm.make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         self.up_proj.reset_parameters()
         self.down_proj.reset_parameters()
         if self.norm is not None and hasattr(self.norm, "reset_parameters"):
@@ -213,6 +214,10 @@ class SwiGLU(nn.Module):
         DTensor (``use_local_output=False``), so the ``chunk(2)`` in
         ``forward`` splits the *logical* tensor and gate/up halves stay
         aligned across ranks. ``down_proj`` is row-sharded.
+
+        Returns:
+          result: The ParallelStyle.
+
         """
         if self.split_gate_projection:
             raise NotImplementedError(

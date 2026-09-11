@@ -67,3 +67,9 @@ def test_load_rejects_other_qwen_families(tmp_path: Path) -> None:
     torch.save({}, tmp_path / "pytorch_model.bin")
     with pytest.raises(ValueError, match="model_type"):
         Qwen3MMDiTGraft.load(tmp_path)
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

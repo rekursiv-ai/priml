@@ -12,7 +12,8 @@ from torch import Tensor, nn
 import torch
 
 from priml.compile import lazy_torch_compile
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
+from priml.memory import convert_to_tensor
 
 
 @functools.wraps(nn.functional.pad)

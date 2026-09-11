@@ -4,7 +4,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
 from priml.math.numeric import (
     log1mexp,
     log_arctan_exp,
@@ -16,6 +16,7 @@ from priml.math.probability import (
     log_cdf_truncated_normal,
     quantile_truncated_normal,
 )
+from priml.memory import convert_to_tensor
 
 
 __all__ = [
@@ -282,7 +283,7 @@ def log_snr_from_log_time_per_logtan(
     low: Tensorable = -20,
     high: Tensorable = +20,
 ) -> Tensor:
-    """log_snr ∝ -log(tan(t)). The "cosine schedule."
+    """log_snr ∝ -log(tan(t)). The "cosine schedule.".
 
     Regarding shift: rule of thumb for images ≥ 64×64:
         shift = log((64 × 64) / (H × W)).
@@ -317,7 +318,7 @@ def log_snr_from_log_time_per_logtan(
     """
     log_t, shift, low, high = convert_to_tensor(log_t, shift, low, high)
     shift = torch.clamp(shift, low, high)
-    log_b = log_arctan_exp(-0.5 * (high - shift))  # ≈ -∞
+    log_b = log_arctan_exp(-0.5 * (high - shift))  # ≈ -∞.
     log_a = logsubexp(log_arctan_exp(-0.5 * (low - shift)), log_b)  # ≈ log(π/2)
     log_angle = torch.logaddexp(log_a + log_t, log_b)
     log_snr = -2 * log_tan_exp(log_angle) + shift
@@ -368,7 +369,7 @@ def log_snr_from_log_time_per_truncnormicdf(
     high: Tensorable = +20,
     scale: Tensorable = 2,
 ) -> Tensor:
-    """log_snr ∝ Φ_trunc⁻¹(t). The "logistic normal schedule."
+    """log_snr ∝ Φ_trunc⁻¹(t). The "logistic normal schedule.".
 
     Regarding shift: rule of thumb for images ≥ 64×64:
         shift = log((64 × 64) / (H × W)).

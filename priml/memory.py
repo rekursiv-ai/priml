@@ -87,6 +87,9 @@ def convert_to_tensor(
       device: Place all outputs on this device.
       dtype_hint: Fallback dtype when no input carries one.
 
+    Returns:
+      result: The Tensor | tuple[Tensor, ...].
+
     """
     if torch.compiler.is_compiling():
         # Only the dtype default differs from the eager path below: under
@@ -288,32 +291,10 @@ def shares_storage_for_compile(x: Tensor, y: Tensor) -> Tensor:
     )
 
 
-@shares_storage_for_compile.register_fake
-def _(x: Tensor, y: Tensor) -> Tensor:
-    # Tracing sees only shape, dtype and device, so this value is never read;
-    # it exists so dynamo can build the graph without running the real op.
-    del y
-    return torch.empty((), dtype=torch.bool, device=x.device)
-
-
-def _is_dense(x: Tensorable) -> bool:
-    """Whether ``x`` occupies every byte of its span, rather than skipping."""
-    start, end, _ = _byte_span(x)
-    if isinstance(x, Tensor):
-        return x.numel() * x.element_size() == end - start
-    if isinstance(x, np.ndarray):
-        return x.nbytes == end - start
-    # A bufferless value spans one synthetic byte and fills it.
-    return True
-
-
+# The device rides along because each one allocates from its own pointers: a CUDA
+# pointer and a CPU pointer can be the same integer while naming unrelated memory.
 def _byte_span(x: Tensorable) -> tuple[int, int, torch.device | None]:
-    """Half-open byte range ``x`` occupies, and the device holding it.
-
-    The device rides along because each one allocates from its own pointers:
-    a CUDA pointer and a CPU pointer can be the same integer while naming
-    unrelated memory.
-    """
+    """Half-open byte range ``x`` occupies, and the device holding it."""
     if isinstance(x, Tensor):
         # Zero-size and meta tensors report address 0, which would put every
         # one of them at the same place; fall through to identity instead.
@@ -344,6 +325,21 @@ def _byte_span(x: Tensorable) -> tuple[int, int, torch.device | None]:
     return (id(x), id(x) + 1, None)
 
 
+def _is_dense(x: Tensorable) -> bool:
+    """Whether ``x`` occupies every byte of its span, rather than skipping."""
+    start, end, _ = _byte_span(x)
+    if isinstance(x, Tensor):
+        return x.numel() * x.element_size() == end - start
+    if isinstance(x, np.ndarray):
+        return x.nbytes == end - start
+    # A bufferless value spans one synthetic byte and fills it.
+    return True
+
+
+# ``stride_scale`` converts a stride to bytes -- the element width for torch, 1 for
+# numpy, whose strides are already bytes. It is separate from ``item_size`` because the
+# trailing element is ``item_size`` wide in both cases; folding the two together
+# shortened every numpy span by ``itemsize - 1`` bytes.
 def _span_from_strides(
     pointer: int,
     shape: Sequence[int],
@@ -352,14 +348,7 @@ def _span_from_strides(
     stride_scale: int,
     item_size: int,
 ) -> tuple[int, int]:
-    """Bounds of a strided layout, walking each axis from its first element.
-
-    ``stride_scale`` converts a stride to bytes -- the element width for
-    torch, 1 for numpy, whose strides are already bytes. It is separate from
-    ``item_size`` because the trailing element is ``item_size`` wide in both
-    cases; folding the two together shortened every numpy span by
-    ``itemsize - 1`` bytes.
-    """
+    """Bounds of a strided layout, walking each axis from its first element."""
     low = high = pointer
     for size, stride in zip(shape, strides, strict=True):
         # A negative stride runs backwards from the element pointer, so it
@@ -374,6 +363,14 @@ def _span_from_strides(
         else:
             high = high + reach
     return (low, high + item_size)
+
+
+@shares_storage_for_compile.register_fake
+def _(x: Tensor, y: Tensor) -> Tensor:
+    # Tracing sees only shape, dtype and device, so this value is never read;
+    # it exists so dynamo can build the graph without running the real op.
+    del y
+    return torch.empty((), dtype=torch.bool, device=x.device)
 
 
 def _resolve_dtype(xs: tuple[Tensorable, ...]) -> torch.dtype | None:

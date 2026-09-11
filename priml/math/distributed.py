@@ -11,7 +11,8 @@ from torch import Tensor
 import torch
 import torch.distributed
 
-from priml.math.custom_types import Tensorable, convert_to_tensor
+from priml.math.custom_types import Tensorable
+from priml.memory import convert_to_tensor
 
 
 def logsumexp_all_to_all(
@@ -21,6 +22,12 @@ def logsumexp_all_to_all(
     world_size: int | None = None,
 ) -> Tensor:
     """Distributed logsumexp via all_gather + local reduction.
+
+    Args:
+      x: X.
+      dim: Dim.
+      keepdim: Keepdim.
+      world_size: World size.
 
     Returns:
       result: Global logsumexp over the specified dimensions.
@@ -37,6 +44,12 @@ def logmeanexp_all_to_all(
 ) -> Tensor:
     """Distributed logmeanexp via all_gather + local reduction.
 
+    Args:
+      x: X.
+      dim: Dim.
+      keepdim: Keepdim.
+      world_size: World size.
+
     Returns:
       result: Global logmeanexp over the specified dimensions.
 
@@ -44,6 +57,10 @@ def logmeanexp_all_to_all(
     return _logsumexp_all_to_all(x, dim, keepdim, world_size, mean=True)
 
 
+# Each rank computes a local logsumexp, then all ranks exchange their partial results
+# via all_gather and apply a second logsumexp to get the global result. Analogous to
+# jax.lax.psum over log-space reductions and tfp.math.reduce_logmeanexp with cross-
+# replica reduction.
 def _logsumexp_all_to_all(
     x: Tensorable,
     dim: int | Sequence[int] = -1,
@@ -51,14 +68,7 @@ def _logsumexp_all_to_all(
     world_size: int | None = None,
     mean: bool = False,
 ) -> Tensor:
-    """Distributed logsumexp via all_gather + local reduction.
-
-    Each rank computes a local logsumexp, then all ranks exchange their
-    partial results via all_gather and apply a second logsumexp to get
-    the global result. Analogous to jax.lax.psum over log-space
-    reductions and tfp.math.reduce_logmeanexp with cross-replica
-    reduction.
-    """
+    """Distributed logsumexp via all_gather + local reduction."""
     x = convert_to_tensor(x)
     partial_result = torch.logsumexp(x, dim=dim, keepdim=keepdim)
     reduced = partial_result.numel()

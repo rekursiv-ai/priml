@@ -60,7 +60,7 @@ def test_kv_cache_fifo_rolling():
         v = torch.full((1, 1, 1, 2), float(i))
         cache.update(k, v)
     assert cache.length == 4
-    # One more should FIFO
+    # One more should FIFO.
     k = torch.full((1, 1, 1, 2), 99.0)
     v = torch.full((1, 1, 1, 2), 99.0)
     k_out, _v_out = cache.update(k, v)

@@ -38,7 +38,7 @@ def test_weighted_sum_basic():
 
     result = loss()
 
-    assert result["loss"].item() == 1.5  # 0.5*1.0 + 0.5*2.0
+    assert result["loss"].item() == 1.5  # 0.5*1.0 + 0.5*2.0.
     assert "loss_0" in result
     assert "loss_1" in result
     assert result["loss_0"].item() == 1.0
@@ -55,7 +55,7 @@ def test_weighted_sum_different_weights():
 
     result = loss()
 
-    assert result["loss"].item() == 17.0  # 0.3*10.0 + 0.7*20.0
+    assert result["loss"].item() == 17.0  # 0.3*10.0 + 0.7*20.0.
     assert result["loss_0"].item() == 10.0
     assert result["loss_1"].item() == 20.0
 
@@ -70,7 +70,7 @@ def test_weighted_sum_single_loss():
 
     result = loss()
 
-    assert result["loss"].item() == 10.0  # 2.0*5.0
+    assert result["loss"].item() == 10.0  # 2.0*5.0.
     assert "loss_0" in result
 
 
@@ -88,7 +88,7 @@ def test_weighted_sum_three_losses():
 
     result = loss()
 
-    assert result["loss"].item() == 6.0  # 1.0*1.0 + 1.0*2.0 + 1.0*3.0
+    assert result["loss"].item() == 6.0  # 1.0*1.0 + 1.0*2.0 + 1.0*3.0.
     assert "loss_0" in result
     assert "loss_1" in result
     assert "loss_2" in result
@@ -104,8 +104,8 @@ def test_weighted_sum_zero_weight():
 
     result = loss()
 
-    assert result["loss"].item() == 5.0  # 0.0*100.0 + 1.0*5.0
-    assert result["loss_0"].item() == 100.0  # Unscaled preserves original
+    assert result["loss"].item() == 5.0  # 0.0*100.0 + 1.0*5.0.
+    assert result["loss_0"].item() == 100.0  # Unscaled preserves original.
 
 
 def test_weighted_sum_accepts_plain_callable_loss() -> None:

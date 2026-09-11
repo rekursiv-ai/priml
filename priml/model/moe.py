@@ -34,14 +34,15 @@ class TokenRouter(Protocol):
 
     @property
     def scoring_func(self) -> str:
-        """Gate activation. ``MoE`` reads it to decide whether the
-        load-balancing auxiliary loss applies: softmax routing needs it,
-        sigmoid routing is aux-loss-free and carries its balance in the
-        router's own bias.
+        """Gate activation.
 
-        Read-only, so an implementation may hold it at a narrower type -- a
-        mutable ``str`` member is invariant and would reject the ``Literal``
-        the shipped ``Router`` stores.
+        ``MoE`` reads it to decide whether the load-balancing auxiliary loss applies:
+        softmax routing needs it, sigmoid routing is aux-loss-free and carries its
+        balance in the router's own bias.
+
+                Read-only, so an implementation may hold it at a narrower type -- a
+                mutable ``str`` member is invariant and would reject the ``Literal``
+                the shipped ``Router`` stores.
         """
         ...
 
@@ -54,7 +55,9 @@ class TokenRouter(Protocol):
         """Return ``(weights, indices, logits)`` for one flat token batch."""
         ...
 
-    def reset_parameters(self) -> None: ...
+    def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
+        ...
 
 
 @runtime_checkable
@@ -189,6 +192,7 @@ class Router(nn.Module):
             self.e_score_correction_bias = None
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         nn.init.kaiming_uniform_(self.gate.weight, a=5**0.5)
         if self.e_score_correction_bias is not None:
             self.e_score_correction_bias.zero_()
@@ -344,6 +348,7 @@ class MoE(nn.Module):
         self._aux_loss = torch.tensor(0.0)
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         # Sole init source for every owned tensor (meta-init audit
         # contract): ``_aux_loss`` is runtime scratch overwritten each
         # forward, but as a registered buffer it must still be reset here.
@@ -380,6 +385,9 @@ class MoE(nn.Module):
         assert isinstance(y, Tensor)
         return y.reshape(*shape[:-1], self.channels_out)
 
+    # Produces one expert forward per *active* expert (at most ``top_k * num_tokens``,
+    # typically ≪ ``num_experts`` for large MoEs). Numerically equivalent to the mask-
+    # per-expert form.
     def _dispatch_routed(
         self,
         x_flat: Tensor,
@@ -388,12 +396,7 @@ class MoE(nn.Module):
         num_tokens: int,
         **kwargs: object,
     ) -> Tensor:
-        """Sort (token, expert) pairs by expert; dispatch contiguously.
-
-        Produces one expert forward per *active* expert (at most
-        ``top_k * num_tokens``, typically ≪ ``num_experts`` for large
-        MoEs). Numerically equivalent to the mask-per-expert form.
-        """
+        """Sort (token, expert) pairs by expert; dispatch contiguously."""
         k = indices.shape[-1]
         flat_idx = indices.reshape(-1)
         flat_w = weights.reshape(-1)
@@ -448,10 +451,8 @@ class MoE(nn.Module):
         return self.num_experts * (freq * mean_probs).sum() * self.aux_loss_weight
 
 
+# Central chokepoint for the upstream torch stubs, whose ``Tensor.tolist()`` return type
+# is ``list[Unknown]``.
 def _as_int_list(t: Tensor) -> list[int]:
-    """Materialize a 1-D tensor as ``list[int]``.
-
-    Central chokepoint for the upstream torch stubs, whose
-    ``Tensor.tolist()`` return type is ``list[Unknown]``.
-    """
+    """Materialize a 1-D tensor as ``list[int]``."""
     return cast(list[int], t.tolist())

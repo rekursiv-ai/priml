@@ -131,7 +131,7 @@ class FactoredPositions(nn.Module):
             )
         self.config = config
         self.embed_scale: float = (
-            math.sqrt(config.channels) if config.embed_scale < 0 else config.embed_scale
+            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         cell = torch.arange(rows * cols)
         row = cell // cols
@@ -202,7 +202,7 @@ class PredictionFeedback(nn.Module):
             )
         self.config = config
         self.embed_scale: float = (
-            math.sqrt(config.channels) if config.embed_scale < 0 else config.embed_scale
+            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         self.embed_feedback = _table(
             config.vocab_size,
@@ -292,7 +292,7 @@ class GridEmbedding(nn.Module):
                 "is normally inherited from the model during finalize.",
             )
         self.config = config
-        self.embed_scale: float = math.sqrt(config.channels_in)
+        self.embed_scale: float = config.channels_in**0.5
         self.embed_tokens = Embedding.Config(
             channels_out=config.channels_in,
             num_embeddings=config.vocab_size,
@@ -329,18 +329,16 @@ class GridEmbedding(nn.Module):
         return embeddings
 
 
+# The std passed to the initializer is divided by ``sqrt(channels)`` because the caller
+# multiplies by that factor at runtime (the embedding rescale trick), so the two cancel
+# and the effective std is ``init_std``.
 def _table(
     num_embeddings: int,
     *,
     channels: int,
     init_std: float,
 ) -> nn.Parameter:
-    """A learned table whose REALIZED std is ``init_std`` after rescaling.
-
-    The std passed to the initializer is divided by ``sqrt(channels)``
-    because the caller multiplies by that factor at runtime (the embedding
-    rescale trick), so the two cancel and the effective std is ``init_std``.
-    """
+    """Return a learned table whose REALIZED std is ``init_std`` after rescaling."""
     w = torch.zeros(num_embeddings, channels)
     if init_std > 0:
         truncated_normal(

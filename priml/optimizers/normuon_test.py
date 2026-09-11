@@ -156,8 +156,9 @@ def test_row_rescaling_redistributes_without_resizing() -> None:
 
 
 def test_a_vector_is_rejected() -> None:
-    """Orthogonalizing a rank-1 tensor is undefined, so it must not be routed
-    here silently.
+    """Orthogonalizing a rank-1 tensor is undefined.
+
+    It must not be routed here silently.
     """
     params = _parameters((8,))
     with pytest.raises(ValueError, match="ndim >= 2"):

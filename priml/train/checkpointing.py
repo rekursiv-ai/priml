@@ -54,7 +54,9 @@ class _Checkpoint:
     """A checkpoint found on disk (internal scan record): step, path, complete."""
 
     step: int
+
     path: Path
+
     complete: bool
     """A plain ``.pt`` file (atomic rename) is always complete; a shard dir is
     complete once its ``.metadata`` marker is present."""
@@ -105,6 +107,12 @@ class StateDictStorer(Protocol):
         background thread, after the write lands, for an async one) -- this is
         how retention rides the write pipeline. May be collective; called in
         lockstep on all ranks.
+
+        Args:
+          path: Path.
+          state_dict: State dict.
+          after_write: After write.
+
         """
         ...
 
@@ -114,6 +122,14 @@ class StateDictStorer(Protocol):
         Returns the restored state (callers use the return, not ``into``).
         ``path`` is assumed complete (the caller selected it via ``is_complete``).
         May be collective; called in lockstep on all ranks.
+
+        Args:
+          path: Path.
+          into: Into.
+
+        Returns:
+          result: The StateDict.
+
         """
         ...
 
@@ -124,6 +140,13 @@ class StateDictStorer(Protocol):
         with a still-running write to ``path`` reports it incomplete *without
         blocking* (so the hot path stays clear); ``flush`` forces those writes
         to land. True only once all ranks' bytes are durable.
+
+        Args:
+          path: Path.
+
+        Returns:
+          result: The bool.
+
         """
         ...
 
@@ -149,8 +172,8 @@ class SyncLocalStateDictStorer:
     class Config(Fig["SyncLocalStateDictStorer"]):
         """Synchronous local storer configuration (empty)."""
 
-    def __init__(self, _config: Config | None = None) -> None:
-        pass
+    def __init__(self, config: Config | None = None) -> None:
+        del config
 
     def write(
         self,
@@ -166,6 +189,12 @@ class SyncLocalStateDictStorer:
         atomically renamed, so a present file is never partial. ``after_write``
         (retention) runs on every rank once the write is durable; it self-guards
         rank-0-only work.
+
+        Args:
+          path: Path.
+          state_dict: State dict.
+          after_write: After write.
+
         """
         start = time.perf_counter()
         if _has_dtensor(state_dict):
@@ -197,11 +226,28 @@ class SyncLocalStateDictStorer:
         after_write()
 
     def read(self, path: Path, into: StateDict) -> StateDict:
-        """Load the checkpoint at ``path`` (DCP dir reshards; ``.pt`` file loads)."""
+        """Load the checkpoint at ``path`` (DCP dir reshards; ``.pt`` file loads).
+
+        Args:
+          path: Path.
+          into: Into.
+
+        Returns:
+          result: The StateDict.
+
+        """
         return _read_checkpoint(path, into)
 
     def is_complete(self, path: Path) -> bool:
-        """Whether ``path`` is a finished checkpoint, not a crashed partial."""
+        """Whether ``path`` is a finished checkpoint, not a crashed partial.
+
+        Args:
+          path: Path.
+
+        Returns:
+          result: The bool.
+
+        """
         return _is_complete(path)
 
     def flush(self) -> None:
@@ -239,7 +285,8 @@ class AsyncLocalStateDictStorer:
     class Config(Fig["AsyncLocalStateDictStorer"]):
         """Asynchronous local storer configuration (empty)."""
 
-    def __init__(self, _config: Config | None = None) -> None:
+    def __init__(self, config: Config | None = None) -> None:
+        del config
         self._pending: Future[Any] | None = None
         self._after_write: Callable[[], None] = lambda: None
         self._pending_path: Path | None = None
@@ -257,6 +304,12 @@ class AsyncLocalStateDictStorer:
         de-stages and launches this one. ``state_dict`` is safe to mutate on
         return; durability and ``after_write`` complete at the next join
         (``write``/``read``/``flush``).
+
+        Args:
+          path: Path.
+          state_dict: State dict.
+          after_write: After write.
+
         """
         self._join()
         path.mkdir(parents=True, exist_ok=True)
@@ -274,6 +327,14 @@ class AsyncLocalStateDictStorer:
 
         Dispatches on the on-disk format just like the sync backend, so toggling
         ``async_save`` on for a resume of a sync-written run loads correctly.
+
+        Args:
+          path: Path.
+          into: Into.
+
+        Returns:
+          result: The StateDict.
+
         """
         self._join()
         return _read_checkpoint(path, into)
@@ -283,6 +344,13 @@ class AsyncLocalStateDictStorer:
 
         An in-flight write reports incomplete because DCP writes ``.metadata``
         last; no special-casing or blocking is needed.
+
+        Args:
+          path: Path.
+
+        Returns:
+          result: The bool.
+
         """
         return _is_complete(path)
 
@@ -291,16 +359,19 @@ class AsyncLocalStateDictStorer:
         self._join()
 
     def has_pending_write(self) -> bool:
-        """Whether a background write is still in flight (for tests/diagnostics)."""
+        """Whether a background write is still in flight (for tests/diagnostics).
+
+        Returns:
+          result: The bool.
+
+        """
         return self._pending is not None
 
+    # Called only from all-rank entry points (``write``, ``read``, ``flush``), so the
+    # barrier is reached in lockstep. ``after_write`` (retention) runs after the write
+    # is durable and before the barrier.
     def _join(self) -> None:
-        """Await the in-flight write, run its ``after_write``, barrier -- lockstep.
-
-        Called only from all-rank entry points (``write``, ``read``, ``flush``),
-        so the barrier is reached in lockstep. ``after_write`` (retention) runs
-        after the write is durable and before the barrier.
-        """
+        """Await the in-flight write, run its ``after_write``, barrier -- lockstep."""
         if self._pending is not None:
             self._pending.result()
             self._pending = None
@@ -322,6 +393,82 @@ class AsyncLocalStateDictStorer:
             dist.barrier()
 
 
+# Used to exempt the RNG blob from ``_read_checkpoint``'s device remap: torch's RNG
+# states (``torch.get_rng_state()`` and each entry of
+# ``torch.cuda.get_rng_state_all()``) are CPU ``ByteTensor``s, and ``set_rng_state`` /
+# ``set_rng_state_all`` reject anything on another device.
+def _to_cpu(obj: object) -> object:
+    """Recursively move every tensor in ``obj`` to CPU, preserving structure."""
+    if isinstance(obj, Tensor):
+        return obj.cpu()
+    if isinstance(obj, Mapping):
+        mapping = cast(Mapping[object, object], obj)
+        return {k: _to_cpu(v) for k, v in mapping.items()}
+    if isinstance(obj, list):
+        items = cast(list[object], obj)
+        return [_to_cpu(v) for v in items]
+    if isinstance(obj, tuple):
+        elems = cast(tuple[object, ...], obj)
+        return tuple(_to_cpu(v) for v in elems)
+    return obj
+
+
+# A DCP *directory* is loaded in place into ``into``, resharding each tensor to this
+# rank's current placement (so a load survives a world-size change), and returned. A
+# plain ``.pt`` *file* is ``torch.load``ed and the fresh dict returned. Shared by every
+# ``StateDictStorer`` because the format is a property of what is on disk, not of which
+# backend wrote it -- so a dir written by one backend loads through another. ``path`` is
+# assumed complete.
+#
+# The ``.pt`` load maps storages to this rank's current device. Without a
+# ``map_location``, tensors deserialize onto their saved device.
+#
+# The RNG blob is exempt: ``torch.get_rng_state()`` is a CPU ``uint8`` tensor and
+# ``torch.set_rng_state`` rejects anything that is not a CPU ``ByteTensor``. Mapping it
+# onto CUDA alongside the model/optimizer tensors would make the restored RNG state
+# unusable, so its subtree is pulled back to CPU after the load.
+def _read_checkpoint(path: Path, into: StateDict) -> StateDict:
+    """Load a checkpoint, dispatching on its on-disk format (backend-agnostic)."""
+    if path.is_dir():
+        state_dict_loader.load(into, checkpoint_id=str(path))
+        return into
+    if torch.cuda.is_available():
+        map_location = torch.device("cuda", torch.cuda.current_device())
+    else:
+        map_location = torch.device("cpu")
+    blob = cast(
+        StateDict,
+        torch.load(path, weights_only=True, map_location=map_location),
+    )
+    if "rng" in blob:
+        blob["rng"] = _to_cpu(blob["rng"])
+    return blob
+
+
+# A plain file is complete by existence (atomic rename). A DCP directory is complete
+# once its ``.metadata`` marker -- written last -- is present. Pure disk read; shared by
+# every ``StateDictStorer`` (completeness is a disk property).
+def _is_complete(path: Path) -> bool:
+    """Whether ``path`` is a finished checkpoint, not a crashed partial."""
+    if path.is_dir():
+        return (path / ".metadata").exists()
+    return path.is_file()
+
+
+# DTensor-bearing state (sharded model/optimizer under FSDP/HSDP) cannot be persisted by
+# a plain ``torch.save`` of one rank -- that stores a single shard mislabeled as the
+# whole tensor -- so it is routed to distributed checkpointing instead.
+def _has_dtensor(obj: object) -> bool:
+    """Whether ``obj`` contains a ``DTensor`` anywhere in its structure."""
+    if isinstance(obj, DTensor):
+        return True
+    if isinstance(obj, Mapping):
+        return any(_has_dtensor(v) for v in cast(Iterable[object], obj.values()))
+    if isinstance(obj, (list, tuple, set)):
+        return any(_has_dtensor(v) for v in cast(Iterable[object], obj))
+    return False
+
+
 class Checkpointer:
     """The stepped disk engine: save cadence, resume, overwrite-guard, retention.
 
@@ -336,14 +483,19 @@ class Checkpointer:
     class Config(Fig["Checkpointer"]):
         base_dir: Path | str | None = None
         """Owner directory supplied during parent finalization."""
+
         working_dir: Path | str = "/checkpoints"
         """Logical checkpoint directory."""
+
         filename: str = "step_{step:08d}.pt"
         """Checkpoint filename template containing one decimal ``{step}`` field."""
+
         save_every: int = 1000
         """Save cadence: a checkpoint is written at every multiple of this step."""
+
         keep_last_n: int = -1
         """Retain at most this many newest checkpoints (-1 = keep all)."""
+
         keep_every: int = 0
         """Also retain every checkpoint whose step is a multiple of this (0 =
         off). Archival retention on top of ``keep_last_n``: checkpoints on
@@ -351,12 +503,14 @@ class Checkpointer:
         trajectory snapshots (ensembling, transfer sources, analysis) while
         the rolling window stays small. Must be a multiple of ``save_every``
         so the archival steps actually land on the save cadence."""
+
         storer: Makeable[StateDictStorer] = field(
             default_factory=SyncLocalStateDictStorer.Config,
         )
         """Backend that persists/restores the state dict. Defaults to synchronous
         local-disk; use ``AsyncLocalStateDictStorer.Config`` to overlap the disk
         write with training (one save in flight, a CPU snapshot per save)."""
+
         resume: bool = True
         """Resume from an existing checkpoint on ``load`` when one is present.
 
@@ -364,8 +518,10 @@ class Checkpointer:
         ``resume_step=-1`` (latest): load the largest checkpoint if any exist,
         else start fresh. With ``resume_step>=0``: load exactly that step or
         raise. ``resume=False`` never loads (always starts fresh)."""
+
         resume_step: int = -1
         """Which checkpoint ``load`` restores: -1 = latest, >=0 = that exact step."""
+
         allow_checkpoint_overwrite: bool = False
         """Permit saves that would overwrite an existing checkpoint. Off by
         default: ``load`` halts the run at startup if a future save on the
@@ -447,6 +603,14 @@ class Checkpointer:
 
         The cadence decision and the write are one call (no should/do gap). Step
         0 is never saved. Pruning rides the write's ``after_write`` callback.
+
+        Args:
+          target: Target.
+          step: Step.
+
+        Returns:
+          result: The bool.
+
         """
         if step == 0 or step % self.save_every != 0:
             return False
@@ -463,6 +627,11 @@ class Checkpointer:
         Drains any pending async write first: its background barrier must
         complete before this method's collective broadcast, or the two
         collectives interleave and desync the ranks.
+
+        Args:
+          target: Target.
+          step: Step.
+
         """
         self.storage.flush()
         exists = step in self.available_steps()
@@ -493,8 +662,17 @@ class Checkpointer:
 
         Returns True iff a checkpoint was restored (so the loop's start step is
         the resumed one, already set inside ``target``).
+
+        Args:
+          target: Target.
+          max_steps: Max steps.
+          guard: Guard.
+
+        Returns:
+          result: The bool.
+
         """
-        self.storage.flush()  # a just-issued async write must be visible to resume
+        self.storage.flush()  # a just-issued async write must be visible to resume.
         inventory = [c for c in self._list() if c.complete]
         resumed_step = self._resume(target, inventory) if self.resume else None
         if guard and not self.allow_checkpoint_overwrite:
@@ -509,17 +687,15 @@ class Checkpointer:
         """
         self.storage.flush()
 
+    # ``resume_step>=0`` requires that exact step (raises if absent); ``resume_step<0``
+    # reverse-indexes the complete checkpoints, returning None on an empty dir (start
+    # fresh).
     def _resume(
         self,
         target: CheckpointableProtocol,
         inventory: list[_Checkpoint],
     ) -> int | None:
-        """Restore the checkpoint selected by ``resume_step``; return its step.
-
-        ``resume_step>=0`` requires that exact step (raises if absent);
-        ``resume_step<0`` reverse-indexes the complete checkpoints, returning
-        None on an empty dir (start fresh).
-        """
+        """Restore the checkpoint selected by ``resume_step``; return its step."""
         if self.resume_step >= 0:
             chosen = next((c for c in inventory if c.step == self.resume_step), None)
             if chosen is None:
@@ -542,20 +718,17 @@ class Checkpointer:
         target.load_state_dict(blob)
         return chosen.step
 
+    # Predicts the full collision set up front from existing complete checkpoints
+    # (incomplete partials are not protected). Uses ``max_steps`` as the trajectory
+    # bound, so an early-stopping run may be refused over a collision it would not reach
+    # -- a deliberate bias toward refusing rather than silently overwriting.
     def _guard_overwrite(
         self,
         inventory: list[_Checkpoint],
         start_step: int,
         max_steps: float,
     ) -> None:
-        """Halt if a future save in ``(start_step, max_steps]`` would overwrite.
-
-        Predicts the full collision set up front from existing complete
-        checkpoints (incomplete partials are not protected). Uses ``max_steps``
-        as the trajectory bound, so an early-stopping run may be refused over a
-        collision it would not reach -- a deliberate bias toward refusing rather
-        than silently overwriting.
-        """
+        """Halt if a future save in ``(start_step, max_steps]`` would overwrite."""
         collisions = [
             c.step
             for c in inventory
@@ -580,11 +753,17 @@ class Checkpointer:
         )
 
     def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics)."""
+        """Ascending steps of all complete checkpoints on disk (for diagnostics).
+
+        Returns:
+          result: The list[int].
+
+        """
         return sorted(c.step for c in self._list() if c.complete)
 
+    # A file and a shard dir share this stem.
     def _path(self, step: int) -> Path:
-        """The on-disk path for ``step`` (a file and a shard dir share this stem)."""
+        """Return the on-disk path for ``step``."""
         return self.checkpoint_dir / self.filename.format(step=step)
 
     def _list(self) -> list[_Checkpoint]:
@@ -595,7 +774,7 @@ class Checkpointer:
         for entry in self.checkpoint_dir.iterdir():
             step = self._parse_step(entry.name)
             if step is None:
-                continue  # malformed (e.g. ``step_latest.pt``) or a temp file
+                continue  # malformed (e.g. ``step_latest.pt``) or a temp file.
             out.append(
                 _Checkpoint(
                     step=step, path=entry, complete=self.storage.is_complete(entry)
@@ -604,25 +783,20 @@ class Checkpointer:
         out.sort(key=lambda c: c.step)
         return out
 
+    # None covers a non-matching prefix/suffix, a temp file (``.pt.tmp``), and a
+    # matching shape whose middle is not an integer (e.g. ``step_latest.pt``).
     def _parse_step(self, name: str) -> int | None:
-        """Decode a checkpoint step from ``name``; None if it does not match.
-
-        None covers a non-matching prefix/suffix, a temp file (``.pt.tmp``), and
-        a matching shape whose middle is not an integer (e.g. ``step_latest.pt``).
-        """
+        """Decode a checkpoint step from ``name``; None if it does not match."""
         match = self._filename_pattern.fullmatch(name)
         return int(match.group("step")) if match is not None else None
 
+    # Runs as ``storage.write``'s ``after_write`` on every rank, so it self-guards to
+    # rank 0 (deletion is rank-0 file I/O; no other rank reads an aged-out checkpoint
+    # mid-run, so no barrier is needed). Counts and deletes only *complete* checkpoints:
+    # a partial is either crashed or an in-flight write, never a retention candidate.
+    # Checkpoints on the ``keep_every`` archival interval are exempt.
     def _prune(self) -> None:
-        """Delete complete checkpoints beyond ``keep_last_n``, oldest first.
-
-        Runs as ``storage.write``'s ``after_write`` on every rank, so it
-        self-guards to rank 0 (deletion is rank-0 file I/O; no other rank reads
-        an aged-out checkpoint mid-run, so no barrier is needed). Counts and
-        deletes only *complete* checkpoints: a partial is either crashed or an
-        in-flight write, never a retention candidate. Checkpoints on the
-        ``keep_every`` archival interval are exempt.
-        """
+        """Delete complete checkpoints beyond ``keep_last_n``, oldest first."""
         if not is_rank_zero() or self.keep_last_n < 0:
             return
         complete = [c for c in self._list() if c.complete]
@@ -630,9 +804,9 @@ class Checkpointer:
             if self.keep_every > 0 and doomed.step % self.keep_every == 0:
                 continue  # Archival snapshot: retained forever.
             try:
-                if doomed.path.is_dir():  # a shard checkpoint
+                if doomed.path.is_dir():  # a shard checkpoint.
                     shutil.rmtree(doomed.path)
-                else:  # a plain .pt file
+                else:  # a plain .pt file.
                     doomed.path.unlink()
                 logger.info(
                     "Purged checkpoint %s (keep_last_n=%d).",
@@ -652,101 +826,13 @@ def _dir_size_mb(path: Path) -> float:
     return total / 1024**2
 
 
+# A per-rank checkpoint-existence check can disagree (a shard becomes visible on one
+# rank before another), which would let one rank skip a save while the others enter the
+# save barrier -- a deadlock. Rank 0's view wins.
 def _agreed_across_ranks(verdict: bool) -> bool:
-    """Broadcast rank 0's boolean ``verdict`` so every rank takes the same branch.
-
-    A per-rank checkpoint-existence check can disagree (a shard becomes visible
-    on one rank before another), which would let one rank skip a save while the
-    others enter the save barrier -- a deadlock. Rank 0's view wins.
-    """
+    """Broadcast rank 0's boolean ``verdict`` so every rank takes the same branch."""
     if not dist.is_initialized():
         return verdict
     shared = [verdict]
     dist.broadcast_object_list(shared, src=0)
     return shared[0]
-
-
-def _read_checkpoint(path: Path, into: StateDict) -> StateDict:
-    """Load a checkpoint, dispatching on its on-disk format (backend-agnostic).
-
-    A DCP *directory* is loaded in place into ``into``, resharding each tensor to
-    this rank's current placement (so a load survives a world-size change), and
-    returned. A plain ``.pt`` *file* is ``torch.load``ed and the fresh dict
-    returned. Shared by every ``StateDictStorer`` because the format is a property of
-    what is on disk, not of which backend wrote it -- so a dir written by one
-    backend loads through another. ``path`` is assumed complete.
-
-    The ``.pt`` load maps storages to this rank's current device. Without a
-    ``map_location``, tensors deserialize onto their saved device.
-
-    The RNG blob is exempt: ``torch.get_rng_state()`` is a CPU ``uint8`` tensor
-    and ``torch.set_rng_state`` rejects anything that is not a CPU
-    ``ByteTensor``. Mapping it onto CUDA alongside the model/optimizer tensors
-    would make the restored RNG state unusable, so its subtree is pulled back to
-    CPU after the load.
-    """
-    if path.is_dir():
-        state_dict_loader.load(into, checkpoint_id=str(path))
-        return into
-    if torch.cuda.is_available():
-        map_location = torch.device("cuda", torch.cuda.current_device())
-    else:
-        map_location = torch.device("cpu")
-    blob = cast(
-        StateDict,
-        torch.load(path, weights_only=True, map_location=map_location),
-    )
-    if "rng" in blob:
-        blob["rng"] = _to_cpu(blob["rng"])
-    return blob
-
-
-def _to_cpu(obj: object) -> object:
-    """Recursively move every tensor in ``obj`` to CPU, preserving structure.
-
-    Used to exempt the RNG blob from ``_read_checkpoint``'s device remap: torch's
-    RNG states (``torch.get_rng_state()`` and each entry of
-    ``torch.cuda.get_rng_state_all()``) are CPU ``ByteTensor``s, and
-    ``set_rng_state`` / ``set_rng_state_all`` reject anything on another device.
-    """
-    if isinstance(obj, Tensor):
-        return obj.cpu()
-    if isinstance(obj, Mapping):
-        mapping = cast(Mapping[object, object], obj)
-        return {k: _to_cpu(v) for k, v in mapping.items()}
-    if isinstance(obj, list):
-        items = cast(list[object], obj)
-        return [_to_cpu(v) for v in items]
-    if isinstance(obj, tuple):
-        elems = cast(tuple[object, ...], obj)
-        return tuple(_to_cpu(v) for v in elems)
-    return obj
-
-
-def _is_complete(path: Path) -> bool:
-    """Whether ``path`` is a finished checkpoint, not a crashed partial.
-
-    A plain file is complete by existence (atomic rename). A DCP directory is
-    complete once its ``.metadata`` marker -- written last -- is present. Pure
-    disk read; shared by every ``StateDictStorer`` (completeness is a disk property).
-    """
-    if path.is_dir():
-        return (path / ".metadata").exists()
-    return path.is_file()
-
-
-def _has_dtensor(obj: object) -> bool:
-    """Whether ``obj`` contains a ``DTensor`` anywhere in its structure.
-
-    DTensor-bearing state (sharded model/optimizer under FSDP/HSDP) cannot be
-    persisted by a plain ``torch.save`` of one rank -- that stores a single
-    shard mislabeled as the whole tensor -- so it is routed to distributed
-    checkpointing instead.
-    """
-    if isinstance(obj, DTensor):
-        return True
-    if isinstance(obj, Mapping):
-        return any(_has_dtensor(v) for v in cast(Iterable[object], obj.values()))
-    if isinstance(obj, (list, tuple, set)):
-        return any(_has_dtensor(v) for v in cast(Iterable[object], obj))
-    return False

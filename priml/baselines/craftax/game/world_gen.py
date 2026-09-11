@@ -15,6 +15,8 @@ same distribution, since every draw here is independent per environment.
 
 from __future__ import annotations
 
+import functools
+
 from torch import Tensor
 from torch.nn import functional
 
@@ -145,16 +147,15 @@ def generate_smooth_world(
         distance / config.player_proximity_map_mountain_strength
     ).clamp(max=config.player_proximity_map_mountain_max)
 
-    def noise(resolution: tuple[int, int]) -> Tensor:
-        return fractal_noise(
-            num_envs=num_envs,
-            shape=shape,
-            resolution=resolution,
-            generator=generator,
-            device=device,
-        )
+    noise = functools.partial(
+        fractal_noise,
+        num_envs=num_envs,
+        shape=shape,
+        generator=generator,
+        device=device,
+    )
 
-    water = noise(coarse) + water_clearance - 1.0
+    water = noise(resolution=coarse) + water_clearance - 1.0
     blocks = torch.where(
         water > config.water_threshold,
         config.sea_block,
@@ -166,13 +167,13 @@ def generate_smooth_world(
         blocks,
     )
 
-    mountain = noise(coarse) + 0.05 + mountain_clearance - 1.0
+    mountain = noise(resolution=coarse) + 0.05 + mountain_clearance - 1.0
     is_mountain = mountain > 0.7
     blocks = torch.where(is_mountain, config.mountain_block, blocks)
 
     # One noise field, used along both axes, cuts the passes through the
     # ranges; sharing it is what makes the paths meet at right angles.
-    ridge = noise(stretched)
+    ridge = noise(resolution=stretched)
     blocks = torch.where(is_mountain & (ridge > 0.8), config.path_block, blocks)
     blocks = torch.where(
         is_mountain & (ridge.transpose(-2, -1) > 0.8),
@@ -185,7 +186,7 @@ def generate_smooth_world(
         blocks,
     )
 
-    tree_noise = noise(detailed)
+    tree_noise = noise(resolution=detailed)
     grows = (tree_noise > config.tree_threshold_perlin) * torch.rand(
         (num_envs, *shape),
         generator=generator,
@@ -442,6 +443,8 @@ def _distance_from(
     return (rows[:, None] ** 2 + columns[None, :] ** 2).float().sqrt()
 
 
+# A floor with no eligible tile would make the draw undefined, so an all-zero row falls
+# back to a uniform choice rather than raising.
 def _sample_tile(
     weights: Tensor,
     shape: tuple[int, int],
@@ -449,11 +452,7 @@ def _sample_tile(
     generator: torch.Generator | None,
     device: torch.device,
 ) -> Tensor:
-    """Draw one tile per environment, proportional to ``weights``.
-
-    A floor with no eligible tile would make the draw undefined, so an
-    all-zero row falls back to a uniform choice rather than raising.
-    """
+    """Draw one tile per environment, proportional to ``weights``."""
     safe = torch.where(
         weights.sum(-1, keepdim=True) > 0,
         weights,
@@ -518,6 +517,8 @@ def _place_room_features(
     )
 
 
+# Only wall is replaced: running the corridor over an existing room would erase its
+# chest or fountain.
 def _carve_corridor(
     blocks: Tensor,
     *,
@@ -525,11 +526,7 @@ def _carve_corridor(
     sink: Tensor,
     device: torch.device,
 ) -> Tensor:
-    """Cut an L-shaped passage between two rooms through solid wall only.
-
-    Only wall is replaced: running the corridor over an existing room would
-    erase its chest or fountain.
-    """
+    """Cut an L-shaped passage between two rooms through solid wall only."""
     rows = torch.arange(blocks.shape[-2], device=device)[None, :, None]
     columns = torch.arange(blocks.shape[-1], device=device)[None, None, :]
     source_row, source_column = source[:, 0, None, None], source[:, 1, None, None]

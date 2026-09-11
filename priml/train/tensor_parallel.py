@@ -79,7 +79,12 @@ class TensorParallelStyleProvider(Protocol):
     """
 
     def tensor_parallel_style(self) -> ParallelStyle:
-        """Return the ``ParallelStyle`` that shards this layer over ``tp``."""
+        """Return the ``ParallelStyle`` that shards this layer over ``tp``.
+
+        Returns:
+          result: The ParallelStyle.
+
+        """
         ...
 
 
@@ -176,6 +181,7 @@ class TensorParallel:
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         # Placed before sharding, through the shared helper, so the plan sees
         # real tensors -- and so this strategy cannot drift from the four in
         # ``train/parallelism.py`` the way it did when it moved with ``.to``.
@@ -183,12 +189,10 @@ class TensorParallel:
         return apply_tensor_parallel(model, self.mesh, mesh_dim=self.mesh_dim)
 
 
+# Custom layers take priority via ``tensor_parallel_style``; standard
+# ``nn.Linear``/``nn.Embedding`` blocks dispatch on their ``shard`` field.
 def _shard_style(module: nn.Module) -> ParallelStyle | None:
-    """Resolve the ``ParallelStyle`` for a single submodule, or ``None``.
-
-    Custom layers take priority via ``tensor_parallel_style``; standard
-    ``nn.Linear``/``nn.Embedding`` blocks dispatch on their ``shard`` field.
-    """
+    """Resolve the ``ParallelStyle`` for a single submodule, or ``None``."""
     if isinstance(module, TensorParallelStyleProvider):
         if not isinstance(module, ShardAware) or not module.shard:
             return None
@@ -212,13 +216,11 @@ def _shard_style(module: nn.Module) -> ParallelStyle | None:
     )
 
 
+# An ``nn.Embedding`` shards its table over the vocabulary (dim 0) and takes a
+# replicated token-id input; an ``nn.Linear`` head shards its output over the vocabulary
+# (dim 0) and returns replicated logits.
 def _vocab_style(module: nn.Module) -> ParallelStyle:
-    """Vocab-dim shard: row-wise for embeddings, col-wise for the lm head.
-
-    An ``nn.Embedding`` shards its table over the vocabulary (dim 0) and takes
-    a replicated token-id input; an ``nn.Linear`` head shards its output over
-    the vocabulary (dim 0) and returns replicated logits.
-    """
+    """Vocab-dim shard: row-wise for embeddings, col-wise for the lm head."""
     if isinstance(module, nn.Embedding):
         return RowwiseParallel(input_layouts=Replicate())
     return ColwiseParallel(output_layouts=Replicate())

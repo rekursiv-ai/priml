@@ -28,15 +28,6 @@ from torch.distributed.device_mesh import DeviceMesh
 import torch
 
 
-class _WorkerDiedError(RuntimeError):
-    """A pool worker exited before acking -- a recoverable, transient failure.
-
-    Distinguishes a dead worker (gloo peer-close, OOM kill) from a wedged-but-
-    alive worker (a dispatch timeout), so only the former triggers a respawn-
-    and-retry rather than failing the test outright.
-    """
-
-
 class PoolWorker(Protocol):
     """The child-process surface the pool watches and tears down.
 
@@ -46,13 +37,31 @@ class PoolWorker(Protocol):
     """
 
     @property
-    def exitcode(self) -> int | None: ...
+    def exitcode(self) -> int | None:
+        """Exitcode."""
+        ...
 
-    def join(self, timeout: float | None = ...) -> None: ...
+    def join(self, timeout: float | None = ...) -> None:
+        """Join.
 
-    def is_alive(self) -> bool: ...
+        Args:
+          timeout: Timeout.
 
-    def kill(self) -> None: ...
+        """
+        ...
+
+    def is_alive(self) -> bool:
+        """Is alive.
+
+        Returns:
+          result: The bool.
+
+        """
+        ...
+
+    def kill(self) -> None:
+        """Kill."""
+        ...
 
 
 class WorkerPool:
@@ -77,13 +86,11 @@ class WorkerPool:
         self._respawn()
         return self
 
+    # Raises if any rank dies or fails to ack readiness within ``_RENDEZVOUS_TIMEOUT``
+    # (a port collision or stalled rendezvous), after tearing down whatever it started
+    # so the caller can retry cleanly.
     def _spawn_once(self) -> None:
-        """Spawn the worker ranks once and block until all report ready.
-
-        Raises if any rank dies or fails to ack readiness within
-        ``_RENDEZVOUS_TIMEOUT`` (a port collision or stalled rendezvous), after
-        tearing down whatever it started so the caller can retry cleanly.
-        """
+        """Spawn the worker ranks once and block until all report ready."""
         world_size = math.prod(self.mesh_dims.values())
         port = self._pick_bindable_port()
         # Spawn (not the platform-default fork) so each worker starts in a fresh
@@ -130,19 +137,17 @@ class WorkerPool:
         self.ack_queue = ack_queue
         self.processes: Sequence[PoolWorker] | None = processes
 
+    # Polls the readiness queue against ``_RENDEZVOUS_TIMEOUT`` while watching the
+    # worker processes: if any exits before acking (a port collision makes rank 0 raise
+    # ``EADDRINUSE``), this raises at once rather than waiting out the full timeout, so
+    # the caller's retry fires near-instantly.
     def _await_ready(
         self,
         processes: Sequence[PoolWorker],
         ready_queue: tm.Queue[Any],
         world_size: int,
     ) -> None:
-        """Block until all ``world_size`` ranks ack readiness, else raise.
-
-        Polls the readiness queue against ``_RENDEZVOUS_TIMEOUT`` while watching
-        the worker processes: if any exits before acking (a port collision makes
-        rank 0 raise ``EADDRINUSE``), this raises at once rather than waiting out
-        the full timeout, so the caller's retry fires near-instantly.
-        """
+        """Block until all ``world_size`` ranks ack readiness, else raise."""
         deadline = time.monotonic() + self._RENDEZVOUS_TIMEOUT.total_seconds()
         seen = 0
         while seen < world_size:
@@ -249,19 +254,18 @@ class WorkerPool:
                     raise _WorkerDiedError(msg) from None
 
     def terminate(self) -> None:
+        """Terminate the workers."""
         assert self.queue is not None
         assert self.processes is not None
         self.queue.put(None)
         self._kill_all(self.processes)
 
+    # A wedged worker (stuck in ``init_process_group`` or a user ``fn``) would block an
+    # unbounded ``join`` forever, so each child is given a grace period and then force-
+    # killed.
     @classmethod
     def _kill_all(cls, processes: Sequence[PoolWorker]) -> None:
-        """Join each child with a bounded timeout, killing any that hang.
-
-        A wedged worker (stuck in ``init_process_group`` or a user ``fn``)
-        would block an unbounded ``join`` forever, so each child is given a
-        grace period and then force-killed.
-        """
+        """Join each child with a bounded timeout, killing any that hang."""
         for p in processes:
             p.join(timeout=cls._JOIN_TIMEOUT_SEC)
             if p.is_alive():
@@ -278,17 +282,14 @@ class WorkerPool:
     # collisions between concurrent pools without masking a real defect.
     _RENDEZVOUS_ATTEMPTS = 3
 
+    # ``find_free_port`` has a TOCTOU window: a concurrent pool can claim the port
+    # between selection and the workers' bind. Re-binding it here, in the parent,
+    # immediately before spawn turns that race into an instant local ``EADDRINUSE``
+    # (rank 0's TCPStore would otherwise refuse and every client rank would burn the
+    # full rendezvous timeout retrying). On a collision we simply pick again; an OS-free
+    # port binds in microseconds, so the common path costs nothing.
     def _pick_bindable_port(self) -> int:
-        """Return a port the parent just confirmed it can bind on the wildcard.
-
-        ``find_free_port`` has a TOCTOU window: a concurrent pool can claim the
-        port between selection and the workers' bind. Re-binding it here, in the
-        parent, immediately before spawn turns that race into an instant local
-        ``EADDRINUSE`` (rank 0's TCPStore would otherwise refuse and every
-        client rank would burn the full rendezvous timeout retrying). On a
-        collision we simply pick again; an OS-free port binds in microseconds,
-        so the common path costs nothing.
-        """
+        """Return a port the parent just confirmed it can bind on the wildcard."""
         for _ in range(self._PORT_PICK_ATTEMPTS):
             port = type(self).find_free_port()
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -299,7 +300,7 @@ class WorkerPool:
                 probe.bind(("", port))
             except OSError:
                 probe.close()
-                continue  # stolen in the TOCTOU window; pick another
+                continue  # stolen in the TOCTOU window; pick another.
             # Close only after confirming the bind; the window to the workers'
             # bind is now as small as possible (next statements spawn them).
             probe.close()
@@ -326,6 +327,10 @@ class WorkerPool:
         could claim the port in the interim (a TOCTOU window). Callers that need
         the port to survive to a later bind go through ``_pick_bindable_port``,
         which re-verifies and re-picks on a collision.
+
+        Returns:
+          port: The int.
+
         """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
@@ -345,10 +350,21 @@ class WorkerPool:
         *,
         ready_queue: tm.Queue[Any],
     ) -> None:
+        """Run one worker.
+
+        Args:
+          rank: Rank.
+          mesh_dims: Mesh dims.
+          port: Port.
+          command_queue: Command queue.
+          ack_queue: Ack queue.
+          ready_queue: Ready queue.
+
+        """
         mesh_dim_sizes = tuple(mesh_dims.values())
         world_size = math.prod(mesh_dim_sizes)
 
-        # setup fake process group
+        # Setup fake process group.
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(port)
         # The combined "cpu:gloo,cuda:nccl" backend eagerly constructs the NCCL
@@ -396,6 +412,15 @@ class WorkerPool:
         td.destroy_process_group()
 
 
+class _WorkerDiedError(RuntimeError):
+    """A pool worker exited before acking -- a recoverable, transient failure.
+
+    Distinguishes a dead worker (gloo peer-close, OOM kill) from a wedged-but-
+    alive worker (a dispatch timeout), so only the former triggers a respawn-
+    and-retry rather than failing the test outright.
+    """
+
+
 # Maps ``mesh_dims`` to a reusable pool. The key must preserve insertion order
 # because the worker builds the mesh from ``tuple(mesh_dims.values())`` and
 # ``.keys()``, so ``{"dp": 2}`` and ``{"dp": 1, "tp": 2}`` are distinct meshes
@@ -404,6 +429,12 @@ type WarmPoolGetter = Callable[[Mapping[str, int]], WorkerPool]
 
 
 def do_something(mesh: DeviceMesh) -> None:
+    """Do a trivial unit of work.
+
+    Args:
+      mesh: Mesh.
+
+    """
     rank = td.get_rank()
 
     assert td.get_rank() == mesh.get_rank()

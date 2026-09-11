@@ -188,13 +188,11 @@ def _advance_boss(state: EnvState) -> EnvState:
     return state
 
 
+# A diamond pickaxe can be crafted or looted from a chest, and both should count.
+# Checking the inventory once at the end of the step covers every route without each
+# route having to remember.
 def _unlock_from_inventory(state: EnvState) -> EnvState:
-    """Grant the achievements that merely require holding something.
-
-    A diamond pickaxe can be crafted or looted from a chest, and both should
-    count. Checking the inventory once at the end of the step covers every
-    route without each route having to remember.
-    """
+    """Grant the achievements that merely require holding something."""
     thresholds = (
         ("wood", 1, Achievement.COLLECT_WOOD),
         ("stone", 1, Achievement.COLLECT_STONE),
@@ -225,18 +223,16 @@ def _unlock_from_inventory(state: EnvState) -> EnvState:
     return state
 
 
+# Achievements are one-time, so the reward is the difference in the unlock table rather
+# than its total. The health term is small and signed, which nudges toward staying alive
+# without paying for it directly.
 def _reward(
     state: EnvState,
     *,
     unlocked_before: Tensor,
     health_before: Tensor,
 ) -> Tensor:
-    """Score the step: what was achieved, plus a tenth of health gained.
-
-    Achievements are one-time, so the reward is the difference in the unlock
-    table rather than its total. The health term is small and signed, which
-    nudges toward staying alive without paying for it directly.
-    """
+    """Score the step: what was achieved, plus a tenth of health gained."""
     newly = (state.achievements.int() - unlocked_before.int()).float()
     earned = (newly * constants.ACHIEVEMENT_REWARD.to(state.device)).sum(-1)
     return earned + (state.player_health - health_before) * 0.1

@@ -32,6 +32,162 @@ import torch.distributed as dist
 _ParamLike = Iterable[Tensor] | Iterable[dict[str, Any]]
 
 
+def _is_distributed() -> bool:
+    """Return whether distributed row aggregation should run."""
+    return dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+
+
+def _sparse_distributed_step(
+    p: Tensor,
+    grad: Tensor,
+    *,
+    lr: float,
+    weight_decay: float,
+) -> None:
+    """Apply reference-style touched-row SignSGD across all ranks."""
+    if not p.is_contiguous():
+        raise RuntimeError(
+            "SignSGD distributed sparse step requires a contiguous params "
+            "tensor; reshape on non-contiguous storage returns a copy and "
+            "the index-write below would be silently discarded.",
+        )
+    grad_flat = grad.reshape(grad.shape[0], -1)
+    p_flat = p.reshape(p.shape[0], -1)
+    touched = grad_flat.any(dim=-1)
+    local_ids = touched.nonzero(as_tuple=False).flatten().to(torch.long)
+    world_size = dist.get_world_size()
+    count = torch.tensor([local_ids.numel()], device=p.device, dtype=torch.long)
+    counts = torch.empty(world_size, device=p.device, dtype=torch.long)
+    dist.all_gather_into_tensor(counts, count)
+    max_count = int(counts.max().item())
+    if max_count == 0:
+        return
+
+    ids_padded = torch.zeros(max_count, device=p.device, dtype=torch.long)
+    grads_padded = torch.zeros(
+        max_count,
+        grad_flat.shape[1],
+        device=p.device,
+        dtype=grad.dtype,
+    )
+    if local_ids.numel() > 0:
+        ids_padded[: local_ids.numel()] = local_ids
+        grads_padded[: local_ids.numel()] = grad_flat[local_ids]
+
+    all_ids = torch.empty(
+        world_size * max_count,
+        device=p.device,
+        dtype=torch.long,
+    )
+    all_grads = torch.empty(
+        world_size * max_count,
+        grad_flat.shape[1],
+        device=p.device,
+        dtype=grad.dtype,
+    )
+    dist.all_gather_into_tensor(all_ids, ids_padded)
+    dist.all_gather_into_tensor(all_grads, grads_padded)
+
+    valid = torch.arange(max_count, device=p.device).expand(world_size, -1)
+    valid = valid < counts.view(-1, 1)
+    valid = valid.flatten()
+    grad_ids, inv = all_ids[valid].unique(return_inverse=True)
+    grad_rows = torch.zeros(
+        grad_ids.shape[0],
+        grad_flat.shape[1],
+        device=p.device,
+        dtype=grad.dtype,
+    )
+    grad_rows.scatter_add_(
+        0,
+        inv.unsqueeze(-1).expand(-1, grad_flat.shape[1]),
+        all_grads[valid],
+    )
+
+    rows = p_flat[grad_ids]
+    if weight_decay != 0.0:
+        rows = rows * (1.0 - lr * weight_decay)
+    rows = rows.add(torch.sign(grad_rows).to(rows.dtype), alpha=-lr)
+    p_flat[grad_ids] = rows
+
+
+# When ``aggregate_distributed`` is False the cross-rank gradient-row gather is skipped
+# and the update is purely local -- required for task-parallel use (per-task TTT) where
+# ranks step independently and a per-step collective would desync and trip the NCCL
+# watchdog.
+def _sparse_embedding_step(
+    local_weights_grad: Tensor,
+    local_ids: Tensor,
+    weights: Tensor,
+    *,
+    lr: float,
+    weight_decay: float,
+    aggregate_distributed: bool = True,
+) -> None:
+    """Apply reference-style sparse embedding SignSGD."""
+    n, d = local_weights_grad.shape
+    all_weights_grad = local_weights_grad
+    all_ids = local_ids
+    if aggregate_distributed and _is_distributed():
+        world_size = dist.get_world_size()
+        all_weights_grad = torch.empty(
+            world_size * n,
+            d,
+            dtype=local_weights_grad.dtype,
+            device=local_weights_grad.device,
+        )
+        all_ids = torch.empty(
+            world_size * n,
+            dtype=local_ids.dtype,
+            device=local_ids.device,
+        )
+        grad_work = dist.all_gather_into_tensor(
+            all_weights_grad,
+            local_weights_grad,
+            async_op=True,
+        )
+        ids_work = dist.all_gather_into_tensor(all_ids, local_ids, async_op=True)
+        assert grad_work is not None
+        assert ids_work is not None
+        grad_work.wait()
+        ids_work.wait()
+
+    grad_ids, inv = all_ids.unique(return_inverse=True)
+    grad = torch.zeros(
+        grad_ids.shape[0],
+        d,
+        dtype=all_weights_grad.dtype,
+        device=all_weights_grad.device,
+    )
+    grad.scatter_add_(0, inv.unsqueeze(-1).expand(-1, d), all_weights_grad)
+
+    index_ids = grad_ids.to(torch.long)
+    rows = weights[index_ids]
+    rows.mul_(1.0 - lr * weight_decay).add_(torch.sign(grad), alpha=-lr)
+    weights[index_ids] = rows
+
+
+def _sparse_embedding_parts(
+    params: list[Tensor],
+) -> tuple[Tensor | None, Tensor, Tensor] | None:
+    """Return reference sparse embedding buffers if this is that optimizer group."""
+    if len(params) != 3:
+        return None
+    local_weights_grad: Tensor | None = None
+    local_ids: Tensor | None = None
+    weights: Tensor | None = None
+    for p in params:
+        if p.requires_grad:
+            local_weights_grad = p.grad
+        elif p.ndim == 1:
+            local_ids = p
+        elif p.ndim == 2:
+            weights = p
+    if local_ids is None or weights is None:
+        return None
+    return local_weights_grad, local_ids, weights
+
+
 class SignSGD(Optimizer):
     """SignSGD with decoupled weight decay."""
 
@@ -174,6 +330,11 @@ class SignSGD(Optimizer):
         signal that the matching group is a sparse-embedding group; the
         ``sparse_embedding=True`` flag is recommended but not required
         here (it IS required for routing via ``step()``).
+
+        Args:
+          local_weights_grad: Local weights grad.
+          local_ids: Local ids.
+
         """
         for group in self.param_groups:
             params = list(group["params"])
@@ -189,161 +350,3 @@ class SignSGD(Optimizer):
                 weight_decay=group["weight_decay"],
                 aggregate_distributed=self.aggregate_distributed,
             )
-
-
-def _is_distributed() -> bool:
-    """Return whether distributed row aggregation should run."""
-    return dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
-
-
-def _sparse_embedding_parts(
-    params: list[Tensor],
-) -> tuple[Tensor | None, Tensor, Tensor] | None:
-    """Return reference sparse embedding buffers if this is that optimizer group."""
-    if len(params) != 3:
-        return None
-    local_weights_grad: Tensor | None = None
-    local_ids: Tensor | None = None
-    weights: Tensor | None = None
-    for p in params:
-        if p.requires_grad:
-            local_weights_grad = p.grad
-        elif p.ndim == 1:
-            local_ids = p
-        elif p.ndim == 2:
-            weights = p
-    if local_ids is None or weights is None:
-        return None
-    return local_weights_grad, local_ids, weights
-
-
-def _sparse_embedding_step(
-    local_weights_grad: Tensor,
-    local_ids: Tensor,
-    weights: Tensor,
-    *,
-    lr: float,
-    weight_decay: float,
-    aggregate_distributed: bool = True,
-) -> None:
-    """Apply reference-style sparse embedding SignSGD.
-
-    When ``aggregate_distributed`` is False the cross-rank gradient-row gather is
-    skipped and the update is purely local -- required for task-parallel use
-    (per-task TTT) where ranks step independently and a per-step collective would
-    desync and trip the NCCL watchdog.
-    """
-    n, d = local_weights_grad.shape
-    all_weights_grad = local_weights_grad
-    all_ids = local_ids
-    if aggregate_distributed and _is_distributed():
-        world_size = dist.get_world_size()
-        all_weights_grad = torch.empty(
-            world_size * n,
-            d,
-            dtype=local_weights_grad.dtype,
-            device=local_weights_grad.device,
-        )
-        all_ids = torch.empty(
-            world_size * n,
-            dtype=local_ids.dtype,
-            device=local_ids.device,
-        )
-        grad_work = dist.all_gather_into_tensor(
-            all_weights_grad,
-            local_weights_grad,
-            async_op=True,
-        )
-        ids_work = dist.all_gather_into_tensor(all_ids, local_ids, async_op=True)
-        assert grad_work is not None
-        assert ids_work is not None
-        grad_work.wait()
-        ids_work.wait()
-
-    grad_ids, inv = all_ids.unique(return_inverse=True)
-    grad = torch.zeros(
-        grad_ids.shape[0],
-        d,
-        dtype=all_weights_grad.dtype,
-        device=all_weights_grad.device,
-    )
-    grad.scatter_add_(0, inv.unsqueeze(-1).expand(-1, d), all_weights_grad)
-
-    index_ids = grad_ids.to(torch.long)
-    rows = weights[index_ids]
-    rows.mul_(1.0 - lr * weight_decay).add_(torch.sign(grad), alpha=-lr)
-    weights[index_ids] = rows
-
-
-def _sparse_distributed_step(
-    p: Tensor,
-    grad: Tensor,
-    *,
-    lr: float,
-    weight_decay: float,
-) -> None:
-    """Apply reference-style touched-row SignSGD across all ranks."""
-    if not p.is_contiguous():
-        raise RuntimeError(
-            "SignSGD distributed sparse step requires a contiguous params "
-            "tensor; reshape on non-contiguous storage returns a copy and "
-            "the index-write below would be silently discarded.",
-        )
-    grad_flat = grad.reshape(grad.shape[0], -1)
-    p_flat = p.reshape(p.shape[0], -1)
-    touched = grad_flat.any(dim=-1)
-    local_ids = touched.nonzero(as_tuple=False).flatten().to(torch.long)
-    world_size = dist.get_world_size()
-    count = torch.tensor([local_ids.numel()], device=p.device, dtype=torch.long)
-    counts = torch.empty(world_size, device=p.device, dtype=torch.long)
-    dist.all_gather_into_tensor(counts, count)
-    max_count = int(counts.max().item())
-    if max_count == 0:
-        return
-
-    ids_padded = torch.zeros(max_count, device=p.device, dtype=torch.long)
-    grads_padded = torch.zeros(
-        max_count,
-        grad_flat.shape[1],
-        device=p.device,
-        dtype=grad.dtype,
-    )
-    if local_ids.numel() > 0:
-        ids_padded[: local_ids.numel()] = local_ids
-        grads_padded[: local_ids.numel()] = grad_flat[local_ids]
-
-    all_ids = torch.empty(
-        world_size * max_count,
-        device=p.device,
-        dtype=torch.long,
-    )
-    all_grads = torch.empty(
-        world_size * max_count,
-        grad_flat.shape[1],
-        device=p.device,
-        dtype=grad.dtype,
-    )
-    dist.all_gather_into_tensor(all_ids, ids_padded)
-    dist.all_gather_into_tensor(all_grads, grads_padded)
-
-    valid = torch.arange(max_count, device=p.device).expand(world_size, -1)
-    valid = valid < counts.view(-1, 1)
-    valid = valid.flatten()
-    grad_ids, inv = all_ids[valid].unique(return_inverse=True)
-    grad_rows = torch.zeros(
-        grad_ids.shape[0],
-        grad_flat.shape[1],
-        device=p.device,
-        dtype=grad.dtype,
-    )
-    grad_rows.scatter_add_(
-        0,
-        inv.unsqueeze(-1).expand(-1, grad_flat.shape[1]),
-        all_grads[valid],
-    )
-
-    rows = p_flat[grad_ids]
-    if weight_decay != 0.0:
-        rows = rows * (1.0 - lr * weight_decay)
-    rows = rows.add(torch.sign(grad_rows).to(rows.dtype), alpha=-lr)
-    p_flat[grad_ids] = rows

@@ -125,7 +125,12 @@ class CraftaxScore:
         self._rollout_index = 0
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the accumulated episodes."""
+        """Return the accumulated episodes.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "returns": list(self._returns),
             "lengths": list(self._lengths),
@@ -134,7 +139,12 @@ class CraftaxScore:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore episodes saved by :meth:`state_dict`."""
+        """Restore episodes saved by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self._returns = list(state_dict["returns"])
         self._lengths = list(state_dict["lengths"])
         self._unlocked = [list(row) for row in state_dict["unlocked"]]

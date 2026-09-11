@@ -45,9 +45,13 @@ class CraftaxStep:
     """
 
     observation: Tensor
+
     reward: Tensor
+
     done: Tensor
+
     info: dict[str, Tensor]
+
     terminal_state: EnvState
 
 
@@ -191,24 +195,13 @@ class CraftaxEnv:
             terminal_state=reached,
         )
 
+    # Only ``num_envs / ratio`` worlds are generated, because generating one is the
+    # single most expensive thing this environment does and a step that ends no episode
+    # would throw all of them away. The generated worlds are dealt to the terminal
+    # workers in order and wrap around, which is what the ratio buys and costs: fewer
+    # worlds generated, and a chance that two workers finishing together share one.
     def _restart(self, state: EnvState, done: Tensor) -> EnvState:
-        """Put every finished worker into a fresh world.
-
-        Only ``num_envs / ratio`` worlds are generated, because generating one
-        is the single most expensive thing this environment does and a step
-        that ends no episode would throw all of them away. The generated
-        worlds are dealt to the terminal workers in order and wrap around,
-        which is what the ratio buys and costs: fewer worlds generated, and a
-        chance that two workers finishing together share one.
-
-        Args:
-          state: The stepped world.
-          done: Which workers finished, ``[envs]``.
-
-        Returns:
-          state: The world with finished workers restarted.
-
-        """
+        """Put every finished worker into a fresh world."""
         # Generate exactly as many worlds as there are finished workers, up to
         # the pool the ratio allows. Generation DOES scale with batch size --
         # 25 ms for one world, 182 ms for sixty-four -- so a step that ended
@@ -234,7 +227,12 @@ class CraftaxEnv:
         return state.select(done, fresh)
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the world and its generator, for checkpointing."""
+        """Return the world and its generator, for checkpointing.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "generator": self._generator.get_state(),
             "num_envs": self._num_envs,
@@ -242,7 +240,12 @@ class CraftaxEnv:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore a world saved by :meth:`state_dict`."""
+        """Restore a world saved by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         generator_state = state_dict["generator"]
         self._generator.set_state(generator_state)
         self._num_envs = state_dict["num_envs"]
@@ -256,13 +259,11 @@ class CraftaxEnv:
         self._generator.set_state(generator_state)
 
 
+# The value is 100 where an episode ended having unlocked the achievement and 0
+# otherwise, so averaging the entries over completed episodes gives the success rate
+# directly.
 def _achievement_info(state: EnvState, done: Tensor) -> dict[str, Tensor]:
-    """Report each achievement's unlock as an end-of-episode percentage.
-
-    The value is 100 where an episode ended having unlocked the achievement
-    and 0 otherwise, so averaging the entries over completed episodes gives
-    the success rate directly.
-    """
+    """Report each achievement's unlock as an end-of-episode percentage."""
     unlocked = state.achievements & done[:, None]
     return {
         f"Achievements/{achievement.name.lower()}": unlocked[:, index].float() * 100.0

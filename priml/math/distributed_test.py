@@ -29,7 +29,7 @@ def test_logsumexp_all_to_all_empty_reduction():
     x = torch.zeros(0, 5)
     result = logsumexp_all_to_all(x, dim=-1)
     assert result.shape == (0,)
-    # logmeanexp shares the divide path; it must also survive the empty case.
+    # ``logmeanexp`` shares the divide path; it must also survive the empty case.
     assert logmeanexp_all_to_all(x, dim=-1).shape == (0,)
 
 
@@ -81,7 +81,7 @@ def test_logmeanexp_all_to_all_single_dim():
 def test_logsumexp_all_to_all_with_world_size_rank():
     """Test logsumexp_all_to_all with explicit world_size and rank (lines 109-118)."""
     # Test non-distributed case with explicit world_size and rank
-    # When torch.distributed is not initialized, should still work
+    # When torch.distributed is not initialized, should still work.
     x = torch.randn(2, 3, 4)
     result = logsumexp_all_to_all(x, dim=-1, world_size=1)
     expected = torch.logsumexp(x, dim=-1)
@@ -90,7 +90,7 @@ def test_logsumexp_all_to_all_with_world_size_rank():
 
 def test_logmeanexp_all_to_all_with_world_size_rank():
     """Test logmeanexp_all_to_all with explicit world_size and rank (lines 109-118)."""
-    # Test non-distributed case with explicit world_size and rank
+    # Test non-distributed case with explicit world_size and rank.
     x = torch.randn(2, 3, 4)
     dim = -1
     result = logmeanexp_all_to_all(x, dim=dim, world_size=1)

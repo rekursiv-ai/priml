@@ -130,14 +130,14 @@ def test_load_strict_false_tolerates_missing_keys() -> None:
     """
     full = _learnable_with()
     state = full.state_dict()
-    del state["model"]["fc.weight"]  # simulate a checkpoint lacking this param
+    del state["model"]["fc.weight"]  # simulate a checkpoint lacking this param.
 
     strict = _learnable_with()
     with pytest.raises(RuntimeError, match="Missing key"):
-        strict.load_state_dict(state)  # default policy is strict
+        strict.load_state_dict(state)  # default policy is strict.
 
     lenient = _learnable_with()
-    lenient.load_state_dict(state, strict=False)  # must not raise
+    lenient.load_state_dict(state, strict=False)  # must not raise.
 
 
 def test_parameter_remap_transforms_before_load() -> None:
@@ -159,7 +159,7 @@ def test_parameter_remap_transforms_before_load() -> None:
 
 
 def _adam_learnable() -> TrainStep:
-    """A learnable whose optimizer (Adam) keeps per-parameter state."""
+    """Return a learnable whose optimizer (Adam) keeps per-parameter state."""
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.1),
@@ -177,9 +177,9 @@ def test_load_optimizer_false_skips_optimizer_restore() -> None:
     """
     source = _adam_learnable()
     source.model(torch.randn(2, 4)).sum().backward()
-    source.optimizer.step()  # populates Adam state
+    source.optimizer.step()  # populates Adam state.
     state = source.state_dict()
-    del state["model"]["fc.weight"]  # architecture changed
+    del state["model"]["fc.weight"]  # architecture changed.
 
     finetune = _adam_learnable()
     finetune.load_state_dict(state, strict=False, load_optimizer=False)
@@ -199,7 +199,7 @@ def test_load_optimizer_true_restores_optimizer_by_default() -> None:
 
 
 def _scheduled(**config_kwargs: Any) -> TrainStep:
-    """A learnable with a nonzero rate, so a schedule has something to scale."""
+    """Return a learnable with a nonzero rate, so a schedule has something to scale."""
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
         optimizer=PartialConfig(torch.optim.SGD, lr=1.0),
@@ -380,7 +380,7 @@ def test_a_call_that_raised_is_still_counted() -> None:
     """It happened, and hiding it would misreport the step being debugged."""
     learnable = _scheduled()
     with pytest.raises(RuntimeError):
-        learnable(torch.randn(2, 9))  # wrong width for the linear
+        learnable(torch.randn(2, 9))  # wrong width for the linear.
     assert learnable.timer_forward.global_count == 1
 
 

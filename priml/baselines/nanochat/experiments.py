@@ -103,22 +103,20 @@ class NanoChatLoop(TrainLoop):
         assert isinstance(step, NanoChatTrainStep)
         return step.elapsed_sec
 
+    # Its ``next(train_loader)`` runs inside the region its clock brackets
+    # (train.py:550, between 543 and 573). Ours happens here, outside the step, so the
+    # budget would otherwise buy free steps: measured at 0.160 of 1.683 s/step on a
+    # 5090, a tenth of the run.
     @override
     def _on_batch_ready(self, fetch_time: float) -> None:
-        """Charge loading to the budget, as the reference charges it.
-
-        Its ``next(train_loader)`` runs inside the region its clock brackets
-        (train.py:550, between 543 and 573). Ours happens here, outside the
-        step, so the budget would otherwise buy free steps: measured at 0.160
-        of 1.683 s/step on a 5090, a tenth of the run.
-        """
+        """Charge loading to the budget, as the reference charges it."""
         step = self.step
         assert isinstance(step, NanoChatTrainStep)
         step.charge_budget(fetch_time)
 
 
 def exp000() -> NanoChatLoop.Config:
-    """The published five-minute recipe, reproduced on its own kernel.
+    """Return the published five-minute recipe, reproduced on its own kernel.
 
     Frozen, and the only rung that reproduces rather than proposes. It pins
     FlashAttention-3 because that is what the reference measured on: a fused
@@ -136,6 +134,9 @@ def exp000() -> NanoChatLoop.Config:
       protocol, and kernel into this package reproduces its published score,
       so the port is faithful and every fork below measures a real change
       rather than an artifact of the port.
+
+    Returns:
+      cfg: The NanoChatLoop.Config.
 
     References:
       https://github.com/karpathy/autoresearch
@@ -222,7 +223,7 @@ def exp000() -> NanoChatLoop.Config:
     # draw rather than the recipe. It seeds initialization alone -- the data
     # order is the corpus's own, packed deterministically and never shuffled.
     cfg.seed = 42
-    # Avoid checkpoint resuming because the job is single-shot
+    # Avoid checkpoint resuming because the job is single-shot.
     checkpointing = cfg.checkpointing
     assert isinstance(checkpointing, Checkpointer.Config)
     checkpointing.resume = False
@@ -269,6 +270,9 @@ def exp001() -> NanoChatLoop.Config:
     Results:
       TBD.
 
+    Returns:
+      cfg: The NanoChatLoop.Config.
+
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
@@ -310,6 +314,9 @@ def exp002() -> NanoChatLoop.Config:
       this rung wins if the accuracy given up is smaller than the accuracy
       those extra steps buy.
 
+    Returns:
+      cfg: The NanoChatLoop.Config.
+
     References:
       https://arxiv.org/abs/2410.17897
         Zhou et al. Value Residual Learning.
@@ -336,6 +343,9 @@ def exp003() -> NanoChatLoop.Config:
       each step cheaper. Restoring the full context therefore buys back that
       accuracy at a higher price per step, and under a fixed budget it loses
       if the steps it gives up were worth more than the attention it regains.
+
+    Returns:
+      cfg: The NanoChatLoop.Config.
 
     References:
       https://arxiv.org/abs/2004.05150
@@ -369,6 +379,10 @@ def exp_smoke() -> NanoChatLoop.Config:
     minted over this rung guard the real one: a change to the architecture, the
     optimizer partition, the schedules, or the precision reaches this config
     too.
+
+    Returns:
+      cfg: The NanoChatLoop.Config.
+
     """
     cfg = exp001()
     cfg.experiment_name = "exp_smoke"

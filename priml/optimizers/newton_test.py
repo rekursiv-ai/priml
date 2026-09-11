@@ -22,9 +22,9 @@ def _binary_cross_entropy_with_logits(
     output: Tensor,
     *,
     y: Tensor,
-    **_kwargs: Any,
+    **_kwargs: object,
 ) -> LossOutput:
-    """Wrapper for binary_cross_entropy_with_logits that extracts y from kwargs."""
+    """Call binary_cross_entropy_with_logits with y extracted from kwargs."""
     return {
         "loss": torch.nn.functional.binary_cross_entropy_with_logits(
             output,
@@ -43,7 +43,9 @@ class _LinearModel(nn.Module):
 
     class Config(Fig["_LinearModel"], make_with_kwargs=True):
         in_features: int = -1
+
         out_features: int = -1
+
         bias: bool = True
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
@@ -73,11 +75,11 @@ def test_newton_logistic_regression():
     n_samples = 100
     n_features = 2
 
-    # Generate linearly separable data
+    # Generate linearly separable data.
     X = torch.randn(n_samples, n_features)
     y = (X[:, 0] + X[:, 1] > 0).float()
 
-    # Create trainable with Newton optimizer
+    # Create trainable with Newton optimizer.
     config = TrainStep.Config()
     config.model = _LinearModel.Config(in_features=2, out_features=1)
     config.optimizer = Newton.Config()

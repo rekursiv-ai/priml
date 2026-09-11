@@ -17,7 +17,9 @@ _CWD: Final = Path(__file__).resolve().parent
 
 class _AdamATan2Golden(TypedDict):
     initial_param: Tensor
+
     grads: Tensor
+
     expected_param: Tensor
 
 
@@ -107,3 +109,9 @@ def _reference_step(
     denom = exp_avg_sq.sqrt() / bias_correction2_sqrt
     param.add_(torch.atan2(exp_avg, denom), alpha=-step_size)
     return param, exp_avg, exp_avg_sq
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

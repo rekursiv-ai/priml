@@ -214,10 +214,10 @@ def test_float2rgb_partitions_the_domain_into_equal_bins():
 
 
 def test_float2rgb_clamp():
-    # Test clamping for out-of-range values
+    # Test clamping for out-of-range values.
     x = torch.tensor([-2.0, 0.0, 2.0])
     result = float2rgb(x)
-    # Should clamp to [0, 255]
+    # Should clamp to [0, 255].
     assert result[0] == 0
     assert result[2] == 255
 
@@ -452,7 +452,7 @@ def test_float2rgb_round_trips_where_both_baselines_lose_levels():
 
 
 def test_compute_video_shapes():
-    # 1080p 16:9 at 30fps for 3 seconds
+    # 1080p 16:9 at 30fps for 3 seconds.
     actual = compute_video_shapes(
         nominal_resolution=1080,
         aspect=16 / 9,
@@ -466,7 +466,7 @@ def test_compute_video_shapes():
     # put two rounding contracts in one tuple.
     assert actual.pixel_full == (90, 1080, 1920)
 
-    # 480p 4:3 at 24fps for 2 seconds
+    # 480p 4:3 at 24fps for 2 seconds.
     actual = compute_video_shapes(
         nominal_resolution=480,
         aspect=4 / 3,
@@ -477,7 +477,7 @@ def test_compute_video_shapes():
     assert actual.pixel_train == (48, 560, 752)
     assert actual.pixel_full == (48, 554, 739)
 
-    # 360p 1:1 at 15fps for 4 seconds
+    # 360p 1:1 at 15fps for 4 seconds.
     actual = compute_video_shapes(
         nominal_resolution=360,
         aspect=1.0,
@@ -514,7 +514,7 @@ def test_pixel_full_reports_one_rounding_contract_per_axis() -> None:
 
 
 def test_compute_video_shapes_image():
-    # Test with duration_sec=0 for single image
+    # Test with duration_sec=0 for single image.
     actual = compute_video_shapes(
         nominal_resolution=1080,
         aspect=16 / 9,
@@ -522,7 +522,7 @@ def test_compute_video_shapes_image():
         fps=30,
     )
     # For images, training and inference frames should be 1
-    # but latent might be different
+    # but latent might be different.
     assert actual.pixel_train.frames == actual.latent.frames * 8
     assert actual.pixel_full.frames == 1
 
@@ -541,34 +541,34 @@ def test_patchify():
     z = patchify(x, patch)
     # c_out = 4 * 2 * 4 * 6 = 192, spatial = (4, 3, 4)
     assert z.shape == (1, 192, 4, 3, 4), z.shape
-    # Verify roundtrip recovers original
+    # Verify roundtrip recovers original.
     x_back = unpatchify(z, patch)
     torch.testing.assert_close(x_back, x, rtol=0, atol=0)
 
 
 def test_patchify_2d():
-    # Test with 2D patches
+    # Test with 2D patches.
     x = torch.randn(2, 12, 8, 16)
     patch = (4, 8)
     z = patchify(x, patch)
-    # c=12, patch=(4,8) -> c_out = 12*4*8 = 384
+    # c=12, patch=(4,8) -> c_out = 12*4*8 = 384.
     assert z.shape == (2, 384, 2, 2)
 
 
 def test_unpatchify():
     patch = (2, 3, 4)
-    # Build a patchified tensor: c_patch = 5 * 2 * 3 * 4 = 120
+    # Build a patchified tensor: c_patch = 5 * 2 * 3 * 4 = 120.
     x = torch.randn(3, 120, 6, 5, 7)
     z = unpatchify(x, patch)
-    # Spatial dims: (6*2, 5*3, 7*4) = (12, 15, 28), channels: 5
+    # Spatial dims: (6*2, 5*3, 7*4) = (12, 15, 28), channels: 5.
     assert z.shape == (3, 5, 12, 15, 28), z.shape
-    # Verify roundtrip recovers original
+    # Verify roundtrip recovers original.
     x_back = patchify(z, patch)
     torch.testing.assert_close(x_back, x, rtol=0, atol=0)
 
 
 def test_unpatchify_2d():
-    # Test with 2D patches
+    # Test with 2D patches.
     x = torch.randn(2, 384, 2, 2)
     patch = (4, 8)
     z = unpatchify(x, patch)
@@ -620,35 +620,35 @@ def test_interpolate_area_variance_preserving_3d():
 
 
 def test_interpolate_with_rank():
-    # Test interpolation with explicit rank
+    # Test interpolation with explicit rank.
     x = torch.randn(2, 3, 4, 8, 8)
     result = interpolate(x, mode="linear", scale_factor=2, rank=2)
     assert result.shape == (2, 3, 4, 16, 16)
 
 
 def test_interpolate_channels_last():
-    # Test with channels_last format
+    # Test with channels_last format.
     x = torch.randn(2, 8, 8, 3)
     result = interpolate(x, mode="nearest", scale_factor=2, rank=2, channels_last=True)
     assert result.shape == (2, 16, 16, 3)
 
 
 def test_interpolate_linear_to_bilinear():
-    # Test that "linear" mode gets converted to "bilinear" for 2D
+    # Test that "linear" mode gets converted to "bilinear" for 2D.
     x = torch.randn(2, 3, 8, 8)
     result = interpolate(x, mode="linear", scale_factor=2, rank=2)
     assert result.shape == (2, 3, 16, 16)
 
 
 def test_interpolate_linear_to_trilinear():
-    # Test that "linear" mode gets converted to "trilinear" for 3D
+    # Test that "linear" mode gets converted to "trilinear" for 3D.
     x = torch.randn(2, 3, 4, 8, 8)
     result = interpolate(x, mode="linear", scale_factor=2, rank=3)
     assert result.shape == (2, 3, 8, 16, 16)
 
 
 def test_interpolate_cubic_to_bicubic():
-    # Test that "cubic" mode gets converted to "bicubic" for 2D
+    # Test that "cubic" mode gets converted to "bicubic" for 2D.
     x = torch.randn(2, 3, 8, 8)
     result = interpolate(x, mode="cubic", scale_factor=2, rank=2)
     assert result.shape == (2, 3, 16, 16)
@@ -656,16 +656,16 @@ def test_interpolate_cubic_to_bicubic():
 
 def test_patchify_insufficient_dimensions():
     """Test patchify raises ValueError when tensor has insufficient dimensions."""
-    x = torch.randn(2, 3)  # Only 2 dimensions
-    patch = (4, 8, 12)  # Needs 3 spatial dims plus a channel axis
+    x = torch.randn(2, 3)  # Only 2 dimensions.
+    patch = (4, 8, 12)  # Needs 3 spatial dims plus a channel axis.
     with pytest.raises(ValueError, match="needs at least"):
         patchify(x, patch)
 
 
 def test_unpatchify_insufficient_dimensions():
     """Test unpatchify raises ValueError when tensor has insufficient dimensions."""
-    x = torch.randn(2, 1152)  # Only 2 dimensions
-    patch = (4, 8, 12)  # Needs 3 spatial dims plus a channel axis
+    x = torch.randn(2, 1152)  # Only 2 dimensions.
+    patch = (4, 8, 12)  # Needs 3 spatial dims plus a channel axis.
     with pytest.raises(ValueError, match="needs at least"):
         unpatchify(x, patch)
 
@@ -689,7 +689,7 @@ def test_unpatchify_rejects_channels_that_are_not_a_patch_multiple():
 
 def test_interpolate_insufficient_dimensions():
     """Test interpolate raises ValueError when input has insufficient dimensions."""
-    x = torch.randn(2)  # Only 1 dimension
+    x = torch.randn(2)  # Only 1 dimension.
     with pytest.raises(ValueError, match="smaller than"):
         interpolate(x, mode="bilinear", size=(4, 4))
 
@@ -697,9 +697,9 @@ def test_interpolate_insufficient_dimensions():
 def test_interpolate_rank_padding():
     """Test interpolate with rank < output_rank (needs padding)."""
     # 1D input (rank=1) interpolated to 2D output (output_rank=2)
-    x = torch.randn(2, 3, 8)  # [batch, channels, width]
+    x = torch.randn(2, 3, 8)  # [batch, channels, width].
     result = interpolate(x, mode="bilinear", size=(8, 16), rank=1)
-    # Should pad to [2, 3, 1, 8] then interpolate to [2, 3, 8, 16]
+    # Should pad to [2, 3, 1, 8] then interpolate to [2, 3, 8, 16].
     assert result.shape == (2, 3, 8, 16)
 
 
@@ -727,7 +727,7 @@ def test_interpolate_linear_1d():
 def test_interpolate_unable_to_infer_rank():
     """Test interpolate raises ValueError when unable to infer output rank."""
     x = torch.randn(2, 3, 8, 8)
-    # No explicit rank, no size/scale_factor, mode doesn't specify rank
+    # No explicit rank, no size/scale_factor, mode doesn't specify rank.
     with pytest.raises(ValueError, match="Unable to infer the output rank"):
         interpolate(x, mode="area")
 
@@ -742,16 +742,16 @@ def test_interpolate_size_scalar():
 def test_interpolate_rank_greater_than_output_rank():
     """Test interpolate with rank > output_rank (lines 288, 339)."""
     # 3D input (rank=3) interpolated to 2D output (output_rank=2)
-    x = torch.randn(2, 3, 4, 8, 8)  # [batch, channels, depth, height, width]
+    x = torch.randn(2, 3, 4, 8, 8)  # [batch, channels, depth, height, width].
     result = interpolate(x, mode="bilinear", size=(16, 16), rank=3)
-    # Should interpolate spatial dims and reshape
+    # Should interpolate spatial dims and reshape.
     assert result.shape == (2, 3, 4, 16, 16)
 
 
 def test_interpolate_infer_from_scale_factor():
     """Test interpolate infers output_rank from scale_factor (line 372)."""
     x = torch.randn(2, 3, 8, 8, 8)
-    # scale_factor as sequence infers output_rank
+    # scale_factor as sequence infers output_rank.
     result = interpolate(x, mode="nearest", scale_factor=(2, 2, 2))
     assert result.shape == (2, 3, 16, 16, 16)
 
@@ -759,17 +759,17 @@ def test_interpolate_infer_from_scale_factor():
 def test_interpolate_linear_1d_fallback():
     """Test interpolate with mode='linear' defaults to output_rank=1 (line 377)."""
     x = torch.randn(2, 3, 8)
-    # No size/scale_factor/rank, mode='linear' should default to output_rank=1
+    # No size/scale_factor/rank, mode='linear' should default to output_rank=1.
     result = interpolate(x, mode="linear", size=16)
     assert result.shape == (2, 3, 16)
 
 
 def test_interpolate_rank_greater_output_rank_channels_last():
     """Test interpolate with rank > output_rank and channels_last (line 339)."""
-    # 3D input with channels last
-    x = torch.randn(2, 4, 8, 8, 3)  # [batch, depth, height, width, channels]
+    # 3D input with channels last.
+    x = torch.randn(2, 4, 8, 8, 3)  # [batch, depth, height, width, channels].
     result = interpolate(x, mode="bilinear", size=(16, 16), rank=3, channels_last=True)
-    # Should handle permutation correctly
+    # Should handle permutation correctly.
     assert result.shape == (2, 4, 16, 16, 3)
 
 
@@ -826,11 +826,11 @@ def test_decode_jpeg_turbojpeg_with_crop():
         mock_turbo,
         height=200,
         width=400,
-        crop=(100, 100),  # Center crop to 1:1 aspect ratio
+        crop=(100, 100),  # Center crop to 1:1 aspect ratio.
     )
 
     assert tensor is not None
-    # Verify crop was called
+    # Verify crop was called.
     mock_turbo.crop.assert_called_once()
 
 
@@ -838,9 +838,9 @@ def test_decode_jpeg_turbojpeg_bgr_to_rgb():
     """Test decode_jpeg_turbojpeg converts BGR to RGB."""
     mock_turbo = MagicMock()
     mock_bgr = np.zeros((10, 10, 3), dtype=np.uint8)
-    mock_bgr[:, :, 0] = 255  # Blue channel
-    mock_bgr[:, :, 1] = 128  # Green channel
-    mock_bgr[:, :, 2] = 64  # Red channel
+    mock_bgr[:, :, 0] = 255  # Blue channel.
+    mock_bgr[:, :, 1] = 128  # Green channel.
+    mock_bgr[:, :, 2] = 64  # Red channel.
     mock_turbo.decode.return_value = mock_bgr
 
     image_bytes = b"fake_jpeg_bytes"
@@ -854,11 +854,11 @@ def test_decode_jpeg_turbojpeg_bgr_to_rgb():
 
     assert tensor is not None
     # Check RGB conversion: BGR -> RGB
-    # Red channel (was BGR[2]) should be RGB[0]
+    # Red channel (was BGR[2]) should be RGB[0].
     assert torch.all(tensor[:, :, 0] == 64)
-    # Green channel should stay same
+    # Green channel should stay same.
     assert torch.all(tensor[:, :, 1] == 128)
-    # Blue channel (was BGR[0]) should be RGB[2]
+    # Blue channel (was BGR[0]) should be RGB[2].
     assert torch.all(tensor[:, :, 2] == 255)
 
 
@@ -983,9 +983,9 @@ def test_decode_image_pil_with_crop():
     )
 
     assert tensor is not None
-    # Crop should be applied during decode
-    assert tensor.shape[1] <= 100  # Height
-    assert tensor.shape[2] <= 200  # Width
+    # Crop should be applied during decode.
+    assert tensor.shape[1] <= 100  # Height.
+    assert tensor.shape[2] <= 200  # Width.
 
 
 def test_decode_image_pil_draft_mode():
@@ -1003,7 +1003,7 @@ def test_decode_image_pil_draft_mode():
     )
 
     assert tensor is not None
-    # Draft mode + crop should produce smaller output than original
+    # Draft mode + crop should produce smaller output than original.
     assert tensor.shape[1] <= 1000
     assert tensor.shape[2] <= 1000
 

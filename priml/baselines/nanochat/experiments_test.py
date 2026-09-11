@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import json
 import math
@@ -45,6 +46,9 @@ from priml.train.parallelism import NoParallel
 from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
+
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
     ("exp000", experiments.exp000),
     ("exp001", experiments.exp001),
@@ -60,7 +64,7 @@ PORTABLE: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = LADDER[1:]
 
 
 def _pattern(cfg: NanoChatLoop.Config) -> str:
-    """The window pattern the stack's attention layers carry."""
+    """Return the window pattern the stack's attention layers carry."""
     attention = cfg.step.model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
     return attention.window_pattern
@@ -211,8 +215,9 @@ def test_no_rung_resumes_a_checkpoint(
 
 
 def test_the_budget_and_the_schedule_horizon_agree() -> None:
-    """A schedule annealing past the stop wastes the tail; short of it, the
-    run trains its last steps at a rate the recipe never intended.
+    """A schedule annealing past the stop wastes the tail.
+
+    Short of it, the run trains its last steps at a rate the recipe never intended.
     """
     for name, factory in LADDER:
         config = factory()
@@ -320,12 +325,10 @@ def test_every_experiments_eval_geometry_is_constructible(
     assert drawn == 2, name
 
 
+# Single-character merges so a document's token count is its length, which is what lets
+# the packer fill a row out of a handful of short documents.
 def _prepared(root: Path, *, vocab: int) -> None:
-    """Write a corpus and a vocabulary of exactly ``vocab`` tokens.
-
-    Single-character merges so a document's token count is its length, which is
-    what lets the packer fill a row out of a handful of short documents.
-    """
+    """Write a corpus and a vocabulary of exactly ``vocab`` tokens."""
     reserved = tuple(f"<|reserved_{index}|>" for index in range(16))
     merges = vocab - len(reserved)
     assert merges > 0, "the vocabulary must exceed its reserved tokens"
@@ -469,7 +472,7 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
     Refresh ``testdata/exp000.txt`` with ``--golden-overwrite`` after reading
     the diff.
     """
-    golden = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
+    golden = _CWD / "testdata" / "exp000.txt"
     rendered = pformat(
         experiments.exp000().copy_tree().finalize(), hide_default_values=False
     )

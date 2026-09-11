@@ -241,15 +241,12 @@ class Cifar10TrainStep(TrainStep):
         spent = self.global_step / self.config.total_train_steps
         return 1.0 if spent > 1.0 else float(spent)
 
+    # The ramp stays indexed by STEP rather than composed as a
+    # :func:`~priml.math.schedules.warmup` factor: it counts ``int(warmup_fraction
+    # * total)`` whole steps and reads one step ahead, which is not the same number as a
+    # fraction of progress -- and the snapshots freeze the rate this produces.
     def _apply_schedule(self) -> None:
-        """Scale every parameter group's learning rate for the current step.
-
-        The ramp stays indexed by STEP rather than composed as a
-        :func:`~priml.math.schedules.warmup` factor: it counts
-        ``int(warmup_fraction * total)`` whole steps and reads one step ahead,
-        which is not the same number as a fraction of progress -- and the
-        snapshots freeze the rate this produces.
-        """
+        """Scale every parameter group's learning rate for the current step."""
         config = self.config
         multiplier = self.schedule(self.progress_learning_schedule)
         warmup_steps = int(config.warmup_fraction * config.total_train_steps)
@@ -314,31 +311,22 @@ class Cifar10TrainStep(TrainStep):
             yield
 
 
+# Six forward passes: the image and two one-pixel-shifted crops, each paired with its
+# horizontal mirror. Shifts come from a reflect-padded copy, so no crop introduces a
+# border the network never saw in training.
 def _tta_logits(model: nn.Module, media: Tensor) -> Tensor:
-    """Average logits over the mirror pair of three overlapping crops.
-
-    Six forward passes: the image and two one-pixel-shifted crops, each paired
-    with its horizontal mirror. Shifts come from a reflect-padded copy, so no
-    crop introduces a border the network never saw in training.
-
-    Args:
-      model: Network in evaluation mode.
-      media: ``(B, 3, H, W)`` images.
-
-    Returns:
-      logits: ``(B, num_classes)`` averaged class scores.
-
-    """
-
-    def mirrored(view: Tensor) -> Tensor:
-        averaged = 0.5 * (model(view) + model(view.flip(-1)))
-        assert isinstance(averaged, Tensor)
-        return averaged
-
+    """Average logits over the mirror pair of three overlapping crops."""
     size = media.shape[-1]
     padded = functional.pad(media, (1,) * 4, "reflect")
     return (
-        mirrored(media)
-        + mirrored(padded[..., 0:size, 0:size])
-        + mirrored(padded[..., 2 : size + 2, 2 : size + 2])
+        _mirrored(model, media)
+        + _mirrored(model, padded[..., 0:size, 0:size])
+        + _mirrored(model, padded[..., 2 : size + 2, 2 : size + 2])
     ) / 3
+
+
+def _mirrored(model: nn.Module, view: Tensor) -> Tensor:
+    """Average the model over ``view`` and its horizontal mirror."""
+    averaged = 0.5 * (model(view) + model(view.flip(-1)))
+    assert isinstance(averaged, Tensor)
+    return averaged

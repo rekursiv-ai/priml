@@ -34,15 +34,29 @@ class EvaluationActor(Protocol):
     """Own evaluation state and choose actions with algorithm semantics."""
 
     @property
-    def model(self) -> nn.Module: ...
+    def model(self) -> nn.Module:
+        """Model."""
+        ...
 
     @property
-    def observation_size(self) -> int: ...
+    def observation_size(self) -> int:
+        """Observation size."""
+        ...
 
     @property
-    def device(self) -> torch.device: ...
+    def device(self) -> torch.device:
+        """Device."""
+        ...
 
-    def reset(self, *, num_envs: int, device: torch.device) -> None: ...
+    def reset(self, *, num_envs: int, device: torch.device) -> None:
+        """Reset accumulated state.
+
+        Args:
+          num_envs: Num envs.
+          device: Device.
+
+        """
+        ...
 
     def act(
         self,
@@ -50,14 +64,33 @@ class EvaluationActor(Protocol):
         previous_done: Tensor,
         *,
         generator: torch.Generator,
-    ) -> Tensor: ...
+    ) -> Tensor:
+        """Act.
+
+        Args:
+          observation: Observation.
+          previous_done: Previous done.
+          generator: Generator.
+
+        Returns:
+          result: The Tensor.
+
+        """
+        ...
 
 
-@runtime_checkable
-class _SupportsEvaluationActor(Protocol):
-    """A training step that can isolate a fresh evaluation actor."""
+class _Cadence:
+    """A finite update cadence with a checkpointable cursor."""
 
-    def make_evaluation_actor(self) -> EvaluationActor: ...
+    def __init__(self, *, count: int, position: int = 0) -> None:
+        self.count = count
+        self.position = position
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for index in range(self.position, self.count):
+            self.position = index + 1
+            yield {"valid_count": 1}
+        self.position = 0
 
 
 class CraftaxRollouts:
@@ -112,7 +145,12 @@ class CraftaxRollouts:
         self._step = step
 
     def train_dataloader(self) -> _Cadence:
-        """Yield one tick per update in an epoch."""
+        """Yield one tick per update in an epoch.
+
+        Returns:
+          stream: The _Cadence.
+
+        """
         stream = _Cadence(
             count=self.config.updates_per_epoch,
             position=self._pending_train_position,
@@ -122,7 +160,12 @@ class CraftaxRollouts:
         return stream
 
     def eval_dataloader(self) -> Iterator[dict[str, Any]]:
-        """Yield evaluation ticks carrying one isolated stateful actor."""
+        """Yield evaluation ticks carrying one isolated stateful actor.
+
+        Returns:
+          result: The Iterator[dict[str, Any]].
+
+        """
         if not isinstance(self._step, _SupportsEvaluationActor):
             raise TypeError("Evaluation requires a bound training step with an actor.")
         batch: dict[str, Any] = {
@@ -133,7 +176,12 @@ class CraftaxRollouts:
         return iter([dict(batch) for _ in range(self.config.eval_batches)])
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the pass count and active cadence position."""
+        """Return the pass count and active cadence position.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         position = (
             self._live_train.position
             if self._live_train is not None
@@ -145,7 +193,12 @@ class CraftaxRollouts:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the pass count and active cadence position."""
+        """Restore the pass count and active cadence position.
+
+        Args:
+          state_dict: State dict.
+
+        """
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
         position = int(state_dict.get("train_position", 0))
@@ -155,15 +208,8 @@ class CraftaxRollouts:
             self._pending_train_position = 0
 
 
-class _Cadence:
-    """A finite update cadence with a checkpointable cursor."""
+@runtime_checkable
+class _SupportsEvaluationActor(Protocol):
+    """A training step that can isolate a fresh evaluation actor."""
 
-    def __init__(self, *, count: int, position: int = 0) -> None:
-        self.count = count
-        self.position = position
-
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        for index in range(self.position, self.count):
-            self.position = index + 1
-            yield {"valid_count": 1}
-        self.position = 0
+    def make_evaluation_actor(self) -> EvaluationActor: ...

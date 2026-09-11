@@ -118,7 +118,7 @@ def polynomial(progress: float, *, power: float = 1.0) -> float:
       multiplier: The rate's share of its initial value.
 
     """
-    return math.pow(1.0 - _clamped(progress), power)
+    return float((1.0 - _clamped(progress)) ** power)
 
 
 def cosine(progress: float, *, final: float = 0.0) -> float:
@@ -160,7 +160,7 @@ def exponential(progress: float, *, decay: float) -> float:
     """
     if decay <= 0:
         raise ValueError(f"decay must be positive; got {decay}.")
-    return math.pow(decay, _clamped(progress))
+    return float(decay ** _clamped(progress))
 
 
 def staircase(progress: float, *, drops: int = 3, gamma: float = 0.1) -> float:
@@ -189,7 +189,7 @@ def staircase(progress: float, *, drops: int = 3, gamma: float = 0.1) -> float:
     # ``min`` rather than a bare floor: progress reaches exactly 1.0 at the
     # end, which would otherwise count one drop more than the run has.
     taken = min(int(_clamped(progress) * (drops + 1)), drops)
-    return math.pow(gamma, taken)
+    return float(gamma**taken)
 
 
 def warmup(progress: float, *, fraction: float) -> float:
@@ -319,12 +319,9 @@ def cosine_restarts(
     return cosine(within, final=final)
 
 
+# A caller's clock can overshoot -- a budget is checked between steps, so the last one
+# lands past it -- and every curve here would then run off its own domain: a polynomial
+# would raise a negative base to a fractional power, and a cosine would climb back up.
 def _clamped(progress: float) -> float:
-    """Clamp progress to ``[0, 1]``.
-
-    A caller's clock can overshoot -- a budget is checked between steps, so the
-    last one lands past it -- and every curve here would then run off its own
-    domain: a polynomial would raise a negative base to a fractional power, and
-    a cosine would climb back up.
-    """
+    """Clamp progress to ``[0, 1]``."""
     return min(1.0, max(0.0, progress))

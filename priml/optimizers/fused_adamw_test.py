@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 
-import math
-
 from torch import Tensor
 
 import pytest
@@ -15,6 +13,8 @@ import torch
 from priml.optimizers.fused_adamw import FusedAdamW
 
 
+# Independent of the implementation under test: it is the arithmetic the module claims
+# to perform, so an error in the module cannot hide here.
 def _reference(
     parameter: Tensor,
     gradient: Tensor,
@@ -28,16 +28,12 @@ def _reference(
     eps: float,
     weight_decay: float,
 ) -> Tensor:
-    """One AdamW step written out longhand, in the fused spelling.
-
-    Independent of the implementation under test: it is the arithmetic the
-    module claims to perform, so an error in the module cannot hide here.
-    """
+    """One AdamW step written out longhand, in the fused spelling."""
     decayed: Tensor = parameter.clone() * (1 - lr * weight_decay)
     first = first.lerp(gradient, 1 - beta1)
     second = second.lerp(gradient.square(), 1 - beta2)
-    denominator = (second / (1 - math.pow(beta2, step))).sqrt() + eps
-    update = first / denominator * (lr / (1 - math.pow(beta1, step)))
+    denominator = (second / float(1 - beta2**step)).sqrt() + eps
+    update = first / denominator * float(lr / (1 - beta1**step))
     return decayed - update
 
 

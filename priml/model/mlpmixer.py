@@ -109,6 +109,7 @@ class MLPMixerBlock(nn.Module):
         self.norm_channel = config.norm_channel.make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         for m in (
             self.token_mixer,
             self.channel_mixer,

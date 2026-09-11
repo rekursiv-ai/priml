@@ -57,9 +57,9 @@ class PassK:
 
     def reset(self) -> None:
         """Drop every accumulated vote."""
-        # puzzle id -> answer hash -> [votes, summed confidence]
+        # Puzzle id -> answer hash -> [votes, summed confidence].
         self._votes: dict[int, dict[str, list[float]]] = {}
-        # puzzle id -> the true answer's hash
+        # Puzzle id -> the true answer's hash.
         self._truth: dict[int, str] = {}
 
     def update(self, logits: Tensor, **batch: object) -> None:
@@ -96,7 +96,7 @@ class PassK:
         for row in range(predictions.shape[0]):
             keep = counted[row]
             if not bool(keep.any()):
-                continue  # an all-ignored row is padding, not a puzzle
+                continue  # an all-ignored row is padding, not a puzzle.
             puzzle = int(identifiers[row])
             answer = _digest(predictions[row][keep])
             truth = _digest(labels[row][keep])
@@ -106,7 +106,12 @@ class PassK:
             tally[1] += float(confidence[row])
 
     def compute(self) -> dict[str, float]:
-        """Rank each puzzle's answers and score every K."""
+        """Rank each puzzle's answers and score every K.
+
+        Returns:
+          result: The dict[str, float].
+
+        """
         solved = dict.fromkeys(self.config.pass_ks, 0)
         for puzzle, tally in self._votes.items():
             truth = self._truth[puzzle]
@@ -138,21 +143,29 @@ class PassK:
         }
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the accumulated votes."""
+        """Return the accumulated votes.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"votes": self._votes, "truth": self._truth}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore votes produced by :meth:`state_dict`."""
+        """Restore votes produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self._votes = state_dict.get("votes", {})
         self._truth = state_dict.get("truth", {})
 
 
+# Only equality between grids matters, and an evaluation holds hundreds of thousands of
+# them, so a digest is stored instead of the grid.
 def _digest(grid: Tensor) -> str:
-    """Hash one grid's tokens.
-
-    Only equality between grids matters, and an evaluation holds hundreds of
-    thousands of them, so a digest is stored instead of the grid.
-    """
+    """Hash one grid's tokens."""
     return hashlib.blake2b(
         grid.to(torch.int16).cpu().numpy().tobytes(),
         digest_size=16,

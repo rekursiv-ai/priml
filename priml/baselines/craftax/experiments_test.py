@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import is_dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from unittest.mock import patch
 
 from configgle import InlineConfig
@@ -44,6 +44,9 @@ from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _Experiment(Protocol):
@@ -425,14 +428,12 @@ def test_the_renamed_forks_record_what_they_dropped() -> None:
         )
 
 
-def _deltas(parent: Any, child: Any) -> set[str]:
-    """Return the dotted names of the fields that differ between two configs.
-
-    A field holding a nested Config is descended into, so a change buried in
-    ``step.model`` is reported at the leaf that actually moved -- unless the
-    two sides hold DIFFERENT Config classes, in which case the swap itself is
-    the single change and its fields are not comparable.
-    """
+# A field holding a nested Config is descended into, so a change buried in
+# ``step.model`` is reported at the leaf that actually moved -- unless the two sides
+# hold DIFFERENT Config classes, in which case the swap itself is the single change and
+# its fields are not comparable.
+def _deltas(parent: object, child: object) -> set[str]:
+    """Return the dotted names of the fields that differ between two configs."""
     flat_parent, flat_child = _flatten(parent), _flatten(child)
     return {
         name
@@ -477,7 +478,7 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
 
     Refresh with ``--golden-overwrite`` after reading the diff.
     """
-    golden = Path(__file__).resolve().parent / "testdata" / "exp000.txt"
+    golden = _CWD / "testdata" / "exp000.txt"
     rendered = pformat(exp000().copy_tree().finalize(), hide_default_values=False)
     if request.config.getoption("--golden-overwrite", default=False):
         golden.parent.mkdir(parents=True, exist_ok=True)

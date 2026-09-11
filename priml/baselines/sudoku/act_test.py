@@ -97,8 +97,8 @@ def test_slots_halt_at_the_step_cap() -> None:
 def test_givens_survive_the_feedback_loop() -> None:
     """The model may revise its guesses but not the puzzle's clues."""
     pool = _pool()
-    media = torch.full((4, 81), 1, dtype=torch.long)  # all empty
-    media[:, :10] = 7  # ten clues
+    media = torch.full((4, 81), 1, dtype=torch.long)  # all empty.
+    media[:, :10] = 7  # ten clues.
     decoded = torch.full((4, 81), 3, dtype=torch.long)
     clamped = pool.clamp_givens(decoded, media=media)
     assert bool((clamped[:, :10] == 7).all())
@@ -162,7 +162,7 @@ def _halt_sequence(*, disturb: bool) -> list[bool]:
     out: list[bool] = []
     for _ in range(3):
         if disturb:
-            torch.rand(17)  # ambient draws that must not matter
+            torch.rand(17)  # ambient draws that must not matter.
         pool.refill(media, labels=labels, valid_count=4, ignore_label_id=-100)
         pool.advance(
             torch.zeros(4, 81, 8),

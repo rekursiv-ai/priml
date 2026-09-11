@@ -67,15 +67,22 @@ class TensorModule(Protocol):
     every call site ``Any``. This names the contract those call sites need.
     """
 
-    def __call__(self, x: Tensor, /, **kwargs: Any) -> Tensor: ...
-    def reset_parameters(self) -> None: ...
+    def __call__(self, x: Tensor, /, **kwargs: Any) -> Tensor:
+        """Apply to the input."""
+        ...
+
+    def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
+        ...
 
 
 @runtime_checkable
 class Resettable(Protocol):
     """Owns resettable parameters or buffers."""
 
-    def reset_parameters(self) -> None: ...
+    def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
+        ...
 
 
 @runtime_checkable
@@ -90,7 +97,9 @@ class RotaryFactors(Protocol):
     a child attribute, so a plain object is left out of the module tree.
     """
 
-    def __call__(self, positions: Tensor, /) -> tuple[Tensor, Tensor]: ...
+    def __call__(self, positions: Tensor, /) -> tuple[Tensor, Tensor]:
+        """Apply to the input."""
+        ...
 
 
 @runtime_checkable
@@ -116,7 +125,9 @@ class AttentionKernel(Protocol):
         k: Tensor,
         v: Tensor,
         **kwargs: Any,
-    ) -> Tensor: ...
+    ) -> Tensor:
+        """Apply to the input."""
+        ...
 
 
 @runtime_checkable
@@ -160,7 +171,9 @@ class LatentAttentionKernel(Protocol):
         w_kr: Tensor,
         w_uv: Tensor,
         **kwargs: Any,
-    ) -> Tensor: ...
+    ) -> Tensor:
+        """Apply to the input."""
+        ...
 
 
 @runtime_checkable
@@ -175,9 +188,25 @@ class LookupTable(Protocol):
 
     weight: Tensor
 
-    def __call__(self, tokens: Tensor, /, **kwargs: Any) -> Tensor: ...
-    def reset_parameters(self) -> None: ...
-    def to(self, *, dtype: torch.dtype) -> Self: ...
+    def __call__(self, tokens: Tensor, /, **kwargs: Any) -> Tensor:
+        """Apply to the input."""
+        ...
+
+    def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
+        ...
+
+    def to(self, *, dtype: torch.dtype) -> Self:
+        """To.
+
+        Args:
+          dtype: Dtype.
+
+        Returns:
+          result: The Self.
+
+        """
+        ...
 
 
 @runtime_checkable
@@ -252,8 +281,11 @@ class TransformerConfig(ChannelsInOutConfig, Protocol):
     """A buildable transformer architecture exposing its replaceable components."""
 
     num_layers: int
+
     in_proj: Makeable[TensorModule] | None
+
     block: TensorBlockConfig | list[TensorBlockConfig]
+
     out_proj: Makeable[TensorModule] | None
 
 
@@ -284,6 +316,13 @@ def has_weight(module: TensorModule | None) -> TypeGuard[WeightedTensorModule]:
     """Check tensor weights, including parameters registered through nn.Module.
 
     Runtime protocol checks use static lookup, missing registered parameters.
+
+    Args:
+      module: Module.
+
+    Returns:
+      result: The TypeGuard[WeightedTensorModule].
+
     """
     return hasattr(module, "weight") and isinstance(
         cast(_WeightAttribute, module).weight, Tensor

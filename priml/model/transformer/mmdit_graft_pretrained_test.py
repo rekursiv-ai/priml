@@ -76,3 +76,9 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
         peak,
     )
     assert peak < 8 * 1024**3
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

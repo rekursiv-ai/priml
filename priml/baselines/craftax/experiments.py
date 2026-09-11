@@ -102,7 +102,7 @@ class CraftaxGTrXLTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
 
 
 def exp000() -> CraftaxTrainLoop:
-    """Published Craftax PPO at one million interactions, seed 42.
+    """Reproduce the published Craftax PPO at one million interactions, seed 42.
 
     The baseline every other experiment forks, and the only one that states a
     recipe rather than a change. Frozen: improvements belong in a fork, never
@@ -112,6 +112,9 @@ def exp000() -> CraftaxTrainLoop:
       A feed-forward actor-critic trained with clipped PPO reaches roughly
       2.2% normalized episodic return at one million interactions -- the bar
       any additional mechanism must clear to earn its complexity.
+
+    Returns:
+      cfg: The CraftaxTrainLoop.
 
     References:
       https://github.com/MichaelTMatthews/Craftax_Baselines
@@ -179,6 +182,9 @@ def exp001() -> CraftaxTrainLoop:
       and evidence that exp000's score is budget-limited rather than
       recipe-limited.
 
+    Returns:
+      cfg: The CraftaxTrainLoop.
+
     References:
       https://github.com/MichaelTMatthews/Craftax_Baselines
       Matthews et al. 2024. Craftax: a lightning-fast benchmark for
@@ -220,6 +226,9 @@ def exp002() -> CraftaxRNNTrainLoop:
 
     Not carried over from the JAX exp002:
       Nothing. This is the whole treatment.
+
+    Returns:
+      cfg: The CraftaxRNNTrainLoop.
 
     References:
       https://github.com/MichaelTMatthews/Craftax_Baselines
@@ -282,6 +291,9 @@ def exp003() -> CraftaxPQNTrainLoop:
     Not carried over from the JAX exp003:
       Nothing architectural. Its 128-step rollouts, 4 minibatches, RAdam, and
       epsilon schedule are all here.
+
+    Returns:
+      cfg: The CraftaxPQNTrainLoop.
 
     References:
       https://arxiv.org/abs/2407.04811
@@ -350,6 +362,9 @@ def exp011() -> CraftaxTrainLoop:
       ``CraftaxEnv._restart``). Optimistic reset, the third treatment, is
       carried directly as ``optimistic_reset_ratio``.
 
+    Returns:
+      cfg: The CraftaxTrainLoop.
+
     References:
       exp001.
 
@@ -391,6 +406,9 @@ def exp013() -> CraftaxGTrXLTrainLoop:
       records: both worked around XLA static shapes that do not exist here.
       Optimistic reset is carried. The architecture change is the whole of
       this fork.
+
+    Returns:
+      cfg: The CraftaxGTrXLTrainLoop.
 
     References:
       https://github.com/Reytuag/transformerXL_PPO_JAX
@@ -449,6 +467,10 @@ def exp_smoke() -> CraftaxTrainLoop:
     Not a result. It answers one question -- does the loop run -- so it is
     cut on every axis that costs time without bearing on that answer. The
     score will be near zero, which is expected.
+
+    Returns:
+      cfg: The CraftaxTrainLoop.
+
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
@@ -467,19 +489,8 @@ def exp_smoke() -> CraftaxTrainLoop:
     return cfg
 
 
+# Floors, because a partial update is not an update: the run stops one rollout short of
+# the budget rather than overshooting it.
 def _updates(*, interactions: int, num_envs: int, rollout_steps: int) -> int:
-    """Convert an interaction budget into the update count that spends it.
-
-    Floors, because a partial update is not an update: the run stops one
-    rollout short of the budget rather than overshooting it.
-
-    Args:
-      interactions: Environment steps the run is allowed.
-      num_envs: Parallel workers.
-      rollout_steps: Steps each worker takes per update.
-
-    Returns:
-      updates: Optimizer steps in the run.
-
-    """
+    """Convert an interaction budget into the update count that spends it."""
     return interactions // (num_envs * rollout_steps)

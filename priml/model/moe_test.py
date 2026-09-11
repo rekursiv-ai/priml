@@ -186,7 +186,7 @@ def test_sigmoid_routing_shared_experts_and_bias():
     router = m.router
     assert isinstance(router, Router)
     assert router.scoring_func == "sigmoid"
-    assert router.norm_topk_prob is True  # auto-enabled for sigmoid
+    assert router.norm_topk_prob is True  # auto-enabled for sigmoid.
     assert router.e_score_correction_bias is not None
     assert len(m.shared_experts) == 1
     x = torch.randn(2, 4, 32)

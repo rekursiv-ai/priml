@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from typing import (
     TYPE_CHECKING,
     Any,
     NotRequired,
     Protocol,
+    Self,
     TypedDict,
     overload,
     runtime_checkable,
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ActivationMemoizationProtocol",
-    "CheckpointableProtocol",
     "CheckpointingProtocol",
     "CudaEventProtocol",
     "EMAProtocol",
@@ -77,8 +77,11 @@ class TrainStepOutput(TypedDict):
     """
 
     loss: Tensor
+
     model: Tensor
+
     metrics: NotRequired[dict[str, float | Tensor]]
+
     eval_extra_votes: NotRequired[list[tuple[Tensor, dict[str, Any]]]]
 
 
@@ -143,28 +146,67 @@ class OptimizerProtocol(CheckpointableProtocol, Protocol):
 class ModuleLike(CheckpointableProtocol, Protocol):
     """Protocol for modules with parameters and buffers."""
 
-    def parameters(self) -> Any:
-        """Get model parameters."""
+    def parameters(self) -> Iterator[Tensor]:
+        """Get model parameters.
+
+        Returns:
+          parameters: Every learnable tensor, recursively.
+
+        """
         ...
 
-    def buffers(self) -> Any:
-        """Get model buffers."""
+    def buffers(self) -> Iterator[Tensor]:
+        """Get model buffers.
+
+        Returns:
+          buffers: Every persistent non-learnable tensor, recursively.
+
+        """
         ...
 
-    def to(self, device: torch.device | str | None = None) -> Any:
-        """Move module to device."""
+    def to(self, device: torch.device | str | None = None) -> Self:
+        """Move module to device.
+
+        Args:
+          device: Where parameters and buffers should live.
+
+        Returns:
+          self: The same module, moved in place.
+
+        """
         ...
 
-    def eval(self) -> Any:
-        """Set module to eval mode."""
+    def eval(self) -> Self:
+        """Set module to eval mode.
+
+        Returns:
+          self: The same module, for chaining.
+
+        """
         ...
 
-    def train(self, mode: bool = True) -> Any:
-        """Set module to train mode."""
+    def train(self, mode: bool = True) -> Self:
+        """Set module to train mode.
+
+        Args:
+          mode: True for training behavior, False for evaluation.
+
+        Returns:
+          self: The same module, for chaining.
+
+        """
         ...
 
-    def requires_grad_(self, requires_grad: bool = True) -> Any:
-        """Set requires_grad for all parameters."""
+    def requires_grad_(self, requires_grad: bool = True) -> Self:
+        """Set requires_grad for all parameters.
+
+        Args:
+          requires_grad: Whether autograd should record operations on them.
+
+        Returns:
+          self: The same module, for chaining.
+
+        """
         ...
 
 
@@ -180,10 +222,12 @@ class EMAProtocol(CheckpointableProtocol, Protocol):
     """
 
     shadow_model: nn.Module | None
+
     global_step: int
+
     local_step: int
 
-    def __call__(self, model: Any) -> None:
+    def __call__(self, model: nn.Module) -> None:
         """Update EMA with current model state."""
         ...
 
@@ -215,11 +259,26 @@ class CheckpointingProtocol(Protocol):
     """
 
     def maybe_save(self, target: CheckpointableProtocol, step: int) -> bool:
-        """Save ``target`` at ``step`` iff on the save cadence; return whether saved."""
+        """Save ``target`` at ``step`` iff on the save cadence; return whether saved.
+
+        Args:
+          target: Target.
+          step: Step.
+
+        Returns:
+          result: The bool.
+
+        """
         ...
 
     def save(self, target: CheckpointableProtocol, step: int) -> None:
-        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists."""
+        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists.
+
+        Args:
+          target: Target.
+          step: Step.
+
+        """
         ...
 
     def load(
@@ -234,11 +293,25 @@ class CheckpointingProtocol(Protocol):
         Resume selection and the overwrite guard are atomic over one inventory
         read. ``guard=False`` skips the guard (e.g. an eval-only run that writes
         nothing). ``max_steps`` bounds the guard's collision prediction.
+
+        Args:
+          target: Target.
+          max_steps: Max steps.
+          guard: Guard.
+
+        Returns:
+          result: The bool.
+
         """
         ...
 
     def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics)."""
+        """Ascending steps of all complete checkpoints on disk (for diagnostics).
+
+        Returns:
+          result: The list[int].
+
+        """
         ...
 
     def close(self) -> None:
@@ -313,7 +386,7 @@ class ProfileProtocol(Protocol):
     """
 
     def on_step_start(self, step: int) -> None:
-        """Called at the start of each training step.
+        """Run at the start of each training step.
 
         Args:
             step: Current global step number.
@@ -322,7 +395,7 @@ class ProfileProtocol(Protocol):
         ...
 
     def on_step_end(self, step: int) -> None:
-        """Called at the end of each training step.
+        """Run at the end of each training step.
 
         Args:
             step: Current global step number.
@@ -331,18 +404,32 @@ class ProfileProtocol(Protocol):
         ...
 
     def cleanup(self) -> None:
-        """Called at end of training to cleanup profiler resources."""
+        """Run at the end of training to clean up profiler resources."""
         ...
 
 
 class CudaEventProtocol(Protocol):
     """Minimal ``torch.cuda.Event`` surface used for deferred GPU timing."""
 
-    def record(self) -> None: ...
+    def record(self) -> None:
+        """Record one timing sample."""
+        ...
 
-    def synchronize(self) -> None: ...
+    def synchronize(self) -> None:
+        """Synchronize."""
+        ...
 
-    def elapsed_time(self, end_event: CudaEventProtocol) -> float: ...
+    def elapsed_time(self, end_event: CudaEventProtocol) -> float:
+        """Elapsed time.
+
+        Args:
+          end_event: End event.
+
+        Returns:
+          result: The float.
+
+        """
+        ...
 
 
 class PhaseTimerProtocol(Protocol):
@@ -356,42 +443,124 @@ class PhaseTimerProtocol(Protocol):
     """
 
     @property
-    def cuda_events_enabled(self) -> bool: ...
+    def cuda_events_enabled(self) -> bool:
+        """Cuda events enabled."""
+        ...
 
-    def phase(self, name: str) -> AbstractContextManager[None]: ...
+    def phase(self, name: str) -> AbstractContextManager[None]:
+        """Phase.
 
-    def measure(self, name: str) -> AbstractContextManager[None]: ...
+        Args:
+          name: Name.
 
-    def measure_cuda(self, name: str) -> AbstractContextManager[None]: ...
+        Returns:
+          result: The AbstractContextManager[None].
 
-    def record(self, name: str, elapsed: float) -> None: ...
+        """
+        ...
+
+    def measure(self, name: str) -> AbstractContextManager[None]:
+        """Measure.
+
+        Args:
+          name: Name.
+
+        Returns:
+          result: The AbstractContextManager[None].
+
+        """
+        ...
+
+    def measure_cuda(self, name: str) -> AbstractContextManager[None]:
+        """Measure cuda.
+
+        Args:
+          name: Name.
+
+        Returns:
+          result: The AbstractContextManager[None].
+
+        """
+        ...
+
+    def record(self, name: str, elapsed: float) -> None:
+        """Record one timing sample.
+
+        Args:
+          name: Name.
+          elapsed: Elapsed.
+
+        """
+        ...
 
     def record_cuda_events(
         self,
         name: str,
         start: CudaEventProtocol,
         end: CudaEventProtocol,
-    ) -> None: ...
+    ) -> None:
+        """Record cuda events.
 
-    def summary(self) -> dict[str, float]: ...
+        Args:
+          name: Name.
+          start: Start.
+          end: End.
 
-    def reset_interval(self) -> None: ...
+        """
+        ...
+
+    def summary(self) -> dict[str, float]:
+        """Summarize recorded timings.
+
+        Returns:
+          result: The dict[str, float].
+
+        """
+        ...
+
+    def reset_interval(self) -> None:
+        """Reset interval."""
+        ...
 
     def publish_interval(
         self,
         tracker: TrackerProtocol | None,
         *,
         step: int,
-    ) -> dict[str, float]: ...
+    ) -> dict[str, float]:
+        """Publish interval.
+
+        Args:
+          tracker: Tracker.
+          step: Step.
+
+        Returns:
+          result: The dict[str, float].
+
+        """
+        ...
 
     def publish_summary(
         self,
         tracker: TrackerProtocol | None,
         *,
         step: int,
-    ) -> dict[str, float]: ...
+    ) -> dict[str, float]:
+        """Publish summary.
 
-    def log_summary(self) -> None: ...
+        Args:
+          tracker: Tracker.
+          step: Step.
+
+        Returns:
+          result: The dict[str, float].
+
+        """
+        ...
+
+    def log_summary(self) -> None:
+        """Log the timing summary."""
+        ...
 
 
 class ActivationMemoizationProtocol(Protocol):
@@ -447,7 +616,8 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
 
     ``**preprocessed_batch`` is ``Any`` so an implementation can narrow it to
     the batch it actually takes (``**batch: Tensor``); ``object`` would reject
-    those.
+    those. ``call_eval`` returns ``Any`` for the same reason: a step returning
+    a ``Tensor`` or a typed output container must still satisfy it.
     """
 
     @property
@@ -461,7 +631,15 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         ...
 
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Preprocess batch (move tensors to device, etc.)."""
+        """Preprocess batch (move tensors to device, etc.).
+
+        Args:
+          batch: Batch.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         ...
 
     def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:
@@ -501,11 +679,21 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         ...
 
     def call_eval(self, **preprocessed_batch: Any) -> Any:
-        """Evaluation forward pass (uses EMA if available, applies inference_mode and autocast)."""
+        """Run the evaluation forward pass.
+
+        EMA if available, under inference_mode and autocast.
+
+        Args:
+          **preprocessed_batch: Preprocessed batch.
+
+        Returns:
+          output: The model's forward result.
+
+        """
         ...
 
     def on_epoch_end(self) -> None:
-        """Called by the loop at each epoch boundary.
+        """Run at each epoch boundary.
 
         Steps with gradient accumulation use this to flush or discard a partial
         accumulation so gradients do not mix across epochs. Steps without

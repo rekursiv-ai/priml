@@ -119,13 +119,10 @@ class Unpatchify(nn.Module):
         return unpatchify(x, self.patch_size)
 
 
+# ``patchify`` checks the same thing, but only once a tensor arrives; a config error
+# belongs at construction, where the field that carries it is still in scope.
 def _validate_patch_size(patch_size: list[int]) -> None:
-    """Reject a patch that cannot tile anything, naming the config field.
-
-    ``patchify`` checks the same thing, but only once a tensor arrives; a
-    config error belongs at construction, where the field that carries it is
-    still in scope.
-    """
+    """Reject a patch that cannot tile anything, naming the config field."""
     if not patch_size:
         raise ValueError("patch_size must name at least one axis.")
     if any(p < 1 for p in patch_size):

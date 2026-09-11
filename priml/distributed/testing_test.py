@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import functools
@@ -31,7 +31,7 @@ def _pool(world_size: int) -> WorkerPool:
 def test_enter_kills_started_children_when_a_later_start_fails() -> None:
     started: list[MagicMock] = []
 
-    def _make_process(*_args: Any, **_kwargs: Any) -> MagicMock:
+    def _make_process(*_args: object, **_kwargs: object) -> MagicMock:
         proc = MagicMock()
         # Fail every third spawn; each attempt's first two must be killed on
         # cleanup before the next retry starts a fresh batch.
@@ -80,12 +80,10 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
     healthy.kill.assert_not_called()
 
 
+# The sleep makes a fire-and-forget dispatch observably lose the race: the sentinel
+# would be absent the instant ``pool(fn)`` returned.
 def _sentinel_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
-    """Sleep, then write a per-rank sentinel file.
-
-    The sleep makes a fire-and-forget dispatch observably lose the race: the
-    sentinel would be absent the instant ``pool(fn)`` returned.
-    """
+    """Sleep, then write a per-rank sentinel file."""
     time.sleep(0.01)
     (Path(result_dir_str) / f"rank_{mesh.get_rank()}").write_text("done")
 
@@ -125,7 +123,8 @@ def test_call_retries_then_raises_when_worker_keeps_dying(
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
     respawns: list[int] = []
 
-    def _record_respawn(_self: WorkerPool) -> None:
+    def _record_respawn(self: WorkerPool) -> None:
+        del self
         respawns.append(1)
 
     monkeypatch.setattr(WorkerPool, "_respawn", _record_respawn)
@@ -149,24 +148,25 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     ``_DISPATCH_ATTEMPTS`` tries.
     """
     proc = MagicMock()
-    proc.exitcode = None  # alive: never produces a _WorkerDiedError
+    proc.exitcode = None  # alive: never produces a _WorkerDiedError.
     proc.is_alive.return_value = True
     pool = _pool(1)
     pool.queue = MagicMock()
     pool.ack_queue = MagicMock()
-    pool.ack_queue.get.side_effect = queue_mod.Empty  # never acks -> timeout
+    pool.ack_queue.get.side_effect = queue_mod.Empty  # never acks -> timeout.
     pool.processes = [proc]
     # Make the ack deadline elapse immediately so the test does not sleep.
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
 
-    def _noop_kill(_self: WorkerPool, _procs: list[BaseProcess]) -> None:
-        return None
+    def _noop_kill(self: WorkerPool, procs: list[BaseProcess]) -> None:
+        del self, procs
 
     monkeypatch.setattr(WorkerPool, "_kill_all", _noop_kill)
     respawns: list[int] = []
 
-    def _record_respawn(_self: WorkerPool) -> None:
+    def _record_respawn(self: WorkerPool) -> None:
+        del self
         respawns.append(1)
 
     monkeypatch.setattr(WorkerPool, "_respawn", _record_respawn)

@@ -138,6 +138,13 @@ class RecurrentRollout:
             yield minibatch
 
 
+def _split_environments(value: Tensor, *, order: Tensor, count: int) -> Tensor:
+    """Shuffle whole trajectories and expose a leading minibatch axis."""
+    shuffled = value[:, order]
+    grouped = shuffled.reshape(value.shape[0], count, -1, *value.shape[2:])
+    return grouped.transpose(0, 1)
+
+
 class CraftaxRNNTrainStep(TrainStep):
     """Model, environment, and optimizer for one recurrent PPO experiment."""
 
@@ -464,7 +471,12 @@ class CraftaxRNNTrainStep(TrainStep):
         return logits
 
     def make_evaluation_actor(self) -> EvaluationActor:
-        """Build an actor with isolated GRU state."""
+        """Build an actor with isolated GRU state.
+
+        Returns:
+          result: The EvaluationActor.
+
+        """
         return _EvaluationActor(
             self.model,
             observation_size=self.env.observation_size,
@@ -634,58 +646,18 @@ class _EvaluationActor:
         ).squeeze(-1)
 
 
+# Compiling the recurrent entry points rather than the module is what keeps the rollout
+# on the compiled path: a rollout calls ``step``, never ``forward``.
 def _compiled(function: _Callable, *, enabled: bool) -> _Callable:
-    """Compile one bound method, or return it untouched.
-
-    Compiling the recurrent entry points rather than the module is what keeps
-    the rollout on the compiled path: a rollout calls ``step``, never
-    ``forward``.
-
-    Args:
-      function: The bound method to compile.
-      enabled: Whether to compile at all.
-
-    Returns:
-      callable: The compiled function, or the original.
-
-    """
+    """Compile one bound method, or return it untouched."""
     return torch.compile(function) if enabled else function
 
 
-def _tensor(value: Any) -> Tensor:
-    """Narrow one checkpoint entry to a tensor.
-
-    A state dict is untyped by construction, and assigning straight from it
-    would widen every restored attribute to ``Any`` -- erasing the shapes the
-    rest of this file depends on.
-
-    Args:
-      value: The checkpoint entry.
-
-    Returns:
-      tensor: The same value, typed.
-
-    Raises:
-      TypeError: The entry is not a tensor.
-
-    """
+# A state dict is untyped by construction, and assigning straight from it would widen
+# every restored attribute to ``Any`` -- erasing the shapes the rest of this file
+# depends on.
+def _tensor(value: object) -> Tensor:
+    """Narrow one checkpoint entry to a tensor."""
     if not isinstance(value, Tensor):
         raise TypeError(f"checkpoint entry must be a tensor, got {type(value)}")
     return value
-
-
-def _split_environments(value: Tensor, *, order: Tensor, count: int) -> Tensor:
-    """Shuffle whole trajectories and expose a leading minibatch axis.
-
-    Args:
-      value: Time-major tensor, ``[time, envs, ...]``.
-      order: Permutation of the worker axis.
-      count: Minibatches to split the workers into.
-
-    Returns:
-      split: ``[count, time, envs / count, ...]``.
-
-    """
-    shuffled = value[:, order]
-    grouped = shuffled.reshape(value.shape[0], count, -1, *value.shape[2:])
-    return grouped.transpose(0, 1)

@@ -48,7 +48,7 @@ def _cfg(
     num_heads: int = 4,
     **kwargs: object,
 ) -> MMDiTBlock.Config:
-    """Helper to build MMDiTBlock.Config with attention params."""
+    """Build an MMDiTBlock.Config with attention params."""
     cfg = MMDiTBlock.Config(channels_in=channels_in, num_streams=num_streams)
     cfg.attn = MultiStreamAttention.Config(num_heads=num_heads)
     for k, v in kwargs.items():

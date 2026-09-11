@@ -129,7 +129,7 @@ def test_log1mexp():
 
 def test_log1mexp_branch_x_less_than_neg_log2():
     """Test the branch where x < -log(2)."""
-    x = torch.tensor([-1.0, -2.0, -3.0])  # All less than -log(2) ≈ -0.693
+    x = torch.tensor([-1.0, -2.0, -3.0])  # All less than -log(2) ≈ -0.693.
     result = log1mexp(x)
     expected = torch.log1p(-torch.exp(x))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -137,7 +137,7 @@ def test_log1mexp_branch_x_less_than_neg_log2():
 
 def test_log1mexp_branch_x_greater_than_neg_log2():
     """Test the branch where x >= -log(2)."""
-    x = torch.tensor([-0.1, -0.3, -0.5])  # All greater than -log(2) ≈ -0.693
+    x = torch.tensor([-0.1, -0.3, -0.5])  # All greater than -log(2) ≈ -0.693.
     result = log1mexp(x)
     expected = torch.log(-torch.expm1(x))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -169,7 +169,7 @@ def test_logsubexp_with_return_sign():
     result_pair = logsubexp(x, y, return_sign=True)
     assert isinstance(result_pair, tuple)
     _, sign = result_pair
-    # When x > y, sign should be +1; when x < y, sign should be -1
+    # When x > y, sign should be +1; when x < y, sign should be -1.
     expected_sign = torch.tensor([1, -1])
     torch.testing.assert_close(sign, expected_sign)
 
@@ -179,7 +179,7 @@ def test_logsubexp_equal_values():
     x = torch.tensor([1.0, 2.0])
     y = torch.tensor([1.0, 2.0])
     result = logsubexp(x, y)
-    # log(exp(x) - exp(x)) = log(0) = -inf
+    # log(exp(x) - exp(x)) = log(0) = -inf.
     assert isinstance(result, Tensor)
     assert torch.all(torch.isinf(result))
 
@@ -198,7 +198,7 @@ def test_softcap_basic():
     cap = 1.0
     result = softcap(x, cap)
     assert isinstance(result, Tensor)
-    # Result should be bounded by cap
+    # Result should be bounded by cap.
     assert torch.all(result <= cap)
     assert torch.all(result >= -cap)
 
@@ -208,9 +208,9 @@ def test_softcap_with_different_caps():
     x = torch.tensor([10.0, -10.0, 0.0])
     for cap in [0.5, 1.0, 2.0, 5.0]:
         result = softcap(x, cap)
-        # Check that values are bounded by cap
+        # Check that values are bounded by cap.
         assert isinstance(result, Tensor)
-        assert torch.all(torch.abs(result) <= cap * 1.001)  # Small tolerance
+        assert torch.all(torch.abs(result) <= cap * 1.001)  # Small tolerance.
 
 
 def test_softcap_preserves_dtype():
@@ -354,7 +354,7 @@ def test_safe_rsqrt_nonpositive():
     vals = torch.tensor([-1.0, 0.0, 0.25, -3.0])
     result = safe_rsqrt(vals)
     assert result[0] == 0.0  # negative -> 0 (undefined domain)
-    assert result[1] == math.inf  # rsqrt(0) = 1/sqrt(0) = +inf
+    assert result[1] == math.inf  # rsqrt(0) = 1/sqrt(0) = +inf.
     assert result[3] == 0.0
     torch.testing.assert_close(result[2], torch.rsqrt(torch.tensor(0.25)))
 
@@ -383,7 +383,7 @@ def test_safe_pow_nonpositive_base():
     exp = torch.tensor(0.5)
     result = safe_pow(base, exp)
     assert result[0] == 0.0
-    assert result[1] == 0.0  # 0 ** 0.5 = 0
+    assert result[1] == 0.0  # 0 ** 0.5 = 0.
     assert result[3] == 0.0
     torch.testing.assert_close(result[2], torch.tensor(2.0))
 
@@ -434,14 +434,15 @@ def test_log_cumsum_exp_2d():
 
 
 def test_kahan_sum_accuracy():
-    """Compensated sum is STRICTLY more accurate than naive for small terms
-    swamped by a large running total.
+    """Compensated sum is STRICTLY more accurate than naive for small terms swamped.
 
-    A big leading term followed by many tiny ones is the canonical case where
-    naive fp32 drops the low-order bits of each small term once the running
-    total grows; the compensation recovers them. Using ``<`` (not ``<=``) so
-    the test actually proves the algorithm adds value -- on a benign sum where
-    compensation is a no-op, ``<=`` would pass vacuously.
+    By a large running total.
+
+        A big leading term followed by many tiny ones is the canonical case where
+        naive fp32 drops the low-order bits of each small term once the running
+        total grows; the compensation recovers them. Using ``<`` (not ``<=``) so
+        the test actually proves the algorithm adds value -- on a benign sum where
+        compensation is a no-op, ``<=`` would pass vacuously.
     """
     # 2**24 (fp32 ULP = 2) then 1000 copies of 1.0: each small term sits at
     # half an ULP, so naive accumulation drops it while compensation recovers
@@ -619,7 +620,7 @@ def test_sqrt1pm1_small():
     """For small x, should match x/2 to first order (Taylor expansion)."""
     x = torch.tensor([1e-8, 1e-10, -1e-8])
     result = sqrt1pm1(x)
-    approx = x / 2  # First-order Taylor
+    approx = x / 2  # First-order Taylor.
     torch.testing.assert_close(result, approx, rtol=1e-4, atol=1e-12)
 
 

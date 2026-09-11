@@ -144,3 +144,9 @@ def test_window_bfb(device: str) -> None:
         build_input=lambda: torch.randn(1, 4, 1, 2),
         seed=0,
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -94,11 +94,21 @@ class CheckpointableStepTimer:
         self.local_sec += elapsed
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the global totals; the local ones belong to this process."""
+        """Return the global totals; the local ones belong to this process.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"global_count": self.global_count, "global_sec": self.global_sec}
 
     def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
-        """Restore the global totals and zero the local ones."""
+        """Restore the global totals and zero the local ones.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.global_count = int(state_dict["global_count"])
         self.global_sec = float(state_dict["global_sec"])
         self.local_count = 0

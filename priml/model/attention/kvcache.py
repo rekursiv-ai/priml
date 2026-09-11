@@ -13,7 +13,7 @@ class KVCache:
     """Static pre-allocated key-value cache for autoregressive generation.
 
     Pre-allocates tensors of shape [..., H, max_seq, D] and writes new
-    KV pairs at an offset. No copies per token — O(1) update.
+    KV pairs at an offset. No copies per token -- O(1) update.
 
     FIFO uses sliced copy (not torch.roll) for torch.compile compat.
     For maximum throughput, HuggingFace and vLLM use custom CUDA
@@ -48,6 +48,19 @@ class KVCache:
         ``channels_v_head`` defaults to ``channels_head`` (symmetric K/V,
         standard MHA/GQA). MLA needs independent dims (K concatenates
         qk_nope + qk_rope; V uses a separate channels_v_head).
+
+        Args:
+          batch: Batch.
+          num_heads: Num heads.
+          max_seq: Max seq.
+          channels_head: Channels head.
+          channels_v_head: Channels v head.
+          device: Device.
+          dtype: Dtype.
+
+        Returns:
+          result: The KVCache.
+
         """
         if isinstance(batch, int):
             batch = (batch,)
@@ -62,10 +75,21 @@ class KVCache:
 
     @property
     def max_seq(self) -> int:
+        """Max seq.
+
+        Returns:
+          result: The int.
+
+        """
         return self.k.shape[-2]
 
     def freeze(self) -> KVCache:
-        """Return a frozen snapshot (update becomes a no-op)."""
+        """Return a frozen snapshot (update becomes a no-op).
+
+        Returns:
+          frozen: The KVCache.
+
+        """
         frozen = _FrozenKVCache(self.k, self.v, self.length)
         # Preserve the monotonic total so post-freeze RoPE keeps assigning
         # correct absolute positions; the constructor reset it to ``length``.
@@ -77,6 +101,14 @@ class KVCache:
 
         If the cache is full, shifts old entries out (FIFO) to make room.
         Uses sliced copy instead of torch.roll for torch.compile compat.
+
+        Args:
+          k: K.
+          v: V.
+
+        Returns:
+          result: The tuple[Tensor, Tensor].
+
         """
         s = k.shape[-2]
         if s > self.max_seq:

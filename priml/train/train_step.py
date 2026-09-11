@@ -247,6 +247,7 @@ class TrainStep:
         dtype_autocast: torch.dtype | None = None
         """Autocast dtype for forward and loss (e.g. ``torch.bfloat16``);
         ``None`` disables autocast entirely."""
+
         autocast_cache_enabled: bool = False
         """Enable autocast's weight cache. Default False preserves exact
         numerics across forward calls; True trades a small numeric difference
@@ -492,13 +493,21 @@ class TrainStep:
             return forward_model(*args, **kwargs)
 
     def call_eval(self, *args: Any, **kwargs: Any) -> Any:
-        """Evaluation forward pass (uses EMA if available, applies inference_mode and autocast).
+        """Run the evaluation forward pass under inference_mode and autocast.
 
         Runs the live model with EMA-averaged weights swapped in via
         ``ema.apply_to``. This is the single eval path for every shadow kind:
         the ``"param_dict"`` shadow keeps ``shadow_model is None`` (FSDP-safe),
         so a ``shadow_model`` truthiness fallback would silently evaluate LIVE
         un-averaged weights. NoEMA's ``apply_to`` is a no-op.
+
+        Args:
+          *args: Positional model inputs.
+          **kwargs: Keyword model inputs (the preprocessed batch).
+
+        Returns:
+          output: The model's forward result under the EMA weights.
+
         """
         was_training = self.model.training
         self.model.eval()
@@ -574,7 +583,15 @@ class TrainStep:
             group["lr"] = group["initial_lr"] * multiplier
 
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Move every tensor in the batch to this step's device."""
+        """Move every tensor in the batch to this step's device.
+
+        Args:
+          batch: Batch.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         non_blocking = self.device.type == "cuda"
         return {
             key: value.to(self.device, non_blocking=non_blocking)
@@ -592,6 +609,9 @@ class TrainStep:
 
         Args:
           **preprocessed_batch: Preprocessed batch data as kwargs.
+
+        Returns:
+          result: The TrainStepOutput.
 
         """
         # Forward (autocast applied in __call__). The output may be a single
@@ -659,6 +679,9 @@ class TrainStep:
         Args:
           **preprocessed_batch: Preprocessed batch data as kwargs.
 
+        Returns:
+          result: The TrainStepOutput.
+
         """
         # Forward (train mode + autocast via __call__)
         output: ModelOutput = self(**preprocessed_batch)
@@ -673,6 +696,9 @@ class TrainStep:
 
         Args:
           **preprocessed_batch: Preprocessed batch data as kwargs.
+
+        Returns:
+          result: The TrainStepOutput.
 
         """
         # Forward (eval mode + autocast via call_eval)
@@ -718,6 +744,10 @@ class TrainStep:
         A subclass adding a timer of its own saves it by extending this, which
         is one line and visible where a reader looks for what a checkpoint
         holds.
+
+        Returns:
+          result: The dict[str, Any].
+
         """
         return {
             "model": self.model.state_dict(),
@@ -748,6 +778,13 @@ class TrainStep:
 
         Gradient accumulation resets: per-microbatch gradients are not saved,
         so a pending accumulation cannot be resumed.
+
+        Args:
+          state_dict: State dict.
+          strict: Strict.
+          load_optimizer: Load optimizer.
+          remap: Remap.
+
         """
         model_state = state_dict["model"]
         if remap is not None:
@@ -773,27 +810,25 @@ class TrainStep:
         self.accumulated_samples = 0
 
         if not load_optimizer:
-            return  # finetuning: keep the fresh optimizer/EMA
+            return  # finetuning: keep the fresh optimizer/EMA.
 
         self.optimizer.load_state_dict(state_dict["optimizer"])
         if "ema" in state_dict:
             self.ema.load_state_dict(state_dict["ema"])
 
+    # The optimizer closure for closure-based optimizers (e.g. exact-Hessian Newton,
+    # which differentiates this via ``autograd.grad``). First-order optimizers never
+    # call it. Returns a graph-bearing scalar so the caller can take further
+    # derivatives.
     def _recompute_loss(self, preprocessed_batch: dict[str, Any]) -> Tensor:
-        """Recompute the scalar training loss on ``preprocessed_batch``.
-
-        The optimizer closure for closure-based optimizers (e.g. exact-Hessian
-        Newton, which differentiates this via ``autograd.grad``). First-order
-        optimizers never call it. Returns a graph-bearing scalar so the caller
-        can take further derivatives.
-        """
+        """Recompute the scalar training loss on ``preprocessed_batch``."""
         output: ModelOutput = self(**preprocessed_batch)
         loss = {**self.loss(output, **preprocessed_batch)}
         return loss["loss"].sum()
 
 
 def _collective_device(group: dist.ProcessGroup | None) -> torch.device:
-    """The device this group's backend can reduce on: NCCL CUDA, gloo CPU."""
+    """Return the device this group's backend can reduce on: NCCL CUDA, gloo CPU."""
     if dist.get_backend(group) == "nccl":
         # The CURRENT device, not index 0: a shared index would put every
         # rank's reduction on one GPU.
@@ -801,21 +836,11 @@ def _collective_device(group: dist.ProcessGroup | None) -> torch.device:
     return torch.device("cpu")
 
 
+# The precondition for the ``train_step`` division (derived in its backward comment).
+# Uses the ``"dp"`` mesh group when one exposes it, else WORLD -- correct when the world
+# is a pure data-parallel group.
 def _assert_uniform_microbatch_count(accumulated_samples: int) -> None:
-    """Verify every data-parallel rank accumulated the same element count.
-
-    The precondition for the ``train_step`` division (derived in its backward
-    comment). Uses the ``"dp"`` mesh group when one exposes it, else WORLD --
-    correct when the world is a pure data-parallel group.
-
-    Args:
-      accumulated_samples: This rank's count for the completed window.
-
-    Raises:
-      ValueError: Ranks accumulated differing counts, which would make the
-        per-rank division diverge from the true big-batch gradient.
-
-    """
+    """Verify every data-parallel rank accumulated the same element count."""
     if not dist.is_initialized() or dist.get_world_size() <= 1:
         return
 

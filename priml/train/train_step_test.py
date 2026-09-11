@@ -35,7 +35,9 @@ class _LinearModel(nn.Module):
 
     class Config(Fig["_LinearModel"], make_with_kwargs=True):
         in_features: int = -1
+
         out_features: int = -1
+
         bias: bool = True
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
@@ -302,7 +304,9 @@ class _DictModel(nn.Module):
 
     class Config(Fig["_DictModel"], make_with_kwargs=True):
         in_features: int = -1
+
         out_features: int = -1
+
         bias: bool = True
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
@@ -363,7 +367,9 @@ class _BadModel(nn.Linear):
 
     class Config(Fig["_BadModel"], make_with_kwargs=True):
         in_features: int = -1
+
         out_features: int = -1
+
         bias: bool = True
 
     @override
@@ -468,7 +474,9 @@ class _CountingModel(nn.Module):
 
     class Config(Fig["_CountingModel"], make_with_kwargs=True):
         in_features: int = -1
+
         out_features: int = -1
+
         bias: bool = True
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
@@ -535,16 +543,20 @@ def _uniform_count_worker(result_dir_str: str, mesh: Any) -> None:
 
         # Unequal counts (rank 0 -> 3, rank 1 -> 5): must raise on every rank.
         local_count = 3 if rank == 0 else 5
-        try:
-            _assert_uniform_microbatch_count(local_count)
-        except ValueError:
-            (result_dir / f"rank_{rank}").write_text("ok")
-        else:
-            (result_dir / f"rank_{rank}").write_text("FAIL:no-raise-on-unequal")
+        (result_dir / f"rank_{rank}").write_text(_unequal_outcome(local_count))
     except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
         (result_dir / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None
+
+
+def _unequal_outcome(local_count: int) -> str:
+    """``ok`` when the uniform-count assertion raises, else a FAIL record."""
+    try:
+        _assert_uniform_microbatch_count(local_count)
+    except ValueError:
+        return "ok"
+    return "FAIL:no-raise-on-unequal"
 
 
 @pytest.mark.cli_python_subprocess

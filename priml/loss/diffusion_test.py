@@ -21,7 +21,7 @@ def test_diffusion_loss_default_config() -> None:
     cfg = DiffusionLoss.Config()
     loss_fn = cfg.make()
 
-    # Check defaults were set
+    # Check defaults were set.
     assert loss_fn.logsnr_fn is not None
     assert loss_fn.target_fn is not None
     assert loss_fn.corruption_fn is not None
@@ -32,22 +32,22 @@ def test_diffusion_loss_forward_basic() -> None:
     cfg = DiffusionLoss.Config()
     loss_fn = cfg.make()
 
-    # Simple denoiser that returns zeros
+    # Simple denoiser that returns zeros.
     def denoiser(x: Tensor, sigma: Tensor) -> Tensor:
         del sigma
         return torch.zeros_like(x)
 
-    # Input: [B, C, F, H, W]
+    # Input: [B, C, F, H, W].
     x0 = torch.randn(2, 3, 4, 8, 8)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
 
-    # Check output structure
+    # Check output structure.
     assert "loss" in result
     assert "x_denoised" in result
     assert "eps_denoised" in result
 
-    # Check shapes
+    # Check shapes.
     assert result["loss"].shape == (2,)
     assert result["x_denoised"].shape == x0.shape
     assert result["eps_denoised"].shape == x0.shape
@@ -62,7 +62,7 @@ def test_diffusion_loss_forward_2d() -> None:
         del sigma
         return x * 0.5
 
-    # Input: [B, C, H, W]
+    # Input: [B, C, H, W].
     x0 = torch.randn(4, 3, 16, 16)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
@@ -80,7 +80,7 @@ def test_diffusion_loss_forward_1d() -> None:
         del sigma
         return x
 
-    # Input: [B, C, L]
+    # Input: [B, C, L].
     x0 = torch.randn(8, 16, 128)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
@@ -187,7 +187,7 @@ def test_diffusion_loss_deterministic() -> None:
 
     x0 = torch.randn(2, 3, 4, 8, 8)
 
-    # Run twice with same seed
+    # Run twice with same seed.
     torch.manual_seed(42)
     result1 = loss_fn(denoiser=denoiser, x0=x0)
 
@@ -210,7 +210,7 @@ def test_diffusion_loss_batch_independence() -> None:
 
     result = loss_fn(denoiser=denoiser, x0=x0)
 
-    # Each sample should have different loss
+    # Each sample should have different loss.
     assert not torch.allclose(result["loss"][0], result["loss"][1])
 
 
@@ -221,14 +221,14 @@ def test_diffusion_loss_perfect_denoiser() -> None:
 
     def perfect_denoiser(x: Tensor, sigma: Tensor) -> Tensor:
         # This would require knowing the noise, so we can't make it perfect
-        # But we can test the structure
+        # But we can test the structure.
         del sigma
         return x
 
     x0 = torch.randn(2, 3, 4, 8, 8)
     result = loss_fn(denoiser=perfect_denoiser, x0=x0)
 
-    # Loss should be finite and non-negative
+    # Loss should be finite and non-negative.
     assert torch.all(torch.isfinite(result["loss"]))
     assert torch.all(result["loss"] >= 0)
 
@@ -238,7 +238,7 @@ def test_diffusion_loss_gradient_flow() -> None:
     cfg = DiffusionLoss.Config()
     loss_fn = cfg.make()
 
-    # Simple learnable denoiser
+    # Simple learnable denoiser.
     class LearnableDenoiser(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -255,7 +255,7 @@ def test_diffusion_loss_gradient_flow() -> None:
     result = loss_fn(denoiser=denoiser.forward, x0=x0)
     loss = result["loss"].mean()
 
-    # Backward should work
+    # Backward should work.
     loss.backward()
     assert denoiser.weight.grad is not None
     assert torch.any(denoiser.weight.grad != 0)
@@ -287,12 +287,12 @@ def test_diffusion_loss_different_dtypes() -> None:
         del sigma
         return x
 
-    # Test with float32
+    # Test with float32.
     x0_f32 = torch.randn(2, 3, 4, 8, 8, dtype=torch.float32)
     result_f32 = loss_fn(denoiser=denoiser, x0=x0_f32)
     assert result_f32["loss"].dtype == torch.float32
 
-    # Test with float64
+    # Test with float64.
     x0_f64 = torch.randn(2, 3, 4, 8, 8, dtype=torch.float64)
     result_f64 = loss_fn(denoiser=denoiser, x0=x0_f64)
     assert result_f64["loss"].dtype == torch.float64

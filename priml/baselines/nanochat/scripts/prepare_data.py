@@ -86,7 +86,12 @@ would mean listing every one of them here."""
 
 
 def main() -> int:
-    """Prepare the corpus and vocabulary; return the process exit code."""
+    """Prepare the corpus and vocabulary; return the process exit code.
+
+    Returns:
+      result: The int.
+
+    """
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -105,7 +110,12 @@ def main() -> int:
 
 
 def default_directory() -> Path:
-    """Return the corpus directory a default ``TrainLoop`` would resolve."""
+    """Return the corpus directory a default ``TrainLoop`` would resolve.
+
+    Returns:
+      result: The Path.
+
+    """
     config = NanoChatData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)
@@ -191,12 +201,7 @@ def _download(out: Path, *, count: int) -> list[Path]:
 
 
 def _staged(out: Path, *, count: int) -> list[Path]:
-    """Return shards already present, refusing a short corpus.
-
-    Raises:
-      FileNotFoundError: Fewer shards are staged than the splits need.
-
-    """
+    """Return shards already present, refusing a short corpus."""
     paths = [out / f"shard_{index:05d}.parquet" for index in range(count)]
     missing = [path.name for path in paths if not path.is_file()]
     if missing:
@@ -212,16 +217,7 @@ def _fit_vocabulary(
     train_chars: int,
     doc_cap: int,
 ) -> None:
-    """Fit a byte-pair vocabulary, or verify the one already fitted.
-
-    Args:
-      shards: Training shards supplying the text.
-      out: Directory receiving ``tokenizer.pkl`` and its byte table.
-      vocab_size: Vocabulary size, including the reserved tokens.
-      train_chars: Characters to fit on.
-      doc_cap: Characters one document may contribute.
-
-    """
+    """Fit a byte-pair vocabulary, or verify the one already fitted."""
     # Imported here, not at module scope: training reads a pickled encoding, so
     # a published install must not need a BPE trainer to import this package.
     import rustbpe  # noqa: PLC0415 -- preparation-only dependency
@@ -321,7 +317,7 @@ def _differing(
     recorded: dict[str, Any],
     requested: dict[str, Any],
 ) -> dict[str, tuple[Any, Any]]:
-    """Requested keys whose recorded value differs, as ``(recorded, wanted)``."""
+    """Return requested keys whose recorded value differs, as ``(recorded, wanted)``."""
     return {
         key: (recorded.get(key), value)
         for key, value in requested.items()
@@ -329,23 +325,20 @@ def _differing(
     }
 
 
+# The bits-per-byte score divides by these, so a reserved token contributing zero is
+# what keeps document boundaries out of the denominator.
+#
+# ``decode`` is deliberate, and NOT interchangeable with ``decode_single_token_bytes``.
+# The two disagree on tokens that are not valid UTF-8 on their own -- a lone high byte
+# decodes to U+FFFD, whose re-encoding is three bytes rather than one -- so they are two
+# different denominators, and a score is comparable only against others using the same
+# one. This spelling is the reference's, and every recorded result was measured under
+# it.
+#
+# Changing it is therefore a protocol change, not a bug fix: it needs a new
+# ``token_bytes_sha256``, which is what stops the two being confused.
 def _token_bytes(encoding: tiktoken.Encoding) -> np.ndarray:
-    """UTF-8 byte length of every token id; reserved tokens count as zero.
-
-    The bits-per-byte score divides by these, so a reserved token contributing
-    zero is what keeps document boundaries out of the denominator.
-
-    ``decode`` is deliberate, and NOT interchangeable with
-    ``decode_single_token_bytes``. The two disagree on tokens that are not valid
-    UTF-8 on their own -- a lone high byte decodes to U+FFFD, whose re-encoding
-    is three bytes rather than one -- so they are two different denominators,
-    and a score is comparable only against others using the same one. This
-    spelling is the reference's, and every recorded result was measured under
-    it.
-
-    Changing it is therefore a protocol change, not a bug fix: it needs a new
-    ``token_bytes_sha256``, which is what stops the two being confused.
-    """
+    """UTF-8 byte length of every token id; reserved tokens count as zero."""
     reserved = set(RESERVED_TOKENS)
     lengths = [
         0 if (text := encoding.decode([token])) in reserved else len(text.encode())
@@ -354,19 +347,16 @@ def _token_bytes(encoding: tiktoken.Encoding) -> np.ndarray:
     return np.array(lengths, dtype=np.int32)
 
 
+# Each document is truncated to ``doc_cap`` BEFORE it is counted, so the budget is spent
+# on many documents rather than on a few long ones -- which is what keeps the merges
+# representative of the corpus rather than of its outliers.
 def _documents(
     shards: list[Path],
     *,
     max_chars: int,
     doc_cap: int,
 ) -> Iterator[str]:
-    """Yield capped documents from parquet shards, stopping after ``max_chars``.
-
-    Each document is truncated to ``doc_cap`` BEFORE it is counted, so the
-    budget is spent on many documents rather than on a few long ones -- which is
-    what keeps the merges representative of the corpus rather than of its
-    outliers.
-    """
+    """Yield capped documents from parquet shards, stopping after ``max_chars``."""
     from pyarrow import parquet  # noqa: PLC0415 -- preparation-only dependency
 
     seen = 0

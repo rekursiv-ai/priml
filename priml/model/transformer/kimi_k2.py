@@ -76,12 +76,72 @@ from priml.model.transformer.transformer import Transformer
 _VALID_MODEL_TYPES = frozenset({"kimi_k2", "deepseek_v3"})
 
 
+def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
+    """Parse HF ``rope_scaling`` → config. None-pass-through; strict on type."""
+    if not rope_scaling:
+        return None
+    # Validated rather than cast: this is an HF ``config.json``, so a
+    # malformed field is caller input, and casting surfaced it as an
+    # ``AttributeError`` from inside ``.get``.
+    scaling = DictCodec.coerce(rope_scaling)
+    stype = scaling.get("type") or scaling.get("rope_type")
+    if stype is None:
+        return None
+    if stype != "yarn":
+        raise ValueError(
+            f"Unsupported rope_scaling type={stype!r}; only yarn is implemented.",
+        )
+    config = YarnScaling.Config()
+    config.factor = FloatCodec.coerce(scaling["factor"])
+    config.original_max_position_embeddings = IntCodec.coerce(
+        scaling["original_max_position_embeddings"],
+        default=4_096,
+    )
+    config.beta_fast = FloatCodec.coerce(scaling.get("beta_fast"), 32.0)
+    config.beta_slow = FloatCodec.coerce(scaling.get("beta_slow"), 1.0)
+    config.mscale = FloatCodec.coerce(scaling.get("mscale"), 1.0)
+    config.mscale_all_dim = FloatCodec.coerce(scaling.get("mscale_all_dim"), 0.0)
+    return config
+
+
+def _remap_shared(
+    hf_sd: dict[str, Tensor],
+    sp: str,
+    bs: str,
+    out: dict[str, Tensor],
+) -> None:
+    gate = hf_sd[f"{sp}.gate_proj.weight"]
+    up = hf_sd[f"{sp}.up_proj.weight"]
+    out[f"{bs}.up_proj.weight"] = torch.cat([gate, up], dim=0)
+    out[f"{bs}.down_proj.weight"] = hf_sd[f"{sp}.down_proj.weight"]
+
+
+# Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
+# layer is built, so a per-layer list and a broadcast template both answer here without
+# this function knowing which it was given.
+def _attn_of(config: KimiK2.Config, layer: int) -> MultiHeadLatentAttention.Config:
+    """Return one layer's attention config."""
+    blocks = config.block if isinstance(config.block, list) else [config.block]
+    # ``len == 1`` is the pre-finalize broadcast template, which answers for
+    # every layer. Any other short list is a genuine index error, and falling
+    # back to layer 0 there remapped excess layers against the wrong geometry.
+    block = blocks[0] if len(blocks) == 1 else blocks[layer]
+    if not isinstance(block, TransformerBlock.Config):
+        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
+    attn = block.attn
+    if not isinstance(attn, MultiHeadLatentAttention.Config):
+        raise TypeError(f"layer {layer} attention is {type(attn).__name__}, not MLA.")
+    return attn
+
+
 class KimiK2(Transformer):
-    """Kimi-K2 / DeepSeek-V3 causal LM — MLA + DS-V3 MoE."""
+    """Kimi-K2 / DeepSeek-V3 causal LM -- MLA + DS-V3 MoE."""
 
     class Config(Makes["KimiK2"], Transformer.Config, kw_only=False):
-        """Widths come from ``from_hf``: ``channels_in`` is ``hidden_size`` and
-        ``channels_out`` the vocabulary, which sizes the embedding's rows too.
+        """Widths come from ``from_hf``.
+
+        ``channels_in`` is ``hidden_size`` and ``channels_out`` the vocabulary, which
+        sizes the embedding's rows too.
         """
 
         _: KW_ONLY
@@ -171,7 +231,15 @@ class KimiK2(Transformer):
 
         @classmethod
         def from_hf(cls, config: dict[str, Any]) -> Self:
-            """Parse an HF ``config.json`` dict."""
+            """Parse an HF ``config.json`` dict.
+
+            Args:
+              config: Config.
+
+            Returns:
+              result: The Self.
+
+            """
             model_type = config.get("model_type")
             if model_type not in _VALID_MODEL_TYPES:
                 raise ValueError(
@@ -293,13 +361,10 @@ class KimiK2(Transformer):
             propagate_attr(self.in_proj, "num_embeddings", self.channels_out)
             return super().finalize()
 
+        # Only the widths: everything else on the block is the caller's, so an edit to
+        # the template survives ``finalize`` rather than being rebuilt over.
         def _size_block(self, block: TensorBlockConfig, layer: int) -> None:
-            """Push the widths the PARENT owns into one already-shaped block.
-
-            Only the widths: everything else on the block is the caller's, so
-            an edit to the template survives ``finalize`` rather than being
-            rebuilt over.
-            """
+            """Push the widths the PARENT owns into one already-shaped block."""
             propagate_attr(block, "channels_in", self.channels_in, protocol=ChannelsIn)
             if not isinstance(block, TransformerBlock.Config):
                 return
@@ -347,6 +412,9 @@ class KimiK2(Transformer):
           device: Target device (default: CPU).
           dtype: Override the dtype recorded in ``config.json``.
 
+        Returns:
+          model: The KimiK2.
+
         """
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
@@ -377,57 +445,6 @@ class KimiK2(Transformer):
         return model
 
 
-def _parse_yarn(rope_scaling: object) -> YarnScaling.Config | None:
-    """Parse HF ``rope_scaling`` → config. None-pass-through; strict on type."""
-    if not rope_scaling:
-        return None
-    # Validated rather than cast: this is an HF ``config.json``, so a
-    # malformed field is caller input, and casting surfaced it as an
-    # ``AttributeError`` from inside ``.get``.
-    scaling = DictCodec.coerce(rope_scaling)
-    stype = scaling.get("type") or scaling.get("rope_type")
-    if stype is None:
-        return None
-    if stype != "yarn":
-        raise ValueError(
-            f"Unsupported rope_scaling type={stype!r}; only yarn is implemented.",
-        )
-    config = YarnScaling.Config()
-    config.factor = FloatCodec.coerce(scaling["factor"])
-    config.original_max_position_embeddings = IntCodec.coerce(
-        scaling["original_max_position_embeddings"],
-        default=4_096,
-    )
-    config.beta_fast = FloatCodec.coerce(scaling.get("beta_fast"), 32.0)
-    config.beta_slow = FloatCodec.coerce(scaling.get("beta_slow"), 1.0)
-    config.mscale = FloatCodec.coerce(scaling.get("mscale"), 1.0)
-    config.mscale_all_dim = FloatCodec.coerce(scaling.get("mscale_all_dim"), 0.0)
-    return config
-
-
-# -- HF weight remap ---------------------------------------------------
-
-
-def _attn_of(config: KimiK2.Config, layer: int) -> MultiHeadLatentAttention.Config:
-    """Return one layer's attention config.
-
-    Read off the BLOCK rather than a parent mirror of it: the geometry lives
-    where the layer is built, so a per-layer list and a broadcast template
-    both answer here without this function knowing which it was given.
-    """
-    blocks = config.block if isinstance(config.block, list) else [config.block]
-    # ``len == 1`` is the pre-finalize broadcast template, which answers for
-    # every layer. Any other short list is a genuine index error, and falling
-    # back to layer 0 there remapped excess layers against the wrong geometry.
-    block = blocks[0] if len(blocks) == 1 else blocks[layer]
-    if not isinstance(block, TransformerBlock.Config):
-        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
-    attn = block.attn
-    if not isinstance(attn, MultiHeadLatentAttention.Config):
-        raise TypeError(f"layer {layer} attention is {type(attn).__name__}, not MLA.")
-    return attn
-
-
 def _moe_of(config: KimiK2.Config, layer: int) -> MoE.Config:
     """Return one layer's MoE config, where the expert counts live."""
     blocks = config.block if isinstance(config.block, list) else [config.block]
@@ -444,7 +461,16 @@ def remap_hf_state_dict(
     hf_sd: dict[str, Tensor],
     config: KimiK2.Config,
 ) -> dict[str, Tensor]:
-    """Convert an HF Kimi-K2 / DSV3 state_dict to loop-native names."""
+    """Convert an HF Kimi-K2 / DSV3 state_dict to loop-native names.
+
+    Args:
+      hf_sd: Hf sd.
+      config: Config.
+
+    Returns:
+      out: The dict[str, Tensor].
+
+    """
     out: dict[str, Tensor] = {
         "in_proj.weight": hf_sd["model.embed_tokens.weight"],
         "out_proj.0.weight": hf_sd["model.norm.weight"],
@@ -512,13 +538,4 @@ def remap_hf_state_dict(
     return out
 
 
-def _remap_shared(
-    hf_sd: dict[str, Tensor],
-    sp: str,
-    bs: str,
-    out: dict[str, Tensor],
-) -> None:
-    gate = hf_sd[f"{sp}.gate_proj.weight"]
-    up = hf_sd[f"{sp}.up_proj.weight"]
-    out[f"{bs}.up_proj.weight"] = torch.cat([gate, up], dim=0)
-    out[f"{bs}.down_proj.weight"] = hf_sd[f"{sp}.down_proj.weight"]
+# -- HF weight remap ---------------------------------------------------

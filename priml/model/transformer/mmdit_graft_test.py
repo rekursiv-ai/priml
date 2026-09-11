@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
@@ -27,6 +28,9 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
     randomize_parameters,
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
@@ -61,7 +65,8 @@ def test_graft_config_pprint() -> None:
     )
 
 
-def _constructor_state(_module: nn.Module, _input: Tensor) -> Tensor:
+def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
+    del module, input
     model = _config(conditioned=True).make()
     return torch.cat(
         [
@@ -76,7 +81,7 @@ def _constructor_state(_module: nn.Module, _input: Tensor) -> Tensor:
 
 def test_graft_constructor_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=Path(__file__).parent / "testdata",
+        golden_dir=_CWD / "testdata",
         golden_name="mmdit_graft_constructor",
         build_module=nn.Identity,
         build_input=lambda: torch.empty(0),
@@ -266,3 +271,9 @@ def test_factory_rejects_unsupported_backbones(invalid: str) -> None:
         error, match=r"Grafting requires|at least one additional stream"
     ):
         graft.make()
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -87,7 +87,16 @@ def drink_potion(state: EnvState, action: Tensor) -> EnvState:
 
 
 def shoot_arrow(state: EnvState, action: Tensor) -> EnvState:
-    """Loose an arrow in the faced direction, spending one from the quiver."""
+    """Loose an arrow in the faced direction, spending one from the quiver.
+
+    Args:
+      state: State.
+      action: Action.
+
+    Returns:
+      state: The EnvState.
+
+    """
     firing = (
         (action == int(Action.SHOOT_ARROW))
         & (state.inventory.bow >= 1)

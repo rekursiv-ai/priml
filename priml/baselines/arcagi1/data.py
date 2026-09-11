@@ -54,157 +54,6 @@ from priml.timer import CheckpointableStepTimer
 logger = logging.getLogger(__name__)
 
 
-class ArcData:
-    """ARC tasks held in device memory, yielding ``media`` / ``label`` batches.
-
-    Every batch is exactly ``batch_size`` rows: a short final batch is padded
-    with zero rows and reports how many are real, so downstream tensor shapes
-    never change mid-epoch. Batches also carry ``puzzle_identifiers``, which
-    the per-task prefix and the pass@K metric both read.
-
-    Raises:
-      FileNotFoundError: If the prepared arrays are absent. Run
-        ``uv --quiet run --frozen python -m
-        priml.baselines.arcagi1.scripts.prepare_data`` first.
-
-    """
-
-    class Config(Fig["ArcData"]):
-        """Where the prepared arrays live, and how batches are drawn."""
-
-        base_dir: Path | str | None = None
-        """Resource root supplied during parent finalization."""
-
-        working_dir: Path | str = "/datasets/arcagi1"
-        """Directory holding the ``train/`` and ``test/`` splits.
-
-        Resolved beneath ``base_dir`` at finalize, so it names a location
-        within the resource root rather than an absolute filesystem path."""
-
-        batch_size: int = 256
-        """Examples per training batch."""
-
-        eval_batch_size: int | None = None
-        """Examples per evaluation batch; ``None`` reuses ``batch_size``."""
-
-        device: str = "auto"
-        """Device holding the resident arrays ("auto" picks the best)."""
-
-        seed: int = 0
-        """Seeds the task-sampling stream.
-
-        Fixed rather than optional because sampling is hierarchical: a run has
-        to be able to replay which tasks and which augmented views it saw."""
-
-        num_tasks: int | None = None
-        """Training tasks to load; ``None`` loads all of them."""
-
-        num_eval_tasks: int | None = None
-        """Evaluation tasks to load; ``None`` loads all of them.
-
-        The full evaluation split is large and every task contributes many
-        augmented views, so mid-training evaluation normally reads a prefix of
-        it and the reported number comes from an uncapped final pass. The two
-        populations are not comparable."""
-
-        @override
-        def finalize(self) -> Self:
-            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
-            return super().finalize()
-
-    def __init__(self, config: Config) -> None:
-        if config.batch_size <= 0:
-            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
-        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
-            raise ValueError(
-                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
-            )
-        self.config = config
-        self.dataset_dir = Path(config.working_dir)
-        self.batch_size = config.batch_size
-        self.eval_batch_size = config.eval_batch_size or config.batch_size
-        self.timer_epoch = CheckpointableStepTimer()
-        """Passes over the training split; ticked by the loop, read by the step.
-
-        The same count as ``_passes`` below, kept separately because that one
-        is an INPUT -- it seeds the sampling sequence -- while this is the
-        record a budget and a schedule read."""
-
-        # Completed passes, persisted across resume so a restored run continues
-        # the sampling sequence instead of replaying the first pass.
-        self._passes = 0
-        self._live: _ArcBatches | None = None
-        self._pending_loader_state: dict[str, Any] | None = None
-
-    def train_dataloader(self) -> _ArcBatches:
-        """Build the re-iterable training stream."""
-        # Snapshot any prior stream's counter first, so re-creating the loader
-        # continues the sequence rather than restarting it.
-        if self._live is not None:
-            self._passes = self._live.passes
-        stream = _ArcBatches(
-            dataset_dir=self.dataset_dir,
-            device=self.config.device,
-            batch_size=self.batch_size,
-            split="train",
-            sample_by_task=True,
-            num_tasks=self.config.num_tasks,
-            seed=self.config.seed,
-            passes=self._passes,
-        )
-        if self._pending_loader_state is not None:
-            stream.load_state_dict(self._pending_loader_state)
-            self._pending_loader_state = None
-        self._live = stream
-        return stream
-
-    def eval_dataloader(self) -> _ArcBatches:
-        """Build the evaluation stream: every view of every task, in order.
-
-        Evaluation must see every augmented view, because pass@K votes across
-        them -- sampling here would discard the ballots.
-        """
-        return _ArcBatches(
-            dataset_dir=self.dataset_dir,
-            device=self.config.device,
-            batch_size=self.eval_batch_size,
-            split="test",
-            sample_by_task=False,
-            num_tasks=self.config.num_eval_tasks,
-            seed=self.config.seed,
-            passes=0,
-        )
-
-    def state_dict(self) -> dict[str, Any]:
-        """Snapshot the sampled pass and its next batch."""
-        loader_state = (
-            self._live.state_dict()
-            if self._live is not None
-            else self._pending_loader_state
-        )
-        return {
-            "passes": self._live.passes if self._live is not None else self._passes,
-            "loader": loader_state,
-            "timer_epoch": self.timer_epoch.state_dict(),
-        }
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore state produced by :meth:`state_dict`."""
-        if "passes" in state_dict:
-            self._passes = int(state_dict["passes"])
-        loader_state_raw = state_dict.get("loader")
-        if isinstance(loader_state_raw, dict):
-            loader_state = cast(dict[str, Any], loader_state_raw)
-            self._pending_loader_state = loader_state
-            if self._live is not None:
-                self._live.load_state_dict(loader_state)
-                self._pending_loader_state = None
-        elif self._live is not None:
-            self._live.passes = self._passes
-        if "timer_epoch" in state_dict:
-            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
-
-
 class _ArcBatches:
     """One split, resident on device, iterated in fixed-size batches."""
 
@@ -264,7 +113,12 @@ class _ArcBatches:
         return sum(1 for _ in self._plan_sampled(pass_index))
 
     def state_dict(self) -> dict[str, Any]:
-        """Return enough state to resume an unfinished sampled pass."""
+        """Return enough state to resume an unfinished sampled pass.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "passes": self.passes,
             "active_pass": self._active_pass,
@@ -272,20 +126,22 @@ class _ArcBatches:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore an unfinished sampled pass."""
+        """Restore an unfinished sampled pass.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.passes = int(state_dict.get("passes", self.passes))
         active_pass = state_dict.get("active_pass")
         self._active_pass = None if active_pass is None else int(active_pass)
         self._next_batch = int(state_dict.get("next_batch", 0))
 
+    # Each batch walks a shuffled task order, taking one random puzzle per task and as
+    # many of its augmented views as still fit. A short final batch is dropped: it would
+    # be a partial task rather than a partial epoch.
     def _iter_sampled(self) -> Iterator[dict[str, Any]]:
-        """Draw whole tasks, so every task carries the same weight.
-
-        Each batch walks a shuffled task order, taking one random puzzle per
-        task and as many of its augmented views as still fit. A short final
-        batch is dropped: it would be a partial task rather than a partial
-        epoch.
-        """
+        """Draw whole tasks, so every task carries the same weight."""
         if self._active_pass is None:
             self._active_pass = self.passes
             self.passes += 1
@@ -377,19 +233,7 @@ class _ArcBatches:
 
 
 def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
-    """Read one prepared split into tensors.
-
-    Args:
-      dataset_dir: Dataset root holding ``train/`` and ``test/``.
-      split: Which one to read.
-
-    Returns:
-      data: Arrays plus the metadata the batch contract needs.
-
-    Raises:
-      FileNotFoundError: If the split or its metadata is missing.
-
-    """
+    """Read one prepared split into tensors."""
     path = Path(dataset_dir).expanduser() / split
     metadata_path = path / "dataset.json"
     if not metadata_path.is_file():
@@ -420,3 +264,173 @@ def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
         "puzzle_identifiers": identifiers,
         "ignore_label_id": metadata.get("ignore_label_id", 0),
     }
+
+
+class ArcData:
+    """ARC tasks held in device memory, yielding ``media`` / ``label`` batches.
+
+    Every batch is exactly ``batch_size`` rows: a short final batch is padded
+    with zero rows and reports how many are real, so downstream tensor shapes
+    never change mid-epoch. Batches also carry ``puzzle_identifiers``, which
+    the per-task prefix and the pass@K metric both read.
+
+    Raises:
+      FileNotFoundError: If the prepared arrays are absent. Run
+        ``uv --quiet run --frozen python -m
+        priml.baselines.arcagi1.scripts.prepare_data`` first.
+
+    """
+
+    class Config(Fig["ArcData"]):
+        """Where the prepared arrays live, and how batches are drawn."""
+
+        base_dir: Path | str | None = None
+        """Resource root supplied during parent finalization."""
+
+        working_dir: Path | str = "/datasets/arcagi1"
+        """Directory holding the ``train/`` and ``test/`` splits.
+
+        Resolved beneath ``base_dir`` at finalize, so it names a location
+        within the resource root rather than an absolute filesystem path."""
+
+        batch_size: int = 256
+        """Examples per training batch."""
+
+        eval_batch_size: int | None = None
+        """Examples per evaluation batch; ``None`` reuses ``batch_size``."""
+
+        device: str = "auto"
+        """Device holding the resident arrays ("auto" picks the best)."""
+
+        seed: int = 0
+        """Seeds the task-sampling stream.
+
+        Fixed rather than optional because sampling is hierarchical: a run has
+        to be able to replay which tasks and which augmented views it saw."""
+
+        num_tasks: int | None = None
+        """Training tasks to load; ``None`` loads all of them."""
+
+        num_eval_tasks: int | None = None
+        """Evaluation tasks to load; ``None`` loads all of them.
+
+        The full evaluation split is large and every task contributes many
+        augmented views, so mid-training evaluation normally reads a prefix of
+        it and the reported number comes from an uncapped final pass. The two
+        populations are not comparable."""
+
+        @override
+        def finalize(self) -> Self:
+            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        if config.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive; got {config.batch_size}.")
+        if config.eval_batch_size is not None and config.eval_batch_size <= 0:
+            raise ValueError(
+                f"eval_batch_size must be positive; got {config.eval_batch_size}.",
+            )
+        self.config = config
+        self.dataset_dir = Path(config.working_dir)
+        self.batch_size = config.batch_size
+        self.eval_batch_size = config.eval_batch_size or config.batch_size
+        self.timer_epoch = CheckpointableStepTimer()
+        """Passes over the training split; ticked by the loop, read by the step.
+
+        The same count as ``_passes`` below, kept separately because that one
+        is an INPUT -- it seeds the sampling sequence -- while this is the
+        record a budget and a schedule read."""
+
+        # Completed passes, persisted across resume so a restored run continues
+        # the sampling sequence instead of replaying the first pass.
+        self._passes = 0
+        self._live: _ArcBatches | None = None
+        self._pending_loader_state: dict[str, Any] | None = None
+
+    def train_dataloader(self) -> _ArcBatches:
+        """Build the re-iterable training stream.
+
+        Returns:
+          stream: The _ArcBatches.
+
+        """
+        # Snapshot any prior stream's counter first, so re-creating the loader
+        # continues the sequence rather than restarting it.
+        if self._live is not None:
+            self._passes = self._live.passes
+        stream = _ArcBatches(
+            dataset_dir=self.dataset_dir,
+            device=self.config.device,
+            batch_size=self.batch_size,
+            split="train",
+            sample_by_task=True,
+            num_tasks=self.config.num_tasks,
+            seed=self.config.seed,
+            passes=self._passes,
+        )
+        if self._pending_loader_state is not None:
+            stream.load_state_dict(self._pending_loader_state)
+            self._pending_loader_state = None
+        self._live = stream
+        return stream
+
+    def eval_dataloader(self) -> _ArcBatches:
+        """Build the evaluation stream: every view of every task, in order.
+
+        Evaluation must see every augmented view, because pass@K votes across
+        them -- sampling here would discard the ballots.
+
+        Returns:
+          result: The _ArcBatches.
+
+        """
+        return _ArcBatches(
+            dataset_dir=self.dataset_dir,
+            device=self.config.device,
+            batch_size=self.eval_batch_size,
+            split="test",
+            sample_by_task=False,
+            num_tasks=self.config.num_eval_tasks,
+            seed=self.config.seed,
+            passes=0,
+        )
+
+    def state_dict(self) -> dict[str, Any]:
+        """Snapshot the sampled pass and its next batch.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
+        loader_state = (
+            self._live.state_dict()
+            if self._live is not None
+            else self._pending_loader_state
+        )
+        return {
+            "passes": self._live.passes if self._live is not None else self._passes,
+            "loader": loader_state,
+            "timer_epoch": self.timer_epoch.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore state produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
+        if "passes" in state_dict:
+            self._passes = int(state_dict["passes"])
+        loader_state_raw = state_dict.get("loader")
+        if isinstance(loader_state_raw, dict):
+            loader_state = cast(dict[str, Any], loader_state_raw)
+            self._pending_loader_state = loader_state
+            if self._live is not None:
+                self._live.load_state_dict(loader_state)
+                self._pending_loader_state = None
+        elif self._live is not None:
+            self._live.passes = self._passes
+        if "timer_epoch" in state_dict:
+            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])

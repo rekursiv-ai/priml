@@ -54,7 +54,7 @@ class Identity(nn.Identity):
         super().__init__()
 
     def reset_parameters(self) -> None:
-        pass
+        """Initialize every parameter in place."""
 
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
@@ -74,6 +74,7 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         """Submodule to wrap with a residual connection."""
 
         channels_in = PassthroughAttribute[int]()
+
         channels_out = PassthroughAttribute[int]()
 
     def __init__(self, config: Config) -> None:
@@ -86,6 +87,7 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         self.inner = config.inner.make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         if hasattr(self.inner, "reset_parameters"):
             self.inner.reset_parameters()
 

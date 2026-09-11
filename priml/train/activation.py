@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any, override
 
@@ -60,6 +60,7 @@ class LayerActivationCheckpointing:
     class Config(Fig["LayerActivationCheckpointing"]):
         interval: int = 1
         """Checkpoint every N-th leaf module."""
+
         reentrant: bool = False
         """Use reentrant checkpointing (legacy, less safe)."""
 
@@ -131,8 +132,10 @@ class SelectiveActivationCheckpointing:
     class Config(Fig["SelectiveActivationCheckpointing"]):
         module_types: Sequence[type[nn.Module]] = ()
         """Module classes to checkpoint (e.g., (TransformerBlock,))."""
+
         checkpoint_fraction: float = 1.0
         """Fraction of matching modules to checkpoint (1.0=all, 0.5=every other)."""
+
         reentrant: bool = False
         """Use reentrant checkpointing (legacy, less safe)."""
 
@@ -215,8 +218,10 @@ class QuantizedActivationStorage:
     class Config(Fig["QuantizedActivationStorage"]):
         dtype_storage: torch.dtype = torch.float8_e4m3fn
         """FP8 dtype for storing activations."""
+
         dtype_compute: torch.dtype | None = None
         """Dtype for backward computation (None = original dtype)."""
+
         min_size: int = 4_096
         """Minimum tensor numel to quantize (smaller tensors stored as-is)."""
 
@@ -242,57 +247,31 @@ class QuantizedActivationStorage:
             model: Module to apply quantization to.
 
         """
-        _empty_marker = torch.tensor([], device="cpu")
-
-        def _make_pack_hook(
-            dtype_storage: torch.dtype,
-            min_size: int,
-        ) -> Callable[[Tensor], Any]:
-            """Create pack hook with config captured in closure."""
-
-            def pack_hook(tensor: Tensor) -> Any:
-                """Quantize activation for storage (forward pass)."""
-                if tensor.numel() < min_size or not tensor.is_floating_point():
-                    return (tensor, _empty_marker, tensor.dtype)
-
-                amax = tensor.abs().max()
-                # An all-zero tensor has amax == 0; clamp the scale to 1 so the
-                # division yields zeros rather than NaN (0/0). Dequant recovers
-                # exact zeros since quantized values are all zero.
-                scale = amax / torch.finfo(dtype_storage).max
-                scale = torch.where(scale > 0, scale, 1.0)
-                quantized = (tensor / scale).to(dtype_storage)
-                return (quantized, scale.reshape(1), tensor.dtype)
-
-            return pack_hook
-
-        def _make_unpack_hook(
-            dtype_compute: torch.dtype | None,
-        ) -> Callable[[Any], Tensor]:
-            """Create unpack hook with config captured in closure."""
-
-            def unpack_hook(packed: Any) -> Tensor:
-                """Dequantize activation for gradient computation (backward pass)."""
-                quantized, scale, orig_dtype = packed
-                assert isinstance(quantized, Tensor)
-
-                if scale is _empty_marker:
-                    return quantized
-
-                target_dtype = dtype_compute or orig_dtype
-                assert isinstance(scale, Tensor)
-                dequantized = quantized.to(target_dtype) * scale[0]
-                return dequantized.requires_grad_(quantized.requires_grad)
-
-            return unpack_hook
-
+        empty_marker = torch.tensor([], device="cpu")
         original_forward = model.forward
-
-        pack_hook = _make_pack_hook(self.dtype_storage, self.min_size)
-        unpack_hook = _make_unpack_hook(self.dtype_compute)
+        pack_hook = partial(
+            _pack_quantized,
+            dtype_storage=self.dtype_storage,
+            min_size=self.min_size,
+            empty_marker=empty_marker,
+        )
+        unpack_hook = partial(
+            _unpack_quantized,
+            dtype_compute=self.dtype_compute,
+            empty_marker=empty_marker,
+        )
 
         def wrapped_forward(*args: Any, **kwargs: Any) -> Any:
-            """Forward pass with quantized activation storage hooks."""
+            """Forward pass with quantized activation storage hooks.
+
+            Args:
+              *args: Positional inputs forwarded to the wrapped forward.
+              **kwargs: Keyword inputs forwarded to the wrapped forward.
+
+            Returns:
+              output: Whatever the wrapped forward returned.
+
+            """
             with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                 return original_forward(*args, **kwargs)
 
@@ -317,8 +296,10 @@ class QuantizedModuleActivationStorage:
     class Config(Fig["QuantizedModuleActivationStorage"]):
         module_types: Sequence[type[torch.nn.Module]] = ()
         """Module classes to quantize (e.g., (nn.Conv2d,))."""
+
         dtype_storage: torch.dtype = torch.float8_e4m3fn
         """FP8 dtype for storing activations."""
+
         min_size: int = 4_096
         """Minimum tensor numel to quantize (smaller tensors stored as-is)."""
 
@@ -383,7 +364,7 @@ class QuantizedModuleActivationStorage:
                 dtype_storage: torch.dtype,
                 min_size: int,
             ) -> Tensor:
-                # Quantize input if large enough
+                # Quantize input if large enough.
                 if input.numel() >= min_size:
                     amax = input.abs().max()
                     # Clamp scale to 1 when amax == 0 (all-zero input) to avoid
@@ -493,7 +474,7 @@ class QuantizedModuleActivationStorage:
                     None,
                 )
 
-        # Replace _conv_forward to intercept before F.conv2d call
+        # Replace _conv_forward to intercept before F.conv2d call.
         def quantized_conv_forward(
             input: Tensor,
             weight: Tensor,
@@ -512,3 +493,37 @@ class QuantizedModuleActivationStorage:
             )
 
         module._conv_forward = quantized_conv_forward  # noqa: SLF001  # ty: ignore[invalid-assignment] -- ty checks an INSTANCE assignment against the unbound signature (with `self`), though reading it back yields the bound one; pyright accepts it
+
+
+def _pack_quantized(
+    tensor: Tensor,
+    *,
+    dtype_storage: torch.dtype,
+    min_size: int,
+    empty_marker: Tensor,
+) -> tuple[Tensor, Tensor, torch.dtype]:
+    """Quantize an activation for storage (forward pass)."""
+    if tensor.numel() < min_size or not tensor.is_floating_point():
+        return (tensor, empty_marker, tensor.dtype)
+    amax = tensor.abs().max()
+    # An all-zero tensor has amax == 0; clamp the scale to 1 so the division
+    # yields zeros rather than NaN (0/0). Dequant recovers exact zeros since
+    # quantized values are all zero.
+    scale = amax / torch.finfo(dtype_storage).max
+    scale = torch.where(scale > 0, scale, 1.0)
+    quantized = (tensor / scale).to(dtype_storage)
+    return (quantized, scale.reshape(1), tensor.dtype)
+
+
+def _unpack_quantized(
+    packed: tuple[Tensor, Tensor, torch.dtype],
+    *,
+    dtype_compute: torch.dtype | None,
+    empty_marker: Tensor,
+) -> Tensor:
+    """Dequantize an activation for gradient computation (backward pass)."""
+    quantized, scale, orig_dtype = packed
+    if scale is empty_marker:
+        return quantized
+    dequantized = quantized.to(dtype_compute or orig_dtype) * scale[0]
+    return dequantized.requires_grad_(quantized.requires_grad)

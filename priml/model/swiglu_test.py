@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from inspect import Parameter, signature
 from pathlib import Path
-from typing import cast, override
+from typing import Final, cast, override
 
 from configgle.testing import assert_pprint_golden
 from torch import nn
@@ -26,6 +26,9 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.mark.parametrize("config_type", [SwiGLU.Config, SwiGLUReluSquared.Config])
@@ -63,7 +66,7 @@ def test_swiglu_relu_squared_config_pprint() -> None:
 
 def test_swiglu_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=Path(__file__).parent.resolve() / "testdata",
+        golden_dir=_CWD / "testdata",
         golden_name="swiglu",
         build_module=lambda: SwiGLU.Config(
             channels_in=4,
@@ -76,7 +79,7 @@ def test_swiglu_bfb() -> None:
 
 def test_swiglu_relu_squared_bfb() -> None:
     assert_bfb_against_golden(
-        golden_dir=Path(__file__).parent.resolve() / "testdata",
+        golden_dir=_CWD / "testdata",
         golden_name="swiglu_relu_squared",
         build_module=lambda: SwiGLUReluSquared.Config(
             channels_in=4,
@@ -102,7 +105,7 @@ def test_ffn_no_gate() -> None:
 
 def test_ffn_custom_hidden() -> None:
     m = SwiGLU.Config(channels_in=64, channels_hidden=128).make()
-    # up_proj is fused: 2*128 when gated
+    # up_proj is fused: 2*128 when gated.
     assert m.up_proj.out_features == 256
 
 
@@ -176,8 +179,9 @@ def test_a_fresh_relu_squared_block_is_the_identity_on_its_residual_stream() -> 
 
 
 def test_the_relu_squared_nonlinearity_is_squared() -> None:
-    """Squared, not plain: the square is what carries what a gate otherwise
-    would, so a plain ReLU is a different model at the same parameter count.
+    """Squared, not plain: the square is what carries what a gate otherwise would.
+
+    So a plain ReLU is a different model at the same parameter count.
     """
     torch.manual_seed(0)
     ffn = SwiGLUReluSquared.Config(channels_in=8).make()
@@ -189,8 +193,9 @@ def test_the_relu_squared_nonlinearity_is_squared() -> None:
 
 
 def test_relu_squared_expansion_sets_the_hidden_width() -> None:
-    """Ungated, so ``up_proj`` is one matrix wide, not two: the hidden width
-    is the only knob, and ``round_to=1`` leaves it an exact multiple.
+    """Ungated, so ``up_proj`` is one matrix wide, not two.
+
+    The hidden width is the only knob, and ``round_to=1`` leaves it an exact multiple.
     """
     ffn = SwiGLUReluSquared.Config(channels_in=8, expansion=3, round_to=1).make()
     assert ffn.up_proj.weight.shape == (24, 8)
@@ -198,8 +203,9 @@ def test_relu_squared_expansion_sets_the_hidden_width() -> None:
 
 
 def test_relu_squared_reset_reinitializes_both_projections() -> None:
-    """Meta-device materialization drives init through this alone, so a
-    projection it skips would train on ``to_empty``'s garbage.
+    """Meta-device materialization drives init through this alone.
+
+    A projection it skips would train on ``to_empty``'s garbage.
     """
     torch.manual_seed(0)
     ffn = SwiGLUReluSquared.Config(channels_in=8).make()
@@ -407,7 +413,7 @@ def test_legacy_constructor_rng_and_forward_bfb(recipe: str) -> None:
         config.init_weight = nn.init.normal_ if recipe == "custom" else kaiming_uniform
         config.init_weight_out = config.init_weight
     assert_bfb_against_golden(
-        golden_dir=Path(__file__).parent.resolve() / "testdata",
+        golden_dir=_CWD / "testdata",
         golden_name=f"swiglu_constructor_{recipe}",
         build_module=nn.Identity,
         build_input=lambda: torch.zeros(1),

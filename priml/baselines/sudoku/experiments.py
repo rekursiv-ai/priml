@@ -80,6 +80,9 @@ def exp000() -> SudokuTrainLoop:
       that uses nothing exotic -- the bar recurrence must clear to earn its
       cost.
 
+    Returns:
+      cfg: The SudokuTrainLoop.
+
     References:
       https://arxiv.org/abs/2510.04871
         Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
@@ -130,6 +133,9 @@ def exp001() -> SudokuTrainLoop:
       so, the mixer matches the transformer, and attention is not what makes
       this task work.
 
+    Returns:
+      cfg: The SudokuTrainLoop.
+
     References:
       https://arxiv.org/abs/2105.01601
         Tolstikhin et al. MLP-Mixer: An all-MLP Architecture for Vision.
@@ -153,6 +159,9 @@ def exp002() -> SudokuTrainLoop:
       recurrence can unroll. Re-applying a small stack over a carried latent,
       and letting each puzzle choose its own depth, should beat the same
       parameters spent in a single forward.
+
+    Returns:
+      cfg: The SudokuTrainLoop.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -188,6 +197,9 @@ def exp003() -> SudokuTrainLoop:
     Results:
       TBD.
 
+    Returns:
+      cfg: The SudokuTrainLoop.
+
     """
     cfg = exp002()
     cfg.experiment_name = "exp003"
@@ -202,6 +214,10 @@ def exp_smoke() -> SudokuTrainLoop:
     loop run -- so every axis that costs time without bearing on that answer is
     cut: a few steps, and a network narrow enough to finish in seconds.
     Accuracy will be poor, which is expected.
+
+    Returns:
+      cfg: The SudokuTrainLoop.
+
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
@@ -215,12 +231,10 @@ def exp_smoke() -> SudokuTrainLoop:
     return cfg
 
 
+# Post-norm, matching the transformer default: a recurrence feeds a block its own
+# output, and an unnormalized residual stream compounds when it does.
 def _mixer_block() -> MLPMixerBlock.Config:
-    """An MLP-mixer block shaped for the sudoku grid.
-
-    Post-norm, matching the transformer default: a recurrence feeds a block its
-    own output, and an unnormalized residual stream compounds when it does.
-    """
+    """Return an MLP-mixer block shaped for the sudoku grid."""
     return MLPMixerBlock.Config(
         seq_len=GRID_LEN,
         prenorm=False,

@@ -38,13 +38,11 @@ def sprite_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return directory
 
 
+# Reading back through the decoder rather than an array API keeps the test honest about
+# geometry: a writer that silently rescaled would still hand a plausible array to
+# ``imread``.
 def _read_video(path: Path) -> tuple[int, tuple[int, int]]:
-    """Return the frame count and (width, height) ffmpeg reports for ``path``.
-
-    Reading back through the decoder rather than an array API keeps the test
-    honest about geometry: a writer that silently rescaled would still hand a
-    plausible array to ``imread``.
-    """
+    """Return the frame count and (width, height) ffmpeg reports for ``path``."""
     reader = imageio_ffmpeg.read_frames(str(path))
     meta = next(reader)
     # Metadata is yielded first and frame bytes after; narrowing is what

@@ -88,6 +88,9 @@ def _save(ckpt: Checkpointer, step: int, state: dict[str, Any]) -> None:
     ckpt.save(_DictTarget(state), step)
 
 
+# Loading a specific step is a per-config concern now, so a fresh Checkpointer is built
+# with ``resume_step`` set. ``guard=False`` (no overwrite guard for a pure load
+# assertion); ``max_steps`` large so it never gates.
 def _load(
     checkpoint_dir: Path,
     *,
@@ -95,12 +98,7 @@ def _load(
     into: dict[str, Any] | None = None,
     **config: Any,
 ) -> dict[str, Any]:
-    """Resume the checkpoint selected by ``resume_step``; return the restored state.
-
-    Loading a specific step is a per-config concern now, so a fresh Checkpointer
-    is built with ``resume_step`` set. ``guard=False`` (no overwrite guard for a
-    pure load assertion); ``max_steps`` large so it never gates.
-    """
+    """Resume the checkpoint selected by ``resume_step``; return the restored state."""
     ckpt = Checkpointer(
         Checkpointer.Config(
             working_dir=checkpoint_dir, resume_step=resume_step, **config
@@ -165,7 +163,7 @@ def test_maybe_save_follows_cadence(temp_checkpoint_dir: Path) -> None:
         Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=100),
     )
     t = _DictTarget({"step": 0})
-    assert not ckpt.maybe_save(t, 0)  # step 0 is never saved
+    assert not ckpt.maybe_save(t, 0)  # step 0 is never saved.
     assert not ckpt.maybe_save(t, 50)
     assert ckpt.maybe_save(t, 100)
     assert not ckpt.maybe_save(t, 150)
@@ -280,7 +278,7 @@ def test_available_steps_ignores_malformed_names(temp_checkpoint_dir: Path) -> N
     ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
     temp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
     (temp_checkpoint_dir / "step_100.pt").write_bytes(b"x")
-    (temp_checkpoint_dir / "step_latest.pt").write_bytes(b"x")  # malformed
+    (temp_checkpoint_dir / "step_latest.pt").write_bytes(b"x")  # malformed.
     assert ckpt.available_steps() == [100]
 
 
@@ -346,13 +344,13 @@ def test_prune_ignores_incomplete_checkpoints(temp_checkpoint_dir: Path) -> None
         ),
     )
     _save(ckpt, 10, {"step": 10})
-    _incomplete_shard(temp_checkpoint_dir, 20)  # partial; must not be counted
+    _incomplete_shard(temp_checkpoint_dir, 20)  # partial; must not be counted.
     _save(ckpt, 30, {"step": 30})
 
     # Saving 30 prunes complete checkpoints to the newest 2 -> {10, 30} both kept
     # (the partial 20 is neither counted nor deleted).
     assert ckpt.available_steps() == [10, 30]
-    assert (temp_checkpoint_dir / "step_20.pt").exists()  # partial left intact
+    assert (temp_checkpoint_dir / "step_20.pt").exists()  # partial left intact.
 
 
 def test_load_falls_back_past_incomplete_latest(temp_checkpoint_dir: Path) -> None:
@@ -362,9 +360,9 @@ def test_load_falls_back_past_incomplete_latest(temp_checkpoint_dir: Path) -> No
     )
     _save(ckpt, 10, {"step": 10})
     _save(ckpt, 20, {"step": 20})
-    _incomplete_shard(temp_checkpoint_dir, 30)  # crashed, no .metadata
+    _incomplete_shard(temp_checkpoint_dir, 30)  # crashed, no .metadata.
 
-    assert ckpt.available_steps() == [10, 20]  # 30 is incomplete
+    assert ckpt.available_steps() == [10, 20]  # 30 is incomplete.
     assert _load(temp_checkpoint_dir, save_every=10)["step"] == 20
 
 
@@ -495,9 +493,9 @@ def test_partial_shard_not_loadable(
     ckpt = Checkpointer(
         Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=1),
     )
-    (temp_checkpoint_dir / "step_0.pt").mkdir(parents=True)  # no .metadata
+    (temp_checkpoint_dir / "step_0.pt").mkdir(parents=True)  # no .metadata.
     assert ckpt.load(_DictTarget({}), max_steps=1e9, guard=False) is False
-    assert ckpt.available_steps() == []  # incomplete -> not available
+    assert ckpt.available_steps() == []  # incomplete -> not available.
 
 
 # -- DTensor-safe checkpointing (round-trip / resharding) ------------------
@@ -634,7 +632,7 @@ def test_async_storage_state_safe_to_mutate_after_write(
     path = temp_checkpoint_dir / "step_0.pt"
     src = torch.tensor([1, 2, 3])
     storage.write(path, {"x": src})
-    src.add_(100)  # mutate after write returns
+    src.add_(100)  # mutate after write returns.
     loaded = storage.read(path, {"x": torch.zeros(3, dtype=torch.long)})
     assert torch.equal(loaded["x"], torch.tensor([1, 2, 3])), "stale snapshot"
     storage.flush()
@@ -659,7 +657,7 @@ def test_async_checkpointer_end_to_end(
     assert ckpt.load(target, max_steps=1e9, guard=False)
     assert target.loaded is not None
     assert int(target.loaded["step"][0]) == 10
-    assert ckpt.available_steps() == [10]  # now flushed -> visible
+    assert ckpt.available_steps() == [10]  # now flushed -> visible.
 
 
 def test_async_retention_enforced_after_flush_no_close(
@@ -706,7 +704,7 @@ def test_async_is_complete_is_pure_no_join(
     del single_rank_group
     storage = AsyncLocalStateDictStorer()
     (temp_checkpoint_dir / "step_0.pt").mkdir()
-    (temp_checkpoint_dir / "step_0.pt" / ".metadata").write_bytes(b"x")  # prior, done
+    (temp_checkpoint_dir / "step_0.pt" / ".metadata").write_bytes(b"x")  # prior, done.
 
     storage.write(temp_checkpoint_dir / "step_10.pt", {"x": torch.tensor([10])})
     # Inspect every checkpoint's completeness (what _prune/_list does)...
@@ -718,12 +716,10 @@ def test_async_is_complete_is_pure_no_join(
     assert not storage.has_pending_write()
 
 
+# Mirrors a real loop: shard ONCE, then checkpoint repeatedly. (Re-sharding a fresh FSDP
+# model per step is not how training works and wedges the group.)
 def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Two async saves of one sharded model across ranks, then load back.
-
-    Mirrors a real loop: shard ONCE, then checkpoint repeatedly. (Re-sharding a
-    fresh FSDP model per step is not how training works and wedges the group.)
-    """
+    """Two async saves of one sharded model across ranks, then load back."""
     rank = mesh.get_rank()
     try:
         model, optimizer = _shard_and_step(mesh)

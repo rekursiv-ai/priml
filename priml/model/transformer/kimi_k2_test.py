@@ -34,7 +34,7 @@ from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _hf_config(**overrides: Any) -> dict[str, Any]:
+def _hf_config(**overrides: object) -> dict[str, Any]:
     base: dict[str, Any] = {
         "model_type": "kimi_k2",
         "vocab_size": 128,
@@ -102,7 +102,7 @@ def test_kimi_k2_bfb() -> None:
 
 
 def _router(cfg: KimiK2.Config, layer: int = -1) -> Router.Config:
-    """The routing config -- where the expert COUNT lives now."""
+    """Return the routing config -- where the expert COUNT lives now."""
     blocks = cfg.block if isinstance(cfg.block, list) else [cfg.block]
     block = blocks[0] if len(blocks) == 1 else blocks[layer]
     assert isinstance(block, TransformerBlock.Config)
@@ -183,12 +183,10 @@ def _synth_hf(cfg: KimiK2.Config) -> dict[str, Tensor]:
     return sd
 
 
+# Accepts a template or a finalized per-layer list, so a caller need not know which side
+# of ``finalize`` it is on.
 def _attn(cfg: KimiK2.Config, layer: int = 0) -> MultiHeadLatentAttention.Config:
-    """One layer's attention -- where the head geometry lives now.
-
-    Accepts a template or a finalized per-layer list, so a caller need not
-    know which side of ``finalize`` it is on.
-    """
+    """One layer's attention -- where the head geometry lives now."""
     block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
     assert isinstance(block, TransformerBlock.Config)
     attn = block.attn
@@ -520,7 +518,8 @@ def _install_transformers_compat_shims() -> Generator[None]:
     def unavailable() -> bool:
         return False
 
-    def passthrough_cache(_cls: type[DynamicCache], pkv: Any) -> Any:
+    def passthrough_cache(cls: type[DynamicCache], pkv: object) -> Any:
+        del cls
         return pkv
 
     # Names come from this tuple rather than literals so the shims install and

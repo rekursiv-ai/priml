@@ -67,11 +67,11 @@ class TestLrScale:
             assert values[i] >= values[i + 1]
 
     def test_warmup_then_decay(self):
-        # Warmup phase should be monotonically increasing
+        # Warmup phase should be monotonically increasing.
         warmup = [lr_scale(s, total_steps=100, warmup_steps=10) for s in range(11)]
         for i in range(len(warmup) - 1):
             assert warmup[i] <= warmup[i + 1]
-        # Decay phase should be monotonically decreasing
+        # Decay phase should be monotonically decreasing.
         decay = [lr_scale(s, total_steps=100, warmup_steps=10) for s in range(10, 101)]
         for i in range(len(decay) - 1):
             assert decay[i] >= decay[i + 1]
@@ -201,17 +201,14 @@ class TestMuon:
         opt2.load_state_dict(state)
 
 
+# Newton-Schulz is a *global* spectral op: ``g.norm`` and ``g @ g.T`` must see the whole
+# matrix. Muon passes the DTensor grad straight into the NS kernel; torch's DTensor
+# dispatch redistributes ``Shard(0) @ Shard(0).T`` into a collective, so the sharded
+# update matches the single-device update (maxdiff ~0). This test pins that property: a
+# regression to *naive per-shard* NS (independent NS on each 4-row block) would diverge
+# by ~0.24. The worker writes ``ok`` or ``FAIL:<reason>`` (max-abs divergence) per rank.
 def _muon_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
-    """Worker: one Muon step on a row-sharded param vs the full-tensor update.
-
-    Newton-Schulz is a *global* spectral op: ``g.norm`` and ``g @ g.T`` must
-    see the whole matrix. Muon passes the DTensor grad straight into the NS
-    kernel; torch's DTensor dispatch redistributes ``Shard(0) @ Shard(0).T``
-    into a collective, so the sharded update matches the single-device update
-    (maxdiff ~0). This test pins that property: a regression to *naive
-    per-shard* NS (independent NS on each 4-row block) would diverge by ~0.24.
-    The worker writes ``ok`` or ``FAIL:<reason>`` (max-abs divergence) per rank.
-    """
+    """Worker: one Muon step on a row-sharded param vs the full-tensor update."""
     result_path = Path(result_dir)
     rank = mesh.get_rank()
     try:

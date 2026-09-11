@@ -39,7 +39,19 @@ class CachedAttention(Protocol):
         *,
         cache: KVCache,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache]: ...
+    ) -> tuple[Tensor, KVCache]:
+        """Forward cached.
+
+        Args:
+          x: X.
+          cache: Cache.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
+        ...
 
 
 class TransformerBlock(nn.Module):
@@ -146,6 +158,7 @@ class TransformerBlock(nn.Module):
         self.norm2 = config.norm2.make()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         for m in (self.attn, self.ffn, self.norm1, self.norm2):
             if hasattr(m, "reset_parameters"):
                 m.reset_parameters()
@@ -178,7 +191,17 @@ class TransformerBlock(nn.Module):
         cache: KVCache,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Run the block while updating its attention cache."""
+        """Run the block while updating its attention cache.
+
+        Args:
+          x: X.
+          cache: Cache.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
         if not isinstance(self.attn, CachedAttention):
             raise TypeError("The attention module must implement cached attention.")
         attention = self.attn

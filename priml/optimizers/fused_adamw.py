@@ -52,21 +52,7 @@ def _adamw_update(
     eps: Tensor,
     weight_decay: Tensor,
 ) -> None:
-    """Apply one AdamW step in place, as a single compiled graph.
-
-    Args:
-      parameter: Weight to update, modified in place.
-      gradient: Its gradient.
-      first_moment: Running mean of the gradient, modified in place.
-      second_moment: Running mean of its square, modified in place.
-      step: 1-based step count, as a 0-D tensor.
-      lr: Learning rate, as a 0-D tensor.
-      beta1: Decay of the first moment, as a 0-D tensor.
-      beta2: Decay of the second moment, as a 0-D tensor.
-      eps: Denominator floor, as a 0-D tensor.
-      weight_decay: Decoupled decay coefficient, as a 0-D tensor.
-
-    """
+    """Apply one AdamW step in place, as a single compiled graph."""
     # Decoupled: the decay multiplies the weight rather than entering the
     # gradient, so it does not accumulate into either moment.
     parameter.mul_(1 - lr * weight_decay)
@@ -83,13 +69,11 @@ def _adamw_update(
     parameter.sub_(first_moment / denominator * (lr / bias1))
 
 
+# Deferred rather than decorated at module scope: compiling at import makes every
+# importer pay for a kernel it may never step.
 @cache
 def _compiled_update() -> Callable[..., None]:
-    """Compile the step once, on first use.
-
-    Deferred rather than decorated at module scope: compiling at import makes
-    every importer pay for a kernel it may never step.
-    """
+    """Compile the step once, on first use."""
     return torch.compile(_adamw_update, dynamic=False)
 
 

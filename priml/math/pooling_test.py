@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 from torch import Tensor
 
 import pytest
@@ -21,12 +19,12 @@ def test_adaptive_avg_pool2d_simple() -> None:
 def test_adaptive_avg_pool2d_variance_preserving() -> None:
     x = torch.randn(2, 3, 8, 8)
     result = adaptive_avg_pool2d(x, (4, 4), variance_preserving=True)
-    # Check shape
+    # Check shape.
     assert result.shape == (2, 3, 4, 4)
 
 
 def test_adaptive_avg_pool2d_divisible() -> None:
-    # When input is divisible by output, should use optimized path
+    # When input is divisible by output, should use optimized path.
     x = torch.randn(1, 1, 8, 8)
     result = adaptive_avg_pool2d(x, (4, 4))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (4, 4))
@@ -34,7 +32,7 @@ def test_adaptive_avg_pool2d_divisible() -> None:
 
 
 def test_adaptive_avg_pool2d_divisible_variance_preserving() -> None:
-    # Divisible case with variance preserving
+    # Divisible case with variance preserving.
     x = torch.randn(1, 2, 8, 8)
     result = adaptive_avg_pool2d(x, (4, 4), variance_preserving=True)
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (4, 4))
@@ -44,7 +42,7 @@ def test_adaptive_avg_pool2d_divisible_variance_preserving() -> None:
 
 
 def test_adaptive_avg_pool2d_non_divisible() -> None:
-    # When input is not divisible, uses slower adaptive path
+    # When input is not divisible, uses slower adaptive path.
     x = torch.randn(1, 1, 7, 7)
     result = adaptive_avg_pool2d(x, (3, 3))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (3, 3))
@@ -52,10 +50,10 @@ def test_adaptive_avg_pool2d_non_divisible() -> None:
 
 
 def test_adaptive_avg_pool2d_non_divisible_variance_preserving() -> None:
-    # Non-divisible case with variance preserving
+    # Non-divisible case with variance preserving.
     x = torch.randn(1, 2, 7, 7)
     result = adaptive_avg_pool2d(x, (3, 3), variance_preserving=True)
-    # Just check shape - exact value depends on adaptive logic
+    # Just check shape - exact value depends on adaptive logic.
     assert result.shape == (1, 2, 3, 3)
 
 
@@ -68,7 +66,7 @@ def test_adaptive_avg_pool2d_3d_input() -> None:
 
 
 def test_adaptive_avg_pool2d_batched() -> None:
-    # Test with batch dimension
+    # Test with batch dimension.
     x = torch.randn(4, 3, 6, 6)
     result = adaptive_avg_pool2d(x, (2, 2))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (2, 2))
@@ -76,7 +74,7 @@ def test_adaptive_avg_pool2d_batched() -> None:
 
 
 def test_adaptive_avg_pool2d_asymmetric() -> None:
-    # Test with asymmetric output size
+    # Test with asymmetric output size.
     x = torch.randn(1, 1, 9, 12)
     result = adaptive_avg_pool2d(x, (3, 4))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (3, 4))
@@ -93,12 +91,12 @@ def test_adaptive_avg_pool3d_simple() -> None:
 def test_adaptive_avg_pool3d_variance_preserving() -> None:
     x = torch.randn(2, 3, 8, 8, 8)
     result = adaptive_avg_pool3d(x, (4, 4, 4), variance_preserving=True)
-    # Check shape
+    # Check shape.
     assert result.shape == (2, 3, 4, 4, 4)
 
 
 def test_adaptive_avg_pool3d_divisible() -> None:
-    # When input is divisible by output, should use optimized path
+    # When input is divisible by output, should use optimized path.
     x = torch.randn(1, 1, 8, 8, 8)
     result = adaptive_avg_pool3d(x, (4, 4, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (4, 4, 4))
@@ -106,7 +104,7 @@ def test_adaptive_avg_pool3d_divisible() -> None:
 
 
 def test_adaptive_avg_pool3d_divisible_variance_preserving() -> None:
-    # Divisible case with variance preserving
+    # Divisible case with variance preserving.
     x = torch.randn(1, 2, 8, 8, 8)
     result = adaptive_avg_pool3d(x, (4, 4, 4), variance_preserving=True)
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (4, 4, 4))
@@ -116,7 +114,7 @@ def test_adaptive_avg_pool3d_divisible_variance_preserving() -> None:
 
 
 def test_adaptive_avg_pool3d_non_divisible() -> None:
-    # When input is not divisible, uses slower adaptive path
+    # When input is not divisible, uses slower adaptive path.
     x = torch.randn(1, 1, 7, 7, 7)
     result = adaptive_avg_pool3d(x, (3, 3, 3))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (3, 3, 3))
@@ -124,10 +122,10 @@ def test_adaptive_avg_pool3d_non_divisible() -> None:
 
 
 def test_adaptive_avg_pool3d_non_divisible_variance_preserving() -> None:
-    # Non-divisible case with variance preserving
+    # Non-divisible case with variance preserving.
     x = torch.randn(1, 2, 7, 7, 7)
     result = adaptive_avg_pool3d(x, (3, 3, 3), variance_preserving=True)
-    # Just check shape - exact value depends on adaptive logic
+    # Just check shape - exact value depends on adaptive logic.
     assert result.shape == (1, 2, 3, 3, 3)
 
 
@@ -140,7 +138,7 @@ def test_adaptive_avg_pool3d_4d_input() -> None:
 
 
 def test_adaptive_avg_pool3d_batched() -> None:
-    # Test with batch dimension
+    # Test with batch dimension.
     x = torch.randn(2, 3, 6, 6, 6)
     result = adaptive_avg_pool3d(x, (2, 2, 2))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (2, 2, 2))
@@ -148,7 +146,7 @@ def test_adaptive_avg_pool3d_batched() -> None:
 
 
 def test_adaptive_avg_pool3d_asymmetric() -> None:
-    # Test with asymmetric output size
+    # Test with asymmetric output size.
     x = torch.randn(1, 1, 6, 9, 12)
     result = adaptive_avg_pool3d(x, (2, 3, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (2, 3, 4))
@@ -156,7 +154,7 @@ def test_adaptive_avg_pool3d_asymmetric() -> None:
 
 
 def test_adaptive_avg_pool3d_partially_adaptive() -> None:
-    # Test case where some dimensions are adaptive and some are not
+    # Test case where some dimensions are adaptive and some are not.
     x = torch.randn(1, 1, 8, 7, 8)
     result = adaptive_avg_pool3d(x, (4, 3, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (4, 3, 4))
@@ -164,7 +162,7 @@ def test_adaptive_avg_pool3d_partially_adaptive() -> None:
 
 
 def test_adaptive_avg_pool2d_single_adaptive_dim() -> None:
-    # Test where only one dimension is adaptive
+    # Test where only one dimension is adaptive.
     x = torch.randn(1, 2, 9, 8)
     result = adaptive_avg_pool2d(x, (3, 4))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (3, 4))
@@ -172,14 +170,14 @@ def test_adaptive_avg_pool2d_single_adaptive_dim() -> None:
 
 
 def test_adaptive_avg_pool2d_non_divisible_vp_multiple_channels() -> None:
-    # Non-divisible variance preserving with multiple channels
+    # Non-divisible variance preserving with multiple channels.
     x = torch.randn(2, 4, 7, 9)
     result = adaptive_avg_pool2d(x, (3, 4), variance_preserving=True)
     assert result.shape == (2, 4, 3, 4)
 
 
 def test_adaptive_avg_pool3d_single_adaptive_dim() -> None:
-    # Test where only one or two dimensions are adaptive
+    # Test where only one or two dimensions are adaptive.
     x = torch.randn(1, 2, 8, 9, 8)
     result = adaptive_avg_pool3d(x, (4, 3, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (4, 3, 4))
@@ -187,7 +185,7 @@ def test_adaptive_avg_pool3d_single_adaptive_dim() -> None:
 
 
 def test_adaptive_avg_pool3d_all_adaptive() -> None:
-    # Test where all dimensions are adaptive
+    # Test where all dimensions are adaptive.
     x = torch.randn(1, 2, 7, 9, 11)
     result = adaptive_avg_pool3d(x, (3, 4, 5))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (3, 4, 5))
@@ -195,36 +193,36 @@ def test_adaptive_avg_pool3d_all_adaptive() -> None:
 
 
 def test_adaptive_avg_pool3d_non_divisible_vp_multiple_channels() -> None:
-    # Non-divisible variance preserving with multiple channels
+    # Non-divisible variance preserving with multiple channels.
     x = torch.randn(2, 3, 7, 9, 11)
     result = adaptive_avg_pool3d(x, (3, 4, 5), variance_preserving=True)
     assert result.shape == (2, 3, 3, 4, 5)
 
 
 def test_adaptive_avg_pool2d_invalid_ndim() -> None:
-    # Test error handling for invalid tensor dimensions
-    x = torch.randn(4, 4)  # 2D tensor, should fail
+    # Test error handling for invalid tensor dimensions.
+    x = torch.randn(4, 4)  # 2D tensor, should fail.
     with pytest.raises(RuntimeError):
         adaptive_avg_pool2d(x, (2, 2))
 
 
 def test_adaptive_avg_pool2d_zero_dimension() -> None:
-    # Test error handling for zero-size dimensions
-    x = torch.randn(1, 1, 0, 4)  # Zero height
+    # Test error handling for zero-size dimensions.
+    x = torch.randn(1, 1, 0, 4)  # Zero height.
     with pytest.raises(RuntimeError):
         adaptive_avg_pool2d(x, (2, 2))
 
 
 def test_adaptive_avg_pool3d_invalid_ndim() -> None:
-    # Test error handling for invalid tensor dimensions
-    x = torch.randn(4, 4, 4)  # 3D tensor, should fail
+    # Test error handling for invalid tensor dimensions.
+    x = torch.randn(4, 4, 4)  # 3D tensor, should fail.
     with pytest.raises(RuntimeError):
         adaptive_avg_pool3d(x, (2, 2, 2))
 
 
 def test_adaptive_avg_pool3d_zero_dimension() -> None:
-    # Test error handling for zero-size dimensions
-    x = torch.randn(1, 1, 0, 4, 4)  # Zero depth
+    # Test error handling for zero-size dimensions.
+    x = torch.randn(1, 1, 0, 4, 4)  # Zero depth.
     with pytest.raises(RuntimeError):
         adaptive_avg_pool3d(x, (2, 2, 2))
 
@@ -232,7 +230,7 @@ def test_adaptive_avg_pool3d_zero_dimension() -> None:
 def test_adaptive_avg_pool2d_adaptive_masking_both_dims() -> None:
     # Test the adaptive masking path for 2D pooling (lines 68-95)
     # Use input/output sizes that trigger adaptive behavior in both dimensions
-    # This happens when in_size % out_size != 0 and out_size % in_size_mod != 0
+    # This happens when in_size % out_size != 0 and out_size % in_size_mod != 0.
     x = torch.randn(1, 2, 10, 10)
     result = adaptive_avg_pool2d(x, (3, 3))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (3, 3))
@@ -241,18 +239,18 @@ def test_adaptive_avg_pool2d_adaptive_masking_both_dims() -> None:
 
 def test_adaptive_avg_pool2d_adaptive_masking_variance_preserving() -> None:
     # Test adaptive masking with variance preserving (lines 68-95, line 94)
-    # Use dimensions that trigger both adaptive=True for both height and width
+    # Use dimensions that trigger both adaptive=True for both height and width.
     x = torch.randn(2, 3, 10, 10)
     result = adaptive_avg_pool2d(x, (3, 3), variance_preserving=True)
     assert result.shape == (2, 3, 3, 3)
-    # Verify the result is not NaN or Inf
+    # Verify the result is not NaN or Inf.
     assert not torch.isnan(result).any()
     assert not torch.isinf(result).any()
 
 
 def test_adaptive_avg_pool2d_adaptive_single_dim_h() -> None:
     # Test adaptive masking in height dimension only (lines 68-74)
-    x = torch.randn(1, 1, 11, 8)  # 11 -> 3 is adaptive, 8 -> 4 is not
+    x = torch.randn(1, 1, 11, 8)  # 11 -> 3 is adaptive, 8 -> 4 is not.
     result = adaptive_avg_pool2d(x, (3, 4))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (3, 4))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -260,7 +258,7 @@ def test_adaptive_avg_pool2d_adaptive_single_dim_h() -> None:
 
 def test_adaptive_avg_pool2d_adaptive_single_dim_w() -> None:
     # Test adaptive masking in width dimension only (lines 75-81)
-    x = torch.randn(1, 1, 8, 11)  # 8 -> 4 is not adaptive, 11 -> 3 is adaptive
+    x = torch.randn(1, 1, 8, 11)  # 8 -> 4 is not adaptive, 11 -> 3 is adaptive.
     result = adaptive_avg_pool2d(x, (4, 3))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (4, 3))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -268,7 +266,7 @@ def test_adaptive_avg_pool2d_adaptive_single_dim_w() -> None:
 
 def test_adaptive_avg_pool3d_adaptive_masking_all_dims() -> None:
     # Test the adaptive masking path for 3D pooling (lines 158-196)
-    # Use input/output sizes that trigger adaptive behavior in all dimensions
+    # Use input/output sizes that trigger adaptive behavior in all dimensions.
     x = torch.randn(1, 1, 10, 10, 10)
     result = adaptive_avg_pool3d(x, (3, 3, 3))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (3, 3, 3))
@@ -284,7 +282,7 @@ def test_adaptive_avg_pool3d_adaptive_masking_variance_preserving() -> None:
 
 def test_adaptive_avg_pool3d_adaptive_depth_only() -> None:
     # Test adaptive masking in depth dimension only (lines 158-164)
-    x = torch.randn(1, 1, 11, 8, 8)  # 11 -> 3 is adaptive
+    x = torch.randn(1, 1, 11, 8, 8)  # 11 -> 3 is adaptive.
     result = adaptive_avg_pool3d(x, (3, 4, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (3, 4, 4))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -292,7 +290,7 @@ def test_adaptive_avg_pool3d_adaptive_depth_only() -> None:
 
 def test_adaptive_avg_pool3d_adaptive_height_only() -> None:
     # Test adaptive masking in height dimension only (lines 165-171)
-    x = torch.randn(1, 1, 8, 11, 8)  # 11 -> 3 is adaptive
+    x = torch.randn(1, 1, 8, 11, 8)  # 11 -> 3 is adaptive.
     result = adaptive_avg_pool3d(x, (4, 3, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (4, 3, 4))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -300,14 +298,14 @@ def test_adaptive_avg_pool3d_adaptive_height_only() -> None:
 
 def test_adaptive_avg_pool3d_adaptive_width_only() -> None:
     # Test adaptive masking in width dimension only (lines 172-178)
-    x = torch.randn(1, 1, 8, 8, 11)  # 11 -> 3 is adaptive
+    x = torch.randn(1, 1, 8, 8, 11)  # 11 -> 3 is adaptive.
     result = adaptive_avg_pool3d(x, (4, 4, 3))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (4, 4, 3))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
 
 
 def test_adaptive_avg_pool3d_adaptive_two_dims() -> None:
-    # Test adaptive masking in two dimensions
+    # Test adaptive masking in two dimensions.
     x = torch.randn(1, 1, 11, 10, 8)
     result = adaptive_avg_pool3d(x, (3, 3, 4))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (3, 3, 4))
@@ -316,7 +314,7 @@ def test_adaptive_avg_pool3d_adaptive_two_dims() -> None:
 
 def test_adaptive_avg_pool2d_maxlength_edge_case() -> None:
     # Test case that triggers maxlength calculation edge cases (line 220)
-    # When in_size % out_size == 0, maxlength should be reduced
+    # When in_size % out_size == 0, maxlength should be reduced.
     x = torch.randn(1, 1, 12, 12)
     result = adaptive_avg_pool2d(x, (4, 4))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (4, 4))
@@ -325,7 +323,7 @@ def test_adaptive_avg_pool2d_maxlength_edge_case() -> None:
 
 def test_adaptive_avg_pool2d_minimum_clamping() -> None:
     # Test the minimum clamping in adaptive case (lines 229-234)
-    # This uses torch.minimum to clamp indices
+    # This uses torch.minimum to clamp indices.
     x = torch.randn(1, 1, 13, 13)
     result = adaptive_avg_pool2d(x, (5, 5))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
@@ -381,14 +379,14 @@ def test_adaptive_avg_pool2d_length_unsqueeze() -> None:
 
 
 def test_adaptive_avg_pool3d_complex_adaptive() -> None:
-    # Complex test with multiple adaptive dimensions and variance preserving
+    # Complex test with multiple adaptive dimensions and variance preserving.
     x = torch.randn(2, 3, 13, 15, 17)
     result = adaptive_avg_pool3d(x, (5, 6, 7), variance_preserving=True)
     assert result.shape == (2, 3, 5, 6, 7)
 
 
 def test_adaptive_avg_pool2d_large_batch() -> None:
-    # Test with larger batch size to ensure robustness
+    # Test with larger batch size to ensure robustness.
     x = torch.randn(8, 16, 14, 14)
     result = adaptive_avg_pool2d(x, (5, 5))
     expected = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
@@ -396,7 +394,7 @@ def test_adaptive_avg_pool2d_large_batch() -> None:
 
 
 def test_adaptive_avg_pool3d_large_batch() -> None:
-    # Test 3D pooling with larger batch size
+    # Test 3D pooling with larger batch size.
     x = torch.randn(4, 8, 13, 13, 13)
     result = adaptive_avg_pool3d(x, (5, 5, 5))
     expected = torch.nn.functional.adaptive_avg_pool3d(x, (5, 5, 5))
@@ -414,7 +412,7 @@ def _reference_variance_preserving(x: Tensor, output_size: tuple[int, int]) -> T
             lo_j, hi_j = (j * w) // out_w, ceil_div((j + 1) * w, out_w)
             block = x[..., lo_i:hi_i, lo_j:hi_j]
             count = block.shape[-1] * block.shape[-2]
-            out[..., i, j] = block.sum(dim=(-2, -1)) / math.sqrt(count)
+            out[..., i, j] = block.sum(dim=(-2, -1)) / count**0.5
     return out
 
 
@@ -463,7 +461,7 @@ def test_variance_preserving_returns_the_input_dtype(dtype: torch.dtype) -> None
 def test_adaptive_avg_pool2d_both_dims_adaptive_vp() -> None:
     # Test to specifically cover line 94 - variance preserving with both dims adaptive
     # Using 11x11 -> 3x3:
-    # 11 % 3 = 2, and 3 % 2 = 1 (not 0), so adaptive = True for both dims
+    # 11 % 3 = 2, and 3 % 2 = 1 (not 0), so adaptive = True for both dims.
     x = torch.randn(1, 1, 11, 11)
     result = adaptive_avg_pool2d(x, (3, 3), variance_preserving=True)
     assert result.shape == (1, 1, 3, 3)

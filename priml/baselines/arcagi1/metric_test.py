@@ -37,7 +37,7 @@ def test_the_majority_answer_wins() -> None:
     metric = _metric()
     labels = torch.full((3, 9), 3, dtype=torch.int64)
     predictions = labels.clone()
-    predictions[:2] = 7  # two views agree on a WRONG answer
+    predictions[:2] = 7  # two views agree on a WRONG answer.
     metric.update(
         _packed(predictions, torch.zeros(3)),
         label=labels,
@@ -52,7 +52,7 @@ def test_confidence_only_breaks_a_tie() -> None:
     metric = _metric()
     labels = torch.full((2, 9), 3, dtype=torch.int64)
     predictions = labels.clone()
-    predictions[0] = 7  # a wrong answer, but stated with low confidence
+    predictions[0] = 7  # a wrong answer, but stated with low confidence.
     metric.update(
         _packed(predictions, torch.tensor([-5.0, 5.0])),
         label=labels,
@@ -66,7 +66,7 @@ def test_votes_are_grouped_per_puzzle() -> None:
     metric = _metric()
     labels = torch.full((4, 9), 3, dtype=torch.int64)
     predictions = labels.clone()
-    predictions[2:] = 7  # the second puzzle is answered wrongly
+    predictions[2:] = 7  # the second puzzle is answered wrongly.
     metric.update(
         _packed(predictions, torch.zeros(4)),
         label=labels,

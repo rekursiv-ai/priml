@@ -30,8 +30,8 @@ Examples:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import argparse
 import importlib
@@ -182,8 +182,8 @@ def compare(label: str, theirs: Tensor, ours: Tensor) -> str | None:
 
 
 def compare_stream(
-    theirs: Any,
-    ours: Any,
+    theirs: Iterator[tuple[Tensor, Tensor, int]],
+    ours: Iterator[dict[str, Tensor]],
     *,
     batches: int,
     tag: str,
@@ -219,7 +219,12 @@ def compare_stream(
 
 
 def main() -> int:
-    """Draw from both implementations' loaders and report every difference."""
+    """Draw from both implementations' loaders and report every difference.
+
+    Returns:
+      result: The int.
+
+    """
     args = _parse_args()
     root = clone_upstream(args.clone)
     upstream = load_upstream(root, corpus=args.corpus)

@@ -10,18 +10,20 @@ from torch import Tensor
 import torch
 import torch.fft
 
-from priml.math.custom_types import (
-    Tensorable,
-    TensorableFn,
-    convert_to_tensor,
-)
+from priml.math.custom_types import Tensorable, TensorableFn
+from priml.memory import convert_to_tensor
 
 
 def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
     """DCT type-II over the last dimension.
 
+    Args:
+      x: X.
+      normalize: Normalize.
+
     Returns:
       coefficients: DCT-II of the signal.
+
 
     References:
       https://github.com/zh217/torch-dct/blob/master/torch_dct/_dct.py
@@ -50,8 +52,13 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     Satisfies idct1d(dct1d(x)) == x.
 
+    Args:
+      x: X.
+      normalize: Normalize.
+
     Returns:
       signal: Reconstructed signal.
+
 
     References:
       https://github.com/zh217/torch-dct/blob/master/torch_dct/_dct.py
@@ -79,7 +86,7 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
         * phase
     )
 
-    # irfft needs a contiguous complex input; q.contiguous() is bit-identical
+    # ``irfft`` needs a contiguous complex input; q.contiguous() is bit-identical
     # to re-wrapping q.real/q.imag and reads more directly.
     y = torch.fft.irfft(
         q.contiguous(),

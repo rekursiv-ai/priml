@@ -29,8 +29,6 @@ from __future__ import annotations
 
 from typing import override
 
-import math
-
 from configgle import Fig
 from torch import Tensor, nn
 
@@ -74,7 +72,7 @@ class ActorCriticRNN(nn.Module):
 
         self.channels_in = config.channels_in
         self.embed = nn.Sequential(
-            _dense(config.observation_size, config.channels_in, gain=math.sqrt(2.0)),
+            _dense(config.observation_size, config.channels_in, gain=2.0**0.5),
             nn.ReLU(),
         )
         self.cell = nn.GRUCell(config.channels_in, config.channels_in)
@@ -199,9 +197,9 @@ class ActorCriticRNN(nn.Module):
 def _head(*, channels_in: int, output_size: int, output_gain: float) -> nn.Sequential:
     """Build one two-layer ReLU head with an orthogonally-scaled output."""
     return nn.Sequential(
-        _dense(channels_in, channels_in, gain=math.sqrt(2.0)),
+        _dense(channels_in, channels_in, gain=2.0**0.5),
         nn.ReLU(),
-        _dense(channels_in, channels_in, gain=math.sqrt(2.0)),
+        _dense(channels_in, channels_in, gain=2.0**0.5),
         nn.ReLU(),
         _dense(channels_in, output_size, gain=output_gain),
     )

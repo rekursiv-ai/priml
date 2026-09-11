@@ -16,7 +16,9 @@ import torch
 class NormProtocol(Protocol):
     """Protocol for normalization layers."""
 
-    def __call__(self, input: Tensor, **kwargs: object) -> Tensor: ...
+    def __call__(self, input: Tensor, **kwargs: object) -> Tensor:
+        """Apply to the input."""
+        ...
 
 
 class NormConfigProtocol(Protocol):
@@ -28,9 +30,13 @@ class NormConfigProtocol(Protocol):
     """
 
     channels_in: int
+
     eps: float
+
     elementwise_affine: bool
+
     device: torch.device | str | None
+
     dtype: torch.dtype | None
 
 
@@ -103,6 +109,7 @@ class RMSNorm(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         if self.weight is not None:
             nn.init.ones_(self.weight)
 
@@ -161,7 +168,8 @@ class CenteredRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.zeros(config.channels_in))
 
     def reset_parameters(self) -> None:
-        # weight is used as ``1.0 + weight``; zeros makes the init identity.
+        """Initialize every parameter in place."""
+        # Weight is used as ``1.0 + weight``; zeros makes the init identity.
         nn.init.zeros_(self.weight)
 
     @override
@@ -414,6 +422,7 @@ class BatchRenorm(nn.Module):
         self.register_buffer("steps", torch.zeros((), dtype=torch.int64))
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         # The running estimates reset too: they are learned state, and the
         # correction this layer applies is measured against them, so leaving
         # them warm would reinitialize into the previous run's statistics.

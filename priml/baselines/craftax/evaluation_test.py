@@ -30,7 +30,9 @@ type CraftaxStep = (
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Case:
     name: str
+
     build: Callable[[], CraftaxStep]
+
     fields: tuple[str, ...]
 
 
@@ -216,3 +218,9 @@ def test_checkpoint_round_trips_complete_training_lifecycle(case: _Case) -> None
     resumed.load_state_dict(saved)
 
     _assert_tree_equal(before, _snapshot(resumed, case.fields))
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

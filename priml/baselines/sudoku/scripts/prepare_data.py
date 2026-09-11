@@ -80,7 +80,12 @@ BOX: Final = 3
 
 
 def main() -> int:
-    """Prepare the dataset; return the process exit code."""
+    """Prepare the dataset; return the process exit code.
+
+    Returns:
+      result: The int.
+
+    """
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -98,7 +103,12 @@ def main() -> int:
 
 
 def default_directory() -> Path:
-    """Return the dataset directory a default ``TrainLoop`` would resolve."""
+    """Return the dataset directory a default ``TrainLoop`` would resolve.
+
+    Returns:
+      result: The Path.
+
+    """
     config = SudokuData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)
@@ -208,18 +218,7 @@ def _build_split(
 
 
 def _download(filename: str, *, into: Path) -> Path:
-    """Fetch one source CSV to a temporary file beside the dataset.
-
-    Args:
-      filename: Source file to fetch.
-      into: Directory to stage under, so the partial file shares a filesystem
-        with its destination and a full disk fails here rather than midway
-        through the build.
-
-    Returns:
-      path: The downloaded file. The caller deletes it once the split is built.
-
-    """
+    """Fetch one source CSV to a temporary file beside the dataset."""
     url = f"{SOURCE_URL}/{SOURCE_REVISION}/{filename}"
     into.mkdir(parents=True, exist_ok=True)
     handle, staged = tempfile.mkstemp(dir=into, prefix=f".{filename}.", suffix=".part")
@@ -241,7 +240,7 @@ def _read_csv(csv_path: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
     solutions: list[np.ndarray] = []
     with csv_path.open(newline="") as handle:
         reader = csv.reader(handle)
-        next(reader)  # header
+        next(reader)  # header.
         for _source, question, answer, _rating in reader:
             puzzles.append(_grid(question.replace(".", "0")))
             solutions.append(_grid(answer))
@@ -249,37 +248,33 @@ def _read_csv(csv_path: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
 
 
 def _grid(text: str) -> np.ndarray:
-    """An 81-character row as a ``[9, 9]`` digit array."""
+    """Return an 81-character row as a ``[9, 9]`` digit array."""
     return np.frombuffer(text.encode(), dtype=np.uint8).reshape(GRID, GRID) - ord("0")
 
 
+# Digits arrive as 0-9 with 0 meaning empty; the model's vocabulary reserves 0 for
+# padding, so everything shifts up by one: 0 pad, 1 empty, 2-10 digits.
 def _tokenize(grids: list[np.ndarray]) -> np.ndarray:
-    """Stack digit grids and shift into the token vocabulary.
-
-    Digits arrive as 0-9 with 0 meaning empty; the model's vocabulary reserves
-    0 for padding, so everything shifts up by one: 0 pad, 1 empty, 2-10 digits.
-    """
+    """Stack digit grids and shift into the token vocabulary."""
     stacked = np.concatenate(grids).reshape(len(grids), -1)
     assert np.all((stacked >= 0) & (stacked <= 9))
     return stacked + 1
 
 
+# Sudoku is invariant under relabeling the digits, transposing the grid, and permuting
+# bands of rows or stacks of columns (and rows within a band, or columns within a
+# stack). None of those can turn a valid grid invalid, because each maps every
+# constraint group onto another constraint group.
+#
+# The draw order is pinned -- digits, transpose, bands, rows, stacks, columns -- because
+# the whole build's byte-identity depends on it.
 def _transform(
     puzzle: np.ndarray,
     *,
     solution: np.ndarray,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return a different valid puzzle with the correspondingly moved solution.
-
-    Sudoku is invariant under relabeling the digits, transposing the grid, and
-    permuting bands of rows or stacks of columns (and rows within a band, or
-    columns within a stack). None of those can turn a valid grid invalid,
-    because each maps every constraint group onto another constraint group.
-
-    The draw order is pinned -- digits, transpose, bands, rows, stacks, columns
-    -- because the whole build's byte-identity depends on it.
-    """
+    """Return a different valid puzzle with the correspondingly moved solution."""
     digits = np.pad(rng.permutation(np.arange(1, GRID + 1)), (1, 0))
     transpose = rng.random() < 0.5
     bands = rng.permutation(BOX)
@@ -290,23 +285,23 @@ def _transform(
         [rows[i // GRID] * GRID + columns[i % GRID] for i in range(GRID * GRID)],
     )
 
-    def apply(grid: np.ndarray) -> np.ndarray:
-        if transpose:
-            grid = grid.T
-        return digits[grid.flatten()[mapping].reshape(GRID, GRID).copy()]
+    return (
+        _permuted(puzzle, mapping=mapping, digits=digits, transpose=transpose),
+        _permuted(solution, mapping=mapping, digits=digits, transpose=transpose),
+    )
 
-    return apply(puzzle), apply(solution)
+
+def _permuted(
+    grid: np.ndarray, *, mapping: np.ndarray, digits: np.ndarray, transpose: bool
+) -> np.ndarray:
+    """Apply one cell permutation and digit relabeling to ``grid``."""
+    if transpose:
+        grid = grid.T
+    return digits[grid.flatten()[mapping].reshape(GRID, GRID).copy()]
 
 
 def _verify(csv_path: Path, *, filename: str) -> None:
-    """Reject a download whose bytes are not the pinned ones.
-
-    Raises:
-      RuntimeError: The digest differs. The revision is pinned, so upstream
-        cannot have changed: the download is corrupt or the cache was
-        modified. Delete the cached file and retry.
-
-    """
+    """Reject a download whose bytes are not the pinned ones."""
     digest = hashlib.sha256()
     with csv_path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):

@@ -67,7 +67,7 @@ def cap_math_threads() -> None:
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",  # macOS Accelerate
+        "VECLIB_MAXIMUM_THREADS",  # macOS Accelerate.
         "BLIS_NUM_THREADS",
     ):
         os.environ.setdefault(name, "1")

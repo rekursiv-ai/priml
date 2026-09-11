@@ -22,6 +22,7 @@ class LPIPSLoss(nn.Module):
     class Config(Fig["LPIPSLoss"]):
         max_num_random_frames: int = 2
         """Maximum number of random frames to subsample per video."""
+
         net: str = "vgg"
         """Backbone network for LPIPS ("vgg", "alex", "squeeze")."""
 
@@ -62,15 +63,15 @@ class LPIPSLoss(nn.Module):
         x_sub = x[:, :, rand_indices, :, :]
         xhat_sub = xhat[:, :, rand_indices, :, :]
 
-        # Reshape to [B*T, C, H, W] for LPIPS
+        # Reshape to [B*T, C, H, W] for LPIPS.
         b, c, t, h, w = x_sub.shape
         x_sub = x_sub.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
         xhat_sub = xhat_sub.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
 
-        # LPIPS returns [B*T, 1, 1, 1]
+        # LPIPS returns [B*T, 1, 1, 1].
         loss = self.lpips_criterion(x_sub, xhat_sub)
 
-        # Reshape back to [B, T] and mean over frames → [B]
+        # Reshape back to [B, T] and mean over frames → [B].
         loss = loss.reshape(b, t).mean(dim=1)
 
         return {"loss": loss}

@@ -34,8 +34,6 @@ from __future__ import annotations
 
 from typing import override
 
-import math
-
 from configgle import Fig
 from torch import Tensor, nn
 
@@ -475,7 +473,7 @@ class _RelativeAttention(nn.Module):
             source[None, None].expand(relative_weights.shape),
         )
 
-        weights = (weights + relative_weights) / math.sqrt(self.head_dim)
+        weights = (weights + relative_weights) / self.head_dim**0.5
         weights = torch.where(mask, weights, -1e30).softmax(-1)
         attended = weights @ value.transpose(1, 2)
         attended = attended.transpose(1, 2).reshape(
@@ -503,14 +501,17 @@ def _head(
 ) -> nn.Sequential:
     """Build one two-layer ReLU head with an orthogonal output."""
     return nn.Sequential(
-        _dense(embed_dim, channels_in, gain=math.sqrt(2.0)),
+        _dense(embed_dim, channels_in, gain=2.0**0.5),
         nn.ReLU(),
-        _dense(channels_in, channels_in, gain=math.sqrt(2.0)),
+        _dense(channels_in, channels_in, gain=2.0**0.5),
         nn.ReLU(),
         _dense(channels_in, output_size, gain=output_gain),
     )
 
 
+# Without an explicit ``gain`` the weights are drawn from a two-sigma truncated normal
+# scaled by the fan-in, which is the reference framework's default and differs from this
+# one's uniform default by enough to change where training starts.
 def _dense(
     in_features: int,
     out_features: int,
@@ -519,30 +520,10 @@ def _dense(
     gain: float | None = None,
     truncation: float = 0.87962566103423978,
 ) -> nn.Linear:
-    """Build a linear layer initialized the way the reference does.
-
-    Without an explicit ``gain`` the weights are drawn from a two-sigma
-    truncated normal scaled by the fan-in, which is the reference framework's
-    default and differs from this one's uniform default by enough to change
-    where training starts.
-
-    Args:
-      in_features: Input width.
-      out_features: Output width.
-      bias: Whether the layer has a bias, always initialized to zero.
-      gain: Orthogonal-initialization gain; omit for the fan-in default.
-      truncation: Standard deviation of a standard normal truncated to two
-        sigma. Dividing by it makes the truncated sample's spread equal the
-        nominal one, as the reference initializer does; omitting it would
-        shrink every weight in the network by twelve percent.
-
-    Returns:
-      layer: The initialized layer.
-
-    """
+    """Build a linear layer initialized the way the reference does."""
     layer = nn.Linear(in_features, out_features, bias=bias)
     if gain is None:
-        deviation = math.sqrt(1.0 / in_features) / truncation
+        deviation = (1.0 / in_features) ** 0.5 / truncation
         torch.nn.init.trunc_normal_(
             layer.weight,
             std=deviation,
@@ -556,6 +537,9 @@ def _dense(
     return layer
 
 
+# Slots are numbered from ``length`` down to one, so the encoding of "one step ago" is
+# the same vector whatever the window's absolute position -- which is the property that
+# lets a sliding memory be attended over at all.
 def _sinusoidal_positions(
     length: int,
     *,
@@ -563,22 +547,7 @@ def _sinusoidal_positions(
     device: torch.device | str,
     dtype: torch.dtype,
 ) -> Tensor:
-    """Encode each key slot by how far in the past it is.
-
-    Slots are numbered from ``length`` down to one, so the encoding of "one
-    step ago" is the same vector whatever the window's absolute position --
-    which is the property that lets a sliding memory be attended over at all.
-
-    Args:
-      length: Key slots to encode.
-      embed_dim: Width of the encoding.
-      device: Device to build on.
-      dtype: Floating type of the result.
-
-    Returns:
-      positions: Encodings, ``[length, embed_dim]``.
-
-    """
+    """Encode each key slot by how far in the past it is."""
     frequency = 1.0 / (
         10_000
         ** (

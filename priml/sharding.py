@@ -14,7 +14,7 @@ def parse_shard_spec(spec: str, total_shards: int) -> set[int]:
         total_shards: Total number of shards available
 
     Returns:
-        Set of shard IDs to process
+        shards: Set of shard IDs to process.
 
     Examples:
         >>> parse_shard_spec("1,3,5", 10)

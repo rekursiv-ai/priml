@@ -9,7 +9,7 @@ HF-shaped arch fields; ``finalize()`` wires them into the inherited
 
 Qwen3 vs. LLaMA:
   - Explicit ``head_dim`` (not ``hidden_size / num_heads``).
-  - Per-head QK-norm — independent ``q_norm`` and ``k_norm`` RMSNorms
+  - Per-head QK-norm -- independent ``q_norm`` and ``k_norm`` RMSNorms
     (via ``SelfAttention.Config.share_qk_norm=False``).
   - GQA via ``num_key_value_heads``.
   - No bias on attention or MLP projections.
@@ -60,12 +60,59 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 
 
+def _load_hf_checkpoint(
+    path_or_repo: Path | str, *, dtype: torch.dtype | None
+) -> tuple[dict[str, object], dict[str, Tensor]]:
+    """Read Qwen checkpoint metadata and tensors once, locally or through the hub."""
+    path = Path(path_or_repo)
+    if path.is_dir() and (path / "config.json").exists():
+        hf_config = DictCodec.coerce(json.loads((path / "config.json").read_text()))
+        return hf_config, hub.load_local_state_dict(path)
+    hf_model = hub.load_transformers_model(
+        str(path_or_repo), "AutoModelForCausalLM", dtype=dtype
+    )
+    return DictCodec.coerce(hf_model.config.to_dict()), {
+        key: value.detach().cpu() for key, value in hf_model.state_dict().items()
+    }
+
+
+def _tied(config: Transformer.Config) -> bool:
+    """Whether the head borrows the embedding, so HF ships no ``lm_head``."""
+    head = config.out_proj
+    if isinstance(head, Sequential.Config):
+        elements = head.elements
+        head = elements[-1] if isinstance(elements, list) else elements
+    return isinstance(head, TiedLinear.Config)
+
+
+# Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
+# layer is built, so a per-layer list and a broadcast template both answer here without
+# this function knowing which it was given.
+def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+    """Return one layer's attention config."""
+    blocks = config.block if isinstance(config.block, list) else [config.block]
+    # ``len == 1`` is the pre-finalize broadcast template, which answers for
+    # every layer. Any other short list is a genuine index error, and falling
+    # back to layer 0 there remapped excess layers against the wrong geometry.
+    block = blocks[0] if len(blocks) == 1 else blocks[layer]
+    if not isinstance(block, TransformerBlock.Config):
+        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
+    attn = block.attn
+    if not isinstance(attn, SelfAttention.Config):
+        raise TypeError(
+            f"layer {layer} attention is {type(attn).__name__}, not self-attention.",
+        )
+    return attn
+
+
 class Qwen3(Transformer):
     """Qwen3 dense causal LM -- ``Transformer`` pre-wired for the Qwen3 arch."""
 
     class Config(Makes["Qwen3"], Transformer.Config, kw_only=False):
-        """Widths come from ``from_hf``: ``channels_in`` is ``hidden_size`` and
-        ``channels_out`` the vocabulary, which sizes the embedding's rows too.
+        """Widths come from ``from_hf``.
+
+        ``channels_in`` is ``hidden_size`` and ``channels_out`` the vocabulary, which
+        sizes the embedding's rows too.
         """
 
         _: KW_ONLY
@@ -128,14 +175,22 @@ class Qwen3(Transformer):
 
         @classmethod
         def from_hf(cls, config: dict[str, Any]) -> Self:
-            """Parse an HF ``config.json`` dict. Validates model_type."""
+            """Parse an HF ``config.json`` dict. Validates model_type.
+
+            Args:
+              config: Config.
+
+            Returns:
+              result: The Self.
+
+            """
             model_type = config.get("model_type")
             if model_type != "qwen3":
                 raise ValueError(
                     f"Expected model_type='qwen3', got {model_type!r}. "
                     "Qwen3-MoE and earlier Qwen versions need their own loader.",
                 )
-            # transformers 4.55+ nests rope params; earlier has rope_theta flat.
+            # ``transformers`` 4.55+ nests rope params; earlier has rope_theta flat.
             rope_theta = config.get("rope_theta")
             if rope_theta is None:
                 # Validated rather than cast: this is an HF ``config.json``, so
@@ -225,13 +280,10 @@ class Qwen3(Transformer):
             propagate_attr(self.in_proj, "num_embeddings", self.channels_out)
             return super().finalize()
 
+        # Only the widths: everything else on the block is the caller's, so an edit to
+        # the template survives ``finalize`` rather than being rebuilt over.
         def _size_block(self, block: TensorBlockConfig) -> None:
-            """Push the widths the PARENT owns into one already-shaped block.
-
-            Only the widths: everything else on the block is the caller's, so
-            an edit to the template survives ``finalize`` rather than being
-            rebuilt over.
-            """
+            """Push the widths the PARENT owns into one already-shaped block."""
             propagate_attr(block, "channels_in", self.channels_in, protocol=ChannelsIn)
             if not isinstance(block, TransformerBlock.Config):
                 return
@@ -262,6 +314,9 @@ class Qwen3(Transformer):
           device: Target device (default: CPU).
           dtype: Override the dtype recorded in ``config.json``.
 
+        Returns:
+          model: The Qwen3.
+
         """
         hf_config, hf_sd = _load_hf_checkpoint(path_or_repo, dtype=dtype)
         config = cls.Config.from_hf(hf_config).finalize()
@@ -276,63 +331,21 @@ class Qwen3(Transformer):
         return model
 
 
-# -- HF weight remap ---------------------------------------------------
-
-
-def _load_hf_checkpoint(
-    path_or_repo: Path | str, *, dtype: torch.dtype | None
-) -> tuple[dict[str, object], dict[str, Tensor]]:
-    """Read Qwen checkpoint metadata and tensors once, locally or through the hub."""
-    path = Path(path_or_repo)
-    if path.is_dir() and (path / "config.json").exists():
-        hf_config = DictCodec.coerce(json.loads((path / "config.json").read_text()))
-        return hf_config, hub.load_local_state_dict(path)
-    hf_model = hub.load_transformers_model(
-        str(path_or_repo), "AutoModelForCausalLM", dtype=dtype
-    )
-    return DictCodec.coerce(hf_model.config.to_dict()), {
-        key: value.detach().cpu() for key, value in hf_model.state_dict().items()
-    }
-
-
-def _attn_of(config: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
-    """Return one layer's attention config.
-
-    Read off the BLOCK rather than a parent mirror of it: the geometry lives
-    where the layer is built, so a per-layer list and a broadcast template
-    both answer here without this function knowing which it was given.
-    """
-    blocks = config.block if isinstance(config.block, list) else [config.block]
-    # ``len == 1`` is the pre-finalize broadcast template, which answers for
-    # every layer. Any other short list is a genuine index error, and falling
-    # back to layer 0 there remapped excess layers against the wrong geometry.
-    block = blocks[0] if len(blocks) == 1 else blocks[layer]
-    if not isinstance(block, TransformerBlock.Config):
-        raise TypeError(f"layer {layer} is {type(block).__name__}, not a transformer.")
-    attn = block.attn
-    if not isinstance(attn, SelfAttention.Config):
-        raise TypeError(
-            f"layer {layer} attention is {type(attn).__name__}, not self-attention.",
-        )
-    return attn
-
-
-def _tied(config: Transformer.Config) -> bool:
-    """Whether the head borrows the embedding, so HF ships no ``lm_head``."""
-    head = config.out_proj
-    if isinstance(head, Sequential.Config):
-        elements = head.elements
-        head = elements[-1] if isinstance(elements, list) else elements
-    return isinstance(head, TiedLinear.Config)
-
-
 def remap_hf_state_dict(
     hf_sd: dict[str, Tensor],
     config: Qwen3.Config,
 ) -> dict[str, Tensor]:
     """Convert an HF Qwen3 ``state_dict`` to loop-native parameter names.
 
-    Pure transform — no device moves, no dtype changes.
+    Pure transform -- no device moves, no dtype changes.
+
+    Args:
+      hf_sd: Hf sd.
+      config: Config.
+
+    Returns:
+      out: The dict[str, Tensor].
+
     """
     h = config.channels_in
     attn = _attn_of(config)
@@ -365,3 +378,6 @@ def remap_hf_state_dict(
         out[f"{b}.ffn.up_proj.weight"] = torch.cat([gate, up], dim=0)
         out[f"{b}.ffn.down_proj.weight"] = hf_sd[f"{p}.mlp.down_proj.weight"]
     return out
+
+
+# -- HF weight remap ---------------------------------------------------

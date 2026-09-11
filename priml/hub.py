@@ -65,7 +65,7 @@ def load_transformers_model(
     revision: str | None = None,
     trust_remote_code: bool = False,
     force_redownload: bool = False,
-    **kwargs: Any,
+    **kwargs: object,
 ) -> Any:
     """Load a model from HuggingFace with consistent caching.
 

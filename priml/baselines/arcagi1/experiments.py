@@ -93,6 +93,9 @@ def exp000() -> ArcTrainLoop:
       recipe that uses nothing exotic -- the bar recurrence must clear on a
       benchmark whose tasks are genuinely novel at test time.
 
+    Returns:
+      cfg: The ArcTrainLoop.
+
     References:
       https://arxiv.org/abs/1911.01547
         Chollet. On the Measure of Intelligence.
@@ -167,6 +170,9 @@ def exp001() -> ArcTrainLoop:
       addressing attention buys may be unnecessary: a learned mixing over
       positions can express the same spatial routing at lower cost.
 
+    Returns:
+      cfg: The ArcTrainLoop.
+
     References:
       https://arxiv.org/abs/2105.01601
         Tolstikhin et al. MLP-Mixer: An all-MLP Architecture for Vision.
@@ -189,6 +195,9 @@ def exp002() -> ArcTrainLoop:
       -- so a fixed-depth network must learn in one pass what a recurrence can
       unroll. Letting each task choose its own depth should beat the same
       parameters spent in a single forward.
+
+    Returns:
+      cfg: The ArcTrainLoop.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -229,6 +238,9 @@ def exp003() -> ArcTrainLoop:
     Results:
       TBD.
 
+    Returns:
+      cfg: The ArcTrainLoop.
+
     """
     cfg = exp002()
     cfg.experiment_name = "exp003"
@@ -247,6 +259,10 @@ def exp_smoke() -> ArcTrainLoop:
     ids they carry -- the build numbers puzzles once across every split -- so a
     table sized to ``num_tasks`` would index off the end. At this width it
     costs 112 MB and 35 ms, which does not bear on the question.
+
+    Returns:
+      cfg: The ArcTrainLoop.
+
     """
     cfg = exp000()
     cfg.experiment_name = "exp_smoke"
@@ -267,20 +283,10 @@ def exp_smoke() -> ArcTrainLoop:
     return cfg
 
 
+# Post-norm, matching the transformer default: a recurrence feeds a block its own
+# output, and an unnormalized residual stream compounds when it does.
 def _mixer_block(seq_len: int) -> MLPMixerBlock.Config:
-    """An MLP-mixer block shaped for the padded grid plus its prefix.
-
-    Post-norm, matching the transformer default: a recurrence feeds a block its
-    own output, and an unnormalized residual stream compounds when it does.
-
-    Args:
-      seq_len: Prefix plus grid tokens. The mixer mixes ACROSS positions, so it
-        must be built to the full sequence, not the grid alone.
-
-    Returns:
-      config: The block config.
-
-    """
+    """Return an MLP-mixer block shaped for the padded grid plus its prefix."""
     return MLPMixerBlock.Config(
         seq_len=seq_len,
         prenorm=False,

@@ -165,6 +165,51 @@ class RecurrentRollout:
             yield minibatch
 
 
+# The rollout recorded what every layer read at every step, and the cache a window
+# starts from is exactly the ``memory_length`` rows preceding it -- so no attention
+# state has to be stored to replay it.
+def _window_memories(
+    history: Tensor,
+    *,
+    memory_length: int,
+    window: int,
+) -> Tensor:
+    """Rebuild the memory each gradient window began with."""
+    rollout_steps = history.shape[0] - memory_length
+    starts = torch.arange(0, rollout_steps, window, device=history.device)
+    rows = torch.arange(memory_length, device=history.device)
+    selected = history[starts[:, None] + rows[None, :]]
+    selected = selected.transpose(1, 2)
+    return selected.reshape(
+        selected.shape[0] * selected.shape[1],
+        memory_length,
+        *selected.shape[3:],
+    )
+
+
+def _windows(value: Tensor, *, window: int) -> Tensor:
+    """Cut time into fixed windows and fold the pieces into the batch axis."""
+    chunks = value.shape[0] // window
+    reshaped = value.reshape(chunks, window, value.shape[1], *value.shape[2:])
+    return reshaped.transpose(0, 1).reshape(
+        window,
+        chunks * value.shape[1],
+        *value.shape[2:],
+    )
+
+
+def _split_environments(
+    value: Tensor,
+    *,
+    order: Tensor,
+    count: int,
+) -> Tensor:
+    """Shuffle whole trajectories and expose a leading minibatch axis."""
+    shuffled = value[:, order]
+    grouped = shuffled.reshape(value.shape[0], count, -1, *value.shape[2:])
+    return grouped.transpose(0, 1)
+
+
 class CraftaxGTrXLTrainStep(TrainStep):
     """Model, environment, and optimizer for one recurrent PPO experiment."""
 
@@ -531,7 +576,12 @@ class CraftaxGTrXLTrainStep(TrainStep):
         return logits
 
     def make_evaluation_actor(self) -> EvaluationActor:
-        """Build an actor with isolated attention memory."""
+        """Build an actor with isolated attention memory.
+
+        Returns:
+          result: The EvaluationActor.
+
+        """
         return _EvaluationActor(
             self.model,
             observation_size=self.env.observation_size,
@@ -718,97 +768,9 @@ class _EvaluationActor:
         ).squeeze(-1)
 
 
+# Compiling the two recurrent entry points rather than the module is what keeps the
+# rollout on the compiled path: a rollout calls ``step``, never ``forward``, so
+# ``torch.compile(module)`` would compile the one method training does not use.
 def _compiled(function: _Callable, *, enabled: bool) -> _Callable:
-    """Compile one bound method, or return it untouched.
-
-    Compiling the two recurrent entry points rather than the module is what
-    keeps the rollout on the compiled path: a rollout calls ``step``, never
-    ``forward``, so ``torch.compile(module)`` would compile the one method
-    training does not use.
-
-    Args:
-      function: The bound method to compile.
-      enabled: Whether to compile at all.
-
-    Returns:
-      callable: The compiled function, or the original.
-
-    """
+    """Compile one bound method, or return it untouched."""
     return torch.compile(function) if enabled else function
-
-
-def _split_environments(
-    value: Tensor,
-    *,
-    order: Tensor,
-    count: int,
-) -> Tensor:
-    """Shuffle whole trajectories and expose a leading minibatch axis.
-
-    Args:
-      value: Time-major tensor, ``[time, envs, ...]``.
-      order: Permutation of the worker axis.
-      count: Minibatches to split the workers into.
-
-    Returns:
-      split: ``[count, time, envs / count, ...]``.
-
-    """
-    shuffled = value[:, order]
-    grouped = shuffled.reshape(value.shape[0], count, -1, *value.shape[2:])
-    return grouped.transpose(0, 1)
-
-
-def _windows(value: Tensor, *, window: int) -> Tensor:
-    """Cut time into fixed windows and fold the pieces into the batch axis.
-
-    Args:
-      value: Time-major tensor, ``[time, envs, ...]``.
-      window: Steps per window; must divide ``time``.
-
-    Returns:
-      windowed: ``[window, chunks * envs, ...]``, chunk-major.
-
-    """
-    chunks = value.shape[0] // window
-    reshaped = value.reshape(chunks, window, value.shape[1], *value.shape[2:])
-    return reshaped.transpose(0, 1).reshape(
-        window,
-        chunks * value.shape[1],
-        *value.shape[2:],
-    )
-
-
-def _window_memories(
-    history: Tensor,
-    *,
-    memory_length: int,
-    window: int,
-) -> Tensor:
-    """Rebuild the memory each gradient window began with.
-
-    The rollout recorded what every layer read at every step, and the cache a
-    window starts from is exactly the ``memory_length`` rows preceding it --
-    so no attention state has to be stored to replay it.
-
-    Args:
-      history: Layer inputs preceded by the rollout's starting cache,
-        ``[memory_length + time, envs, layers, embed]``.
-      memory_length: Rows the model attends over.
-      window: Steps per gradient window.
-
-    Returns:
-      memories: ``[chunks * envs, memory_length, layers, embed]``, ordered to
-        match :func:`_windows`.
-
-    """
-    rollout_steps = history.shape[0] - memory_length
-    starts = torch.arange(0, rollout_steps, window, device=history.device)
-    rows = torch.arange(memory_length, device=history.device)
-    selected = history[starts[:, None] + rows[None, :]]
-    selected = selected.transpose(1, 2)
-    return selected.reshape(
-        selected.shape[0] * selected.shape[1],
-        memory_length,
-        *selected.shape[3:],
-    )

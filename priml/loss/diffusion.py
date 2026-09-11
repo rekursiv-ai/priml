@@ -37,12 +37,16 @@ class DiffusionLoss(nn.Module):
     class Config(Fig["DiffusionLoss"]):
         logsnr_fn: TensorableFn = log_snr_from_log_time_per_truncnormicdf
         """Maps log_t to log signal-to-noise ratio."""
+
         target_fn: TargetFn = target_rectified_flow
         """Computes training target and prediction from model output."""
+
         corruption_fn: TensorableFn = log_sigma_from_log_snr_per_rectified_flow
         """Maps log_snr to log noise coefficient."""
+
         time_transform: TensorableFn | None = None
         """Optional transform applied to log_t before logsnr_fn."""
+
         snr_gamma: float = 0.0
         """Min-SNR-γ loss weighting (Hang et al. 2023). 0 disables.
 
@@ -58,12 +62,16 @@ class DiffusionLoss(nn.Module):
 
         loss: Tensor
         """Per-sample MSE loss, shape [B]."""
+
         x_denoised: Tensor
         """Model's estimate of x_original."""
+
         eps_denoised: Tensor
         """Model's estimate of eps_original."""
+
         log_snr: Tensor
         """Log signal-to-noise ratio, shape [B, 1, ...]."""
+
         log_sigma: Tensor
         """Log noise coefficient, shape [B, 1, ...]."""
 

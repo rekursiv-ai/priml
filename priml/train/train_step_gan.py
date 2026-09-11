@@ -32,7 +32,7 @@ class GANTrainStep:
 
         generator: Makeable[TrainStep] = field(
             default_factory=lambda: TrainStep.Config(
-                model=Identity.Config(),  # Replace with actual generator
+                model=Identity.Config(),  # Replace with actual generator.
                 optimizer=PartialConfig(
                     torch.optim.Adam,
                     lr=2e-4,
@@ -46,9 +46,10 @@ class GANTrainStep:
             ),
         )
         """Generator TrainStep configuration."""
+
         discriminator: Makeable[TrainStep] = field(
             default_factory=lambda: TrainStep.Config(
-                model=Identity.Config(),  # Replace with actual discriminator
+                model=Identity.Config(),  # Replace with actual discriminator.
                 optimizer=PartialConfig(
                     torch.optim.Adam,
                     lr=2e-4,
@@ -61,6 +62,7 @@ class GANTrainStep:
             ),
         )
         """Discriminator TrainStep configuration."""
+
         n_discriminator_steps: int = 1
         """Number of discriminator steps per generator step."""
 
@@ -92,9 +94,19 @@ class GANTrainStep:
         """
         return self.generator.preprocess_batch(batch)
 
-    def call_eval(self, **kwargs: Any) -> Any:
-        """Evaluation forward pass (generator only)."""
-        return self.generator.call_eval(**kwargs)
+    def call_eval(self, **kwargs: object) -> Tensor:
+        """Run the evaluation forward pass (generator only).
+
+        Args:
+          **kwargs: Preprocessed batch, forwarded to the generator.
+
+        Returns:
+          media: The generator's output.
+
+        """
+        media = self.generator.call_eval(**kwargs)
+        assert isinstance(media, Tensor)
+        return media
 
     def on_epoch_end(self) -> None:
         """Flush partial accumulation in both sub-steps at the epoch boundary."""
@@ -166,7 +178,7 @@ class GANTrainStep:
             for name, param in self.discriminator.model.named_parameters():
                 param.requires_grad_(requires_grad_backup[name])
 
-        # Increment GAN step counters
+        # Increment GAN step counters.
         self.global_step += 1
         self.local_step += 1
 
@@ -181,7 +193,16 @@ class GANTrainStep:
         return cast(TrainStepOutput, result)
 
     def train_loss(self, *, media: Tensor, **batch: object) -> TrainStepOutput:
-        """Compute GAN loss in train mode without backprop."""
+        """Compute GAN loss in train mode without backprop.
+
+        Args:
+          media: Media.
+          **batch: Batch.
+
+        Returns:
+          result: The TrainStepOutput.
+
+        """
         real_media = media
         batch_size = real_media.shape[0]
 
@@ -207,7 +228,7 @@ class GANTrainStep:
             )
         d_loss_sum = d_loss_total.item() if d_loss_total is not None else 0.0
 
-        # Compute generator loss
+        # Compute generator loss.
         fake_media = self.generator.model(**batch)
         fake_logits = self.discriminator.model(fake_media)
         g_loss_result = self.generator.train_loss(
@@ -225,7 +246,16 @@ class GANTrainStep:
         return cast(TrainStepOutput, result)
 
     def eval_loss(self, *, media: Tensor, **batch: object) -> TrainStepOutput:
-        """Compute GAN loss in eval mode (uses EMA models if available)."""
+        """Compute GAN loss in eval mode (uses EMA models if available).
+
+        Args:
+          media: Media.
+          **batch: Batch.
+
+        Returns:
+          result: The TrainStepOutput.
+
+        """
         real_media = media
         batch_size = real_media.shape[0]
 
@@ -250,7 +280,7 @@ class GANTrainStep:
             )
         d_loss_sum = d_loss_total.item() if d_loss_total is not None else 0.0
 
-        # Compute generator loss
+        # Compute generator loss.
         fake_media = self.generator.call_eval(**batch)
         fake_logits = self.discriminator.call_eval(media=fake_media)
         g_loss_result = self.generator.eval_loss(
@@ -268,7 +298,12 @@ class GANTrainStep:
         return cast(TrainStepOutput, result)
 
     def state_dict(self) -> dict[str, Any]:
-        """Get checkpoint state for both generator and discriminator."""
+        """Get checkpoint state for both generator and discriminator.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "generator": self.generator.state_dict(),
             "discriminator": self.discriminator.state_dict(),
@@ -276,7 +311,12 @@ class GANTrainStep:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load checkpoint state for both generator and discriminator."""
+        """Load checkpoint state for both generator and discriminator.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.generator.load_state_dict(state_dict["generator"])
         self.discriminator.load_state_dict(state_dict["discriminator"])
         self.global_step = state_dict["global_step"]

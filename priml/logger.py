@@ -74,14 +74,20 @@ class CustomFormatter(logging.Formatter):
     FORMAT: ClassVar[str] = (
         "%(asctime)s | %(rank_info)s%(levelname)s | %(name)s%(classname)s | %(funcName)s:%(lineno)d | %(message)s"
     )
+
     DATEFMT: ClassVar[str] = "%y-%m-%d %H:%M:%S.%f"
 
     class LogColors:
         DEBUG: str = "\x1b[38;20m"
+
         INFO: str = "\x1b[34;20m"
+
         WARNING: str = "\x1b[33;20m"
+
         ERROR: str = "\x1b[31;20m"
+
         CRITICAL: str = "\x1b[31;1m"
+
         RESET: str = "\x1b[0m"
 
     LOG_LEVEL_COLOR_MAP: ClassVar[dict[int, str]] = {
@@ -131,33 +137,8 @@ class CustomFormatter(logging.Formatter):
         return dt.strftime(datefmt or self.datefmt or "")
 
 
-class _ReplayBufferHandler(logging.Handler):
-    """Retains emitted records so they can be replayed to a later stdout.
-
-    W&B's console capture only hooks ``sys.stdout`` from ``wandb.init()``
-    onward, so every record logged before init (hardware banner, experiment
-    config, model parameter counts) is invisible in the W&B run. This handler
-    keeps those records in memory; :func:`replay_buffered_logs`, called once
-    after ``wandb.init()``, re-emits them through the now-wrapped stdout so the
-    W&B console shows the full run log from the start. ``job.log`` already has
-    them via the stream handler, so replay is purely for the W&B console.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.records: list[logging.LogRecord] = []
-
-    @override
-    def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
-
-
-class _StdoutStreamHandler(logging.StreamHandler[TextIO]):
-    """Loop-owned stdout stream handler that may be rebound after W&B init."""
-
-
 def setup_logging(level: str = "INFO") -> None:
-    """Setup logging with specified level.
+    """Set up logging at the specified level.
 
     Args:
       level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -217,3 +198,28 @@ def replay_buffered_logs() -> None:
         replay.emit(record)
     replay.flush()
     root_logger.removeHandler(buffer)
+
+
+class _ReplayBufferHandler(logging.Handler):
+    """Retains emitted records so they can be replayed to a later stdout.
+
+    W&B's console capture only hooks ``sys.stdout`` from ``wandb.init()``
+    onward, so every record logged before init (hardware banner, experiment
+    config, model parameter counts) is invisible in the W&B run. This handler
+    keeps those records in memory; :func:`replay_buffered_logs`, called once
+    after ``wandb.init()``, re-emits them through the now-wrapped stdout so the
+    W&B console shows the full run log from the start. ``job.log`` already has
+    them via the stream handler, so replay is purely for the W&B console.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+class _StdoutStreamHandler(logging.StreamHandler[TextIO]):
+    """Loop-owned stdout stream handler that may be rebound after W&B init."""

@@ -30,15 +30,20 @@ value on device rather than forcing a GPU->CPU sync mid-step.
 """
 
 
-def _shape(param: Tensor, ensemble_dims: int) -> tuple[int, int]:
-    """Return ``(fan_out, fan_in)`` with the ensemble axes folded away."""
-    return param.shape[ensemble_dims], math.prod(param.shape[ensemble_dims + 1 :])
-
-
 def adjust_lr_original(lr: float, param: Tensor, ensemble_dims: int = 0) -> float:
-    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``."""
+    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``.
+
+    Args:
+      lr: Lr.
+      param: Param.
+      ensemble_dims: Ensemble dims.
+
+    Returns:
+      result: The float.
+
+    """
     c_out, c_in = _shape(param, ensemble_dims)
-    return lr * math.sqrt(max(1, c_out / c_in))
+    return lr * float(max(1, c_out / c_in) ** 0.5)
 
 
 def adjust_lr_match_rms_adamw(
@@ -49,9 +54,18 @@ def adjust_lr_match_rms_adamw(
     """Scale so the update RMS matches what AdamW would have produced.
 
     Lets a recipe reuse an AdamW-tuned learning rate unchanged.
+
+    Args:
+      lr: Lr.
+      param: Param.
+      ensemble_dims: Ensemble dims.
+
+    Returns:
+      result: The float.
+
     """
     c_out, c_in = _shape(param, ensemble_dims)
-    return lr * 0.2 * math.sqrt(max(c_out, c_in))
+    return lr * 0.2 * float(max(c_out, c_in) ** 0.5)
 
 
 def adjust_lr_conv_heuristic(
@@ -63,9 +77,23 @@ def adjust_lr_conv_heuristic(
 
     Data-dependent, so the result stays a 0-dim ``Tensor``: calling ``.item()``
     here would synchronize the device on every parameter of every step.
+
+    Args:
+      lr: Lr.
+      param: Param.
+      ensemble_dims: Ensemble dims.
+
+    Returns:
+      result: The Tensor.
+
     """
     c_out, _ = _shape(param, ensemble_dims)
-    return lr * param.data.norm() / math.sqrt(c_out)
+    return lr * param.data.norm() / float(c_out**0.5)
+
+
+def _shape(param: Tensor, ensemble_dims: int) -> tuple[int, int]:
+    """Return ``(fan_out, fan_in)`` with the ensemble axes folded away."""
+    return param.shape[ensemble_dims], math.prod(param.shape[ensemble_dims + 1 :])
 
 
 class Muon(Optimizer):

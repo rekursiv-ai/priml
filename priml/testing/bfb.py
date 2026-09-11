@@ -106,7 +106,7 @@ Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,16 +137,14 @@ if TYPE_CHECKING:
 _ENV_REGENERATE: Final = "BFB_REGENERATE"
 
 
-class _MissingGoldenError(AssertionError):
-    """A missing BFB golden was minted and requires review."""
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class _TorchProcessState:
     """Process-global Torch state temporarily changed by a BFB assertion."""
 
     algorithms_enabled: bool
+
     warn_only_enabled: bool
+
     rng_state: Tensor
 
 
@@ -248,257 +246,6 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
 }
 
 
-def _is_narrow_float(dtype: torch.dtype) -> bool:
-    """Whether a dtype should be widened before the op runs.
-
-    Named for the upcast's question -- "is this narrower than the scratch
-    width" -- so float64 is False here because it IS the scratch, not because
-    it is host-independent (it is not; see the module docstring). A caller
-    asking whether a dtype is portable wants
-    :func:`_assert_portable_output_dtype`, which admits float32 alone.
-
-    bfloat16 and float16 count because a mixed-precision recipe COMPUTES in
-    them -- an autocast forward, or an optimizer that orthogonalizes in half
-    precision -- so a golden that left them native would be minted to one
-    machine.
-    """
-    return dtype.is_floating_point and dtype != torch.float64
-
-
-def _floating_dtypes(value: object) -> set[torch.dtype]:
-    """The float dtypes appearing in a tensor / list / tuple.
-
-    ``_foreach_*`` ops (e.g. ``_foreach_norm`` behind ``clip_grad_norm_``)
-    receive a ``list[Tensor]`` rather than a bare tensor, so a direct
-    ``isinstance(a, Tensor)`` check misses them and the upcast silently does
-    not apply.
-    """
-    if isinstance(value, Tensor):
-        return {value.dtype} if value.dtype.is_floating_point else set()
-    if isinstance(value, (list, tuple)):
-        found: set[torch.dtype] = set()
-        for item in cast(list[object] | tuple[object, ...], value):
-            found |= _floating_dtypes(item)
-        return found
-    return set()
-
-
-def _result_dtype(dtypes: set[torch.dtype]) -> torch.dtype:
-    """The dtype the op would have produced natively.
-
-    Torch promotes mixed inputs, so a bfloat16 tensor meeting a float32 one
-    yields float32. Reproducing that promotion here is what lets the result be
-    narrowed back to the width the unwrapped computation would have held --
-    narrowing everything to float32 instead would silently widen a half
-    precision graph and change every value downstream of it.
-    """
-    ordered = sorted(dtypes, key=str)
-    result = ordered[0]
-    for dtype in ordered[1:]:
-        result = torch.promote_types(result, dtype)
-    return result
-
-
-def _upcast(value: object) -> object:
-    if isinstance(value, Tensor) and _is_narrow_float(value.dtype):
-        return value.double()
-    if isinstance(value, list):
-        return [_upcast(v) for v in cast(list[object], value)]
-    if isinstance(value, tuple):
-        return tuple(_upcast(v) for v in cast(tuple[object, ...], value))
-    return value
-
-
-def _downcast_f64(value: object, target: torch.dtype = torch.float32) -> object:
-    if isinstance(value, Tensor) and value.dtype == torch.float64:
-        return value.to(target)
-    if isinstance(value, list):
-        return [_downcast_f64(v, target) for v in cast(list[object], value)]
-    if isinstance(value, tuple):
-        return tuple(_downcast_f64(v, target) for v in cast(tuple[object, ...], value))
-    return value
-
-
-def _downcast_result(
-    result: object,
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-    fallback: torch.dtype,
-) -> object:
-    """Downcast foreach results per element and ordinary results globally."""
-    if not isinstance(result, list):
-        return _downcast_f64(result, fallback)
-    typed_result = cast(list[object], result)
-    sequences: list[list[object] | tuple[object, ...]] = []
-    shared_dtypes: set[torch.dtype] = set()
-    for value in (*args, *kwargs.values()):
-        if isinstance(value, list):
-            sequence = cast(list[object], value)
-        elif isinstance(value, tuple):
-            sequence = cast(tuple[object, ...], value)
-        else:
-            shared_dtypes |= _floating_dtypes(value)
-            continue
-        if len(sequence) == len(typed_result):
-            sequences.append(sequence)
-    downcast = list[object]()
-    for index, value in enumerate(typed_result):
-        dtypes = set(shared_dtypes)
-        for sequence in sequences:
-            dtypes |= _floating_dtypes(sequence[index])
-        target = _result_dtype(dtypes) if dtypes else fallback
-        downcast.append(_downcast_f64(value, target))
-    return downcast
-
-
-def _copy_back(original: object, computed: object) -> None:
-    """Narrow ``computed`` (float64) into ``original`` in place.
-
-    Recurses into lists/tuples for ``_foreach_*`` write targets. A tensor that
-    was never upcast -- one whose dtype is not a narrow float -- was written by
-    the op itself, so it is skipped. The narrowing ``copy_`` is
-    IEEE-correctly-rounded, hence host-independent.
-    """
-    if isinstance(original, Tensor):
-        if _is_narrow_float(original.dtype) and isinstance(computed, Tensor):
-            if original.shape != computed.shape:
-                original.resize_(computed.shape)
-            original.copy_(computed)
-        return
-    if isinstance(original, (list, tuple)) and isinstance(computed, (list, tuple)):
-        for o, c in zip(
-            cast(list[object] | tuple[object, ...], original),
-            cast(list[object] | tuple[object, ...], computed),
-            strict=True,
-        ):
-            _copy_back(o, c)
-
-
-def _write_back(
-    func: OpOverload[..., object],
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-    up_args: tuple[object, ...],
-    up_kwargs: dict[str, object],
-    *,
-    result: object,
-    target: torch.dtype,
-) -> object:
-    """Restore an in-place / ``out=`` / foreach op's mutation onto the originals.
-
-    The op ran on the float64 upcast copies in ``up_args``/``up_kwargs``, so its
-    computed values live there, not in the caller's float32 originals. For every
-    write argument (``alias_info.is_write``), narrow its upcast copy back into the
-    original (``_copy_back``, recursing through foreach ``Tensor[]``) as the side
-    effect, and remember the (upcast-copy, original) pair.
-
-    The return is then rebuilt element-wise: a returned element that IS one of the
-    upcast write copies is swapped to the caller's original (preserving in-place /
-    ``out=`` return identity); every other element -- a freshly-computed output
-    that merely happens to ride alongside the writes, e.g.
-    ``_native_batch_norm_legit`` returns ``(output, save_mean, save_invstd)`` while
-    writing ``running_*`` -- is downcast and kept, never dropped. ``None`` (void
-    in-place, e.g. ``_foreach_*_``) passes through, which the dispatcher requires.
-    """
-    schema = func._schema  # noqa: SLF001 -- OpOverload exposes its schema only privately
-    # Copy each mutated float64 upcast copy back into its float32 original (the
-    # side effect), recording (upcast_copy -> original) so a returned element
-    # that IS a write target can be swapped to the caller's original. Returns
-    # that are fresh (non-write) tensors -- e.g. ``_native_batch_norm_legit``
-    # returns ``(output, save_mean, save_invstd)`` while writing ``running_*`` --
-    # are simply downcast, never dropped.
-    upcast_to_original: list[tuple[object, object]] = []
-    for i, arg in enumerate(schema.arguments):
-        if arg.alias_info is None or not arg.alias_info.is_write:
-            continue
-        name = arg.name
-        original = kwargs[name] if name in kwargs else args[i]
-        computed = up_kwargs[name] if name in up_kwargs else up_args[i]
-        _copy_back(original, computed)
-        upcast_to_original.append((computed, original))
-
-    def _resolve(element: object) -> object:
-        for computed, original in upcast_to_original:
-            if element is computed:
-                return original
-        return _downcast_f64(element, target)
-
-    if result is None:
-        return None
-    if isinstance(result, tuple):
-        return tuple(_resolve(e) for e in cast(tuple[object, ...], result))
-    if isinstance(result, list):
-        return [_resolve(e) for e in cast(list[object], result)]
-    return _resolve(result)
-
-
-def _op_name(func: OpOverload[..., object]) -> str:
-    """Return an Aten overload's packet name."""
-    return func.name().split("::")[-1].split(".")[0]
-
-
-class _Float64Compute(TorchDispatchMode):
-    """Compute every float32 arithmetic op in float64, return float32.
-
-    Operates at the aten-dispatch layer, so it sees the aten ops the computation
-    issues during forward and autograd backward. An op is upcast when it has a
-    float32 argument and its overloadpacket name is NOT
-    in ``_EXACT_F32_OPS``; the float32 args are widened to float64, the op runs,
-    and float64 results are narrowed back to float32. Allowlisted ops (exact
-    elementwise arithmetic and pure data movement) pass through untouched.
-
-    Upcast-by-default is the completeness guarantee: a transcendental or
-    reduction absent from every list is still upcast, so it cannot silently mint
-    a host-dependent golden. The only unsafe act is wrongly *adding* an op to
-    ``_EXACT_F32_OPS``, which the guard test in ``bfb_test.py`` catches.
-    """
-
-    @override
-    def __torch_dispatch__(
-        self,
-        func: OpOverload[..., object],
-        types: tuple[type, ...],
-        args: tuple[object, ...] = (),
-        kwargs: dict[str, object] | None = None,
-    ) -> object:
-        kwargs = kwargs or {}
-        exact = _op_name(func) in _EXACT_F32_OPS
-        input_dtypes: set[torch.dtype] = set()
-        for value in (*args, *kwargs.values()):
-            input_dtypes |= _floating_dtypes(value)
-        narrow = {dtype for dtype in input_dtypes if _is_narrow_float(dtype)}
-        if exact or not narrow:
-            return func(*args, **kwargs)
-        explicit_dtype = kwargs.get("dtype")
-        target = (
-            explicit_dtype
-            if isinstance(explicit_dtype, torch.dtype)
-            else _result_dtype(input_dtypes)
-        )
-        up_args = tuple(_upcast(a) for a in args)
-        up_kwargs = {k: _upcast(v) for k, v in kwargs.items()}
-        if isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype):
-            up_kwargs["dtype"] = torch.float64
-        result = func(*up_args, **up_kwargs)
-        if any(
-            arg.alias_info is not None and arg.alias_info.is_write
-            for arg in func._schema.arguments  # noqa: SLF001 -- schema is OpOverload's only write-arg source
-        ):
-            # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
-            # the caller's originals. Narrow each back and return the originals
-            # in the op's own return shape.
-            return _write_back(
-                func,
-                args,
-                kwargs,
-                up_args,
-                up_kwargs,
-                result=result,
-                target=target,
-            )
-        return _downcast_result(result, args, kwargs, target)
-
-
 @contextmanager
 def host_agnostic_numerics() -> Generator[None]:
     """Force the wrapped computation onto host-independent float kernels.
@@ -522,6 +269,10 @@ def host_agnostic_numerics() -> Generator[None]:
     kernel (HF: ``attn_implementation="eager"``) so both sides issue the same
     primitive ops. See the module docstring's cross-implementation section and
     ``priml/model/transformer/qwen3_hf_test.py``.
+
+    Yields:
+      item: Each yielded value.
+
     """
     with sdpa_kernel(SDPBackend.MATH), _Float64Compute():
         yield
@@ -599,15 +350,6 @@ def first_tensor(result: object) -> Tensor:
     if not isinstance(result, Tensor):
         raise TypeError("module result must be a Tensor")
     return result
-
-
-def _module_device(module: nn.Module) -> str:
-    """Return the module's tensor device, defaulting tensorless modules to CPU."""
-    parameter = next(module.parameters(), None)
-    if parameter is not None:
-        return parameter.device.type
-    buffer = next(module.buffers(), None)
-    return buffer.device.type if buffer is not None else "cpu"
 
 
 def randomize_parameters(
@@ -736,31 +478,6 @@ def assert_bfb_against_golden[InputT](
         _restore_torch_process_state(state)
 
 
-def _capture_torch_process_state() -> _TorchProcessState:
-    """Capture every process-global setting changed by the BFB harness."""
-    return _TorchProcessState(
-        algorithms_enabled=torch.are_deterministic_algorithms_enabled(),
-        warn_only_enabled=torch.is_deterministic_algorithms_warn_only_enabled(),
-        rng_state=torch.get_rng_state(),
-    )
-
-
-def _restore_torch_process_state(state: _TorchProcessState) -> None:
-    """Restore every process-global setting changed by the BFB harness."""
-    torch.use_deterministic_algorithms(
-        state.algorithms_enabled,
-        warn_only=state.warn_only_enabled,
-    )
-    torch.set_rng_state(state.rng_state)
-
-
-def _seed_bfb(seed: int) -> None:
-    """Seed the CPU default generator without queuing a lazy CUDA seed."""
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    torch.set_rng_state(generator.get_state())
-
-
 def regenerate_golden[InputT](
     *,
     golden_dir: Path,
@@ -805,86 +522,6 @@ def regenerate_golden[InputT](
             os.environ.pop(_ENV_REGENERATE, None)
         else:
             os.environ[_ENV_REGENERATE] = prior
-
-
-class _Golden(TypedDict):
-    """What a golden file stores.
-
-    ``post_state_dict`` is absent when the run mutated nothing, which the
-    replay reads as "equal to ``state_dict``".
-    """
-
-    state_dict: dict[str, Tensor]
-    input: object
-    output: Tensor
-    seed: int
-    post_state_dict: NotRequired[dict[str, Tensor]]
-
-
-def _write_golden[InputT](
-    *,
-    golden_path: Path,
-    build_module: Callable[[], nn.Module],
-    build_input: Callable[[], InputT],
-    seed: int,
-    run: Callable[[nn.Module, InputT], Tensor],
-) -> None:
-    """Build, randomize, run, and snapshot pre- and post-run state."""
-    torch.use_deterministic_algorithms(True)
-    _seed_bfb(seed)
-    module = build_module()
-    device = _module_device(module)
-    if device != "cpu":
-        raise ValueError("The BFB harness is CPU-only.")
-    inp = build_input()
-    randomize_parameters(module, seed=seed)
-    pre_state = _cpu_state_dict(module.state_dict())
-    with host_agnostic_numerics():
-        output = run(module, inp)
-    _assert_portable_output_dtype(output)
-    post_state = _cpu_state_dict(module.state_dict())
-    payload: _Golden = {
-        "state_dict": pre_state,
-        "input": _to_cpu(inp),
-        "output": output.detach().cpu(),
-        "seed": seed,
-    }
-    # Absence means "unchanged", which the replay asserts against the pre-run
-    # copy -- so omitting it is not a weaker check.
-    if state_differs(pre_state, post_state):
-        payload["post_state_dict"] = post_state
-    torch.save(payload, golden_path)
-
-
-def _assert_portable_output_dtype(output: Tensor) -> None:
-    """Refuse a golden comparand that skipped the round back to float32.
-
-    bfloat16 and float16 are refused too, not float64 alone: the harness
-    computes in all three and only the rounding makes a value portable (see
-    the module docstring). Complex outputs are unsupported. Integers carry no
-    rounding and pass.
-
-    Args:
-      output: What the runner returned, and what the golden compares.
-
-    Raises:
-      TypeError: The output is complex or a float other than float32.
-
-    """
-    if output.dtype.is_complex:
-        raise TypeError(
-            f"bfb golden output is {output.dtype}, which is not supported; "
-            "return a float32 or integer tensor."
-        )
-    if not output.dtype.is_floating_point or output.dtype == torch.float32:
-        return
-    raise TypeError(
-        f"bfb golden output is {output.dtype}, which is not portable across "
-        "hosts; it must be float32. host_agnostic_numerics computes in "
-        "float64 and the ROUND BACK to float32 is what makes the result "
-        "host-independent; returning the unrounded value stores this host's "
-        "libm error. Narrow in the runner: `return value.float()`.",
-    )
 
 
 def state_differs(before: Mapping[str, Tensor], after: Mapping[str, Tensor]) -> bool:
@@ -1030,20 +667,17 @@ def _tensor_bits_equal(a: Tensor, b: Tensor) -> bool:
     return torch.equal(a_bits, b_bits)
 
 
+# The unit a bit-for-bit failure is actually measured in: 1 says the hosts round
+# differently, a large count says the computation changed, and an absolute difference
+# says neither on its own (1 ULP is 1e-7 near one and 1e-45 near zero).
+#
+# Bit patterns are ordered only WITHIN a sign -- the negative half is stored sign-
+# magnitude, counting away from zero -- so they are mapped to one monotone line first.
+# Subtracting raw patterns instead reports ~2**31 for two neighbours straddling zero,
+# which is the magnitude a total regression produces, from the case where the values are
+# closest.
 def _max_ulp_diff(a: Tensor, b: Tensor) -> int | str:
-    """Largest gap in representable steps, or why it could not be measured.
-
-    The unit a bit-for-bit failure is actually measured in: 1 says the hosts
-    round differently, a large count says the computation changed, and an
-    absolute difference says neither on its own (1 ULP is 1e-7 near one and
-    1e-45 near zero).
-
-    Bit patterns are ordered only WITHIN a sign -- the negative half is stored
-    sign-magnitude, counting away from zero -- so they are mapped to one
-    monotone line first. Subtracting raw patterns instead reports ~2**31 for
-    two neighbours straddling zero, which is the magnitude a total regression
-    produces, from the case where the values are closest.
-    """
+    """Largest gap in representable steps, or why it could not be measured."""
     kind = {
         torch.float64: torch.int64,
         torch.float32: torch.int32,
@@ -1059,18 +693,377 @@ def _max_ulp_diff(a: Tensor, b: Tensor) -> int | str:
     return int((_ordered(a, kind) - _ordered(b, kind)).abs().max())
 
 
+# A negative float's pattern grows as the number falls, so the negative half is
+# reflected. The result orders the whole line, which is what makes a subtraction count
+# representable steps.
+#
+# Reflected about the float's OWN signed minimum, not int64's: the pattern is widened
+# for the arithmetic, and reflecting about the wide minimum would offset the negative
+# half by the difference between the two widths.
 def _ordered(value: Tensor, kind: torch.dtype) -> Tensor:
-    """Reinterpret floats as integers that increase with the float's value.
-
-    A negative float's pattern grows as the number falls, so the negative half
-    is reflected. The result orders the whole line, which is what makes a
-    subtraction count representable steps.
-
-    Reflected about the float's OWN signed minimum, not int64's: the pattern is
-    widened for the arithmetic, and reflecting about the wide minimum would
-    offset the negative half by the difference between the two widths.
-    """
+    """Reinterpret floats as integers that increase with the float's value."""
     bits = value.detach().contiguous().view(kind)
     floor = torch.iinfo(bits.dtype).min
     wide = bits.to(torch.int64)
     return torch.where(wide < 0, floor - wide, wide)
+
+
+class _MissingGoldenError(AssertionError):
+    """A missing BFB golden was minted and requires review."""
+
+
+# Named for the upcast's question -- "is this narrower than the scratch width" -- so
+# float64 is False here because it IS the scratch, not because it is host-independent
+# (it is not; see the module docstring). A caller asking whether a dtype is portable
+# wants :func:`_assert_portable_output_dtype`, which admits float32 alone.
+#
+# bfloat16 and float16 count because a mixed-precision recipe COMPUTES in them -- an
+# autocast forward, or an optimizer that orthogonalizes in half precision -- so a golden
+# that left them native would be minted to one machine.
+def _is_narrow_float(dtype: torch.dtype) -> bool:
+    """Whether a dtype should be widened before the op runs."""
+    return dtype.is_floating_point and dtype != torch.float64
+
+
+# ``_foreach_*`` ops (e.g. ``_foreach_norm`` behind ``clip_grad_norm_``) receive a
+# ``list[Tensor]`` rather than a bare tensor, so a direct ``isinstance(a, Tensor)``
+# check misses them and the upcast silently does not apply.
+def _floating_dtypes(value: object) -> set[torch.dtype]:
+    """Return the float dtypes appearing in a tensor / list / tuple."""
+    if isinstance(value, Tensor):
+        return {value.dtype} if value.dtype.is_floating_point else set()
+    if isinstance(value, (list, tuple)):
+        found: set[torch.dtype] = set()
+        for item in cast(list[object] | tuple[object, ...], value):
+            found |= _floating_dtypes(item)
+        return found
+    return set()
+
+
+# Torch promotes mixed inputs, so a bfloat16 tensor meeting a float32 one yields
+# float32. Reproducing that promotion here is what lets the result be narrowed back to
+# the width the unwrapped computation would have held -- narrowing everything to float32
+# instead would silently widen a half precision graph and change every value downstream
+# of it.
+def _result_dtype(dtypes: set[torch.dtype]) -> torch.dtype:
+    """Return the dtype the op would have produced natively."""
+    ordered = sorted(dtypes, key=str)
+    result = ordered[0]
+    for dtype in ordered[1:]:
+        result = torch.promote_types(result, dtype)
+    return result
+
+
+def _upcast(value: object) -> object:
+    if isinstance(value, Tensor) and _is_narrow_float(value.dtype):
+        return value.double()
+    if isinstance(value, list):
+        return [_upcast(v) for v in cast(list[object], value)]
+    if isinstance(value, tuple):
+        return tuple(_upcast(v) for v in cast(tuple[object, ...], value))
+    return value
+
+
+def _downcast_f64(value: object, target: torch.dtype = torch.float32) -> object:
+    if isinstance(value, Tensor) and value.dtype == torch.float64:
+        return value.to(target)
+    if isinstance(value, list):
+        return [_downcast_f64(v, target) for v in cast(list[object], value)]
+    if isinstance(value, tuple):
+        return tuple(_downcast_f64(v, target) for v in cast(tuple[object, ...], value))
+    return value
+
+
+def _downcast_result(
+    result: object,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    fallback: torch.dtype,
+) -> object:
+    """Downcast foreach results per element and ordinary results globally."""
+    if not isinstance(result, list):
+        return _downcast_f64(result, fallback)
+    typed_result = cast(list[object], result)
+    sequences: list[list[object] | tuple[object, ...]] = []
+    shared_dtypes: set[torch.dtype] = set()
+    for value in (*args, *kwargs.values()):
+        if isinstance(value, list):
+            sequence = cast(list[object], value)
+        elif isinstance(value, tuple):
+            sequence = cast(tuple[object, ...], value)
+        else:
+            shared_dtypes |= _floating_dtypes(value)
+            continue
+        if len(sequence) == len(typed_result):
+            sequences.append(sequence)
+    downcast = list[object]()
+    for index, value in enumerate(typed_result):
+        dtypes = set(shared_dtypes)
+        for sequence in sequences:
+            dtypes |= _floating_dtypes(sequence[index])
+        target = _result_dtype(dtypes) if dtypes else fallback
+        downcast.append(_downcast_f64(value, target))
+    return downcast
+
+
+# Recurses into lists/tuples for ``_foreach_*`` write targets. A tensor that was never
+# upcast -- one whose dtype is not a narrow float -- was written by the op itself, so it
+# is skipped. The narrowing ``copy_`` is IEEE-correctly-rounded, hence host-independent.
+def _copy_back(original: object, computed: object) -> None:
+    """Narrow ``computed`` (float64) into ``original`` in place."""
+    if isinstance(original, Tensor):
+        if _is_narrow_float(original.dtype) and isinstance(computed, Tensor):
+            if original.shape != computed.shape:
+                original.resize_(computed.shape)
+            original.copy_(computed)
+        return
+    if isinstance(original, (list, tuple)) and isinstance(computed, (list, tuple)):
+        for o, c in zip(
+            cast(list[object] | tuple[object, ...], original),
+            cast(list[object] | tuple[object, ...], computed),
+            strict=True,
+        ):
+            _copy_back(o, c)
+
+
+# The op ran on the float64 upcast copies in ``up_args``/``up_kwargs``, so its computed
+# values live there, not in the caller's float32 originals. For every write argument
+# (``alias_info.is_write``), narrow its upcast copy back into the original
+# (``_copy_back``, recursing through foreach ``Tensor[]``) as the side effect, and
+# remember the (upcast-copy, original) pair.
+#
+# The return is then rebuilt element-wise: a returned element that IS one of the upcast
+# write copies is swapped to the caller's original (preserving in-place / ``out=``
+# return identity); every other element -- a freshly-computed output that merely happens
+# to ride alongside the writes, e.g. ``_native_batch_norm_legit`` returns ``(output,
+# save_mean, save_invstd)`` while writing ``running_*`` -- is downcast and kept, never
+# dropped. ``None`` (void in-place, e.g. ``_foreach_*_``) passes through, which the
+# dispatcher requires.
+def _write_back(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    up_args: tuple[object, ...],
+    up_kwargs: dict[str, object],
+    *,
+    result: object,
+    target: torch.dtype,
+) -> object:
+    """Restore an in-place / ``out=`` / foreach op's mutation onto the originals."""
+    schema = func._schema  # noqa: SLF001 -- OpOverload exposes its schema only privately
+    # Copy each mutated float64 upcast copy back into its float32 original (the
+    # side effect), recording (upcast_copy -> original) so a returned element
+    # that IS a write target can be swapped to the caller's original. Returns
+    # that are fresh (non-write) tensors -- e.g. ``_native_batch_norm_legit``
+    # returns ``(output, save_mean, save_invstd)`` while writing ``running_*`` --
+    # are simply downcast, never dropped.
+    upcast_to_original: list[tuple[object, object]] = []
+    for i, arg in enumerate(schema.arguments):
+        if arg.alias_info is None or not arg.alias_info.is_write:
+            continue
+        name = arg.name
+        original = kwargs[name] if name in kwargs else args[i]
+        computed = up_kwargs[name] if name in up_kwargs else up_args[i]
+        _copy_back(original, computed)
+        upcast_to_original.append((computed, original))
+
+    if result is None:
+        return None
+    if isinstance(result, tuple):
+        return tuple(
+            _resolve_output(e, upcast_to_original, target)
+            for e in cast(tuple[object, ...], result)
+        )
+    if isinstance(result, list):
+        return [
+            _resolve_output(e, upcast_to_original, target)
+            for e in cast(list[object], result)
+        ]
+    return _resolve_output(result, upcast_to_original, target)
+
+
+def _resolve_output(
+    element: object,
+    upcast_to_original: Sequence[tuple[object, object]],
+    target: torch.dtype,
+) -> object:
+    """Map an in-place output back to its original tensor, else downcast it."""
+    for computed, original in upcast_to_original:
+        if element is computed:
+            return original
+    return _downcast_f64(element, target)
+
+
+def _op_name(func: OpOverload[..., object]) -> str:
+    """Return an Aten overload's packet name."""
+    return func.name().split("::")[-1].split(".")[0]
+
+
+class _Float64Compute(TorchDispatchMode):
+    """Compute every float32 arithmetic op in float64, return float32.
+
+    Operates at the aten-dispatch layer, so it sees the aten ops the computation
+    issues during forward and autograd backward. An op is upcast when it has a
+    float32 argument and its overloadpacket name is NOT
+    in ``_EXACT_F32_OPS``; the float32 args are widened to float64, the op runs,
+    and float64 results are narrowed back to float32. Allowlisted ops (exact
+    elementwise arithmetic and pure data movement) pass through untouched.
+
+    Upcast-by-default is the completeness guarantee: a transcendental or
+    reduction absent from every list is still upcast, so it cannot silently mint
+    a host-dependent golden. The only unsafe act is wrongly *adding* an op to
+    ``_EXACT_F32_OPS``, which the guard test in ``bfb_test.py`` catches.
+    """
+
+    @override
+    def __torch_dispatch__(
+        self,
+        func: OpOverload[..., object],
+        types: tuple[type, ...],
+        args: tuple[object, ...] = (),
+        kwargs: dict[str, object] | None = None,
+    ) -> object:
+        kwargs = kwargs or {}
+        exact = _op_name(func) in _EXACT_F32_OPS
+        input_dtypes: set[torch.dtype] = set()
+        for value in (*args, *kwargs.values()):
+            input_dtypes |= _floating_dtypes(value)
+        narrow = {dtype for dtype in input_dtypes if _is_narrow_float(dtype)}
+        if exact or not narrow:
+            return func(*args, **kwargs)
+        explicit_dtype = kwargs.get("dtype")
+        target = (
+            explicit_dtype
+            if isinstance(explicit_dtype, torch.dtype)
+            else _result_dtype(input_dtypes)
+        )
+        up_args = tuple(_upcast(a) for a in args)
+        up_kwargs = {k: _upcast(v) for k, v in kwargs.items()}
+        if isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype):
+            up_kwargs["dtype"] = torch.float64
+        result = func(*up_args, **up_kwargs)
+        if any(
+            arg.alias_info is not None and arg.alias_info.is_write
+            for arg in func._schema.arguments  # noqa: SLF001 -- schema is OpOverload's only write-arg source
+        ):
+            # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
+            # the caller's originals. Narrow each back and return the originals
+            # in the op's own return shape.
+            return _write_back(
+                func,
+                args,
+                kwargs,
+                up_args,
+                up_kwargs,
+                result=result,
+                target=target,
+            )
+        return _downcast_result(result, args, kwargs, target)
+
+
+def _module_device(module: nn.Module) -> str:
+    """Return the module's tensor device, defaulting tensorless modules to CPU."""
+    parameter = next(module.parameters(), None)
+    if parameter is not None:
+        return parameter.device.type
+    buffer = next(module.buffers(), None)
+    return buffer.device.type if buffer is not None else "cpu"
+
+
+def _capture_torch_process_state() -> _TorchProcessState:
+    """Capture every process-global setting changed by the BFB harness."""
+    return _TorchProcessState(
+        algorithms_enabled=torch.are_deterministic_algorithms_enabled(),
+        warn_only_enabled=torch.is_deterministic_algorithms_warn_only_enabled(),
+        rng_state=torch.get_rng_state(),
+    )
+
+
+def _restore_torch_process_state(state: _TorchProcessState) -> None:
+    """Restore every process-global setting changed by the BFB harness."""
+    torch.use_deterministic_algorithms(
+        state.algorithms_enabled,
+        warn_only=state.warn_only_enabled,
+    )
+    torch.set_rng_state(state.rng_state)
+
+
+def _seed_bfb(seed: int) -> None:
+    """Seed the CPU default generator without queuing a lazy CUDA seed."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    torch.set_rng_state(generator.get_state())
+
+
+class _Golden(TypedDict):
+    """What a golden file stores.
+
+    ``post_state_dict`` is absent when the run mutated nothing, which the
+    replay reads as "equal to ``state_dict``".
+    """
+
+    state_dict: dict[str, Tensor]
+
+    input: object
+
+    output: Tensor
+
+    seed: int
+
+    post_state_dict: NotRequired[dict[str, Tensor]]
+
+
+def _write_golden[InputT](
+    *,
+    golden_path: Path,
+    build_module: Callable[[], nn.Module],
+    build_input: Callable[[], InputT],
+    seed: int,
+    run: Callable[[nn.Module, InputT], Tensor],
+) -> None:
+    """Build, randomize, run, and snapshot pre- and post-run state."""
+    torch.use_deterministic_algorithms(True)
+    _seed_bfb(seed)
+    module = build_module()
+    device = _module_device(module)
+    if device != "cpu":
+        raise ValueError("The BFB harness is CPU-only.")
+    inp = build_input()
+    randomize_parameters(module, seed=seed)
+    pre_state = _cpu_state_dict(module.state_dict())
+    with host_agnostic_numerics():
+        output = run(module, inp)
+    _assert_portable_output_dtype(output)
+    post_state = _cpu_state_dict(module.state_dict())
+    payload: _Golden = {
+        "state_dict": pre_state,
+        "input": _to_cpu(inp),
+        "output": output.detach().cpu(),
+        "seed": seed,
+    }
+    # Absence means "unchanged", which the replay asserts against the pre-run
+    # copy -- so omitting it is not a weaker check.
+    if state_differs(pre_state, post_state):
+        payload["post_state_dict"] = post_state
+    torch.save(payload, golden_path)
+
+
+# bfloat16 and float16 are refused too, not float64 alone: the harness computes in all
+# three and only the rounding makes a value portable (see the module docstring). Complex
+# outputs are unsupported. Integers carry no rounding and pass.
+def _assert_portable_output_dtype(output: Tensor) -> None:
+    """Refuse a golden comparand that skipped the round back to float32."""
+    if output.dtype.is_complex:
+        raise TypeError(
+            f"bfb golden output is {output.dtype}, which is not supported; "
+            "return a float32 or integer tensor."
+        )
+    if not output.dtype.is_floating_point or output.dtype == torch.float32:
+        return
+    raise TypeError(
+        f"bfb golden output is {output.dtype}, which is not portable across "
+        "hosts; it must be float32. host_agnostic_numerics computes in "
+        "float64 and the ROUND BACK to float32 is what makes the result "
+        "host-independent; returning the unrounded value stores this host's "
+        "libm error. Narrow in the runner: `return value.float()`.",
+    )

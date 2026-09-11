@@ -20,10 +20,7 @@ import pygame
 import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
-from priml.baselines.craftax.game import (
-    step as game_step,
-    world_gen,
-)
+from priml.baselines.craftax.game import step, world_gen
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.render.pixels import Renderer
 
@@ -125,12 +122,12 @@ def play(
             action = KEYS.get(event.key)
             if action is None:
                 continue
-            state, _ = game_step.step(
+            state, _ = step.step(
                 state,
                 torch.tensor([int(action)]),
                 generator=generator,
             )
-            if bool(game_step.is_done(state)[0]):
+            if bool(step.is_done(state)[0]):
                 state = world_gen.generate_world(
                     num_envs=1,
                     generator=generator,

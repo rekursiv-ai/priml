@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from priml import logger as logger_module
+from priml import logger
 from priml.logger import (
     CustomFormatter,
     Timer,
@@ -24,7 +24,7 @@ from priml.logger import (
 
 def test_module_and_public_defs_have_docstrings() -> None:
     """Module, Timer, and CustomFormatter must have docstrings (CORE-007)."""
-    tree = ast.parse(Path(logger_module.__file__).read_text())
+    tree = ast.parse(Path(logger.__file__).read_text())
     assert ast.get_docstring(tree) is not None
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     for name in ("Timer", "CustomFormatter"):
@@ -98,7 +98,7 @@ class TestCustomFormatter:
         formatter = CustomFormatter(config)
 
         assert formatter.datefmt == config.datefmt
-        # Verify the formatter was initialized with the config
+        # Verify the formatter was initialized with the config.
         assert hasattr(formatter, "_style")
 
     def test_formatter_with_distributed_initialized(self) -> None:
@@ -107,9 +107,9 @@ class TestCustomFormatter:
         formatter = CustomFormatter(config)
 
         with (
-            patch.object(logger_module.dist, "is_initialized", return_value=True),
-            patch.object(logger_module.dist, "get_rank", return_value=2),
-            patch.object(logger_module.dist, "get_world_size", return_value=8),
+            patch.object(logger.dist, "is_initialized", return_value=True),
+            patch.object(logger.dist, "get_rank", return_value=2),
+            patch.object(logger.dist, "get_world_size", return_value=8),
         ):
             record = logging.LogRecord(
                 name="test",
@@ -130,7 +130,7 @@ class TestCustomFormatter:
         config = CustomFormatter.Config()
         formatter = CustomFormatter(config)
 
-        with patch.object(logger_module.dist, "is_initialized", return_value=False):
+        with patch.object(logger.dist, "is_initialized", return_value=False):
             record = logging.LogRecord(
                 name="test",
                 level=logging.INFO,
@@ -150,7 +150,7 @@ class TestCustomFormatter:
         config = CustomFormatter.Config()
         formatter = CustomFormatter(config)
 
-        with patch.object(logger_module.dist, "is_initialized", return_value=False):
+        with patch.object(logger.dist, "is_initialized", return_value=False):
             record = logging.LogRecord(
                 name="test",
                 level=logging.DEBUG,
@@ -170,7 +170,7 @@ class TestCustomFormatter:
         config = CustomFormatter.Config()
         formatter = CustomFormatter(config)
 
-        with patch.object(logger_module.dist, "is_initialized", return_value=False):
+        with patch.object(logger.dist, "is_initialized", return_value=False):
             record = logging.LogRecord(
                 name="test",
                 level=logging.INFO,
@@ -190,7 +190,7 @@ class TestCustomFormatter:
         config = CustomFormatter.Config()
         formatter = CustomFormatter(config)
 
-        with patch.object(logger_module.dist, "is_initialized", return_value=False):
+        with patch.object(logger.dist, "is_initialized", return_value=False):
             record = logging.LogRecord(
                 name="test",
                 level=logging.WARNING,
@@ -210,7 +210,7 @@ class TestCustomFormatter:
         config = CustomFormatter.Config()
         formatter = CustomFormatter(config)
 
-        with patch.object(logger_module.dist, "is_initialized", return_value=False):
+        with patch.object(logger.dist, "is_initialized", return_value=False):
             record = logging.LogRecord(
                 name="test",
                 level=logging.ERROR,
@@ -230,7 +230,7 @@ class TestCustomFormatter:
         config = CustomFormatter.Config()
         formatter = CustomFormatter(config)
 
-        with patch.object(logger_module.dist, "is_initialized", return_value=False):
+        with patch.object(logger.dist, "is_initialized", return_value=False):
             record = logging.LogRecord(
                 name="test",
                 level=logging.CRITICAL,
@@ -264,7 +264,7 @@ class TestCustomFormatter:
 
         formatted_time = formatter.formatTime(record)
         assert formatted_time is not None
-        # Should contain date components based on datefmt
+        # Should contain date components based on datefmt.
         assert len(formatted_time) > 0
 
     def test_formatter_format_time_custom_datefmt(self) -> None:
@@ -292,7 +292,7 @@ class TestCustomFormatter:
 class TestSetupLogging:
     def test_setup_logging_basic(self) -> None:
         """Test basic setup_logging functionality (lines 115-122)."""
-        # Clear any existing handlers
+        # Clear any existing handlers.
         root_logger = logging.getLogger()
         root_logger.handlers.clear()
 
@@ -307,13 +307,13 @@ class TestSetupLogging:
         """Test that setup_logging clears existing handlers (line 116-117)."""
         root_logger = logging.getLogger()
 
-        # Add a dummy handler
+        # Add a dummy handler.
         dummy_handler = logging.StreamHandler(sys.stdout)
         root_logger.addHandler(dummy_handler)
         initial_count = len(root_logger.handlers)
         assert initial_count > 0
 
-        # Setup should clear and add new handlers
+        # Setup should clear and add new handlers.
         setup_logging()
 
         # Stream handler + replay-buffer handler after setup; the dummy is gone.
@@ -376,7 +376,7 @@ class TestReplayBufferedLogs:
         assert len(root.handlers) == 2
 
         replay_buffered_logs()
-        assert len(root.handlers) == 1  # buffer detached, stream remains
+        assert len(root.handlers) == 1  # buffer detached, stream remains.
 
         # Second call is a no-op (no buffer left).
         replay_buffered_logs()
@@ -386,7 +386,7 @@ class TestReplayBufferedLogs:
         """Replay with no buffer installed does nothing and does not raise."""
         root = logging.getLogger()
         root.handlers.clear()
-        replay_buffered_logs()  # no buffer -> no-op
+        replay_buffered_logs()  # no buffer -> no-op.
 
 
 if __name__ == "__main__":

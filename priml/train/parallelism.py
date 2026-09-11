@@ -80,6 +80,7 @@ class NoParallel:
         self.device = get_device(config.device)
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         return place(model, self.device)
 
 
@@ -93,8 +94,10 @@ class DataParallel:
     class Config(Fig["DataParallel"]):
         mesh_dim: str = "dp"
         """Device mesh dimension for data parallelism."""
+
         bucket_cap_mb: int = 25
         """Gradient all-reduce bucket size in MB."""
+
         find_unused_parameters: bool = False
         """Reduce grads for params absent from a given backward graph.
 
@@ -104,6 +107,7 @@ class DataParallel:
         skips the all-reduce when one does not, leaving replicas to diverge.
         Carries the usual DDP overhead of an extra graph traversal, so leave it
         off for static models that use all parameters every step."""
+
         gradient_as_bucket_view: bool = False
         """If True, make gradients views into DDP all-reduce buckets."""
 
@@ -127,6 +131,7 @@ class DataParallel:
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         model = place(model, self.device)
         replicate(
             model,
@@ -153,12 +158,16 @@ class FullySharded:
     class Config(Fig["FullySharded"]):
         mesh_dim: str = "dp"
         """Device mesh dimension for sharding."""
+
         reshard_after_forward: bool = True
         """Re-shard parameters after forward pass to save memory."""
+
         mp_param_dtype: torch.dtype | None = None
         """Mixed precision dtype for parameters."""
+
         mp_reduce_dtype: torch.dtype | None = None
         """Mixed precision dtype for gradient reduction."""
+
         mp_output_dtype: torch.dtype | None = None
         """Mixed precision dtype for output."""
 
@@ -186,6 +195,7 @@ class FullySharded:
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         _shard(
             model,
             mesh=self.mesh,
@@ -212,14 +222,19 @@ class HybridSharded:
     class Config(Fig["HybridSharded"]):
         replicate_dim: str = "dp"
         """Mesh dimension for replication across replicas."""
+
         shard_dim: str = "tp"
         """Mesh dimension for sharding within replicas."""
+
         reshard_after_forward: bool = True
         """Re-shard parameters after forward pass to save memory."""
+
         mp_param_dtype: torch.dtype | None = None
         """Mixed precision dtype for parameters."""
+
         mp_reduce_dtype: torch.dtype | None = None
         """Mixed precision dtype for gradient reduction."""
+
         mp_output_dtype: torch.dtype | None = None
         """Mixed precision dtype for output."""
 
@@ -258,6 +273,7 @@ class HybridSharded:
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         _shard(
             model,
             mesh=self.mesh,
@@ -282,14 +298,19 @@ class RecursiveSharded:
     class Config(Fig["RecursiveSharded"]):
         mesh_dim: str = "dp"
         """Device mesh dimension for sharding."""
+
         module_types: Sequence[type[nn.Module]] = ()
         """Module classes to shard recursively (e.g., (TransformerBlock,))."""
+
         reshard_after_forward: bool = True
         """Re-shard parameters after forward pass to save memory."""
+
         mp_param_dtype: torch.dtype | None = None
         """Mixed precision dtype for parameters."""
+
         mp_reduce_dtype: torch.dtype | None = None
         """Mixed precision dtype for gradient reduction."""
+
         mp_output_dtype: torch.dtype | None = None
         """Mixed precision dtype for output."""
 
@@ -323,6 +344,7 @@ class RecursiveSharded:
         self.config = config
 
     def __call__(self, model: nn.Module) -> nn.Module:
+        """Apply to the input."""
         # Standard per-block FSDP sharding pattern from PyTorch composable API
         # docs. Shard matching submodules in reverse order (leaves first).
         # BatchNorm is sharded individually (leaves-first ordering reaches it
@@ -354,7 +376,7 @@ class RecursiveSharded:
                 f"Verify module_types contains correct classes.",
             )
 
-        # Shard root module
+        # Shard root module.
         _shard(
             model,
             mesh=self.mesh,
@@ -404,6 +426,13 @@ def named_meta_state(model: nn.Module) -> list[tuple[str, Tensor]]:
     Both parameters and buffers can live on the meta device after lazy
     construction and both must be materialized and initialized; a forgotten
     buffer is as fatal as a forgotten parameter.
+
+    Args:
+      model: Model.
+
+    Returns:
+      result: The list[tuple[str, Tensor]].
+
     """
     return [*model.named_parameters(), *model.named_buffers()]
 
@@ -485,19 +514,16 @@ def _create_mp_policy(
     )
 
 
+# BatchNorm accumulates running statistics by reduction; doing that reduction in a low-
+# precision ``param_dtype`` (e.g. bfloat16) loses precision and can drift the stats.
+# When a reduced-precision base policy is active, force BatchNorm to full float32
+# (params, reduction, and output) so its statistics stay exact, mirroring standard FSDP
+# mixed-precision practice. Non-BatchNorm modules keep the base policy unchanged.
 def _module_mp_policy(
     module: nn.Module,
     mp_policy: MixedPrecisionPolicy | None,
 ) -> MixedPrecisionPolicy | None:
-    """Resolve the mixed-precision policy for one module, overriding BatchNorm.
-
-    BatchNorm accumulates running statistics by reduction; doing that reduction
-    in a low-precision ``param_dtype`` (e.g. bfloat16) loses precision and can
-    drift the stats. When a reduced-precision base policy is active, force
-    BatchNorm to full float32 (params, reduction, and output) so its statistics
-    stay exact, mirroring standard FSDP mixed-precision practice. Non-BatchNorm
-    modules keep the base policy unchanged.
-    """
+    """Resolve the mixed-precision policy for one module, overriding BatchNorm."""
     if mp_policy is None or not isinstance(module, _BatchNorm):
         return mp_policy
     return MixedPrecisionPolicy(

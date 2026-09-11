@@ -19,8 +19,6 @@ References:
 
 from __future__ import annotations
 
-import math
-
 from torch import Tensor
 
 import torch
@@ -143,13 +141,11 @@ def perlin_noise(
     # The scale restores unit variance: the ramps are dot products of unit
     # gradients against offsets of at most one, so the blend lands well
     # inside [-1, 1] without it.
-    return blended * math.sqrt(2.0)
+    return blended * float(2.0**0.5)
 
 
+# A linear blend would leave a visible crease at every cell boundary, which reads as a
+# grid in the terrain.
 def _smoothstep(t: Tensor) -> Tensor:
-    """Ease between lattice corners with zero first and second derivatives.
-
-    A linear blend would leave a visible crease at every cell boundary, which
-    reads as a grid in the terrain.
-    """
+    """Ease between lattice corners with zero first and second derivatives."""
     return t * t * t * (t * (t * 6 - 15) + 10)

@@ -123,6 +123,7 @@ class Sequential(nn.Sequential):
         super().__init__(*modules)
 
     def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
         for module in self:
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()

@@ -105,6 +105,10 @@ class MMDiTGraft(nn.Module):
         The source must match Config.backbone, including non-tensor settings
         such as norm epsilon and rotary frequencies. Modality parameters and
         existing requires_grad flags are unchanged.
+
+        Args:
+          source: Source.
+
         """
         if any(
             not isinstance(block, TransformerBlock)
@@ -118,11 +122,21 @@ class MMDiTGraft(nn.Module):
         target.load_state_dict(source.state_dict(), strict=True)
 
     def load_backbone_state(self, state_dict: Mapping[str, Tensor]) -> None:
-        """Load native language weights keyed as a ``Transformer`` names them."""
+        """Load native language weights keyed as a ``Transformer`` names them.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self._backbone_view().load_state_dict(state_dict, strict=True)
 
     def freeze_backbone(self, freeze: bool = True) -> None:
-        """Freeze or unfreeze only the language stream, embedding, and head."""
+        """Freeze or unfreeze only the language stream, embedding, and head.
+
+        Args:
+          freeze: Freeze.
+
+        """
         self._backbone_view().requires_grad_(not freeze)
 
     def reset_parameters(self) -> None:
