@@ -472,7 +472,7 @@ class TrainStep:
         """
         return self.progress_complete
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to the model's forward, itself Any; a subclass narrows to its batch (``**batch: Tensor``), which ``object`` would reject.
         """Training forward pass (sets train mode, applies autocast, optionally compiles)."""
         self.model.train()
         if self._compile_fn is not None and self._compiled_model is None:
@@ -492,7 +492,7 @@ class TrainStep:
         with self.timer_forward, autocast_ctx:
             return forward_model(*args, **kwargs)
 
-    def call_eval(self, *args: Any, **kwargs: Any) -> Any:
+    def call_eval(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to the model's forward, itself Any; a subclass narrows to its batch (``**batch: Tensor``), which ``object`` would reject.
         """Run the evaluation forward pass under inference_mode and autocast.
 
         Runs the live model with EMA-averaged weights swapped in via

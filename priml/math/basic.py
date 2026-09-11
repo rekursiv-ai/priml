@@ -120,7 +120,7 @@ def ceil_div(x: int, y: int) -> int:
 class SupportsLT(Protocol):
     """Anything ``argsort`` can order with ``<``."""
 
-    def __lt__(self, other: Any, /) -> bool: ...
+    def __lt__(self, other: Any, /) -> bool: ...  # noqa: ANN401 -- mirrors typeshed's SupportsDunderLT; object rejects int.
 
 
 def argsort(

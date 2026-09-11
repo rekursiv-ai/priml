@@ -474,7 +474,7 @@ def test_the_shipped_experiments_forward_bfb() -> None:
     away.
     """
 
-    def _model() -> Any:
+    def _model() -> Any:  # noqa: ANN401 -- forwards an upstream Any.
         return experiments.exp_smoke().step.model
 
     def build() -> nn.Module:

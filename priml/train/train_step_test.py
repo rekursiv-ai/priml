@@ -263,7 +263,7 @@ def test_autocast_cache_enabled_is_configurable(
     seen: list[bool | None] = []
     orig = torch.amp.autocast
 
-    def spy(*args: Any, **kwargs: Any) -> Any:
+    def spy(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
         seen.append(kwargs.get("cache_enabled"))
         return orig(*args, **kwargs)
 
@@ -320,10 +320,10 @@ class _DictModel(nn.Module):
 
 
 def _loss_from_logits_dict(
-    output: Any,
+    output: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
     *,
     label: Tensor,
-    **_kwargs: Any,
+    **_kwargs: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
 ) -> LossOutput:
     """Loss that consumes a ModelOutput by indexing its ``logits`` entry."""
     return {
@@ -445,10 +445,10 @@ def test_grad_accum_equals_single_batch_unequal_micro_sizes() -> None:
 
 
 def _binary_cross_entropy_with_logits(
-    output: Any,
+    output: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
     *,
     label: Tensor,
-    **_kwargs: Any,
+    **_kwargs: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
 ) -> LossOutput:
     """Per-element BCE-with-logits loss (reduction='none')."""
     logits = output.logits if hasattr(output, "logits") else output
@@ -523,7 +523,7 @@ def test_assert_uniform_microbatch_count_single_process_noop() -> None:
     _assert_uniform_microbatch_count(5)
 
 
-def _uniform_count_worker(result_dir_str: str, mesh: Any) -> None:
+def _uniform_count_worker(result_dir_str: str, mesh: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
     """Worker: equal per-rank counts pass; unequal counts raise ValueError."""
     result_dir = Path(result_dir_str)
     rank = mesh.get_rank()

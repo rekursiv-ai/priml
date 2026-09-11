@@ -16,7 +16,7 @@ import pytest
 from priml.train.profiling import PhaseTimer, TorchProfiling
 
 
-def _phase_timer_config(**kwargs: Any) -> PhaseTimer.Config:
+def _phase_timer_config(**kwargs: Any) -> PhaseTimer.Config:  # noqa: ANN401 -- forwarded to an upstream Any.
     kwargs.setdefault("working_dir", "/scratch/profiling")
     return PhaseTimer.Config(**kwargs)
 

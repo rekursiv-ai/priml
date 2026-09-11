@@ -525,7 +525,7 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
     captured: dict[str, object] = {}
     orig_to = Tensor.to
 
-    def spy_to(self: Tensor, *args: Any, **kwargs: Any) -> Tensor:
+    def spy_to(self: Tensor, *args: Any, **kwargs: Any) -> Tensor:  # noqa: ANN401 -- forwarded to an upstream Any.
         # Record any dequant on a float8 tensor (capture its target dtype).
         if self.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) and args:
             captured["dequant_target"] = args[0]

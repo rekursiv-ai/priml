@@ -96,7 +96,7 @@ def _load(
     *,
     resume_step: int = -1,
     into: dict[str, Any] | None = None,
-    **config: Any,
+    **config: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
 ) -> dict[str, Any]:
     """Resume the checkpoint selected by ``resume_step``; return the restored state."""
     ckpt = Checkpointer(
@@ -293,7 +293,7 @@ def test_load_uses_weights_only(
     seen: list[str] = []
     orig = torch.load
 
-    def spy(path: Any, **kwargs: Any) -> Any:
+    def spy(path: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
         seen.append(f"weights_only={kwargs.get('weights_only')}")
         return orig(path, **kwargs)
 
@@ -475,7 +475,7 @@ def test_distributed_save_barriers(
     calls: list[str] = []
     orig = dist.barrier
 
-    def spy(*args: Any, **kwargs: Any) -> Any:
+    def spy(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
         calls.append("barrier")
         return orig(*args, **kwargs)
 

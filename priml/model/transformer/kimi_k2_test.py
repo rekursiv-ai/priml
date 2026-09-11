@@ -518,7 +518,7 @@ def _install_transformers_compat_shims() -> Generator[None]:
     def unavailable() -> bool:
         return False
 
-    def passthrough_cache(cls: type[DynamicCache], pkv: object) -> Any:
+    def passthrough_cache(cls: type[DynamicCache], pkv: object) -> Any:  # noqa: ANN401 -- forwards an upstream Any.
         del cls
         return pkv
 
@@ -540,7 +540,7 @@ def _install_transformers_compat_shims() -> Generator[None]:
             delattr(owner, name)
 
 
-def _build_hf_model(q_lora_rank: int | None) -> Any:
+def _build_hf_model(q_lora_rank: int | None) -> Any:  # noqa: ANN401 -- forwards an upstream Any.
     """Instantiate HF's real ``DeepseekV3ForCausalLM`` at tiny size."""
     transformers = pytest.importorskip("transformers")
     config = transformers.AutoConfig.from_pretrained(
@@ -581,7 +581,7 @@ def _build_hf_model(q_lora_rank: int | None) -> Any:
     return model.to(torch.float32).eval()
 
 
-def _our_config_from_hf(hf_model: Any, q_lora_rank: int | None) -> KimiK2.Config:
+def _our_config_from_hf(hf_model: Any, q_lora_rank: int | None) -> KimiK2.Config:  # noqa: ANN401 -- forwarded to an upstream Any.
     """Mirror an HF model's config into a ``KimiK2.Config``."""
     hf_cfg = hf_model.config.to_dict()
     hf_cfg.setdefault("model_type", "deepseek_v3")
@@ -592,7 +592,7 @@ def _our_config_from_hf(hf_model: Any, q_lora_rank: int | None) -> KimiK2.Config
 
 
 def _hf_state_dict_with_bias_fill(
-    hf_model: Any,
+    hf_model: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
     config: KimiK2.Config,
 ) -> dict[str, Tensor]:
     """Extract HF weights and backfill absent router correction biases."""
