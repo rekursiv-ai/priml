@@ -162,7 +162,7 @@ def compare(label: str, theirs: Tensor, ours: Tensor) -> str | None:
     Args:
       label: Name reported with a difference.
       theirs: The reference's tensor.
-      ours: Ours.
+      ours: This implementation's tensor.
 
     Returns:
       problem: A description naming the first differing position, or None.
@@ -222,7 +222,7 @@ def main() -> int:
     """Draw from both implementations' loaders and report every difference.
 
     Returns:
-      result: The int.
+      exit_code: 0 if identical, nonzero if differences found.
 
     """
     args = _parse_args()

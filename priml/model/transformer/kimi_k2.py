@@ -234,10 +234,10 @@ class KimiK2(Transformer):
             """Parse an HF ``config.json`` dict.
 
             Args:
-              config: Config.
+              config: HuggingFace config dict.
 
             Returns:
-              result: The Self.
+              result: KimiK2.Config instance.
 
             """
             model_type = config.get("model_type")
@@ -406,14 +406,12 @@ class KimiK2(Transformer):
         """Build a KimiK2 with HF weights loaded.
 
         Args:
-          path_or_repo: Local directory with ``config.json`` + weight
-              shards, OR a HuggingFace repo id (downloaded via
-              ``priml.hub``).
+          path_or_repo: Local checkpoint directory or HF model id.
           device: Target device (default: CPU).
-          dtype: Override the dtype recorded in ``config.json``.
+          dtype: Override the dtype recorded in config.json.
 
         Returns:
-          model: The KimiK2.
+          model: KimiK2 instance with weights loaded.
 
         """
         path = Path(path_or_repo)
@@ -464,11 +462,11 @@ def remap_hf_state_dict(
     """Convert an HF Kimi-K2 / DSV3 state_dict to loop-native names.
 
     Args:
-      hf_sd: Hf sd.
-      config: Config.
+      hf_sd: HuggingFace checkpoint with HF naming.
+      config: KimiK2 config to determine tied weights.
 
     Returns:
-      out: The dict[str, Tensor].
+      out: State dict keyed by this package's layer names.
 
     """
     out: dict[str, Tensor] = {

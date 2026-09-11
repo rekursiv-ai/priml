@@ -30,13 +30,9 @@ class NormConfigProtocol(Protocol):
     """
 
     channels_in: int
-
     eps: float
-
     elementwise_affine: bool
-
     device: torch.device | str | None
-
     dtype: torch.dtype | None
 
 

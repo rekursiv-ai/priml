@@ -127,11 +127,12 @@ def local_view(
       grid: Values to read, ``[envs, rows, columns]``.
       centers: Row/column of each window's center, ``[envs, 2]``.
       size: Window height and width, both odd.
-      outside: Value reported for tiles beyond the grid. The renderer passes
-        the out-of-bounds block so the agent can see the world's edge.
+      outside: Padding value for out-of-bounds reads (typically the
+        out-of-bounds block id).
 
     Returns:
-      view: The windows, ``[envs, size[0], size[1]]``.
+      view: Windows extracted around each center, ``[envs, size[0],
+        size[1]]``.
 
     """
     height, width = size

@@ -40,17 +40,7 @@ class CachedAttention(Protocol):
         cache: KVCache,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Forward cached.
-
-        Args:
-          x: X.
-          cache: Cache.
-          **kwargs: Kwargs.
-
-        Returns:
-          result: The tuple[Tensor, KVCache].
-
-        """
+        """Forward cached."""
         ...
 
 
@@ -194,12 +184,13 @@ class TransformerBlock(nn.Module):
         """Run the block while updating its attention cache.
 
         Args:
-          x: X.
-          cache: Cache.
-          **kwargs: Kwargs.
+          x: Input tensor.
+          cache: Key-value cache to update in-place.
+          **kwargs: Additional arguments forwarded to attention and FFN.
 
         Returns:
-          result: The tuple[Tensor, KVCache].
+          output: Output tensor same shape as x.
+          cache: Updated cache after attention.
 
         """
         if not isinstance(self.attn, CachedAttention):

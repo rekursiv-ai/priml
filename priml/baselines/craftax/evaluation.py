@@ -18,10 +18,10 @@ def evaluation_mode(model: nn.Module) -> Generator[None]:
     """Temporarily evaluate a model, restoring its incoming mode.
 
     Args:
-      model: Model.
+      model: PyTorch module to switch to eval mode.
 
     Yields:
-      item: Each yielded value.
+      item: None; used as a context manager only.
 
     """
     training = model.training
@@ -42,12 +42,12 @@ def evaluation_transaction[StateT](
     """Run evaluation against a snapshot and restore all training state.
 
     Args:
-      model: Model.
-      save: Save.
-      restore: Restore.
+      model: PyTorch module to operate on.
+      save: Callable that captures the current model state.
+      restore: Callable that restores state and side effects.
 
     Yields:
-      item: Each yielded value.
+      item: None; used as a context manager only.
 
     """
     state = copy.deepcopy(save())

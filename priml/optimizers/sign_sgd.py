@@ -332,8 +332,8 @@ class SignSGD(Optimizer):
         here (it IS required for routing via ``step()``).
 
         Args:
-          local_weights_grad: Local weights grad.
-          local_ids: Local ids.
+          local_weights_grad: [n, d] accumulated gradients for n embedding rows.
+          local_ids: [n] global row indices corresponding to each gradient.
 
         """
         for group in self.param_groups:

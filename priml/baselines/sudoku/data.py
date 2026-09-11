@@ -201,12 +201,7 @@ class _SudokuBatches:
         return ceil_div(int(self.bounds[-1]), self.batch_size)
 
     def state_dict(self) -> dict[str, Any]:
-        """Return enough state to resume an unfinished epoch.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Return enough state to resume an unfinished epoch."""
         return {
             "epoch": self.epoch,
             "active_epoch": self._active_epoch,
@@ -214,12 +209,7 @@ class _SudokuBatches:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore an unfinished epoch.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore an unfinished epoch."""
         self.epoch = int(state_dict.get("epoch", self.epoch))
         active_epoch = state_dict.get("active_epoch")
         self._active_epoch = None if active_epoch is None else int(active_epoch)
@@ -382,7 +372,7 @@ class SudokuData:
         """Build the re-iterable training stream.
 
         Returns:
-          stream: The _SudokuBatches.
+          stream: Shuffled, augmented puzzle batches that resume from the prior epoch.
 
         """
         # Snapshot any prior stream's epoch first, so re-creating the loader
@@ -415,7 +405,7 @@ class SudokuData:
         transformation happened to be drawn.
 
         Returns:
-          result: The _SudokuBatches.
+          result: Unshuffled, unaugmented puzzle batches in disk order.
 
         """
         return _SudokuBatches(
@@ -435,7 +425,8 @@ class SudokuData:
         """Snapshot the active epoch and its next batch.
 
         Returns:
-          result: The dict[str, Any].
+          state: ``"epoch"`` (int), ``"loader"`` (nested loader state), and
+            ``"timer_epoch"``.
 
         """
         loader_state = (
@@ -453,7 +444,8 @@ class SudokuData:
         """Restore state produced by :meth:`state_dict`.
 
         Args:
-          state_dict: State dict.
+          state_dict: A prior :meth:`state_dict`; restores the epoch counter and
+            the next batch position.
 
         """
         if "timer_epoch" in state_dict:

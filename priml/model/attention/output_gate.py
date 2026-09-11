@@ -35,18 +35,7 @@ class CachedAttention(Protocol):
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> KVCache:
-        """Alloc kv cache.
-
-        Args:
-          batch: Batch.
-          max_seq: Max seq.
-          device: Device.
-          dtype: Dtype.
-
-        Returns:
-          result: The KVCache.
-
-        """
+        """Alloc kv cache."""
         ...
 
     def forward_cached(
@@ -56,17 +45,7 @@ class CachedAttention(Protocol):
         cache: KVCache,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Forward cached.
-
-        Args:
-          x: X.
-          cache: Cache.
-          **kwargs: Kwargs.
-
-        Returns:
-          result: The tuple[Tensor, KVCache].
-
-        """
+        """Forward cached."""
         ...
 
 
@@ -168,13 +147,13 @@ class OutputGate(nn.Module):
         """Allocate the wrapped attention's cache.
 
         Args:
-          batch: Batch.
-          max_seq: Max seq.
-          device: Device.
-          dtype: Dtype.
+          batch: Batch size or shape tuple.
+          max_seq: Maximum sequence length.
+          device: Device placement (default: module device).
+          dtype: Tensor dtype (default: module dtype).
 
         Returns:
-          result: The KVCache.
+          cache: Empty KV cache ready for generation.
 
         """
         inner = cast(CachedAttention, self.inner)
@@ -201,17 +180,7 @@ class OutputGate(nn.Module):
         cache: KVCache,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Apply the gate while updating the wrapped attention's cache.
-
-        Args:
-          x: X.
-          cache: Cache.
-          **kwargs: Kwargs.
-
-        Returns:
-          result: The tuple[Tensor, KVCache].
-
-        """
+        """Apply the gate while updating the wrapped attention's cache."""
         gate = torch.sigmoid(self.gate_proj(x))
         inner = cast(CachedAttention, self.inner)
         out, updated = inner.forward_cached(x, cache=cache, **kwargs)

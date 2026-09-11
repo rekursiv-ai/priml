@@ -94,7 +94,8 @@ def exp000() -> ArcTrainLoop:
       benchmark whose tasks are genuinely novel at test time.
 
     Returns:
-      cfg: The ArcTrainLoop.
+      cfg: Training config with transformer block, grid embedding, and sparse
+        per-task prefix over 30x30 ARC grids.
 
     References:
       https://arxiv.org/abs/1911.01547
@@ -171,7 +172,8 @@ def exp001() -> ArcTrainLoop:
       positions can express the same spatial routing at lower cost.
 
     Returns:
-      cfg: The ArcTrainLoop.
+      cfg: exp000 config with MLP-mixer replacing the transformer attention
+        block.
 
     References:
       https://arxiv.org/abs/2105.01601
@@ -197,7 +199,8 @@ def exp002() -> ArcTrainLoop:
       parameters spent in a single forward.
 
     Returns:
-      cfg: The ArcTrainLoop.
+      cfg: exp000 config with deep recurrence (3 slow + 4 fast cycles per
+        task), prediction feedback, and halting policy.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -239,7 +242,8 @@ def exp003() -> ArcTrainLoop:
       TBD.
 
     Returns:
-      cfg: The ArcTrainLoop.
+      cfg: exp002 config with MLP-mixer replacing the transformer attention
+        block.
 
     """
     cfg = exp002()
@@ -261,7 +265,8 @@ def exp_smoke() -> ArcTrainLoop:
     costs 112 MB and 35 ms, which does not bear on the question.
 
     Returns:
-      cfg: The ArcTrainLoop.
+      cfg: exp000 config at 1/8 scale (32 channels, 1 layer, 4 steps, 4 tasks)
+        for installation verification.
 
     """
     cfg = exp000()

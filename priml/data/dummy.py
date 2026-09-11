@@ -73,7 +73,7 @@ class DummyDataset:
         """Get training dataloader.
 
         Returns:
-          result: The DataLoader[Any].
+          result: Shuffled DataLoader wrapping the dummy dataset.
 
         """
         return DataLoader(
@@ -88,7 +88,7 @@ class DummyDataset:
         """Get evaluation dataloader.
 
         Returns:
-          result: The DataLoader[Any].
+          result: Non-shuffled DataLoader wrapping the dummy dataset.
 
         """
         return DataLoader(
@@ -100,21 +100,11 @@ class DummyDataset:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the pass count, the only state this dataset carries.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Return the pass count, the only state this dataset carries."""
         return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the pass count.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore the pass count."""
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 

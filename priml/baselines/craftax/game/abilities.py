@@ -90,11 +90,11 @@ def shoot_arrow(state: EnvState, action: Tensor) -> EnvState:
     """Loose an arrow in the faced direction, spending one from the quiver.
 
     Args:
-      state: State.
-      action: Action.
+      state: Environment state to mutate.
+      action: Action mask tensor indicating which envs should shoot.
 
     Returns:
-      state: The EnvState.
+      state: Updated EnvState with arrow removed and projectile spawned.
 
     """
     firing = (

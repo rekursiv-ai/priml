@@ -45,16 +45,7 @@ class Selector(Protocol):
 
 
 def everything(name: str, parameter: Parameter) -> bool:
-    """Select every parameter; the single-group recipe.
-
-    Args:
-      name: Name.
-      parameter: Parameter.
-
-    Returns:
-      result: The bool.
-
-    """
+    """Select every parameter; the single-group recipe."""
     del name, parameter
     return True
 

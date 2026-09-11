@@ -37,21 +37,15 @@ __all__ = [
 
 class SampleOneStepResult(NamedTuple):
     x_clean: Tensor
-
     mean: Tensor
-
     log_std: Tensor
 
 
 class SampleResult(NamedTuple):
     x_curr: Tensor
-
     x_clean: Tensor
-
     mean: Tensor
-
     log_std: Tensor
-
     model: Tensor
 
 

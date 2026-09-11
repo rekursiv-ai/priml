@@ -54,9 +54,7 @@ class _Checkpoint:
     """A checkpoint found on disk (internal scan record): step, path, complete."""
 
     step: int
-
     path: Path
-
     complete: bool
     """A plain ``.pt`` file (atomic rename) is always complete; a shard dir is
     complete once its ``.metadata`` marker is present."""
@@ -109,9 +107,10 @@ class StateDictStorer(Protocol):
         lockstep on all ranks.
 
         Args:
-          path: Path.
-          state_dict: State dict.
-          after_write: After write.
+          path: Filesystem location where checkpoint is written.
+          state_dict: Model, optimizer, and other stateful tensors to persist.
+          after_write: Hook run once the checkpoint is durable (for cleanup
+            or logging); noop by default.
 
         """
         ...
@@ -124,11 +123,12 @@ class StateDictStorer(Protocol):
         May be collective; called in lockstep on all ranks.
 
         Args:
-          path: Path.
-          into: Into.
+          path: Filesystem location of the checkpoint to load.
+          into: Template state dict to reshard into (for distributed
+            checkpoints); ignored by synchronous single-rank loads.
 
         Returns:
-          result: The StateDict.
+          state: Restored model, optimizer, and auxiliary state dict.
 
         """
         ...
@@ -142,10 +142,10 @@ class StateDictStorer(Protocol):
         to land. True only once all ranks' bytes are durable.
 
         Args:
-          path: Path.
+          path: Checkpoint path to check (dir for distributed, file for local).
 
         Returns:
-          result: The bool.
+          complete: Whether the checkpoint is fully written and safe to load.
 
         """
         ...
@@ -191,9 +191,10 @@ class SyncLocalStateDictStorer:
         rank-0-only work.
 
         Args:
-          path: Path.
-          state_dict: State dict.
-          after_write: After write.
+          path: Destination directory or file path.
+          state_dict: Model, optimizer, and other stateful objects to save.
+          after_write: Callback after durability; runs on all ranks in
+            lockstep (handles rank-0-only operations via is_rank_zero()).
 
         """
         start = time.perf_counter()
@@ -229,11 +230,11 @@ class SyncLocalStateDictStorer:
         """Load the checkpoint at ``path`` (DCP dir reshards; ``.pt`` file loads).
 
         Args:
-          path: Path.
-          into: Into.
+          path: Checkpoint location (dir for distributed, file for local).
+          into: Template state dict for resharding (used by DCP only).
 
         Returns:
-          result: The StateDict.
+          state: Loaded checkpoint with tensors on this rank's device.
 
         """
         return _read_checkpoint(path, into)
@@ -242,10 +243,11 @@ class SyncLocalStateDictStorer:
         """Whether ``path`` is a finished checkpoint, not a crashed partial.
 
         Args:
-          path: Path.
+          path: Checkpoint path (dir for distributed, file for local).
 
         Returns:
-          result: The bool.
+          complete: True if .metadata exists (dir) or file exists and is not
+            temp (.tmp suffix).
 
         """
         return _is_complete(path)
@@ -306,9 +308,9 @@ class AsyncLocalStateDictStorer:
         (``write``/``read``/``flush``).
 
         Args:
-          path: Path.
-          state_dict: State dict.
-          after_write: After write.
+          path: Destination directory or file path.
+          state_dict: Model, optimizer, and other stateful objects to save.
+          after_write: Callback after durability (see SyncLocalStateDictStorer).
 
         """
         self._join()
@@ -329,11 +331,11 @@ class AsyncLocalStateDictStorer:
         ``async_save`` on for a resume of a sync-written run loads correctly.
 
         Args:
-          path: Path.
-          into: Into.
+          path: Checkpoint location (dir for distributed, file for local).
+          into: Template state dict for resharding (used by DCP only).
 
         Returns:
-          result: The StateDict.
+          state: Loaded checkpoint with tensors on this rank's device.
 
         """
         self._join()
@@ -346,10 +348,11 @@ class AsyncLocalStateDictStorer:
         last; no special-casing or blocking is needed.
 
         Args:
-          path: Path.
+          path: Checkpoint path (dir for distributed, file for local).
 
         Returns:
-          result: The bool.
+          complete: True if .metadata exists (dir) or file exists (never blocks
+            on pending async writes).
 
         """
         return _is_complete(path)
@@ -359,12 +362,7 @@ class AsyncLocalStateDictStorer:
         self._join()
 
     def has_pending_write(self) -> bool:
-        """Whether a background write is still in flight (for tests/diagnostics).
-
-        Returns:
-          result: The bool.
-
-        """
+        """Whether a background write is still in flight (for tests/diagnostics)."""
         return self._pending is not None
 
     # Called only from all-rank entry points (``write``, ``read``, ``flush``), so the
@@ -605,11 +603,12 @@ class Checkpointer:
         0 is never saved. Pruning rides the write's ``after_write`` callback.
 
         Args:
-          target: Target.
-          step: Step.
+          target: Checkpointable object (typically TrainLoop) to serialize.
+          step: Training step number (0 is skipped, only multiples of
+            save_every trigger a save).
 
         Returns:
-          result: The bool.
+          saved: True if checkpoint was written; False if not on cadence.
 
         """
         if step == 0 or step % self.save_every != 0:
@@ -629,8 +628,8 @@ class Checkpointer:
         collectives interleave and desync the ranks.
 
         Args:
-          target: Target.
-          step: Step.
+          target: Checkpointable object (typically TrainLoop) to serialize.
+          step: Training step number (saved only if not already on disk).
 
         """
         self.storage.flush()
@@ -664,12 +663,14 @@ class Checkpointer:
         the resumed one, already set inside ``target``).
 
         Args:
-          target: Target.
-          max_steps: Max steps.
-          guard: Guard.
+          target: Checkpointable object (typically TrainLoop) to restore state.
+          max_steps: Upper bound on training steps used to detect collision with
+            future cadence saves.
+          guard: When True, raise if a save on the cadence would overwrite an
+            existing checkpoint.
 
         Returns:
-          result: The bool.
+          resumed: True if a checkpoint was loaded; False if starting fresh.
 
         """
         self.storage.flush()  # a just-issued async write must be visible to resume.
@@ -753,12 +754,7 @@ class Checkpointer:
         )
 
     def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics).
-
-        Returns:
-          result: The list[int].
-
-        """
+        """Ascending steps of all complete checkpoints on disk (for diagnostics)."""
         return sorted(c.step for c in self._list() if c.complete)
 
     # A file and a shard dir share this stem.

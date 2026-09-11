@@ -133,7 +133,7 @@ class ActPool:
         """Move pool state to ``device`` and reseed the RNG there.
 
         Args:
-          device: Device.
+          device: Target device (CPU or CUDA) for all pool tensors and RNG.
 
         """
         self.device = device
@@ -148,12 +148,7 @@ class ActPool:
         self._generator.manual_seed(self.config.halt_exploration_seed)
 
     def latents(self) -> tuple[Tensor, Tensor]:
-        """Return the carried ``(z_slow, z_fast)`` for this step's forward.
-
-        Returns:
-          result: The tuple[Tensor, Tensor].
-
-        """
+        """Return the carried ``(z_slow, z_fast)`` for this step's forward."""
         return self.z_slow, self.z_fast
 
     def refill(
@@ -327,11 +322,11 @@ class ActPool:
         the puzzle told it, so clue cells are copied back verbatim.
 
         Args:
-          decoded: Decoded.
-          media: Media.
+          decoded: Model output to restore; clue cells are overwritten in place.
+          media: Raw puzzle tensor with givens in config.given_low..given_high range.
 
         Returns:
-          result: The Tensor.
+          result: Tensor with decoded values except clue cells (restored from media).
 
         """
         given = (media >= self.config.given_low) & (media <= self.config.given_high)
@@ -346,18 +341,13 @@ class ActPool:
         saved because the exploration sequence must not restart.
 
         Returns:
-          result: The dict[str, Any].
+          result: Dict with "halt_rng" key holding the generator state tensor.
 
         """
         return {"halt_rng": self._generator.get_state()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the halting RNG produced by :meth:`state_dict`.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore the halting RNG produced by :meth:`state_dict`."""
         if "halt_rng" in state_dict:
             # ``set_state`` wants a CPU byte tensor; a checkpoint read onto the
             # compute device would otherwise be rejected here.

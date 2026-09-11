@@ -89,7 +89,7 @@ class GridAccuracy:
         """Return exact and cell accuracy, summed across ranks first.
 
         Returns:
-          result: The dict[str, float].
+          result: Dict with exact and cell accuracy floats.
 
         """
         counts = torch.tensor(
@@ -113,7 +113,7 @@ class GridAccuracy:
         """Return the accumulated counts.
 
         Returns:
-          result: The dict[str, Any].
+          result: Counters for solved puzzles, total, correct cells, total cells.
 
         """
         return {
@@ -124,12 +124,7 @@ class GridAccuracy:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore counts produced by :meth:`state_dict`.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore counts produced by :meth:`state_dict`."""
         self.solved = state_dict.get("solved", 0)
         self.puzzles = state_dict.get("puzzles", 0)
         self.cells_correct = state_dict.get("cells_correct", 0)

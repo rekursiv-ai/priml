@@ -35,7 +35,7 @@ def main() -> int:
     """Prepare the dataset; return the process exit code.
 
     Returns:
-      result: The int.
+      code: 0 on success, 1 on error.
 
     """
     parser = argparse.ArgumentParser(

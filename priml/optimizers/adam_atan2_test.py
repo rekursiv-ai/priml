@@ -17,9 +17,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 class _AdamATan2Golden(TypedDict):
     initial_param: Tensor
-
     grads: Tensor
-
     expected_param: Tensor
 
 

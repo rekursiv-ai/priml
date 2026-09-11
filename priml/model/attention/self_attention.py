@@ -327,13 +327,13 @@ class SelfAttention(AttentionProjections):
         """Allocate a KV cache sized for this attention block.
 
         Args:
-          batch: Batch.
-          max_seq: Max seq.
-          device: Device.
-          dtype: Dtype.
+          batch: Batch size (int) or multi-batch shape tuple.
+          max_seq: Maximum sequence length the cache holds.
+          device: Torch device placement; None defers to block's device.
+          dtype: Tensor dtype; None defers to block's dtype.
 
         Returns:
-          result: The KVCache.
+          cache: Allocated KVCache instance for this head config.
 
         """
         return KVCache.alloc(
@@ -384,17 +384,18 @@ class SelfAttention(AttentionProjections):
         """Attend using and updating ``cache``.
 
         Args:
-          x: X.
-          cache: Cache.
-          positions: Positions.
-          cos_sin: Cos sin.
-          dropout_p: Dropout p.
-          is_causal: Is causal.
-          attn_mask: Attn mask.
-          **kwargs: Kwargs.
+          x: Input query tensor.
+          cache: Pre-allocated KVCache to update with new keys/values.
+          positions: Token position indices for RoPE; None = sequential.
+          cos_sin: Pre-computed rotation angles (cos, sin); None = compute.
+          dropout_p: Dropout probability (0.0 to 1.0); None = no dropout.
+          is_causal: Mask future positions; None = no causal masking.
+          attn_mask: Custom attention mask; None = no additional masking.
+          **kwargs: Extra arguments passed to _forward.
 
         Returns:
-          result: The tuple[Tensor, KVCache].
+          output: Attention output.
+          updated_cache: The cache with this step's keys and values appended.
 
         """
         out, updated = self._forward(

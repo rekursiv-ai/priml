@@ -55,11 +55,8 @@ __all__ = [
 
 class TargetResult(NamedTuple):
     target: Tensor | None
-
     predict: Tensor | None
-
     x_clean: Tensor
-
     eps_clean: Tensor
 
 

@@ -428,10 +428,11 @@ def named_meta_state(model: nn.Module) -> list[tuple[str, Tensor]]:
     buffer is as fatal as a forgotten parameter.
 
     Args:
-      model: Model.
+      model: Neural network module to inspect.
 
     Returns:
-      result: The list[tuple[str, Tensor]].
+      state: List of (name, tensor) pairs for all parameters and buffers
+        (e.g., [("layer1.weight", Tensor(...)), ...]).
 
     """
     return [*model.named_parameters(), *model.named_buffers()]

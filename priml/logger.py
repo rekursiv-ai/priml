@@ -74,20 +74,14 @@ class CustomFormatter(logging.Formatter):
     FORMAT: ClassVar[str] = (
         "%(asctime)s | %(rank_info)s%(levelname)s | %(name)s%(classname)s | %(funcName)s:%(lineno)d | %(message)s"
     )
-
     DATEFMT: ClassVar[str] = "%y-%m-%d %H:%M:%S.%f"
 
     class LogColors:
         DEBUG: str = "\x1b[38;20m"
-
         INFO: str = "\x1b[34;20m"
-
         WARNING: str = "\x1b[33;20m"
-
         ERROR: str = "\x1b[31;20m"
-
         CRITICAL: str = "\x1b[31;1m"
-
         RESET: str = "\x1b[0m"
 
     LOG_LEVEL_COLOR_MAP: ClassVar[dict[int, str]] = {

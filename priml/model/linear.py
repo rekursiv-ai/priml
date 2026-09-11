@@ -172,7 +172,7 @@ class EnsembleLinear(nn.Module):
         the ensemble dim so downstream per-head splits stay consistent.
 
         Returns:
-          result: The ParallelStyle.
+          style: _EnsembleParallel sharding ensemble dim over devices.
 
         """
         return _EnsembleParallel()

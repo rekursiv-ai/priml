@@ -46,9 +46,7 @@ class _FakeMesh:
     """
 
     device_type = "cpu"
-
     mesh_dim_names = ("dp", "tp")
-
     shape = (1, 1)
 
     def __getitem__(self, key: object) -> _FakeMesh:

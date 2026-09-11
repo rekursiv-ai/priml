@@ -112,7 +112,7 @@ class Cifar10Data:
         """Return a shuffling iterator over the training split.
 
         Returns:
-          stream: The _BatchIterator.
+          stream: _BatchIterator over shuffled training data.
 
         """
         stream = _BatchIterator(
@@ -132,7 +132,7 @@ class Cifar10Data:
         """Return a sequential iterator over the test split.
 
         Returns:
-          result: The _BatchIterator.
+          result: _BatchIterator over unshuffled validation data.
 
         """
         return _BatchIterator(
@@ -147,7 +147,7 @@ class Cifar10Data:
         """Return the pass count and active permutation position.
 
         Returns:
-          result: The dict[str, Any].
+          result: Dict with loader state and timer_epoch checkpoint.
 
         """
         loader_state = (
@@ -164,7 +164,7 @@ class Cifar10Data:
         """Restore the pass count and active permutation position.
 
         Args:
-          state_dict: State dict.
+          state_dict: Checkpoint from state_dict() to restore training.
 
         """
         if "timer_epoch" in state_dict:
@@ -286,24 +286,14 @@ class _BatchIterator:
         return (count + self.batch_size - 1) // self.batch_size
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the active permutation and next batch index.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Return the active permutation and next batch index."""
         return {
             "order": None if self._order is None else self._order.cpu(),
             "next_batch": self._next_batch,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the active permutation and next batch index.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore the active permutation and next batch index."""
         order = state_dict.get("order")
         self._order = order.to(self.media.device) if isinstance(order, Tensor) else None
         self._next_batch = int(state_dict.get("next_batch", 0))

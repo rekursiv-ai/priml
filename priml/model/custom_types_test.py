@@ -76,7 +76,6 @@ def test_head_capabilities_are_direct_attributes() -> None:
     @dataclass(slots=True, kw_only=True)
     class Attention:
         num_heads: int
-
         channels_head: int
 
     attention = Attention(num_heads=4, channels_head=32)

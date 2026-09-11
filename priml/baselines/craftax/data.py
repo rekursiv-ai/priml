@@ -49,13 +49,7 @@ class EvaluationActor(Protocol):
         ...
 
     def reset(self, *, num_envs: int, device: torch.device) -> None:
-        """Reset accumulated state.
-
-        Args:
-          num_envs: Num envs.
-          device: Device.
-
-        """
+        """Reset accumulated state."""
         ...
 
     def act(
@@ -65,17 +59,7 @@ class EvaluationActor(Protocol):
         *,
         generator: torch.Generator,
     ) -> Tensor:
-        """Act.
-
-        Args:
-          observation: Observation.
-          previous_done: Previous done.
-          generator: Generator.
-
-        Returns:
-          result: The Tensor.
-
-        """
+        """Act."""
         ...
 
 
@@ -148,7 +132,7 @@ class CraftaxRollouts:
         """Yield one tick per update in an epoch.
 
         Returns:
-          stream: The _Cadence.
+          stream: Cadence with position tracking across epoch batches.
 
         """
         stream = _Cadence(
@@ -163,7 +147,7 @@ class CraftaxRollouts:
         """Yield evaluation ticks carrying one isolated stateful actor.
 
         Returns:
-          result: The Iterator[dict[str, Any]].
+          result: Iterator of eval batch dicts, one per evaluation step.
 
         """
         if not isinstance(self._step, _SupportsEvaluationActor):
@@ -179,7 +163,7 @@ class CraftaxRollouts:
         """Return the pass count and active cadence position.
 
         Returns:
-          result: The dict[str, Any].
+          result: Dict with train_position and epoch timer state.
 
         """
         position = (
@@ -196,7 +180,7 @@ class CraftaxRollouts:
         """Restore the pass count and active cadence position.
 
         Args:
-          state_dict: State dict.
+          state_dict: Dict from a prior state_dict call for resuming.
 
         """
         if "timer_epoch" in state_dict:

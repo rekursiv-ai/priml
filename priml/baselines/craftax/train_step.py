@@ -432,12 +432,7 @@ class CraftaxTrainStep(TrainStep):
         return logits
 
     def make_evaluation_actor(self) -> EvaluationActor:
-        """Build a stateless sampling actor over the live policy.
-
-        Returns:
-          result: The EvaluationActor.
-
-        """
+        """Build a stateless sampling actor over the live policy."""
         return _EvaluationActor(
             self.model,
             observation_size=self.env.observation_size,

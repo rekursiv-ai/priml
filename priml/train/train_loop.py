@@ -1241,7 +1241,7 @@ class TrainLoop:
         """Run validation.
 
         Returns:
-          results: The dict[str, Any].
+          metrics: Computed validation metrics keyed by name.
 
         """
         for metric in self.metrics.values():
@@ -1374,12 +1374,7 @@ class TrainLoop:
         return results
 
     def run(self, *args: str) -> None:
-        """Run training (entry point for experimental.lib.launch).
-
-        Args:
-          *args: Args.
-
-        """
+        """Run training (entry point for experimental.lib.launch)."""
         del args
         self.train()
 
@@ -1387,7 +1382,7 @@ class TrainLoop:
         """Get training state for checkpointing.
 
         Returns:
-          state: The dict[str, Any].
+          state: All model, dataset, and RNG state for resume.
 
         """
         state: dict[str, Any] = {
@@ -1404,7 +1399,7 @@ class TrainLoop:
         """Load training state from checkpoint (full restore for resume).
 
         Args:
-          state_dict: State dict.
+          state_dict: State from a prior state_dict() call.
 
         """
         self.step.load_state_dict(state_dict["step"])

@@ -181,7 +181,7 @@ class TorchProfiling:
         """Run at the start of each training step.
 
         Args:
-          step: Step.
+          step: Zero-based step number in the training run.
 
         """
         if not self._should_profile():
@@ -206,7 +206,7 @@ class TorchProfiling:
         """Run at the end of each training step.
 
         Args:
-          step: Step.
+          step: Zero-based step number matching the preceding on_step_start call.
 
         """
         if not self._should_profile():
@@ -359,29 +359,13 @@ class PhaseTimer:
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Generator[None, None, None]:
-        """Measure and narrate one potentially long phase.
-
-        Args:
-          name: Name.
-
-        Yields:
-          item: Each yielded value.
-
-        """
+        """Measure and narrate one potentially long phase."""
         with self._timed(name, narrate=True):
             yield
 
     @contextlib.contextmanager
     def measure(self, name: str) -> Generator[None, None, None]:
-        """Measure a frequent phase without per-call boundary logs.
-
-        Args:
-          name: Name.
-
-        Yields:
-          item: Each yielded value.
-
-        """
+        """Measure a frequent phase without per-call boundary logs."""
         with self._timed(name, narrate=False):
             yield
 
@@ -390,10 +374,11 @@ class PhaseTimer:
         """Record asynchronous GPU stream time without a hot-path sync.
 
         Args:
-          name: Name.
+          name: Label for this GPU measurement; nested under the open phase.
 
         Yields:
-          item: Each yielded value.
+          nothing: Start and end events bracket the block; elapsed time is
+            resolved later by ``record_cuda_events``.
 
         """
         if not self.cuda_events_enabled or not torch.cuda.is_available():
@@ -418,8 +403,8 @@ class PhaseTimer:
         """Record one timing sample.
 
         Args:
-          name: Name.
-          elapsed: Elapsed.
+          name: Label for this timing; nested under parent path if in a stack.
+          elapsed: Elapsed seconds; subtracted from parent's child time if nested.
 
         """
         if not self._enabled:
@@ -435,26 +420,14 @@ class PhaseTimer:
         start: CudaEventProtocol,
         end: CudaEventProtocol,
     ) -> None:
-        """Record a CUDA event pair for deferred elapsed-time reporting.
-
-        Args:
-          name: Name.
-          start: Start.
-          end: End.
-
-        """
+        """Record a CUDA event pair for deferred elapsed-time reporting."""
         if not self.cuda_events_enabled:
             return
         self._cuda_events.setdefault(name, []).append((start, end))
         self._cuda_summary = None
 
     def summary(self) -> dict[str, float]:
-        """Summarize recorded timings.
-
-        Returns:
-          result: The dict[str, float].
-
-        """
+        """Summarize recorded timings."""
         total = time.perf_counter() - self._start_time
         return {**self._phases, "total": total}
 
@@ -474,11 +447,11 @@ class PhaseTimer:
         """Publish and reset one hierarchical timing interval.
 
         Args:
-          tracker: Tracker.
-          step: Step.
+          tracker: Optional metric sink; if None, metrics are not published.
+          step: Step number to associate with published metrics.
 
         Returns:
-          metrics: The dict[str, float].
+          metrics: Dict mapping metric names to elapsed seconds since last reset.
 
         """
         if not self._enabled:
@@ -509,11 +482,11 @@ class PhaseTimer:
         """Publish one cumulative hierarchical timing summary.
 
         Args:
-          tracker: Tracker.
-          step: Step.
+          tracker: Optional metric sink; if None, metrics are not published.
+          step: Step number to associate with published metrics.
 
         Returns:
-          metrics: The dict[str, float].
+          metrics: Dict mapping metric names to cumulative seconds; only published once.
 
         """
         if not self._enabled:
@@ -778,9 +751,7 @@ class _PhaseFrame:
     """One active phase and the inclusive time consumed by nested children."""
 
     path: str
-
     started_at: float
-
     child_sec: float = 0.0
 
 

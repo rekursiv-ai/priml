@@ -18,7 +18,7 @@ def log_arctan_exp(x: Tensorable) -> Tensor:
     """Numerically stable log(arctan(exp(x))).
 
     Args:
-      x: X.
+      x: Input tensor or array-like.
 
     Returns:
       result: log(arctan(exp(x))).
@@ -75,7 +75,7 @@ def log1mexp(x: Tensorable) -> Tensor:
 
 
     Returns:
-      result: The Tensor.
+      result: log(1 - exp(x)) computed stably via branch selection.
 
     References:
       Machler (2012), "Accurately computing log(1 - exp(-|a|))"
@@ -174,10 +174,10 @@ def logerfc(x: Tensorable) -> Tensor:
       log(erfc(x)) = log(erfcx(x)) - x².
 
     Args:
-      x: X.
+      x: Input tensor or array-like.
 
     Returns:
-      result: The Tensor.
+      result: log(erfc(x)) computed stably via complementary error function.
 
     References:
       tfp.math.logerfc
@@ -243,7 +243,7 @@ def softplus_inverse(x: Tensorable) -> Tensor:
 
 
     Returns:
-      result: The Tensor.
+      result: log(expm1(x)) for the inverse of softplus.
 
     References:
       tfp.math.softplus_inverse
@@ -264,10 +264,10 @@ def log1psquare(x: Tensorable) -> Tensor:
     For large |x| (where x² overflows), uses 2*log(|x|).
 
     Args:
-      x: X.
+      x: Input tensor or array-like.
 
     Returns:
-      result: The Tensor.
+      result: log(1 + x²) stable for all magnitudes.
 
     References:
       tfp.math.log1psquare
@@ -822,8 +822,8 @@ def custom_grad(*, actual: Tensor, phantom: Tensor) -> Tensor:
     Adapted from ``tfp.math.custom_grad`` (tensorflow/probability).
 
     Args:
-      actual: Actual.
-      phantom: Phantom.
+      actual: Output in forward pass.
+      phantom: Gradient path in backward pass.
 
     Returns:
       result: actual.detach() + (phantom - phantom.detach()).
@@ -841,11 +841,11 @@ def ste_round(x: Tensorable, scale: Tensorable = 1.0) -> Tensor:
     the identity function.
 
     Args:
-      x: X.
-      scale: Scale.
+      x: Input tensor or array-like.
+      scale: Quantization divisor; default 1.0 rounds to integers.
 
     Returns:
-      result: The Tensor.
+      result: Rounded output with identity gradient.
 
     References:
       Bengio et al. 2013, "Estimating or Propagating Gradients Through
@@ -868,12 +868,12 @@ def ste_clamp(
     the identity function.
 
     Args:
-      input: Input.
-      min: Min.
-      max: Max.
+      input: Input tensor or array-like.
+      min: Minimum boundary, or None for unbounded below.
+      max: Maximum boundary, or None for unbounded above.
 
     Returns:
-      result: The Tensor.
+      result: Clamped output with identity gradient.
 
     References:
       Bengio et al. 2013, "Estimating or Propagating Gradients Through
@@ -893,7 +893,7 @@ def safe_log(input: Tensorable) -> Tensor:
     Adapted from tensorflow/probability.
 
     Args:
-      input: Input.
+      input: Input tensor or array-like, any sign.
 
     Returns:
       result: log(input) where input > 0, -inf for non-positive input, NaN
@@ -922,8 +922,8 @@ def safe_xlogy(
     Adapted from tensorflow/probability.
 
     Args:
-      input: Input.
-      other: Other.
+      input: Multiplicand; 0 triggers the 0*-inf = 0 special case.
+      other: Argument to logarithm.
 
     Returns:
       result: x * log(y), with 0 where x == 0.
@@ -940,7 +940,7 @@ def safe_sqrt(input: Tensorable) -> Tensor:
     Adapted from tensorflow/probability.
 
     Args:
-      input: Input.
+      input: Input tensor or array-like, any sign.
 
     Returns:
       result: sqrt(input) where input > 0, 0 for non-positive input, NaN where
@@ -975,7 +975,7 @@ def safe_rsqrt(input: Tensorable) -> Tensor:
     finite (the double-where keeps the autograd branch on a clamped operand).
 
     Args:
-      input: Input.
+      input: Input tensor or array-like, any sign.
 
     Returns:
       result: ``rsqrt(input)`` for ``input > 0``; ``+inf`` at ``0``; ``0`` for
@@ -1008,8 +1008,8 @@ def safe_pow(base: Tensorable, exponent: Tensorable) -> Tensor:
       rather than being laundered into the fallback.
 
     Args:
-      base: Base.
-      exponent: Exponent.
+      base: Base tensor or array-like, any sign.
+      exponent: Exponent tensor or array-like.
 
     Returns:
       result: ``base ** exponent`` on the positive domain; ``1`` for ``0 ** 0``;

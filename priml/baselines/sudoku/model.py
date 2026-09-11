@@ -149,20 +149,7 @@ class Recurrence(Protocol):
         *,
         collect_intermediates: bool,
     ) -> ForwardOutput:
-        """Run the core to completion for one forward pass.
-
-        Args:
-          core: Core.
-          input_emb: Input emb.
-          z_slow: Z slow.
-          z_fast: Z fast.
-          cos_sin: Cos sin.
-          collect_intermediates: Collect intermediates.
-
-        Returns:
-          result: The ForwardOutput.
-
-        """
+        """Run the core to completion for one forward pass."""
         ...
 
 
@@ -398,15 +385,7 @@ class SudokuNet(nn.Module):
         return self._dummy.device
 
     def init_latents(self, batch_size: int) -> tuple[Tensor, Tensor]:
-        """Return the initial ``(z_slow, z_fast)`` for a batch.
-
-        Args:
-          batch_size: Batch size.
-
-        Returns:
-          result: The tuple[Tensor, Tensor].
-
-        """
+        """Return the initial ``(z_slow, z_fast)`` for a batch."""
         s = self.config.total_seq_len
         z_slow = self.slow_init[0].expand(batch_size, s, -1).contiguous()
         z_fast = self.fast_init[0].expand(batch_size, s, -1).contiguous()

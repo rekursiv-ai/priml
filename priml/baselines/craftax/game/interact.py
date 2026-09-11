@@ -68,30 +68,12 @@ def interact(
 
 
 def item_at(state: EnvState, position: Tensor) -> Tensor:
-    """Return the item lying on ``position`` of the player's floor, ``[envs]``.
-
-    Args:
-      state: State.
-      position: Position.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Return the item lying on ``position`` of the player's floor, ``[envs]``."""
     return gather_tiles(mechanics.current_items(state), position)
 
 
 def is_ladder(item: Tensor, kind: ItemType) -> Tensor:
-    """Whether ``item`` is the named ladder.
-
-    Args:
-      item: Item.
-      kind: Kind.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Whether ``item`` is the named ladder."""
     return item == int(kind)
 
 

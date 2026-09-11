@@ -86,7 +86,7 @@ def main() -> int:
     """Run the program; return the process exit code.
 
     Returns:
-      result: The int.
+      exit_code: 0 on successful training run.
 
     """
     t0 = time.perf_counter()

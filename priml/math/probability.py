@@ -24,9 +24,9 @@ def pdf_normal(
     """PDF of a normal distribution.
 
     Args:
-      x: X.
-      loc: Loc.
-      scale: Scale.
+      x: Sample value at which to evaluate the density.
+      loc: Mean of the distribution.
+      scale: Standard deviation of the distribution.
 
     Returns:
       pdf: Probability density at x.
@@ -45,9 +45,9 @@ def cdf_normal(
     """CDF of a normal distribution.
 
     Args:
-      x: X.
-      loc: Loc.
-      scale: Scale.
+      x: Sample value at which to evaluate the CDF.
+      loc: Mean of the distribution.
+      scale: Standard deviation of the distribution.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -67,9 +67,9 @@ def quantile_normal(
     """Quantile function ("inverse CDF") of a normal distribution.
 
     Args:
-      p: P.
-      loc: Loc.
-      scale: Scale.
+      p: Cumulative probability in [0, 1].
+      loc: Mean of the distribution.
+      scale: Standard deviation of the distribution.
 
     Returns:
       quantile: Value at which CDF equals p.
@@ -87,9 +87,9 @@ def pdf_uniform(
     """PDF of a uniform distribution.
 
     Args:
-      x: X.
-      low: Low.
-      high: High.
+      x: Sample value at which to evaluate the density.
+      low: Lower bound of the support.
+      high: Upper bound of the support.
 
     Returns:
       pdf: Probability density at x.
@@ -111,9 +111,9 @@ def cdf_uniform(
     """CDF of a uniform distribution.
 
     Args:
-      x: X.
-      low: Low.
-      high: High.
+      x: Sample value at which to evaluate the CDF.
+      low: Lower bound of the support.
+      high: Upper bound of the support.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -136,9 +136,9 @@ def quantile_uniform(
     """Quantile function of a uniform distribution.
 
     Args:
-      p: P.
-      low: Low.
-      high: High.
+      p: Cumulative probability in [0, 1].
+      low: Lower bound of the support.
+      high: Upper bound of the support.
 
     Returns:
       quantile: Value at which CDF equals p.
@@ -158,9 +158,9 @@ def pdf_logit_normal(
     """PDF of a logit-normal distribution.
 
     Args:
-      x: X.
-      loc: Loc.
-      scale: Scale.
+      x: Sample value in (0, 1) at which to evaluate the density.
+      loc: Mean of the underlying normal distribution.
+      scale: Standard deviation of the underlying normal distribution.
 
     Returns:
       pdf: Probability density at x.
@@ -179,9 +179,9 @@ def cdf_logit_normal(
     """CDF of a logit-normal distribution.
 
     Args:
-      x: X.
-      loc: Loc.
-      scale: Scale.
+      x: Sample value in (0, 1) at which to evaluate the CDF.
+      loc: Mean of the underlying normal distribution.
+      scale: Standard deviation of the underlying normal distribution.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -200,9 +200,9 @@ def quantile_logit_normal(
     """Quantile function of a logit-normal distribution.
 
     Args:
-      x: X.
-      loc: Loc.
-      scale: Scale.
+      x: Cumulative probability in (0, 1).
+      loc: Mean of the underlying normal distribution.
+      scale: Standard deviation of the underlying normal distribution.
 
     Returns:
       quantile: Value at which CDF equals p.
@@ -224,11 +224,11 @@ def cdf_truncated_normal(
     """CDF of a truncated normal distribution.
 
     Args:
-      x: X.
-      loc: Loc.
-      scale: Scale.
-      low: Low.
-      high: High.
+      x: Sample value at which to evaluate the CDF.
+      loc: Mean of the underlying normal distribution.
+      scale: Standard deviation of the underlying normal distribution.
+      low: Lower truncation bound.
+      high: Upper truncation bound.
 
     Returns:
       cdf: Cumulative probability at x.
@@ -309,11 +309,11 @@ def quantile_truncated_normal(
       tensorflow_probability/python/distributions/truncated_normal.py::_quantile
 
     Args:
-      p: P.
-      loc: Loc.
-      scale: Scale.
-      low: Low.
-      high: High.
+      p: Cumulative probability in [0, 1].
+      loc: Mean of the underlying normal distribution.
+      scale: Standard deviation of the underlying normal distribution.
+      low: Lower truncation bound.
+      high: Upper truncation bound.
 
     Returns:
       quantile: Value at which CDF equals p.
@@ -366,8 +366,8 @@ def cdf_logit_distribution(
     """CDF of Y = sigmoid(X), given CDF of X.
 
     Args:
-      x: X.
-      base_cdf: Base cdf.
+      x: Sample value in (0, 1) at which to evaluate the CDF.
+      base_cdf: CDF of the underlying distribution.
 
     Returns:
       cdf: base_cdf(logit(x)).
@@ -389,8 +389,8 @@ def quantile_logit_distribution(
     """Quantile function of Y = sigmoid(X), given quantile of X.
 
     Args:
-      x: X.
-      base_quantile: Base quantile.
+      x: Cumulative probability in (0, 1).
+      base_quantile: Quantile function of the underlying distribution.
 
     Returns:
       quantile: sigmoid(base_quantile(x)).
@@ -414,12 +414,12 @@ def random_student_t(
       tensorflow_probability/python/distributions/student_t.py::sample_n
 
     Args:
-      df: Df.
-      loc: Loc.
-      scale: Scale.
-      dtype: Dtype.
-      device: Device.
-      *samples_size: Samples size.
+      df: Degrees of freedom (shape parameter).
+      loc: Location shift.
+      scale: Scale factor.
+      dtype: Output tensor data type.
+      device: Output tensor device.
+      *samples_size: Shape of the sample batch.
 
     Returns:
       samples: Tensor of shape (*samples_size, *params_size).
@@ -452,10 +452,10 @@ def random_chi2(
     """Sample from chi-squared distribution. Non-differentiable wrt df.
 
     Args:
-      df: Df.
-      dtype: Dtype.
-      device: Device.
-      *samples_size: Samples size.
+      df: Degrees of freedom (shape parameter).
+      dtype: Output tensor data type.
+      device: Output tensor device.
+      *samples_size: Shape of the sample batch.
 
     Returns:
       samples: Tensor of shape (*samples_size, *df.shape).
@@ -481,11 +481,11 @@ def random_gamma(
     """Sample from Gamma(concentration, rate). Non-differentiable wrt concentration.
 
     Args:
-      concentration: Concentration.
-      rate: Rate.
-      dtype: Dtype.
-      device: Device.
-      *samples_size: Samples size.
+      concentration: Shape parameter α > 0.
+      rate: Rate parameter β > 0 (inverse scale).
+      dtype: Output tensor data type.
+      device: Output tensor device.
+      *samples_size: Shape of the sample batch.
 
     Returns:
       samples: Tensor of shape (*samples_size, *params_size).
@@ -569,11 +569,11 @@ def random_logit_normal(
     """Sample from a logit-normal distribution.
 
     Args:
-      loc: Loc.
-      scale: Scale.
-      dtype: Dtype.
-      device: Device.
-      *samples_size: Samples size.
+      loc: Mean of the underlying normal distribution.
+      scale: Standard deviation of the underlying normal distribution.
+      dtype: Output tensor data type.
+      device: Output tensor device.
+      *samples_size: Shape of the sample batch.
 
     Returns:
       samples: Tensor in (0, 1) of shape (*samples_size, *params_size).
@@ -601,7 +601,7 @@ def ndtr(x: Tensorable) -> Tensor:
       tensorflow_probability/python/internal/special_math.py::ndtr
 
     Args:
-      x: X.
+      x: Sample value at which to evaluate the standard normal CDF.
 
     Returns:
       ndtr: Φ(x) = 0.5 (1 + erf(x / √2)).
@@ -629,7 +629,7 @@ def ndtri(p: Tensorable) -> Tensor:
     """Evaluate the function inverse of ndtr.
 
     Args:
-      p: P.
+      p: Cumulative probability in (0, 1).
 
     Returns:
       x: Value such that ndtr(x) = p.
@@ -654,10 +654,10 @@ def log_gamma_correction(x: Tensorable) -> Tensor:
     Uses a rational minimax approximation (DiDonato & Morris 1988).
 
     Args:
-      x: X.
+      x: Input value at least 8.
 
     Returns:
-      result: The Tensor.
+      correction: Stirling approximation error for lgamma(x).
 
     References:
       DiDonato & Morris, "Significant Digit Computation of the
@@ -695,11 +695,11 @@ def log_gamma_difference(x: Tensorable, y: Tensorable) -> Tensor:
     the small correction terms.
 
     Args:
-      x: X.
-      y: Y.
+      x: First argument to the difference.
+      y: Second argument; must be >= 8 for the analytical cancellation.
 
     Returns:
-      result: The Tensor.
+      result: Log-space difference lgamma(y) - lgamma(x + y).
 
     References:
       DiDonato & Morris, "Significant Digit Computation of the
@@ -722,11 +722,11 @@ def lbeta(x: Tensorable, y: Tensorable) -> Tensor:
     to cancel the large terms analytically.
 
     Args:
-      x: X.
-      y: Y.
+      x: First argument.
+      y: Second argument.
 
     Returns:
-      result: The Tensor.
+      log_beta: log Beta(x, y) = lgamma(x) + lgamma(y) - lgamma(x + y).
 
     References:
       DiDonato & Morris, "Significant Digit Computation of the

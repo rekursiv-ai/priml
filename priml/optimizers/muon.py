@@ -31,17 +31,7 @@ value on device rather than forcing a GPU->CPU sync mid-step.
 
 
 def adjust_lr_original(lr: float, param: Tensor, ensemble_dims: int = 0) -> float:
-    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``.
-
-    Args:
-      lr: Lr.
-      param: Param.
-      ensemble_dims: Ensemble dims.
-
-    Returns:
-      result: The float.
-
-    """
+    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``."""
     c_out, c_in = _shape(param, ensemble_dims)
     return lr * float(max(1, c_out / c_in) ** 0.5)
 
@@ -56,12 +46,12 @@ def adjust_lr_match_rms_adamw(
     Lets a recipe reuse an AdamW-tuned learning rate unchanged.
 
     Args:
-      lr: Lr.
-      param: Param.
-      ensemble_dims: Ensemble dims.
+      lr: Base learning rate to scale.
+      param: Parameter tensor whose shape determines the scaling factor.
+      ensemble_dims: Trailing axes to fold away (0 = no ensemble axes).
 
     Returns:
-      result: The float.
+      result: Scaled learning rate matching AdamW's update norm.
 
     """
     c_out, c_in = _shape(param, ensemble_dims)
@@ -79,12 +69,12 @@ def adjust_lr_conv_heuristic(
     here would synchronize the device on every parameter of every step.
 
     Args:
-      lr: Lr.
-      param: Param.
-      ensemble_dims: Ensemble dims.
+      lr: Base learning rate to scale.
+      param: Parameter tensor whose norm determines scaling.
+      ensemble_dims: Trailing axes to fold away (0 = no ensemble axes).
 
     Returns:
-      result: The Tensor.
+      result: Scaled LR as 0-dim tensor on param's device (avoids sync).
 
     """
     c_out, _ = _shape(param, ensemble_dims)

@@ -178,10 +178,10 @@ class Qwen3(Transformer):
             """Parse an HF ``config.json`` dict. Validates model_type.
 
             Args:
-              config: Config.
+              config: HF config.json dict (must have model_type='qwen3').
 
             Returns:
-              result: The Self.
+              result: Loop Qwen3.Config parsed from HF schema.
 
             """
             model_type = config.get("model_type")
@@ -315,7 +315,7 @@ class Qwen3(Transformer):
           dtype: Override the dtype recorded in ``config.json``.
 
         Returns:
-          model: The Qwen3.
+          model: Qwen3 instance with loaded weights on target device.
 
         """
         hf_config, hf_sd = _load_hf_checkpoint(path_or_repo, dtype=dtype)
@@ -340,11 +340,11 @@ def remap_hf_state_dict(
     Pure transform -- no device moves, no dtype changes.
 
     Args:
-      hf_sd: Hf sd.
-      config: Config.
+      hf_sd: HuggingFace state_dict from HF Qwen3 checkpoint.
+      config: Loop Qwen3 config with channel/layer dimensions.
 
     Returns:
-      out: The dict[str, Tensor].
+      out: State dict with loop parameter names.
 
     """
     h = config.channels_in

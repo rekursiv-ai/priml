@@ -92,7 +92,7 @@ def exp000() -> Cifar10TrainLoop:
       bar any additional mechanism must clear to earn its complexity.
 
     Returns:
-      cfg: The Cifar10TrainLoop.
+      cfg: Cifar10 training loop configured with baseline recipe.
 
     References:
       https://arxiv.org/abs/1603.05027
@@ -136,7 +136,7 @@ def exp001() -> Cifar10TrainLoop:
       architecture because reaching accuracy quickly is the claim.
 
     Returns:
-      cfg: The Cifar10TrainLoop.
+      cfg: Cifar10 training loop configured with SpeedNet architecture.
 
     References:
       https://github.com/KellerJordan/cifar10-airbench
@@ -166,7 +166,7 @@ def exp002() -> Cifar10TrainLoop:
       prescribes, so the two travel together as one change.
 
     Returns:
-      cfg: The Cifar10TrainLoop.
+      cfg: Cifar10 training loop with Muon optimizer on convolutions.
 
     References:
       https://kellerjordan.github.io/posts/muon/
@@ -218,7 +218,7 @@ def exp003() -> Cifar10TrainLoop:
       time alone.
 
     Returns:
-      cfg: The Cifar10TrainLoop.
+      cfg: Cifar10 training loop with test-time augmentation enabled.
 
     References:
       https://arxiv.org/abs/1409.4842
@@ -245,7 +245,7 @@ def exp004() -> Cifar10TrainLoop:
       chain rather than on exp000.
 
     Returns:
-      cfg: The Cifar10TrainLoop.
+      cfg: Cifar10 training loop with Dirac initialization.
 
     References:
       https://arxiv.org/abs/1511.06856
@@ -272,7 +272,7 @@ def exp_smoke() -> Cifar10TrainLoop:
     in seconds. Accuracy will be poor, which is expected.
 
     Returns:
-      cfg: The Cifar10TrainLoop.
+      cfg: Minimal Cifar10 training loop for sanity tests.
 
     """
     cfg = exp000()

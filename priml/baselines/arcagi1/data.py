@@ -113,12 +113,7 @@ class _ArcBatches:
         return sum(1 for _ in self._plan_sampled(pass_index))
 
     def state_dict(self) -> dict[str, Any]:
-        """Return enough state to resume an unfinished sampled pass.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Return enough state to resume an unfinished sampled pass."""
         return {
             "passes": self.passes,
             "active_pass": self._active_pass,
@@ -126,12 +121,7 @@ class _ArcBatches:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore an unfinished sampled pass.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore an unfinished sampled pass."""
         self.passes = int(state_dict.get("passes", self.passes))
         active_pass = state_dict.get("active_pass")
         self._active_pass = None if active_pass is None else int(active_pass)
@@ -352,7 +342,7 @@ class ArcData:
         """Build the re-iterable training stream.
 
         Returns:
-          stream: The _ArcBatches.
+          stream: _ArcBatches for training (continues prior pass on recreate).
 
         """
         # Snapshot any prior stream's counter first, so re-creating the loader
@@ -382,7 +372,7 @@ class ArcData:
         them -- sampling here would discard the ballots.
 
         Returns:
-          result: The _ArcBatches.
+          result: _ArcBatches for evaluation (exhaustive, non-sampled).
 
         """
         return _ArcBatches(
@@ -400,7 +390,7 @@ class ArcData:
         """Snapshot the sampled pass and its next batch.
 
         Returns:
-          result: The dict[str, Any].
+          result: Dict with passes, loader state, and epoch timer.
 
         """
         loader_state = (
@@ -418,7 +408,7 @@ class ArcData:
         """Restore state produced by :meth:`state_dict`.
 
         Args:
-          state_dict: State dict.
+          state_dict: Dict from state_dict() to restore from.
 
         """
         if "passes" in state_dict:

@@ -45,13 +45,9 @@ class CraftaxStep:
     """
 
     observation: Tensor
-
     reward: Tensor
-
     done: Tensor
-
     info: dict[str, Tensor]
-
     terminal_state: EnvState
 
 
@@ -227,12 +223,7 @@ class CraftaxEnv:
         return state.select(done, fresh)
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the world and its generator, for checkpointing.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Return the world and its generator, for checkpointing."""
         return {
             "generator": self._generator.get_state(),
             "num_envs": self._num_envs,
@@ -243,7 +234,7 @@ class CraftaxEnv:
         """Restore a world saved by :meth:`state_dict`.
 
         Args:
-          state_dict: State dict.
+          state_dict: State from :meth:`state_dict` with generator, env state.
 
         """
         generator_state = state_dict["generator"]

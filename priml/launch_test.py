@@ -35,7 +35,6 @@ class ChildJob:
 
     class Config(Fig["ChildJob"]):
         lr: float = 1e-3
-
         steps: int = 10
 
     def __init__(self, config: Config):
@@ -51,9 +50,7 @@ class NestedJob:
 
     class Config(Fig["NestedJob"]):
         name: str = ""
-
         enabled: bool = False
-
         child: ChildJob.Config = field(default_factory=ChildJob.Config)
 
     def __init__(self, config: Config):
@@ -197,7 +194,6 @@ class _CapturingJob:
 
     class Config(Fig["_CapturingJob"]):
         name: str = ""
-
         child: ChildJob.Config = field(default_factory=ChildJob.Config)
 
     def __init__(self, config: Config):
@@ -221,13 +217,9 @@ class _LaunchableJob:
 
     class Config(Fig["_LaunchableJob"]):
         study_name: str = ""
-
         experiment_name: str = ""
-
         base_dir: Path | str | None = Path("/scratch")
-
         working_dir: Path | str = "/runs/{study_name}/{experiment_name}"
-
         doc: str = ""
 
         @override

@@ -681,7 +681,7 @@ class NanoChatData:
         reference produces there.
 
         Returns:
-          result: The _PackedStream.
+          stream: Packed training data stream, infinite unless externally limited.
 
         """
         self._live = _PackedStream(
@@ -705,7 +705,7 @@ class NanoChatData:
         the shard each time and report the difference as progress.
 
         Returns:
-          result: The _PackedStream.
+          stream: Packed eval data stream, finite length per config.
 
         """
         return _PackedStream(
@@ -721,12 +721,7 @@ class NanoChatData:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Snapshot how far the training stream has advanced.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Snapshot how far the training stream has advanced."""
         return {
             "batches": self._live.served if self._live is not None else 0,
             "timer_epoch": self.timer_epoch.state_dict(),
@@ -742,10 +737,10 @@ class NanoChatData:
         checkpoint left them.
 
         Args:
-          state_dict: State dict.
+          state_dict: Checkpoint state; raises if any batches were served.
 
         Raises:
-          ValueError: The checkpoint had advanced the stream.
+          ValueError: The checkpoint had advanced the stream beyond zero.
 
         """
         served = int(state_dict.get("batches", 0))

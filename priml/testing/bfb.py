@@ -142,9 +142,7 @@ class _TorchProcessState:
     """Process-global Torch state temporarily changed by a BFB assertion."""
 
     algorithms_enabled: bool
-
     warn_only_enabled: bool
-
     rng_state: Tensor
 
 
@@ -271,7 +269,7 @@ def host_agnostic_numerics() -> Generator[None]:
     ``priml/model/transformer/qwen3_hf_test.py``.
 
     Yields:
-      item: Each yielded value.
+      item: Nothing; used as a context manager for computation.
 
     """
     with sdpa_kernel(SDPBackend.MATH), _Float64Compute():
@@ -1003,13 +1001,9 @@ class _Golden(TypedDict):
     """
 
     state_dict: dict[str, Tensor]
-
     input: object
-
     output: Tensor
-
     seed: int
-
     post_state_dict: NotRequired[dict[str, Tensor]]
 
 

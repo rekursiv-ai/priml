@@ -20,11 +20,8 @@ from priml.loss.policy_gradient import (
 
 class _TermsOverrides(TypedDict, total=False):
     log_probs: Tensor
-
     behavior_log_probs: Tensor
-
     advantages: Tensor
-
     values: Tensor
 
 

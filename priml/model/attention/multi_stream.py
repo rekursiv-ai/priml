@@ -348,17 +348,17 @@ class MultiStreamAttention(nn.Module):
         """Attend jointly using and updating per-stream caches.
 
         Args:
-          xs: Xs.
-          cache: Cache.
-          positions: Positions.
-          cos_sin: Cos sin.
-          dropout_p: Dropout p.
-          is_causal: Is causal.
-          attn_mask: Attn mask.
-          **kwargs: Kwargs.
+          xs: Input tensors, one per stream.
+          cache: Per-stream KVCache or None for prefill.
+          positions: Per-stream position indices.
+          cos_sin: Per-stream pre-computed sin/cos for rotary embeddings.
+          dropout_p: Attention dropout rate (None for inference).
+          is_causal: Whether to apply causal mask.
+          attn_mask: Per-stream attention mask or single mask for all.
+          **kwargs: Extra arguments forwarded to the base forward.
 
         Returns:
-          result: The tuple[tuple[Tensor, ...], list[KVCache]].
+          result: Tuple of per-stream outputs and updated KVCaches.
 
         """
         outputs, updated = self._forward(

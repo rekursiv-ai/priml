@@ -298,12 +298,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         @property
         def channels_qk_head(self) -> int:
-            """Channels qk head.
-
-            Returns:
-              result: The int.
-
-            """
+            """Channels qk head."""
             return self.channels_qk_nope_head + self.channels_qk_rope_head
 
         @property
@@ -478,13 +473,13 @@ class MultiHeadLatentAttention(nn.Module):
         single "head" axis of size 1 (the latent is head-shared).
 
         Args:
-          batch: Batch.
-          max_seq: Max seq.
-          device: Device.
-          dtype: Dtype.
+          batch: Batch size or shape tuple (supports dynamic batch).
+          max_seq: Maximum sequence length to allocate storage for.
+          device: Torch device (cuda/cpu); defaults to model device.
+          dtype: Tensor dtype; defaults to model dtype.
 
         Returns:
-          result: The KVCache.
+          cache: Allocated KVCache with k:[batch, 1, max_seq, kv_lora_rank].
 
         """
         return KVCache.alloc(
@@ -539,18 +534,19 @@ class MultiHeadLatentAttention(nn.Module):
         """Attend using and updating the compressed latent cache.
 
         Args:
-          x: X.
-          cache: Cache.
-          positions: Positions.
-          cos_sin: Cos sin.
-          scale: Scale.
-          is_causal: Is causal.
-          dropout_p: Dropout p.
-          attn_mask: Attn mask.
-          **kwargs: Kwargs.
+          x: Input tokens; [batch, seq, hidden].
+          cache: KVCache to update with new compressed latents.
+          positions: Token positions for RoPE; inferred from cache.seen.
+          cos_sin: Precomputed RoPE (cos, sin); recomputed if None.
+          scale: Attention softmax scale (Q·K^T multiplier).
+          is_causal: Apply causal mask; uses config default if None.
+          dropout_p: Attention dropout probability (0 at eval).
+          attn_mask: Optional custom attention mask.
+          **kwargs: Passed to the attention kernel.
 
         Returns:
-          result: The tuple[Tensor, KVCache].
+          output: Attention output; [batch, seq, hidden].
+          updated_cache: Updated KVCache with new seq appended.
 
         """
         out, updated = self._forward(
@@ -725,7 +721,7 @@ class MultiHeadLatentAttention(nn.Module):
         bug, not merely wasteful.
 
         Returns:
-          result: The ParallelStyle.
+          style: Custom _MLAParallel instance for head-dim sharding.
 
         Raises:
           ValueError: If ``tp`` does not divide ``num_heads`` (the per-rank head

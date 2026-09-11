@@ -104,11 +104,11 @@ def causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     tokens in the same chunk.
 
     Args:
-      q: Q.
-      k: K.
+      q: Query tensor shape [..., query_len, ...].
+      k: Key/cache tensor shape [..., cache_len, ...].
 
     Returns:
-      result: The Tensor | None.
+      result: Additive mask [query_len, cache_len] or None if lengths match.
 
     """
     s, t = q.shape[-3], k.shape[-3]

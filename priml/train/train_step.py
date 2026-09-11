@@ -586,10 +586,11 @@ class TrainStep:
         """Move every tensor in the batch to this step's device.
 
         Args:
-          batch: Batch.
+          batch: Input batch with tensor and non-tensor fields.
 
         Returns:
-          result: The dict[str, Any].
+          batch: Same dict with every tensor moved to self.device
+            (non-blocking on CUDA).
 
         """
         non_blocking = self.device.type == "cuda"
@@ -608,10 +609,12 @@ class TrainStep:
         and the update overrides this and drives :meth:`step` itself.
 
         Args:
-          **preprocessed_batch: Preprocessed batch data as kwargs.
+          **preprocessed_batch: Batch tensors (e.g. input, target) moved to
+            device.
 
         Returns:
-          result: The TrainStepOutput.
+          output: Dict with "loss" (per-element unreduced tensor), "model"
+            (forward output), and any extra loss dict entries.
 
         """
         # Forward (autocast applied in __call__). The output may be a single
@@ -677,10 +680,12 @@ class TrainStep:
         """Compute loss in train mode (no backprop).
 
         Args:
-          **preprocessed_batch: Preprocessed batch data as kwargs.
+          **preprocessed_batch: Batch tensors (e.g. input, target) moved to
+            device.
 
         Returns:
-          result: The TrainStepOutput.
+          output: Dict with "loss" (per-element unreduced tensor), "model"
+            (forward output), and any extra loss dict entries.
 
         """
         # Forward (train mode + autocast via __call__)
@@ -695,10 +700,12 @@ class TrainStep:
         """Compute loss in eval mode (uses EMA if available).
 
         Args:
-          **preprocessed_batch: Preprocessed batch data as kwargs.
+          **preprocessed_batch: Batch tensors (e.g. input, target) moved to
+            device.
 
         Returns:
-          result: The TrainStepOutput.
+          output: Dict with "loss" (per-element unreduced tensor), "model"
+            (forward output), and any extra loss dict entries.
 
         """
         # Forward (eval mode + autocast via call_eval)
@@ -746,7 +753,9 @@ class TrainStep:
         holds.
 
         Returns:
-          result: The dict[str, Any].
+          state: Dict with "model", "optimizer", "timer_forward",
+            "timer_eval", "timer_step", "ema", "accumulation_steps",
+            "accumulated_samples".
 
         """
         return {
@@ -780,10 +789,13 @@ class TrainStep:
         so a pending accumulation cannot be resumed.
 
         Args:
-          state_dict: State dict.
-          strict: Strict.
-          load_optimizer: Load optimizer.
-          remap: Remap.
+          state_dict: Checkpoint dict (output of state_dict).
+          strict: If True, require exact key match with model and abort if
+            keys differ; if False, load subset (for finetuning).
+          load_optimizer: If True, restore optimizer and EMA; if False, skip
+            (for changed architecture).
+          remap: Optional function to transform model dict before load
+            (e.g., remove a prefix).
 
         """
         model_state = state_dict["model"]

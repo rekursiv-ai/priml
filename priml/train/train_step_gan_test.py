@@ -23,7 +23,6 @@ class SimpleGenerator(nn.Module):
 
     class Config(Fig["SimpleGenerator"], make_with_kwargs=True):
         latent_dim: int = -1
-
         image_size: int = -1
 
     def __init__(self, latent_dim: int, image_size: int):

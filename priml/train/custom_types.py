@@ -77,11 +77,8 @@ class TrainStepOutput(TypedDict):
     """
 
     loss: Tensor
-
     model: Tensor
-
     metrics: NotRequired[dict[str, float | Tensor]]
-
     eval_extra_votes: NotRequired[list[tuple[Tensor, dict[str, Any]]]]
 
 
@@ -222,9 +219,7 @@ class EMAProtocol(CheckpointableProtocol, Protocol):
     """
 
     shadow_model: nn.Module | None
-
     global_step: int
-
     local_step: int
 
     def __call__(self, model: nn.Module) -> None:
@@ -259,26 +254,11 @@ class CheckpointingProtocol(Protocol):
     """
 
     def maybe_save(self, target: CheckpointableProtocol, step: int) -> bool:
-        """Save ``target`` at ``step`` iff on the save cadence; return whether saved.
-
-        Args:
-          target: Target.
-          step: Step.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Save ``target`` at ``step`` iff on the save cadence; return whether saved."""
         ...
 
     def save(self, target: CheckpointableProtocol, step: int) -> None:
-        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists.
-
-        Args:
-          target: Target.
-          step: Step.
-
-        """
+        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists."""
         ...
 
     def load(
@@ -295,23 +275,18 @@ class CheckpointingProtocol(Protocol):
         nothing). ``max_steps`` bounds the guard's collision prediction.
 
         Args:
-          target: Target.
-          max_steps: Max steps.
-          guard: Guard.
+          target: Stateful object to load checkpoint into.
+          max_steps: Step limit for collision prediction; used for validation.
+          guard: Enable collision detection; False for eval-only runs.
 
         Returns:
-          result: The bool.
+          loaded: True if a checkpoint was found and restored.
 
         """
         ...
 
     def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics).
-
-        Returns:
-          result: The list[int].
-
-        """
+        """Ascending steps of all complete checkpoints on disk (for diagnostics)."""
         ...
 
     def close(self) -> None:
@@ -420,15 +395,7 @@ class CudaEventProtocol(Protocol):
         ...
 
     def elapsed_time(self, end_event: CudaEventProtocol) -> float:
-        """Elapsed time.
-
-        Args:
-          end_event: End event.
-
-        Returns:
-          result: The float.
-
-        """
+        """Elapsed time."""
         ...
 
 
@@ -448,49 +415,19 @@ class PhaseTimerProtocol(Protocol):
         ...
 
     def phase(self, name: str) -> AbstractContextManager[None]:
-        """Phase.
-
-        Args:
-          name: Name.
-
-        Returns:
-          result: The AbstractContextManager[None].
-
-        """
+        """Phase."""
         ...
 
     def measure(self, name: str) -> AbstractContextManager[None]:
-        """Measure.
-
-        Args:
-          name: Name.
-
-        Returns:
-          result: The AbstractContextManager[None].
-
-        """
+        """Measure."""
         ...
 
     def measure_cuda(self, name: str) -> AbstractContextManager[None]:
-        """Measure cuda.
-
-        Args:
-          name: Name.
-
-        Returns:
-          result: The AbstractContextManager[None].
-
-        """
+        """Measure cuda."""
         ...
 
     def record(self, name: str, elapsed: float) -> None:
-        """Record one timing sample.
-
-        Args:
-          name: Name.
-          elapsed: Elapsed.
-
-        """
+        """Record one timing sample."""
         ...
 
     def record_cuda_events(
@@ -499,23 +436,11 @@ class PhaseTimerProtocol(Protocol):
         start: CudaEventProtocol,
         end: CudaEventProtocol,
     ) -> None:
-        """Record cuda events.
-
-        Args:
-          name: Name.
-          start: Start.
-          end: End.
-
-        """
+        """Record cuda events."""
         ...
 
     def summary(self) -> dict[str, float]:
-        """Summarize recorded timings.
-
-        Returns:
-          result: The dict[str, float].
-
-        """
+        """Summarize recorded timings."""
         ...
 
     def reset_interval(self) -> None:
@@ -528,16 +453,7 @@ class PhaseTimerProtocol(Protocol):
         *,
         step: int,
     ) -> dict[str, float]:
-        """Publish interval.
-
-        Args:
-          tracker: Tracker.
-          step: Step.
-
-        Returns:
-          result: The dict[str, float].
-
-        """
+        """Publish interval."""
         ...
 
     def publish_summary(
@@ -546,16 +462,7 @@ class PhaseTimerProtocol(Protocol):
         *,
         step: int,
     ) -> dict[str, float]:
-        """Publish summary.
-
-        Args:
-          tracker: Tracker.
-          step: Step.
-
-        Returns:
-          result: The dict[str, float].
-
-        """
+        """Publish summary."""
         ...
 
     def log_summary(self) -> None:
@@ -631,15 +538,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         ...
 
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Preprocess batch (move tensors to device, etc.).
-
-        Args:
-          batch: Batch.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Preprocess batch (move tensors to device, etc.)."""
         ...
 
     def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:
@@ -684,10 +583,10 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         EMA if available, under inference_mode and autocast.
 
         Args:
-          **preprocessed_batch: Preprocessed batch.
+          **preprocessed_batch: Batch data after dataset preprocessing.
 
         Returns:
-          output: The model's forward result.
+          output: Model predictions; schema depends on task.
 
         """
         ...
