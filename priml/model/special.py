@@ -74,7 +74,6 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         """Submodule to wrap with a residual connection."""
 
         channels_in = PassthroughAttribute[int]()
-
         channels_out = PassthroughAttribute[int]()
 
     def __init__(self, config: Config) -> None:

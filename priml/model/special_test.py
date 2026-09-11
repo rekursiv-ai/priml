@@ -235,7 +235,6 @@ class _LanguageModel(torch.nn.Module):
 
     class Config(Fig["_LanguageModel"]):
         embed: Makeable[TensorModule] = field(default_factory=Embedding.Config)
-
         head: Makeable[TensorModule] = field(default_factory=Linear.Config)
 
     def __init__(self, config: Config) -> None:

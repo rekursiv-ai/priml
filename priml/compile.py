@@ -51,8 +51,8 @@ def lazy_torch_compile(
     call, so processes that import but never invoke pay zero cost.
 
     Args:
-      *compile_args: Compile args.
-      **compile_kwargs: Compile kwargs.
+      *compile_args: Positional arguments forwarded to torch.compile().
+      **compile_kwargs: Keyword arguments forwarded to torch.compile().
 
     Returns:
       result: The lazily-compiled function when applied bare, otherwise a

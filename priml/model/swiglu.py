@@ -216,7 +216,7 @@ class SwiGLU(nn.Module):
         aligned across ranks. ``down_proj`` is row-sharded.
 
         Returns:
-          result: The ParallelStyle.
+          style: ParallelStyle for tensor parallelism across ranks.
 
         """
         if self.split_gate_projection:

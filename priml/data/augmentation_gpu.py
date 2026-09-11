@@ -12,15 +12,7 @@ import torch
 
 
 def flip_lr(images: Tensor) -> Tensor:
-    """Random horizontal flip per image (50% probability).
-
-    Args:
-      images: Images.
-
-    Returns:
-      result: The Tensor.
-
-    """
+    """Random horizontal flip per image (50% probability)."""
     mask = torch.rand(len(images), device=images.device) < 0.5
     return torch.where(mask.view(-1, 1, 1, 1), images.flip(-1), images)
 

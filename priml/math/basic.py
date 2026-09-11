@@ -57,11 +57,13 @@ def ceil_multiple(x: Tensorable, multiple: float | None) -> Tensorable:
     integer-floor representation error of the ``(x + m - 1) // m`` trick.
 
     Args:
-      x: X.
-      multiple: Multiple.
+      x: Value or tensor to round up to grid spacing.
+      multiple: Grid spacing in units of x (step size); None returns x
+        unchanged.
 
     Returns:
-      result: The Tensorable.
+      result: Tensor or number with same type as multiple, rounded up to
+        nearest grid boundary.
 
     """
     return _to_multiple(x, multiple, up=True)
@@ -84,11 +86,13 @@ def floor_multiple(x: Tensorable, multiple: float | None) -> Tensorable:
     unchanged (idempotent).
 
     Args:
-      x: X.
-      multiple: Multiple.
+      x: Value or tensor to round down to grid spacing.
+      multiple: Grid spacing in units of x (step size); None returns x
+        unchanged.
 
     Returns:
-      result: The Tensorable.
+      result: Tensor or number with same type as multiple, rounded down to
+        nearest grid boundary.
 
     """
     return _to_multiple(x, multiple, up=False)
@@ -103,11 +107,11 @@ def ceil_div(x: int, y: int) -> int:
     for every sign.
 
     Args:
-      x: X.
-      y: Y.
+      x: Numerator (any sign).
+      y: Divisor (any sign, nonzero).
 
     Returns:
-      result: The int.
+      result: ceil(x / y), exact for all sign combinations.
 
     """
     return -(-x // y)

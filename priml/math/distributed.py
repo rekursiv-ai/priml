@@ -24,10 +24,10 @@ def logsumexp_all_to_all(
     """Distributed logsumexp via all_gather + local reduction.
 
     Args:
-      x: X.
-      dim: Dim.
-      keepdim: Keepdim.
-      world_size: World size.
+      x: Local tensor to reduce.
+      dim: Dimension(s) over which to sum in log-space.
+      keepdim: If True, reduced dimensions are kept with size 1.
+      world_size: Number of ranks; if None, auto-detect from distributed setup.
 
     Returns:
       result: Global logsumexp over the specified dimensions.
@@ -45,10 +45,10 @@ def logmeanexp_all_to_all(
     """Distributed logmeanexp via all_gather + local reduction.
 
     Args:
-      x: X.
-      dim: Dim.
-      keepdim: Keepdim.
-      world_size: World size.
+      x: Local tensor to reduce.
+      dim: Dimension(s) over which to average in log-space.
+      keepdim: If True, reduced dimensions are kept with size 1.
+      world_size: Number of ranks; if None, auto-detect from distributed setup.
 
     Returns:
       result: Global logmeanexp over the specified dimensions.

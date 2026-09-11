@@ -50,16 +50,16 @@ class KVCache:
         qk_nope + qk_rope; V uses a separate channels_v_head).
 
         Args:
-          batch: Batch.
-          num_heads: Num heads.
-          max_seq: Max seq.
-          channels_head: Channels head.
-          channels_v_head: Channels v head.
-          device: Device.
-          dtype: Dtype.
+          batch: Batch size (int) or shape tuple for multi-batch dims.
+          num_heads: Number of attention heads.
+          max_seq: Maximum sequence length to allocate.
+          channels_head: K/Q channels per head (key dimension).
+          channels_v_head: V channels per head; defaults to channels_head.
+          device: torch device or device string (CPU/CUDA).
+          dtype: torch dtype (float32, bfloat16, etc).
 
         Returns:
-          result: The KVCache.
+          result: Empty KVCache with allocated tensors and length=0.
 
         """
         if isinstance(batch, int):
@@ -75,21 +75,11 @@ class KVCache:
 
     @property
     def max_seq(self) -> int:
-        """Max seq.
-
-        Returns:
-          result: The int.
-
-        """
+        """Max seq."""
         return self.k.shape[-2]
 
     def freeze(self) -> KVCache:
-        """Return a frozen snapshot (update becomes a no-op).
-
-        Returns:
-          frozen: The KVCache.
-
-        """
+        """Return a frozen snapshot (update becomes a no-op)."""
         frozen = _FrozenKVCache(self.k, self.v, self.length)
         # Preserve the monotonic total so post-freeze RoPE keeps assigning
         # correct absolute positions; the constructor reset it to ``length``.
@@ -103,11 +93,11 @@ class KVCache:
         Uses sliced copy instead of torch.roll for torch.compile compat.
 
         Args:
-          k: K.
-          v: V.
+          k: New key tensor of shape [..., seq_len, channels_head].
+          v: New value tensor of shape [..., seq_len, channels_v_head].
 
         Returns:
-          result: The tuple[Tensor, Tensor].
+          result: Tuple of (valid_k_slice, valid_v_slice) after update.
 
         """
         s = k.shape[-2]

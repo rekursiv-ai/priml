@@ -114,7 +114,7 @@ def exp000() -> CraftaxTrainLoop:
       any additional mechanism must clear to earn its complexity.
 
     Returns:
-      cfg: The CraftaxTrainLoop.
+      cfg: Configured CraftaxTrainLoop ready to train.
 
     References:
       https://github.com/MichaelTMatthews/Craftax_Baselines
@@ -183,7 +183,7 @@ def exp001() -> CraftaxTrainLoop:
       recipe-limited.
 
     Returns:
-      cfg: The CraftaxTrainLoop.
+      cfg: Configured CraftaxTrainLoop at billion-interaction scale.
 
     References:
       https://github.com/MichaelTMatthews/Craftax_Baselines
@@ -228,7 +228,7 @@ def exp002() -> CraftaxRNNTrainLoop:
       Nothing. This is the whole treatment.
 
     Returns:
-      cfg: The CraftaxRNNTrainLoop.
+      cfg: Configured CraftaxRNNTrainLoop with GRU memory layer.
 
     References:
       https://github.com/MichaelTMatthews/Craftax_Baselines
@@ -293,7 +293,7 @@ def exp003() -> CraftaxPQNTrainLoop:
       epsilon schedule are all here.
 
     Returns:
-      cfg: The CraftaxPQNTrainLoop.
+      cfg: Configured CraftaxPQNTrainLoop using Q-learning value function.
 
     References:
       https://arxiv.org/abs/2407.04811
@@ -363,7 +363,7 @@ def exp011() -> CraftaxTrainLoop:
       carried directly as ``optimistic_reset_ratio``.
 
     Returns:
-      cfg: The CraftaxTrainLoop.
+      cfg: Configured CraftaxTrainLoop at 100M-interaction screening scale.
 
     References:
       exp001.
@@ -408,7 +408,7 @@ def exp013() -> CraftaxGTrXLTrainLoop:
       this fork.
 
     Returns:
-      cfg: The CraftaxGTrXLTrainLoop.
+      cfg: Configured CraftaxGTrXLTrainLoop with transformer memory layer.
 
     References:
       https://github.com/Reytuag/transformerXL_PPO_JAX
@@ -469,7 +469,7 @@ def exp_smoke() -> CraftaxTrainLoop:
     score will be near zero, which is expected.
 
     Returns:
-      cfg: The CraftaxTrainLoop.
+      cfg: Minimal CraftaxTrainLoop for smoke testing (4 steps total).
 
     """
     cfg = exp000()

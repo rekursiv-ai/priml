@@ -197,15 +197,7 @@ class LookupTable(Protocol):
         ...
 
     def to(self, *, dtype: torch.dtype) -> Self:
-        """To.
-
-        Args:
-          dtype: Dtype.
-
-        Returns:
-          result: The Self.
-
-        """
+        """To."""
         ...
 
 
@@ -281,11 +273,8 @@ class TransformerConfig(ChannelsInOutConfig, Protocol):
     """A buildable transformer architecture exposing its replaceable components."""
 
     num_layers: int
-
     in_proj: Makeable[TensorModule] | None
-
     block: TensorBlockConfig | list[TensorBlockConfig]
-
     out_proj: Makeable[TensorModule] | None
 
 
@@ -318,10 +307,10 @@ def has_weight(module: TensorModule | None) -> TypeGuard[WeightedTensorModule]:
     Runtime protocol checks use static lookup, missing registered parameters.
 
     Args:
-      module: Module.
+      module: Module to check for a weight attribute.
 
     Returns:
-      result: The TypeGuard[WeightedTensorModule].
+      guard: True if module has a weight attribute that is a Tensor.
 
     """
     return hasattr(module, "weight") and isinstance(

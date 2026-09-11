@@ -83,7 +83,7 @@ def main() -> int:
     """Prepare the dataset; return the process exit code.
 
     Returns:
-      result: The int.
+      result: Process exit code (0 on success).
 
     """
     parser = argparse.ArgumentParser(
@@ -103,12 +103,7 @@ def main() -> int:
 
 
 def default_directory() -> Path:
-    """Return the dataset directory a default ``TrainLoop`` would resolve.
-
-    Returns:
-      result: The Path.
-
-    """
+    """Return the dataset directory a default ``TrainLoop`` would resolve."""
     config = SudokuData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)

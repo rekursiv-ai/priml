@@ -238,7 +238,6 @@ class ImageShape(NamedTuple):
     """Image shape in (height, width) format."""
 
     height: int
-
     width: int
 
 
@@ -246,9 +245,7 @@ class VideoShape(NamedTuple):
     """Video shape in (frames, height, width) format."""
 
     frames: int
-
     height: int
-
     width: int
 
 
@@ -267,9 +264,7 @@ class ShapeBundle(NamedTuple):
     """
 
     latent: VideoShape
-
     pixel_train: VideoShape
-
     pixel_full: VideoShape
 
 
@@ -651,15 +646,15 @@ def decode_jpeg_turbojpeg(
     """Decode JPEG → uint8 Tensor. See ``priml.image.decode_jpeg_turbojpeg``.
 
     Args:
-      image_bytes: Image bytes.
-      turbo_jpeg: Turbo jpeg.
-      height: Height.
-      width: Width.
-      crop: Crop.
-      channels_first: Channels first.
+      image_bytes: JPEG bytes.
+      turbo_jpeg: TurboJPEG decoder instance.
+      height: Requested height (None means decode full size).
+      width: Requested width (None means decode full size).
+      crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
+      channels_first: True → (C, H, W), False → (H, W, C).
 
     Returns:
-      result: The Tensor | None.
+      tensor: uint8 image tensor, or None if decode fails.
 
     """
     return _to_tensor(
@@ -679,14 +674,14 @@ def decode_webp_libwebp(
     """Decode WebP → uint8 Tensor. See ``priml.image.decode_webp_libwebp``.
 
     Args:
-      image_bytes: Image bytes.
-      height: Height.
-      width: Width.
-      crop: Crop.
-      channels_first: Channels first.
+      image_bytes: WebP bytes.
+      height: Requested height (None means decode full size).
+      width: Requested width (None means decode full size).
+      crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
+      channels_first: True → (C, H, W), False → (H, W, C).
 
     Returns:
-      result: The Tensor | None.
+      tensor: uint8 image tensor, or None if decode fails.
 
     """
     return _to_tensor(
@@ -707,15 +702,15 @@ def decode_image_pil(
     """Decode via PIL → uint8 Tensor. See ``priml.image.decode_image_pil``.
 
     Args:
-      image_bytes: Image bytes.
-      height: Height.
-      width: Width.
-      crop: Crop.
-      channels_format: Channels format.
-      channels_first: Channels first.
+      image_bytes: Image bytes (any PIL-supported format).
+      height: Requested height (None means decode full size).
+      width: Requested width (None means decode full size).
+      crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
+      channels_format: "rgb" or "rgba" (3 or 4 channels).
+      channels_first: True → (C, H, W), False → (H, W, C).
 
     Returns:
-      result: The Tensor | None.
+      tensor: uint8 image tensor, or None if decode fails.
 
     """
     return _to_tensor(

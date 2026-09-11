@@ -40,18 +40,7 @@ class AttentionLike(Protocol):
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> KVCache:
-        """Alloc kv cache.
-
-        Args:
-          batch: Batch.
-          max_seq: Max seq.
-          device: Device.
-          dtype: Dtype.
-
-        Returns:
-          result: The KVCache.
-
-        """
+        """Alloc kv cache."""
         ...
 
 
@@ -67,16 +56,7 @@ class BlockLike(Protocol):
         *,
         cache: KVCache,
     ) -> tuple[Tensor, KVCache]:
-        """Forward cached.
-
-        Args:
-          x: X.
-          cache: Cache.
-
-        Returns:
-          result: The tuple[Tensor, KVCache].
-
-        """
+        """Forward cached."""
         ...
 
 
@@ -99,15 +79,7 @@ class TransformerLike(Protocol):
         ...
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:
-        """Project to logits.
-
-        Args:
-          hidden: Hidden.
-
-        Returns:
-          result: The Tensor.
-
-        """
+        """Project to logits."""
         ...
 
 

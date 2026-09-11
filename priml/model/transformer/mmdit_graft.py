@@ -107,7 +107,8 @@ class MMDiTGraft(nn.Module):
         existing requires_grad flags are unchanged.
 
         Args:
-          source: Source.
+          source: Pre-trained Transformer with native architecture (prenorm,
+            self-attention, no modality branches).
 
         """
         if any(
@@ -122,21 +123,11 @@ class MMDiTGraft(nn.Module):
         target.load_state_dict(source.state_dict(), strict=True)
 
     def load_backbone_state(self, state_dict: Mapping[str, Tensor]) -> None:
-        """Load native language weights keyed as a ``Transformer`` names them.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Load native language weights keyed as a ``Transformer`` names them."""
         self._backbone_view().load_state_dict(state_dict, strict=True)
 
     def freeze_backbone(self, freeze: bool = True) -> None:
-        """Freeze or unfreeze only the language stream, embedding, and head.
-
-        Args:
-          freeze: Freeze.
-
-        """
+        """Freeze or unfreeze only the language stream, embedding, and head."""
         self._backbone_view().requires_grad_(not freeze)
 
     def reset_parameters(self) -> None:

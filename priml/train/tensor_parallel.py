@@ -79,12 +79,7 @@ class TensorParallelStyleProvider(Protocol):
     """
 
     def tensor_parallel_style(self) -> ParallelStyle:
-        """Return the ``ParallelStyle`` that shards this layer over ``tp``.
-
-        Returns:
-          result: The ParallelStyle.
-
-        """
+        """Return the ``ParallelStyle`` that shards this layer over ``tp``."""
         ...
 
 

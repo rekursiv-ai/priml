@@ -51,17 +51,11 @@ class Recipe:
     """
 
     action: Action
-
     costs: dict[str, int] = field(default_factory=dict)
-
     tool: tuple[str, int] | None = None
-
     stock: tuple[str, int] | None = None
-
     needs_table: bool = True
-
     needs_furnace: bool = False
-
     achievement: Achievement | None = None
 
 

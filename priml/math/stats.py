@@ -81,10 +81,10 @@ def entropy_logits(
     """Cross-entropy H(softmax(x), softmax(y)), or entropy if y is None.
 
     Args:
-      x: X.
-      y: Y.
-      dim: Dim.
-      keepdim: Keepdim.
+      x: Logits; softmax(x) is the first distribution.
+      y: Logits for cross-entropy; if None, computes H(softmax(x)).
+      dim: Dimension(s) over which to compute softmax and sum.
+      keepdim: If True, reduced dimensions are kept with size 1.
 
     Returns:
       entropy: Scalar or reduced tensor.
@@ -109,10 +109,10 @@ def entropy_probs(
     """Cross-entropy H(p, q), or entropy H(p) if q is None.
 
     Args:
-      p: P.
-      q: Q.
-      dim: Dim.
-      keepdim: Keepdim.
+      p: Probability distribution (elements sum to 1 along dim).
+      q: Reference distribution for cross-entropy; if None, computes H(p).
+      dim: Dimension(s) over which to sum the entropy.
+      keepdim: If True, reduced dimensions are kept with size 1.
 
     Returns:
       entropy: Scalar or reduced tensor.
@@ -189,13 +189,13 @@ def entropy_logits_mean_all_to_all(
     entropy used in semi-supervised learning.
 
     Args:
-      x: X.
-      y: Y.
-      dim: Dim.
-      dim_mean: Dim mean.
-      keepdim: Keepdim.
-      keepdim_mean: Keepdim mean.
-      world_size: World size.
+      x: Logits; softmax(x) is the first distribution.
+      y: Logits for cross-entropy; if None, computes H(softmax(x)).
+      dim: Dimension(s) for softmax and final summation.
+      dim_mean: Dimensions over which to average before computing log-mean.
+      keepdim: If True, reduced dimensions in dim are kept with size 1.
+      keepdim_mean: If True, reduced dimensions in dim_mean are kept.
+      world_size: Number of ranks in the all_gather; if None, auto-detect.
 
     Returns:
       entropy: Cross-entropy of the averaged distributions.
@@ -413,13 +413,7 @@ class SlidingWindow:
         self.samples: list[tuple[float, float]] = []
 
     def add(self, timestamp: float, cumulative_count: float) -> None:
-        """Record an observation and prune expired entries.
-
-        Args:
-          timestamp: Timestamp.
-          cumulative_count: Cumulative count.
-
-        """
+        """Record an observation and prune expired entries."""
         self.samples.append((timestamp, cumulative_count))
         cutoff = timestamp - self.window_sec
         self.samples = [(t, c) for t, c in self.samples if t >= cutoff]
@@ -428,11 +422,11 @@ class SlidingWindow:
         """Compute items/sec over the window with Laplace smoothing.
 
         Args:
-          current_time: Current time.
-          current_count: Current count.
+          current_time: Timestamp in seconds.
+          current_count: Cumulative count at current_time.
 
         Returns:
-          result: The float.
+          rate: Items per second with Laplace smoothing added.
 
         """
         if len(self.samples) < 2:

@@ -367,22 +367,12 @@ class RoPE(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
-        """Dtype.
-
-        Returns:
-          result: The torch.dtype.
-
-        """
+        """Dtype."""
         return self._dtype.dtype
 
     @property
     def device(self) -> torch.device:
-        """Device.
-
-        Returns:
-          result: The torch.device.
-
-        """
+        """Device."""
         return self._dtype.device
 
     @override

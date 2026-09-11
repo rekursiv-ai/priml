@@ -30,9 +30,7 @@ type CraftaxStep = (
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Case:
     name: str
-
     build: Callable[[], CraftaxStep]
-
     fields: tuple[str, ...]
 
 

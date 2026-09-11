@@ -165,16 +165,7 @@ class Transformer(nn.Module):
                 module.reset_parameters()
 
     def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
-        """Apply the head, or return hidden states when absent.
-
-        Args:
-          hidden: Hidden.
-          **kwargs: Kwargs.
-
-        Returns:
-          result: The Tensor.
-
-        """
+        """Apply the head, or return hidden states when absent."""
         return hidden if self.out_proj is None else self.out_proj(hidden, **kwargs)
 
     @override

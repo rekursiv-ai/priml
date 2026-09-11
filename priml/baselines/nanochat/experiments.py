@@ -136,7 +136,7 @@ def exp000() -> NanoChatLoop.Config:
       rather than an artifact of the port.
 
     Returns:
-      cfg: The NanoChatLoop.Config.
+      config: NanoChatLoop configuration with reference architecture and FA3.
 
     References:
       https://github.com/karpathy/autoresearch
@@ -271,7 +271,8 @@ def exp001() -> NanoChatLoop.Config:
       TBD.
 
     Returns:
-      cfg: The NanoChatLoop.Config.
+      cfg: Baseline config with device-resolved attention kernel instead of
+            FlashAttention-3.
 
     """
     cfg = exp000()
@@ -315,7 +316,7 @@ def exp002() -> NanoChatLoop.Config:
       those extra steps buy.
 
     Returns:
-      cfg: The NanoChatLoop.Config.
+      config: NanoChatLoop configuration without value embeddings.
 
     References:
       https://arxiv.org/abs/2410.17897
@@ -345,7 +346,7 @@ def exp003() -> NanoChatLoop.Config:
       if the steps it gives up were worth more than the attention it regains.
 
     Returns:
-      cfg: The NanoChatLoop.Config.
+      config: NanoChatLoop configuration with full attention context.
 
     References:
       https://arxiv.org/abs/2004.05150
@@ -381,7 +382,7 @@ def exp_smoke() -> NanoChatLoop.Config:
     too.
 
     Returns:
-      cfg: The NanoChatLoop.Config.
+      config: NanoChatLoop configuration optimized for rapid validation.
 
     """
     cfg = exp001()

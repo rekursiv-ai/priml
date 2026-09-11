@@ -576,7 +576,6 @@ def test_namedtuple():
 
     class Point(NamedTuple):
         x: int
-
         y: int
 
     data = Point(1, 2)

@@ -31,77 +31,41 @@ class BlockType(IntEnum):
     """A tile of the world map."""
 
     INVALID = 0
-
     OUT_OF_BOUNDS = 1
-
     GRASS = 2
-
     WATER = 3
-
     STONE = 4
-
     TREE = 5
-
     WOOD = 6
-
     PATH = 7
-
     COAL = 8
-
     IRON = 9
-
     DIAMOND = 10
-
     CRAFTING_TABLE = 11
-
     FURNACE = 12
-
     SAND = 13
-
     LAVA = 14
-
     PLANT = 15
-
     RIPE_PLANT = 16
-
     WALL = 17
-
     DARKNESS = 18
-
     WALL_MOSS = 19
-
     STALAGMITE = 20
-
     SAPPHIRE = 21
-
     RUBY = 22
-
     CHEST = 23
-
     FOUNTAIN = 24
-
     FIRE_GRASS = 25
-
     ICE_GRASS = 26
-
     GRAVEL = 27
-
     FIRE_TREE = 28
-
     ICE_SHRUB = 29
-
     ENCHANTMENT_TABLE_FIRE = 30
-
     ENCHANTMENT_TABLE_ICE = 31
-
     NECROMANCER = 32
-
     GRAVE = 33
-
     GRAVE2 = 34
-
     GRAVE3 = 35
-
     NECROMANCER_VULNERABLE = 36
 
 
@@ -109,13 +73,9 @@ class ItemType(IntEnum):
     """An object occupying a tile alongside its block."""
 
     NONE = 0
-
     TORCH = 1
-
     LADDER_DOWN = 2
-
     LADDER_UP = 3
-
     LADDER_DOWN_BLOCKED = 4
 
 
@@ -123,89 +83,47 @@ class Action(IntEnum):
     """One of the 43 things the agent may attempt each step."""
 
     NOOP = 0
-
     LEFT = 1
-
     RIGHT = 2
-
     UP = 3
-
     DOWN = 4
-
     DO = 5
-
     SLEEP = 6
-
     PLACE_STONE = 7
-
     PLACE_TABLE = 8
-
     PLACE_FURNACE = 9
-
     PLACE_PLANT = 10
-
     MAKE_WOOD_PICKAXE = 11
-
     MAKE_STONE_PICKAXE = 12
-
     MAKE_IRON_PICKAXE = 13
-
     MAKE_WOOD_SWORD = 14
-
     MAKE_STONE_SWORD = 15
-
     MAKE_IRON_SWORD = 16
-
     REST = 17
-
     DESCEND = 18
-
     ASCEND = 19
-
     MAKE_DIAMOND_PICKAXE = 20
-
     MAKE_DIAMOND_SWORD = 21
-
     MAKE_IRON_ARMOUR = 22
-
     MAKE_DIAMOND_ARMOUR = 23
-
     SHOOT_ARROW = 24
-
     MAKE_ARROW = 25
-
     CAST_FIREBALL = 26
-
     CAST_ICEBALL = 27
-
     PLACE_TORCH = 28
-
     DRINK_POTION_RED = 29
-
     DRINK_POTION_GREEN = 30
-
     DRINK_POTION_BLUE = 31
-
     DRINK_POTION_PINK = 32
-
     DRINK_POTION_CYAN = 33
-
     DRINK_POTION_YELLOW = 34
-
     READ_BOOK = 35
-
     ENCHANT_SWORD = 36
-
     ENCHANT_ARMOUR = 37
-
     MAKE_TORCH = 38
-
     LEVEL_UP_DEXTERITY = 39
-
     LEVEL_UP_STRENGTH = 40
-
     LEVEL_UP_INTELLIGENCE = 41
-
     ENCHANT_BOW = 42
 
 
@@ -213,13 +131,9 @@ class MobClass(IntEnum):
     """Which of the five mob arrays a creature is stored in."""
 
     PASSIVE = 0
-
     MELEE = 1
-
     RANGED = 2
-
     MOB_PROJECTILE = 3
-
     PLAYER_PROJECTILE = 4
 
 
@@ -227,19 +141,12 @@ class ProjectileType(IntEnum):
     """The visual and damage identity of a flying object."""
 
     ARROW = 0
-
     DAGGER = 1
-
     FIREBALL = 2
-
     ICEBALL = 3
-
     ARROW2 = 4
-
     SLIMEBALL = 5
-
     FIREBALL2 = 6
-
     ICEBALL2 = 7
 
 
@@ -247,141 +154,75 @@ class Achievement(IntEnum):
     """One of the 67 one-time goals whose unlock is the reward signal."""
 
     COLLECT_WOOD = 0
-
     PLACE_TABLE = 1
-
     EAT_COW = 2
-
     COLLECT_SAPLING = 3
-
     COLLECT_DRINK = 4
-
     MAKE_WOOD_PICKAXE = 5
-
     MAKE_WOOD_SWORD = 6
-
     PLACE_PLANT = 7
-
     DEFEAT_ZOMBIE = 8
-
     COLLECT_STONE = 9
-
     PLACE_STONE = 10
-
     EAT_PLANT = 11
-
     DEFEAT_SKELETON = 12
-
     MAKE_STONE_PICKAXE = 13
-
     MAKE_STONE_SWORD = 14
-
     WAKE_UP = 15
-
     PLACE_FURNACE = 16
-
     COLLECT_COAL = 17
-
     COLLECT_IRON = 18
-
     COLLECT_DIAMOND = 19
-
     MAKE_IRON_PICKAXE = 20
-
     MAKE_IRON_SWORD = 21
-
     MAKE_ARROW = 22
-
     MAKE_TORCH = 23
-
     PLACE_TORCH = 24
-
     # The tail is deliberately out of order: achievements added after the
     # first release took the next free value instead of renumbering the
     # published ones, and the reward table is indexed by these values, so
     # sorting them would silently re-price the game.
     COLLECT_SAPPHIRE = 54
-
     COLLECT_RUBY = 59
-
     MAKE_DIAMOND_PICKAXE = 60
-
     MAKE_DIAMOND_SWORD = 25
-
     MAKE_IRON_ARMOUR = 26
-
     MAKE_DIAMOND_ARMOUR = 27
-
     ENTER_GNOMISH_MINES = 28
-
     ENTER_DUNGEON = 29
-
     ENTER_SEWERS = 30
-
     ENTER_VAULT = 31
-
     ENTER_TROLL_MINES = 32
-
     ENTER_FIRE_REALM = 33
-
     ENTER_ICE_REALM = 34
-
     ENTER_GRAVEYARD = 35
-
     DEFEAT_GNOME_WARRIOR = 36
-
     DEFEAT_GNOME_ARCHER = 37
-
     DEFEAT_ORC_SOLIDER = 38
-
     DEFEAT_ORC_MAGE = 39
-
     DEFEAT_LIZARD = 40
-
     DEFEAT_KOBOLD = 41
-
     DEFEAT_KNIGHT = 65
-
     DEFEAT_ARCHER = 66
-
     DEFEAT_TROLL = 42
-
     DEFEAT_DEEP_THING = 43
-
     DEFEAT_PIGMAN = 44
-
     DEFEAT_FIRE_ELEMENTAL = 45
-
     DEFEAT_FROST_TROLL = 46
-
     DEFEAT_ICE_ELEMENTAL = 47
-
     DAMAGE_NECROMANCER = 48
-
     DEFEAT_NECROMANCER = 49
-
     EAT_BAT = 50
-
     EAT_SNAIL = 51
-
     FIND_BOW = 52
-
     FIRE_BOW = 53
-
     LEARN_FIREBALL = 55
-
     CAST_FIREBALL = 56
-
     LEARN_ICEBALL = 57
-
     CAST_ICEBALL = 58
-
     OPEN_CHEST = 61
-
     DRINK_POTION = 62
-
     ENCHANT_SWORD = 63
-
     ENCHANT_ARMOUR = 64
 
 

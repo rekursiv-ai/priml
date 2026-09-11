@@ -55,15 +55,10 @@ class AdaLNZero(nn.Module):
         """Six modulation parameters from AdaLN-Zero."""
 
         attn_scale: Tensor
-
         attn_shift: Tensor
-
         attn_gate: Tensor
-
         ffn_scale: Tensor
-
         ffn_shift: Tensor
-
         ffn_gate: Tensor
 
     class Config(Fig["AdaLNZero"], kw_only=False):

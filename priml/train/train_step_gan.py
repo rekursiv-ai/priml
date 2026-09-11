@@ -196,11 +196,11 @@ class GANTrainStep:
         """Compute GAN loss in train mode without backprop.
 
         Args:
-          media: Media.
-          **batch: Batch.
+          media: Real input images for the GAN discriminator.
+          **batch: Additional batch fields (passed to generator).
 
         Returns:
-          result: The TrainStepOutput.
+          output: TrainStepOutput with combined generator and discriminator loss.
 
         """
         real_media = media
@@ -249,11 +249,11 @@ class GANTrainStep:
         """Compute GAN loss in eval mode (uses EMA models if available).
 
         Args:
-          media: Media.
-          **batch: Batch.
+          media: Real input images for the GAN discriminator.
+          **batch: Additional batch fields (passed to generator).
 
         Returns:
-          result: The TrainStepOutput.
+          output: TrainStepOutput with combined generator and discriminator loss.
 
         """
         real_media = media
@@ -298,12 +298,7 @@ class GANTrainStep:
         return cast(TrainStepOutput, result)
 
     def state_dict(self) -> dict[str, Any]:
-        """Get checkpoint state for both generator and discriminator.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Get checkpoint state for both generator and discriminator."""
         return {
             "generator": self.generator.state_dict(),
             "discriminator": self.discriminator.state_dict(),
@@ -311,12 +306,7 @@ class GANTrainStep:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load checkpoint state for both generator and discriminator.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Load checkpoint state for both generator and discriminator."""
         self.generator.load_state_dict(state_dict["generator"])
         self.discriminator.load_state_dict(state_dict["discriminator"])
         self.global_step = state_dict["global_step"]

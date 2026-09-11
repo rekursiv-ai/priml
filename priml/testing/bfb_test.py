@@ -87,19 +87,12 @@ class _TorchProcessState:
     """Independent snapshot used to verify BFB process-state restoration."""
 
     algorithms_enabled: bool
-
     warn_only_enabled: bool
-
     cudnn_benchmark: bool
-
     cudnn_deterministic: bool
-
     flash_sdp_enabled: bool
-
     memory_efficient_sdp_enabled: bool
-
     rng_state: Tensor
-
     cublas_workspace_config: str | None
 
 
@@ -213,7 +206,7 @@ def test_bfb_devices_is_cpu_only() -> None:
 def test_bfb_files_do_not_use_typing_any() -> None:
     paths = [
         _THIS,
-        _CWD / ("bfb.py"),
+        _CWD / "bfb.py",
         _CWD.parents[0] / "model" / "transformer" / "block_test.py",
     ]
     offenders = list[str]()

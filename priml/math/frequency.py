@@ -18,11 +18,12 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
     """DCT type-II over the last dimension.
 
     Args:
-      x: X.
-      normalize: Normalize.
+      x: Input signal (tensor or array-like).
+      normalize: If True, apply orthonormal scaling; if False, unnormalized
+        (default).
 
     Returns:
-      coefficients: DCT-II of the signal.
+      coefficients: DCT-II of the signal (same shape as x).
 
 
     References:
@@ -53,11 +54,12 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
     Satisfies idct1d(dct1d(x)) == x.
 
     Args:
-      x: X.
-      normalize: Normalize.
+      x: DCT-II coefficients (tensor or array-like).
+      normalize: If True, apply orthonormal scaling (must match dct1d call);
+        if False, unnormalized (default).
 
     Returns:
-      signal: Reconstructed signal.
+      signal: Reconstructed signal (same shape as x).
 
 
     References:

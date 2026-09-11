@@ -81,7 +81,8 @@ def exp000() -> SudokuTrainLoop:
       cost.
 
     Returns:
-      cfg: The SudokuTrainLoop.
+      config: SudokuTrainLoop configuration with 2 layers, 512 hidden dim,
+        384 batch size, 19.5k steps.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -134,7 +135,7 @@ def exp001() -> SudokuTrainLoop:
       this task work.
 
     Returns:
-      cfg: The SudokuTrainLoop.
+      config: SudokuTrainLoop with mixer block in place of attention.
 
     References:
       https://arxiv.org/abs/2105.01601
@@ -161,7 +162,8 @@ def exp002() -> SudokuTrainLoop:
       parameters spent in a single forward.
 
     Returns:
-      cfg: The SudokuTrainLoop.
+      config: SudokuTrainLoop with deep recurrence and prediction feedback
+        embedding.
 
     References:
       https://arxiv.org/abs/2510.04871
@@ -198,7 +200,7 @@ def exp003() -> SudokuTrainLoop:
       TBD.
 
     Returns:
-      cfg: The SudokuTrainLoop.
+      config: SudokuTrainLoop with mixer block and deep recurrence.
 
     """
     cfg = exp002()
@@ -216,7 +218,7 @@ def exp_smoke() -> SudokuTrainLoop:
     Accuracy will be poor, which is expected.
 
     Returns:
-      cfg: The SudokuTrainLoop.
+      config: SudokuTrainLoop with minimal hidden dim and steps.
 
     """
     cfg = exp000()

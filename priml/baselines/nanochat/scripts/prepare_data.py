@@ -89,7 +89,7 @@ def main() -> int:
     """Prepare the corpus and vocabulary; return the process exit code.
 
     Returns:
-      result: The int.
+      result: 0 on success.
 
     """
     parser = argparse.ArgumentParser(
@@ -110,12 +110,7 @@ def main() -> int:
 
 
 def default_directory() -> Path:
-    """Return the corpus directory a default ``TrainLoop`` would resolve.
-
-    Returns:
-      result: The Path.
-
-    """
+    """Return the corpus directory a default ``TrainLoop`` would resolve."""
     config = NanoChatData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)

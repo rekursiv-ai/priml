@@ -109,7 +109,7 @@ class PassK:
         """Rank each puzzle's answers and score every K.
 
         Returns:
-          result: The dict[str, float].
+          metrics: Accuracy at each pass@K threshold, keyed as "pass@{k}".
 
         """
         solved = dict.fromkeys(self.config.pass_ks, 0)
@@ -143,21 +143,11 @@ class PassK:
         }
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the accumulated votes.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Return the accumulated votes."""
         return {"votes": self._votes, "truth": self._truth}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore votes produced by :meth:`state_dict`.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Restore votes produced by :meth:`state_dict`."""
         self._votes = state_dict.get("votes", {})
         self._truth = state_dict.get("truth", {})
 

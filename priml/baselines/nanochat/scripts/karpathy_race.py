@@ -175,7 +175,7 @@ def main() -> int:
     """Run their script to completion and report what it scored.
 
     Returns:
-      result: The int.
+      result: Exit code; 0 on success, non-zero if the upstream script fails.
 
     """
     args = _parse_args()

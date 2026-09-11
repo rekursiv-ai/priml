@@ -43,9 +43,7 @@ class _LinearModel(nn.Module):
 
     class Config(Fig["_LinearModel"], make_with_kwargs=True):
         in_features: int = -1
-
         out_features: int = -1
-
         bias: bool = True
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:

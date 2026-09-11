@@ -43,7 +43,7 @@ class NoEMA:
         """No-op swap: yields with the live model untouched.
 
         Args:
-          model: Model.
+          model: PyTorch module (unused in no-op).
 
         Yields:
           context: Block in which ``model`` carries its live weights.
@@ -53,21 +53,11 @@ class NoEMA:
         yield
 
     def state_dict(self) -> dict[str, Any]:
-        """Get empty state dict.
-
-        Returns:
-          result: The dict[str, Any].
-
-        """
+        """Get empty state dict."""
         return {"global_step": self.global_step, "local_step": self.local_step}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load step counters only.
-
-        Args:
-          state_dict: State dict.
-
-        """
+        """Load step counters only."""
         self.global_step = state_dict["global_step"]
         self.local_step = state_dict.get("local_step", 0)
 
@@ -84,16 +74,7 @@ each, and a recipe wanting a third writes it instead of editing this module.
 
 
 def constant_decay(decay: float, step: int) -> float:
-    """Hold ``decay`` flat for the whole run.
-
-    Args:
-      decay: Decay.
-      step: Step.
-
-    Returns:
-      decay: The float.
-
-    """
+    """Hold ``decay`` flat for the whole run."""
     del step
     return decay
 
@@ -105,11 +86,11 @@ def karras_decay(decay: float, step: int) -> float:
     the first few steps' weights.
 
     Args:
-      decay: Decay.
-      step: Step.
+      decay: Target decay rate (upper bound).
+      step: Post-warmup step count (0-indexed).
 
     Returns:
-      result: The float.
+      result: Effective decay at this step, ramping from 0 to decay.
 
     References:
       https://arxiv.org/abs/2312.02696
@@ -358,7 +339,7 @@ class EMA:
         weight-averaging only. Works for both shadow kinds.
 
         Args:
-          model: Model.
+          model: PyTorch module whose parameters to temporarily swap.
 
         Yields:
           context: Block in which ``model.parameters()`` carry shadow values.

@@ -42,21 +42,11 @@ class PoolWorker(Protocol):
         ...
 
     def join(self, timeout: float | None = ...) -> None:
-        """Join.
-
-        Args:
-          timeout: Timeout.
-
-        """
+        """Join."""
         ...
 
     def is_alive(self) -> bool:
-        """Is alive.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Is alive."""
         ...
 
     def kill(self) -> None:
@@ -329,7 +319,7 @@ class WorkerPool:
         which re-verifies and re-picks on a collision.
 
         Returns:
-          port: The int.
+          port: Unbound port on INADDR_ANY, tested for TCPStore collision.
 
         """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -353,12 +343,12 @@ class WorkerPool:
         """Run one worker.
 
         Args:
-          rank: Rank.
-          mesh_dims: Mesh dims.
-          port: Port.
-          command_queue: Command queue.
-          ack_queue: Ack queue.
-          ready_queue: Ready queue.
+          rank: Rank in process group (0 is rank zero).
+          mesh_dims: Device mesh layout as name -> size dict.
+          port: TCPStore port; must match MASTER_PORT.
+          command_queue: Receives pickled callables to run.
+          ack_queue: Signals parent when a command completes.
+          ready_queue: Signals parent when rendezvous succeeds.
 
         """
         mesh_dim_sizes = tuple(mesh_dims.values())
@@ -432,7 +422,7 @@ def do_something(mesh: DeviceMesh) -> None:
     """Do a trivial unit of work.
 
     Args:
-      mesh: Mesh.
+      mesh: Device mesh for assertions (testing only).
 
     """
     rank = td.get_rank()

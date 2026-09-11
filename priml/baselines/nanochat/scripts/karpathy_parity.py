@@ -508,7 +508,7 @@ def main() -> int:
     """Step both implementations together and report every difference.
 
     Returns:
-      result: The int.
+      result: Exit code (0 on success).
 
     """
     args = _parse_args()
