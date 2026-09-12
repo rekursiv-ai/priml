@@ -135,7 +135,13 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
     @contiguous
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, block_size, scale, cu_seqlens
+        ctx,
+        q,
+        k,
+        v,
+        block_size,
+        scale,
+        cu_seqlens,
     ) -> tuple[Tensor, Tensor]: ...
     @staticmethod
     @contiguous

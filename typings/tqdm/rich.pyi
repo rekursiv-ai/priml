@@ -16,7 +16,10 @@ class RateColumn(ProgressColumn):
     unit_scale: Incomplete
     unit_divisor: Incomplete
     def __init__(
-        self, unit: str = "", unit_scale: bool = False, unit_divisor: int = 1000
+        self,
+        unit: str = "",
+        unit_scale: bool = False,
+        unit_divisor: int = 1000,
     ) -> None: ...
     def render(self, task): ...
 

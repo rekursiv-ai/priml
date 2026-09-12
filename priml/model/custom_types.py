@@ -314,7 +314,8 @@ def has_weight(module: TensorModule | None) -> TypeGuard[WeightedTensorModule]:
 
     """
     return hasattr(module, "weight") and isinstance(
-        cast(_WeightAttribute, module).weight, Tensor
+        cast(_WeightAttribute, module).weight,
+        Tensor,
     )
 
 
@@ -339,7 +340,7 @@ def flatten_depth_index(depth_index: DepthIndex) -> int:
         if count < 1 or index < 0 or index >= count:
             raise ValueError(
                 f"depth_index level {level} must satisfy 0 <= index < count; "
-                f"got ({index}, {count})."
+                f"got ({index}, {count}).",
             )
         flattened = index if flattened == -1 else flattened * count + index
     return flattened

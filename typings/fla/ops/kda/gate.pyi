@@ -32,7 +32,7 @@ def naive_kda_lowerbound_gate(
         "HAS_BIAS": lambda args: args["dt_bias"] is not None,
         "HAS_BETA": lambda args: args["beta"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -67,7 +67,7 @@ def kda_gate_fwd_kernel(
         "HAS_BIAS": lambda args: args["dt_bias"] is not None,
         "HAS_BETA": lambda args: args["beta"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -130,7 +130,8 @@ class KDAGateFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, dyg: torch.Tensor
+        ctx,
+        dyg: torch.Tensor,
     ) -> tuple[Tensor, Tensor, Tensor | None, None, None]: ...
 
 @torch.compiler.disable
@@ -147,7 +148,7 @@ def fused_kda_gate(
         "HAS_SCALE": lambda args: args["scale"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

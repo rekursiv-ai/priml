@@ -65,7 +65,7 @@ class ShuffleNet_V2_X2_0_QuantizedWeights(WeightsEnum):
             if kwargs.get("quantize", False)
             else ShuffleNet_V2_X0_5_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def shufflenet_v2_x0_5(
     *,
@@ -85,7 +85,7 @@ def shufflenet_v2_x0_5(
             if kwargs.get("quantize", False)
             else ShuffleNet_V2_X1_0_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def shufflenet_v2_x1_0(
     *,
@@ -105,7 +105,7 @@ def shufflenet_v2_x1_0(
             if kwargs.get("quantize", False)
             else ShuffleNet_V2_X1_5_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def shufflenet_v2_x1_5(
     *,
@@ -125,7 +125,7 @@ def shufflenet_v2_x1_5(
             if kwargs.get("quantize", False)
             else ShuffleNet_V2_X2_0_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def shufflenet_v2_x2_0(
     *,

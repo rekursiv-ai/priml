@@ -349,10 +349,14 @@ def _step_toward_player(
     use_rows = torch.where(tied, coin, prefer_rows)
     step = torch.zeros_like(position)
     step[:, 0] = torch.where(
-        use_rows, offset[:, 0].sign(), torch.zeros_like(step[:, 0])
+        use_rows,
+        offset[:, 0].sign(),
+        torch.zeros_like(step[:, 0]),
     )
     step[:, 1] = torch.where(
-        use_rows, torch.zeros_like(step[:, 1]), offset[:, 1].sign()
+        use_rows,
+        torch.zeros_like(step[:, 1]),
+        offset[:, 1].sign(),
     )
     return step
 

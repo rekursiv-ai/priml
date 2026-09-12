@@ -29,15 +29,20 @@ class MultiTensor(torch.Tensor):
     in_place_threshold: int = ...
     @staticmethod
     def __new__(
-        cls, input: torch.Tensor | Sequence[torch.Tensor], **kwargs: Any
+        cls,
+        input: torch.Tensor | Sequence[torch.Tensor],
+        **kwargs: Any,
     ) -> Self: ...
     def __init__(
-        self, input: torch.Tensor | Sequence[torch.Tensor], **kwargs: Any
+        self,
+        input: torch.Tensor | Sequence[torch.Tensor],
+        **kwargs: Any,
     ) -> None: ...
     def append(self, input: torch.Tensor):  # -> MultiTensor:
         ...
     def add_tensors(
-        self, input: torch.Tensor | Sequence[torch.Tensor]
+        self,
+        input: torch.Tensor | Sequence[torch.Tensor],
     ) -> MultiTensor: ...
     def pad_to_length(self, length, pad_in_place=...):  # -> MultiTensor | Self:
         ...
@@ -70,7 +75,8 @@ class MultiTensor(torch.Tensor):
     ) -> Any: ...
     @classmethod
     def grouped_to_flat(
-        cls, grouped: list[tuple[Any, ...]]
+        cls,
+        grouped: list[tuple[Any, ...]],
     ) -> tuple[list[Any], bool]: ...
     @classmethod
     def faster_quant(cls, H, W, device):  # -> tuple[Any, Tensor, Any]:
@@ -121,7 +127,10 @@ class Int4WeightOnlyGPTQQuantizer(GPTQQuantizer):
         layout: Layout | None = ...,
     ) -> None: ...
     def quantize(
-        self, model: torch.nn.Module, *args: tuple[Any, ...], **kwargs: dict[str, Any]
+        self,
+        model: torch.nn.Module,
+        *args: tuple[Any, ...],
+        **kwargs: dict[str, Any],
     ) -> torch.nn.Module: ...
 
 class StateDictManager:

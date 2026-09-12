@@ -21,7 +21,8 @@ __version__: str
 def deserialize(bytes): ...
 @staticmethod
 def serialize(
-    tensor_dict: dict[str, TensorSpec], metadata: dict[str, str] | None = ...
+    tensor_dict: dict[str, TensorSpec],
+    metadata: dict[str, str] | None = ...,
 ) -> bytes: ...
 @staticmethod
 def serialize_file(
@@ -32,7 +33,12 @@ def serialize_file(
 
 class TensorSpec:
     def __init__(
-        self, *, dtype: str, shape: Sequence[int], data_ptr: int, data_len: int
+        self,
+        *,
+        dtype: str,
+        shape: Sequence[int],
+        data_ptr: int,
+        data_len: int,
     ) -> None: ...
     @property
     def data_len(self) -> int: ...
@@ -45,7 +51,12 @@ class TensorSpec:
 
 class safe_open:
     def __init__(
-        self, filename, framework, device=..., *, backend: str = ...
+        self,
+        filename,
+        framework,
+        device=...,
+        *,
+        backend: str = ...,
     ) -> None: ...
     def __enter__(self): ...
     def __exit__(self, _exc_type, _exc_value, _traceback): ...

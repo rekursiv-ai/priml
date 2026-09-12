@@ -27,7 +27,7 @@ class BackboneWithFPN(nn.Module):
         lambda kwargs: _get_enum_from_fn(resnet.__dict__[kwargs["backbone_name"]])[
             "IMAGENET1K_V1"
         ],
-    )
+    ),
 )
 def resnet_fpn_backbone(
     *,
@@ -44,7 +44,7 @@ def resnet_fpn_backbone(
         lambda kwargs: _get_enum_from_fn(mobilenet.__dict__[kwargs["backbone_name"]])[
             "IMAGENET1K_V1"
         ],
-    )
+    ),
 )
 def mobilenet_backbone(
     *,

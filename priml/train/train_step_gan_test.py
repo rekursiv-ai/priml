@@ -255,7 +255,9 @@ def test_gan_train_step_disc_loss_no_per_step_item(
     gan = config.make()
     # Swap in a per-step loss tensor that counts .item().
     monkeypatch.setattr(
-        gan.discriminator, "train_step", _counting_train_step(item_calls)
+        gan.discriminator,
+        "train_step",
+        _counting_train_step(item_calls),
     )
 
     batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
@@ -384,7 +386,9 @@ def test_gan_discriminator_receives_media_under_consistent_key() -> None:
     seen_keys: list[str] = []
 
     def record(
-        module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+        module: nn.Module,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> None:
         del module, args
         seen_keys.extend(kwargs.keys())

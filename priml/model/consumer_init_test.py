@@ -70,7 +70,7 @@ def test_reference_initialization(kind: str, std: float) -> None:
         config = Qwen3.Config.from_hf(qwen3_test._hf_config(initializer_range=std))
     else:
         config = KimiK2.Config.from_hf(
-            kimi_k2_test._hf_config(initializer_range=std, q_lora_rank=16)
+            kimi_k2_test._hf_config(initializer_range=std, q_lora_rank=16),
         )
     torch.manual_seed(13)
     model = config.make()
@@ -151,7 +151,8 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
             model.reset_parameters()
         assert torch.count_nonzero(model.in_proj.weight[0]) == 0
         assert torch.equal(
-            model.in_proj.weight[1:], torch.ones_like(model.in_proj.weight[1:])
+            model.in_proj.weight[1:],
+            torch.ones_like(model.in_proj.weight[1:]),
         )
         for module in model.modules():
             if isinstance(module, SwiGLU):
@@ -170,7 +171,8 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
 
 
 @pytest.mark.parametrize(
-    "kind", ["transformer", "mmdit", "moe", "mixer", "nanochat", "qwen", "kimi"]
+    "kind",
+    ["transformer", "mmdit", "moe", "mixer", "nanochat", "qwen", "kimi"],
 )
 def test_legacy_composite_constructor_bfb(kind: str) -> None:
     assert_bfb_against_golden(
@@ -185,7 +187,8 @@ def test_legacy_composite_constructor_bfb(kind: str) -> None:
 def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
     del module, inp
     legacy_ffn = SwiGLU.Config(
-        init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+        init_weight=kaiming_uniform,
+        init_weight_out=kaiming_uniform,
     )
     if kind == "transformer":
         cfg = TransformerBlock.Config(channels_in=8, ffn=legacy_ffn)
@@ -222,7 +225,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             elements=[
                 RMSNorm.Config(elementwise_affine=True),
                 Linear.Config(shard="vocab"),
-            ]
+            ],
         )
         config = config.finalize()
         assert isinstance(config.block, list)
@@ -230,7 +233,8 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             assert isinstance(block, TransformerBlock.Config)
             attn = block.attn
             assert isinstance(
-                attn, (SelfAttention.Config, MultiHeadLatentAttention.Config)
+                attn,
+                (SelfAttention.Config, MultiHeadLatentAttention.Config),
             )
             attn.init_weight = kaiming_uniform
             if isinstance(attn, MultiHeadLatentAttention.Config):

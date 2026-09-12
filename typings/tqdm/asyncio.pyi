@@ -16,7 +16,13 @@ class tqdm_asyncio(std_tqdm):
     def send(self, *args, **kwargs): ...
     @classmethod
     def as_completed(
-        cls, fs, *, loop=None, timeout=None, total=None, **tqdm_kwargs
+        cls,
+        fs,
+        *,
+        loop=None,
+        timeout=None,
+        total=None,
+        **tqdm_kwargs,
     ) -> Generator[Incomplete, Incomplete]: ...
     @classmethod
     async def gather(cls, *fs, loop=None, timeout=None, total=None, **tqdm_kwargs): ...  # noqa: ASYNC109 -- mirrors upstream timeout parameter

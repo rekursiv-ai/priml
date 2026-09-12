@@ -8,7 +8,7 @@ import triton.language as tl
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_G": lambda args: args["g"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

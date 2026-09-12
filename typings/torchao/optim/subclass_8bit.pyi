@@ -19,20 +19,32 @@ class OptimState8bit(TorchAOBaseTensor):
     @staticmethod
     def __new__(cls, codes: Tensor, scale: Tensor, qmap: Tensor, signed: bool): ...
     def __init__(
-        self, codes: Tensor, scale: Tensor, qmap: Tensor, signed: bool
+        self,
+        codes: Tensor,
+        scale: Tensor,
+        qmap: Tensor,
+        signed: bool,
     ) -> None: ...
     def __tensor_flatten__(self):  # -> tuple[list[str], list[bool]]:
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size=..., outer_stride=...
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size=...,
+        outer_stride=...,
     ):  # -> Self:
         ...
     def dequantize(self, output_dtype=...):  # -> Tensor:
         ...
     @classmethod
     def zeros(
-        cls, shape, signed: bool = ..., block_size: int = ..., device=...
+        cls,
+        shape,
+        signed: bool = ...,
+        block_size: int = ...,
+        device=...,
     ):  # -> Self:
         ...
     def __repr__(self):  # -> str:
@@ -56,7 +68,7 @@ def _(func, types, args, kwargs):  # -> OptimState8bit:
         c10d_functional.wait_tensor.default,
         _c10d_functional.wait_tensor.default,
         aten.detach.default,
-    ]
+    ],
 )
 def _(func, types, args, kwargs):  # -> OptimState8bit:
     ...

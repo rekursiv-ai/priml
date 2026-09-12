@@ -128,7 +128,9 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dout, *args
+        ctx,
+        dout,
+        *args,
     ) -> tuple[
         Tensor,
         Tensor | None,
@@ -167,7 +169,12 @@ def rms_norm_linear_quant(
 ) -> None: ...
 @require_version("triton>=3.0", ...)
 def bit_linear(
-    x, weight, bias=..., norm_weight=..., norm_bias=..., eps=...
+    x,
+    weight,
+    bias=...,
+    norm_weight=...,
+    norm_bias=...,
+    eps=...,
 ) -> None: ...
 
 class BitLinear(nn.Linear):

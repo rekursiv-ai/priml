@@ -11,11 +11,13 @@ class AOBaseConfig(abc.ABC):
 
 class ConfigJSONEncoder(json.JSONEncoder):
     def default(
-        self, o
+        self,
+        o,
     ):  # -> dict[str, str | Any | int | dict[Any, Any]] | dict[str, Any | int | dict[Any, dict[str, str | Any | int | dict[Any, Any]] | dict[str, Any | int | dict[Any, Any]] | dict[str, str] | dict[str, Any | dict[str | Any, Any]] | list[Any] | dict[Any, Any] | Any]] | dict[str, str] | dict[str, Any | dict[str | Any, Any]] | list[Any] | dict[Any, Any] | Any:
         ...
     def encode_value(
-        self, value
+        self,
+        value,
     ):  # -> dict[str, str | Any | int | dict[Any, Any]] | dict[str, Any | int | dict[Any, dict[str, str | Any | int | dict[Any, Any]] | dict[str, Any | int | dict[Any, Any]] | dict[str, str] | dict[str, Any | dict[str | Any, Any]] | list[Any] | dict[Any, Any] | Any]] | dict[str, str] | dict[str, Any | dict[str | Any, Any]] | list[Any] | dict[Any, Any] | Any:
         ...
 

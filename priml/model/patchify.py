@@ -40,7 +40,7 @@ class Patchify(nn.Module):
                 if self.channels_out % factor:
                     raise ValueError(
                         f"channels_out={self.channels_out} must be divisible by "
-                        f"prod(patch_size)={factor}."
+                        f"prod(patch_size)={factor}.",
                     )
                 self.channels_in = self.channels_out // factor
             if self.channels_out == -1 and self.channels_in != -1:
@@ -51,7 +51,7 @@ class Patchify(nn.Module):
             ):
                 raise ValueError(
                     f"channels_out={self.channels_out} must equal "
-                    f"channels_in={self.channels_in} * prod(patch_size)={factor}."
+                    f"channels_in={self.channels_in} * prod(patch_size)={factor}.",
                 )
             return super().finalize()
 
@@ -93,7 +93,7 @@ class Unpatchify(nn.Module):
                 if self.channels_in % factor:
                     raise ValueError(
                         f"channels_in={self.channels_in} must be divisible by "
-                        f"prod(patch_size)={factor}."
+                        f"prod(patch_size)={factor}.",
                     )
                 self.channels_out = self.channels_in // factor
             if (
@@ -102,7 +102,7 @@ class Unpatchify(nn.Module):
             ):
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} * prod(patch_size)={factor}."
+                    f"channels_out={self.channels_out} * prod(patch_size)={factor}.",
                 )
             return super().finalize()
 

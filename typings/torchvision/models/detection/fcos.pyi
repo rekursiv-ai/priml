@@ -79,7 +79,9 @@ class FCOS(nn.Module):
     ) -> None: ...
     @torch.jit.unused
     def eager_outputs(
-        self, losses: dict[str, Tensor], detections: list[dict[str, Tensor]]
+        self,
+        losses: dict[str, Tensor],
+        detections: list[dict[str, Tensor]],
     ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]]]: ...
     def compute_loss(
         self,
@@ -95,10 +97,14 @@ class FCOS(nn.Module):
         image_shapes: list[tuple[int, int]],
     ) -> list[dict[str, Tensor]]: ...
     def forward(
-        self, images: list[Tensor], targets: list[dict[str, Tensor]] | None = ...
+        self,
+        images: list[Tensor],
+        targets: list[dict[str, Tensor]] | None = ...,
     ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]]]: ...
 
 class FCOS_ResNet50_FPN_Weights(WeightsEnum):

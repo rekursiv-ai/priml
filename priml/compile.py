@@ -34,7 +34,8 @@ def lazy_torch_compile[**P, R](
 
 
 def lazy_torch_compile(
-    *compile_args: object, **compile_kwargs: object
+    *compile_args: object,
+    **compile_kwargs: object,
 ) -> Callable[..., object]:
     """Lazy ``@torch.compile`` -- defers dynamo/inductor imports to first call.
 
@@ -138,7 +139,9 @@ def trace_compile(
 
 
 def _make_lazy_compiled[**P, R](
-    fn: Callable[P, R], *compile_args: object, **compile_kwargs: object
+    fn: Callable[P, R],
+    *compile_args: object,
+    **compile_kwargs: object,
 ) -> Callable[P, R]:
     """Wrap ``fn`` so ``torch.compile`` runs on first call, not at decoration."""
     compiled: Callable[P, R] | None = None
@@ -152,7 +155,8 @@ def _make_lazy_compiled[**P, R](
             # forwarded splat is opaque to it, so the decorator it returns is
             # rebuilt as the ``Callable[P, R]`` it is documented to be.
             compile_fn = cast(
-                Callable[..., Callable[[Callable[P, R]], Callable[P, R]]], torch.compile
+                Callable[..., Callable[[Callable[P, R]], Callable[P, R]]],
+                torch.compile,
             )
             target = compile_fn(*compile_args, **compile_kwargs)(fn)
             compiled = target

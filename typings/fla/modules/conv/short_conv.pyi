@@ -31,7 +31,9 @@ class ShortConvolution(nn.Conv1d):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def step(
         self,

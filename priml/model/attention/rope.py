@@ -489,7 +489,7 @@ class RoPE(nn.Module):
         if rope_len > seq_len:
             raise ValueError(
                 f"cos/sin cover {rope_len} positions but q/k have {seq_len}; "
-                "slice the tables to the sequence before rotating."
+                "slice the tables to the sequence before rotating.",
             )
         if rope_len < seq_len:
             pad_shape = list(cos.shape)
@@ -563,7 +563,7 @@ class RoPE(nn.Module):
                 raise ValueError(
                     f"Dim {c} has no recommended base: the lowest frequency's "
                     "period is independent of it. Use at least 4 channels, "
-                    "or choose the base directly."
+                    "or choose the base directly.",
                 )
             bases.append(((m - 1) / (2 * math.pi)) ** (c / (c - 2)))
         return bases[0] if len(bases) == 1 else tuple(bases)

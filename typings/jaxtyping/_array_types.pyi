@@ -83,7 +83,8 @@ _union_types = ...
 class _MetaAbstractDtype(type):
     def __instancecheck__(cls, obj: Any) -> NoReturn: ...
     def __getitem__(
-        cls, item: tuple[Any, str]
+        cls,
+        item: tuple[Any, str],
     ) -> (
         type[__class__MetaAbstractArray]
         | tuple[

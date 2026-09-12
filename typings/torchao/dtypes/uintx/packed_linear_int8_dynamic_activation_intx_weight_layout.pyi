@@ -34,7 +34,11 @@ class PackedLinearInt8DynamicActivationIntxWeightLayout(Layout):
         ...
     def has_params_set(self) -> bool: ...
     def set_params(
-        self, bit_width: int, group_size: int, has_weight_zeros: bool, has_bias: bool
+        self,
+        bit_width: int,
+        group_size: int,
+        has_weight_zeros: bool,
+        has_bias: bool,
     ):  # -> None:
         ...
 
@@ -68,7 +72,11 @@ class PackedLinearInt8DynamicActivationIntxWeightAQTTensorImpl(AQTTensorImpl):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
 

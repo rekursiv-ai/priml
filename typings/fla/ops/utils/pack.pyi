@@ -21,7 +21,9 @@ def packunpack_sequence_kernel(
     PACK: tl.constexpr,
 ) -> None: ...
 def pack_sequence_fwdbwd(
-    x: torch.Tensor, cu_seqlens: torch.Tensor, padding_side: str
+    x: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    padding_side: str,
 ) -> torch.Tensor: ...
 def unpack_sequence_fwdbwd(
     x: torch.Tensor,
@@ -34,7 +36,10 @@ class PackSequenceFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def forward(
-        ctx, x: torch.Tensor, cu_seqlens: torch.Tensor, padding_side: str
+        ctx,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        padding_side: str,
     ) -> torch.Tensor: ...
     @staticmethod
     @input_guard
@@ -55,7 +60,9 @@ class UnpackSequenceFunction(torch.autograd.Function):
     def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor | None]: ...
 
 def pack_sequence(
-    x: torch.Tensor, cu_seqlens: torch.Tensor, padding_side: str = ...
+    x: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    padding_side: str = ...,
 ) -> torch.Tensor: ...
 def unpack_sequence(
     x: torch.Tensor,

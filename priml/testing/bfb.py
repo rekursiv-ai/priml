@@ -479,7 +479,7 @@ def assert_bfb_against_golden[InputT](
             if missing:
                 raise _MissingGoldenError(
                     f"Missing golden regenerated at {golden_path}; inspect it, "
-                    "then rerun the test."
+                    "then rerun the test.",
                 )
             return
 
@@ -576,7 +576,8 @@ def _replay_golden[InputT](
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
     payload = cast(
-        _Golden, torch.load(golden_path, weights_only=False, map_location="cpu")
+        _Golden,
+        torch.load(golden_path, weights_only=False, map_location="cpu"),
     )
     module.load_state_dict(payload["state_dict"])
     inp = cast(InputT, move_to_device(payload["input"], device))
@@ -662,7 +663,7 @@ def _assert_equal(a: object, b: object, *, label: str) -> None:
                 max(
                     abs(value_a - value_b)
                     for value_a, value_b in zip(values_a, values_b, strict=True)
-                )
+                ),
             )
         raise AssertionError(
             f"{label}: bitwise comparison failed "
@@ -953,7 +954,7 @@ class _Float64Compute(TorchDispatchMode):
             input_dtypes.add(
                 explicit_dtype
                 if isinstance(explicit_dtype, torch.dtype)
-                else torch.get_default_dtype()
+                else torch.get_default_dtype(),
             )
         narrow = {dtype for dtype in input_dtypes if _is_narrow_float(dtype)}
         if exact or not narrow:
@@ -1080,7 +1081,7 @@ def _assert_portable_output_dtype(output: Tensor) -> None:
     if output.dtype.is_complex:
         raise TypeError(
             f"bfb golden output is {output.dtype}, which is not supported; "
-            "return a float32 or integer tensor."
+            "return a float32 or integer tensor.",
         )
     if not output.dtype.is_floating_point or output.dtype == torch.float32:
         return

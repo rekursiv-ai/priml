@@ -218,7 +218,10 @@ class SudokuTrainStep(TrainStep):
         with self._autocast():
             out = self.net(media, *self._carry(), **_prefix_kwargs(batch))
             loss, metrics = self._loss(
-                out.logits, labels=labels, halt=out.halt, active=active
+                out.logits,
+                labels=labels,
+                halt=out.halt,
+                active=active,
             )
         loss.backward()
 
@@ -274,7 +277,10 @@ class SudokuTrainStep(TrainStep):
             out = self.net(media, **_prefix_kwargs(batch))
             active = torch.ones(media.shape[0], dtype=torch.bool, device=media.device)
             loss, metrics = self._loss(
-                out.logits, labels=labels, halt=out.halt, active=active
+                out.logits,
+                labels=labels,
+                halt=out.halt,
+                active=active,
             )
         return {"loss": loss, "model": out.logits, "metrics": metrics}
 
@@ -296,10 +302,15 @@ class SudokuTrainStep(TrainStep):
             with torch.inference_mode(), self._autocast():
                 logits, halt = self._eval_rollout(media, _prefix_kwargs(batch))
                 active = torch.ones(
-                    media.shape[0], dtype=torch.bool, device=media.device
+                    media.shape[0],
+                    dtype=torch.bool,
+                    device=media.device,
                 )
                 loss, metrics = self._loss(
-                    logits, labels=labels, halt=halt, active=active
+                    logits,
+                    labels=labels,
+                    halt=halt,
+                    active=active,
                 )
         predictions = logits.argmax(dim=-1)
         packed = torch.cat(

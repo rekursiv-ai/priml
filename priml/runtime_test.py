@@ -91,10 +91,12 @@ def test_single_process_initialize_is_idempotent_for_same_config(
     monkeypatch.setattr(runtime, "_single_process_settings", None)
 
     SingleProcess.Config(
-        device="cpu", float32_matmul_precision="high"
+        device="cpu",
+        float32_matmul_precision="high",
     ).make().initialize()
     SingleProcess.Config(
-        device="cpu", float32_matmul_precision="high"
+        device="cpu",
+        float32_matmul_precision="high",
     ).make().initialize()
 
     # The second initialize is a no-op, not a re-application.
@@ -111,7 +113,8 @@ def test_single_process_initialize_rejects_conflicting_settings(
     monkeypatch.setattr(runtime, "_single_process_settings", None)
 
     SingleProcess.Config(
-        device="cpu", float32_matmul_precision="high"
+        device="cpu",
+        float32_matmul_precision="high",
     ).make().initialize()
 
     with pytest.raises(RuntimeError, match="different settings"):

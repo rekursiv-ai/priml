@@ -13,7 +13,9 @@ c10d_functional = ...
 def nf4_all_gather_into_tensor(func, *args, **kwargs):  # -> NF4Tensor:
     ...
 def scatter_nf4tensor(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ):  # -> tuple[Any | list[Any], Any | list[Any]]:
     ...
 
@@ -26,15 +28,22 @@ def same_metadata(a: NF4Tensor, b: NF4Tensor):  # -> bool:
 def implements(aten_ops):  # -> Callable[..., Any]:
     ...
 def construct_nf4_args(
-    nf4tensor: NF4Tensor, kwargs: dict[str, Any] | None = ...
+    nf4tensor: NF4Tensor,
+    kwargs: dict[str, Any] | None = ...,
 ):  # -> tuple[SubclassTensorArgs, Any, Any, Any, Any, Any, Any, Any, Any]:
     ...
 def apply_to_inner_tensors(
-    nf4tensor: NF4Tensor, aten_op, args, kwargs
+    nf4tensor: NF4Tensor,
+    aten_op,
+    args,
+    kwargs,
 ):  # -> dict[Any, Any]:
     ...
 def call_from_inner_tensors(
-    nf4tensor: NF4Tensor, method_name: str, args, kwargs
+    nf4tensor: NF4Tensor,
+    method_name: str,
+    args,
+    kwargs,
 ):  # -> dict[Any, Any]:
     ...
 
@@ -43,15 +52,23 @@ class CompareOp(Enum):
     LT = ...
 
 def expect_num_of_args(
-    op: CompareOp, num: int, msg: str
+    op: CompareOp,
+    num: int,
+    msg: str,
 ):  # -> Callable[..., _Wrapped[..., Any, ..., Any]]:
     ...
 def expect_arg_value_at_k(
-    k: int, op: CompareOp, value: Any, msg: str
+    k: int,
+    op: CompareOp,
+    value: Any,
+    msg: str,
 ):  # -> Callable[..., _Wrapped[..., Any, ..., Any]]:
     ...
 def expect_args_len_at_k(
-    k: int, op: CompareOp, value: Any, msg: str
+    k: int,
+    op: CompareOp,
+    value: Any,
+    msg: str,
 ):  # -> Callable[..., _Wrapped[..., Any, ..., Any]]:
     ...
 @implements([torch.ops.aten.detach])
@@ -153,12 +170,17 @@ class NF4Tensor(torch.Tensor):
     @classmethod
     @torch.no_grad()
     def from_tensor(
-        cls, input_tensor: torch.Tensor, block_size: int, scaler_block_size: int
+        cls,
+        input_tensor: torch.Tensor,
+        block_size: int,
+        scaler_block_size: int,
     ):  # -> Self:
         ...
     @staticmethod
     def double_quantize_scalers(
-        input_tensor: torch.Tensor, block_size: int, scaler_block_size: int
+        input_tensor: torch.Tensor,
+        block_size: int,
+        scaler_block_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def dequantize_scalers(
         self,
@@ -168,12 +190,16 @@ class NF4Tensor(torch.Tensor):
     ) -> torch.Tensor: ...
     @staticmethod
     def convert_to_norm_float_weight(
-        input_tensor: torch.Tensor, n_blocks: int, block_size: int, nf4: torch.Tensor
+        input_tensor: torch.Tensor,
+        n_blocks: int,
+        block_size: int,
+        nf4: torch.Tensor,
     ) -> torch.Tensor: ...
     def get_original_weight(self) -> torch.Tensor: ...
     @staticmethod
     def quantize_tensor_nearest(
-        value: torch.Tensor, nf4: torch.Tensor
+        value: torch.Tensor,
+        nf4: torch.Tensor,
     ) -> torch.Tensor: ...
     @staticmethod
     def dequantize(value: torch.Tensor, nf4: torch.Tensor) -> torch.Tensor: ...
@@ -183,7 +209,10 @@ class NF4Tensor(torch.Tensor):
         ...
     @staticmethod
     def __tensor_unflatten__(
-        inner_tensors: dict, metadata, outer_size, outer_stride
+        inner_tensors: dict,
+        metadata,
+        outer_size,
+        outer_stride,
     ):  # -> NF4Tensor:
         ...
     @classmethod
@@ -193,7 +222,8 @@ class NF4Tensor(torch.Tensor):
     @classmethod
     def __torch_function__(cls, func, types, args=..., kwargs=...): ...
     def fsdp_pre_all_gather(
-        self, mesh: DeviceMesh
+        self,
+        mesh: DeviceMesh,
     ) -> tuple[tuple[torch.Tensor, ...], Any]: ...
     def fsdp_post_all_gather(
         self,
@@ -214,7 +244,9 @@ class LinearNF4(torch.autograd.Function):
 
 def linear_nf4(input: torch.Tensor, weight: NF4Tensor) -> torch.Tensor: ...
 def to_nf4(
-    tensor, block_size: int = ..., scaler_block_size: int = ...
+    tensor,
+    block_size: int = ...,
+    scaler_block_size: int = ...,
 ):  # -> NF4Tensor:
     ...
 

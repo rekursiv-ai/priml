@@ -46,7 +46,11 @@ class WindowPartition(nn.Module):
 class WindowDepartition(nn.Module):
     def __init__(self) -> None: ...
     def forward(
-        self, x: Tensor, p: int, h_partitions: int, w_partitions: int
+        self,
+        x: Tensor,
+        p: int,
+        h_partitions: int,
+        w_partitions: int,
     ) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
@@ -139,5 +143,8 @@ class MaxVit_T_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MaxVit_T_Weights.IMAGENET1K_V1))
 def maxvit_t(
-    *, weights: MaxVit_T_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MaxVit_T_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MaxVit: ...

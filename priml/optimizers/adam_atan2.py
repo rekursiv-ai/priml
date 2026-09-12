@@ -120,10 +120,12 @@ class AdamATan2(Optimizer):
                     # here so the tensor form bought us nothing.
                     state["step"] = 0
                     state["exp_avg"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
+                        p,
+                        memory_format=torch.preserve_format,
                     )
                     state["exp_avg_sq"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
+                        p,
+                        memory_format=torch.preserve_format,
                     )
                 state["step"] = int(state["step"]) + 1
                 step = int(state["step"])

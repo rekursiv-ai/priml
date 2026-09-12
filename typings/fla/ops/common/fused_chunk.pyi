@@ -22,7 +22,7 @@ NUM_WARPS = ...
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -67,7 +67,7 @@ def fused_chunk_fwd_kernel(
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["dh0"] is not None,
         "USE_FINAL_STATE": lambda args: args["dht"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -140,13 +140,24 @@ class FusedChunkFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, g, g_gamma, scale, initial_state, output_final_state, cu_seqlens
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        g_gamma,
+        scale,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
     ) -> tuple[Tensor | Any, Tensor | None]: ...
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dht=...
+        ctx,
+        do,
+        dht=...,
     ) -> tuple[
         Tensor | Any,
         Tensor | Any,

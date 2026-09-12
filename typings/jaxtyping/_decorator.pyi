@@ -15,20 +15,27 @@ _tb_flag = ...
 
 @overload
 def jaxtyped(
-    *, typechecker: Callable[..., Any] | _Sentinel = ...
+    *,
+    typechecker: Callable[..., Any] | _Sentinel = ...,
 ) -> Callable[[_TypeOrCallable], _TypeOrCallable]: ...
 @overload
 def jaxtyped(
-    fn: type[_T], *, typechecker: Callable[..., Any] | _Sentinel = ...
+    fn: type[_T],
+    *,
+    typechecker: Callable[..., Any] | _Sentinel = ...,
 ) -> type[_T]: ...
 @overload
 def jaxtyped(
-    fn: Callable[_Params, _Return], *, typechecker: Callable[..., Any] | _Sentinel = ...
+    fn: Callable[_Params, _Return],
+    *,
+    typechecker: Callable[..., Any] | _Sentinel = ...,
 ) -> Callable[_Params, _Return]: ...
 @overload
 def jaxtyped(fn: Literal["context"]) -> AbstractContextManager[None]: ...
 def jaxtyped(
-    fn=..., *, typechecker=...
+    fn=...,
+    *,
+    typechecker=...,
 ) -> (
     type[DataclassInstance | object]
     | _JaxtypingContext

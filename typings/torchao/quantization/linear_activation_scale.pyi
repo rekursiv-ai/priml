@@ -12,11 +12,15 @@ class WeightTensorWithLinearActivationScaleMetadata(TorchAOBaseTensor):
     tensor_data_names = ...
     tensor_attribute_names = ...
     def __new__(
-        cls, original_weight_tensor: torch.Tensor, scale: torch.Tensor
+        cls,
+        original_weight_tensor: torch.Tensor,
+        scale: torch.Tensor,
     ):  # -> Self:
         ...
     def __init__(
-        self, original_weight_tensor: torch.Tensor, scale: torch.Tensor
+        self,
+        original_weight_tensor: torch.Tensor,
+        scale: torch.Tensor,
     ) -> None: ...
     @classmethod
     def from_float(cls, input_float: torch.Tensor, scale: torch.Tensor):  # -> Self:

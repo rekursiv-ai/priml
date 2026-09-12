@@ -47,7 +47,9 @@ class _MBConvConfig:
     block: Callable[..., nn.Module]
     @staticmethod
     def adjust_channels(
-        channels: int, width_mult: float, min_value: int | None = ...
+        channels: int,
+        width_mult: float,
+        min_value: int | None = ...,
     ) -> int: ...
 
 class MBConvConfig(_MBConvConfig):
@@ -227,7 +229,7 @@ def efficientnet_b7(
 ) -> EfficientNet: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", EfficientNet_V2_S_Weights.IMAGENET1K_V1)
+    weights=("pretrained", EfficientNet_V2_S_Weights.IMAGENET1K_V1),
 )
 def efficientnet_v2_s(
     *,
@@ -237,7 +239,7 @@ def efficientnet_v2_s(
 ) -> EfficientNet: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", EfficientNet_V2_M_Weights.IMAGENET1K_V1)
+    weights=("pretrained", EfficientNet_V2_M_Weights.IMAGENET1K_V1),
 )
 def efficientnet_v2_m(
     *,
@@ -247,7 +249,7 @@ def efficientnet_v2_m(
 ) -> EfficientNet: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", EfficientNet_V2_L_Weights.IMAGENET1K_V1)
+    weights=("pretrained", EfficientNet_V2_L_Weights.IMAGENET1K_V1),
 )
 def efficientnet_v2_l(
     *,

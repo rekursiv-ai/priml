@@ -54,9 +54,20 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[
-        Tensor, Tensor, Tensor, Tensor | Any | None, None, None, Any, None, None, None
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor | Any | None,
+        None,
+        None,
+        Any,
+        None,
+        None,
+        None,
     ]: ...
 
 @torch.compiler.disable

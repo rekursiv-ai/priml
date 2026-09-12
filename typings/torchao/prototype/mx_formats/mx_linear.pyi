@@ -31,7 +31,8 @@ class mx_mm(torch.autograd.Function):
         ...
     @staticmethod
     def backward(
-        ctx, grad_output_hp: torch.Tensor
+        ctx,
+        grad_output_hp: torch.Tensor,
     ):  # -> tuple[Tensor, Tensor, None, None, None, None, None, None, None]:
         ...
 

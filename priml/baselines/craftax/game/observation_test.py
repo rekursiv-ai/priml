@@ -143,7 +143,8 @@ def test_the_facing_direction_is_reported() -> None:
     facing_down = _state()
     facing_down.player_direction[:] = int(Action.DOWN)
     assert not torch.equal(
-        observation.render(facing_up), observation.render(facing_down)
+        observation.render(facing_up),
+        observation.render(facing_down),
     )
 
 

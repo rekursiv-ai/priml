@@ -47,7 +47,10 @@ def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
 
 
 def _config(
-    *, depth: int = 1, tie: bool = False, conditioned: bool = False
+    *,
+    depth: int = 1,
+    tie: bool = False,
+    conditioned: bool = False,
 ) -> MMDiTGraft.Config:
     config = MMDiTGraft.Config()
     config.backbone = _backbone(depth=depth, tie=tie)
@@ -61,7 +64,9 @@ def _config(
 
 def test_graft_config_pprint() -> None:
     assert_pprint_golden(
-        test_file=__file__, name="mmdit_graft", config=_config(conditioned=True)
+        test_file=__file__,
+        name="mmdit_graft",
+        config=_config(conditioned=True),
     )
 
 
@@ -75,7 +80,7 @@ def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
                 for value in model.state_dict().values()
             ),
             torch.get_rng_state().float(),
-        ]
+        ],
     )
 
 
@@ -146,7 +151,8 @@ def test_weights_logits_and_stream_isolation(depth: int, tie: bool) -> None:
         assert streams[0].shape == other.shape
         assert torch.equal(graft(tokens, [other + 100], attn_mask=masks)[0], expected)
         assert not torch.equal(
-            graft(tokens, [other], attn_mask=[None, None])[0], expected
+            graft(tokens, [other], attn_mask=[None, None])[0],
+            expected,
         )
 
 
@@ -157,7 +163,8 @@ def test_continuous_backbone_projections(projected: bool) -> None:
     backbone.num_layers = 1
     assert isinstance(backbone.block, TransformerBlock.Config)
     backbone.block.attn = SelfAttention.Config(
-        num_heads=2, attn_kernel=SdpaNaive.Config()
+        num_heads=2,
+        attn_kernel=SdpaNaive.Config(),
     )
     if projected:
         backbone.in_proj = Linear.Config(channels_out=16)
@@ -268,7 +275,8 @@ def test_factory_rejects_unsupported_backbones(invalid: str) -> None:
     graft.streams = streams
     error = TypeError if invalid == "nonattention" else ValueError
     with pytest.raises(
-        error, match=r"Grafting requires|at least one additional stream"
+        error,
+        match=r"Grafting requires|at least one additional stream",
     ):
         graft.make()
 

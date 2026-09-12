@@ -33,7 +33,13 @@ def make_grid(
 class _ImageDrawTV(ImageDraw.ImageDraw):
     def oriented_rectangle(self, xy, fill=..., outline=..., width=...): ...
     def dashed_line(
-        self, xy, fill=..., width=..., joint=..., dash_length=..., space_length=...
+        self,
+        xy,
+        fill=...,
+        width=...,
+        joint=...,
+        dash_length=...,
+        space_length=...,
     ): ...
 
 @torch.no_grad()

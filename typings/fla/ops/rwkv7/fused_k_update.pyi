@@ -10,7 +10,9 @@ import triton.language as tl
 NUM_WARPS_AUTOTUNE = ...
 
 def k_update_ref(
-    k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor
+    k: torch.Tensor,
+    a: torch.Tensor,
+    ka: torch.Tensor,
 ) -> torch.Tensor: ...
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
@@ -24,7 +26,15 @@ def k_update_ref(
 )
 @triton.jit
 def k_update_fwd_kernel_short(
-    k, a, ka, out, cu_seqlens, T, D, BD: tl.constexpr, IS_VARLEN: tl.constexpr
+    k,
+    a,
+    ka,
+    out,
+    cu_seqlens,
+    T,
+    D,
+    BD: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ) -> None: ...
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
@@ -132,5 +142,9 @@ class KUpdateFunction(torch.autograd.Function):
     def backward(ctx, grad_output) -> tuple[Tensor, Tensor, Tensor, None, None]: ...
 
 def fused_k_rwkv7(
-    k, a, ka, cu_seqlens=..., cu_seqlens_cpu=...
+    k,
+    a,
+    ka,
+    cu_seqlens=...,
+    cu_seqlens_cpu=...,
 ) -> Tensor | Any | None: ...

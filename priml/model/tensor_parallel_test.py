@@ -58,7 +58,9 @@ def test_self_attention_declares_qkv_colwise_out_rowwise() -> None:
 
 def test_multistream_attention_declares_qkv_colwise_out_rowwise() -> None:
     attn = MultiStreamAttention.Config(
-        channels_in=32, num_heads=4, num_streams=2
+        channels_in=32,
+        num_heads=4,
+        num_streams=2,
     ).make()
     assert all(qkv.shard == "colwise" for qkv in attn.proj_qkvs)
     assert all(out.shard == "rowwise" for out in attn.proj_outs)
@@ -218,7 +220,7 @@ def _meta_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
             (result_dir / f"rank_{rank}").write_text("FAIL:still meta")
         elif deviation > 1e-5:
             (result_dir / f"rank_{rank}").write_text(
-                f"FAIL:mismatch max={deviation:.2e}"
+                f"FAIL:mismatch max={deviation:.2e}",
             )
         else:
             (result_dir / f"rank_{rank}").write_text("ok")

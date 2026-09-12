@@ -236,7 +236,7 @@ class TorchProfiling:
             logger.info("Profiler top ops:\n%s", table)
             if self.export_trace:
                 trace_path = Path(
-                    self.working_dir / f"trace_step_{step}{rank_suffix}.json.gz"
+                    self.working_dir / f"trace_step_{step}{rank_suffix}.json.gz",
                 )
                 trace_path.parent.mkdir(parents=True, exist_ok=True)
                 profiler.export_chrome_trace(str(trace_path))
@@ -248,7 +248,7 @@ class TorchProfiling:
             and torch.cuda.is_available()
         ):
             snapshot_path = Path(
-                self.working_dir / f"memory_step_{step}{rank_suffix}.pickle"
+                self.working_dir / f"memory_step_{step}{rank_suffix}.pickle",
             )
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             torch.cuda.memory._dump_snapshot(str(snapshot_path))  # noqa: SLF001
@@ -337,7 +337,8 @@ class PhaseTimer:
         self._interval_started_at = time.perf_counter()
         self._stack: list[_PhaseFrame] = []
         self._cuda_events: dict[
-            str, list[tuple[CudaEventProtocol, CudaEventProtocol]]
+            str,
+            list[tuple[CudaEventProtocol, CudaEventProtocol]],
         ] = {}
         self._cuda_summary: dict[str, tuple[float, int]] | None = None
         self._start_time = time.perf_counter()

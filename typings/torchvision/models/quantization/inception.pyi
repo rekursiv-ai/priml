@@ -65,7 +65,7 @@ class Inception_V3_QuantizedWeights(WeightsEnum):
             if kwargs.get("quantize", False)
             else Inception_V3_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def inception_v3(
     *,

@@ -26,12 +26,16 @@ class LinearAttentionBlock(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class LinearAttentionPreTrainedModel(PreTrainedModel):
@@ -58,7 +62,9 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, FLAGenerationMixin):

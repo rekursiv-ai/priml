@@ -282,7 +282,8 @@ def test_gate_norm_width_reset_and_forward_contract() -> None:
 
 
 @pytest.mark.parametrize(
-    ("gate", "split"), [(False, False), (True, False), (True, True)]
+    ("gate", "split"),
+    [(False, False), (True, False), (True, True)],
 )
 def test_relu_squared_norm_forward_and_gradients(gate: bool, split: bool) -> None:
     config = SwiGLUReluSquared.Config()
@@ -302,7 +303,7 @@ def test_relu_squared_norm_forward_and_gradients(gate: bool, split: bool) -> Non
         ffn.up_proj.weight.copy_(
             torch.arange(ffn.up_proj.weight.numel()).reshape_as(ffn.up_proj.weight)
             / ffn.up_proj.weight.numel()
-            - 0.5
+            - 0.5,
         )
         ffn.norm.weight.copy_(torch.tensor([0.5, 1.0, 1.5, 2.0]))
     x = torch.tensor([[-2.0, 0.5, 1.0], [1.0, -1.0, 2.0]], requires_grad=True)

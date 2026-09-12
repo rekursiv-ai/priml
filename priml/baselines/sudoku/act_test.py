@@ -31,7 +31,10 @@ def test_first_refill_seats_every_slot() -> None:
     pool = _pool()
     media, labels = _batch()
     seated, _, active = pool.refill(
-        media, labels=labels, valid_count=4, ignore_label_id=-100
+        media,
+        labels=labels,
+        valid_count=4,
+        ignore_label_id=-100,
     )
     assert torch.equal(seated, media)
     assert bool(active.all())
@@ -46,7 +49,10 @@ def test_occupied_slots_keep_their_puzzle() -> None:
     pool.halted = torch.tensor([True, False, True, False])
     second, labels2 = _batch(fill=7)
     seated, _, _ = pool.refill(
-        second, labels=labels2, valid_count=4, ignore_label_id=-100
+        second,
+        labels=labels2,
+        valid_count=4,
+        ignore_label_id=-100,
     )
     assert torch.equal(seated[0], second[0])
     assert torch.equal(seated[2], second[2])
@@ -59,7 +65,10 @@ def test_padding_rows_are_masked_out_of_the_loss() -> None:
     pool = _pool()
     media, labels = _batch()
     _, seated_labels, _ = pool.refill(
-        media, labels=labels, valid_count=2, ignore_label_id=-100
+        media,
+        labels=labels,
+        valid_count=2,
+        ignore_label_id=-100,
     )
     assert bool((seated_labels[2:] == -100).all())
     assert not bool((seated_labels[:2] == -100).any())

@@ -66,7 +66,8 @@ class AugMix(_AutoAugmentBase):
     _v1_transform_cls = _transforms.AugMix
     _PARTIAL_AUGMENTATION_SPACE = ...
     _AUGMENTATION_SPACE: dict[
-        str, tuple[Callable[[int, int, int], torch.Tensor | None], bool]
+        str,
+        tuple[Callable[[int, int, int], torch.Tensor | None], bool],
     ] = ...
     def __init__(
         self,

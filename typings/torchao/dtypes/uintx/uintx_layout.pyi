@@ -38,7 +38,11 @@ class UintxTensor(TorchAOBaseTensor):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     def get_plain(self):  # -> Tensor:
@@ -49,7 +53,10 @@ class UintxTensor(TorchAOBaseTensor):
         ...
     @classmethod
     def from_uint8(
-        cls, int_data: torch.Tensor, dtype: torch.dtype, pack_dim: int = ...
+        cls,
+        int_data: torch.Tensor,
+        dtype: torch.dtype,
+        pack_dim: int = ...,
     ):  # -> Self:
         ...
     def to(self, *args, **kwargs):  # -> Tensor | Self:

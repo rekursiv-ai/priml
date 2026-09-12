@@ -49,7 +49,11 @@ class TensorCoreTiledAQTTensorImpl(AQTTensorImpl):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     @classmethod
@@ -65,7 +69,11 @@ class TensorCoreTiledAQTTensorImpl(AQTTensorImpl):
         ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs
+        cls,
+        func,
+        types,
+        args,
+        kwargs,
     ):  # -> tuple[Any, ...] | Any | None:
         ...
     @property

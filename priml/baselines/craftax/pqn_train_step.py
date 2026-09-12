@@ -267,7 +267,8 @@ class CraftaxPQNTrainStep(TrainStep):
         self.env = config.env.make()
         model = self.model
         self._step: _StepFn = _compiled(
-            model.step, enabled=config.compile_recurrent_steps
+            model.step,
+            enabled=config.compile_recurrent_steps,
         )
         self._sequence: _SequenceFn = _compiled(
             model.sequence,

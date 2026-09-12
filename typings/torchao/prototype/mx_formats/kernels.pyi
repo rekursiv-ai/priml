@@ -143,11 +143,15 @@ def triton_f6_e2m3_to_bf16(x: torch.Tensor) -> torch.Tensor: ...
 def triton_f6_e3m2_to_bf16(x: torch.Tensor) -> torch.Tensor: ...
 @torch.library.custom_op("ao::triton_f6_e2m3_to_scaled_bf16", mutates_args=())
 def triton_f6_e2m3_to_scaled_bf16(
-    x: torch.Tensor, s_e8m0: torch.Tensor, mx_block_size: int
+    x: torch.Tensor,
+    s_e8m0: torch.Tensor,
+    mx_block_size: int,
 ) -> torch.Tensor: ...
 @torch.library.custom_op("ao::triton_f6_e3m2_to_scaled_bf16", mutates_args=())
 def triton_f6_e3m2_to_scaled_bf16(
-    x: torch.Tensor, s_e8m0: torch.Tensor, mx_block_size: int
+    x: torch.Tensor,
+    s_e8m0: torch.Tensor,
+    mx_block_size: int,
 ) -> torch.Tensor: ...
 @triton_f6_e3m2_to_scaled_bf16.register_fake
 def _(x, s_e8m0, mx_block_size):  # -> Tensor:
@@ -186,15 +190,18 @@ if torch_version_at_least("2.7.0") and has_triton():
     ): ...
     @triton_op("torchao::triton_to_mxfp8_dim1", mutates_args={})
     def triton_to_mxfp8_dim1(
-        x: torch.Tensor, inner_block_size: int = ...
+        x: torch.Tensor,
+        inner_block_size: int = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     @register_sharding(torch.ops.torchao.triton_to_mxfp8_dim1.default)
     def custom_triton_to_mxfp8_dim1_sharding(
-        x, inner_block_size=...
+        x,
+        inner_block_size=...,
     ):  # -> list[tuple[list[Replicate], list[Replicate | None]] | tuple[list[Shard], list[Shard | None]]]:
         ...
     def triton_to_mxfp8_dim1_reference(
-        x_hp: torch.Tensor, block_size
+        x_hp: torch.Tensor,
+        block_size,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     @triton.jit
     def triton_scale_swizzle(
@@ -229,7 +236,8 @@ if torch_version_at_least("2.7.0") and has_triton():
     ): ...
     @torch.library.custom_op("ao::triton_quantize_nvfp4", mutates_args=())
     def triton_quantize_nvfp4(
-        x: torch.Tensor, per_tensor_scale: torch.Tensor | None = ...
+        x: torch.Tensor,
+        per_tensor_scale: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     @triton_quantize_nvfp4.register_fake
     def _(x, per_tensor_scale=...):  # -> tuple[Tensor, Tensor]:
@@ -239,14 +247,17 @@ if torch_version_at_least("2.7.0") and has_triton():
 
 else:
     def triton_to_mxfp8_dim1(
-        x, inner_block_size=...
+        x,
+        inner_block_size=...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def triton_to_mxfp8_dim1_reference(
-        x_hp: torch.Tensor, block_size
+        x_hp: torch.Tensor,
+        block_size,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor: ...
     def triton_quantize_nvfp4(
-        x: torch.Tensor, tensor_scale: torch.Tensor | None = ...
+        x: torch.Tensor,
+        tensor_scale: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 mxfp8_cuda_extension_available = ...

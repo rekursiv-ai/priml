@@ -96,7 +96,7 @@ def fixture_absent_craftax(monkeypatch: pytest.MonkeyPatch) -> None:
     def raising(name: str, package: str | None = None) -> ModuleSpec | None:
         if name.startswith("craftax"):
             raise ModuleNotFoundError(
-                f"No module named {name.split('.', maxsplit=1)[0]!r}"
+                f"No module named {name.split('.', maxsplit=1)[0]!r}",
             )
         return real(name, package)
 

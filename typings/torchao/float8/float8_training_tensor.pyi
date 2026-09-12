@@ -91,13 +91,20 @@ class Float8TrainingTensor(torch.Tensor):
         ...
     @staticmethod
     def __tensor_unflatten__(
-        inner_tensors: dict, metadata, outer_size, outer_stride
+        inner_tensors: dict,
+        metadata,
+        outer_size,
+        outer_stride,
     ):  # -> Float8TrainingTensor:
         ...
     def to_original_precision(self):  # -> None:
         ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs=...
+        cls,
+        func,
+        types,
+        args,
+        kwargs=...,
     ):  # -> _NotImplementedType | Any:
         ...

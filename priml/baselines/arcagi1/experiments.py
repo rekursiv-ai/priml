@@ -116,7 +116,8 @@ def exp000() -> ArcTrainLoop:
     model.num_layers = 2
     assert isinstance(model.block, TransformerBlock.Config)
     model.block.ffn = SwiGLU.Config(
-        init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+        init_weight=kaiming_uniform,
+        init_weight_out=kaiming_uniform,
     )
     model.vocab_size = VOCAB_SIZE
 

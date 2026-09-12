@@ -2,13 +2,21 @@ import torch
 
 def tril_softmax(scores: torch.Tensor, strict: bool = ...) -> torch.Tensor: ...
 def naive_causal_attention_bhtd(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
 ) -> torch.Tensor: ...
 def naive_deltaformer_attn_head_first(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, beta: torch.Tensor | None = ...
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor | None = ...,
 ) -> torch.Tensor: ...
 def naive_deltaformer_attn(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, beta: torch.Tensor | None = ...
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor | None = ...,
 ) -> torch.Tensor: ...
 
 __all__ = ["naive_deltaformer_attn", "tril_softmax"]

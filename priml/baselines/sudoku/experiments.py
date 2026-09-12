@@ -107,7 +107,8 @@ def exp000() -> SudokuTrainLoop:
     cfg.step.model.num_layers = 2
     assert isinstance(cfg.step.model.block, TransformerBlock.Config)
     cfg.step.model.block.ffn = SwiGLU.Config(
-        init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+        init_weight=kaiming_uniform,
+        init_weight_out=kaiming_uniform,
     )
 
     cfg.dataset.batch_size = 384

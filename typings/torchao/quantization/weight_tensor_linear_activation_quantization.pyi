@@ -45,7 +45,11 @@ class WeightTensorWithLinearActivationQuantizationMetadata(TorchAOBaseTensor):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     @classmethod

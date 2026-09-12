@@ -239,7 +239,8 @@ class Muon(Optimizer):
     @torch.no_grad()
     @override
     def step(
-        self, closure: Callable[[], Tensor | float] | None = None
+        self,
+        closure: Callable[[], Tensor | float] | None = None,
     ) -> Tensor | float | None:
         loss = None
         if closure is not None:

@@ -215,10 +215,16 @@ class NanoChatLM(nn.Module):
             last = self.num_layers - 1
             for layer, block in enumerate(self.block):
                 propagate_attr(
-                    block, "channels_in", self.channels_in, protocol=ChannelsIn
+                    block,
+                    "channels_in",
+                    self.channels_in,
+                    protocol=ChannelsIn,
                 )
                 propagate_attr(
-                    block, "channels_out", self.channels_in, protocol=ChannelsOut
+                    block,
+                    "channels_out",
+                    self.channels_in,
+                    protocol=ChannelsOut,
                 )
                 propagate_attr(
                     block,
@@ -237,7 +243,10 @@ class NanoChatLM(nn.Module):
             propagate_attr(self.lm_head, "channels_in", self.channels_in)
             propagate_attr(self.lm_head, "channels_out", self.vocab_size)
             propagate_attr(
-                self.norm, "channels_in", self.channels_in, protocol=ChannelsIn
+                self.norm,
+                "channels_in",
+                self.channels_in,
+                protocol=ChannelsIn,
             )
             self.mix.num_layers = self.num_layers
             self.rope.channels_head = _head_shape(self.block[0], self.channels_in)[0]

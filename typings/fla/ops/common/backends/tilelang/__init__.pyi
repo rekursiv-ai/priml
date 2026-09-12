@@ -49,7 +49,10 @@ class TileLangBackend(BaseBackend):
         use_exp2: bool = ...,
         transpose_state_layout: bool = ...,
     ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
     ]: ...
     def parallel_attn_fwd_verifier(
         self,

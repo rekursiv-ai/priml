@@ -24,5 +24,8 @@ class AlexNet_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", AlexNet_Weights.IMAGENET1K_V1))
 def alexnet(
-    *, weights: AlexNet_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: AlexNet_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> AlexNet: ...

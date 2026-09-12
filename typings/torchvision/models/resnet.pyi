@@ -141,27 +141,42 @@ class Wide_ResNet101_2_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet18_Weights.IMAGENET1K_V1))
 def resnet18(
-    *, weights: ResNet18_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ResNet18_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> ResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet34_Weights.IMAGENET1K_V1))
 def resnet34(
-    *, weights: ResNet34_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ResNet34_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> ResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet50_Weights.IMAGENET1K_V1))
 def resnet50(
-    *, weights: ResNet50_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ResNet50_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> ResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet101_Weights.IMAGENET1K_V1))
 def resnet101(
-    *, weights: ResNet101_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ResNet101_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> ResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet152_Weights.IMAGENET1K_V1))
 def resnet152(
-    *, weights: ResNet152_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ResNet152_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> ResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNeXt50_32X4D_Weights.IMAGENET1K_V1))

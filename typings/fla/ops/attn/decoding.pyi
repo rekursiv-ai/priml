@@ -8,7 +8,7 @@ import triton.language as tl
     {
         "USE_G": lambda args: args["g_cumsum"] is not None,
         "USE_SINK_BIAS": lambda args: args["sink_bias"] is not None,
-    }
+    },
 )
 @triton.jit
 def naive_attn_decoding_kernel(

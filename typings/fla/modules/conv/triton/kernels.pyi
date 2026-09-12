@@ -14,7 +14,7 @@ STATIC_WARPS = ...
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "USE_INITIAL_STATE": lambda args: args["initial_state"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -60,7 +60,7 @@ def causal_conv1d_fwd_kernel(
         "USE_INITIAL_STATE": lambda args: args["initial_state"] is not None,
         "USE_FINAL_STATE": lambda args: args["dht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -111,7 +111,7 @@ def causal_conv1d_bwd_kernel(
         "HAS_WEIGHT": lambda args: args["weight"] is not None,
         "HAS_BIAS": lambda args: args["bias"] is not None,
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -149,7 +149,7 @@ def causal_conv1d_update_kernel(
     {
         "USE_ACTIVATION": lambda args: args["y"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit
 def compute_dh0_kernel(
@@ -171,7 +171,7 @@ def compute_dh0_kernel(
     {
         "USE_INITIAL_STATE": lambda args: args["initial_state"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit
 def causal_conv1d_states_fwd_kernel(

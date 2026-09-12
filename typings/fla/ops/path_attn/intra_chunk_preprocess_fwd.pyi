@@ -8,7 +8,7 @@ import triton.language as tl
     {
         "USE_G": lambda args: args["g_cumsum"] is not None,
         "IS_VARLEN": lambda args: args["offsets"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def intra_chunk_preprocess_fwd_kernel(

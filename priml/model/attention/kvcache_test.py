@@ -39,7 +39,7 @@ def _cache_contract(x: Tensor) -> Tensor:
     frozen_k, frozen_v = frozen.update(x[..., :1, :], x[..., :1, :])
     metadata = x.new_tensor([cache.length, cache.seen, frozen.length, frozen.seen])
     return torch.cat(
-        [k.flatten(), v.flatten(), frozen_k.flatten(), frozen_v.flatten(), metadata]
+        [k.flatten(), v.flatten(), frozen_k.flatten(), frozen_v.flatten(), metadata],
     )
 
 
@@ -110,7 +110,8 @@ def test_kv_cache_freeze_preserves_seen():
     cache = KVCache.alloc(batch=1, num_heads=1, max_seq=2, channels_head=2)
     for i in range(4):
         cache.update(
-            torch.full((1, 1, 1, 2), float(i)), torch.full((1, 1, 1, 2), float(i))
+            torch.full((1, 1, 1, 2), float(i)),
+            torch.full((1, 1, 1, 2), float(i)),
         )
     assert cache.length == 2
     assert cache.seen == 4

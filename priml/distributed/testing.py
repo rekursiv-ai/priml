@@ -209,7 +209,7 @@ class WorkerPool:
                     self._respawn()
         raise RuntimeError(
             f"worker pool {self.mesh_dims} failed dispatch across "
-            f"{self._DISPATCH_ATTEMPTS} attempts (last: {type(last_exc).__name__})"
+            f"{self._DISPATCH_ATTEMPTS} attempts (last: {type(last_exc).__name__})",
         ) from last_exc
 
     _DISPATCH_ATTEMPTS = 3

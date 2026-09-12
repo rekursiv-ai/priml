@@ -59,7 +59,11 @@ class MarlinQQQAQTTensorImpl(AQTTensorImpl):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     def get_plain(self):  # -> tuple[Tensor, Tensor, Tensor]:

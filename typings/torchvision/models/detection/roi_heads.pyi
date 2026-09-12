@@ -11,10 +11,14 @@ def fastrcnn_loss(
     regression_targets: list[torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def maskrcnn_inference(
-    x: torch.Tensor, labels: list[torch.Tensor]
+    x: torch.Tensor,
+    labels: list[torch.Tensor],
 ) -> list[torch.Tensor]: ...
 def project_masks_on_boxes(
-    gt_masks: Tensor, boxes: Tensor, matched_idxs: Tensor, M: int
+    gt_masks: Tensor,
+    boxes: Tensor,
+    matched_idxs: Tensor,
+    M: int,
 ) -> Tensor: ...
 def maskrcnn_loss(
     mask_logits: Tensor,
@@ -24,7 +28,9 @@ def maskrcnn_loss(
     mask_matched_idxs: list[Tensor],
 ) -> Tensor: ...
 def keypoints_to_heatmap(
-    keypoints: Tensor, rois: Tensor, heatmap_size: int
+    keypoints: Tensor,
+    rois: Tensor,
+    heatmap_size: int,
 ) -> tuple[Tensor, Tensor]: ...
 def heatmaps_to_keypoints(maps, rois):  # -> tuple[Tensor, Tensor]:
     ...
@@ -35,7 +41,8 @@ def keypointrcnn_loss(
     keypoint_matched_idxs: list[Tensor],
 ) -> Tensor: ...
 def keypointrcnn_inference(
-    x: Tensor, boxes: list[Tensor]
+    x: Tensor,
+    boxes: list[Tensor],
 ) -> tuple[list[Tensor], list[Tensor]]: ...
 def expand_boxes(boxes: Tensor, scale: float) -> Tensor: ...
 @torch.jit.unused
@@ -43,7 +50,10 @@ def expand_masks_tracing_scale(M: int, padding: int) -> float: ...
 def expand_masks(mask: Tensor, padding: int) -> tuple[Tensor, float]: ...
 def paste_mask_in_image(mask: Tensor, box: Tensor, im_h: int, im_w: int) -> Tensor: ...
 def paste_masks_in_image(
-    masks: Tensor, boxes: Tensor, img_shape: tuple[int, int], padding: int = ...
+    masks: Tensor,
+    boxes: Tensor,
+    img_shape: tuple[int, int],
+    padding: int = ...,
 ) -> Tensor: ...
 
 class RoIHeads(nn.Module):
@@ -73,15 +83,22 @@ class RoIHeads(nn.Module):
     def has_keypoint(self):  # -> bool:
         ...
     def assign_targets_to_proposals(
-        self, proposals: list[Tensor], gt_boxes: list[Tensor], gt_labels: list[Tensor]
+        self,
+        proposals: list[Tensor],
+        gt_boxes: list[Tensor],
+        gt_labels: list[Tensor],
     ) -> tuple[list[Tensor], list[Tensor]]: ...
     def subsample(self, labels: list[Tensor]) -> list[Tensor]: ...
     def add_gt_proposals(
-        self, proposals: list[Tensor], gt_boxes: list[Tensor]
+        self,
+        proposals: list[Tensor],
+        gt_boxes: list[Tensor],
     ) -> list[Tensor]: ...
     def check_targets(self, targets: list[dict[str, Tensor]] | None) -> None: ...
     def select_training_samples(
-        self, proposals: list[Tensor], targets: list[dict[str, Tensor]] | None
+        self,
+        proposals: list[Tensor],
+        targets: list[dict[str, Tensor]] | None,
     ) -> tuple[list[Tensor], list[Tensor], list[Tensor], list[Tensor]]: ...
     def postprocess_detections(
         self,
@@ -98,5 +115,7 @@ class RoIHeads(nn.Module):
         targets: list[dict[str, torch.Tensor]] | None = ...,
     ) -> tuple[list[dict[str, torch.Tensor]], dict[str, torch.Tensor]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[dict[str, torch.Tensor]], dict[str, torch.Tensor]]: ...

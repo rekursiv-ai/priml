@@ -117,17 +117,26 @@ class R2Plus1D_18_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", R3D_18_Weights.KINETICS400_V1))
 def r3d_18(
-    *, weights: R3D_18_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: R3D_18_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VideoResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MC3_18_Weights.KINETICS400_V1))
 def mc3_18(
-    *, weights: MC3_18_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MC3_18_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VideoResNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", R2Plus1D_18_Weights.KINETICS400_V1))
 def r2plus1d_18(
-    *, weights: R2Plus1D_18_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: R2Plus1D_18_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VideoResNet: ...
 
 model_urls = ...

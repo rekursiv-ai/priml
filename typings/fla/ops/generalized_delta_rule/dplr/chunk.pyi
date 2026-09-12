@@ -72,7 +72,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do: torch.Tensor, dht: torch.Tensor
+        ctx,
+        do: torch.Tensor,
+        dht: torch.Tensor,
     ) -> tuple[
         Tensor,
         Tensor,

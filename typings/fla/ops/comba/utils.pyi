@@ -8,7 +8,7 @@ import triton.language as tl
     {
         "HAS_SCALE": lambda args: args["scale"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],

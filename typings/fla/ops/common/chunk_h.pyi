@@ -11,7 +11,7 @@ BKV_LIST = ...
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -58,7 +58,7 @@ def chunk_fwd_kernel_h(
         "STORE_INITIAL_STATE_GRADIENT": lambda args: args["dh0"] is not None,
         "USE_FINAL_STATE_GRADIENT": lambda args: args["dht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

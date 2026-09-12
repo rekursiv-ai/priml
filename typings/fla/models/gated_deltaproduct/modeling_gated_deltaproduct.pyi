@@ -28,12 +28,16 @@ class GatedDeltaProductBlock(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[dict],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class GatedDeltaProductPreTrainedModel(PreTrainedModel):
@@ -61,11 +65,14 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
         **kwargs: Unpack[dict],
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class GatedDeltaProductForCausalLM(
-    GatedDeltaProductPreTrainedModel, FLAGenerationMixin
+    GatedDeltaProductPreTrainedModel,
+    FLAGenerationMixin,
 ):
     _tied_weights_keys = ...
     def __init__(self, config) -> None: ...

@@ -210,7 +210,7 @@ class TensorBoardTracker:
             msg = "tensorboard is not installed. Install with: pip install tensorboard"
             raise ImportError(msg)
         self.writer: _Writer | None = _summary_writer_cls(
-            str(validated_output_path(config.working_dir))
+            str(validated_output_path(config.working_dir)),
         )
 
     def log_metrics(

@@ -25,12 +25,16 @@ class ForgettingTransformerBlock(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         **kwargs: Unpack[Any],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class ForgettingTransformerPreTrainedModel(PreTrainedModel):
@@ -43,7 +47,8 @@ class ForgettingTransformerPreTrainedModel(PreTrainedModel):
 
 class ForgettingTransformerModel(ForgettingTransformerPreTrainedModel):
     def __init__(
-        self, config: ForgettingTransformerConfig
+        self,
+        config: ForgettingTransformerConfig,
     ) -> ForgettingTransformerModel: ...
     def get_input_embeddings(self) -> Embedding | Module: ...
     def set_input_embeddings(self, value) -> None: ...
@@ -62,7 +67,8 @@ class ForgettingTransformerModel(ForgettingTransformerPreTrainedModel):
     def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
 
 class ForgettingTransformerForCausalLM(
-    ForgettingTransformerPreTrainedModel, FLAGenerationMixin
+    ForgettingTransformerPreTrainedModel,
+    FLAGenerationMixin,
 ):
     _tied_weights_keys = ...
     def __init__(self, config) -> None: ...

@@ -72,7 +72,7 @@ class ReadPassthroughMixin:
             return getattr(target, name)
         except AttributeError:
             raise AttributeError(
-                f"{type(self).__name__!s} has no attribute {name!r}."
+                f"{type(self).__name__!s} has no attribute {name!r}.",
             ) from None
 
 
@@ -92,5 +92,5 @@ class ReadWritePassthroughMixin(ReadPassthroughMixin):
             setattr(target, name, value)
             return
         raise AttributeError(
-            f"{type(self).__name__!s} passthrough targets have no attribute {name!r}."
+            f"{type(self).__name__!s} passthrough targets have no attribute {name!r}.",
         )

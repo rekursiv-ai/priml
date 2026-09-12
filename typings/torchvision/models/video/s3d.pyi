@@ -54,5 +54,8 @@ class S3D_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", S3D_Weights.KINETICS400_V1))
 def s3d(
-    *, weights: S3D_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: S3D_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> S3D: ...

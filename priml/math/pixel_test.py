@@ -62,7 +62,7 @@ def warm_dynamo() -> None:
     """
     torch._dynamo.reset()
     _ = torch.compile(rgb2float, fullgraph=True, backend=_TRACE_ONLY)(
-        torch.zeros(1, dtype=torch.float16)
+        torch.zeros(1, dtype=torch.float16),
     )
     torch._dynamo.reset()
 
@@ -106,7 +106,8 @@ def test_the_pixel_pair_is_an_exact_round_trip():
         assert torch.equal(float2rgb(rgb2float(levels.to(dtype))), levels)
         assert torch.equal(
             float2rgb(
-                rgb2float(levels.to(dtype), unit_interval=True), unit_interval=True
+                rgb2float(levels.to(dtype), unit_interval=True),
+                unit_interval=True,
             ),
             levels,
         )
@@ -149,7 +150,8 @@ def test_the_round_trip_survives_compilation_and_repetition() -> None:
 
     torch._dynamo.reset()
     assert torch.equal(
-        torch.compile(trip, fullgraph=True, backend=_TRACE_ONLY)(widened), levels
+        torch.compile(trip, fullgraph=True, backend=_TRACE_ONLY)(widened),
+        levels,
     )
 
     # Ten cycles: a half-level bias would compound into a visible drift.
@@ -268,7 +270,8 @@ def test_rgb2float_accepts_anything_convert_to_tensor_does():
 
 
 @pytest.mark.parametrize(
-    "dtype", [torch.uint8, torch.int64, torch.bool, torch.complex64]
+    "dtype",
+    [torch.uint8, torch.int64, torch.bool, torch.complex64],
 )
 def test_both_conversions_refuse_a_non_float_dtype(dtype: torch.dtype) -> None:
     """Neither function guesses a width, and neither drops an imaginary part.
@@ -389,7 +392,7 @@ def test_rgb2float_halves_the_error_of_a_unit_interval_intermediate():
 
     def worst_error(got: torch.Tensor) -> float:
         return float(
-            max(abs(Fraction(float(g)) - e) for g, e in zip(got, exact, strict=True))
+            max(abs(Fraction(float(g)) - e) for g, e in zip(got, exact, strict=True)),
         )
 
     for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
@@ -1199,7 +1202,7 @@ def test_inplace_scaling_allocates_nothing() -> None:
     """
     numel = 1 << 22
     widened = torch.randint(0, 256, (numel,), dtype=torch.uint8, device="cuda").to(
-        torch.float16
+        torch.float16,
     )
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
@@ -1223,7 +1226,7 @@ def test_out_of_place_scaling_costs_exactly_one_result() -> None:
     numel = 1 << 22
     result_mib = numel * 2 / 2**20
     widened = torch.randint(0, 256, (numel,), dtype=torch.uint8, device="cuda").to(
-        torch.float16
+        torch.float16,
     )
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()

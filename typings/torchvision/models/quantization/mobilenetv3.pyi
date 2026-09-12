@@ -46,7 +46,7 @@ class MobileNet_V3_Large_QuantizedWeights(WeightsEnum):
             if kwargs.get("quantize", False)
             else MobileNet_V3_Large_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def mobilenet_v3_large(
     *,

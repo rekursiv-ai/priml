@@ -146,7 +146,9 @@ class EnsembleLinear(nn.Module):
         """Initialize every parameter in place."""
         for i in range(self.weight.shape[0]):
             call_init(
-                self._init_weight, self.weight.data[i], depth_index=self.depth_index
+                self._init_weight,
+                self.weight.data[i],
+                depth_index=self.depth_index,
             )
         if self.bias is not None:
             nn.init.zeros_(self.bias)

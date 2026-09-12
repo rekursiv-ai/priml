@@ -13,10 +13,13 @@ class Float8MMConfig(NamedTuple):
     pad_inner_dim: bool = ...
 
 def preprocess_data(
-    a_data: Tensor, b_data: Tensor, scaled_mm_config: Float8MMConfig
+    a_data: Tensor,
+    b_data: Tensor,
+    scaled_mm_config: Float8MMConfig,
 ) -> tuple[Tensor, Tensor]: ...
 def preprocess_scale(
-    input_scale: torch.Tensor, input_shape: tuple[int, ...]
+    input_scale: torch.Tensor,
+    input_shape: tuple[int, ...],
 ):  # -> Tensor:
     ...
 def addmm_float8_unwrapped_inference(

@@ -49,10 +49,16 @@ class Int8DynActInt4WeightQATQuantizer(_LegacyQATQuantizer):
         scales_precision: torch.dtype = ...,
     ) -> None: ...
     def prepare(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def convert(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def get_activation_fake_quantize_config(
         self,
@@ -89,10 +95,16 @@ class Int4WeightOnlyQATQuantizer(_LegacyQATQuantizer):
         scales_precision: torch.dtype = ...,
     ) -> None: ...
     def prepare(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def convert(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def get_weight_fake_quantize_config(self) -> FakeQuantizeConfigBase | None: ...
 
@@ -120,13 +132,21 @@ def disable_4w_fake_quant(mod: torch.nn.Module):  # -> None:
 
 class Float8ActInt4WeightQATQuantizer(_LegacyQATQuantizer):
     def __init__(
-        self, group_size: int | None = ..., scale_precision: torch.dtype = ...
+        self,
+        group_size: int | None = ...,
+        scale_precision: torch.dtype = ...,
     ) -> None: ...
     def prepare(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def convert(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def get_activation_fake_quantize_config(
         self,

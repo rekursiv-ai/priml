@@ -207,7 +207,9 @@ def test_enter_recovers_from_a_port_collision(
         return port
 
     monkeypatch.setattr(
-        WorkerPool, "find_free_port", staticmethod(_colliding_then_free)
+        WorkerPool,
+        "find_free_port",
+        staticmethod(_colliding_then_free),
     )
 
     try:

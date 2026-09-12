@@ -100,11 +100,11 @@ def test_explained_variance_reports_fit_and_constant_targets() -> None:
     values = torch.tensor([1.0, 2.0, 3.0])
     assert float(explained_variance(values, values)) == pytest.approx(1.0)
     assert float(explained_variance(values, torch.full((3,), 2.0))) == pytest.approx(
-        0.0
+        0.0,
     )
     # Predicting the mean explains nothing but is not negative.
     assert float(explained_variance(torch.full((3,), 2.0), values)) == pytest.approx(
-        0.0
+        0.0,
     )
 
 

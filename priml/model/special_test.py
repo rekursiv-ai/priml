@@ -145,7 +145,9 @@ _SKIP_CONFIG_TYPES = [
 
 
 @pytest.mark.parametrize(
-    "config_type", _SKIP_CONFIG_TYPES, ids=lambda cls: cls.__qualname__
+    "config_type",
+    _SKIP_CONFIG_TYPES,
+    ids=lambda cls: cls.__qualname__,
 )
 def test_skip_preserving_configs_infer_either_channel_boundary(
     config_type: type,
@@ -162,7 +164,9 @@ def test_skip_preserving_configs_infer_either_channel_boundary(
 
 
 @pytest.mark.parametrize(
-    "config_type", _SKIP_CONFIG_TYPES, ids=lambda cls: cls.__qualname__
+    "config_type",
+    _SKIP_CONFIG_TYPES,
+    ids=lambda cls: cls.__qualname__,
 )
 def test_skip_preserving_modules_reject_width_changes(config_type: type) -> None:
     config = config_type()

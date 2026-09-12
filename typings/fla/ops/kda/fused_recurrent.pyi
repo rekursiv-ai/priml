@@ -13,7 +13,7 @@ import triton.language as tl
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
         "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["N", "T"])
 def fused_recurrent_kda_fwd_kernel(

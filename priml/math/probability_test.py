@@ -186,7 +186,8 @@ def test_log_cdf_truncated_normal_degenerate_interval_is_finite():
     assert not torch.isnan(result).any()
     # log(unit step at low): -inf below, 0 at/above.
     torch.testing.assert_close(
-        result, torch.tensor([-math.inf, 0.0, 0.0], dtype=torch.float64)
+        result,
+        torch.tensor([-math.inf, 0.0, 0.0], dtype=torch.float64),
     )
 
 

@@ -11,7 +11,7 @@ NUM_WARPS_AUTOTUNE = ...
         "USE_FINAL_STATE_GRADIENT": lambda args: args["dht"] is not None,
         "USE_INITIAL_STATE": lambda args: args["dh0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

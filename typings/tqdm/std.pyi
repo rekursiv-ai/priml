@@ -53,7 +53,11 @@ class Bar:
     default_len: Incomplete
     charset: Incomplete
     def __init__(
-        self, frac, default_len: int = 10, charset=..., colour=None
+        self,
+        frac,
+        default_len: int = 10,
+        charset=...,
+        colour=None,
     ) -> None: ...
     @property
     def colour(self): ...
@@ -100,12 +104,18 @@ class tqdm(Comparable):
     def __new__(cls, *_, **__): ...
     @classmethod
     def write(
-        cls, s: str, file: Any = None, end: str = "\n", nolock: bool = False
+        cls,
+        s: str,
+        file: Any = None,
+        end: str = "\n",
+        nolock: bool = False,
     ) -> None: ...
     @classmethod
     @contextmanager
     def external_write_mode(
-        cls, file=None, nolock: bool = False
+        cls,
+        file=None,
+        nolock: bool = False,
     ) -> Generator[None]: ...
     @classmethod
     def set_lock(cls, lock) -> None: ...
@@ -195,13 +205,20 @@ class tqdm(Comparable):
     def unpause(self) -> None: ...
     def reset(self, total: Any = None) -> None: ...
     def set_description(
-        self, desc: str | None = None, refresh: bool = True
+        self,
+        desc: str | None = None,
+        refresh: bool = True,
     ) -> None: ...
     def set_description_str(
-        self, desc: str | None = None, refresh: bool = True
+        self,
+        desc: str | None = None,
+        refresh: bool = True,
     ) -> None: ...
     def set_postfix(
-        self, ordered_dict: Any = None, refresh: bool = True, **kwargs: Any
+        self,
+        ordered_dict: Any = None,
+        refresh: bool = True,
+        **kwargs: Any,
     ) -> None: ...
     def set_postfix_str(self, s: str = "", refresh: bool = True) -> None: ...
     def moveto(self, n: int) -> None: ...
@@ -211,7 +228,12 @@ class tqdm(Comparable):
     @classmethod
     @contextmanager
     def wrapattr(
-        cls, stream, method, total=None, bytes: bool = True, **tqdm_kwargs
+        cls,
+        stream,
+        method,
+        total=None,
+        bytes: bool = True,
+        **tqdm_kwargs,
     ) -> Generator[Incomplete]: ...
 
 def trange(*args, **kwargs): ...

@@ -131,7 +131,7 @@ class AttentionProjections(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         if config.num_heads % config.num_heads_kv != 0:
@@ -239,7 +239,10 @@ class AttentionProjections(nn.Module):
 # extent when it builds the tensor, and re-checking here would add a second message for
 # one fault (STYLE.md "Let the leaf complain").
 def _validate_head_dims(
-    *, channels_in: int, num_heads: int, channels_head: int
+    *,
+    channels_in: int,
+    num_heads: int,
+    channels_head: int,
 ) -> None:
     """Reject geometry that stayed unresolved after finalize."""
     if channels_head == -1 and channels_in != -1:

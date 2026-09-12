@@ -89,7 +89,10 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dhkt=..., dhvt=...
+        ctx,
+        do,
+        dhkt=...,
+        dhvt=...,
     ) -> tuple[Tensor, Any, Any, Any, Any, None, Any, Any, None, None, None]: ...
 
 def fused_recurrent_gsa(

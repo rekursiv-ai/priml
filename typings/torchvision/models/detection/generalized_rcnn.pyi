@@ -18,7 +18,9 @@ class GeneralizedRCNN(nn.Module):
     ) -> None: ...
     @torch.jit.unused
     def eager_outputs(
-        self, losses: dict[str, torch.Tensor], detections: list[dict[str, torch.Tensor]]
+        self,
+        losses: dict[str, torch.Tensor],
+        detections: list[dict[str, torch.Tensor]],
     ) -> dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]: ...
     def forward(
         self,
@@ -26,5 +28,7 @@ class GeneralizedRCNN(nn.Module):
         targets: list[dict[str, torch.Tensor]] | None = ...,
     ) -> tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor]]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[dict[str, torch.Tensor], list[dict[str, torch.Tensor]]]: ...

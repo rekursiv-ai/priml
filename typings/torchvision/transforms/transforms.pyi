@@ -73,7 +73,11 @@ class Normalize(torch.nn.Module):
 
 class Resize(torch.nn.Module):
     def __init__(
-        self, size, interpolation=..., max_size=..., antialias=...
+        self,
+        size,
+        interpolation=...,
+        max_size=...,
+        antialias=...,
     ) -> None: ...
     def forward(self, img): ...
 
@@ -107,10 +111,16 @@ class RandomChoice(RandomTransforms):
 class RandomCrop(torch.nn.Module):
     @staticmethod
     def get_params(
-        img: Tensor, output_size: tuple[int, int]
+        img: Tensor,
+        output_size: tuple[int, int],
     ) -> tuple[int, int, int, int]: ...
     def __init__(
-        self, size, padding=..., pad_if_needed=..., fill=..., padding_mode=...
+        self,
+        size,
+        padding=...,
+        pad_if_needed=...,
+        fill=...,
+        padding_mode=...,
     ) -> None: ...
     def forward(self, img): ...
 
@@ -124,12 +134,18 @@ class RandomVerticalFlip(torch.nn.Module):
 
 class RandomPerspective(torch.nn.Module):
     def __init__(
-        self, distortion_scale=..., p=..., interpolation=..., fill=...
+        self,
+        distortion_scale=...,
+        p=...,
+        interpolation=...,
+        fill=...,
     ) -> None: ...
     def forward(self, img): ...
     @staticmethod
     def get_params(
-        width: int, height: int, distortion_scale: float
+        width: int,
+        height: int,
+        distortion_scale: float,
     ) -> tuple[list[list[int]], list[list[int]]]: ...
 
 class RandomResizedCrop(torch.nn.Module):
@@ -143,7 +159,9 @@ class RandomResizedCrop(torch.nn.Module):
     ) -> None: ...
     @staticmethod
     def get_params(
-        img: Tensor, scale: list[float], ratio: list[float]
+        img: Tensor,
+        scale: list[float],
+        ratio: list[float],
     ) -> tuple[int, int, int, int]: ...
     def forward(self, img): ...
 
@@ -179,7 +197,12 @@ class ColorJitter(torch.nn.Module):
 
 class RandomRotation(torch.nn.Module):
     def __init__(
-        self, degrees, interpolation=..., expand=..., center=..., fill=...
+        self,
+        degrees,
+        interpolation=...,
+        expand=...,
+        center=...,
+        fill=...,
     ) -> None: ...
     @staticmethod
     def get_params(degrees: list[float]) -> float: ...
@@ -260,7 +283,9 @@ class ElasticTransform(torch.nn.Module):
     def __init__(self, alpha=..., sigma=..., interpolation=..., fill=...) -> None: ...
     @staticmethod
     def get_params(
-        alpha: list[float], sigma: list[float], size: list[int]
+        alpha: list[float],
+        sigma: list[float],
+        size: list[int],
     ) -> Tensor: ...
     def forward(self, tensor: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

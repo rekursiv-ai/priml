@@ -385,7 +385,9 @@ class ChunkGLAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, None, Tensor, None, None, None]: ...
 
 @torch.compiler.disable

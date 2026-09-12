@@ -11,7 +11,7 @@ import triton.language as tl
     {
         "HAS_SMOOTHING": lambda args: args["label_smoothing"] > 0,
         "HAS_SOFTCAPPING": lambda args: args["logit_softcapping"] is not None,
-    }
+    },
 )
 @triton.jit
 def cross_entropy_fwd_kernel(
@@ -39,7 +39,7 @@ def cross_entropy_fwd_kernel(
     {
         "HAS_SMOOTHING": lambda args: args["label_smoothing"] > 0,
         "HAS_SOFTCAPPING": lambda args: args["logit_softcapping"] is not None,
-    }
+    },
 )
 @triton.jit
 def cross_entropy_bwd_kernel(
@@ -92,7 +92,9 @@ class CrossEntropyLossFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, grad_losses, grad_z_losses
+        ctx,
+        grad_losses,
+        grad_z_losses,
     ) -> tuple[Any | Tensor, None, None, None, None, None, None, None, None, None]: ...
 
 def cross_entropy_loss(
@@ -122,5 +124,7 @@ class FusedCrossEntropyLoss(nn.Module):
     ) -> None: ...
     def forward(self, input, target) -> Tensor | tuple[Any | Tensor, Any | Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> Tensor | tuple[Any | Tensor, Any | Tensor]: ...

@@ -74,7 +74,7 @@ class RMSNorm(nn.Module):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -85,7 +85,7 @@ class RMSNorm(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         self.normalized_shape = (config.channels_in,)
@@ -146,7 +146,7 @@ class CenteredRMSNorm(nn.Module):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -157,7 +157,7 @@ class CenteredRMSNorm(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         self.eps = config.eps
@@ -209,7 +209,7 @@ class LayerNorm(nn.LayerNorm):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -220,7 +220,7 @@ class LayerNorm(nn.LayerNorm):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__(
             normalized_shape=config.channels_in,
@@ -272,7 +272,7 @@ class BatchNorm(nn.BatchNorm1d):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -283,7 +283,7 @@ class BatchNorm(nn.BatchNorm1d):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__(
             config.channels_in,
@@ -369,7 +369,7 @@ class BatchRenorm(nn.Module):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -389,7 +389,7 @@ class BatchRenorm(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for BatchRenorm."
+                f"channels_out={config.channels_out} for BatchRenorm.",
             )
         super().__init__()
         if config.channels_in <= 0:
@@ -454,7 +454,9 @@ class BatchRenorm(nn.Module):
         return self._affine(x, mean=mean, variance=variance)
 
     def _corrected(
-        self, batch_mean: Tensor, batch_var: Tensor
+        self,
+        batch_mean: Tensor,
+        batch_var: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Return the statistics to normalize by, corrected once warm."""
         config = self.config
@@ -532,7 +534,7 @@ class BatchNorm2d(nn.BatchNorm2d):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -543,7 +545,7 @@ class BatchNorm2d(nn.BatchNorm2d):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__(
             config.channels_in,
@@ -602,7 +604,7 @@ class GroupNorm2d(nn.GroupNorm):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -613,7 +615,7 @@ class GroupNorm2d(nn.GroupNorm):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__(
             config.num_groups,
@@ -666,7 +668,7 @@ class GroupNorm(nn.GroupNorm):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}."
+                    f"channels_out={self.channels_out}.",
                 )
             return super().finalize()
 
@@ -677,7 +679,7 @@ class GroupNorm(nn.GroupNorm):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__(
             config.num_groups,

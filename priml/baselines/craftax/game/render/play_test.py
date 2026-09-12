@@ -192,7 +192,8 @@ def test_the_writer_is_sized_by_the_renderer_that_fills_it(
         asset_dir=sprite_dir,
     )
     expected_height, expected_width = Renderer(
-        block_pixels=8, asset_dir=sprite_dir
+        block_pixels=8,
+        asset_dir=sprite_dir,
     ).frame_shape
 
     _, size = _read_video(path)

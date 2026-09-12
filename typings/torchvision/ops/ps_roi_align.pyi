@@ -20,7 +20,10 @@ def ps_roi_align(
 
 class PSRoIAlign(nn.Module):
     def __init__(
-        self, output_size: int, spatial_scale: float, sampling_ratio: int
+        self,
+        output_size: int,
+        spatial_scale: float,
+        sampling_ratio: int,
     ) -> None: ...
     def forward(self, input: Tensor, rois: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

@@ -38,7 +38,15 @@ def chunk_hgrn_fwd_kernel_h(
 ): ...
 @triton.jit(do_not_specialize=["T"])
 def chunk_hgrn_fwd_kernel_o(
-    gc, o, s_b, s_t, s_d, T, D: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr
+    gc,
+    o,
+    s_b,
+    s_t,
+    s_d,
+    T,
+    D: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
 ): ...
 @triton.autotune(
     configs=[
@@ -51,7 +59,14 @@ def chunk_hgrn_fwd_kernel_o(
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_hgrn_bwd_kernel_h(
-    g, gc, dx, do, T, D: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr
+    g,
+    gc,
+    dx,
+    do,
+    T,
+    D: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
 ): ...
 @triton.jit(do_not_specialize=["T"])
 def chunk_hgrn_bwd_kernel_o(
@@ -73,7 +88,11 @@ class ChunkHGRNFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def forward(
-        ctx, x, g, initial_state=..., output_final_state=...
+        ctx,
+        x,
+        g,
+        initial_state=...,
+        output_final_state=...,
     ) -> tuple[Tensor, Tensor | None]: ...
     @staticmethod
     @input_guard

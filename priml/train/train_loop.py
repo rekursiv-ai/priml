@@ -558,7 +558,9 @@ class TrainLoop:
                     not self.eval_only,
                 )
                 self.checkpointing.load(
-                    self, max_steps=self.max_steps, guard=not self.eval_only
+                    self,
+                    max_steps=self.max_steps,
+                    guard=not self.eval_only,
                 )
                 logger.info(
                     "TrainLoop startup: checkpoint load complete (global_step=%d).",
@@ -851,7 +853,7 @@ class TrainLoop:
             )
             payload["time"] = eval_time
             payload.update(
-                self._extra_eval_payload(eval_scalar_metrics, step, is_final=is_final)
+                self._extra_eval_payload(eval_scalar_metrics, step, is_final=is_final),
             )
             self.tracker.log_metrics(payload, step, prefix="eval/")
         return eval_scalar_metrics
@@ -1044,7 +1046,9 @@ class TrainLoop:
         }
         step_metrics: dict[str, float] = {
             key: float(
-                step_metric_tensors[key].item() if key in step_metric_tensors else value
+                step_metric_tensors[key].item()
+                if key in step_metric_tensors
+                else value,
             )
             for key, value in raw_step_metrics.items()
         }
@@ -1556,7 +1560,10 @@ def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]
             # GIL-wedged and the dump (unsafe against running threads, see
             # docstring) stays disarmed.
             faulthandler.dump_traceback_later(
-                2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
+                2.0 * interval_s,
+                repeat=True,
+                file=sys.stderr,
+                exit=False,
             )
             logger.warning(
                 "[rank %d] STILL IN PHASE %r after %.0fs "
@@ -1570,7 +1577,10 @@ def _phase_heartbeat(label: str, *, interval_s: float = 20.0) -> Generator[None]
     # the beat thread stalls for 2*interval_s (a GIL-holding native hang the
     # Python beat cannot observe). ``repeat=True`` keeps a long wedge emitting.
     faulthandler.dump_traceback_later(
-        2.0 * interval_s, repeat=True, file=sys.stderr, exit=False
+        2.0 * interval_s,
+        repeat=True,
+        file=sys.stderr,
+        exit=False,
     )
     thread = threading.Thread(target=beat, name="phase-heartbeat", daemon=True)
     thread.start()

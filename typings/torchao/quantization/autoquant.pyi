@@ -24,10 +24,22 @@ _AUTOQUANT_CACHE = ...
 class AutoQuantizableLinearWeight(torch.Tensor):
     @staticmethod
     def __new__(
-        cls, weight, qtensor_class_list, *args, mode=..., min_sqnr=..., **kwargs
+        cls,
+        weight,
+        qtensor_class_list,
+        *args,
+        mode=...,
+        min_sqnr=...,
+        **kwargs,
     ): ...
     def __init__(
-        self, weight, qtensor_class_list, *args, mode=..., min_sqnr=..., **kwargs
+        self,
+        weight,
+        qtensor_class_list,
+        *args,
+        mode=...,
+        min_sqnr=...,
+        **kwargs,
     ) -> None: ...
     def __repr__(self):  # -> str:
         ...
@@ -44,7 +56,11 @@ class AutoQuantizableLinearWeight(torch.Tensor):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size=..., outer_stride=...
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size=...,
+        outer_stride=...,
     ):  # -> Self:
         ...
     @classmethod
@@ -55,7 +71,11 @@ class AutoQuantizableLinearWeight(torch.Tensor):
         ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs
+        cls,
+        func,
+        types,
+        args,
+        kwargs,
     ):  # -> tuple[Any, ...] | Any | None:
         ...
 
@@ -72,7 +92,7 @@ class AQInt8DynamicallyQuantizedLinearWeight(AQMixin, LinearActivationQuantizedT
         ...
 
 class AQInt8DynamicallyQuantizedSemiSparseLinearWeight(
-    AQInt8DynamicallyQuantizedLinearWeight
+    AQInt8DynamicallyQuantizedLinearWeight,
 ):
     aq_layout: Layout = ...
 
@@ -82,14 +102,17 @@ class AQInt8WeightOnlyQuantizedLinearWeight(AffineQuantizedTensor, AQMixin):
         ...
 
 class AQInt8WeightOnlyQuantizedLinearWeight2(
-    AQInt8WeightOnlyQuantizedLinearWeight, AQMixin
+    AQInt8WeightOnlyQuantizedLinearWeight,
+    AQMixin,
 ): ...
 class AQInt8WeightOnlyQuantizedLinearWeight3(
-    AQInt8WeightOnlyQuantizedLinearWeight, AQMixin
+    AQInt8WeightOnlyQuantizedLinearWeight,
+    AQMixin,
 ): ...
 
 class AQInt4G32WeightOnlyQuantizedLinearWeight(
-    LinearActivationQuantizedTensor, AQMixin
+    LinearActivationQuantizedTensor,
+    AQMixin,
 ):
     group_size: int = ...
     aq_layout: Layout = ...
@@ -98,28 +121,29 @@ class AQInt4G32WeightOnlyQuantizedLinearWeight(
         ...
 
 class AQInt4G64WeightOnlyQuantizedLinearWeight(
-    AQInt4G32WeightOnlyQuantizedLinearWeight
+    AQInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
 
 class AQInt4G128WeightOnlyQuantizedLinearWeight(
-    AQInt4G32WeightOnlyQuantizedLinearWeight
+    AQInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
 
 class AQInt4G256WeightOnlyQuantizedLinearWeight(
-    AQInt4G32WeightOnlyQuantizedLinearWeight
+    AQInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
 
 class AQInt4G128WeightOnlyQuantizedMarlinSparseLinearWeight(
-    AQInt4G32WeightOnlyQuantizedLinearWeight
+    AQInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
     aq_layout: Layout = ...
 
 class AQGemliteInt4G32WeightOnlyQuantizedLinearWeight(
-    LinearActivationQuantizedTensor, AQMixin
+    LinearActivationQuantizedTensor,
+    AQMixin,
 ):
     group_size: int = ...
     @classmethod
@@ -127,17 +151,17 @@ class AQGemliteInt4G32WeightOnlyQuantizedLinearWeight(
         ...
 
 class AQGemliteInt4G64WeightOnlyQuantizedLinearWeight(
-    AQGemliteInt4G32WeightOnlyQuantizedLinearWeight
+    AQGemliteInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
 
 class AQGemliteInt4G128WeightOnlyQuantizedLinearWeight(
-    AQGemliteInt4G32WeightOnlyQuantizedLinearWeight
+    AQGemliteInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
 
 class AQGemliteInt4G256WeightOnlyQuantizedLinearWeight(
-    AQGemliteInt4G32WeightOnlyQuantizedLinearWeight
+    AQGemliteInt4G32WeightOnlyQuantizedLinearWeight,
 ):
     group_size: int = ...
 
@@ -200,7 +224,8 @@ class AQFloat8WeightOnlyQuantizedLinearWeight(AffineQuantizedTensor, AQMixin):
         ...
 
 class AQFloat8PerRowScalingDynamicallyQuantizedLinearWeight(
-    AQMixin, LinearActivationQuantizedTensor
+    AQMixin,
+    LinearActivationQuantizedTensor,
 ):
     activation_granularity = ...
     @classmethod
@@ -208,7 +233,8 @@ class AQFloat8PerRowScalingDynamicallyQuantizedLinearWeight(
         ...
 
 class AQFloat8PerTensorScalingDynamicallyQuantizedLinearWeight(
-    AQMixin, LinearActivationQuantizedTensor
+    AQMixin,
+    LinearActivationQuantizedTensor,
 ):
     activation_granularity = ...
     @classmethod

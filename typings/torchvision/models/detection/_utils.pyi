@@ -5,20 +5,27 @@ import torch
 class BalancedPositiveNegativeSampler:
     def __init__(self, batch_size_per_image: int, positive_fraction: float) -> None: ...
     def __call__(
-        self, matched_idxs: list[Tensor]
+        self,
+        matched_idxs: list[Tensor],
     ) -> tuple[list[Tensor], list[Tensor]]: ...
 
 @torch.jit._script_if_tracing
 def encode_boxes(
-    reference_boxes: Tensor, proposals: Tensor, weights: Tensor
+    reference_boxes: Tensor,
+    proposals: Tensor,
+    weights: Tensor,
 ) -> Tensor: ...
 
 class BoxCoder:
     def __init__(
-        self, weights: tuple[float, float, float, float], bbox_xform_clip: float = ...
+        self,
+        weights: tuple[float, float, float, float],
+        bbox_xform_clip: float = ...,
     ) -> None: ...
     def encode(
-        self, reference_boxes: list[Tensor], proposals: list[Tensor]
+        self,
+        reference_boxes: list[Tensor],
+        proposals: list[Tensor],
     ) -> list[Tensor]: ...
     def encode_single(self, reference_boxes: Tensor, proposals: Tensor) -> Tensor: ...
     def decode(self, rel_codes: Tensor, boxes: list[Tensor]) -> Tensor: ...
@@ -41,7 +48,10 @@ class Matcher:
     ) -> None: ...
     def __call__(self, match_quality_matrix: Tensor) -> Tensor: ...
     def set_low_quality_matches_(
-        self, matches: Tensor, all_matches: Tensor, match_quality_matrix: Tensor
+        self,
+        matches: Tensor,
+        all_matches: Tensor,
+        match_quality_matrix: Tensor,
     ) -> None: ...
 
 class SSDMatcher(Matcher):

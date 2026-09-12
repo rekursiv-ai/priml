@@ -160,7 +160,7 @@ def test_minibatches_partition_the_rollout_exactly() -> None:
 def test_minibatches_are_shuffled() -> None:
     rollout = _step().collect()
     first = next(
-        rollout.minibatches(count=1, generator=torch.Generator().manual_seed(0))
+        rollout.minibatches(count=1, generator=torch.Generator().manual_seed(0)),
     )
     second = next(
         rollout.minibatches(count=1, generator=torch.Generator().manual_seed(1)),

@@ -75,7 +75,10 @@ class MeanPoolingFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, x: torch.Tensor, chunk_size: int, cu_seqlens: torch.LongTensor | None = ...
+        ctx,
+        x: torch.Tensor,
+        chunk_size: int,
+        cu_seqlens: torch.LongTensor | None = ...,
     ) -> torch.Tensor: ...
     @staticmethod
     @input_guard

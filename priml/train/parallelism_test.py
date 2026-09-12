@@ -431,7 +431,7 @@ def test_materialize_meta_initializes_gated_delta_net_raw_params() -> None:
                 num_heads_v=4,
                 channels_k_head=8,
                 channels_v_head=8,
-            ).finalize()
+            ).finalize(),
         )
     materialize_meta(gdn, torch.device("cpu"))
     assert torch.isfinite(gdn.dt_bias).all()

@@ -119,7 +119,7 @@ class OutputGate(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         self.inner = config.inner.make()

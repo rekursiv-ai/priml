@@ -23,7 +23,10 @@ class _JaxtypingLoader(SourceFileLoader):
 
 class _JaxtypingFinder(MetaPathFinder):
     def __init__(
-        self, modules, original_pathfinder, typechecker: Typechecker
+        self,
+        modules,
+        original_pathfinder,
+        typechecker: Typechecker,
     ) -> None: ...
     def find_spec(self, fullname, path=..., target=...) -> None: ...
     def should_instrument(self, module_name: str) -> bool: ...
@@ -35,5 +38,6 @@ class ImportHookManager:
     def uninstall(self) -> None: ...
 
 def install_import_hook(
-    modules: str | Sequence[str], typechecker: str | None
+    modules: str | Sequence[str],
+    typechecker: str | None,
 ) -> ImportHookManager: ...

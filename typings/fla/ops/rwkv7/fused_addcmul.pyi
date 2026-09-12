@@ -113,19 +113,40 @@ def addcmul_bwd1(
 ) -> tuple[Any | Tensor, Tensor]: ...
 @torch_compile
 def addcmul_bwd2(
-    d_oxr, d_xw, d_xk, d_xv, d_xa, d_xg, delta, use_xg: bool
+    d_oxr,
+    d_xw,
+    d_xk,
+    d_xv,
+    d_xa,
+    d_xg,
+    delta,
+    use_xg: bool,
 ) -> tuple[Any, Any, Any, Any, Any, Any | None]: ...
 
 class Rwkv7FusedAddcmul(torch.autograd.Function):
     @staticmethod
     @input_guard
     def forward(
-        ctx, hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g
+        ctx,
+        hidden_states,
+        delta,
+        x_r,
+        x_w,
+        x_k,
+        x_v,
+        x_a,
+        x_g,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None]: ...
     @staticmethod
     @input_guard
     def backward(
-        ctx, dxr, dxw, dxk, dxv, dxa, dxg
+        ctx,
+        dxr,
+        dxw,
+        dxk,
+        dxv,
+        dxa,
+        dxg,
     ) -> tuple[Any | Tensor, Tensor, Any, Any, Any, Any, Any, Any | None]: ...
 
 def fused_addcmul_rwkv7(
@@ -144,7 +165,14 @@ def fused_addcmul_rwkv7(
     | None
 ): ...
 def torch_addcmul_rwkv7(
-    hidden_states, delta, xr, xw, xk, xv, xa, xg=...
+    hidden_states,
+    delta,
+    xr,
+    xw,
+    xk,
+    xv,
+    xa,
+    xg=...,
 ) -> (
     tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
     | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, None]

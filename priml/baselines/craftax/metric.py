@@ -164,12 +164,12 @@ class CraftaxScore:
         if observation.shape[-1] != actor.observation_size:
             raise ValueError(
                 f"Evaluation observation_size={observation.shape[-1]} does not match "
-                f"actor observation_size={actor.observation_size}."
+                f"actor observation_size={actor.observation_size}.",
             )
         if observation.device != actor.device:
             raise ValueError(
                 f"Evaluation device={observation.device} does not match "
-                f"actor device={actor.device}."
+                f"actor device={actor.device}.",
             )
         generator = torch.Generator(device=observation.device)
         generator.manual_seed(self.config.seed + self._rollout_index)

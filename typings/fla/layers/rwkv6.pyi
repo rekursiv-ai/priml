@@ -33,7 +33,9 @@ class RWKV6Attention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
 
 class LoRA(nn.Module):
@@ -51,7 +53,10 @@ class LoRA(nn.Module):
 
 class LerpLinear(nn.Module):
     def __init__(
-        self, input_dim: int, output_dim: int, low_rank_dim: int | None = ...
+        self,
+        input_dim: int,
+        output_dim: int,
+        low_rank_dim: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -63,7 +68,10 @@ class LerpLinear(nn.Module):
 
 class DDLerpLinear(nn.Module):
     def __init__(
-        self, input_dim: int, output_dim: int, low_rank_dim: int | None = ...
+        self,
+        input_dim: int,
+        output_dim: int,
+        low_rank_dim: int | None = ...,
     ) -> None: ...
     def forward(
         self,

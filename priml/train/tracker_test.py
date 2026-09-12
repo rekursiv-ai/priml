@@ -80,7 +80,8 @@ def test_log_metrics_skips_non_scalar_value() -> None:
     """A dict-valued metric is skipped, not logged (no flatten, no raise)."""
     tracker, writer = _tracker_with_fake_writer()
     tracker.log_metrics(
-        {"score": 1.0, "bundle": {"loss": torch.tensor(1.0), "aux": 5.0}}, step=0
+        {"score": 1.0, "bundle": {"loss": torch.tensor(1.0), "aux": 5.0}},
+        step=0,
     )
     assert writer.scalars == [("score", 1.0, 0)]
 
@@ -241,7 +242,8 @@ def test_wandb_non_rank_zero_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _init_tracker(
-    monkeypatch: pytest.MonkeyPatch, config: WandbTracker.Config
+    monkeypatch: pytest.MonkeyPatch,
+    config: WandbTracker.Config,
 ) -> tuple[dict[str, Any], _FakeRun]:
     """Build a rank-0 WandbTracker against a fake W&B run."""
     captured: dict[str, Any] = {}
@@ -266,7 +268,8 @@ def _init_tracker(
 
 
 def _init_kwargs(
-    monkeypatch: pytest.MonkeyPatch, config: WandbTracker.Config
+    monkeypatch: pytest.MonkeyPatch,
+    config: WandbTracker.Config,
 ) -> dict[str, Any]:
     """Build a rank-0 WandbTracker against a fake wandb; return init kwargs."""
     captured, _ = _init_tracker(monkeypatch, config)
@@ -303,7 +306,8 @@ def test_wandb_explicit_name_overrides_slurm_job_name(
     """An explicit config name wins over the SLURM_JOB_NAME fallback."""
     monkeypatch.setenv("SLURM_JOB_NAME", "job_xyz")
     kwargs = _init_kwargs(
-        monkeypatch, WandbTracker.Config(project="trm", name="my_run")
+        monkeypatch,
+        WandbTracker.Config(project="trm", name="my_run"),
     )
     assert kwargs["name"] == "my_run"
 
@@ -326,7 +330,8 @@ def test_wandb_run_id_resumes_existing_run(
     the checkpoint instead of opening a separate run.
     """
     kwargs = _init_kwargs(
-        monkeypatch, WandbTracker.Config(project="trm", run_id="9vralbfd")
+        monkeypatch,
+        WandbTracker.Config(project="trm", run_id="9vralbfd"),
     )
     assert kwargs["id"] == "9vralbfd"
     assert kwargs["resume"] == "allow"
@@ -580,13 +585,16 @@ def test_file_tracker_empty_path_is_noop(tmp_path: Path) -> None:
 
 
 def test_file_tracker_non_rank_zero_is_noop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Off rank 0, FileTracker writes nothing (one file per job, not per rank)."""
     monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: False)
     target = tmp_path / "metrics.json"
     FileTracker.Config(working_dir=str(target)).make().log_metrics(
-        {"score": 1.0}, 0, prefix="eval/"
+        {"score": 1.0},
+        0,
+        prefix="eval/",
     )
     assert not target.exists()
 
@@ -695,7 +703,7 @@ def test_file_tracker_working_dir_is_scoped_by_owner() -> None:
     config.base_dir = "/scratch/runs/study/run-1"
 
     assert config.finalize().working_dir == Path(
-        "/scratch/runs/study/run-1/metrics.json"
+        "/scratch/runs/study/run-1/metrics.json",
     )
 
 
@@ -752,7 +760,7 @@ def test_async_tracker_is_enabled_ordered_and_nonblocking_by_default() -> None:
         target=lambda: (
             tracker.log_metrics({"index": 2}, 2),
             second_returned.set(),
-        )
+        ),
     )
     second.start()
     assert second_returned.wait(timeout=1.0)

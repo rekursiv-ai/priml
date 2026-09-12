@@ -238,7 +238,9 @@ def test_training_buffer_override_does_not_change_validation_rows(corpus: Path) 
     assert next(iter(parent.train_dataloader()))["media"][0, 1].item() == ord("b")
     assert next(iter(changed.train_dataloader()))["media"][0, 1].item() == ord("a")
     for first, second in zip(
-        parent.eval_dataloader(), changed.eval_dataloader(), strict=True
+        parent.eval_dataloader(),
+        changed.eval_dataloader(),
+        strict=True,
     ):
         torch.testing.assert_close(first["media"], second["media"])
         torch.testing.assert_close(first["label"], second["label"])

@@ -298,13 +298,13 @@ def compute_video_shapes(
     """
     if nominal_resolution <= 0:
         raise ValueError(
-            f"nominal_resolution must be positive; got {nominal_resolution}."
+            f"nominal_resolution must be positive; got {nominal_resolution}.",
         )
     if aspect <= 0 or not math.isfinite(aspect):
         raise ValueError(f"aspect must be finite and positive; got {aspect}.")
     if duration_sec < 0 or not math.isfinite(duration_sec):
         raise ValueError(
-            f"duration_sec must be finite and non-negative; got {duration_sec}."
+            f"duration_sec must be finite and non-negative; got {duration_sec}.",
         )
     if fps <= 0 or not math.isfinite(fps):
         raise ValueError(f"fps must be finite and positive; got {fps}.")
@@ -400,7 +400,7 @@ def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     # neither the axis nor the patch size.
     if any(d % p for d, p in zip(spatial, patch_size, strict=True)):
         raise ValueError(
-            f"spatial dims {spatial} must each be divisible by {patch_size=}."
+            f"spatial dims {spatial} must each be divisible by {patch_size=}.",
         )
     batch = x.shape[: -rank - 1]
     interleaved = (
@@ -453,7 +453,7 @@ def unpatchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
     if c % math.prod(patch_size):
         raise ValueError(
             f"channels {c} must be divisible by the patch volume "
-            f"{math.prod(patch_size)} from {patch_size=}."
+            f"{math.prod(patch_size)} from {patch_size=}.",
         )
     out = x.reshape(*batch, c // math.prod(patch_size), *patch_size, *spatial)
     base = len(batch) + 1
@@ -596,7 +596,9 @@ def interpolate(
             x = adaptive_avg_pool2d(x, (size_[0], size_[1]), variance_preserving=True)
         elif len(size_) == 3:
             x = adaptive_avg_pool3d(
-                x, (size_[0], size_[1], size_[2]), variance_preserving=True
+                x,
+                (size_[0], size_[1], size_[2]),
+                variance_preserving=True,
             )
         else:
             raise NotImplementedError(f"{size_=} not supported for {mode_=}.")

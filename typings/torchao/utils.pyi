@@ -36,7 +36,8 @@ def get_available_devices():  # -> list[str]:
 def get_compute_capability():  # -> float:
     ...
 def compute_max_diff(
-    output: torch.Tensor, output_ref: torch.Tensor
+    output: torch.Tensor,
+    output_ref: torch.Tensor,
 ) -> torch.Tensor: ...
 def benchmark_torch_function_in_microseconds(f, *args, **kwargs):  # -> float:
     ...
@@ -96,7 +97,11 @@ class TorchAOBaseTensor(torch.Tensor):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     def __repr__(self):  # -> str:
@@ -131,5 +136,7 @@ def is_package_at_least(package_name: str, min_version: str):  # -> bool:
 
 class DummyModule(torch.nn.Module):
     def __init__(
-        self, weight: torch.Tensor, bias: torch.Tensor | None = ...
+        self,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None = ...,
     ) -> None: ...

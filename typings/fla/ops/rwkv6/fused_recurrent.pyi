@@ -17,7 +17,7 @@ import triton.language as tl
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16]],
@@ -52,7 +52,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -90,7 +90,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     {
         "USE_INITIAL_STATE": lambda args: args["dh0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -200,9 +200,20 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[
-        Any, Any, Any, Tensor, Tensor | Any, None, Tensor | None, None, None, None
+        Any,
+        Any,
+        Any,
+        Tensor,
+        Tensor | Any,
+        None,
+        Tensor | None,
+        None,
+        None,
+        None,
     ]: ...
 
 def fused_recurrent_rwkv6(

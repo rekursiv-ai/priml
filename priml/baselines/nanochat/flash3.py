@@ -229,11 +229,11 @@ def receipt_validation_error(
         elif receipt[name] != expected_value:
             if name.endswith("_sha256"):
                 errors.append(
-                    f"{name} mismatch: receipt {receipt[name]}, actual {expected_value}"
+                    f"{name} mismatch: receipt {receipt[name]}, actual {expected_value}",
                 )
             else:
                 errors.append(
-                    f"{name} mismatch: expected {expected_value}, receipt {receipt[name]}"
+                    f"{name} mismatch: expected {expected_value}, receipt {receipt[name]}",
                 )
     errors.extend(
         f"unexpected receipt field {name}"
@@ -282,7 +282,7 @@ def prepare_flash3(
     if destination.exists():
         raise FileExistsError(
             f"FA3 artifact at {destination} failed validation: {validation_error}. "
-            "Remove only this content-addressed directory, then prepare again."
+            "Remove only this content-addressed directory, then prepare again.",
         )
 
     _validate_build_runtime()
@@ -304,7 +304,7 @@ def prepare_flash3(
     if validation_error := _artifact_validation_error(destination):
         raise RuntimeError(
             f"Prepared FA3 artifact at {destination} failed validation: "
-            f"{validation_error}."
+            f"{validation_error}.",
         )
     return destination
 
@@ -330,7 +330,7 @@ def load_flash3(
         raise Flash3UnavailableError(
             f"Prepared FlashAttention-3 is invalid at {prepared}: "
             f"{validation_error}. "
-            "Run `python -m priml.baselines.nanochat.flash3` once on this node."
+            "Run `python -m priml.baselines.nanochat.flash3` once on this node.",
         )
     if module_error := _loaded_module_error("flash_attn_3._C", prepared):
         raise Flash3UnavailableError(module_error)
@@ -359,7 +359,7 @@ def _build_flash3(destination: Path) -> None:
             "add",
             "origin",
             "https://github.com/varunneal/flash-attention.git",
-        ]
+        ],
     )
     _run(
         [
@@ -370,7 +370,7 @@ def _build_flash3(destination: Path) -> None:
             "--depth=1",
             "origin",
             source_revision(),
-        ]
+        ],
     )
     _run(["git", "-C", str(source), "checkout", "--detach", "FETCH_HEAD"])
     _run(
@@ -382,7 +382,7 @@ def _build_flash3(destination: Path) -> None:
             "update",
             "--init",
             "csrc/cutlass",
-        ]
+        ],
     )
     if _run_output(["git", "-C", str(source), "rev-parse", "HEAD"]) != (
         source_revision()
@@ -466,7 +466,7 @@ def _nvcc_path() -> Path:
         return provisioned
     raise RuntimeError(
         "FA3 source preparation requires nvcc 12.8 on PATH or at "
-        "/usr/local/cuda-12.8/bin/nvcc."
+        "/usr/local/cuda-12.8/bin/nvcc.",
     )
 
 
@@ -514,7 +514,7 @@ def _runtime_files_error(path: Path) -> str:
     )
     if extension_count != 1:
         errors.append(
-            f"expected exactly one flash_attn_3/_C*.so; found {extension_count}"
+            f"expected exactly one flash_attn_3/_C*.so; found {extension_count}",
         )
     return "; ".join(errors)
 
@@ -548,7 +548,7 @@ def _extension_path(path: Path) -> Path:
     ]
     if len(extensions) != 1:
         raise FileNotFoundError(
-            f"expected exactly one flash_attn_3/_C*.so; found {len(extensions)}"
+            f"expected exactly one flash_attn_3/_C*.so; found {len(extensions)}",
         )
     return extensions[0]
 

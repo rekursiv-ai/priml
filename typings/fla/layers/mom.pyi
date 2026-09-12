@@ -55,7 +55,9 @@ class MomAttention(nn.Module):
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
     def shared_o(
         self,
@@ -70,13 +72,28 @@ class MomAttention(nn.Module):
     ) -> torch.Tensor: ...
     def cu2pad(self, x, cu_seqlens) -> tuple[Tensor, Tensor]: ...
     def pad_for_conv(
-        self, cu_seqlens, cu_q, cu_k, cu_v
+        self,
+        cu_seqlens,
+        cu_q,
+        cu_k,
+        cu_v,
     ) -> tuple[Tensor, Any, Any, Any, Tensor]: ...
     def unpad_after_conv(
-        self, conv_cu_seqlens, cu_seqlens, cu_q, cu_k, cu_v, pad_lengths
+        self,
+        conv_cu_seqlens,
+        cu_seqlens,
+        cu_q,
+        cu_k,
+        cu_v,
+        pad_lengths,
     ) -> tuple[Tensor, Tensor, Tensor]: ...
     def prepare_recurrent_state(
-        self, recurrent_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size
+        self,
+        recurrent_state,
+        cu_seqlens,
+        cu_seqlen_all,
+        reverse_indices,
+        batch_size,
     ) -> Tensor | None: ...
     def handle_recurrent_state(
         self,

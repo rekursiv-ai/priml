@@ -317,7 +317,7 @@ SOLID_BLOCK: Final = torch.zeros(len(BlockType), dtype=torch.bool).index_fill_(
             BlockType.GRAVE,
             BlockType.GRAVE2,
             BlockType.GRAVE3,
-        ]
+        ],
     ),
     True,
 )
@@ -335,7 +335,7 @@ CAN_PLACE_ITEM_ON: Final = torch.zeros(len(BlockType), dtype=torch.bool).index_f
             BlockType.PATH,
             BlockType.FIRE_GRASS,
             BlockType.ICE_GRASS,
-        ]
+        ],
     ),
     True,
 )

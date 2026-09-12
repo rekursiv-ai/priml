@@ -129,7 +129,9 @@ class RecurrentRollout:
             for name, value in named.items()
         }
         states = self.initial_state[order].reshape(
-            count, -1, self.initial_state.shape[-1]
+            count,
+            -1,
+            self.initial_state.shape[-1],
         )
 
         for index in range(count):
@@ -245,7 +247,9 @@ class CraftaxRNNTrainStep(TrainStep):
         # base reads it, so there is one optimizer rather than an
         # inherited AdamW discarded for this one.
         config.optimizer = PartialConfig(
-            torch.optim.Adam, lr=config.learning_rate, eps=1e-5
+            torch.optim.Adam,
+            lr=config.learning_rate,
+            eps=1e-5,
         )
         # Weight initialization draws from the global stream, so the seed has
         # to reach it for a run to be reproducible from its config alone. The
@@ -265,7 +269,8 @@ class CraftaxRNNTrainStep(TrainStep):
         # module would leave the hot path interpreted.
         self._step = _compiled(model.step, enabled=config.compile_recurrent_steps)
         self._sequence = _compiled(
-            model.sequence, enabled=config.compile_recurrent_steps
+            model.sequence,
+            enabled=config.compile_recurrent_steps,
         )
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(config.seed)

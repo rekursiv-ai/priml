@@ -20,7 +20,10 @@ class SSD300_VGG16_Weights(WeightsEnum):
 
 class SSDHead(nn.Module):
     def __init__(
-        self, in_channels: list[int], num_anchors: list[int], num_classes: int
+        self,
+        in_channels: list[int],
+        num_anchors: list[int],
+        num_classes: int,
     ) -> None: ...
     def forward(self, x: list[Tensor]) -> dict[str, Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Tensor]: ...
@@ -32,7 +35,10 @@ class SSDScoringHead(nn.Module):
 
 class SSDClassificationHead(SSDScoringHead):
     def __init__(
-        self, in_channels: list[int], num_anchors: list[int], num_classes: int
+        self,
+        in_channels: list[int],
+        num_anchors: list[int],
+        num_classes: int,
     ) -> None: ...
 
 class SSDRegressionHead(SSDScoringHead):
@@ -59,7 +65,9 @@ class SSD(nn.Module):
     ) -> None: ...
     @torch.jit.unused
     def eager_outputs(
-        self, losses: dict[str, Tensor], detections: list[dict[str, Tensor]]
+        self,
+        losses: dict[str, Tensor],
+        detections: list[dict[str, Tensor]],
     ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]]]: ...
     def compute_loss(
         self,
@@ -69,10 +77,14 @@ class SSD(nn.Module):
         matched_idxs: list[Tensor],
     ) -> dict[str, Tensor]: ...
     def forward(
-        self, images: list[Tensor], targets: list[dict[str, Tensor]] | None = ...
+        self,
+        images: list[Tensor],
+        targets: list[dict[str, Tensor]] | None = ...,
     ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[dict[str, Tensor], list[dict[str, Tensor]]]: ...
     def postprocess_detections(
         self,

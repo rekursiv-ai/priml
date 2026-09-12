@@ -141,7 +141,7 @@ def generate_smooth_world(
     # starts walled in or in the sea.
     distance = _distance_from(player_position, shape, device=device)
     water_clearance = (distance / config.player_proximity_map_water_strength).clamp(
-        max=config.player_proximity_map_water_max
+        max=config.player_proximity_map_water_max,
     )
     mountain_clearance = (
         distance / config.player_proximity_map_mountain_strength

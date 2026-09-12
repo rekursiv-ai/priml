@@ -196,10 +196,14 @@ class ActPool:
         # belong to the puzzle that just left, not the one arriving.
         seat_latent = halted.view(-1, 1, 1)
         self.z_slow = torch.where(
-            seat_latent, torch.zeros_like(self.z_slow), self.z_slow
+            seat_latent,
+            torch.zeros_like(self.z_slow),
+            self.z_slow,
         )
         self.z_fast = torch.where(
-            seat_latent, torch.zeros_like(self.z_fast), self.z_fast
+            seat_latent,
+            torch.zeros_like(self.z_fast),
+            self.z_fast,
         )
         self.feedback = torch.where(seat, self.inputs, self.feedback)
         return self.inputs, self.labels, torch.ones_like(halted)
@@ -296,7 +300,7 @@ class ActPool:
             correct_cells = (predictions == labels) & counted
             per_row = counted.sum(dim=-1)
             solved = ((correct_cells.sum(dim=-1) == per_row) & (per_row > 0)).to(
-                halt.dtype
+                halt.dtype,
             )
         per_sample = nn.functional.binary_cross_entropy_with_logits(
             halt,

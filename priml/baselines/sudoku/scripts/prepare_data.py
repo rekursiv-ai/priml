@@ -292,7 +292,11 @@ def _transform(
 
 
 def _permuted(
-    grid: np.ndarray, *, mapping: np.ndarray, digits: np.ndarray, transpose: bool
+    grid: np.ndarray,
+    *,
+    mapping: np.ndarray,
+    digits: np.ndarray,
+    transpose: bool,
 ) -> np.ndarray:
     """Apply one cell permutation and digit relabeling to ``grid``."""
     if transpose:

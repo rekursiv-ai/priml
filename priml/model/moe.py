@@ -308,10 +308,16 @@ class MoE(nn.Module):
             self.router.channels_in = self.channels_in
             for cfg in (self.expert, self.shared_expert):
                 propagate_attr(
-                    cfg, "channels_in", self.channels_in, protocol=ChannelsIn
+                    cfg,
+                    "channels_in",
+                    self.channels_in,
+                    protocol=ChannelsIn,
                 )
                 propagate_attr(
-                    cfg, "channels_out", self.channels_out, protocol=ChannelsOut
+                    cfg,
+                    "channels_out",
+                    self.channels_out,
+                    protocol=ChannelsOut,
                 )
                 propagate_attr(
                     cfg,

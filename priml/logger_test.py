@@ -335,7 +335,8 @@ class TestSetupLogging:
         assert isinstance(handler.formatter, CustomFormatter)
 
     def test_bind_logging_to_current_stdout_retargets_loop_handler(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After W&B wraps stdout, Loop logs must use the wrapped stream."""
         root_logger = logging.getLogger()
@@ -354,7 +355,8 @@ class TestReplayBufferedLogs:
     """Replay re-emits pre-init records to the current stdout, then detaches."""
 
     def test_replay_re_emits_buffered_records(
-        self, capsys: pytest.CaptureFixture[str]
+        self,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Records logged before replay are re-emitted to stdout on replay."""
         logging.getLogger().handlers.clear()

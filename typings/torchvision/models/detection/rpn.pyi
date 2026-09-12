@@ -11,14 +11,22 @@ class RPNHead(nn.Module):
     def __init__(self, in_channels: int, num_anchors: int, conv_depth=...) -> None: ...
     def forward(self, x: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[Tensor], list[Tensor]]: ...
 
 def permute_and_flatten(
-    layer: Tensor, N: int, A: int, C: int, H: int, W: int
+    layer: Tensor,
+    N: int,
+    A: int,
+    C: int,
+    H: int,
+    W: int,
 ) -> Tensor: ...
 def concat_box_prediction_layers(
-    box_cls: list[Tensor], box_regression: list[Tensor]
+    box_cls: list[Tensor],
+    box_regression: list[Tensor],
 ) -> tuple[Tensor, Tensor]: ...
 
 class RegionProposalNetwork(torch.nn.Module):
@@ -39,7 +47,9 @@ class RegionProposalNetwork(torch.nn.Module):
     def pre_nms_top_n(self) -> int: ...
     def post_nms_top_n(self) -> int: ...
     def assign_targets_to_anchors(
-        self, anchors: list[Tensor], targets: list[dict[str, Tensor]]
+        self,
+        anchors: list[Tensor],
+        targets: list[dict[str, Tensor]],
     ) -> tuple[list[Tensor], list[Tensor]]: ...
     def filter_proposals(
         self,
@@ -62,5 +72,7 @@ class RegionProposalNetwork(torch.nn.Module):
         targets: list[dict[str, Tensor]] | None = ...,
     ) -> tuple[list[Tensor], dict[str, Tensor]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[list[Tensor], dict[str, Tensor]]: ...

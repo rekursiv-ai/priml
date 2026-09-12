@@ -37,7 +37,9 @@ class Mamba2Block(GradientCheckpointingLayer):
         **kwargs,
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
 
 class Mamba2PreTrainedModel(PreTrainedModel):
@@ -65,7 +67,9 @@ class Mamba2Model(Mamba2PreTrainedModel):
         **kwargs,
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class Mamba2ForCausalLM(Mamba2PreTrainedModel, FLAGenerationMixin):

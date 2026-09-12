@@ -45,7 +45,10 @@ class Int4PreshuffledTensor(TorchAOBaseTensor):
     ) -> None: ...
     @classmethod
     def from_hp(
-        cls, w: torch.Tensor, block_size: list[int], activation_dtype: torch.dtype = ...
+        cls,
+        w: torch.Tensor,
+        block_size: list[int],
+        activation_dtype: torch.dtype = ...,
     ):  # -> Int4PreshuffledTensor:
         ...
     @classmethod

@@ -78,7 +78,9 @@ class CausalConv1dFunction(torch.autograd.Function):
     @staticmethod
     @input_guard(no_guard_contiguous=["dy"])
     def backward(
-        ctx, dy: torch.Tensor, dht: torch.Tensor | None = ...
+        ctx,
+        dy: torch.Tensor,
+        dht: torch.Tensor | None = ...,
     ) -> tuple[
         Tensor,
         Any | None,

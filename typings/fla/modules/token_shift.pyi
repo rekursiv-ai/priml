@@ -9,13 +9,14 @@ import triton.language as tl
 NUM_WARPS_AUTOTUNE = ...
 
 def token_shift_ref(
-    x: torch.Tensor, cu_seqlens: torch.Tensor | None = ...
+    x: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = ...,
 ) -> torch.Tensor: ...
 @triton.heuristics(
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["cache"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -45,7 +46,7 @@ def token_shift_fwd_kernel_short(
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["cache"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -78,7 +79,7 @@ def token_shift_fwd_kernel_long(
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["grad_cache_out"] is not None,
         "HAS_DCACHE": lambda args: args["grad_cache_in"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -108,7 +109,7 @@ def token_shift_bwd_kernel_short(
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["grad_cache_out"] is not None,
         "HAS_DCACHE": lambda args: args["grad_cache_in"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -170,7 +171,9 @@ class TokenShift(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dy: torch.Tensor, dcache: torch.Tensor | None = ...
+        ctx,
+        dy: torch.Tensor,
+        dcache: torch.Tensor | None = ...,
     ) -> tuple[Any, None, Any, None, None]: ...
 
 def token_shift(

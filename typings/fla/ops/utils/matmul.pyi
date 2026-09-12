@@ -8,33 +8,49 @@ import triton.language as tl
     {
         "HAS_ALPHA": lambda args: args["alpha"] is not None,
         "HAS_BETA": lambda args: args["beta"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
         triton.Config(
-            {"BM": 128, "BK": 64, "BN": 256, "G": 4}, num_stages=3, num_warps=8
+            {"BM": 128, "BK": 64, "BN": 256, "G": 4},
+            num_stages=3,
+            num_warps=8,
         ),
         triton.Config(
-            {"BM": 64, "BK": 32, "BN": 256, "G": 4}, num_stages=4, num_warps=4
+            {"BM": 64, "BK": 32, "BN": 256, "G": 4},
+            num_stages=4,
+            num_warps=4,
         ),
         triton.Config(
-            {"BM": 128, "BK": 32, "BN": 128, "G": 4}, num_stages=4, num_warps=4
+            {"BM": 128, "BK": 32, "BN": 128, "G": 4},
+            num_stages=4,
+            num_warps=4,
         ),
         triton.Config(
-            {"BM": 128, "BK": 32, "BN": 64, "G": 4}, num_stages=4, num_warps=4
+            {"BM": 128, "BK": 32, "BN": 64, "G": 4},
+            num_stages=4,
+            num_warps=4,
         ),
         triton.Config(
-            {"BM": 64, "BK": 32, "BN": 128, "G": 4}, num_stages=4, num_warps=4
+            {"BM": 64, "BK": 32, "BN": 128, "G": 4},
+            num_stages=4,
+            num_warps=4,
         ),
         triton.Config(
-            {"BM": 128, "BK": 32, "BN": 32, "G": 4}, num_stages=4, num_warps=4
+            {"BM": 128, "BK": 32, "BN": 32, "G": 4},
+            num_stages=4,
+            num_warps=4,
         ),
         triton.Config(
-            {"BM": 64, "BK": 32, "BN": 32, "G": 4}, num_stages=5, num_warps=2
+            {"BM": 64, "BK": 32, "BN": 32, "G": 4},
+            num_stages=5,
+            num_warps=2,
         ),
         triton.Config(
-            {"BM": 32, "BK": 32, "BN": 64, "G": 4}, num_stages=5, num_warps=2
+            {"BM": 32, "BK": 32, "BN": 64, "G": 4},
+            num_stages=5,
+            num_warps=2,
         ),
     ],
     key=["M", "N", "K"],

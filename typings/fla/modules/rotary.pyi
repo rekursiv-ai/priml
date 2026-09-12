@@ -71,7 +71,8 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, do
+        ctx,
+        do,
     ) -> tuple[Tensor, None, None, None, None, None, None, None]: ...
 
 def rotary_embedding(
@@ -106,5 +107,7 @@ class RotaryEmbedding(nn.Module):
         chunk_indices: torch.LongTensor | None = ...,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...

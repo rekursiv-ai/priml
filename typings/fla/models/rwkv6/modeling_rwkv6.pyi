@@ -47,12 +47,16 @@ class RWKV6Block(GradientCheckpointingLayer):
         cu_seqlens: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class RWKV6PreTrainedModel(PreTrainedModel):
@@ -81,7 +85,9 @@ class RWKV6Model(RWKV6PreTrainedModel):
         **kwargs: Unpack[dict],
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class RWKV6ForCausalLM(RWKV6PreTrainedModel, FLAGenerationMixin):

@@ -37,7 +37,7 @@ class Qwen3MMDiTGraft(MMDiTGraft):
 
     class Config(Makes["Qwen3MMDiTGraft"], MMDiTGraft.Config):
         backbone: TransformerConfig = field(
-            default_factory=cast(Callable[[], TransformerConfig], Qwen3.Config)
+            default_factory=cast(Callable[[], TransformerConfig], Qwen3.Config),
         )
         """Dense Qwen3 language architecture; the checkpoint supplies this on load."""
 
@@ -75,7 +75,7 @@ class Qwen3MMDiTGraft(MMDiTGraft):
         model.load_backbone_state(remap_hf_state_dict(hf_state, graft.backbone))
         model = model.to(
             dtype=dtype
-            or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16")))
+            or hub.resolve_hf_dtype(str(hf_config.get("torch_dtype", "bfloat16"))),
         )
         if device is not None:
             model = model.to(device=device)

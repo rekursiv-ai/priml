@@ -25,7 +25,13 @@ NUM_WARPS_AUTOTUNE = ...
 )
 @triton.jit(do_not_specialize=["T"])
 def sigmoid_fwd_kernel(
-    x, y, T, D: tl.constexpr, stride_x_row, stride_y_row, B: tl.constexpr
+    x,
+    y,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_y_row,
+    B: tl.constexpr,
 ): ...
 @triton.autotune(
     configs=[
@@ -52,7 +58,9 @@ def sigmoid_bwd_kernel(
 def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = ...) -> torch.Tensor: ...
 @torch.compiler.disable
 def sigmoid_bwd(
-    x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = ...
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    output_contiguous: bool = ...,
 ) -> torch.Tensor: ...
 
 class SigmoidFunction(torch.autograd.Function):
@@ -76,7 +84,14 @@ sigmoid = ...
 )
 @triton.jit(do_not_specialize=["T"])
 def logsigmoid_fwd_kernel(
-    x, y, temperature, T, D: tl.constexpr, stride_x_row, stride_y_row, B: tl.constexpr
+    x,
+    y,
+    temperature,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_y_row,
+    B: tl.constexpr,
 ): ...
 @triton.autotune(
     configs=[
@@ -102,7 +117,9 @@ def logsigmoid_bwd_kernel(
 ): ...
 @torch.compiler.disable
 def logsigmoid_fwd(
-    x: torch.Tensor, temperature: float = ..., output_contiguous: bool = ...
+    x: torch.Tensor,
+    temperature: float = ...,
+    output_contiguous: bool = ...,
 ) -> torch.Tensor: ...
 @torch.compiler.disable
 def logsigmoid_bwd(
@@ -132,7 +149,13 @@ def logsigmoid(x: torch.Tensor, temperature: float = ...) -> torch.Tensor: ...
 )
 @triton.jit(do_not_specialize=["T"])
 def swish_fwd_kernel(
-    x, y, T, D: tl.constexpr, stride_x_row, stride_y_row, B: tl.constexpr
+    x,
+    y,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_y_row,
+    B: tl.constexpr,
 ): ...
 @triton.autotune(
     configs=[
@@ -159,7 +182,9 @@ def swish_bwd_kernel(
 def swish_fwd(x: torch.Tensor, output_contiguous: bool = ...) -> torch.Tensor: ...
 @torch.compiler.disable
 def swish_bwd(
-    x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = ...
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    output_contiguous: bool = ...,
 ) -> torch.Tensor: ...
 
 class SwishFunction(torch.autograd.Function):
@@ -265,7 +290,9 @@ def swiglu_fwdbwd_kernel(
 ): ...
 @torch.compiler.disable
 def swiglu_fwd(
-    x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = ...
+    x: torch.Tensor,
+    y: torch.Tensor,
+    output_contiguous: bool = ...,
 ) -> torch.Tensor: ...
 @torch.compiler.disable
 def swiglu_fwdbwd(
@@ -283,7 +310,8 @@ class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
     @input_guard(no_guard_contiguous=True)
     def backward(
-        ctx, dout
+        ctx,
+        dout,
     ) -> tuple[Tensor, Tensor, Tensor | None] | tuple[Tensor, Tensor]: ...
 
 class SwiGLULinearFunction(torch.autograd.Function):

@@ -11,7 +11,12 @@ aten = ...
 def get_gemlite_quant_kwargs(bit_width, group_size, dtype):  # -> dict[Any, Any]:
     ...
 def get_gemlite_aqt_kwargs(
-    weight, group_size=..., bit_width=..., packing_bitwidth=..., mode=..., use_hqq=...
+    weight,
+    group_size=...,
+    bit_width=...,
+    packing_bitwidth=...,
+    mode=...,
+    use_hqq=...,
 ):  # -> dict[Any, Any]:
     ...
 
@@ -45,7 +50,11 @@ class GemliteAQTTensorImpl(TensorCoreTiledAQTTensorImpl):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     @classmethod
@@ -62,7 +71,11 @@ class GemliteAQTTensorImpl(TensorCoreTiledAQTTensorImpl):
     def get_plain(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs
+        cls,
+        func,
+        types,
+        args,
+        kwargs,
     ):  # -> tuple[Any, ...] | Any | None:
         ...
     def get_layout(self) -> Layout: ...

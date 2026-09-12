@@ -12,7 +12,7 @@ import triton.language as tl
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -53,7 +53,7 @@ def fused_recurrent_fwd_kernel(
         "USE_DHT": lambda args: args["dht"] is not None,
         "USE_DH0": lambda args: args["dh0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -115,7 +115,9 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[Any, Any, Tensor, Any, Any, None, Tensor | None, None, None]: ...
 
 def fused_recurrent_iplr_delta_rule(
