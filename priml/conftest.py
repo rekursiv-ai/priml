@@ -16,6 +16,7 @@ from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
 import os
+import random
 import sys
 
 import pytest
@@ -34,7 +35,12 @@ if TYPE_CHECKING:
 # Re-exported, not merely imported: an autouse fixture reaches only the
 # directory of the conftest that names it, so binding it here is what points
 # every priml test's XDG lookups at a tmp dir instead of the developer's own.
-__all__ = ["isolate_user_dirs", "pytest_collection_modifyitems", "pytest_configure"]
+__all__ = [
+    "isolate_user_dirs",
+    "pytest_collection_modifyitems",
+    "pytest_configure",
+    "seed_rng",
+]
 
 
 def cap_math_threads() -> None:
@@ -103,6 +109,37 @@ def reset_runtime_global() -> Generator[None]:
         # Private-global reset: the module exposes no setter (none should exist
         # in prod); tests are the only context that may leak it.
         setattr(runtime, "_runtime_initialized", False)  # noqa: B010 -- dynamic module global, no static attr
+
+
+@pytest.fixture(autouse=True)
+def seed_rng() -> None:
+    """Start every test from one RNG state.
+
+    Python's ``random``, NumPy, and torch RNGs are process globals, so under
+    xdist a test's draws depend on which tests its worker ran before it.
+    Reseeding at entry makes leaked state unobservable; nothing needs
+    restoring afterwards. A test wanting a specific stream still seeds
+    itself.
+
+    Each library is seeded only if it is already imported: a process that
+    never loaded torch has no torch RNG to leak, and importing it here would
+    make torch a test dependency of every package in the repo. Reading
+    ``sys.modules`` rather than importing keeps that true.
+    """
+    random.seed(1337)
+    numpy = sys.modules.get("numpy")
+    if numpy is not None:
+        numpy.random.seed(1337)
+        # ``priml.math.seed.numpy_rng`` is the house Generator; it is a
+        # separate stream from the legacy module RNG seeded above.
+        seed = sys.modules.get("priml.math.seed")
+        if seed is not None:
+            seed.numpy_rng.bit_generator.state = numpy.random.PCG64(1337).state
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        # Seeds CPU and every visible CUDA device (through its lazy-init
+        # path when no context exists yet), as ``set_seed_local`` does.
+        torch.manual_seed(1337)
 
 
 @pytest.fixture(scope="session")
