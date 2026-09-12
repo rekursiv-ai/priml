@@ -1072,14 +1072,25 @@ def test_known_host_dependent_ops_are_not_allowlisted() -> None:
     for name in must_upcast:
         assert name not in _EXACT_F32_OPS
 
-    a = torch.randn(4096, dtype=torch.float32)
-    b = torch.randn(4096, dtype=torch.float32)
-    fma32 = a.clone().addcmul_(b, b, value=0.7)
-    fma64 = a.double().addcmul_(b.double(), b.double(), value=0.7).float()
+    # Constructed inputs, not random ones: a witness on a random draw asserts a
+    # probability, and the scatter one below coincided for 91/2000 seeds. These
+    # values make the divergence a property of IEEE-754, true on every host.
+    #
+    # ``1 + 2**-14 + 0.7 * (1 + 2**-12)(1 + 2**-14)``: the product carries 26
+    # significant bits, so float32 rounds it before the add; float64 keeps it,
+    # and the sum lands one float32 ULP apart.
+    a = torch.full((64,), 1.0 + 2.0**-14, dtype=torch.float32)
+    b = torch.full((64,), 1.0 + 2.0**-12, dtype=torch.float32)
+    c = torch.full((64,), 1.0 + 2.0**-14, dtype=torch.float32)
+    fma32 = a.clone().addcmul_(b, c, value=0.7)
+    fma64 = a.double().addcmul_(b.double(), c.double(), value=0.7).float()
     assert not torch.equal(fma32, fma64)
 
+    # Mixed magnitudes: adding 1e-8 to 1.0 in float32 is absorbed on every
+    # host, while the float64 sum keeps it, so the two paths cannot coincide.
     idx = torch.zeros(1024, dtype=torch.long)
-    src = torch.randn(1024, dtype=torch.float32)
+    src = torch.full((1024,), 1e-8, dtype=torch.float32)
+    src[0] = 1.0
     acc32 = torch.zeros(1, dtype=torch.float32).scatter_add_(0, idx, src)
     acc64 = (
         torch.zeros(1, dtype=torch.float64).scatter_add_(0, idx, src.double()).float()
