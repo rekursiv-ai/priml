@@ -460,7 +460,7 @@ class _PackedStream:
             # early does not leave it alive holding the corpus.
             done.set()
             for event in copied:
-                event.set()  # unblock a worker parked on a slot it cannot refill.
+                event.set()  # Unblock a worker parked on a slot it cannot refill.
             with contextlib.suppress(queue.Empty):
                 ready.get_nowait()
 

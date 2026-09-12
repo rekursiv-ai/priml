@@ -409,7 +409,7 @@ def log_snr_from_log_time_per_truncnormicdf(
         scale,
     )
     shift = torch.clamp(shift, low, high)
-    t = log_t.exp()  # ndtri needs p, not log_p; safe since log_t ≤ 0.
+    t = log_t.exp()  # Ndtri needs p, not log_p; safe since log_t ≤ 0.
     # Swap low/high to reverse direction: t=0 → high, t=1 → low.
     log_snr = quantile_truncated_normal(
         t,

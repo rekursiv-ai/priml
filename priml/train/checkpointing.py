@@ -680,7 +680,7 @@ class Checkpointer:
           resumed: True if a checkpoint was loaded; False if starting fresh.
 
         """
-        self.storage.flush()  # a just-issued async write must be visible to resume.
+        self.storage.flush()  # A just-issued async write must be visible to resume.
         inventory = [c for c in self._list() if c.complete]
         resumed_step = self._resume(target, inventory) if self.resume else None
         if guard and not self.allow_checkpoint_overwrite:
@@ -782,7 +782,7 @@ class Checkpointer:
         for entry in self.checkpoint_dir.iterdir():
             step = self._parse_step(entry.name)
             if step is None:
-                continue  # malformed (e.g. ``step_latest.pt``) or a temp file.
+                continue  # Malformed (e.g. ``step_latest.pt``) or a temp file.
             out.append(
                 _Checkpoint(
                     step=step, path=entry, complete=self.storage.is_complete(entry)
@@ -812,9 +812,9 @@ class Checkpointer:
             if self.keep_every > 0 and doomed.step % self.keep_every == 0:
                 continue  # Archival snapshot: retained forever.
             try:
-                if doomed.path.is_dir():  # a shard checkpoint.
+                if doomed.path.is_dir():  # A shard checkpoint.
                     shutil.rmtree(doomed.path)
-                else:  # a plain .pt file.
+                else:  # A plain .pt file.
                     doomed.path.unlink()
                 logger.info(
                     "Purged checkpoint %s (keep_last_n=%d).",

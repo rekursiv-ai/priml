@@ -182,7 +182,7 @@ def test_schedule_warms_up_then_decays() -> None:
         step._apply_schedule()
         rates.append(step.optimizer.param_groups[0]["lr"])
 
-    assert rates[0] < peak  # warming up.
+    assert rates[0] < peak  # Warming up.
     assert rates[1] == pytest.approx(peak, rel=0.05)
     assert rates[-1] < rates[2] < rates[1]
 

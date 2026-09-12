@@ -376,7 +376,7 @@ class TestReplayBufferedLogs:
         assert len(root.handlers) == 2
 
         replay_buffered_logs()
-        assert len(root.handlers) == 1  # buffer detached, stream remains.
+        assert len(root.handlers) == 1  # Buffer detached, stream remains.
 
         # Second call is a no-op (no buffer left).
         replay_buffered_logs()
@@ -386,7 +386,7 @@ class TestReplayBufferedLogs:
         """Replay with no buffer installed does nothing and does not raise."""
         root = logging.getLogger()
         root.handlers.clear()
-        replay_buffered_logs()  # no buffer -> no-op.
+        replay_buffered_logs()  # No buffer -> no-op.
 
 
 if __name__ == "__main__":

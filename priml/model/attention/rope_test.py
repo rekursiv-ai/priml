@@ -208,7 +208,7 @@ def test_rope_rotate_padding() -> None:
     """cos/sin shorter than seq_len should be padded with identity."""
     q = torch.randn(2, 16, 1, 32)
     k = torch.randn(2, 16, 1, 32)
-    cos = torch.randn(8, 1, 16)  # shorter than seq_len=16.
+    cos = torch.randn(8, 1, 16)  # Shorter than seq_len=16.
     sin = torch.randn(8, 1, 16)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
     assert torch.equal(q_rot[:, 8:], q[:, 8:])
@@ -219,7 +219,7 @@ def test_rope_sum_mode():
     m = RoPE.Config([16, 16], reduction_mode="sum").make()
     pos = torch.stack([torch.arange(8), torch.arange(8)], dim=-1)
     cos, _sin = m(pos)
-    assert cos.shape == (8, 1, 8)  # sum reduces to single set.
+    assert cos.shape == (8, 1, 8)  # `sum` reduces to single set.
 
 
 def test_rope_auto_split_dim():

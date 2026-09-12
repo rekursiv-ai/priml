@@ -103,11 +103,11 @@ def test_an_optimizer_step_waits_for_the_whole_token_batch() -> None:
     the recipe was tuned for, and the budget comparison would be against a
     different experiment.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update.
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # Two passes per update.
     assert step.accumulate_passes == 2
     batch = _batch()
     step.train_step(**batch)
-    assert step.global_step == 0  # accumulated, not yet applied.
+    assert step.global_step == 0  # Accumulated, not yet applied.
     step.train_step(**batch)
     assert step.global_step == 1
 
@@ -190,7 +190,7 @@ def test_the_warmup_is_counted_in_steps_not_passes() -> None:
     step = _step(tokens_per_optimizer_step=4 * SEQ, budget_warmup_steps=1)
     assert step.accumulate_passes == 2
     batch = _batch()
-    for _ in range(2):  # one whole optimizer step: the warmup.
+    for _ in range(2):  # One whole optimizer step: the warmup.
         step.train_step(**batch)
     assert step.global_step == 1
     assert step.elapsed_sec == 0.0
@@ -210,9 +210,9 @@ def test_loop_side_work_is_charged_to_the_budget_past_warmup() -> None:
     step = _step(budget_warmup_steps=1)
     batch = _batch()
     step.charge_budget(5.0)
-    assert step.elapsed_sec == 0.0  # warmup: not yet charged.
-    step.train_step(**batch)  # the warmup step.
-    step.train_step(**batch)  # past it, and itself charged.
+    assert step.elapsed_sec == 0.0  # Warmup: not yet charged.
+    step.train_step(**batch)  # The warmup step.
+    step.train_step(**batch)  # Past it, and itself charged.
     charged = step.elapsed_sec
     step.charge_budget(5.0)
     assert step.elapsed_sec >= charged + 5.0
@@ -228,7 +228,7 @@ def test_resuming_does_not_rerun_the_budget_warmup() -> None:
     """
     step = _step(budget_warmup_steps=2)
     batch = _batch()
-    for _ in range(4):  # two warmup, two charged.
+    for _ in range(4):  # Two warmup, two charged.
         step.train_step(**batch)
     charged = step.elapsed_sec
     assert charged > 0.0
@@ -315,9 +315,9 @@ def test_a_diverged_pass_is_caught_at_the_batch_it_belongs_to() -> None:
     is the same guarantee -- that update ran on gradients whose loss was
     finite, and the diverged batch never reaches a second one.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update.
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # Two passes per update.
     step.config.divergence_threshold = 1e-6
-    step.train_step(**_batch())  # the diverged pass, mid-batch.
+    step.train_step(**_batch())  # The diverged pass, mid-batch.
     assert step.global_step == 0
     with pytest.raises(RuntimeError, match="diverged"):
         step.train_step(**_batch())
@@ -332,7 +332,7 @@ def test_divergence_clears_the_pending_accumulation() -> None:
     smaller than the one the recipe is tuned against -- the invariant the
     divisibility check in ``finalize`` exists to hold.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ)  # two passes per update.
+    step = _step(tokens_per_optimizer_step=4 * SEQ)  # Two passes per update.
     step.train_step(**_batch())
     assert step._pending_passes == 1
 

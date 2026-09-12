@@ -831,7 +831,7 @@ class TrainStep:
         self.accumulated_samples = 0
 
         if not load_optimizer:
-            return  # finetuning: keep the fresh optimizer/EMA.
+            return  # Finetuning: keep the fresh optimizer/EMA.
 
         self.optimizer.load_state_dict(state_dict["optimizer"])
         if "ema" in state_dict:

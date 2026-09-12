@@ -46,7 +46,7 @@ def test_padding_counts_for_neither_side() -> None:
     """Rows squaring off a short batch must not be scored as solved or failed."""
     metric = GridAccuracy.Config().make()
     labels = torch.full((4, 9), 3, dtype=torch.int64)
-    labels[2:] = -100  # the padded tail.
+    labels[2:] = -100  # The padded tail.
     metric.update(_packed(labels.clone()), label=labels)
     assert metric.compute()["exact"] == 1.0
     assert metric.puzzles == 2
@@ -56,7 +56,7 @@ def test_valid_count_truncates_before_scoring() -> None:
     metric = GridAccuracy.Config().make()
     labels = torch.full((4, 9), 3, dtype=torch.int64)
     predictions = labels.clone()
-    predictions[2:] = 7  # wrong, but past the valid rows.
+    predictions[2:] = 7  # `wrong`, but past the valid rows.
     metric.update(_packed(predictions), label=labels, valid_count=2)
     assert metric.compute()["exact"] == 1.0
 
@@ -65,11 +65,11 @@ def test_counts_accumulate_across_batches() -> None:
     """Ratios are computed once at the end, not averaged per batch."""
     metric = GridAccuracy.Config().make()
     labels = torch.full((1, 9), 3, dtype=torch.int64)
-    metric.update(_packed(labels.clone()), label=labels)  # solved.
+    metric.update(_packed(labels.clone()), label=labels)  # Solved.
     wrong = labels.clone()
     wrong[0, 0] = 5
-    metric.update(_packed(wrong), label=labels)  # not solved.
-    metric.update(_packed(wrong), label=labels)  # not solved.
+    metric.update(_packed(wrong), label=labels)  # Not solved.
+    metric.update(_packed(wrong), label=labels)  # Not solved.
     assert metric.compute()["exact"] == 1 / 3
 
 

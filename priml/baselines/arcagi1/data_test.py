@@ -114,7 +114,7 @@ def test_short_final_batch_is_padded(dataset_dir: Path) -> None:
 def test_the_skipped_cell_marker_is_remapped(dataset_dir: Path) -> None:
     """The loss and the halt target both key on -100, so remap once here."""
     batch = next(iter(_data(dataset_dir).eval_dataloader()))
-    assert int(batch["label"].min()) >= 2  # nothing was 0 to remap here.
+    assert int(batch["label"].min()) >= 2  # Nothing was 0 to remap here.
     # A padded row carries the marker.
     padded = list(_data(dataset_dir, batch_size=7).eval_dataloader())[-1]
     assert -100 in padded["label"].tolist()[-1]

@@ -60,7 +60,7 @@ def test_sample_top_p_keeps_boundary_token():
     exclusive cumsum is ``[0, .25, .5, .75]``; ``>=`` keeps only 2 tokens
     while the correct ``>`` keeps 3 (mass through the boundary token).
     """
-    logits = torch.zeros(1, 4)  # softmax -> uniform 0.25 each.
+    logits = torch.zeros(1, 4)  # `softmax` -> uniform 0.25 each.
     probs = _topp_probs(logits, top_p=0.5)
     kept = (probs > 0).sum(dim=-1).item()
     assert kept == 3
@@ -72,7 +72,7 @@ def test_sample_top_p_restores_vocab_order():
     Regression for GEN-TOPP (Issue#333): the surviving token's probability
     mass must land on its original vocab index, not a sorted position.
     """
-    logits = torch.tensor([[1.0, 0.0, 9.0, 0.5, 0.2]])  # argmax at index 2.
+    logits = torch.tensor([[1.0, 0.0, 9.0, 0.5, 0.2]])  # `argmax` at index 2.
     probs = _topp_probs(logits, top_p=0.5)
     assert probs.argmax(dim=-1).item() == 2
 

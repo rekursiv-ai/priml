@@ -62,7 +62,7 @@ def test_total_norm_spans_all_parameters() -> None:
 
 def test_clip_rescales_to_cap_when_norm_exceeds() -> None:
     """A norm above max_norm is rescaled so the post-clip norm equals the cap."""
-    params = _params_with_grads([torch.tensor([3.0, 4.0])])  # norm 5.
+    params = _params_with_grads([torch.tensor([3.0, 4.0])])  # `norm` 5.
     returned = clip_grad_norm_(params, max_norm=1.0, foreach=_FOREACH)
     # Returned norm is the PRE-clip norm.
     _close(returned, torch.tensor(5.0))
@@ -75,12 +75,12 @@ def test_clip_rescales_to_cap_when_norm_exceeds() -> None:
 
 def test_clip_leaves_grads_untouched_when_norm_within_cap() -> None:
     """A norm at or below max_norm does not rescale grads."""
-    params = _params_with_grads([torch.tensor([0.3, 0.4])])  # norm 0.5.
+    params = _params_with_grads([torch.tensor([0.3, 0.4])])  # `norm` 0.5.
     grad = params[0].grad
     assert grad is not None
     before = grad.clone()
     clip_grad_norm_(params, max_norm=1.0, foreach=_FOREACH)
-    _close(grad, before.cpu())  # clip mutates grad in place; grad is params[0].grad.
+    _close(grad, before.cpu())  # Clip mutates grad in place; grad is params[0].grad.
 
 
 def test_total_grad_norm_does_not_mutate_grads() -> None:
@@ -107,7 +107,7 @@ def test_params_without_grad_are_skipped_in_norm() -> None:
     device = _test_device()
     p_with = torch.nn.Parameter(torch.zeros(2, device=device))
     p_with.grad = torch.tensor([3.0, 4.0], device=device)
-    p_without = torch.nn.Parameter(torch.zeros(2, device=device))  # grad stays None.
+    p_without = torch.nn.Parameter(torch.zeros(2, device=device))  # `grad` stays None.
     norm = total_grad_norm([p_with, p_without], foreach=_FOREACH)
     _close(norm, torch.tensor(5.0))
 

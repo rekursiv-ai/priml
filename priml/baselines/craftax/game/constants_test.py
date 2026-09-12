@@ -33,8 +33,8 @@ def test_observation_size_matches_the_declared_layout() -> None:
     channels = (
         len(constants.BlockType)
         + len(constants.ItemType)
-        + 5 * 8  # five mob classes, eight species each.
-        + 1  # light.
+        + 5 * 8  # Five mob classes, eight species each.
+        + 1  # `light`.
     )
     assert rows * columns * channels + constants.INVENTORY_OBS_SIZE == 8_268
 

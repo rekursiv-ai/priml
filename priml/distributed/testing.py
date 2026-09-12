@@ -296,7 +296,7 @@ class WorkerPool:
                 probe.bind(("", port))
             except OSError:
                 probe.close()
-                continue  # stolen in the TOCTOU window; pick another.
+                continue  # Stolen in the TOCTOU window; pick another.
             # Close only after confirming the bind; the window to the workers'
             # bind is now as small as possible (next statements spawn them).
             probe.close()

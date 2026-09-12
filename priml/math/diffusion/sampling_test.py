@@ -331,7 +331,7 @@ def test_sample_wrap_steps_sees_every_step():
 
     with torch.no_grad():
         sample(log_snr, _identity_model_fn, x, wrap_steps=spy)
-    assert len(seen) == 2  # one per diffusion step.
+    assert len(seen) == 2  # One per diffusion step.
 
 
 def test_sample_wrap_steps_default_does_not_change_result():
@@ -362,14 +362,14 @@ def test_sample_wrap_steps_can_truncate_the_run():
     consumed: list[SampleResult] = []
 
     def take_two(it: Iterable[SampleResult]) -> Iterable[SampleResult]:
-        for step in islice(it, 2):  # stop after the 2nd of 3 steps.
+        for step in islice(it, 2):  # Stop after the 2nd of 3 steps.
             consumed.append(step)
             yield step
 
     with torch.no_grad():
         result = sample(log_snr, _identity_model_fn, x, wrap_steps=take_two)
 
-    assert len(consumed) == 2  # the 3rd step was never generated.
+    assert len(consumed) == 2  # The 3rd step was never generated.
     # sample() returns exactly the last step the wrapped stream yielded
     # (identity check, robust to a degenerate model_fn producing non-finite
     # values: this asserts the drain plumbing, not the diffusion numerics).

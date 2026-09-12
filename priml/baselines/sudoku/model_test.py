@@ -138,7 +138,7 @@ def test_sequence_length_counts_the_prefix_before_finalize() -> None:
     config = _config()
     registers = RegisterTokens.Config(num_tokens=4)
     config.prefix = registers
-    assert config.num_prefix_tokens == -1  # not yet finalized.
+    assert config.num_prefix_tokens == -1  # Not yet finalized.
     assert config.total_seq_len == 81 + 4
     # After finalize the count is materialized and agrees.
     final = config.copy_tree().finalize()
@@ -158,7 +158,7 @@ def test_prefix_tokens_reach_the_sequence() -> None:
 def test_a_prefix_without_a_token_count_is_rejected() -> None:
     """Guessing 0 would silently shift every grid position."""
     config = _config()
-    config.prefix = RMSNorm.Config(channels_in=16)  # not a prefix module.
+    config.prefix = RMSNorm.Config(channels_in=16)  # Not a prefix module.
     with pytest.raises(ValueError, match="declares no"):
         config.copy_tree().finalize()
 

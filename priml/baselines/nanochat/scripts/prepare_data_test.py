@@ -26,7 +26,7 @@ from priml.baselines.nanochat.scripts.prepare_data import (
 )
 
 
-VOCAB = 300  # above the 16 reserved tokens and the 256 byte-level merges.
+VOCAB = 300  # Above the 16 reserved tokens and the 256 byte-level merges.
 
 
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:
