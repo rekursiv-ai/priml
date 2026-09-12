@@ -53,11 +53,21 @@ class NoEMA:
         yield
 
     def state_dict(self) -> dict[str, Any]:
-        """Get empty state dict."""
+        """Get empty state dict.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"global_step": self.global_step, "local_step": self.local_step}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load step counters only."""
+        """Load step counters only.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.global_step = state_dict["global_step"]
         self.local_step = state_dict.get("local_step", 0)
 
@@ -74,7 +84,16 @@ each, and a recipe wanting a third writes it instead of editing this module.
 
 
 def constant_decay(decay: float, step: int) -> float:
-    """Hold ``decay`` flat for the whole run."""
+    """Hold ``decay`` flat for the whole run.
+
+    Args:
+      decay: Decay.
+      step: Step.
+
+    Returns:
+      decay: The float.
+
+    """
     del step
     return decay
 

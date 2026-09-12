@@ -657,11 +657,13 @@ NanoChatLoop.Config(
                         working_dir=PosixPath('/opt/scratch/datasets/nanochat'),
                         tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/tokenizer'),
                         num_train_shards=7,
+                        train_shard_indices=(),
                         val_shard=7,
                         batch_size=32,
                         eval_batch_size=128,
                         eval_tokens=20_971_520,
                         buffer_size=1_000,
+                        train_buffer_size=None,
                         device='cuda',
                         vocab_size=8_192,
                         max_seq_len=2_048

@@ -180,7 +180,17 @@ class OutputGate(nn.Module):
         cache: KVCache,
         **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
-        """Apply the gate while updating the wrapped attention's cache."""
+        """Apply the gate while updating the wrapped attention's cache.
+
+        Args:
+          x: X.
+          cache: Cache.
+          **kwargs: Kwargs.
+
+        Returns:
+          result: The tuple[Tensor, KVCache].
+
+        """
         gate = torch.sigmoid(self.gate_proj(x))
         inner = cast(CachedAttention, self.inner)
         out, updated = inner.forward_cached(x, cache=cache, **kwargs)

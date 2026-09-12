@@ -413,7 +413,13 @@ class SlidingWindow:
         self.samples: list[tuple[float, float]] = []
 
     def add(self, timestamp: float, cumulative_count: float) -> None:
-        """Record an observation and prune expired entries."""
+        """Record an observation and prune expired entries.
+
+        Args:
+          timestamp: Timestamp.
+          cumulative_count: Cumulative count.
+
+        """
         self.samples.append((timestamp, cumulative_count))
         cutoff = timestamp - self.window_sec
         self.samples = [(t, c) for t, c in self.samples if t >= cutoff]

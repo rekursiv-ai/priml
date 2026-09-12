@@ -79,7 +79,12 @@ class KVCache:
         return self.k.shape[-2]
 
     def freeze(self) -> KVCache:
-        """Return a frozen snapshot (update becomes a no-op)."""
+        """Return a frozen snapshot (update becomes a no-op).
+
+        Returns:
+          frozen: The KVCache.
+
+        """
         frozen = _FrozenKVCache(self.k, self.v, self.length)
         # Preserve the monotonic total so post-freeze RoPE keeps assigning
         # correct absolute positions; the constructor reset it to ``length``.

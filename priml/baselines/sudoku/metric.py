@@ -124,7 +124,12 @@ class GridAccuracy:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore counts produced by :meth:`state_dict`."""
+        """Restore counts produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.solved = state_dict.get("solved", 0)
         self.puzzles = state_dict.get("puzzles", 0)
         self.cells_correct = state_dict.get("cells_correct", 0)

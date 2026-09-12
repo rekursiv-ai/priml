@@ -286,14 +286,24 @@ class _BatchIterator:
         return (count + self.batch_size - 1) // self.batch_size
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the active permutation and next batch index."""
+        """Return the active permutation and next batch index.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "order": None if self._order is None else self._order.cpu(),
             "next_batch": self._next_batch,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the active permutation and next batch index."""
+        """Restore the active permutation and next batch index.
+
+        Args:
+          state_dict: State dict.
+
+        """
         order = state_dict.get("order")
         self._order = order.to(self.media.device) if isinstance(order, Tensor) else None
         self._next_batch = int(state_dict.get("next_batch", 0))

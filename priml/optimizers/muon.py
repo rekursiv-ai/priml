@@ -31,7 +31,17 @@ value on device rather than forcing a GPU->CPU sync mid-step.
 
 
 def adjust_lr_original(lr: float, param: Tensor, ensemble_dims: int = 0) -> float:
-    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``."""
+    """Keller Jordan's scaling: ``sqrt(max(1, fan_out / fan_in))``.
+
+    Args:
+      lr: Lr.
+      param: Param.
+      ensemble_dims: Ensemble dims.
+
+    Returns:
+      result: The float.
+
+    """
     c_out, c_in = _shape(param, ensemble_dims)
     return lr * float(max(1, c_out / c_in) ** 0.5)
 

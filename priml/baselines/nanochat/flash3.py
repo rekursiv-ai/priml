@@ -129,17 +129,32 @@ class Flash3Attention:
 
 
 def source_revision() -> str:
-    """Return the immutable FA3 source revision."""
+    """Return the immutable FA3 source revision.
+
+    Returns:
+      result: The str.
+
+    """
     return "3da5f873029162763568db56546fee70a779fade"
 
 
 def cutlass_revision() -> str:
-    """Return the CUTLASS submodule revision pinned by the FA3 source."""
+    """Return the CUTLASS submodule revision pinned by the FA3 source.
+
+    Returns:
+      result: The str.
+
+    """
     return "dc4817921edda44a549197ff3a9dcf5df0636e7b"
 
 
 def hf_reference_revision() -> str:
-    """Return the previously qualified HF binary revision."""
+    """Return the previously qualified HF binary revision.
+
+    Returns:
+      result: The str.
+
+    """
     return "de87b9b5af06dd9984df595bef90b2eba44b181a"
 
 

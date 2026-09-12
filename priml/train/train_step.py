@@ -616,6 +616,9 @@ class TrainStep:
           output: Dict with "loss" (per-element unreduced tensor), "model"
             (forward output), and any extra loss dict entries.
 
+        Returns:
+          result: The TrainStepOutput.
+
         """
         # Forward (autocast applied in __call__). The output may be a single
         # Tensor or a multi-output container; the loss consumes it via the
@@ -687,6 +690,9 @@ class TrainStep:
           output: Dict with "loss" (per-element unreduced tensor), "model"
             (forward output), and any extra loss dict entries.
 
+        Returns:
+          result: The TrainStepOutput.
+
         """
         # Forward (train mode + autocast via __call__)
         output: ModelOutput = self(**preprocessed_batch)
@@ -706,6 +712,9 @@ class TrainStep:
         Returns:
           output: Dict with "loss" (per-element unreduced tensor), "model"
             (forward output), and any extra loss dict entries.
+
+        Returns:
+          result: The TrainStepOutput.
 
         """
         # Forward (eval mode + autocast via call_eval)

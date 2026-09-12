@@ -141,11 +141,23 @@ class FileTracker:
         logger.info("Wrote metrics to %s", path)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """No-op image logging; a metrics file holds scalars only."""
+        """No-op image logging; a metrics file holds scalars only.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
-        """No-op; a metrics file has no notes concept."""
+        """No-op; a metrics file has no notes concept.
+
+        Args:
+          notes: Notes.
+
+        """
         del notes
 
     def close(self) -> None:
@@ -222,11 +234,23 @@ class TensorBoardTracker:
             self.writer.add_scalar(f"{prefix}{name}", value, step)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """No-op image logging fallback for scalar-only TensorBoard tracker."""
+        """No-op image logging fallback for scalar-only TensorBoard tracker.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
-        """No-op; TensorBoard has no run-notes concept."""
+        """No-op; TensorBoard has no run-notes concept.
+
+        Args:
+          notes: Notes.
+
+        """
         del notes
 
     def close(self) -> None:
@@ -464,7 +488,14 @@ class WandbTracker:
         )
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """Log images to W&B at ``step``."""
+        """Log images to W&B at ``step``.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         if self._run is None:
             return
         self._run.log({key: [wandb.Image(image) for image in images]}, step=step)
@@ -542,17 +573,36 @@ class AsyncTracker:
         *,
         prefix: str = "",
     ) -> None:
-        """Queue a shallow call-time snapshot of one metric batch."""
+        """Queue a shallow call-time snapshot of one metric batch.
+
+        Args:
+          metrics: Metrics.
+          step: Step.
+          prefix: Prefix.
+
+        """
         payload = dict(metrics) if self._executor is not None else metrics
         self._submit(self.tracker.log_metrics, payload, step, prefix=prefix)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """Queue a shallow call-time snapshot of one image batch."""
+        """Queue a shallow call-time snapshot of one image batch.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         payload = list(images) if self._executor is not None else images
         self._submit(self.tracker.log_images, key, payload, step)
 
     def log_notes(self, notes: str) -> None:
-        """Set run notes synchronously before training starts."""
+        """Set run notes synchronously before training starts.
+
+        Args:
+          notes: Notes.
+
+        """
         if self._closed:
             raise RuntimeError("AsyncTracker is closed.")
         self.tracker.log_notes(notes)
@@ -637,17 +687,36 @@ class TrackerList:
         *,
         prefix: str = "",
     ) -> None:
-        """Forward metrics to every child tracker."""
+        """Forward metrics to every child tracker.
+
+        Args:
+          metrics: Metrics.
+          step: Step.
+          prefix: Prefix.
+
+        """
         for tracker in self.trackers.values():
             tracker.log_metrics(metrics, step, prefix=prefix)
 
     def log_images(self, key: str, images: list[Any], step: int) -> None:
-        """Forward images to every child tracker."""
+        """Forward images to every child tracker.
+
+        Args:
+          key: Key.
+          images: Images.
+          step: Step.
+
+        """
         for tracker in self.trackers.values():
             tracker.log_images(key, images, step)
 
     def log_notes(self, notes: str) -> None:
-        """Forward run notes to every child tracker."""
+        """Forward run notes to every child tracker.
+
+        Args:
+          notes: Notes.
+
+        """
         for tracker in self.trackers.values():
             tracker.log_notes(notes)
 

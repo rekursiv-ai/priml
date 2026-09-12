@@ -100,11 +100,21 @@ class DummyDataset:
         )
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the pass count, the only state this dataset carries."""
+        """Return the pass count, the only state this dataset carries.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"timer_epoch": self.timer_epoch.state_dict()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the pass count."""
+        """Restore the pass count.
+
+        Args:
+          state_dict: State dict.
+
+        """
         if "timer_epoch" in state_dict:
             self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
 

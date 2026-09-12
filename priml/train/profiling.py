@@ -359,13 +359,29 @@ class PhaseTimer:
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Generator[None, None, None]:
-        """Measure and narrate one potentially long phase."""
+        """Measure and narrate one potentially long phase.
+
+        Args:
+          name: Name.
+
+        Yields:
+          item: Each yielded value.
+
+        """
         with self._timed(name, narrate=True):
             yield
 
     @contextlib.contextmanager
     def measure(self, name: str) -> Generator[None, None, None]:
-        """Measure a frequent phase without per-call boundary logs."""
+        """Measure a frequent phase without per-call boundary logs.
+
+        Args:
+          name: Name.
+
+        Yields:
+          item: Each yielded value.
+
+        """
         with self._timed(name, narrate=False):
             yield
 
@@ -420,7 +436,14 @@ class PhaseTimer:
         start: CudaEventProtocol,
         end: CudaEventProtocol,
     ) -> None:
-        """Record a CUDA event pair for deferred elapsed-time reporting."""
+        """Record a CUDA event pair for deferred elapsed-time reporting.
+
+        Args:
+          name: Name.
+          start: Start.
+          end: End.
+
+        """
         if not self.cuda_events_enabled:
             return
         self._cuda_events.setdefault(name, []).append((start, end))
@@ -751,7 +774,9 @@ class _PhaseFrame:
     """One active phase and the inclusive time consumed by nested children."""
 
     path: str
+
     started_at: float
+
     child_sec: float = 0.0
 
 

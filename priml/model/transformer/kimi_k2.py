@@ -413,6 +413,9 @@ class KimiK2(Transformer):
         Returns:
           model: KimiK2 instance with weights loaded.
 
+        Returns:
+          model: The KimiK2.
+
         """
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
