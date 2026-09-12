@@ -5,7 +5,6 @@ from __future__ import annotations
 # ruff: noqa: INP001 (Implicit namespace package.)
 # ruff: noqa: S301 (Suspicious pickle usage.)
 # ruff: noqa: T201 (Print.)
-# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false, reportImplicitStringConcatenation=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportAttributeAccessIssue=false
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import field
 from datetime import timedelta
@@ -62,7 +61,7 @@ class WorkerPool:
     __slots__ = ("ack_queue", "mesh_dims", "processes", "queue")
 
     class Config(Fig["WorkerPool"]):
-        mesh_dims: dict[str, int] = field(default_factory=dict)
+        mesh_dims: dict[str, int] = field(default_factory=dict[str, int])
         """Mesh dimension name to size; their product is the world size."""
 
     def __init__(self, config: Config):
