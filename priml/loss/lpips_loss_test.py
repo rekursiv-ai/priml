@@ -1,5 +1,4 @@
 """Tests for LPIPSLoss."""
-# pyright: reportAttributeAccessIssue=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 
 from __future__ import annotations
 
