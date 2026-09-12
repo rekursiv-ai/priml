@@ -11,6 +11,7 @@ class PassthroughAttribute[T]:
     name: str = ""
 
     def __set_name__(self, owner: type, name: str) -> None:
+        """Store the attribute name in the descriptor."""
         del owner
         self.name = name
 
@@ -25,6 +26,7 @@ class PassthroughAttribute[T]:
         instance: ReadPassthroughMixin | None,
         owner: type,
     ) -> Self | T:
+        """Get the passthrough attribute value."""
         del owner
         if instance is None:
             return self
@@ -42,11 +44,13 @@ class ReadPassthroughMixin:
         passthrough: str | None = None,
         **kwargs: object,
     ) -> None:
+        """Initialize the subclass with passthrough configuration."""
         super().__init_subclass__(**kwargs)
         if passthrough is not None:
             cls._passthrough = passthrough
 
     def _passthrough_target(self, attribute: str) -> object:
+        """Get the passthrough target object by attribute name."""
         try:
             return object.__getattribute__(self, attribute)
         except AttributeError:
@@ -56,6 +60,7 @@ class ReadPassthroughMixin:
             return parent_getattr(attribute)
 
     def __getattr__(self, name: str) -> object:
+        """Get an attribute, delegating to the passthrough target."""
         parent_getattr = getattr(super(), "__getattr__", None)
         if parent_getattr is not None:
             try:

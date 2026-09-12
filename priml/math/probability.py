@@ -1,3 +1,5 @@
+"""Probability and distribution utilities."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
