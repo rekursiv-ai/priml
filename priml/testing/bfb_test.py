@@ -1087,6 +1087,66 @@ def test_known_host_dependent_ops_are_not_allowlisted() -> None:
     assert not torch.equal(acc32, acc64)
 
 
+def _draw_randn(dtype: torch.dtype | None = None) -> Tensor:
+    return torch.randn(18, dtype=dtype)
+
+
+def _draw_normal(dtype: torch.dtype | None = None) -> Tensor:
+    return torch.normal(0.5, std=2.0, size=(18,), dtype=dtype)
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [pytest.param(_draw_randn, id="randn"), pytest.param(_draw_normal, id="normal")],
+)
+def test_host_agnostic_draws_normal_factories_in_float64(
+    sample: Callable[[torch.dtype | None], Tensor],
+) -> None:
+    """A tensorless normal sampler draws in float64 and rounds to its dtype.
+
+    ``randn`` has no float32 argument, so the input-driven upcast never fires
+    and the vectorized float32 fill (16+ elements) runs natively -- SLEEF under
+    AVX2, libm elsewhere -- and lands on host-specific bits. The witness at the
+    end proves the two paths differ, so the assertion is not vacuous.
+    """
+    torch.manual_seed(0)
+    with host_agnostic_numerics():
+        drawn = sample(None)
+    torch.manual_seed(0)
+    expected = sample(torch.float64).float()
+    assert drawn.dtype == torch.float32
+    assert torch.equal(drawn, expected)
+
+    torch.manual_seed(0)
+    with host_agnostic_numerics():
+        drawn_half = sample(torch.bfloat16)
+    torch.manual_seed(0)
+    assert torch.equal(drawn_half, sample(torch.float64).bfloat16())
+
+    torch.manual_seed(0)
+    with host_agnostic_numerics():
+        drawn_wide = sample(torch.float64)
+    torch.manual_seed(0)
+    assert torch.equal(drawn_wide, sample(torch.float64))
+
+    torch.manual_seed(0)
+    assert not torch.equal(sample(None), expected)
+
+
+def test_host_agnostic_keeps_uniform_factories_native() -> None:
+    """``rand`` stays float32: a uniform draw is an exact integer scaling.
+
+    Routing it through float64 would only change generator consumption and
+    invalidate every golden whose runner draws uniform inputs, for no gain in
+    portability.
+    """
+    torch.manual_seed(0)
+    with host_agnostic_numerics():
+        drawn = torch.rand(18)
+    torch.manual_seed(0)
+    assert torch.equal(drawn, torch.rand(18))
+
+
 def test_host_agnostic_upcasts_inplace_op_and_mutates_original() -> None:
     """An upcast in-place op writes the float64 result back into the original.
 
