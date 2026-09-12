@@ -1,3 +1,5 @@
+"""Distributed testing utilities with worker pool management."""
+
 from __future__ import annotations
 
 # ruff: noqa: INP001 (Implicit namespace package.)
@@ -55,6 +57,8 @@ class PoolWorker(Protocol):
 
 
 class WorkerPool:
+    """Manage a pool of distributed worker processes."""
+
     __slots__ = ("ack_queue", "mesh_dims", "processes", "queue")
 
     class Config(Fig["WorkerPool"]):
@@ -66,6 +70,7 @@ class WorkerPool:
         self.processes = self.queue = self.ack_queue = None
 
     def __enter__(self) -> Self:
+        """Enter the context manager, spawning worker processes."""
         # ``find_free_port`` closes the socket before the workers bind it, so
         # ANY process on this host -- a concurrent pool, or anything else
         # holding a port on any local address -- can claim it in the gap,
@@ -162,6 +167,7 @@ class WorkerPool:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool:
+        """Exit the context manager, terminating all worker processes."""
         del exc_type, exc_val, exc_tb
         self.terminate()
         self.processes = self.queue = self.ack_queue = None

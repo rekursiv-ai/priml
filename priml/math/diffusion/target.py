@@ -54,6 +54,8 @@ __all__ = [
 
 
 class TargetResult(NamedTuple):
+    """Result tuple from a target parameterization function."""
+
     target: Tensor | None
     predict: Tensor | None
     x_clean: Tensor
@@ -61,6 +63,8 @@ class TargetResult(NamedTuple):
 
 
 class TargetFn(Protocol):
+    """Protocol for target parameterization functions."""
+
     def __call__(
         self,
         model: Tensor,

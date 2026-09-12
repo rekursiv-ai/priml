@@ -1,3 +1,5 @@
+"""Sampling algorithms for diffusion models including DDPM and DDIM."""
+
 from __future__ import annotations
 
 from collections import deque
@@ -36,12 +38,16 @@ __all__ = [
 
 
 class SampleOneStepResult(NamedTuple):
+    """Result of a single sampling step."""
+
     x_clean: Tensor
     mean: Tensor
     log_std: Tensor
 
 
 class SampleResult(NamedTuple):
+    """Complete sampling result."""
+
     x_curr: Tensor
     x_clean: Tensor
     mean: Tensor
@@ -50,6 +56,8 @@ class SampleResult(NamedTuple):
 
 
 class SampleOneStepFn(Protocol):
+    """Protocol for a single sampling step function."""
+
     def __call__(
         self,
         model: Tensor,
@@ -62,6 +70,8 @@ class SampleOneStepFn(Protocol):
 
 
 class SampleModelFn(Protocol):
+    """Protocol for a model evaluation function during sampling."""
+
     def __call__(
         self,
         x: Tensor,

@@ -1,3 +1,5 @@
+"""Frequency domain utilities for signal processing."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence

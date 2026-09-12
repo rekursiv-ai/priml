@@ -1,3 +1,5 @@
+"""Basic math utilities and protocols."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -120,7 +122,9 @@ def ceil_div(x: int, y: int) -> int:
 class SupportsLT(Protocol):
     """Anything ``argsort`` can order with ``<``."""
 
-    def __lt__(self, other: Any, /) -> bool: ...  # noqa: ANN401 -- mirrors typeshed's SupportsDunderLT; object rejects int.
+    def __lt__(self, other: Any, /) -> bool:  # noqa: ANN401 -- mirrors typeshed's SupportsDunderLT; object rejects int.
+        """Compare using less-than operator."""
+        ...
 
 
 def argsort(

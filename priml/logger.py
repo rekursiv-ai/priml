@@ -50,6 +50,7 @@ class Timer:
         self.elapsed: float = 0
 
     def __enter__(self) -> Self:
+        """Enter the context manager, starting the timer."""
         self.start = time.perf_counter()
         return self
 
@@ -59,6 +60,7 @@ class Timer:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        """Exit the context manager, stopping the timer."""
         del exc_type, exc_val, exc_tb
         self.stop = time.perf_counter()
         self.elapsed = self.stop - self.start

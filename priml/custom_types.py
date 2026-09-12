@@ -27,6 +27,8 @@ __all__ = [
 
 @runtime_checkable
 class JobProtocol(Protocol):
+    """Protocol for a runnable job."""
+
     def run(self, *args: str) -> None:
         """Run."""
         ...
@@ -96,6 +98,8 @@ class MetricObjective:
 
 @runtime_checkable
 class CheckpointableProtocol(Protocol):
+    """Protocol for a checkpointable object."""
+
     def state_dict(self) -> dict[str, Any]:
         """Get state for checkpointing."""
         ...

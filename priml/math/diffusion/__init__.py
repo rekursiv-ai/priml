@@ -1,3 +1,5 @@
+"""Diffusion model utilities including sampling and scheduling."""
+
 from __future__ import annotations
 
 from priml.math.diffusion.sampling import (

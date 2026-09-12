@@ -1,3 +1,5 @@
+"""Pixel and image utilities for computer vision."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
