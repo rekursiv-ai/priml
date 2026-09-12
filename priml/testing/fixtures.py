@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 try:
     import torch
-except ImportError:  # torch is optional; cleanup_cuda + get_device no-op without it.
+except ImportError:  # `torch` is optional; cleanup_cuda + get_device no-op without it.
     torch = None
 
 

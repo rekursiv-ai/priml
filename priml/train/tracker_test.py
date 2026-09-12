@@ -65,7 +65,7 @@ def test_del_safe_when_writer_missing() -> None:
     """T-029: __del__ must not raise when __init__ never set self.writer."""
     tracker = TensorBoardTracker.__new__(TensorBoardTracker)
     # Simulate a partially-constructed tracker (writer never assigned).
-    tracker.__del__()  # must not raise AttributeError.
+    tracker.__del__()  # Must not raise AttributeError.
 
 
 def test_del_does_not_double_close_after_explicit_close() -> None:
@@ -201,7 +201,7 @@ def test_wandb_close_idempotent_and_del_safe() -> None:
 def test_wandb_del_safe_when_run_missing() -> None:
     """__del__ must not raise when __init__ never set self._run."""
     tracker = WandbTracker.__new__(WandbTracker)
-    tracker.__del__()  # must not raise AttributeError.
+    tracker.__del__()  # Must not raise AttributeError.
 
 
 def test_wandb_log_notes_sets_run_notes() -> None:
@@ -223,7 +223,7 @@ def test_wandb_log_notes_noop_without_run() -> None:
     """Off rank 0 (no run) log_notes is a no-op, not a crash."""
     tracker = WandbTracker.__new__(WandbTracker)
     tracker._run = None
-    tracker.log_notes("anything")  # must not raise.
+    tracker.log_notes("anything")  # Must not raise.
 
 
 def test_wandb_non_rank_zero_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -565,7 +565,7 @@ def test_file_tracker_ignores_non_capture_prefix(tmp_path: Path) -> None:
     tracker.log_metrics({"batch_time": 1.25}, 1, prefix="train/")
     assert not target.exists()
     tracker.log_metrics({"score": 0.9}, 2, prefix="eval/")
-    tracker.log_metrics({"batch_time": 1.30}, 3, prefix="train/")  # must not clobber.
+    tracker.log_metrics({"batch_time": 1.30}, 3, prefix="train/")  # Must not clobber.
     assert json.loads(target.read_text()) == {"eval/score": 0.9}
 
 

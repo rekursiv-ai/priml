@@ -148,12 +148,12 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     ``_DISPATCH_ATTEMPTS`` tries.
     """
     proc = MagicMock()
-    proc.exitcode = None  # alive: never produces a _WorkerDiedError.
+    proc.exitcode = None  # Alive: never produces a _WorkerDiedError.
     proc.is_alive.return_value = True
     pool = _pool(1)
     pool.queue = MagicMock()
     pool.ack_queue = MagicMock()
-    pool.ack_queue.get.side_effect = queue_mod.Empty  # never acks -> timeout.
+    pool.ack_queue.get.side_effect = queue_mod.Empty  # Never acks -> timeout.
     pool.processes = [proc]
     # Make the ack deadline elapse immediately so the test does not sleep.
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))

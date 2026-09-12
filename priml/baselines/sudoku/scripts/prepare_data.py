@@ -240,7 +240,7 @@ def _read_csv(csv_path: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
     solutions: list[np.ndarray] = []
     with csv_path.open(newline="") as handle:
         reader = csv.reader(handle)
-        next(reader)  # header.
+        next(reader)  # Header.
         for _source, question, answer, _rating in reader:
             puzzles.append(_grid(question.replace(".", "0")))
             solutions.append(_grid(answer))

@@ -314,7 +314,7 @@ def test_group_topk_masks_inactive_groups():
     assert bias is not None
     with torch.no_grad():
         bias.zero_()
-        bias[0] = 1e3  # pin group 0 (experts 0-3)
+        bias[0] = 1e3  # Pin group 0 (experts 0-3)
     x = torch.randn(8, 32)
     _, indices, _ = m.router(x)
     assert ((indices >= 0) & (indices < 4)).all()

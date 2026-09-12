@@ -142,7 +142,7 @@ def test_ema_apply_to_swaps_params_and_restores() -> None:
     model = nn.Linear(1, 1)
     with torch.no_grad():
         model.weight.fill_(1.0)
-    ema = EMA.Config(decay=0.0).make()  # shadow := live at first call.
+    ema = EMA.Config(decay=0.0).make()  # `shadow` := live at first call.
     ema(model)
     with torch.no_grad():
         model.weight.fill_(7.0)
@@ -181,7 +181,7 @@ def test_ema_apply_to_uses_preallocated_backup() -> None:
     """
     model = nn.Linear(4, 4)
     ema = EMA.Config(decay=0.0).make()
-    ema(model)  # lazy init populates EMA._backup.
+    ema(model)  # Lazy init populates EMA._backup.
     backup_ptrs_before = {name: t.data_ptr() for name, t in ema._backup.items()}
     assert backup_ptrs_before, "backup buffers should be pre-allocated"
 
@@ -201,8 +201,8 @@ def test_ema_apply_to_uses_preallocated_backup() -> None:
 def test_ema_param_filter_excludes_matching_params() -> None:
     """``param_filter`` returning False excludes the param from the shadow."""
     model = nn.Sequential(
-        nn.Linear(2, 2),  # named "0"
-        nn.Linear(2, 2),  # named "1"
+        nn.Linear(2, 2),  # Named "0"
+        nn.Linear(2, 2),  # Named "1"
     )
 
     def exclude_layer_1(name: str, p: nn.Parameter) -> bool:
@@ -234,7 +234,7 @@ def test_ema_param_filter_excludes_matching_params() -> None:
 def test_ema_state_dict_returns_independent_tensors() -> None:
     model = nn.Linear(1, 1)
     ema = EMA.Config().make()
-    ema(model)  # lazy init shadow.
+    ema(model)  # Lazy init shadow.
     state = ema.state_dict()
     # state["shadow_model"] is a state_dict (mapping); each tensor must be
     # an independent clone of the live shadow_model's parameter storage.
@@ -256,7 +256,7 @@ def test_ema_two_instances_loaded_from_one_state_are_independent() -> None:
 
     a = EMA.Config().make()
     b = EMA.Config().make()
-    a(model)  # init structure.
+    a(model)  # Init structure.
     b(model)
     a.load_state_dict(state)
     b.load_state_dict(state)
@@ -297,7 +297,7 @@ def test_ema_state_dict_preserves_metadata() -> None:
     """T-002: state_dict must preserve ``_metadata`` for versioned load."""
     model = nn.Linear(2, 2)
     ema = EMA.Config().make()
-    ema(model)  # lazy init shadow.
+    ema(model)  # Lazy init shadow.
 
     state = ema.state_dict()
     shadow_sd = state["shadow_model"]
@@ -313,7 +313,7 @@ def test_ema_apply_to_raises_on_missing_tracked_param() -> None:
     """T-003: a tracked param absent at swap time must not be silently skipped."""
     model = nn.Linear(2, 2)
     ema = EMA.Config(decay=0.0).make()
-    ema(model)  # lazy init; tracks weight + bias.
+    ema(model)  # Lazy init; tracks weight + bias.
 
     # Inject a phantom tracked name absent from both live and shadow.
     ema._tracked_names.add("nonexistent.weight")
@@ -336,7 +336,7 @@ def test_ema_apply_to_rolls_back_on_mid_swap_failure(
     """
     model = nn.Linear(3, 3, bias=True)
     ema = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
-    ema(model)  # lazy init seeds shadow at current weights.
+    ema(model)  # Lazy init seeds shadow at current weights.
     # Mutate live so shadow != live: a leaked swap would be detectable.
     with torch.no_grad():
         for p in model.parameters():
@@ -378,7 +378,7 @@ def test_ema_param_dict_lerps_after_warmup() -> None:
         model.bias.fill_(0.0)
     ema = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
 
-    ema(model)  # lazy init seeds shadow at current params.
+    ema(model)  # Lazy init seeds shadow at current params.
     assert ema.shadow_model is None, "param_dict mode must not clone a module"
     torch.testing.assert_close(
         ema.shadow_params["weight"],
@@ -441,7 +441,7 @@ def test_ema_param_dict_round_trips_under_dtensor(
         )
 
     ema = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
-    ema(model)  # must NOT deepcopy the sharded module.
+    ema(model)  # Must NOT deepcopy the sharded module.
     shadow = ema.shadow_params["weight"]
     assert isinstance(shadow, DTensor)
     live = model.weight
@@ -477,13 +477,13 @@ def test_ema_warmup_seed_copies_live_at_boundary() -> None:
         warmup_seed=True,
     ).make()
 
-    ema(model)  # step 0: warmup, shadow seeded at 1.0.
+    ema(model)  # `step` 0: warmup, shadow seeded at 1.0.
     with torch.no_grad():
         model.weight.fill_(5.0)
-    ema(model)  # step 1: warmup.
+    ema(model)  # `step` 1: warmup.
     with torch.no_grad():
         model.weight.fill_(9.0)
-    ema(model)  # step 2: boundary -> seed shadow to live (9.0), no lerp yet.
+    ema(model)  # `step` 2: boundary -> seed shadow to live (9.0), no lerp yet.
     torch.testing.assert_close(
         ema.shadow_params["weight"],
         torch.full_like(model.weight, 9.0),
@@ -491,7 +491,7 @@ def test_ema_warmup_seed_copies_live_at_boundary() -> None:
 
     with torch.no_grad():
         model.weight.fill_(11.0)
-    ema(model)  # step 3: lerp 0.5*9 + 0.5*11 = 10.0.
+    ema(model)  # `step` 3: lerp 0.5*9 + 0.5*11 = 10.0.
     torch.testing.assert_close(
         ema.shadow_params["weight"],
         torch.full_like(model.weight, 10.0),
@@ -510,10 +510,10 @@ def test_ema_no_warmup_seed_keeps_initial_shadow() -> None:
         warmup_seed=False,
     ).make()
 
-    ema(model)  # step 0: warmup, shadow = 1.0.
+    ema(model)  # `step` 0: warmup, shadow = 1.0.
     with torch.no_grad():
         model.weight.fill_(3.0)
-    ema(model)  # step 1: boundary, lerp 0.5*1 + 0.5*3 = 2.0.
+    ema(model)  # `step` 1: boundary, lerp 0.5*1 + 0.5*3 = 2.0.
     torch.testing.assert_close(
         ema.shadow_params["weight"],
         torch.full_like(model.weight, 2.0),
@@ -543,7 +543,7 @@ def test_ema_karras_decay_grows_with_step() -> None:
     # With update_after_step=0 the first call IS averaging step t=0
     # (decay 1/10) against live=0.0 -> shadow stays 0.0, local_step -> 1.
     ref = torch.zeros_like(model.weight)
-    ema(model)  # averaging step t=0: eff = 1/10, live 0.0 -> shadow 0.0.
+    ema(model)  # Averaging step t=0: eff = 1/10, live 0.0 -> shadow 0.0.
     ref.mul_(1 / 10).add_(model.weight.detach(), alpha=1 - 1 / 10)
     torch.testing.assert_close(ema.shadow_params["weight"], ref, rtol=0, atol=0)
 
@@ -783,7 +783,7 @@ def test_ema_loaded_shadow_moves_to_live_param_device() -> None:
     cpu_model = nn.Linear(2, 2)
     src = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
     src(cpu_model)
-    state = src.state_dict()  # shadow tensors live on CPU.
+    state = src.state_dict()  # `shadow` tensors live on CPU.
 
     live_model = nn.Linear(2, 2).to(get_device())
     dst = EMA.Config(decay=0.5, shadow_kind="param_dict").make()
@@ -808,9 +808,9 @@ def test_ema_clone_path_bit_for_bit_default_config() -> None:
     """
     torch.manual_seed(0)
     model = nn.Linear(3, 3)
-    ema = EMA.Config().make()  # all defaults: module clone, decay=0.9999.
+    ema = EMA.Config().make()  # All defaults: module clone, decay=0.9999.
 
-    ema(model)  # seed.
+    ema(model)  # Seed.
     assert ema.shadow_model is not None
     shadow = cast(nn.Linear, ema.shadow_model)
     expected = shadow.weight.detach().clone()

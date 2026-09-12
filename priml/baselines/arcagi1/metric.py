@@ -96,7 +96,7 @@ class PassK:
         for row in range(predictions.shape[0]):
             keep = counted[row]
             if not bool(keep.any()):
-                continue  # an all-ignored row is padding, not a puzzle.
+                continue  # An all-ignored row is padding, not a puzzle.
             puzzle = int(identifiers[row])
             answer = _digest(predictions[row][keep])
             truth = _digest(labels[row][keep])

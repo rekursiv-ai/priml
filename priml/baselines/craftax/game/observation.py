@@ -28,8 +28,8 @@ from priml.baselines.craftax.game.state import EnvState
 CHANNELS_PER_TILE: int = (
     len(BlockType)
     + len(ItemType)
-    + 5 * 8  # five creature classes, eight species each.
-    + 1  # whether the tile is lit.
+    + 5 * 8  # Five creature classes, eight species each.
+    + 1  # Whether the tile is lit.
 )
 """Planes each visible tile contributes.
 

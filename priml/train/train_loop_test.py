@@ -695,8 +695,8 @@ def test_eval_only_loads_checkpoint_and_skips_training(seeded_checkpoints: Path)
         eval_loop = eval_cfg.make()
         # Resume defaults on, so the checkpoint loads without eval_only touching
         # the checkpointer's read policy.
-        assert eval_loop.step.global_step == 20  # loaded, not trained.
-        eval_loop.train()  # dispatches to the eval-only path.
+        assert eval_loop.step.global_step == 20  # Loaded, not trained.
+        eval_loop.train()  # Dispatches to the eval-only path.
         # Still 20: eval_only must not advance the optimizer step.
         assert eval_loop.step.global_step == 20
         # No new checkpoint is written by eval_only.
@@ -787,7 +787,7 @@ def test_resume_latest_uses_largest_when_checkpoints_exist(seeded_checkpoints: P
         cfg.checkpointing.resume = True
         cfg.checkpointing.resume_step = -1
         loop = cfg.make()
-        assert loop.step.global_step == 20  # largest on disk.
+        assert loop.step.global_step == 20  # Largest on disk.
 
 
 def test_resume_latest_starts_fresh_when_no_checkpoints():
@@ -797,7 +797,7 @@ def test_resume_latest_starts_fresh_when_no_checkpoints():
     nothing, i.e. a fresh start. Must NOT raise (the prior contract did).
     """
     with tempfile.TemporaryDirectory() as temp_dir:
-        empty_dir = Path(temp_dir) / "nope"  # never written to.
+        empty_dir = Path(temp_dir) / "nope"  # `never` written to.
         cfg = _resume_table_config(empty_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
         cfg.checkpointing.resume = True
@@ -827,7 +827,7 @@ def test_resume_explicit_step_missing_raises(seeded_checkpoints: Path):
     """resume=True, resume_step>0 absent -> hard error (named step not found)."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # has 10, 20 -- not 999.
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Has 10, 20 -- not 999.
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -856,7 +856,7 @@ def test_resume_false_starts_at_zero_into_empty_dir():
         cfg = _resume_table_config(empty_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
         cfg.checkpointing.resume = False
-        cfg.checkpointing.resume_step = 10  # must be ignored.
+        cfg.checkpointing.resume_step = 10  # Must be ignored.
         loop = cfg.make()
         assert loop.step.global_step == 0
 
@@ -886,17 +886,17 @@ def test_a_resume_with_nothing_left_to_do_says_so(
         checkpoint_dir = Path(temp_dir) / "ck"
         _seed_checkpoints(
             checkpoint_dir, seeded_checkpoints
-        )  # trains to max_steps and saves step_20.
+        )  # Trains to max_steps and saves step_20.
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
         cfg.checkpointing.resume = True
         cfg.checkpointing.resume_step = -1
         loop = cfg.make()
-        assert loop.step.global_step == cfg.max_steps  # nothing left to run.
+        assert loop.step.global_step == cfg.max_steps  # Nothing left to run.
         with caplog.at_level(logging.WARNING, logger=train_loop.__name__):
             loop.train()
-        assert loop.step.global_step == 20  # exited cleanly, trained nothing.
+        assert loop.step.global_step == 20  # Exited cleanly, trained nothing.
         warnings = [
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
@@ -915,7 +915,7 @@ def test_fresh_run_refuses_to_overwrite_existing_checkpoints(seeded_checkpoints:
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20.
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -936,12 +936,12 @@ def test_rewind_resume_refuses_to_overwrite_newer_checkpoints(
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20.
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
         cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = 10  # rewind: start_step=10, step_20 is newer.
+        cfg.checkpointing.resume_step = 10  # Rewind: start_step=10, step_20 is newer.
         cfg.checkpointing.allow_checkpoint_overwrite = False
         with pytest.raises(RuntimeError, match="would overwrite existing"):
             cfg.make()
@@ -951,7 +951,7 @@ def test_resume_latest_does_not_trip_overwrite_guard(seeded_checkpoints: Path):
     """Resuming the latest checkpoint never collides -- no save step exceeds it."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20.
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -967,7 +967,7 @@ def test_fresh_run_into_off_cadence_dir_is_allowed():
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
         checkpoint_dir.mkdir(parents=True)
-        (checkpoint_dir / "step_5.pt").write_bytes(b"x")  # off the save cadence.
+        (checkpoint_dir / "step_5.pt").write_bytes(b"x")  # Off the save cadence.
 
         cfg = _resume_table_config(checkpoint_dir)  # save_every=10 -> 10, 20.
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
@@ -1007,16 +1007,16 @@ def test_eval_only_never_trips_overwrite_guard(seeded_checkpoints: Path):
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
-        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # steps 10, 20.
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
         cfg.eval_only = True
         assert isinstance(cfg.checkpointing, Checkpointer.Config)
         cfg.checkpointing.resume_step = (
-            10  # older than latest; would-collide for training.
+            10  # Older than latest; would-collide for training.
         )
         cfg.checkpointing.allow_checkpoint_overwrite = False
-        loop = cfg.make()  # must not raise.
+        loop = cfg.make()  # Must not raise.
         assert loop.step.global_step == 10
 
 
@@ -1097,7 +1097,7 @@ def test_eval_fails_when_exceeding_max_eval_time() -> None:
     config.max_steps = 0
     config.num_steps_eval = math.inf
     config.eval_every_epoch = False
-    config.max_eval_time = 0.0  # any elapsed batch trips the deadline.
+    config.max_eval_time = 0.0  # `any` elapsed batch trips the deadline.
 
     loop = config.make()
 
@@ -1390,7 +1390,7 @@ class TestFinalize:
             cfg.checkpointing = None
             cfg.tracker = None
             cfg.doc = "docstring note"
-            loop = cfg.make()  # must not raise.
+            loop = cfg.make()  # Must not raise.
             assert loop.tracker is None
 
 
@@ -1450,7 +1450,7 @@ def _make_step_logging_loop_config() -> TrainLoop.Config:
     config.checkpointing = None
     config.max_steps = 2
     config.num_steps_eval = math.inf
-    config.num_steps_log = 1  # log every step.
+    config.num_steps_log = 1  # Log every step.
     config.seed = 42
     return config
 
@@ -1493,7 +1493,7 @@ def test_result_line_accounts_for_every_second(
         key: float(parts[key].removesuffix("s"))
         for key in ("train_sec", "train_unbilled_sec", "eval_sec", "other_sec", "time")
     }
-    assert seconds["eval_sec"] >= 0.1  # two evals, 0.05s each.
+    assert seconds["eval_sec"] >= 0.1  # Two evals, 0.05s each.
     accounted = (
         seconds["train_sec"]
         + seconds["train_unbilled_sec"]
@@ -1514,7 +1514,7 @@ def test_the_runtime_device_places_the_model() -> None:
     """
     config = _make_step_logging_loop_config()
     config.runtime = SingleProcess.Config(device="cpu")
-    config.step.parallelism = NoParallel.Config()  # unset: defer to the runtime.
+    config.step.parallelism = NoParallel.Config()  # Unset: defer to the runtime.
     loop = config.copy_tree().finalize().make()
 
     assert loop.runtime.device == torch.device("cpu")
@@ -1536,7 +1536,7 @@ def test_result_line_shows_seconds_a_budget_declined_to_charge(
     clock = _FakeClock()
     monkeypatch.setattr(time, "perf_counter", clock)
     config = _make_step_logging_loop_config()
-    config.num_steps_eval = 100  # finite (RESULT fires) but no cadence eval in 2 steps.
+    config.num_steps_eval = 100  # Finite (RESULT fires) but no cadence eval in 2 steps.
     loop = config.make()
     monkeypatch.setattr(
         loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=100.0)
@@ -1756,7 +1756,7 @@ def test_max_time_wall_counts_first_step_compile(
 
     loop.train()
 
-    assert loop.step.global_step == 1  # the 100s "compile" alone exceeds 10s.
+    assert loop.step.global_step == 1  # The 100s "compile" alone exceeds 10s.
 
 
 def test_max_time_train_kind_excludes_first_step_compile(
@@ -1795,7 +1795,7 @@ def test_max_time_train_kind_excludes_cadence_eval_time(
 
     def timed_eval() -> dict[str, Any]:
         eval_calls.append(loop.step.global_step)
-        clock.now += 50.0  # each eval alone would blow the 10s budget.
+        clock.now += 50.0  # Each eval alone would blow the 10s budget.
         return {"score": 1.0}
 
     monkeypatch.setattr(loop, "eval", timed_eval)
@@ -1825,7 +1825,7 @@ def test_max_time_train_kind_excludes_epoch_boundary_eval_time(
 
     def timed_eval() -> dict[str, Any]:
         eval_calls.append(loop.step.global_step)
-        clock.now += 50.0  # each eval alone would blow the 10s budget.
+        clock.now += 50.0  # Each eval alone would blow the 10s budget.
         return {"score": 1.0}
 
     monkeypatch.setattr(loop, "eval", timed_eval)
@@ -1977,7 +1977,7 @@ def test_no_eval_or_checkpoint_at_step_zero(monkeypatch: pytest.MonkeyPatch) -> 
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.max_steps = 1
-        config.num_steps_eval = 5  # step 0 would be a multiple of 5.
+        config.num_steps_eval = 5  # `step` 0 would be a multiple of 5.
         loop = config.make()
 
         eval_steps: list[int] = []

@@ -68,7 +68,7 @@ def test_call_eval_param_dict_uses_shadow_not_live_weights() -> None:
     with torch.no_grad():
         for p in learnable.model.parameters():
             p.add_(5.0)
-    learnable.ema(learnable.model)  # shadow = 0.5*orig + 0.5*(orig+5)
+    learnable.ema(learnable.model)  # Shadow = 0.5*orig + 0.5*(orig+5)
 
     # Reference: forward with the shadow swapped in.
     with torch.inference_mode(), learnable.ema.apply_to(learnable.model):
@@ -130,14 +130,14 @@ def test_load_strict_false_tolerates_missing_keys() -> None:
     """
     full = _learnable_with()
     state = full.state_dict()
-    del state["model"]["fc.weight"]  # simulate a checkpoint lacking this param.
+    del state["model"]["fc.weight"]  # Simulate a checkpoint lacking this param.
 
     strict = _learnable_with()
     with pytest.raises(RuntimeError, match="Missing key"):
-        strict.load_state_dict(state)  # default policy is strict.
+        strict.load_state_dict(state)  # Default policy is strict.
 
     lenient = _learnable_with()
-    lenient.load_state_dict(state, strict=False)  # must not raise.
+    lenient.load_state_dict(state, strict=False)  # Must not raise.
 
 
 def test_parameter_remap_transforms_before_load() -> None:
@@ -177,9 +177,9 @@ def test_load_optimizer_false_skips_optimizer_restore() -> None:
     """
     source = _adam_learnable()
     source.model(torch.randn(2, 4)).sum().backward()
-    source.optimizer.step()  # populates Adam state.
+    source.optimizer.step()  # Populates Adam state.
     state = source.state_dict()
-    del state["model"]["fc.weight"]  # architecture changed.
+    del state["model"]["fc.weight"]  # Architecture changed.
 
     finetune = _adam_learnable()
     finetune.load_state_dict(state, strict=False, load_optimizer=False)
@@ -380,7 +380,7 @@ def test_a_call_that_raised_is_still_counted() -> None:
     """It happened, and hiding it would misreport the step being debugged."""
     learnable = _scheduled()
     with pytest.raises(RuntimeError):
-        learnable(torch.randn(2, 9))  # wrong width for the linear.
+        learnable(torch.randn(2, 9))  # Wrong width for the linear.
     assert learnable.timer_forward.global_count == 1
 
 

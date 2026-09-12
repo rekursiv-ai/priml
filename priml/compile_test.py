@@ -55,11 +55,11 @@ class TestLazyTorchCompile:
             def f(x: int) -> int:
                 return x
 
-            assert calls == []  # not compiled at decoration time.
+            assert calls == []  # Not compiled at decoration time.
             assert f(5) == 5
             assert len(calls) == 1
             f(6)
-            assert len(calls) == 1  # compiled exactly once.
+            assert len(calls) == 1  # Compiled exactly once.
 
 
 class TestLazyAssumeConstantResult:

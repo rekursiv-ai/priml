@@ -297,7 +297,7 @@ def test_a_byte_table_that_does_not_match_its_fingerprint_is_rejected(
     to tell them apart.
     """
     lengths = np.load(corpus / "tokenizer" / "token_bytes.npy")
-    lengths[3] = 7  # same shape, different accounting.
+    lengths[3] = 7  # Same shape, different accounting.
     np.save(corpus / "tokenizer" / "token_bytes.npy", lengths)
     with pytest.raises(ValueError, match="fingerprint"):
         _data(corpus)

@@ -366,7 +366,7 @@ class TestPhaseTimerTorchProfile:
                 pass
             timer.log_summary()
             assert timer._profiler is None
-            timer.log_summary()  # second call must not re-stop/export.
+            timer.log_summary()  # `second` call must not re-stop/export.
             profiler.stop.assert_called_once()
             profiler.export_chrome_trace.assert_called_once_with(str(path))
 
@@ -520,7 +520,7 @@ class TestPhaseTimerTotalCollision:
             time.sleep(0.001)
 
         with caplog.at_level(logging.INFO):
-            timer.log_summary()  # must not raise KeyError.
+            timer.log_summary()  # Must not raise KeyError.
 
 
 class TestTorchProfilingWorkingDir:

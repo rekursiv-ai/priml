@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from priml.model.attention.kvcache import (
-    KVCache,  # used in preallocated cache test.
+    KVCache,  # Used in preallocated cache test.
 )
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE

@@ -257,7 +257,7 @@ def test_distributed_strategies_place_an_eager_model(
     )
     for config in configs:
         strategy = config.make()
-        strategy.device = torch.device("meta")  # a device the model is NOT on.
+        strategy.device = torch.device("meta")  # A device the model is NOT on.
         placed = strategy(SimpleModel())
         assert next(placed.parameters()).is_meta, type(config).__qualname__
 
@@ -450,7 +450,7 @@ def test_materialize_meta_raises_on_uninitialized_param() -> None:
     class _Uninit(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.weight = nn.Parameter(torch.zeros(4))  # no reset_parameters.
+            self.weight = nn.Parameter(torch.zeros(4))  # No reset_parameters.
 
     with torch.device("meta"):
         mod = _Uninit()
@@ -471,7 +471,7 @@ def test_materialize_meta_raises_on_uninitialized_buffer() -> None:
             self.register_buffer("stat", torch.zeros(4))
 
         def reset_parameters(self) -> None:
-            nn.init.ones_(self.weight)  # writes the param, forgets the buffer.
+            nn.init.ones_(self.weight)  # Writes the param, forgets the buffer.
 
     with torch.device("meta"):
         mod = _UninitBuf()
@@ -492,7 +492,7 @@ def test_materialize_meta_raises_on_partial_param_init() -> None:
 
         def reset_parameters(self) -> None:
             with torch.no_grad():
-                self.weight[:2] = 1.0  # only half written.
+                self.weight[:2] = 1.0  # Only half written.
 
     with torch.device("meta"):
         mod = _Partial()

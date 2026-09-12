@@ -562,7 +562,7 @@ def test_quantized_activation_storage_all_zero_no_nan() -> None:
             return self.linear(x) * 0.0
 
     config = QuantizedActivationStorage.Config()
-    config.min_size = 4  # ensure the zero activation crosses the quantize path.
+    config.min_size = 4  # Ensure the zero activation crosses the quantize path.
 
     module = ZeroOutModule()
     config.make()(module)

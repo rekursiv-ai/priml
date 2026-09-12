@@ -353,7 +353,7 @@ def test_safe_rsqrt():
 def test_safe_rsqrt_nonpositive():
     vals = torch.tensor([-1.0, 0.0, 0.25, -3.0])
     result = safe_rsqrt(vals)
-    assert result[0] == 0.0  # negative -> 0 (undefined domain)
+    assert result[0] == 0.0  # Negative -> 0 (undefined domain)
     assert result[1] == math.inf  # rsqrt(0) = 1/sqrt(0) = +inf.
     assert result[3] == 0.0
     torch.testing.assert_close(result[2], torch.rsqrt(torch.tensor(0.25)))

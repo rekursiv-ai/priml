@@ -68,7 +68,7 @@ def test_swiglu_declares_shard_via_transformer_block() -> None:
     block = TransformerBlock.Config(channels_in=32).make()
     assert isinstance(block.ffn, SwiGLU)
     assert block.ffn.shard == "colwise"
-    assert block.ffn.up_proj.shard is None  # the SwiGLU style shards children.
+    assert block.ffn.up_proj.shard is None  # The SwiGLU style shards children.
     assert block.ffn.down_proj.shard is None
 
 
