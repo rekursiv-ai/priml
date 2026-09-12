@@ -110,7 +110,12 @@ def main() -> int:
 
 
 def default_directory() -> Path:
-    """Return the corpus directory a default ``TrainLoop`` would resolve."""
+    """Return the corpus directory a default ``TrainLoop`` would resolve.
+
+    Returns:
+      result: The Path.
+
+    """
     config = NanoChatData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)

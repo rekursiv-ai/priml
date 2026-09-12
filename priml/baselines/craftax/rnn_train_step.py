@@ -471,7 +471,12 @@ class CraftaxRNNTrainStep(TrainStep):
         return logits
 
     def make_evaluation_actor(self) -> EvaluationActor:
-        """Build an actor with isolated GRU state."""
+        """Build an actor with isolated GRU state.
+
+        Returns:
+          result: The EvaluationActor.
+
+        """
         return _EvaluationActor(
             self.model,
             observation_size=self.env.observation_size,

@@ -219,6 +219,31 @@ def test_training_and_validation_draw_from_different_shards(corpus: Path) -> Non
     assert not seen[0] & seen[1]
 
 
+def test_explicit_training_shards_keep_validation_held_out(corpus: Path) -> None:
+    _write_shard(corpus, 2, ["z"] * 128)
+    data = _data(corpus, train_shard_indices=(2,))
+    batch = next(iter(data.train_dataloader()))["media"]
+    assert set(batch.flatten().tolist()) == {data.tokenizer.bos_token_id, ord("z")}
+    assert data.val_paths == [corpus / "shard_00001.parquet"]
+    with pytest.raises(ValueError, match="validation"):
+        _data(corpus, train_shard_indices=(0, 1))
+    with pytest.raises(ValueError, match="twice"):
+        _data(corpus, train_shard_indices=(0, 0))
+
+
+def test_training_buffer_override_does_not_change_validation_rows(corpus: Path) -> None:
+    _write_shard(corpus, 0, ["a"] * 128 + ["bbbbbbbb"] * 172)
+    parent = _data(corpus, buffer_size=256)
+    changed = _data(corpus, buffer_size=256, train_buffer_size=8)
+    assert next(iter(parent.train_dataloader()))["media"][0, 1].item() == ord("b")
+    assert next(iter(changed.train_dataloader()))["media"][0, 1].item() == ord("a")
+    for first, second in zip(
+        parent.eval_dataloader(), changed.eval_dataloader(), strict=True
+    ):
+        torch.testing.assert_close(first["media"], second["media"])
+        torch.testing.assert_close(first["label"], second["label"])
+
+
 def test_the_training_stream_does_not_end(corpus: Path) -> None:
     """The budget ends the run, so the corpus must outlast it by wrapping.
 

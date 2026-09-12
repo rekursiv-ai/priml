@@ -347,7 +347,12 @@ class ActPool:
         return {"halt_rng": self._generator.get_state()}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore the halting RNG produced by :meth:`state_dict`."""
+        """Restore the halting RNG produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         if "halt_rng" in state_dict:
             # ``set_state`` wants a CPU byte tensor; a checkpoint read onto the
             # compute device would otherwise be rejected here.

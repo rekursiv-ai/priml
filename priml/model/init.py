@@ -55,25 +55,49 @@ def call_init(fn: InitFn, t: Tensor, **kwargs: DepthIndex) -> None:
 
 
 def kaiming_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Kaiming uniform, scaled by 1/sqrt(depth_index)."""
+    """Kaiming uniform, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.kaiming_uniform_(w, a=5**0.5)
     _depth_index_scale(w, depth_index)
 
 
 def kaiming_normal(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Kaiming normal, scaled by 1/sqrt(depth_index)."""
+    """Kaiming normal, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.kaiming_normal_(w, a=5**0.5)
     _depth_index_scale(w, depth_index)
 
 
 def xavier_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Xavier uniform, scaled by 1/sqrt(depth_index)."""
+    """Xavier uniform, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.xavier_uniform_(w)
     _depth_index_scale(w, depth_index)
 
 
 def xavier_normal(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """Xavier normal, scaled by 1/sqrt(depth_index)."""
+    """Xavier normal, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     nn.init.xavier_normal_(w)
     _depth_index_scale(w, depth_index)
 
@@ -146,7 +170,13 @@ def unit_fan_in_uniform(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
 
 
 def mup_output(w: Tensor, *, depth_index: DepthIndex = ()) -> None:
-    """MuP output projection init: 1/fan_in, scaled by 1/sqrt(depth_index)."""
+    """MuP output projection init: 1/fan_in, scaled by 1/sqrt(depth_index).
+
+    Args:
+      w: W.
+      depth_index: Depth index.
+
+    """
     fan_in = w.shape[1] if w.ndim >= 2 else w.shape[0]
     nn.init.normal_(w, std=1 / fan_in)
     _depth_index_scale(w, depth_index)

@@ -54,7 +54,9 @@ class _Checkpoint:
     """A checkpoint found on disk (internal scan record): step, path, complete."""
 
     step: int
+
     path: Path
+
     complete: bool
     """A plain ``.pt`` file (atomic rename) is always complete; a shard dir is
     complete once its ``.metadata`` marker is present."""
@@ -362,7 +364,12 @@ class AsyncLocalStateDictStorer:
         self._join()
 
     def has_pending_write(self) -> bool:
-        """Whether a background write is still in flight (for tests/diagnostics)."""
+        """Whether a background write is still in flight (for tests/diagnostics).
+
+        Returns:
+          result: The bool.
+
+        """
         return self._pending is not None
 
     # Called only from all-rank entry points (``write``, ``read``, ``flush``), so the
@@ -754,7 +761,12 @@ class Checkpointer:
         )
 
     def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics)."""
+        """Ascending steps of all complete checkpoints on disk (for diagnostics).
+
+        Returns:
+          result: The list[int].
+
+        """
         return sorted(c.step for c in self._list() if c.complete)
 
     # A file and a shard dir share this stem.

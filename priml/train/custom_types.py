@@ -77,8 +77,11 @@ class TrainStepOutput(TypedDict):
     """
 
     loss: Tensor
+
     model: Tensor
+
     metrics: NotRequired[dict[str, float | Tensor]]
+
     eval_extra_votes: NotRequired[list[tuple[Tensor, dict[str, Any]]]]
 
 
@@ -219,7 +222,9 @@ class EMAProtocol(CheckpointableProtocol, Protocol):
     """
 
     shadow_model: nn.Module | None
+
     global_step: int
+
     local_step: int
 
     def __call__(self, model: nn.Module) -> None:
@@ -254,11 +259,26 @@ class CheckpointingProtocol(Protocol):
     """
 
     def maybe_save(self, target: CheckpointableProtocol, step: int) -> bool:
-        """Save ``target`` at ``step`` iff on the save cadence; return whether saved."""
+        """Save ``target`` at ``step`` iff on the save cadence; return whether saved.
+
+        Args:
+          target: Target.
+          step: Step.
+
+        Returns:
+          result: The bool.
+
+        """
         ...
 
     def save(self, target: CheckpointableProtocol, step: int) -> None:
-        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists."""
+        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists.
+
+        Args:
+          target: Target.
+          step: Step.
+
+        """
         ...
 
     def load(
@@ -286,7 +306,12 @@ class CheckpointingProtocol(Protocol):
         ...
 
     def available_steps(self) -> list[int]:
-        """Ascending steps of all complete checkpoints on disk (for diagnostics)."""
+        """Ascending steps of all complete checkpoints on disk (for diagnostics).
+
+        Returns:
+          result: The list[int].
+
+        """
         ...
 
     def close(self) -> None:
@@ -538,7 +563,15 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         ...
 
     def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Preprocess batch (move tensors to device, etc.)."""
+        """Preprocess batch (move tensors to device, etc.).
+
+        Args:
+          batch: Batch.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         ...
 
     def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.

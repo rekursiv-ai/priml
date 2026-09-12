@@ -46,7 +46,9 @@ class LaunchableExperiment(Protocol):
     """
 
     study_name: str
+
     experiment_name: str
+
     doc: str
 
 
@@ -62,6 +64,7 @@ class HasNormalizedWorkingDirPattern(Protocol):
     """
 
     base_dir: Path | str | None
+
     working_dir: Path | str
 
 
@@ -90,7 +93,16 @@ class MetricObjective:
     """Whether a lower (minimize) or higher (maximize) value is better."""
 
     def is_better(self, candidate: float, incumbent: float) -> bool:
-        """Whether ``candidate`` beats ``incumbent`` under this direction."""
+        """Whether ``candidate`` beats ``incumbent`` under this direction.
+
+        Args:
+          candidate: Candidate.
+          incumbent: Incumbent.
+
+        Returns:
+          result: The bool.
+
+        """
         if self.direction == "minimize":
             return candidate < incumbent
         return candidate > incumbent
@@ -101,9 +113,19 @@ class CheckpointableProtocol(Protocol):
     """Protocol for a checkpointable object."""
 
     def state_dict(self) -> dict[str, Any]:
-        """Get state for checkpointing."""
+        """Get state for checkpointing.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         ...
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load state from checkpoint."""
+        """Load state from checkpoint.
+
+        Args:
+          state_dict: State dict.
+
+        """
         ...

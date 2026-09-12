@@ -103,7 +103,12 @@ def main() -> int:
 
 
 def default_directory() -> Path:
-    """Return the dataset directory a default ``TrainLoop`` would resolve."""
+    """Return the dataset directory a default ``TrainLoop`` would resolve.
+
+    Returns:
+      result: The Path.
+
+    """
     config = SudokuData.Config()
     config.base_dir = TrainLoop.Config().base_dir
     return Path(config.copy_tree().finalize().working_dir)

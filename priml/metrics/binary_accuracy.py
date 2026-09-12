@@ -69,13 +69,23 @@ class BinaryAccuracy:
         return {"accuracy": self.correct / self.total}
 
     def state_dict(self) -> dict[str, Any]:
-        """Get metric state for checkpointing."""
+        """Get metric state for checkpointing.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "correct": self.correct,
             "total": self.total,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load metric state from checkpoint."""
+        """Load metric state from checkpoint.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.correct = state_dict.get("correct", 0)
         self.total = state_dict.get("total", 0)

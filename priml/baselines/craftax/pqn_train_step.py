@@ -505,7 +505,12 @@ class CraftaxPQNTrainStep(TrainStep):
             return self.model.forward(observation)
 
     def make_evaluation_actor(self) -> EvaluationActor:
-        """Build a greedy actor with isolated LSTM state."""
+        """Build a greedy actor with isolated LSTM state.
+
+        Returns:
+          result: The EvaluationActor.
+
+        """
         return _EvaluationActor(
             self.model,
             observation_size=self.env.observation_size,

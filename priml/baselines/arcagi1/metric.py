@@ -143,11 +143,21 @@ class PassK:
         }
 
     def state_dict(self) -> dict[str, Any]:
-        """Return the accumulated votes."""
+        """Return the accumulated votes.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {"votes": self._votes, "truth": self._truth}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore votes produced by :meth:`state_dict`."""
+        """Restore votes produced by :meth:`state_dict`.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self._votes = state_dict.get("votes", {})
         self._truth = state_dict.get("truth", {})
 

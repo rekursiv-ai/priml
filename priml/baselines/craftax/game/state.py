@@ -41,9 +41,13 @@ class Mobs:
     """
 
     position: Tensor
+
     health: Tensor
+
     mask: Tensor
+
     attack_cooldown: Tensor
+
     type_id: Tensor
 
     @classmethod
@@ -87,20 +91,35 @@ class Inventory:
     """
 
     wood: Tensor
+
     stone: Tensor
+
     coal: Tensor
+
     iron: Tensor
+
     diamond: Tensor
+
     sapling: Tensor
+
     pickaxe: Tensor
+
     sword: Tensor
+
     bow: Tensor
+
     arrows: Tensor
+
     armour: Tensor
+
     torches: Tensor
+
     ruby: Tensor
+
     sapphire: Tensor
+
     potions: Tensor
+
     books: Tensor
 
     @classmethod
@@ -200,63 +219,99 @@ class EnvState:
     """
 
     map: Tensor
+
     item_map: Tensor
+
     light_map: Tensor
+
     mob_map: Tensor
+
     down_ladders: Tensor
+
     up_ladders: Tensor
+
     chests_opened: Tensor
+
     monsters_killed: Tensor
 
     player_position: Tensor
+
     player_level: Tensor
+
     player_direction: Tensor
 
     player_health: Tensor
+
     player_food: Tensor
+
     player_drink: Tensor
+
     player_energy: Tensor
+
     player_mana: Tensor
+
     is_sleeping: Tensor
+
     is_resting: Tensor
 
     player_recover: Tensor
+
     player_hunger: Tensor
+
     player_thirst: Tensor
+
     player_fatigue: Tensor
+
     player_recover_mana: Tensor
 
     player_xp: Tensor
+
     player_dexterity: Tensor
+
     player_strength: Tensor
+
     player_intelligence: Tensor
 
     inventory: Inventory
 
     melee_mobs: Mobs
+
     passive_mobs: Mobs
+
     ranged_mobs: Mobs
+
     mob_projectiles: Mobs
+
     mob_projectile_directions: Tensor
+
     player_projectiles: Mobs
+
     player_projectile_directions: Tensor
 
     growing_plants_positions: Tensor
+
     growing_plants_age: Tensor
+
     growing_plants_mask: Tensor
 
     potion_mapping: Tensor
+
     learned_spells: Tensor
 
     sword_enchantment: Tensor
+
     bow_enchantment: Tensor
+
     armour_enchantments: Tensor
 
     boss_progress: Tensor
+
     boss_timesteps_to_spawn_this_round: Tensor
 
     light_level: Tensor
+
     achievements: Tensor
+
     timestep: Tensor
 
     @property
@@ -333,7 +388,12 @@ class EnvState:
         return flat
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore tensors saved by :meth:`state_dict`, in place."""
+        """Restore tensors saved by :meth:`state_dict`, in place.
+
+        Args:
+          state_dict: State dict.
+
+        """
         for name, value in state_dict.items():
             head, _, tail = name.partition(".")
             target = getattr(self, head) if tail else self

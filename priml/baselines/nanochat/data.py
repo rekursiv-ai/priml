@@ -559,6 +559,9 @@ class NanoChatData:
         num_train_shards: int = 7
         """Shards forming the training split, numbered from zero."""
 
+        train_shard_indices: tuple[int, ...] = ()
+        """Explicit training shards; empty uses the first ``num_train_shards``."""
+
         val_shard: int = 7
         """The pinned validation shard; no run trains on it."""
 
@@ -579,6 +582,9 @@ class NanoChatData:
 
         buffer_size: int = 1_000
         """Documents held for best-fit selection before a row is packed."""
+
+        train_buffer_size: int | None = None
+        """Training-only packing buffer; None inherits ``buffer_size``."""
 
         device: torch.device | str | None = "auto"
         """Device batches land on.
@@ -621,6 +627,8 @@ class NanoChatData:
             )
         if config.buffer_size <= 0:
             raise ValueError(f"buffer_size must be positive; got {config.buffer_size}.")
+        if config.train_buffer_size is not None and config.train_buffer_size <= 0:
+            raise ValueError("train_buffer_size must be positive.")
         tokens_per_eval_batch = config.eval_batch_size * config.max_seq_len
         if config.eval_tokens <= 0 or config.eval_tokens % tokens_per_eval_batch:
             raise ValueError(
@@ -641,10 +649,14 @@ class NanoChatData:
         ending, and the recipe stops on time long before the corpus is
         exhausted."""
 
-        self.train_paths = _shard_paths(
-            self.dataset_dir,
-            indices=range(config.num_train_shards),
+        train_indices = list(
+            config.train_shard_indices or range(config.num_train_shards)
         )
+        if len(train_indices) != len(set(train_indices)):
+            raise ValueError("train_shard_indices names a shard twice.")
+        if config.val_shard in train_indices:
+            raise ValueError("The validation shard must be excluded from training.")
+        self.train_paths = _shard_paths(self.dataset_dir, indices=train_indices)
         self.val_paths = _shard_paths(self.dataset_dir, indices=[config.val_shard])
         self.tokenizer = Tokenizer.from_directory(Path(config.tokenizer_dir))
         if 0 < config.vocab_size != self.tokenizer.vocab_size:
@@ -690,7 +702,9 @@ class NanoChatData:
             token_bytes=self.token_bytes,
             batch_size=self.batch_size,
             max_seq_len=self.config.max_seq_len,
-            buffer_size=self.config.buffer_size,
+            buffer_size=self.config.train_buffer_size
+            if self.config.train_buffer_size is not None
+            else self.config.buffer_size,
             device=self.device,
             max_batches=None,
             prefetch=True,

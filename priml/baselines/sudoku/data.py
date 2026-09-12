@@ -201,7 +201,12 @@ class _SudokuBatches:
         return ceil_div(int(self.bounds[-1]), self.batch_size)
 
     def state_dict(self) -> dict[str, Any]:
-        """Return enough state to resume an unfinished epoch."""
+        """Return enough state to resume an unfinished epoch.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "epoch": self.epoch,
             "active_epoch": self._active_epoch,
@@ -209,7 +214,12 @@ class _SudokuBatches:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore an unfinished epoch."""
+        """Restore an unfinished epoch.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.epoch = int(state_dict.get("epoch", self.epoch))
         active_epoch = state_dict.get("active_epoch")
         self._active_epoch = None if active_epoch is None else int(active_epoch)

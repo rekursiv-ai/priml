@@ -1374,7 +1374,12 @@ class TrainLoop:
         return results
 
     def run(self, *args: str) -> None:
-        """Run training (entry point for experimental.lib.launch)."""
+        """Run training (entry point for experimental.lib.launch).
+
+        Args:
+          *args: Args.
+
+        """
         del args
         self.train()
 

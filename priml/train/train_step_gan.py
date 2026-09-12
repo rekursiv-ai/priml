@@ -298,7 +298,12 @@ class GANTrainStep:
         return cast(TrainStepOutput, result)
 
     def state_dict(self) -> dict[str, Any]:
-        """Get checkpoint state for both generator and discriminator."""
+        """Get checkpoint state for both generator and discriminator.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "generator": self.generator.state_dict(),
             "discriminator": self.discriminator.state_dict(),
@@ -306,7 +311,12 @@ class GANTrainStep:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Load checkpoint state for both generator and discriminator."""
+        """Load checkpoint state for both generator and discriminator.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.generator.load_state_dict(state_dict["generator"])
         self.discriminator.load_state_dict(state_dict["discriminator"])
         self.global_step = state_dict["global_step"]

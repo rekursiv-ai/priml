@@ -113,7 +113,12 @@ class _ArcBatches:
         return sum(1 for _ in self._plan_sampled(pass_index))
 
     def state_dict(self) -> dict[str, Any]:
-        """Return enough state to resume an unfinished sampled pass."""
+        """Return enough state to resume an unfinished sampled pass.
+
+        Returns:
+          result: The dict[str, Any].
+
+        """
         return {
             "passes": self.passes,
             "active_pass": self._active_pass,
@@ -121,7 +126,12 @@ class _ArcBatches:
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore an unfinished sampled pass."""
+        """Restore an unfinished sampled pass.
+
+        Args:
+          state_dict: State dict.
+
+        """
         self.passes = int(state_dict.get("passes", self.passes))
         active_pass = state_dict.get("active_pass")
         self._active_pass = None if active_pass is None else int(active_pass)

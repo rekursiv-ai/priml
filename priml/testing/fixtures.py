@@ -38,7 +38,12 @@ def get_device() -> torch_typed.device:
 
 @pytest.fixture(autouse=True)
 def cleanup_cuda() -> Generator[None]:
-    """Reclaim CUDA memory symmetrically around each test (no-op on CPU)."""
+    """Reclaim CUDA memory symmetrically around each test (no-op on CPU).
+
+    Yields:
+      item: Each yielded value.
+
+    """
     _reclaim_cuda()
     yield
     _reclaim_cuda()

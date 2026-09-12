@@ -28,6 +28,7 @@ def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
       coefficients: DCT-II of the signal (same shape as x).
 
 
+
     References:
       https://github.com/zh217/torch-dct/blob/master/torch_dct/_dct.py
         via https://github.com/AaltoML/generative-inverse-heat-dissipation/blob/main/model_code/torch_dct.py
@@ -62,6 +63,7 @@ def idct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:
 
     Returns:
       signal: Reconstructed signal (same shape as x).
+
 
 
     References:
