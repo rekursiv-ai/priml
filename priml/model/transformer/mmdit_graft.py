@@ -36,12 +36,13 @@ class MMDiTGraft(nn.Module):
         """Transformer architecture exposing projections and blocks."""
 
         streams: list[MMDiTStream.Config] = field(
-            default_factory=lambda: [MMDiTStream.Config()]
+            default_factory=lambda: [MMDiTStream.Config()],
         )
         """Additional stream templates, copied independently into each layer."""
 
         block: list[MMDiTBlock.Config] = field(
-            default_factory=list[MMDiTBlock.Config], init=False
+            default_factory=list[MMDiTBlock.Config],
+            init=False,
         )
         """Joint layers derived from the backbone and stream templates."""
 
@@ -58,7 +59,8 @@ class MMDiTGraft(nn.Module):
                         continue
                     language = MMDiTStream.Config()
                     language.attn = AttentionProjections.Config().update(
-                        attn, skip_missing=True
+                        attn,
+                        skip_missing=True,
                     )
                     language.attn.causal = False
                     language.norm1 = layer.norm1.copy_tree()
@@ -170,7 +172,7 @@ class MMDiTGraft(nn.Module):
         """
         if len(streams) != self.num_streams - 1:
             raise ValueError(
-                f"Expected {self.num_streams - 1} modality streams, got {len(streams)}."
+                f"Expected {self.num_streams - 1} modality streams, got {len(streams)}.",
             )
         language = self.in_proj(tokens) if self.in_proj is not None else tokens
         hidden: tuple[Tensor, ...] = (language, *streams)
@@ -190,7 +192,7 @@ class MMDiTGraft(nn.Module):
                     "norm1": block.norms1[0],
                     "norm2": block.norms2[0],
                     "ffn": block.ffns[0],
-                }
+                },
             )
             for block in self.blocks
         ]

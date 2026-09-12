@@ -129,7 +129,7 @@ class MMDiTStream(nn.Module):
         """Residual width, inherited from the joint block."""
 
         attn: AttentionProjections.Config = field(
-            default_factory=AttentionProjections.Config
+            default_factory=AttentionProjections.Config,
         )
         """Stream attention leaves, built and registered by the joint attention."""
 
@@ -198,7 +198,7 @@ class MMDiTBlock(nn.Module):
         """
 
         streams: list[MMDiTStream.Config] = field(
-            default_factory=list[MMDiTStream.Config]
+            default_factory=list[MMDiTStream.Config],
         )
         """Explicit stream-owned subtrees; their length determines the stream count."""
 
@@ -235,7 +235,7 @@ class MMDiTBlock(nn.Module):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for MMDiTBlock."
+                    f"channels_out={self.channels_out} for MMDiTBlock.",
                 )
             if self.streams:
                 self.num_streams = len(self.streams)
@@ -285,7 +285,7 @@ class MMDiTBlock(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for MMDiTBlock."
+                f"channels_out={config.channels_out} for MMDiTBlock.",
             )
         super().__init__()
         N = config.num_streams
@@ -306,7 +306,7 @@ class MMDiTBlock(nn.Module):
                         str(i): stream.adaln
                         for i, stream in enumerate(streams)
                         if stream.adaln is not None
-                    }
+                    },
                 )
             return
 
@@ -326,10 +326,11 @@ class MMDiTBlock(nn.Module):
             self.adalns = nn.ModuleDict(
                 {
                     str(i): AdaLNZero.Config(
-                        channels_in=D, cond_dim=config.cond_dim
+                        channels_in=D,
+                        cond_dim=config.cond_dim,
                     ).make()
                     for i in range(N)
-                }
+                },
             )
 
     def reset_parameters(self) -> None:
@@ -371,7 +372,7 @@ class MMDiTBlock(nn.Module):
                 "norm1": self.norms1[index],
                 "norm2": self.norms2[index],
                 "ffn": self.ffns[index],
-            }
+            },
         )
         _validate_native_state(target, source=source)
         target.load_state_dict(source.state_dict(), strict=True)

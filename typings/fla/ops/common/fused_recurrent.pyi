@@ -17,7 +17,7 @@ import triton.language as tl
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [4, 8]],
@@ -60,7 +60,7 @@ def fused_recurrent_fwd_kernel(
         "STORE_INITIAL_STATE_GRADIENT": lambda args: args["dh0"] is not None,
         "USE_FINAL_STATE_GRADIENT": lambda args: args["dht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [4]],
@@ -160,7 +160,9 @@ class FusedRecurrentFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[
         Any,
         Any,

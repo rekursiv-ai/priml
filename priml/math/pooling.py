@@ -209,7 +209,7 @@ def _adaptive_avg_pool(
     if not any(d.needs_irregular_kernel for d in dims):
         max_kernel_size_dims = tuple(-(2 * k + 1) for k in reversed(range(n)))
         return vals.mean(dim=max_kernel_size_dims) * float(
-            math.prod(vals.shape[d] for d in max_kernel_size_dims) ** 0.5
+            math.prod(vals.shape[d] for d in max_kernel_size_dims) ** 0.5,
         )
 
     # Mask out-of-window positions; accumulate per-position window sizes.

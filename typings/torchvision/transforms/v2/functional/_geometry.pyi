@@ -21,7 +21,8 @@ def horizontal_flip_image(image: torch.Tensor) -> torch.Tensor: ...
 @_register_kernel_internal(horizontal_flip, tv_tensors.Mask)
 def horizontal_flip_mask(mask: torch.Tensor) -> torch.Tensor: ...
 def horizontal_flip_keypoints(
-    keypoints: torch.Tensor, canvas_size: tuple[int, int]
+    keypoints: torch.Tensor,
+    canvas_size: tuple[int, int],
 ): ...
 def horizontal_flip_bounding_boxes(
     bounding_boxes: torch.Tensor,
@@ -37,7 +38,8 @@ def vertical_flip_image(image: torch.Tensor) -> torch.Tensor: ...
 @_register_kernel_internal(vertical_flip, tv_tensors.Mask)
 def vertical_flip_mask(mask: torch.Tensor) -> torch.Tensor: ...
 def vertical_flip_keypoints(
-    keypoints: torch.Tensor, canvas_size: tuple[int, int]
+    keypoints: torch.Tensor,
+    canvas_size: tuple[int, int],
 ) -> torch.Tensor: ...
 def vertical_flip_bounding_boxes(
     bounding_boxes: torch.Tensor,
@@ -67,7 +69,9 @@ def resize_image(
     antialias: bool | None = ...,
 ) -> torch.Tensor: ...
 def resize_mask(
-    mask: torch.Tensor, size: list[int] | None, max_size: int | None = ...
+    mask: torch.Tensor,
+    size: list[int] | None,
+    max_size: int | None = ...,
 ) -> torch.Tensor: ...
 def resize_keypoints(
     keypoints: torch.Tensor,
@@ -249,18 +253,30 @@ def pad_video(
     padding_mode: str = ...,
 ) -> torch.Tensor: ...
 def crop(
-    inpt: torch.Tensor, top: int, left: int, height: int, width: int
+    inpt: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
 ) -> torch.Tensor: ...
 @_register_kernel_internal(crop, torch.Tensor)
 @_register_kernel_internal(crop, tv_tensors.Image)
 def crop_image(
-    image: torch.Tensor, top: int, left: int, height: int, width: int
+    image: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
 ) -> torch.Tensor: ...
 
 _crop_image_pil = ...
 
 def crop_keypoints(
-    keypoints: torch.Tensor, top: int, left: int, height: int, width: int
+    keypoints: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
 ) -> tuple[torch.Tensor, tuple[int, int]]: ...
 def crop_bounding_boxes(
     bounding_boxes: torch.Tensor,
@@ -273,11 +289,19 @@ def crop_bounding_boxes(
 ) -> tuple[torch.Tensor, tuple[int, int]]: ...
 @_register_kernel_internal(crop, tv_tensors.Mask)
 def crop_mask(
-    mask: torch.Tensor, top: int, left: int, height: int, width: int
+    mask: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
 ) -> torch.Tensor: ...
 @_register_kernel_internal(crop, tv_tensors.Video)
 def crop_video(
-    video: torch.Tensor, top: int, left: int, height: int, width: int
+    video: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
 ) -> torch.Tensor: ...
 def perspective(
     inpt: torch.Tensor,
@@ -347,7 +371,9 @@ def elastic_image(
     fill: _FillTypeJIT = ...,
 ) -> torch.Tensor: ...
 def elastic_keypoints(
-    keypoints: torch.Tensor, canvas_size: tuple[int, int], displacement: torch.Tensor
+    keypoints: torch.Tensor,
+    canvas_size: tuple[int, int],
+    displacement: torch.Tensor,
 ) -> torch.Tensor: ...
 def elastic_bounding_boxes(
     bounding_boxes: torch.Tensor,
@@ -357,7 +383,9 @@ def elastic_bounding_boxes(
     clamping_mode: CLAMPING_MODE_TYPE = ...,
 ) -> torch.Tensor: ...
 def elastic_mask(
-    mask: torch.Tensor, displacement: torch.Tensor, fill: _FillTypeJIT = ...
+    mask: torch.Tensor,
+    displacement: torch.Tensor,
+    fill: _FillTypeJIT = ...,
 ) -> torch.Tensor: ...
 @_register_kernel_internal(elastic, tv_tensors.Video)
 def elastic_video(
@@ -371,7 +399,9 @@ def center_crop(inpt: torch.Tensor, output_size: list[int]) -> torch.Tensor: ...
 @_register_kernel_internal(center_crop, tv_tensors.Image)
 def center_crop_image(image: torch.Tensor, output_size: list[int]) -> torch.Tensor: ...
 def center_crop_keypoints(
-    inpt: torch.Tensor, canvas_size: tuple[int, int], output_size: list[int]
+    inpt: torch.Tensor,
+    canvas_size: tuple[int, int],
+    output_size: list[int],
 ): ...
 def center_crop_bounding_boxes(
     bounding_boxes: torch.Tensor,
@@ -425,7 +455,12 @@ def resized_crop_bounding_boxes(
     clamping_mode: CLAMPING_MODE_TYPE = ...,
 ) -> tuple[torch.Tensor, tuple[int, int]]: ...
 def resized_crop_mask(
-    mask: torch.Tensor, top: int, left: int, height: int, width: int, size: list[int]
+    mask: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
+    size: list[int],
 ) -> torch.Tensor: ...
 @_register_kernel_internal(resized_crop, tv_tensors.Video)
 def resized_crop_video(
@@ -439,19 +474,24 @@ def resized_crop_video(
     antialias: bool | None = ...,
 ) -> torch.Tensor: ...
 def five_crop(
-    inpt: torch.Tensor, size: list[int]
+    inpt: torch.Tensor,
+    size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 @_register_five_ten_crop_kernel_internal(five_crop, torch.Tensor)
 @_register_five_ten_crop_kernel_internal(five_crop, tv_tensors.Image)
 def five_crop_image(
-    image: torch.Tensor, size: list[int]
+    image: torch.Tensor,
+    size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 @_register_five_ten_crop_kernel_internal(five_crop, tv_tensors.Video)
 def five_crop_video(
-    video: torch.Tensor, size: list[int]
+    video: torch.Tensor,
+    size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 def ten_crop(
-    inpt: torch.Tensor, size: list[int], vertical_flip: bool = ...
+    inpt: torch.Tensor,
+    size: list[int],
+    vertical_flip: bool = ...,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -467,7 +507,9 @@ def ten_crop(
 @_register_five_ten_crop_kernel_internal(ten_crop, torch.Tensor)
 @_register_five_ten_crop_kernel_internal(ten_crop, tv_tensors.Image)
 def ten_crop_image(
-    image: torch.Tensor, size: list[int], vertical_flip: bool = ...
+    image: torch.Tensor,
+    size: list[int],
+    vertical_flip: bool = ...,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -482,7 +524,9 @@ def ten_crop_image(
 ]: ...
 @_register_five_ten_crop_kernel_internal(ten_crop, tv_tensors.Video)
 def ten_crop_video(
-    video: torch.Tensor, size: list[int], vertical_flip: bool = ...
+    video: torch.Tensor,
+    size: list[int],
+    vertical_flip: bool = ...,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,

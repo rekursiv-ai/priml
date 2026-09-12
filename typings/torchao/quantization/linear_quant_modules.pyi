@@ -44,7 +44,11 @@ class WeightOnlyInt4Linear(torch.nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def replace_linear_int4(
-    module, groupsize, inner_k_tiles, padding_allowed, skip_layer_func=...
+    module,
+    groupsize,
+    inner_k_tiles,
+    padding_allowed,
+    skip_layer_func=...,
 ):  # -> None:
     ...
 
@@ -58,11 +62,21 @@ class Int4WeightOnlyQuantizer(Quantizer):
         precision: torch.dtype = ...,
     ) -> None: ...
     def quantize(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
 
 def linear_forward_8da4w(
-    x, weight_int8, bias, scales, zeros, out_features, groupsize, output_precision
+    x,
+    weight_int8,
+    bias,
+    scales,
+    zeros,
+    out_features,
+    groupsize,
+    output_precision,
 ):  # -> Tensor:
     ...
 
@@ -106,5 +120,8 @@ class Int8DynActInt4WeightQuantizer(Quantizer):
         mapping_type: MappingType = ...,
     ) -> None: ...
     def quantize(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...

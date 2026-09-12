@@ -8,13 +8,20 @@ import triton
 import triton.language as tl
 
 def rms_norm_ref(
-    x, weight, bias, z=..., eps=..., group_size=..., norm_before_gate=..., upcast=...
+    x,
+    weight,
+    bias,
+    z=...,
+    eps=...,
+    group_size=...,
+    norm_before_gate=...,
+    upcast=...,
 ): ...
 @triton.heuristics(
     {
         "HAS_BIAS": lambda args: args["B"] is not None,
         "HAS_Z": lambda args: args["Z"] is not None,
-    }
+    },
 )
 @triton.jit
 def layer_norm_fwd_kernel(
@@ -53,7 +60,7 @@ def layer_norm_fwd(
         "HAS_BIAS": lambda args: args["B"] is not None,
         "HAS_Z": lambda args: args["Z"] is not None,
         "RECOMPUTE_OUTPUT": lambda args: args["Y"] is not None,
-    }
+    },
 )
 @triton.jit
 def layer_norm_bwd_kernel(
@@ -125,9 +132,17 @@ class LayerNormFn(torch.autograd.Function):
     @input_guard
     @staticmethod
     def backward(
-        ctx, dy
+        ctx,
+        dy,
     ) -> tuple[
-        Tensor, Tensor, Tensor | None, Tensor | None, None, None, None, None
+        Tensor,
+        Tensor,
+        Tensor | None,
+        Tensor | None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 def layernorm_fn(
@@ -141,7 +156,13 @@ def layernorm_fn(
     is_rms_norm=...,
 ) -> None: ...
 def rmsnorm_fn(
-    x, weight, bias, z=..., eps=..., group_size=..., norm_before_gate=...
+    x,
+    weight,
+    bias,
+    z=...,
+    eps=...,
+    group_size=...,
+    norm_before_gate=...,
 ) -> None: ...
 
 class LayerNormGated(nn.Module):

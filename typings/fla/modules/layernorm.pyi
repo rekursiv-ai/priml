@@ -50,7 +50,10 @@ class GroupNormRef(nn.Module):
     ) -> GroupNormRef: ...
     def reset_parameters(self) -> None: ...
     def forward(
-        self, x, residual=..., prenorm=...
+        self,
+        x,
+        residual=...,
+        prenorm=...,
     ) -> Tensor | tuple[Tensor, Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor | tuple[Tensor, Tensor]: ...
 
@@ -230,9 +233,19 @@ class LayerNormFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dy, *args
+        ctx,
+        dy,
+        *args,
     ) -> tuple[
-        Tensor, Any | None, Any | None, Tensor | None, None, None, None, None, None
+        Tensor,
+        Any | None,
+        Any | None,
+        Tensor | None,
+        None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 def layer_norm(
@@ -367,7 +380,9 @@ class LayerNormLinearFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dout, *args
+        ctx,
+        dout,
+        *args,
     ) -> tuple[
         Tensor,
         Any | None,
@@ -394,7 +409,13 @@ class LayerNormLinear(nn.Module):
     ) -> LayerNormLinear: ...
     def reset_parameters(self) -> None: ...
     def forward(
-        self, x, weight, bias, residual=..., prenorm=..., residual_in_fp32=...
+        self,
+        x,
+        weight,
+        bias,
+        residual=...,
+        prenorm=...,
+        residual_in_fp32=...,
     ) -> None: ...
     def __call__(self, *args: Any, **kwargs: Any) -> None: ...
 
@@ -412,7 +433,13 @@ class GroupNormLinear(nn.Module):
     ) -> GroupNormLinear: ...
     def reset_parameters(self) -> None: ...
     def forward(
-        self, x, weight, bias, residual=..., prenorm=..., residual_in_fp32=...
+        self,
+        x,
+        weight,
+        bias,
+        residual=...,
+        prenorm=...,
+        residual_in_fp32=...,
     ) -> None: ...
     def __call__(self, *args: Any, **kwargs: Any) -> None: ...
 
@@ -428,11 +455,20 @@ class RMSNormLinear(nn.Module):
     ) -> RMSNormLinear: ...
     def reset_parameters(self) -> None: ...
     def forward(
-        self, x, weight, bias, residual=..., prenorm=..., residual_in_fp32=...
+        self,
+        x,
+        weight,
+        bias,
+        residual=...,
+        prenorm=...,
+        residual_in_fp32=...,
     ) -> None: ...
     def __call__(self, *args: Any, **kwargs: Any) -> None: ...
 
 class NormParallel(ParallelStyle):
     def __init__(
-        self, *, sequence_dim: int = ..., use_local_output: bool = ...
+        self,
+        *,
+        sequence_dim: int = ...,
+        use_local_output: bool = ...,
     ) -> None: ...

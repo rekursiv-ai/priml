@@ -11,7 +11,7 @@ NUM_WARPS = ...
     {
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

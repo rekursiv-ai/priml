@@ -228,7 +228,7 @@ class _LaunchableJob:
                 str(self.working_dir).format(
                     study_name=self.study_name,
                     experiment_name=self.experiment_name,
-                )
+                ),
             )
             if self.base_dir is None:
                 self.working_dir = working_dir

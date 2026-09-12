@@ -189,7 +189,7 @@ def test_a_generated_world_survives_every_action() -> None:
     # Padded to a whole number of steps, wrapping onto NOOP.
     steps = -(-len(constants.Action) // 4)
     dealt = torch.cat(
-        [dealt, torch.zeros(steps * 4 - dealt.numel(), dtype=dealt.dtype)]
+        [dealt, torch.zeros(steps * 4 - dealt.numel(), dtype=dealt.dtype)],
     )
     seen: set[int] = set()
     for action in dealt.reshape(steps, 4):

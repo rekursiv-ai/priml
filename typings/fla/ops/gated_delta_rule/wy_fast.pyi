@@ -16,7 +16,7 @@ else:
     {
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -54,7 +54,7 @@ def recompute_w_u_fwd_kernel(
     {
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

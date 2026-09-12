@@ -15,7 +15,7 @@ STATIC_WARPS = ...
     {
         "HAS_SCALE": lambda args: args["scale"] is not None,
         "HAS_SOFTCAPPING": lambda args: args["softcapping"] is not None,
-    }
+    },
 )
 @triton.jit
 def logsumexp_fwd_kernel(
@@ -66,7 +66,10 @@ def fused_linear_cross_entropy_forward(
     l2_penalty_factor: float = ...,
 ) -> tuple[Tensor, Tensor, Tensor | Any | None, Tensor | None]: ...
 def fused_linear_cross_entropy_backward(
-    do: torch.Tensor, dx: torch.Tensor, dw: torch.Tensor, db: torch.Tensor
+    do: torch.Tensor,
+    dx: torch.Tensor,
+    dw: torch.Tensor,
+    db: torch.Tensor,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 
 class FusedLinearCrossEntropyFunction(torch.autograd.Function):
@@ -90,9 +93,21 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, do
+        ctx,
+        do,
     ) -> tuple[
-        Tensor, None, Tensor, Tensor, None, None, None, None, None, None, None, None
+        Tensor,
+        None,
+        Tensor,
+        Tensor,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 def fused_linear_cross_entropy_loss(
@@ -133,5 +148,8 @@ class FusedLinearCrossEntropyLoss(nn.Module):
 
 class LinearLossParallel(ParallelStyle):
     def __init__(
-        self, *, sequence_dim: int = ..., use_local_output: bool = ...
+        self,
+        *,
+        sequence_dim: int = ...,
+        use_local_output: bool = ...,
     ) -> None: ...

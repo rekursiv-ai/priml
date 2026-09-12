@@ -16,19 +16,27 @@ class GeneralizedRCNNTransform(nn.Module):
         **kwargs: Any,
     ) -> None: ...
     def forward(
-        self, images: list[Tensor], targets: list[dict[str, Tensor]] | None = ...
+        self,
+        images: list[Tensor],
+        targets: list[dict[str, Tensor]] | None = ...,
     ) -> tuple[ImageList, list[dict[str, Tensor]] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[ImageList, list[dict[str, Tensor]] | None]: ...
     def normalize(self, image: Tensor) -> Tensor: ...
     def torch_choice(self, k: list[int]) -> int: ...
     def resize(
-        self, image: Tensor, target: dict[str, Tensor] | None = ...
+        self,
+        image: Tensor,
+        target: dict[str, Tensor] | None = ...,
     ) -> tuple[Tensor, dict[str, Tensor] | None]: ...
     def max_by_axis(self, the_list: list[list[int]]) -> list[int]: ...
     def batch_images(
-        self, images: list[Tensor], size_divisible: int = ...
+        self,
+        images: list[Tensor],
+        size_divisible: int = ...,
     ) -> Tensor: ...
     def postprocess(
         self,
@@ -38,8 +46,12 @@ class GeneralizedRCNNTransform(nn.Module):
     ) -> list[dict[str, Tensor]]: ...
 
 def resize_keypoints(
-    keypoints: Tensor, original_size: list[int], new_size: list[int]
+    keypoints: Tensor,
+    original_size: list[int],
+    new_size: list[int],
 ) -> Tensor: ...
 def resize_boxes(
-    boxes: Tensor, original_size: list[int], new_size: list[int]
+    boxes: Tensor,
+    original_size: list[int],
+    new_size: list[int],
 ) -> Tensor: ...

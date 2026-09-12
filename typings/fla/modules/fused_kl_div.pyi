@@ -32,7 +32,9 @@ def fused_kl_div_forward(
     reduction: str = ...,
 ) -> tuple[Tensor, Tensor, Tensor | None]: ...
 def fused_kl_div_backward(
-    do: torch.Tensor, dx: torch.Tensor, dw: torch.Tensor
+    do: torch.Tensor,
+    dx: torch.Tensor,
+    dw: torch.Tensor,
 ) -> tuple[Tensor, Tensor]: ...
 
 class FusedKLDivLossFunction(torch.autograd.Function):

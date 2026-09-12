@@ -9,7 +9,7 @@ import triton.language as tl
         "STORE_QG": lambda args: args["qg"] is not None,
         "STORE_KG": lambda args: args["kg"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

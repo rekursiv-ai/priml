@@ -112,27 +112,42 @@ class ViT_H_14_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ViT_B_16_Weights.IMAGENET1K_V1))
 def vit_b_16(
-    *, weights: ViT_B_16_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ViT_B_16_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VisionTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ViT_B_32_Weights.IMAGENET1K_V1))
 def vit_b_32(
-    *, weights: ViT_B_32_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ViT_B_32_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VisionTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ViT_L_16_Weights.IMAGENET1K_V1))
 def vit_l_16(
-    *, weights: ViT_L_16_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ViT_L_16_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VisionTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ViT_L_32_Weights.IMAGENET1K_V1))
 def vit_l_32(
-    *, weights: ViT_L_32_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ViT_L_32_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VisionTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", None))
 def vit_h_14(
-    *, weights: ViT_H_14_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: ViT_H_14_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VisionTransformer: ...
 def interpolate_embeddings(
     image_size: int,

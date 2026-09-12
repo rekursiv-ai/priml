@@ -214,7 +214,7 @@ class ValueGatedAttention(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for ValueGatedAttention."
+                f"channels_out={config.channels_out} for ValueGatedAttention.",
             )
         # Only constraints torch cannot state: RoPE pairs the head width, and
         # the gate indexes into the layer input. A nonpositive extent is torch's

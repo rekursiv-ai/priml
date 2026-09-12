@@ -49,7 +49,7 @@ class Identity(nn.Identity):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for Identity."
+                f"channels_out={config.channels_out} for Identity.",
             )
         super().__init__()
 
@@ -161,7 +161,7 @@ class TiedLinear(nn.Module, LateBound):
         if self._source is None:
             raise RuntimeError(
                 f"TiedLinear is unbound; a make() must build the root holding "
-                f"{self.tied!r}."
+                f"{self.tied!r}.",
             )
         weight = self._source.weight.T if self.transpose else self._source.weight
         if x.dtype.is_floating_point:

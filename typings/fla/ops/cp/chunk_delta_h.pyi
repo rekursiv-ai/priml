@@ -12,7 +12,7 @@ import triton.language as tl
         "USE_GK": lambda args: args["gk"] is not None,
         "USE_BG": lambda args: args["bg"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -88,7 +88,7 @@ def merge_fwd_bwd_kernel(
         "USE_G": lambda args: args["g"] is not None,
         "USE_GK": lambda args: args["gk"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def pre_process_bwd_kernel_merged(

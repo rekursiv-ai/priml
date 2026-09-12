@@ -38,7 +38,9 @@ def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config
     config.block = TransformerBlock.Config(
         prenorm=False,
         ffn=SwiGLU.Config(
-            round_to=16, init_weight=kaiming_uniform, init_weight_out=kaiming_uniform
+            round_to=16,
+            init_weight=kaiming_uniform,
+            init_weight_out=kaiming_uniform,
         ),
     )
     if mixer:

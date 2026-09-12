@@ -63,7 +63,10 @@ def corrected_fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
     """
     del depth
     truncated_normal(
-        w, std=w.shape[-1] ** -0.5, depth_index=(), variance_correction=True
+        w,
+        std=w.shape[-1] ** -0.5,
+        depth_index=(),
+        variance_correction=True,
     )
 
 

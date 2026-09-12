@@ -632,7 +632,9 @@ def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
         seed=0,
     )
     payload = torch.load(
-        tmp_path / "buffer_mutating.pt", weights_only=False, map_location="cpu"
+        tmp_path / "buffer_mutating.pt",
+        weights_only=False,
+        map_location="cpu",
     )
     pre = payload["state_dict"]["running_sum"]
     post = payload["post_state_dict"]["running_sum"]
@@ -828,7 +830,7 @@ _NONARITHMETIC_PROBES: dict[str, TensorFn] = {
 # explicitly -- ``test_value_producing_nonarith_ops_are_probed`` enforces this so
 # a future value op mistagged ``movement`` cannot dodge proof.
 _VALUE_PRODUCING_NONARITH = frozenset(
-    {"where", "copy_", "_to_copy", "to", "fill_", "masked_fill", "masked_fill_"}
+    {"where", "copy_", "_to_copy", "to", "fill_", "masked_fill", "masked_fill_"},
 )
 
 
@@ -904,7 +906,7 @@ def test_every_allowlist_entry_is_categorized_and_arith_is_probed() -> None:
 # meaningless (two calls differ). Excluded from the enumeration scan -- they are
 # pure allocation, carry no value to diverge, and are host-independent by nature.
 _ALLOCATION_OPS = frozenset(
-    {"empty", "empty_like", "empty_strided", "new_empty", "new_empty_strided"}
+    {"empty", "empty_like", "empty_strided", "new_empty", "new_empty_strided"},
 )
 
 
@@ -1028,7 +1030,8 @@ def test_no_unvetted_f32_op_in_transformer_forward_backward() -> None:
     """
     torch.manual_seed(0)
     block = TransformerBlock.Config(
-        channels_in=16, attn=SelfAttention.Config(num_heads=2, channels_head=8)
+        channels_in=16,
+        attn=SelfAttention.Config(num_heads=2, channels_head=8),
     ).make()
     randomize_parameters(block, seed=0)
     inp = torch.randn(2, 4, 16, requires_grad=True)
@@ -1316,7 +1319,14 @@ def test_host_agnostic_multi_output_write_op_keeps_all_returns() -> None:
     bias = torch.zeros(3, dtype=torch.float32)
     with host_agnostic_numerics():
         out, save_mean, save_invstd = torch.ops.aten._native_batch_norm_legit(
-            x, weight, bias, running_mean, running_var, True, 0.1, 1e-5
+            x,
+            weight,
+            bias,
+            running_mean,
+            running_var,
+            True,
+            0.1,
+            1e-5,
         )
     expected = torch.ops.aten._native_batch_norm_legit(
         x.double(),

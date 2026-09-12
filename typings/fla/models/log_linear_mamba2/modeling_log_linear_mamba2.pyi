@@ -28,7 +28,9 @@ class LogLinearMamba2Block(nn.Module):
         **kwargs,
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[Tensor, Any, Cache | list[FloatTensor] | None]: ...
 
 class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
@@ -56,7 +58,9 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
         **kwargs,
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):

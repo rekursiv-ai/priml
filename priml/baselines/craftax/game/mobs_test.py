@@ -40,7 +40,7 @@ def test_a_nearby_hunter_closes_on_the_player() -> None:
     state = _with_melee(_state(), at=(10, 13))
     state = mobs.update_mobs(state, generator=_seed())
     gap = int(
-        (state.melee_mobs.position[0, 0, 0] - state.player_position[0]).abs().sum()
+        (state.melee_mobs.position[0, 0, 0] - state.player_position[0]).abs().sum(),
     )
     assert gap < 3
 
@@ -160,7 +160,7 @@ def test_a_projectile_stops_at_a_wall() -> None:
 def test_spawning_fills_empty_slots_near_the_player() -> None:
     state = mobs.spawn_mobs(_state(num_envs=16), generator=_seed(5))
     spawned = state.melee_mobs.mask[:, 0].any(-1) | state.passive_mobs.mask[:, 0].any(
-        -1
+        -1,
     )
     assert bool(spawned.any())
     positions = state.passive_mobs.position[:, 0, 0]

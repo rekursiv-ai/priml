@@ -11,11 +11,25 @@ BASE_ONNX_OPSET_VERSION = ...
 def symbolic_multi_label_nms(g, boxes, scores, iou_threshold): ...
 @parse_args("v", "v", "f", "i", "i", "i", "i")
 def roi_align_opset11(
-    g, input, rois, spatial_scale, pooled_height, pooled_width, sampling_ratio, aligned
+    g,
+    input,
+    rois,
+    spatial_scale,
+    pooled_height,
+    pooled_width,
+    sampling_ratio,
+    aligned,
 ): ...
 @parse_args("v", "v", "f", "i", "i", "i", "i")
 def roi_align_opset16(
-    g, input, rois, spatial_scale, pooled_height, pooled_width, sampling_ratio, aligned
+    g,
+    input,
+    rois,
+    spatial_scale,
+    pooled_height,
+    pooled_width,
+    sampling_ratio,
+    aligned,
 ): ...
 @parse_args("v", "v", "f", "i", "i")
 def roi_pool(g, input, rois, spatial_scale, pooled_height, pooled_width): ...

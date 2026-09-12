@@ -33,7 +33,7 @@ def assert_text_golden(
         _ = golden.write_text(rendered + "\n", encoding="utf-8")
     if missing:
         raise AssertionError(
-            f"Missing golden regenerated at {golden}; inspect it, then rerun the test."
+            f"Missing golden regenerated at {golden}; inspect it, then rerun the test.",
         )
     assert golden.read_text(encoding="utf-8") == rendered + "\n", (
         f"{name} changed; read the diff, then rerun with --golden-overwrite "

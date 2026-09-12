@@ -21,7 +21,7 @@ NUM_WARPS = ...
         "OUTPUT_ATTENTIONS": lambda args: args["attn"] is not None,
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -109,7 +109,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
         "NV": lambda args: triton.cdiv(args["V"], args["BV"]),
         "USE_G": lambda args: args["g"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -173,13 +173,23 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, g, scale, output_attentions, cu_seqlens, cu_seqlens_cpu
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        scale,
+        output_attentions,
+        cu_seqlens,
+        cu_seqlens_cpu,
     ) -> tuple[Any, Tensor | None]: ...
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, da=...
+        ctx,
+        do,
+        da=...,
     ) -> tuple[Any, Any, Any, Tensor | Any | None, None, None, None, None]: ...
 
 def parallel_simple_gla(

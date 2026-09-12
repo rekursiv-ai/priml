@@ -70,7 +70,7 @@ class MobileNet_V3_Small_Weights(WeightsEnum):
 
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", MobileNet_V3_Large_Weights.IMAGENET1K_V1)
+    weights=("pretrained", MobileNet_V3_Large_Weights.IMAGENET1K_V1),
 )
 def mobilenet_v3_large(
     *,
@@ -80,7 +80,7 @@ def mobilenet_v3_large(
 ) -> MobileNetV3: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+    weights=("pretrained", MobileNet_V3_Small_Weights.IMAGENET1K_V1),
 )
 def mobilenet_v3_small(
     *,

@@ -169,7 +169,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
         "STORE_INITIAL_STATE_GRADIENT": lambda args: args["dh0"] is not None,
         "USE_FINAL_STATE_GRADIENT": lambda args: args["dht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -382,9 +382,20 @@ class ChunkRWKV6Function(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[
-        Tensor, Tensor, Tensor, Tensor, Tensor, None, Tensor, None, None, None
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        None,
+        Tensor,
+        None,
+        None,
+        None,
     ]: ...
 
 @torch.compiler.disable

@@ -40,7 +40,7 @@ def test_custom_types_public_contract(request: pytest.FixtureRequest) -> None:
             f"  unspecified: {flatten_depth_index(())}",
             f"  one level ((3, 12),): {flatten_depth_index(((3, 12),))}",
             f"  nested ((1, 4), (3, 12)): {flatten_depth_index(((1, 4), (3, 12)))}",
-        ]
+        ],
     )
     assert_text_golden(
         request,
@@ -59,7 +59,7 @@ def test_custom_types_bfb() -> None:
             [
                 [[0, 2], [1, 3]],
                 [[1, 2], [2, 3]],
-            ]
+            ],
         ),
         seed=0,
     )
@@ -177,12 +177,12 @@ def test_channel_config_fields_are_uniform() -> None:
             if channel_properties:
                 violations.append(
                     f"{path.relative_to(root)}:{node.lineno}: channel properties "
-                    f"{sorted(channel_properties)}"
+                    f"{sorted(channel_properties)}",
                 )
             if "channels_in" in fields and "channels_out" in fields:
                 if fields[:3] != ["channels_in", "channels_out", "_"]:
                     violations.append(
-                        f"{path.relative_to(root)}:{node.lineno}: fields begin {fields[:3]}"
+                        f"{path.relative_to(root)}:{node.lineno}: fields begin {fields[:3]}",
                     )
                 channel_fields = {
                     child.target.id: child
@@ -195,7 +195,7 @@ def test_channel_config_fields_are_uniform() -> None:
                     if field.value is None or ast.unparse(field.value) != "-1":
                         violations.append(
                             f"{path.relative_to(root)}:{field.lineno}: "
-                            f"{name} default is not -1"
+                            f"{name} default is not -1",
                         )
     assert not violations, "\n".join(violations)
 
@@ -208,7 +208,7 @@ class _FlattenDepthIndex(nn.Module):
             [
                 flatten_depth_index(tuple((index, count) for index, count in levels))
                 for levels in nested
-            ]
+            ],
         )
 
 

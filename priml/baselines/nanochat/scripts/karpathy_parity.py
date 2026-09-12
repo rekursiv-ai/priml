@@ -618,7 +618,9 @@ def main() -> int:
         # curve, the weight-decay ramp, and the momentum ramp into the
         # comparison instead of sampling one point of each.
         progress = _progress_at(
-            index, warmup=args.warmup, budget_steps=args.budget_steps
+            index,
+            warmup=args.warmup,
+            budget_steps=args.budget_steps,
         )
         multiplier = upstream.get_lr_multiplier(progress)
         for group in their_optimizer.param_groups:
@@ -747,7 +749,10 @@ class _LossAdapter(nn.Module):
 
     @override
     def forward(
-        self, tokens: Tensor, targets: Tensor, reduction: str = "mean"
+        self,
+        tokens: Tensor,
+        targets: Tensor,
+        reduction: str = "mean",
     ) -> Tensor:
         logits = self.inner(tokens)
         assert isinstance(logits, Tensor)

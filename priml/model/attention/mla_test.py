@@ -85,7 +85,8 @@ def _tiny(
         q_lora_rank=q_lora_rank,
         kv_lora_rank=32,
         rope=RoPE.Config(
-            channels_head=8, frequencies=HuggingFaceFrequencies.Config(base=50_000)
+            channels_head=8,
+            frequencies=HuggingFaceFrequencies.Config(base=50_000),
         ),
         attn_kernel=LatentAttention.Config(absorb=absorb, attn_kernel=kernel),
     ).make()

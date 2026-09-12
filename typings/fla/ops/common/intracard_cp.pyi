@@ -43,7 +43,10 @@ class SplitSeqInfo(NamedTuple):
     def __bool__(self) -> bool: ...
 
 def compute_subseq_len(
-    seq_len: int, num_sms: int, num_heads: int, chunk_size: int = ...
+    seq_len: int,
+    num_sms: int,
+    num_heads: int,
+    chunk_size: int = ...,
 ) -> int: ...
 def prepare_subseq_cu_seqlens(
     cu_seqlens_cpu: torch.Tensor,

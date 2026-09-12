@@ -42,7 +42,13 @@ class CppInt8SdpaTemplate(CppFlexAttentionTemplate):
     ):  # -> DataProcessorTemplateWrapper:
         ...
     def reshape_attn_mask_to_4d(
-        self, kernel, attn_mask: ir.Buffer, batchSize, num_head, qSize, kvSize
+        self,
+        kernel,
+        attn_mask: ir.Buffer,
+        batchSize,
+        num_head,
+        qSize,
+        kvSize,
     ):  # -> Any:
         ...
     def get_options(
@@ -68,6 +74,9 @@ class CppInt8SdpaTemplate(CppFlexAttentionTemplate):
     def codegen_useful_function(self, kernel_name: str):  # -> Any:
         ...
     def codegen_allocate_buffer(
-        self, buffer_name: str, buffer_dtype, buffer_size
+        self,
+        buffer_name: str,
+        buffer_dtype,
+        buffer_size,
     ):  # -> Any:
         ...

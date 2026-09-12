@@ -35,7 +35,7 @@ def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
                 "  max_new_tokens: 4",
                 f"  prompt: {tokens[0][:2]}",
                 f"  tokens: {tokens[0]}",
-            ]
+            ],
         ),
     )
 

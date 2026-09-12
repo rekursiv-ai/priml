@@ -10,7 +10,7 @@ import triton.language as tl
     {
         "IS_VARLEN": lambda args: args["offsets"] is not None,
         "USE_GATE": lambda args: args["g_cumsum"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def parallel_path_bwd_intra_chunk_kernel(

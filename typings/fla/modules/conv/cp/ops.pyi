@@ -20,7 +20,8 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
     ): ...
     @staticmethod
     def backward(
-        ctx, dy: torch.Tensor
+        ctx,
+        dy: torch.Tensor,
     ) -> tuple[Tensor, Any | None, Any | None, None, None, None, None, None]: ...
 
 def causal_conv1d_cp(

@@ -21,7 +21,7 @@ def naive_gdn_gate(
         "HAS_BIAS": lambda args: args["dt_bias"] is not None,
         "HAS_SCALE": lambda args: args["scale"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
@@ -94,7 +94,14 @@ def gdn_gate_bwd(
 )
 @triton.jit(do_not_specialize=["T"])
 def gdn_gate_fwd_kernel(
-    g, A_log, dt_bias, yg, T, H: tl.constexpr, BT: tl.constexpr, HAS_BIAS: tl.constexpr
+    g,
+    A_log,
+    dt_bias,
+    yg,
+    T,
+    H: tl.constexpr,
+    BT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
 ): ...
 def gdn_gate_fwd(
     g: torch.Tensor,
@@ -118,7 +125,8 @@ class GDNGateFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, dyg: torch.Tensor
+        ctx,
+        dyg: torch.Tensor,
     ) -> tuple[Tensor, Tensor, Tensor | None, None]: ...
 
 @torch.compiler.disable

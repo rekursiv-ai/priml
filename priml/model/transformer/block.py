@@ -111,7 +111,10 @@ class TransformerBlock(nn.Module):
                     and not cfg.depth_index
                 ):
                     propagate_attr(
-                        cfg, "depth_index", self.depth_index, protocol=HasDepthIndex
+                        cfg,
+                        "depth_index",
+                        self.depth_index,
+                        protocol=HasDepthIndex,
                     )
             # Tensor parallelism: the FFN shards over the tp dim (its block-
             # internal style handles the fused-gate split alignment). The
@@ -127,7 +130,7 @@ class TransformerBlock(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for TransformerBlock."
+                f"channels_out={config.channels_out} for TransformerBlock.",
             )
         # A one-channel FFN would silently broadcast across the residual stream.
         if (
@@ -136,7 +139,7 @@ class TransformerBlock(nn.Module):
         ):
             raise ValueError(
                 f"ffn.channels_out={config.ffn.channels_out} must equal "
-                f"channels_in={config.channels_in} for TransformerBlock."
+                f"channels_in={config.channels_in} for TransformerBlock.",
             )
         super().__init__()
         self.prenorm = config.prenorm

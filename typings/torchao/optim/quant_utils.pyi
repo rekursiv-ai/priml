@@ -1,7 +1,9 @@
 from torch import Tensor
 
 def create_dynamic_map(
-    signed=..., max_exponent_bits=..., total_bits=...
+    signed=...,
+    max_exponent_bits=...,
+    total_bits=...,
 ):  # -> list[Any]:
     ...
 def scale_tensor(input: Tensor, block_size: int):  # -> tuple[Tensor, Tensor]:

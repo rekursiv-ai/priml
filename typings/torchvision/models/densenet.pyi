@@ -92,20 +92,32 @@ class DenseNet201_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", DenseNet121_Weights.IMAGENET1K_V1))
 def densenet121(
-    *, weights: DenseNet121_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: DenseNet121_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> DenseNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", DenseNet161_Weights.IMAGENET1K_V1))
 def densenet161(
-    *, weights: DenseNet161_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: DenseNet161_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> DenseNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", DenseNet169_Weights.IMAGENET1K_V1))
 def densenet169(
-    *, weights: DenseNet169_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: DenseNet169_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> DenseNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", DenseNet201_Weights.IMAGENET1K_V1))
 def densenet201(
-    *, weights: DenseNet201_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: DenseNet201_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> DenseNet: ...

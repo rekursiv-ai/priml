@@ -132,7 +132,8 @@ class SwiGLU(nn.Module):
                 self.expansion = 8 / 3 if self.gate else 4.0
             if self.channels_hidden == -1:
                 self.channels_hidden = ceil_multiple(
-                    self.channels_in * self.expansion, self.round_to
+                    self.channels_in * self.expansion,
+                    self.round_to,
                 )
             # Pushed here, not in __init__: the norm is finalized with the tree,
             # so a width written afterwards never reaches pprint or a diff.

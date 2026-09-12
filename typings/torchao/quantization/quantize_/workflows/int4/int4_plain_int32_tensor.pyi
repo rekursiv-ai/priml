@@ -30,7 +30,9 @@ class Int4PlainInt32Tensor(TorchAOBaseTensor):
     ) -> None: ...
     @classmethod
     def from_hp(
-        cls, w: torch.Tensor, block_size: list[int]
+        cls,
+        w: torch.Tensor,
+        block_size: list[int],
     ):  # -> Int4PlainInt32Tensor:
         ...
 

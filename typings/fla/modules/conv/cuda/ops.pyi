@@ -27,9 +27,21 @@ class FastCausalConv1dFn(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dout, *args
+        ctx,
+        dout,
+        *args,
     ) -> tuple[
-        Any, Any, Any | None, None, None, None, None, None, None, None, None
+        Any,
+        Any,
+        Any | None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 def fast_causal_conv1d_fn(

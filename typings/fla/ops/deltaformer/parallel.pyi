@@ -134,7 +134,8 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
     ) -> Tensor: ...
     @staticmethod
     def backward(
-        ctx, grad_u: torch.Tensor
+        ctx,
+        grad_u: torch.Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, None, None]: ...
 
 def deltaformer_attn(

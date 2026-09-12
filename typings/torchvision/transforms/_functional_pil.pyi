@@ -38,11 +38,17 @@ def pad(
 ) -> Image.Image: ...
 @torch.jit.unused
 def crop(
-    img: Image.Image, top: int, left: int, height: int, width: int
+    img: Image.Image,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
 ) -> Image.Image: ...
 @torch.jit.unused
 def resize(
-    img: Image.Image, size: list[int] | int, interpolation: int = ...
+    img: Image.Image,
+    size: list[int] | int,
+    interpolation: int = ...,
 ) -> Image.Image: ...
 @torch.jit.unused
 def affine(

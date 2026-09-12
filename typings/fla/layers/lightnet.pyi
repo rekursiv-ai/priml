@@ -31,6 +31,8 @@ class LightNetAttention(nn.Module):
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]: ...
     def state_size(self, **kwargs) -> int: ...

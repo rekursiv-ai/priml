@@ -121,7 +121,9 @@ def main() -> int:
     # unset; any other config (a standalone job) is launched untouched.
     if isinstance(config, LaunchableExperiment):
         _stamp_run_identity(
-            config, module_name=module_name, function_name=function_name
+            config,
+            module_name=module_name,
+            function_name=function_name,
         )
         if docstring and not config.doc:
             config.doc = docstring
@@ -136,7 +138,8 @@ def main() -> int:
     with _graceful_sigterm():
         job.run(*unparsed)
     logging.getLogger(__name__).info(
-        "Total program time: %.1fs", time.perf_counter() - t0
+        "Total program time: %.1fs",
+        time.perf_counter() - t0,
     )
     return 0
 
@@ -230,7 +233,9 @@ def _log_docstring(config_str: str, docstring: str) -> None:
         )
         return
     logging.getLogger(__name__).info(
-        "experiment %s docstring:\n%s", config_str, docstring
+        "experiment %s docstring:\n%s",
+        config_str,
+        docstring,
     )
 
 
@@ -249,7 +254,8 @@ def _graceful_sigterm() -> Generator[None]:
     def _raise_on_sigterm(signum: int, frame: object) -> None:
         del frame
         logging.getLogger(__name__).info(
-            "received signal %d; raising to run cleanup before exit", signum
+            "received signal %d; raising to run cleanup before exit",
+            signum,
         )
         raise KeyboardInterrupt
 

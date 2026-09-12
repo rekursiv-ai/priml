@@ -62,25 +62,40 @@ class MLPMixerBlock(nn.Module):
             if self.channels_in != self.channels_out:
                 raise ValueError(
                     f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for MLPMixerBlock."
+                    f"channels_out={self.channels_out} for MLPMixerBlock.",
                 )
             # Token mixer operates on the seq_len dimension.
             propagate_attr(
-                self.token_mixer, "channels_in", self.seq_len, protocol=ChannelsIn
+                self.token_mixer,
+                "channels_in",
+                self.seq_len,
+                protocol=ChannelsIn,
             )
             propagate_attr(
-                self.token_mixer, "channels_out", self.seq_len, protocol=ChannelsOut
+                self.token_mixer,
+                "channels_out",
+                self.seq_len,
+                protocol=ChannelsOut,
             )
             propagate_attr(
-                self.norm_token, "channels_in", self.seq_len, protocol=ChannelsIn
+                self.norm_token,
+                "channels_in",
+                self.seq_len,
+                protocol=ChannelsIn,
             )
             # Channel mixer operates on the channels_in dimension.
             for cfg in (self.channel_mixer, self.norm_channel):
                 propagate_attr(
-                    cfg, "channels_in", self.channels_in, protocol=ChannelsIn
+                    cfg,
+                    "channels_in",
+                    self.channels_in,
+                    protocol=ChannelsIn,
                 )
                 propagate_attr(
-                    cfg, "channels_out", self.channels_in, protocol=ChannelsOut
+                    cfg,
+                    "channels_out",
+                    self.channels_in,
+                    protocol=ChannelsOut,
                 )
             for cfg in (self.token_mixer, self.channel_mixer):
                 propagate_attr(
@@ -98,7 +113,7 @@ class MLPMixerBlock(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for MLPMixerBlock."
+                f"channels_out={config.channels_out} for MLPMixerBlock.",
             )
         super().__init__()
         self.prenorm = config.prenorm

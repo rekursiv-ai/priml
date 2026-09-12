@@ -29,13 +29,15 @@ def implements(aten_ops):  # -> Callable[..., Any]:
         aten.slice.Tensor,
         aten.fill_.Scalar,
         aten.reshape.default,
-    ]
+    ],
 )
 def float8_desugar_op(aten_op, args, kwargs=...):  # -> Float8TrainingTensor:
     ...
 @implements([aten.detach.default])
 def float8_desugar_data_and_scale_op(
-    aten_op, args, kwargs=...
+    aten_op,
+    args,
+    kwargs=...,
 ):  # -> Float8TrainingTensor:
     ...
 @implements([aten.t.default, aten.transpose.int])
@@ -53,7 +55,8 @@ def float8_cat(aten_op, args, kwargs=...):  # -> Float8TrainingTensor:
 @implements([aten.sum.dim_IntList])
 def float8_cast_up_op(aten_op, args, kwargs=...): ...
 def preprocess_addmm(
-    a: Float8TrainingTensor, b: Float8TrainingTensor
+    a: Float8TrainingTensor,
+    b: Float8TrainingTensor,
 ):  # -> tuple[Tensor, Tensor, Tensor, Tensor]:
     ...
 @implements([aten.mm.default, aten.matmul.default])
@@ -71,7 +74,7 @@ def autocast_to_copy(aten_op, args, kwargs=...):  # -> Float8TrainingTensor:
     [
         c10d_functional.all_gather_into_tensor.default,
         _c10d_functional.all_gather_into_tensor.default,
-    ]
+    ],
 )
 def allgather_fp8(aten_op, args, kwargs=...):  # -> Float8TrainingTensor:
     ...

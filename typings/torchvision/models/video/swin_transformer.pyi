@@ -104,15 +104,24 @@ class Swin3D_B_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin3D_T_Weights.KINETICS400_V1))
 def swin3d_t(
-    *, weights: Swin3D_T_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin3D_T_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer3d: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin3D_S_Weights.KINETICS400_V1))
 def swin3d_s(
-    *, weights: Swin3D_S_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin3D_S_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer3d: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin3D_B_Weights.KINETICS400_V1))
 def swin3d_b(
-    *, weights: Swin3D_B_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin3D_B_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer3d: ...

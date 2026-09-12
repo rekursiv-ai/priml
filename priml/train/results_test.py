@@ -53,7 +53,8 @@ def test_summarize_prints_summary(tmp_path: Path, capsys: pytest.CaptureFixture[
 
 
 def test_summarize_missing_file_returns_1(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ):
     code = summarize(["--path", str(tmp_path / "absent.json")])
     assert code == 1

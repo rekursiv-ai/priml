@@ -24,7 +24,11 @@ class RandomErasing(_RandomApplyTransform):
 
 class _BaseMixUpCutMix(Transform):
     def __init__(
-        self, *, alpha: float = ..., num_classes: int | None = ..., labels_getter=...
+        self,
+        *,
+        alpha: float = ...,
+        num_classes: int | None = ...,
+        labels_getter=...,
     ) -> None: ...
     def forward(self, *inputs): ...
 

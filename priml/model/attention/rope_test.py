@@ -331,7 +331,8 @@ def test_yarn_split_interp_extrap():
     yarn.inner = GeometricFrequencies.Config(base=10_000.0)
     m = RoPE.Config(channels_head=dim, frequencies=yarn).make()
     orig, _ = GeometricFrequencies(GeometricFrequencies.Config(base=10_000.0))(
-        channels=dim, device=torch.device("cpu")
+        channels=dim,
+        device=torch.device("cpu"),
     )
     got = m._inv_freqs[0].squeeze(0)
     # First channel (highest freq) stays original; last channel (lowest
@@ -371,7 +372,8 @@ def test_hf_inv_freq_matches_hf_formula():
     base = 1_000_000.0
     dim = 16
     m = RoPE.Config(
-        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+        channels_head=dim,
+        frequencies=HuggingFaceFrequencies.Config(base=base),
     ).make()
     expected = 1.0 / (
         base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
@@ -391,10 +393,12 @@ def test_the_default_table_is_the_hugging_face_one():
     dim = 16
     default = RoPE.Config(channels_head=dim).make()
     explicit = RoPE.Config(
-        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+        channels_head=dim,
+        frequencies=HuggingFaceFrequencies.Config(base=base),
     ).make()
     geometric = RoPE.Config(
-        channels_head=dim, frequencies=GeometricFrequencies.Config(base=base)
+        channels_head=dim,
+        frequencies=GeometricFrequencies.Config(base=base),
     ).make()
     default_freq = default._inv_freqs[0].squeeze(-1)
     assert torch.equal(default_freq, explicit._inv_freqs[0].squeeze(-1))
@@ -416,7 +420,8 @@ def test_hf_inv_freq_cos_sin_exact():
     base = 10_000.0
     dim = 32
     m = RoPE.Config(
-        channels_head=dim, frequencies=HuggingFaceFrequencies.Config(base=base)
+        channels_head=dim,
+        frequencies=HuggingFaceFrequencies.Config(base=base),
     ).make()
     cos, sin = m(torch.arange(8))
     # Reproduce HF's computation manually.
@@ -516,7 +521,10 @@ def test_yarn_needs_a_table_whose_spacing_has_a_base():
             del config
 
         def __call__(
-            self, *, channels: int, device: torch.device
+            self,
+            *,
+            channels: int,
+            device: torch.device,
         ) -> tuple[Tensor, float]:
             return torch.ones(channels // 2, device=device), 1.0
 
@@ -605,10 +613,14 @@ def test_a_custom_frequency_table_needs_no_library_change():
             del config
 
         def __call__(
-            self, *, channels: int, device: torch.device
+            self,
+            *,
+            channels: int,
+            device: torch.device,
         ) -> tuple[Tensor, float]:
             inner, _ = HuggingFaceFrequencies(HuggingFaceFrequencies.Config())(
-                channels=channels, device=device
+                channels=channels,
+                device=device,
             )
             return inner / 2.0, 1.0
 
@@ -629,7 +641,8 @@ def test_the_two_builders_differ_only_in_precision():
     """
     device = torch.device("cpu")
     geometric, _ = GeometricFrequencies(GeometricFrequencies.Config(base=10_000.0))(
-        channels=64, device=device
+        channels=64,
+        device=device,
     )
     hugging_face, _ = HuggingFaceFrequencies(
         HuggingFaceFrequencies.Config(),
@@ -733,7 +746,8 @@ def test_rope_mixed_bfb(device: str) -> None:
         build_input=lambda: torch.arange(4),
         seed=0,
         run=lambda module, positions: torch.cat(
-            cast(RoPEMixed, module)(positions), dim=-1
+            cast(RoPEMixed, module)(positions),
+            dim=-1,
         ),
     )
 

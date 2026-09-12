@@ -3,7 +3,8 @@ from torch import Tensor
 import torch
 
 def prepare_moba_chunks(
-    cu_seqlens: torch.LongTensor, chunk_size: int
+    cu_seqlens: torch.LongTensor,
+    chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]: ...
 
 class ParallelMoBAFunction(torch.autograd.Function):
@@ -24,9 +25,20 @@ class ParallelMoBAFunction(torch.autograd.Function):
     ) -> Tensor: ...
     @staticmethod
     def backward(
-        ctx, d_output
+        ctx,
+        d_output,
     ) -> tuple[
-        Tensor, Tensor, Tensor, None, Tensor, Tensor, None, None, None, None, None
+        Tensor,
+        Tensor,
+        Tensor,
+        None,
+        Tensor,
+        Tensor,
+        None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 def parallel_moba(

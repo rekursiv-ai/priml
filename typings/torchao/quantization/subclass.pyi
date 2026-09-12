@@ -25,7 +25,11 @@ class QuantizedLinearWeightBase(torch.Tensor):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> None:
         ...
     @classmethod
@@ -36,7 +40,11 @@ class QuantizedLinearWeightBase(torch.Tensor):
         ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs
+        cls,
+        func,
+        types,
+        args,
+        kwargs,
     ):  # -> tuple[Any, ...] | Any | None:
         ...
 
@@ -49,7 +57,8 @@ class ConstructTensorSubclass(torch.nn.Module):
 
 @torch._dynamo.allow_in_graph
 def from_qtensor_components_int8dyn(
-    *args, **kwargs
+    *args,
+    **kwargs,
 ):  # -> Int8DynamicallyQuantizedLinearWeight:
     ...
 
@@ -62,7 +71,13 @@ class Int8DynamicallyQuantizedLinearWeight(QuantizedLinearWeightBase):
     @staticmethod
     def __new__(cls, int_data, q_scales, transposed, shape, dtype=..., **kwargs): ...
     def __init__(
-        self, int_data, q_scales, transposed, shape, dtype=..., **kwargs
+        self,
+        int_data,
+        q_scales,
+        transposed,
+        shape,
+        dtype=...,
+        **kwargs,
     ) -> None: ...
     def dequantize(self, dtype=...):  # -> Tensor:
         ...
@@ -76,7 +91,11 @@ class Int8DynamicallyQuantizedLinearWeight(QuantizedLinearWeightBase):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size=..., outer_stride=...
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size=...,
+        outer_stride=...,
     ):  # -> Self:
         ...
     @classmethod
@@ -85,7 +104,8 @@ class Int8DynamicallyQuantizedLinearWeight(QuantizedLinearWeightBase):
 
 @torch._dynamo.allow_in_graph
 def from_qtensor_components_int8wo(
-    *args, **kwargs
+    *args,
+    **kwargs,
 ):  # -> Int8WeightOnlyQuantizedLinearWeight:
     ...
 
@@ -98,13 +118,16 @@ class Int8WeightOnlyQuantizedLinearWeight(Int8DynamicallyQuantizedLinearWeight):
 
 @torch._dynamo.allow_in_graph
 def from_qtensor_components_int4wo(
-    *args, **kwargs
+    *args,
+    **kwargs,
 ):  # -> Int4WeightOnlyQuantizedLinearWeight:
     ...
 
 class ConstructTensorSubclassInt4wo(ConstructTensorSubclass):
     def forward(
-        self, int_data, scales_and_zeros
+        self,
+        int_data,
+        scales_and_zeros,
     ):  # -> Int4WeightOnlyQuantizedLinearWeight:
         ...
 
@@ -151,7 +174,11 @@ class Int4WeightOnlyQuantizedLinearWeight(QuantizedLinearWeightBase):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, attributes, outer_size=..., outer_stride=...
+        cls,
+        tensor_data_dict,
+        attributes,
+        outer_size=...,
+        outer_stride=...,
     ):  # -> Self:
         ...
     @classmethod

@@ -13,7 +13,7 @@ NUM_WARPS = ...
         "USE_G": lambda args: args["g"] is not None,
         "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -56,7 +56,7 @@ def chunk_fwd_kernel_o(
         "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
         "USE_DW": lambda args: args["dw"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -118,7 +118,7 @@ def chunk_bwd_kernel_dqkwg(
         "USE_G": lambda args: args["g"] is not None,
         "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -160,7 +160,7 @@ def chunk_bwd_kernel_dv(
         "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
         "USE_A": lambda args: args["A"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

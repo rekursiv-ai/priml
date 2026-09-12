@@ -97,7 +97,7 @@ def test_eval_walks_every_row_in_order(dataset_dir: Path) -> None:
         [
             b["media"][: b["valid_count"], 0]
             for b in _data(dataset_dir).eval_dataloader()
-        ]
+        ],
     )
     assert torch.equal(seen, again)
 

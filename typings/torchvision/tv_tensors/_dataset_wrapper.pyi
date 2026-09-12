@@ -37,11 +37,13 @@ def wrap_target_by_type(target, *, target_types, type_wrappers):  # -> tuple[Any
 def classification_wrapper_factory(dataset, target_keys):  # -> Callable[..., Any]:
     ...
 def segmentation_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Mask]]:
     ...
 def video_classification_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Video, Any, Any]]:
     ...
 @WRAPPER_FACTORIES.register(datasets.Caltech101)
@@ -49,7 +51,8 @@ def caltech101_wrapper_factory(dataset, target_keys):  # -> Callable[..., Any]:
     ...
 @WRAPPER_FACTORIES.register(datasets.CocoDetection)
 def coco_dectection_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, dict[str, Any]] | tuple[Any, dict[Any, Any]]]:
     ...
 
@@ -58,7 +61,8 @@ VOC_DETECTION_CATEGORY_TO_IDX = ...
 
 @WRAPPER_FACTORIES.register(datasets.VOCDetection)
 def voc_detection_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Any | dict[Any, Any]]]:
     ...
 @WRAPPER_FACTORIES.register(datasets.SBDataset)
@@ -66,7 +70,8 @@ def sbd_wrapper(dataset, target_keys):  # -> Callable[..., tuple[Any, Mask]]:
     ...
 @WRAPPER_FACTORIES.register(datasets.CelebA)
 def celeba_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Tensor | tuple[Tensor, ...]]]:
     ...
 
@@ -75,21 +80,25 @@ KITTI_CATEGORY_TO_IDX = ...
 
 @WRAPPER_FACTORIES.register(datasets.Kitti)
 def kitti_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Any] | tuple[Any, dict[Any, Any]]]:
     ...
 @WRAPPER_FACTORIES.register(datasets.OxfordIIITPet)
 def oxford_iiit_pet_wrapper_factor(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Mask | Any | tuple[Mask | Any, ...]]]:
     ...
 @WRAPPER_FACTORIES.register(datasets.Cityscapes)
 def cityscapes_wrapper_factory(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Mask | dict[str, Tensor] | Any | tuple[Mask | dict[str, Tensor] | Any, ...]]]:
     ...
 @WRAPPER_FACTORIES.register(datasets.WIDERFace)
 def widerface_wrapper(
-    dataset, target_keys
+    dataset,
+    target_keys,
 ):  # -> Callable[..., tuple[Any, Any] | tuple[Any, dict[str | Any, Any]]]:
     ...

@@ -39,7 +39,8 @@ def csv_dir(tmp_path: Path) -> Path:
 
 
 def test_training_split_expands_and_test_split_does_not(
-    tmp_path: Path, csv_dir: Path
+    tmp_path: Path,
+    csv_dir: Path,
 ) -> None:
     """Copies raise the training rows; the test split stays verbatim.
 
@@ -47,7 +48,10 @@ def test_training_split_expands_and_test_split_does_not(
     training side is expanded.
     """
     out = prepare(
-        tmp_path / "data", num_puzzles=3, copies_per_puzzle=2, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=3,
+        copies_per_puzzle=2,
+        csv_directory=csv_dir,
     )
     train = np.load(out / "train" / "all__inputs.npy")
     test = np.load(out / "test" / "all__inputs.npy")
@@ -58,18 +62,25 @@ def test_training_split_expands_and_test_split_does_not(
 def test_group_indices_bound_each_puzzles_copies(tmp_path: Path, csv_dir: Path) -> None:
     """The loader shuffles within a puzzle, so the boundaries must be right."""
     out = prepare(
-        tmp_path / "data", num_puzzles=3, copies_per_puzzle=2, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=3,
+        copies_per_puzzle=2,
+        csv_directory=csv_dir,
     )
     bounds = np.load(out / "train" / "all__group_indices.npy")
     assert bounds.tolist() == [0, 3, 6, 9]
 
 
 def test_tokens_land_in_the_documented_vocabulary(
-    tmp_path: Path, csv_dir: Path
+    tmp_path: Path,
+    csv_dir: Path,
 ) -> None:
     """0 is pad, 1 is an empty cell, 2-10 are the digits."""
     out = prepare(
-        tmp_path / "data", num_puzzles=2, copies_per_puzzle=1, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=2,
+        copies_per_puzzle=1,
+        csv_directory=csv_dir,
     )
     inputs = np.load(out / "train" / "all__inputs.npy")
     labels = np.load(out / "train" / "all__labels.npy")
@@ -90,7 +101,10 @@ def test_transformations_keep_the_solution_valid(tmp_path: Path, csv_dir: Path) 
     each label grid has all nine digits in every row, column, and box.
     """
     out = prepare(
-        tmp_path / "data", num_puzzles=2, copies_per_puzzle=4, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=2,
+        copies_per_puzzle=4,
+        csv_directory=csv_dir,
     )
     labels = np.load(out / "train" / "all__labels.npy")
     for row in labels:
@@ -106,7 +120,10 @@ def test_transformations_keep_the_solution_valid(tmp_path: Path, csv_dir: Path) 
 def test_the_clues_survive_transformation(tmp_path: Path, csv_dir: Path) -> None:
     """A transformed puzzle's clues must agree with its transformed solution."""
     out = prepare(
-        tmp_path / "data", num_puzzles=2, copies_per_puzzle=4, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=2,
+        copies_per_puzzle=4,
+        csv_directory=csv_dir,
     )
     inputs = np.load(out / "train" / "all__inputs.npy")
     labels = np.load(out / "train" / "all__labels.npy")
@@ -117,10 +134,16 @@ def test_the_clues_survive_transformation(tmp_path: Path, csv_dir: Path) -> None
 def test_the_build_is_deterministic(tmp_path: Path, csv_dir: Path) -> None:
     """One seed, one dataset -- otherwise a result cannot be reproduced."""
     first = prepare(
-        tmp_path / "a", num_puzzles=3, copies_per_puzzle=2, csv_directory=csv_dir
+        tmp_path / "a",
+        num_puzzles=3,
+        copies_per_puzzle=2,
+        csv_directory=csv_dir,
     )
     second = prepare(
-        tmp_path / "b", num_puzzles=3, copies_per_puzzle=2, csv_directory=csv_dir
+        tmp_path / "b",
+        num_puzzles=3,
+        copies_per_puzzle=2,
+        csv_directory=csv_dir,
     )
     assert np.array_equal(
         np.load(first / "train" / "all__inputs.npy"),
@@ -130,7 +153,10 @@ def test_the_build_is_deterministic(tmp_path: Path, csv_dir: Path) -> None:
 
 def test_a_different_seed_builds_different_data(tmp_path: Path, csv_dir: Path) -> None:
     first = prepare(
-        tmp_path / "a", num_puzzles=3, copies_per_puzzle=2, csv_directory=csv_dir
+        tmp_path / "a",
+        num_puzzles=3,
+        copies_per_puzzle=2,
+        csv_directory=csv_dir,
     )
     second = prepare(
         tmp_path / "b",
@@ -148,12 +174,18 @@ def test_a_different_seed_builds_different_data(tmp_path: Path, csv_dir: Path) -
 def test_rerunning_leaves_a_prepared_split_alone(tmp_path: Path, csv_dir: Path) -> None:
     """Idempotent, so re-running the preparer costs nothing."""
     out = prepare(
-        tmp_path / "data", num_puzzles=2, copies_per_puzzle=1, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=2,
+        copies_per_puzzle=1,
+        csv_directory=csv_dir,
     )
     marker = out / "train" / "all__inputs.npy"
     stamp = marker.stat().st_mtime_ns
     prepare(
-        tmp_path / "data", num_puzzles=2, copies_per_puzzle=1, csv_directory=csv_dir
+        tmp_path / "data",
+        num_puzzles=2,
+        copies_per_puzzle=1,
+        csv_directory=csv_dir,
     )
     assert marker.stat().st_mtime_ns == stamp
 

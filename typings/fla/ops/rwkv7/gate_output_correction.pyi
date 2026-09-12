@@ -21,7 +21,13 @@ def gate_output_correction_ref(
     g: torch.Tensor,
 ) -> Tensor: ...
 def gate_output_correction_backward_ref(
-    grad_output, o, r, k, r_k, v, g
+    grad_output,
+    o,
+    r,
+    k,
+    r_k,
+    v,
+    g,
 ) -> tuple[Any, Any, Any, Any, Any, Any]: ...
 @triton.autotune(
     configs=[
@@ -96,7 +102,13 @@ def gate_output_correction_bwd_kernel(
     BT: tl.constexpr,
 ): ...
 def gate_output_correction_backward_triton(
-    grad_output, o, r, k, r_k, v, g
+    grad_output,
+    o,
+    r,
+    k,
+    r_k,
+    v,
+    g,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: ...
 
 class GateOutputCorrection(torch.autograd.Function):
@@ -108,7 +120,8 @@ class GateOutputCorrection(torch.autograd.Function):
     @autocast_custom_bwd
     @input_guard
     def backward(
-        ctx, grad_output
+        ctx,
+        grad_output,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: ...
 
 gate_output_correction = ...

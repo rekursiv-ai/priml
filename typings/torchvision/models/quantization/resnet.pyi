@@ -76,7 +76,7 @@ class ResNeXt101_64X4D_QuantizedWeights(WeightsEnum):
             if kwargs.get("quantize", False)
             else ResNet18_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def resnet18(
     *,
@@ -94,7 +94,7 @@ def resnet18(
             if kwargs.get("quantize", False)
             else ResNet50_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def resnet50(
     *,
@@ -112,7 +112,7 @@ def resnet50(
             if kwargs.get("quantize", False)
             else ResNeXt101_32X8D_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def resnext101_32x8d(
     *,
@@ -130,7 +130,7 @@ def resnext101_32x8d(
             if kwargs.get("quantize", False)
             else ResNeXt101_64X4D_Weights.IMAGENET1K_V1
         ),
-    )
+    ),
 )
 def resnext101_64x4d(
     *,

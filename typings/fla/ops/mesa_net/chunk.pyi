@@ -63,7 +63,10 @@ class ChunkMesaNetFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dh_kk_final=..., dh_kv_final=...
+        ctx,
+        do,
+        dh_kk_final=...,
+        dh_kv_final=...,
     ) -> tuple[
         Tensor | Any,
         Tensor | Any,

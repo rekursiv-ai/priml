@@ -136,7 +136,7 @@ def _synth_hf(cfg: KimiK2.Config) -> dict[str, Tensor]:
         else:
             sd[f"{p}.self_attn.q_a_proj.weight"] = torch.randn(attn.q_lora_rank or 0, h)
             sd[f"{p}.self_attn.q_a_layernorm.weight"] = torch.randn(
-                attn.q_lora_rank or 0
+                attn.q_lora_rank or 0,
             )
             sd[f"{p}.self_attn.q_b_proj.weight"] = torch.randn(
                 n * (qkn + qkr),
@@ -470,7 +470,8 @@ def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
         hf_model = _build_hf_model(q_lora_rank)
         config = _our_config_from_hf(hf_model, q_lora_rank)
         loop_sd = remap_hf_state_dict(
-            _hf_state_dict_with_bias_fill(hf_model, config), config
+            _hf_state_dict_with_bias_fill(hf_model, config),
+            config,
         )
         loop_model = config.make()
         loop_model.load_state_dict(loop_sd, strict=True)

@@ -12,7 +12,7 @@ import triton.language as tl
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def fused_recurrent_delta_rule_fwd_kernel(
@@ -43,7 +43,7 @@ def fused_recurrent_delta_rule_fwd_kernel(
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "USE_FINAL_STATE_GRADIENT": lambda args: args["dht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def fused_recurrent_delta_rule_bwd_kernel(
@@ -114,7 +114,9 @@ class FusedRecurrentFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, None, Tensor, None, None, None]: ...
 
 @torch.compiler.disable

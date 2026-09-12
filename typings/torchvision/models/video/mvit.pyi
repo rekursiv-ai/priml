@@ -33,10 +33,14 @@ class Pool(nn.Module):
         norm_before_pool: bool = ...,
     ) -> None: ...
     def forward(
-        self, x: torch.Tensor, thw: tuple[int, int, int]
+        self,
+        x: torch.Tensor,
+        thw: tuple[int, int, int],
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
 
 class MultiscaleAttention(nn.Module):
@@ -57,10 +61,14 @@ class MultiscaleAttention(nn.Module):
         norm_layer: Callable[..., nn.Module] = ...,
     ) -> None: ...
     def forward(
-        self, x: torch.Tensor, thw: tuple[int, int, int]
+        self,
+        x: torch.Tensor,
+        thw: tuple[int, int, int],
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
 
 class MultiscaleBlock(nn.Module):
@@ -77,10 +85,14 @@ class MultiscaleBlock(nn.Module):
         norm_layer: Callable[..., nn.Module] = ...,
     ) -> None: ...
     def forward(
-        self, x: torch.Tensor, thw: tuple[int, int, int]
+        self,
+        x: torch.Tensor,
+        thw: tuple[int, int, int],
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int, int, int]]: ...
 
 class PositionalEncoding(nn.Module):
@@ -128,10 +140,16 @@ class MViT_V2_S_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MViT_V1_B_Weights.KINETICS400_V1))
 def mvit_v1_b(
-    *, weights: MViT_V1_B_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MViT_V1_B_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MViT: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MViT_V2_S_Weights.KINETICS400_V1))
 def mvit_v2_s(
-    *, weights: MViT_V2_S_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MViT_V2_S_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MViT: ...

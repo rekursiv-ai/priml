@@ -61,7 +61,9 @@ from priml.model.transformer.transformer import Transformer
 
 
 def _load_hf_checkpoint(
-    path_or_repo: Path | str, *, dtype: torch.dtype | None
+    path_or_repo: Path | str,
+    *,
+    dtype: torch.dtype | None,
 ) -> tuple[dict[str, object], dict[str, Tensor]]:
     """Read Qwen checkpoint metadata and tensors once, locally or through the hub."""
     path = Path(path_or_repo)
@@ -69,7 +71,9 @@ def _load_hf_checkpoint(
         hf_config = DictCodec.coerce(json.loads((path / "config.json").read_text()))
         return hf_config, hub.load_local_state_dict(path)
     hf_model = hub.load_transformers_model(
-        str(path_or_repo), "AutoModelForCausalLM", dtype=dtype
+        str(path_or_repo),
+        "AutoModelForCausalLM",
+        dtype=dtype,
     )
     return DictCodec.coerce(hf_model.config.to_dict()), {
         key: value.detach().cpu() for key, value in hf_model.state_dict().items()
@@ -124,7 +128,7 @@ class Qwen3(Transformer):
             default_factory=lambda: Embedding.Config(
                 init_weight=partial(nn.init.normal_, std=0.02),
                 shard="vocab",
-            )
+            ),
         )
         """Reference token embedding initialization."""
 
@@ -136,8 +140,8 @@ class Qwen3(Transformer):
                         init_weight=partial(nn.init.normal_, std=0.02),
                         shard="vocab",
                     ),
-                ]
-            )
+                ],
+            ),
         )
         """Learned final RMS scale, then the reference untied head.
 
@@ -216,14 +220,16 @@ class Qwen3(Transformer):
             num_heads_kv = int(config.get("num_key_value_heads", num_heads))
             if num_heads_kv < 1:
                 raise ValueError(
-                    f"num_key_value_heads must be > 0, got {num_heads_kv}."
+                    f"num_key_value_heads must be > 0, got {num_heads_kv}.",
                 )
             attn.num_heads_kv = num_heads_kv
             # Qwen3 states the head width, so it need not divide the model
             # width -- the attention's inner width is decoupled from the
             # residual. Falling back to the quotient matches HF's own default.
             channels_head = int(
-                config["head_dim"] if "head_dim" in config else channels_in // num_heads
+                config["head_dim"]
+                if "head_dim" in config
+                else channels_in // num_heads,
             )
             if channels_head < 1:
                 raise ValueError(f"head_dim must be > 0, got {channels_head}.")

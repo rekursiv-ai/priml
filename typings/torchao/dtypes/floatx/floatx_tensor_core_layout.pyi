@@ -11,11 +11,16 @@ _ONES_TABLE = ...
 
 def pack_tc_floatx(tensor: Tensor, nbits: int) -> Tensor: ...
 def to_scaled_tc_floatx(
-    tensor: Tensor, ebits: int, mbits: int
+    tensor: Tensor,
+    ebits: int,
+    mbits: int,
 ) -> tuple[Tensor, Tensor]: ...
 def unpack_tc_floatx(tensor: Tensor, nbits: int) -> Tensor: ...
 def from_scaled_tc_floatx(
-    tensor: Tensor, ebits: int, mbits: int, scale=...
+    tensor: Tensor,
+    ebits: int,
+    mbits: int,
+    scale=...,
 ) -> Tensor: ...
 
 _SPLIT_K_MAP = ...
@@ -28,17 +33,27 @@ class FloatxTensorCoreLayout(Layout):
 @register_layout(FloatxTensorCoreLayout)
 class FloatxTensorCoreAQTTensorImpl(AQTTensorImpl):
     def __new__(
-        cls, packed_floatx_data: torch.Tensor, scale: torch.Tensor, _layout: Layout
+        cls,
+        packed_floatx_data: torch.Tensor,
+        scale: torch.Tensor,
+        _layout: Layout,
     ):  # -> Self:
         ...
     def __init__(
-        self, packed_floatx_data: torch.Tensor, scale: torch.Tensor, _layout: Layout
+        self,
+        packed_floatx_data: torch.Tensor,
+        scale: torch.Tensor,
+        _layout: Layout,
     ) -> None: ...
     def __tensor_flatten__(self):  # -> tuple[list[str], list[Layout]]:
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     def get_plain(self) -> tuple[torch.Tensor, torch.Tensor]: ...

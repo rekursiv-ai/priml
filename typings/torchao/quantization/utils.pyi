@@ -28,7 +28,8 @@ def compute_error(x, y):  # -> Tensor:
 
 _cur_fqn: str | None = ...
 _fqn_to_op_to_shape_to_count: dict[
-    str | None, dict[str | None, dict[str | None, int]]
+    str | None,
+    dict[str | None, dict[str | None, int]],
 ] = ...
 
 class LoggingTensorMode(TorchDispatchMode):
@@ -46,7 +47,10 @@ class _MultiInput:
         ...
 
 def dynamically_quantize_per_channel(
-    x, quant_min, quant_max, target_dtype
+    x,
+    quant_min,
+    quant_max,
+    target_dtype,
 ):  # -> tuple[Tensor, Tensor, Tensor]:
     ...
 def dequantize_per_tensor(int_repr, scale, zero_point, out_dtype=...):  # -> Tensor:
@@ -68,27 +72,54 @@ def pack_tinygemm_scales_and_zeros(scales, zeros, dtype=...):  # -> Tensor:
 def unpack_tinygemm_scales_and_zeros(scales_and_zeros):  # -> tuple[Tensor, ...]:
     ...
 def groupwise_affine_quantize_tensor_from_qparams(
-    w, scales, zeros, n_bit=..., groupsize=..., zero_point_domain=...
+    w,
+    scales,
+    zeros,
+    n_bit=...,
+    groupsize=...,
+    zero_point_domain=...,
 ):  # -> Tensor:
     ...
 def groupwise_affine_dequantize_tensor_from_qparams(
-    w_int4x8, scales, zeros, n_bit=..., groupsize=..., zero_point_domain=...
+    w_int4x8,
+    scales,
+    zeros,
+    n_bit=...,
+    groupsize=...,
+    zero_point_domain=...,
 ):  # -> Tensor:
     ...
 def groupwise_affine_quantize_tensor(
-    w, n_bit=..., groupsize=..., dtype=..., zero_point_domain=..., preserve_zero=...
+    w,
+    n_bit=...,
+    groupsize=...,
+    dtype=...,
+    zero_point_domain=...,
+    preserve_zero=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def groupwise_affine_dequantize_tensor(
-    w_int4x8, scales_and_zeros, n_bit=..., groupsize=...
+    w_int4x8,
+    scales_and_zeros,
+    n_bit=...,
+    groupsize=...,
 ):  # -> Tensor:
     ...
 def get_group_qparams_symmetric(
-    w, n_bit=..., groupsize=..., precision=..., mapping_type=..., eps=...
+    w,
+    n_bit=...,
+    groupsize=...,
+    precision=...,
+    mapping_type=...,
+    eps=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def group_quantize_tensor_symmetric(
-    w, n_bit=..., group_size=..., precision=..., mapping_type=...
+    w,
+    n_bit=...,
+    group_size=...,
+    precision=...,
+    mapping_type=...,
 ):  # -> tuple[Any, Tensor, Tensor]:
     ...
 def per_token_dynamic_quant(
@@ -100,5 +131,6 @@ def per_token_dynamic_quant(
 def recommended_inductor_config_setter():  # -> None:
     ...
 def get_block_size(
-    input_shape: tuple[int, ...], granularity: Granularity
+    input_shape: tuple[int, ...],
+    granularity: Granularity,
 ) -> tuple[int, ...]: ...

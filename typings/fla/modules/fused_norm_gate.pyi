@@ -13,7 +13,7 @@ import triton.language as tl
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -54,7 +54,7 @@ def layer_norm_gated_fwd_kernel(
         "HAS_RESIDUAL": lambda args: args["residual"] is not None,
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [2, 4, 8, 16]],
@@ -88,7 +88,7 @@ def layer_norm_gated_fwd_kernel1(
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
         "RECOMPUTE_OUTPUT": lambda args: args["y"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -135,7 +135,7 @@ def layer_norm_gated_bwd_kernel(
         "HAS_WEIGHT": lambda args: args["w"] is not None,
         "HAS_BIAS": lambda args: args["b"] is not None,
         "RECOMPUTE_OUTPUT": lambda args: args["y"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [2, 4, 8, 16]],
@@ -221,7 +221,9 @@ class LayerNormGatedFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dy, *args
+        ctx,
+        dy,
+        *args,
     ) -> tuple[
         Tensor,
         Tensor,
@@ -255,7 +257,9 @@ class LayerNormGatedLinearFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dout, *args
+        ctx,
+        dout,
+        *args,
     ) -> tuple[
         Tensor,
         Tensor,

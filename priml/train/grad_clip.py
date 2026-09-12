@@ -71,7 +71,10 @@ def clip_grad_norm_(
 
     grads = [p.grad for p in parameters if p.grad is not None]
     total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
+        grads,
+        norm_type,
+        error_if_nonfinite,
+        foreach,
     )
 
     # Sharded grads (TP/FSDP) yield a DTensor total norm with _NormPartial
@@ -136,7 +139,7 @@ def total_param_norm(
     if isinstance(parameters, Tensor):
         parameters = [parameters]
     total_norm = torch.stack([p.detach().norm(norm_type) for p in parameters]).norm(
-        norm_type
+        norm_type,
     )
     if isinstance(total_norm, DTensor):
         total_norm = total_norm.full_tensor()

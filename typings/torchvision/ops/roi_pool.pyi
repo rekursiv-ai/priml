@@ -20,7 +20,9 @@ def roi_pool(
 
 class RoIPool(nn.Module):
     def __init__(
-        self, output_size: BroadcastingList2[int], spatial_scale: float
+        self,
+        output_size: BroadcastingList2[int],
+        spatial_scale: float,
     ) -> None: ...
     def forward(self, input: Tensor, rois: Tensor | list[Tensor]) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

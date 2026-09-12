@@ -46,7 +46,8 @@ def test_a_wood_pickaxe_costs_wood_and_needs_a_table() -> None:
     away = _state()
     away.inventory.wood[:] = 5
     assert crafting.craft(
-        away, _act(Action.MAKE_WOOD_PICKAXE)
+        away,
+        _act(Action.MAKE_WOOD_PICKAXE),
     ).inventory.pickaxe.tolist() == [
         0,
         0,
@@ -77,7 +78,8 @@ def test_an_iron_pickaxe_needs_both_stations() -> None:
     for material in ("wood", "stone", "iron", "coal"):
         getattr(at_table.inventory, material)[:] = 3
     assert crafting.craft(
-        at_table, _act(Action.MAKE_IRON_PICKAXE)
+        at_table,
+        _act(Action.MAKE_IRON_PICKAXE),
     ).inventory.pickaxe.tolist() == [
         0,
         0,

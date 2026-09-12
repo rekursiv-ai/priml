@@ -15,7 +15,7 @@ import triton.language as tl
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_GATE_IN_KERNEL": lambda args: args["A_log"] is not None,
         "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def fused_recurrent_gated_delta_rule_fwd_kernel(

@@ -194,7 +194,8 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
     """
     golden = _CWD / "testdata" / "exp000.txt"
     rendered = pformat(
-        experiments.exp000().copy_tree().finalize(), hide_default_values=False
+        experiments.exp000().copy_tree().finalize(),
+        hide_default_values=False,
     )
     if request.config.getoption("--golden-overwrite", default=False):
         golden.parent.mkdir(parents=True, exist_ok=True)

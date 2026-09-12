@@ -485,7 +485,8 @@ def test_importing_parity_module_preserves_global_determinism(
             warn_only=warn_only_enabled,
         )
         spec = importlib.util.spec_from_file_location(
-            "_qwen3_hf_import_probe", __file__
+            "_qwen3_hf_import_probe",
+            __file__,
         )
         assert spec is not None
         assert spec.loader is not None
@@ -527,7 +528,7 @@ def test_parity_test_restores_process_state_when_setup_fails(
         cuda_available = Mock(return_value=True)
         enable_flash_sdp = Mock(wraps=torch.backends.cuda.enable_flash_sdp)
         enable_mem_efficient_sdp = Mock(
-            wraps=torch.backends.cuda.enable_mem_efficient_sdp
+            wraps=torch.backends.cuda.enable_mem_efficient_sdp,
         )
         monkeypatch.setattr(torch.backends.cudnn, "is_available", cudnn_available)
         monkeypatch.setattr(torch.cuda, "is_available", cuda_available)

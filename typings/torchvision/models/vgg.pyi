@@ -82,40 +82,64 @@ class VGG19_BN_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG11_Weights.IMAGENET1K_V1))
 def vgg11(
-    *, weights: VGG11_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG11_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG11_BN_Weights.IMAGENET1K_V1))
 def vgg11_bn(
-    *, weights: VGG11_BN_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG11_BN_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG13_Weights.IMAGENET1K_V1))
 def vgg13(
-    *, weights: VGG13_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG13_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG13_BN_Weights.IMAGENET1K_V1))
 def vgg13_bn(
-    *, weights: VGG13_BN_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG13_BN_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG16_Weights.IMAGENET1K_V1))
 def vgg16(
-    *, weights: VGG16_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG16_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG16_BN_Weights.IMAGENET1K_V1))
 def vgg16_bn(
-    *, weights: VGG16_BN_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG16_BN_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG19_Weights.IMAGENET1K_V1))
 def vgg19(
-    *, weights: VGG19_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG19_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", VGG19_BN_Weights.IMAGENET1K_V1))
 def vgg19_bn(
-    *, weights: VGG19_BN_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: VGG19_BN_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> VGG: ...

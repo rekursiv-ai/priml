@@ -33,7 +33,8 @@ class PlainLayout(Layout): ...
 def is_device(target_device_str: str, device: str | torch.device):  # -> bool:
     ...
 def get_out_shape(
-    input_shape: tuple[int], weight_shape: tuple[int]
+    input_shape: tuple[int],
+    weight_shape: tuple[int],
 ) -> tuple[int, int]: ...
 
 class AQTTensorImpl(TorchAOBaseTensor):

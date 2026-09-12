@@ -24,7 +24,13 @@ class ApplyMask(torch.autograd.Function):
 
 class SupermaskLinear(nn.Linear):
     def __init__(
-        self, sparsity_level, blocksize, fixed_mask, fixed_weight, *args, **kwargs
+        self,
+        sparsity_level,
+        blocksize,
+        fixed_mask,
+        fixed_weight,
+        *args,
+        **kwargs,
     ) -> None: ...
     def get_mask(self):  # -> Tensor | None:
         ...
@@ -32,7 +38,10 @@ class SupermaskLinear(nn.Linear):
         ...
     @classmethod
     def from_linear(
-        cls, linear, sparsity_level=..., blocksize=...
+        cls,
+        linear,
+        sparsity_level=...,
+        blocksize=...,
     ):  # -> SupermaskLinear:
         ...
     @classmethod

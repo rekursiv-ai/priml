@@ -179,15 +179,24 @@ def test_gated_delta_net_rejects_every_degenerate_dimension():
         _ = GatedDeltaNet.Config(channels_in=0, num_heads_k=2, num_heads_v=2).make()
     with pytest.raises(ValueError, match="channels_k_head"):
         _ = GatedDeltaNet.Config(
-            channels_in=64, num_heads_k=2, num_heads_v=2, channels_k_head=0
+            channels_in=64,
+            num_heads_k=2,
+            num_heads_v=2,
+            channels_k_head=0,
         ).make()
     with pytest.raises(ValueError, match="channels_v_head"):
         _ = GatedDeltaNet.Config(
-            channels_in=64, num_heads_k=2, num_heads_v=2, channels_v_head=0
+            channels_in=64,
+            num_heads_k=2,
+            num_heads_v=2,
+            channels_v_head=0,
         ).make()
     with pytest.raises(ValueError, match="conv_kernel_size"):
         _ = GatedDeltaNet.Config(
-            channels_in=64, num_heads_k=2, num_heads_v=2, conv_kernel_size=0
+            channels_in=64,
+            num_heads_k=2,
+            num_heads_v=2,
+            conv_kernel_size=0,
         ).make()
 
 

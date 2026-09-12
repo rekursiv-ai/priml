@@ -212,7 +212,10 @@ class Tokenizer:
         return int(self.encoding.n_vocab)
 
     def encode_batch(
-        self, texts: list[str], *, num_threads: int = 8
+        self,
+        texts: list[str],
+        *,
+        num_threads: int = 8,
     ) -> list[list[int]]:
         """Encode documents, prepending the document-start token to each.
 
@@ -650,7 +653,7 @@ class NanoChatData:
         exhausted."""
 
         train_indices = list(
-            config.train_shard_indices or range(config.num_train_shards)
+            config.train_shard_indices or range(config.num_train_shards),
         )
         if len(train_indices) != len(set(train_indices)):
             raise ValueError("train_shard_indices names a shard twice.")

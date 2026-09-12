@@ -164,8 +164,9 @@ class KimiK2(Transformer):
 
         in_proj: Makeable[TensorModule] | None = field(
             default_factory=lambda: Embedding.Config(
-                init_weight=partial(nn.init.normal_, std=0.02), shard="vocab"
-            )
+                init_weight=partial(nn.init.normal_, std=0.02),
+                shard="vocab",
+            ),
         )
         """Reference token embedding initialization."""
 
@@ -177,8 +178,8 @@ class KimiK2(Transformer):
                         init_weight=partial(nn.init.normal_, std=0.02),
                         shard="vocab",
                     ),
-                ]
-            )
+                ],
+            ),
         )
         """Learned final RMS scale, then the reference untied head.
 
@@ -267,11 +268,14 @@ class KimiK2(Transformer):
             init_weight = partial(
                 nn.init.normal_,
                 std=FloatCodec.coerce(
-                    config.get("initializer_range", 0.02), default=None
+                    config.get("initializer_range", 0.02),
+                    default=None,
                 ),
             )
             attn = MultiHeadLatentAttention.Config(
-                bias=False, causal=True, init_weight=init_weight
+                bias=False,
+                causal=True,
+                init_weight=init_weight,
             )
             attn.num_heads = int(config["num_attention_heads"])
             attn.channels_qk_nope_head = int(config.get("qk_nope_head_dim", 128))
@@ -299,10 +303,12 @@ class KimiK2(Transformer):
 
             moe = MoE.Config(
                 expert=SwiGLU.Config(
-                    init_weight=init_weight, init_weight_out=init_weight
+                    init_weight=init_weight,
+                    init_weight_out=init_weight,
                 ),
                 shared_expert=SwiGLU.Config(
-                    init_weight=init_weight, init_weight_out=init_weight
+                    init_weight=init_weight,
+                    init_weight_out=init_weight,
                 ),
             )
             moe.router = router
@@ -324,7 +330,7 @@ class KimiK2(Transformer):
                 config.get(
                     "moe_intermediate_size",
                     config["intermediate_size"],
-                )
+                ),
             )
             if channels_hidden_expert < 1:
                 raise ValueError(
@@ -376,7 +382,8 @@ class KimiK2(Transformer):
                     rope.channels_head = attn.channels_qk_rope_head
             if layer < self.first_k_dense_replace:
                 if isinstance(block.ffn, MoE.Config) and isinstance(
-                    block.ffn.expert, SwiGLU.Config
+                    block.ffn.expert,
+                    SwiGLU.Config,
                 ):
                     block.ffn = block.ffn.expert.copy_tree()
                 if isinstance(block.ffn, SwiGLU.Config):
@@ -420,7 +427,7 @@ class KimiK2(Transformer):
         path = Path(path_or_repo)
         if path.is_dir() and (path / "config.json").exists():
             hf_config = DictCodec.coerce(
-                decode("object", (path / "config.json").read_text())
+                decode("object", (path / "config.json").read_text()),
             )
             hf_sd = hub.load_local_state_dict(path)
         else:
@@ -526,7 +533,10 @@ def remap_hf_state_dict(
             # a single module; loop stores a ModuleList indexed from 0.
             if moe.num_shared_experts == 1:
                 _remap_shared(
-                    hf_sd, f"{p}.mlp.shared_experts", f"{bf}.shared_experts.0", out
+                    hf_sd,
+                    f"{p}.mlp.shared_experts",
+                    f"{bf}.shared_experts.0",
+                    out,
                 )
             else:
                 for s in range(moe.num_shared_experts):

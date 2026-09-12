@@ -45,12 +45,20 @@ class Float8AQTTensorImpl(AQTTensorImpl):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size, outer_stride
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size,
+        outer_stride,
     ):  # -> Self:
         ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs
+        cls,
+        func,
+        types,
+        args,
+        kwargs,
     ):  # -> _NotImplementedType | Any:
         ...
     def get_plain(

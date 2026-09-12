@@ -30,7 +30,8 @@ else:
     from wrapt import lazy_import
 
     chunk_gated_delta_rule = lazy_import(
-        "fla.ops.gated_delta_rule", "chunk_gated_delta_rule"
+        "fla.ops.gated_delta_rule",
+        "chunk_gated_delta_rule",
     )
 
 
@@ -100,7 +101,7 @@ class GatedDeltaNet(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         # Every count, not just num_heads_k: a zero elsewhere builds a zero-width
@@ -251,7 +252,7 @@ class GatedDeltaNet(nn.Module):
             )
 
         out = self.norm(out.reshape(-1, self.channels_v_head)) * f.silu(
-            z.reshape(-1, self.channels_v_head).float()
+            z.reshape(-1, self.channels_v_head).float(),
         ).type_as(out)
         return self.out_proj(out.reshape(-1, S, v_dim)).reshape(*shape[:-1], -1)
 
@@ -299,7 +300,7 @@ def _torch_chunk_gated_delta_rule(
     ]
     g = g.reshape(B, H, -1, chunk_size)
     mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device)
+        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device),
     )
     g = g.cumsum(dim=-1)
     decay_mask = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().tril()
@@ -327,7 +328,8 @@ def _torch_chunk_gated_delta_rule(
         state = (
             state * g[:, :, ci, -1, None, None].exp()
             + (k_i * (g[:, :, ci, -1, None] - g[:, :, ci]).exp()[..., None]).transpose(
-                -1, -2
+                -1,
+                -2,
             )
             @ v_new
         )

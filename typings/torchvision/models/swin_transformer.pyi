@@ -29,13 +29,17 @@ __all__ = [
 
 class PatchMerging(nn.Module):
     def __init__(
-        self, dim: int, norm_layer: Callable[..., nn.Module] = ...
+        self,
+        dim: int,
+        norm_layer: Callable[..., nn.Module] = ...,
     ) -> None: ...
     def forward(self, x: Tensor): ...
 
 class PatchMergingV2(nn.Module):
     def __init__(
-        self, dim: int, norm_layer: Callable[..., nn.Module] = ...
+        self,
+        dim: int,
+        norm_layer: Callable[..., nn.Module] = ...,
     ) -> None: ...
     def forward(self, x: Tensor): ...
 
@@ -169,30 +173,48 @@ class Swin_V2_B_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin_T_Weights.IMAGENET1K_V1))
 def swin_t(
-    *, weights: Swin_T_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin_T_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin_S_Weights.IMAGENET1K_V1))
 def swin_s(
-    *, weights: Swin_S_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin_S_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin_B_Weights.IMAGENET1K_V1))
 def swin_b(
-    *, weights: Swin_B_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin_B_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin_V2_T_Weights.IMAGENET1K_V1))
 def swin_v2_t(
-    *, weights: Swin_V2_T_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin_V2_T_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin_V2_S_Weights.IMAGENET1K_V1))
 def swin_v2_s(
-    *, weights: Swin_V2_S_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin_V2_S_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Swin_V2_B_Weights.IMAGENET1K_V1))
 def swin_v2_b(
-    *, weights: Swin_V2_B_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: Swin_V2_B_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> SwinTransformer: ...

@@ -28,19 +28,34 @@ class ResidualBlock(nn.Module):
 
 class BottleneckBlock(nn.Module):
     def __init__(
-        self, in_channels, out_channels, *, norm_layer, stride=...
+        self,
+        in_channels,
+        out_channels,
+        *,
+        norm_layer,
+        stride=...,
     ) -> None: ...
     def forward(self, x): ...
 
 class FeatureEncoder(nn.Module):
     def __init__(
-        self, *, block=..., layers=..., strides=..., norm_layer=...
+        self,
+        *,
+        block=...,
+        layers=...,
+        strides=...,
+        norm_layer=...,
     ) -> None: ...
     def forward(self, x): ...
 
 class MotionEncoder(nn.Module):
     def __init__(
-        self, *, in_channels_corr, corr_layers=..., flow_layers=..., out_channels=...
+        self,
+        *,
+        in_channels_corr,
+        corr_layers=...,
+        flow_layers=...,
+        out_channels=...,
     ) -> None: ...
     def forward(self, flow, corr_features): ...
 
@@ -50,7 +65,12 @@ class ConvGRU(nn.Module):
 
 class RecurrentBlock(nn.Module):
     def __init__(
-        self, *, input_size, hidden_size, kernel_size=..., padding=...
+        self,
+        *,
+        input_size,
+        hidden_size,
+        kernel_size=...,
+        padding=...,
     ) -> None: ...
     def forward(self, h, x): ...
 
@@ -102,10 +122,16 @@ class Raft_Small_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Raft_Large_Weights.C_T_SKHT_V2))
 def raft_large(
-    *, weights: Raft_Large_Weights | None = ..., progress=..., **kwargs
+    *,
+    weights: Raft_Large_Weights | None = ...,
+    progress=...,
+    **kwargs,
 ) -> RAFT: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Raft_Small_Weights.C_T_V2))
 def raft_small(
-    *, weights: Raft_Small_Weights | None = ..., progress=..., **kwargs
+    *,
+    weights: Raft_Small_Weights | None = ...,
+    progress=...,
+    **kwargs,
 ) -> RAFT: ...

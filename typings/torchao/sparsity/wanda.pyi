@@ -11,7 +11,11 @@ class WandaSparsifier(BaseSparsifier):
     ) -> None: ...
     def prepare(self, model: nn.Module, config: list[dict]) -> None: ...
     def update_mask(
-        self, module: nn.Module, tensor_name: str, sparsity_level: float, **kwargs
+        self,
+        module: nn.Module,
+        tensor_name: str,
+        sparsity_level: float,
+        **kwargs,
     ) -> None: ...
     def squash_mask(
         self,

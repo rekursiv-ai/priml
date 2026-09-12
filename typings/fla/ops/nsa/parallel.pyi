@@ -43,7 +43,7 @@ def parallel_nsa_kernel_topk(
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4]],
@@ -76,7 +76,7 @@ def parallel_nsa_fwd_kernel(
     USE_BLOCK_COUNTS: tl.constexpr,
 ): ...
 @triton.heuristics(
-    {"USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor)}
+    {"USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor)},
 )
 @triton.jit(do_not_specialize=["T"])
 def parallel_nsa_kernel_mask(
@@ -94,7 +94,7 @@ def parallel_nsa_kernel_mask(
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
-    }
+    },
 )
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4]],
@@ -210,13 +210,22 @@ class ParallelNSAFunction(torch.autograd.Function):
     @contiguous
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens
+        ctx,
+        q,
+        k,
+        v,
+        block_indices,
+        block_counts,
+        block_size,
+        scale,
+        cu_seqlens,
     ) -> Tensor: ...
     @staticmethod
     @contiguous
     @autocast_custom_bwd
     def backward(
-        ctx, do
+        ctx,
+        do,
     ) -> tuple[Any, Any, Tensor, None, None, None, None, None, None, None, None]: ...
 
 def parallel_nsa(

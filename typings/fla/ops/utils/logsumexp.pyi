@@ -14,6 +14,11 @@ import triton.language as tl
 )
 @triton.jit
 def logsumexp_fwd_kernel(
-    x, z, scale, D: tl.constexpr, B: tl.constexpr, HAS_SCALE: tl.constexpr
+    x,
+    z,
+    scale,
+    D: tl.constexpr,
+    B: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
 ): ...
 def logsumexp_fwd(x, scale: float | None = ..., dtype: torch.dtype | None = ...): ...

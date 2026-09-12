@@ -38,7 +38,7 @@ def _head(tie: bool = False) -> Sequential.Config:
         elements=[
             RMSNorm.Config(),
             TiedLinear.Config(tied="in_proj") if tie else Linear.Config(shard="vocab"),
-        ]
+        ],
     )
 
 
@@ -208,7 +208,7 @@ def test_transformer_reports_the_head_width_when_composed() -> None:
     config = _tiny_config()
     config.channels_out = -1
     config.out_proj = Sequential.Config(
-        elements=[RMSNorm.Config(), Linear.Config(32, 99)]
+        elements=[RMSNorm.Config(), Linear.Config(32, 99)],
     )
 
     finalized = config.copy_tree().finalize()

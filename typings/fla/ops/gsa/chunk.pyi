@@ -259,7 +259,10 @@ class ChunkGSAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(
-        ctx, dov, dhkt=..., dhvt=...
+        ctx,
+        dov,
+        dhkt=...,
+        dhvt=...,
     ) -> tuple[
         Tensor,
         Tensor,

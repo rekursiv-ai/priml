@@ -28,7 +28,11 @@ class WeightWithDynamicFloat8CastTensor(torch.Tensor):
     ) -> None: ...
     @classmethod
     def __torch_dispatch__(
-        cls, func, types, args, kwargs=...
+        cls,
+        func,
+        types,
+        args,
+        kwargs=...,
     ):  # -> WeightWithDynamicFloat8CastTensor | PyTree:
         ...
     def __tensor_flatten__(
@@ -37,13 +41,17 @@ class WeightWithDynamicFloat8CastTensor(torch.Tensor):
         ...
     @staticmethod
     def __tensor_unflatten__(
-        inner_tensors, flatten_spec, outer_size, outer_stride
+        inner_tensors,
+        flatten_spec,
+        outer_size,
+        outer_stride,
     ):  # -> WeightWithDynamicFloat8CastTensor:
         ...
     def __repr__(self):  # -> str:
         ...
     def fsdp_pre_all_gather(
-        self, mesh
+        self,
+        mesh,
     ):  # -> tuple[tuple[Any | Tensor], tuple[Any | Tensor]]:
         ...
     def fsdp_post_all_gather(

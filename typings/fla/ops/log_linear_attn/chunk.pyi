@@ -20,7 +20,7 @@ BLOCK_K = ...
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -291,13 +291,23 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, g, level_scales, initial_state, output_final_state, cu_seqlens
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        level_scales,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
     ) -> tuple[Tensor, LogLinearAttentionState] | tuple[Tensor, None]: ...
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dht
+        ctx,
+        do,
+        dht,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | Any, Tensor, None, None, None]: ...
 
 @torch.compiler.disable

@@ -35,7 +35,10 @@ class GoogLeNet(nn.Module):
     ) -> None: ...
     @torch.jit.unused
     def eager_outputs(
-        self, x: Tensor, aux2: Tensor, aux1: Tensor | None
+        self,
+        x: Tensor,
+        aux2: Tensor,
+        aux1: Tensor | None,
     ) -> GoogLeNetOutputs: ...
     def forward(self, x: Tensor) -> GoogLeNetOutputs: ...
     def __call__(self, *args: Any, **kwargs: Any) -> GoogLeNetOutputs: ...
@@ -78,5 +81,8 @@ class GoogLeNet_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", GoogLeNet_Weights.IMAGENET1K_V1))
 def googlenet(
-    *, weights: GoogLeNet_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: GoogLeNet_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> GoogLeNet: ...

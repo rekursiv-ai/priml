@@ -40,5 +40,9 @@ else:
     make_tensor_descriptor = ...
     @triton.jit
     def make_tensor_descriptor(
-        base, shape, strides, block_shape, _builder=...
+        base,
+        shape,
+        strides,
+        block_shape,
+        _builder=...,
     ) -> None: ...

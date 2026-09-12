@@ -28,7 +28,10 @@ class DeepLabV3(_SimpleSegmentationModel): ...
 
 class DeepLabHead(nn.Sequential):
     def __init__(
-        self, in_channels: int, num_classes: int, atrous_rates: Sequence[int] = ...
+        self,
+        in_channels: int,
+        num_classes: int,
+        atrous_rates: Sequence[int] = ...,
     ) -> None: ...
 
 class ASPPConv(nn.Sequential):
@@ -41,7 +44,10 @@ class ASPPPooling(nn.Sequential):
 
 class ASPP(nn.Module):
     def __init__(
-        self, in_channels: int, atrous_rates: Sequence[int], out_channels: int = ...
+        self,
+        in_channels: int,
+        atrous_rates: Sequence[int],
+        out_channels: int = ...,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

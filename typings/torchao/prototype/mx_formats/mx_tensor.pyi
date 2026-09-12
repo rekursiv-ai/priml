@@ -38,7 +38,12 @@ def to_mx(
 def get_fp_scale(scale_e8m0):  # -> Tensor:
     ...
 def to_dtype(
-    data_lp, scale_e8m0, elem_dtype, block_size, target_dtype, pack_fp6: bool = ...
+    data_lp,
+    scale_e8m0,
+    elem_dtype,
+    block_size,
+    target_dtype,
+    pack_fp6: bool = ...,
 ):  # -> Tensor:
     ...
 def tensor_size_hp_to_fp4x2(orig_size, is_contiguous):  # -> list[Any]:

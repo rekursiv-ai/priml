@@ -558,7 +558,7 @@ def test_phase_timer_working_dir_is_scoped_by_owner() -> None:
     timer = config.make()
 
     assert timer._torch_profile_path == Path(
-        "/scratch/runs/study/run-1/profiling/phase_trace.json.gz"
+        "/scratch/runs/study/run-1/profiling/phase_trace.json.gz",
     )
 
 

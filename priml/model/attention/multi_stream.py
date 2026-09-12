@@ -52,7 +52,7 @@ class MultiStreamAttention(nn.Module):
         """Number of parallel token streams when streams is empty."""
 
         streams: list[AttentionProjections.Config] = field(
-            default_factory=list[AttentionProjections.Config]
+            default_factory=list[AttentionProjections.Config],
         )
         """Explicit stream subtrees.
 
@@ -151,7 +151,7 @@ class MultiStreamAttention(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         if config.num_heads % config.num_heads_kv != 0:
@@ -212,7 +212,7 @@ class MultiStreamAttention(nn.Module):
                 str(i): cast(nn.Module, cfg.make())
                 for i, cfg in enumerate(config.rope)
                 if cfg is not None
-            }
+            },
         )
 
         # QK norm: shared instance (``share_qk_norm=True``) or two
@@ -525,7 +525,7 @@ class MultiStreamAttention(nn.Module):
     def _init_streams(self, config: Config) -> None:
         if len(config.streams) > 1 and any(s.causal for s in config.streams):
             raise ValueError(
-                "Causal streams require a single stream; use per-stream masks."
+                "Causal streams require a single stream; use per-stream masks.",
             )
         self.streams = nn.ModuleList(
             AttentionProjections(stream) for stream in config.streams
@@ -539,7 +539,7 @@ def _validate_native_state(target: nn.Module, *, source: nn.Module) -> None:
     expected, actual = target.state_dict(), source.state_dict()
     if expected.keys() != actual.keys():
         raise ValueError(
-            "Native stream state keys do not match the configured destination."
+            "Native stream state keys do not match the configured destination.",
         )
     for name, tensor in expected.items():
         if tensor.shape != actual[name].shape:

@@ -38,7 +38,10 @@ class _InvertedResidual(nn.Module):
 
 class MNASNet(torch.nn.Module):
     def __init__(
-        self, alpha: float, num_classes: int = ..., dropout: float = ...
+        self,
+        alpha: float,
+        num_classes: int = ...,
+        dropout: float = ...,
     ) -> None: ...
     def forward(self, x: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
@@ -64,20 +67,32 @@ class MNASNet1_3_Weights(WeightsEnum):
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MNASNet0_5_Weights.IMAGENET1K_V1))
 def mnasnet0_5(
-    *, weights: MNASNet0_5_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MNASNet0_5_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MNASNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MNASNet0_75_Weights.IMAGENET1K_V1))
 def mnasnet0_75(
-    *, weights: MNASNet0_75_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MNASNet0_75_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MNASNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MNASNet1_0_Weights.IMAGENET1K_V1))
 def mnasnet1_0(
-    *, weights: MNASNet1_0_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MNASNet1_0_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MNASNet: ...
 @register_model()
 @handle_legacy_interface(weights=("pretrained", MNASNet1_3_Weights.IMAGENET1K_V1))
 def mnasnet1_3(
-    *, weights: MNASNet1_3_Weights | None = ..., progress: bool = ..., **kwargs: Any
+    *,
+    weights: MNASNet1_3_Weights | None = ...,
+    progress: bool = ...,
+    **kwargs: Any,
 ) -> MNASNet: ...

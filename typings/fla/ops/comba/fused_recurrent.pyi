@@ -10,7 +10,7 @@ import triton.language as tl
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def fused_recurrent_comba_fwd_kernel(

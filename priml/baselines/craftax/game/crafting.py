@@ -189,7 +189,10 @@ def craft(state: EnvState, action: Tensor) -> EnvState:
                 making,
             )
     return _craft_armour(
-        state, action, near_table=near_table, near_furnace=near_furnace
+        state,
+        action,
+        near_table=near_table,
+        near_furnace=near_furnace,
     )
 
 

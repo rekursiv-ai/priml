@@ -21,10 +21,16 @@ class LPIPS(nn.Module):
         verbose=...,
     ) -> None: ...
     def forward(
-        self, in0, in1, retPerLayer=..., normalize=...
+        self,
+        in0,
+        in1,
+        retPerLayer=...,
+        normalize=...,
     ) -> tuple[Any | Literal[0], list[Any]] | Literal[0]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[Any | Literal[0], list[Any]] | Literal[0]: ...
 
 class ScalingLayer(nn.Module):

@@ -221,12 +221,20 @@ class ChunkABCFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def forward(
-        ctx, q, k, v, s, initial_state, output_final_state
+        ctx,
+        q,
+        k,
+        v,
+        s,
+        initial_state,
+        output_final_state,
     ) -> tuple[Tensor, tuple[Any, Any] | None]: ...
     @staticmethod
     @input_guard
     def backward(
-        ctx, dov, dht=...
+        ctx,
+        dov,
+        dht=...,
     ) -> tuple[Tensor, Tensor, Any, Tensor, None, None]: ...
 
 @torch.compiler.disable

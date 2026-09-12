@@ -254,7 +254,8 @@ class TrainStep:
         for reusing cast weights within a forward (perf)."""
 
     def __init__[ModelConfigT: Makeable[nn.Module]](
-        self, config: Config[ModelConfigT]
+        self,
+        config: Config[ModelConfigT],
     ) -> None:
         self.config = config
 

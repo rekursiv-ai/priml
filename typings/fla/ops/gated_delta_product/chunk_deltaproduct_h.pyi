@@ -13,7 +13,7 @@ NUM_WARPS = ...
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -57,7 +57,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
         "USE_INITIAL_STATE": lambda args: args["dh0"] is not None,
         "USE_FINAL_STATE_GRADIENT": lambda args: args["dht"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[

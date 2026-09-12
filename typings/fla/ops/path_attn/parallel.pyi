@@ -10,15 +10,35 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, w, beta, g, scale, cu_seqlens, use_cache=...
+        ctx,
+        q,
+        k,
+        v,
+        w,
+        beta,
+        g,
+        scale,
+        cu_seqlens,
+        use_cache=...,
     ) -> tuple[Tensor, Tensor | None]: ...
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(
-        ctx, do, dk_new
+        ctx,
+        do,
+        dk_new,
     ) -> tuple[
-        Tensor, Tensor, Any, Tensor, Tensor, Tensor | Any | None, None, None, None, None
+        Tensor,
+        Tensor,
+        Any,
+        Tensor,
+        Tensor,
+        Tensor | Any | None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 @torch.compiler.disable

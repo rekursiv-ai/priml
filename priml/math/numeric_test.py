@@ -839,7 +839,8 @@ def test_log_cosh_never_nan_for_finite_real_input() -> None:
 
 
 @pytest.mark.parametrize(
-    "dtype", [torch.float64, torch.float32, torch.float16, torch.bfloat16]
+    "dtype",
+    [torch.float64, torch.float32, torch.float16, torch.bfloat16],
 )
 def test_log_cosh_gradient_never_nan(dtype: torch.dtype) -> None:
     """Gradient is tanh(x): finite everywhere (and +-1 at +-inf), never NaN."""
@@ -848,7 +849,10 @@ def test_log_cosh_gradient_never_nan(dtype: torch.dtype) -> None:
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
     torch.testing.assert_close(
-        x.grad.float(), torch.tanh(x.detach().float()), atol=2e-2, rtol=2e-2
+        x.grad.float(),
+        torch.tanh(x.detach().float()),
+        atol=2e-2,
+        rtol=2e-2,
     )
     # +-inf inputs give finite +-1 gradients, not NaN.
     xinf = torch.tensor([float("inf"), float("-inf")], requires_grad=True)
@@ -1068,7 +1072,8 @@ def test_safe_pow_propagates_nan_like_its_siblings() -> None:
 
 
 @pytest.mark.parametrize(
-    "dtype", [torch.float64, torch.float32, torch.bfloat16, torch.float16]
+    "dtype",
+    [torch.float64, torch.float32, torch.bfloat16, torch.float16],
 )
 def test_smoothstep_inverse_is_finite_at_the_boundaries(dtype: torch.dtype) -> None:
     """The Newton guard must scale with the dtype, not be a fixed literal.

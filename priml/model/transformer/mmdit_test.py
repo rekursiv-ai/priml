@@ -297,7 +297,8 @@ def test_mmdit_block_bfb(device: str) -> None:
         golden_name="mmdit_block",
         build_module=lambda: _canonical_mmdit_config().make().to(device),
         build_input=lambda: move_to_device(
-            [torch.randn(2, 3, 8), torch.randn(2, 2, 8)], device
+            [torch.randn(2, 3, 8), torch.randn(2, 2, 8)],
+            device,
         ),
         seed=0,
         run=lambda module, streams: torch.cat(module(streams), dim=-2),
@@ -370,7 +371,8 @@ def test_native_stream_loading_matches_transformer_and_freezes_independently() -
     torch.optim.SGD(mixed.parameters(), lr=0.1).step()
     assert torch.equal(before["ffns.0.up_proj.weight"], mixed.ffns[0].up_proj.weight)
     assert not torch.equal(
-        before["ffns.1.up_proj.weight"], mixed.ffns[1].up_proj.weight
+        before["ffns.1.up_proj.weight"],
+        mixed.ffns[1].up_proj.weight,
     )
 
 
@@ -471,7 +473,8 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
         model.load_stream(0, source=source_cfg.make())
     with pytest.raises(ValueError, match="explicit"):
         _cfg(channels_in=8, num_heads=2).make().load_stream(
-            0, source=_native_stream_config().make()
+            0,
+            source=_native_stream_config().make(),
         )
 
 

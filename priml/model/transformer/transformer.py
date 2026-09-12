@@ -53,7 +53,7 @@ class Transformer(nn.Module):
         """Input projection or embedding; None accepts hidden states directly."""
 
         block: TensorBlockConfig | list[TensorBlockConfig] = field(
-            default_factory=TransformerBlock.Config
+            default_factory=TransformerBlock.Config,
         )
         """Block template or explicit per-layer list of length num_layers."""
 
@@ -142,7 +142,7 @@ class Transformer(nn.Module):
             raise TypeError("A finalized Transformer config must contain a block list.")
         if len(config.block) != config.num_layers:
             raise ValueError(
-                f"block list length {len(config.block)} != num_layers={config.num_layers}."
+                f"block list length {len(config.block)} != num_layers={config.num_layers}.",
             )
         super().__init__()
         self.channels_in = config.channels_in

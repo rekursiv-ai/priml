@@ -471,7 +471,9 @@ def test_shares_storage_for_compile_matches_eager_under_fullgraph() -> None:
 
     torch._dynamo.reset()
     compiled = torch.compile(
-        shares_storage_for_compile, fullgraph=True, backend=_TRACE_ONLY
+        shares_storage_for_compile,
+        fullgraph=True,
+        backend=_TRACE_ONLY,
     )
     for name, (x, y) in cases.items():
         assert bool(compiled(x, y)) is shares_storage(x, y), name
@@ -505,7 +507,8 @@ def test_shares_storage_for_compile_branches_without_a_graph_break() -> None:
     torch._dynamo.reset()
     compiled = torch.compile(branchy, fullgraph=True, backend=_TRACE_ONLY)
     torch.testing.assert_close(
-        compiled(parent[2:5], parent), torch.tensor([3.0, 4.0, 5.0])
+        compiled(parent[2:5], parent),
+        torch.tensor([3.0, 4.0, 5.0]),
     )
     torch.testing.assert_close(compiled(parent.clone(), parent), parent * 2.0)
 

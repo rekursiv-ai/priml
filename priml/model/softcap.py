@@ -72,10 +72,16 @@ class SoftCap(nn.Module):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             propagate_attr(
-                self.inner, "channels_in", self.channels_in, protocol=ChannelsIn
+                self.inner,
+                "channels_in",
+                self.channels_in,
+                protocol=ChannelsIn,
             )
             propagate_attr(
-                self.inner, "channels_out", self.channels_out, protocol=ChannelsOut
+                self.inner,
+                "channels_out",
+                self.channels_out,
+                protocol=ChannelsOut,
             )
             return super().finalize()
 

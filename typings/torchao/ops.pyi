@@ -72,11 +72,17 @@ def unpack_tensor_core_tiled_layout(packed_w: Tensor, inner_k_tiles: int) -> Ten
 @register_custom_op("torchao::unpack_tensor_core_tiled_layout")
 def _(packed_w: Tensor, inner_k_tiles: int) -> Tensor: ...
 def dequantize_tensor_core_tiled_layout(
-    packed_w: Tensor, scales_and_zeros: Tensor, group_size: int, inner_k_tiles: int
+    packed_w: Tensor,
+    scales_and_zeros: Tensor,
+    group_size: int,
+    inner_k_tiles: int,
 ) -> Tensor: ...
 @register_custom_op("torchao::dequantize_tensor_core_tiled_layout")
 def _(
-    packed_w: Tensor, scales_and_zeros: Tensor, group_size: int, inner_k_tiles: int
+    packed_w: Tensor,
+    scales_and_zeros: Tensor,
+    group_size: int,
+    inner_k_tiles: int,
 ) -> Tensor: ...
 def marlin_24_gemm(
     x: Tensor,
@@ -221,11 +227,17 @@ def _(
 ):  # -> Tensor:
     ...
 def swizzle_mm(
-    mat1: Tensor, mat2: Tensor, mat1_is_swizzled: bool, mat2_is_swizzled: bool
+    mat1: Tensor,
+    mat2: Tensor,
+    mat1_is_swizzled: bool,
+    mat2_is_swizzled: bool,
 ) -> Tensor: ...
 @register_custom_op("torchao::swizzle_mm")
 def _(
-    mat1: Tensor, mat2: Tensor, mat1_is_swizzled: bool, mat2_is_swizzled: bool
+    mat1: Tensor,
+    mat2: Tensor,
+    mat1_is_swizzled: bool,
+    mat2_is_swizzled: bool,
 ) -> Tensor: ...
 def swizzle_scaled_mm(
     mat1: Tensor,
@@ -252,18 +264,26 @@ def _(
 ) -> Tensor: ...
 @register_custom_op("torchao::mx_fp8_bf16")
 def meta_mx_fp8_bf16(
-    A: Tensor, B: Tensor, A_scale: Tensor, B_scale: Tensor
+    A: Tensor,
+    B: Tensor,
+    A_scale: Tensor,
+    B_scale: Tensor,
 ):  # -> Tensor:
     ...
 def mx_fp4_bf16(A: Tensor, B: Tensor, A_scale: Tensor, B_scale: Tensor):  # -> Any:
     ...
 @register_custom_op("torchao::mx_fp4_bf16")
 def meta_mx_fp4_bf16(
-    A: Tensor, B: Tensor, A_scale: Tensor, B_scale: Tensor
+    A: Tensor,
+    B: Tensor,
+    A_scale: Tensor,
+    B_scale: Tensor,
 ):  # -> Tensor:
     ...
 def da8w4_linear_prepack_cpu(
-    weight: Tensor, scales: Tensor, qzeros: Tensor
+    weight: Tensor,
+    scales: Tensor,
+    qzeros: Tensor,
 ) -> Tensor: ...
 @register_custom_op("torchao::da8w4_linear_prepack_cpu")
 def _(weight: Tensor, scales: Tensor, qzeros: Tensor) -> Tensor: ...

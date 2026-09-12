@@ -45,18 +45,25 @@ class FromIntXQuantizationAwareTrainingConfig(AOBaseConfig):
         ...
 
 class from_intx_quantization_aware_training(
-    FromIntXQuantizationAwareTrainingConfig
+    FromIntXQuantizationAwareTrainingConfig,
 ): ...
 
 class ComposableQATQuantizer(TwoStepQuantizer):
     def __init__(self, quantizers: list[TwoStepQuantizer]) -> None: ...
     def prepare(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def convert(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
 
 def initialize_fake_quantizers(
-    model: torch.nn.Module, example_inputs: tuple[Any, ...]
+    model: torch.nn.Module,
+    example_inputs: tuple[Any, ...],
 ) -> None: ...

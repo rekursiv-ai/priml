@@ -68,7 +68,7 @@ class ShuffleNet_V2_X2_0_Weights(WeightsEnum):
 
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", ShuffleNet_V2_X0_5_Weights.IMAGENET1K_V1)
+    weights=("pretrained", ShuffleNet_V2_X0_5_Weights.IMAGENET1K_V1),
 )
 def shufflenet_v2_x0_5(
     *,
@@ -78,7 +78,7 @@ def shufflenet_v2_x0_5(
 ) -> ShuffleNetV2: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", ShuffleNet_V2_X1_0_Weights.IMAGENET1K_V1)
+    weights=("pretrained", ShuffleNet_V2_X1_0_Weights.IMAGENET1K_V1),
 )
 def shufflenet_v2_x1_0(
     *,
@@ -88,7 +88,7 @@ def shufflenet_v2_x1_0(
 ) -> ShuffleNetV2: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", ShuffleNet_V2_X1_5_Weights.IMAGENET1K_V1)
+    weights=("pretrained", ShuffleNet_V2_X1_5_Weights.IMAGENET1K_V1),
 )
 def shufflenet_v2_x1_5(
     *,
@@ -98,7 +98,7 @@ def shufflenet_v2_x1_5(
 ) -> ShuffleNetV2: ...
 @register_model()
 @handle_legacy_interface(
-    weights=("pretrained", ShuffleNet_V2_X2_0_Weights.IMAGENET1K_V1)
+    weights=("pretrained", ShuffleNet_V2_X2_0_Weights.IMAGENET1K_V1),
 )
 def shufflenet_v2_x2_0(
     *,

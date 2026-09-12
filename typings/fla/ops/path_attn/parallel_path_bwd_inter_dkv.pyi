@@ -10,7 +10,7 @@ import triton.language as tl
     {
         "USE_GATE": lambda args: args["g_cumsum"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def parallel_path_bwd_dkv_kernel(

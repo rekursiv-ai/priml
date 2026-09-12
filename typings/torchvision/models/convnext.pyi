@@ -38,7 +38,10 @@ class CNBlock(nn.Module):
 
 class CNBlockConfig:
     def __init__(
-        self, input_channels: int, out_channels: int | None, num_layers: int
+        self,
+        input_channels: int,
+        out_channels: int | None,
+        num_layers: int,
     ) -> None: ...
 
 class ConvNeXt(nn.Module):

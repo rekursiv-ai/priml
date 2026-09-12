@@ -110,10 +110,14 @@ def test_votes_accumulate_across_batches() -> None:
     wrong[0, 0] = 7
     identifiers = torch.zeros(1, dtype=torch.int64)
     metric.update(
-        _packed(wrong, torch.zeros(1)), label=labels, puzzle_identifiers=identifiers
+        _packed(wrong, torch.zeros(1)),
+        label=labels,
+        puzzle_identifiers=identifiers,
     )
     metric.update(
-        _packed(wrong, torch.zeros(1)), label=labels, puzzle_identifiers=identifiers
+        _packed(wrong, torch.zeros(1)),
+        label=labels,
+        puzzle_identifiers=identifiers,
     )
     metric.update(
         _packed(labels.clone(), torch.zeros(1)),

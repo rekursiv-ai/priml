@@ -166,7 +166,7 @@ def test_meters_never_leave_their_range_over_a_long_life() -> None:
     state = _state()
     for _ in range(200):
         state = mechanics.clip_meters(
-            survival.update_intrinsics(state, _act(Action.NOOP))
+            survival.update_intrinsics(state, _act(Action.NOOP)),
         )
     assert float(state.player_food.min()) >= 0
     assert float(state.player_health.min()) >= 0
@@ -182,7 +182,7 @@ def test_an_unfed_player_eventually_dies() -> None:
     state.player_health[:] = 1
     for _ in range(100):
         state = mechanics.clip_meters(
-            survival.update_intrinsics(state, _act(Action.NOOP))
+            survival.update_intrinsics(state, _act(Action.NOOP)),
         )
     assert float(state.player_health.max()) == pytest.approx(0.0)
 

@@ -62,7 +62,7 @@ def test_load_local_checkpoint(tmp_path: Path, tie: bool, dtype: torch.dtype) ->
 
 def test_load_rejects_other_qwen_families(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text(
-        json.dumps(_hf_config(model_type="qwen3_moe"))
+        json.dumps(_hf_config(model_type="qwen3_moe")),
     )
     torch.save({}, tmp_path / "pytorch_model.bin")
     with pytest.raises(ValueError, match="model_type"):

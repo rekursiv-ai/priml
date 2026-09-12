@@ -14,7 +14,7 @@ import triton.language as tl
         "USE_SINK_BIAS": lambda args: args["sink_bias"] is not None,
         "USE_WINDOW": lambda args: args["W"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit
 def parallel_attn_fwd_kernel(
@@ -47,14 +47,18 @@ def parallel_attn_fwd_kernel(
 ): ...
 @triton.jit
 def parallel_attn_bwd_kernel_preprocess(
-    o, do, delta, B: tl.constexpr, V: tl.constexpr
+    o,
+    do,
+    delta,
+    B: tl.constexpr,
+    V: tl.constexpr,
 ): ...
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g_cumsum"] is not None,
         "USE_WINDOW": lambda args: args["W"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def parallel_attn_bwd_kernel_dq(
@@ -91,7 +95,7 @@ def parallel_attn_bwd_kernel_dq(
         "USE_G": lambda args: args["g_cumsum"] is not None,
         "USE_WINDOW": lambda args: args["W"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def parallel_attn_bwd_kernel_dkv(
@@ -160,15 +164,33 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @contiguous
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices=...
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        sink_bias,
+        scale,
+        window_size,
+        cu_seqlens,
+        chunk_indices=...,
     ) -> Tensor: ...
     @staticmethod
     @contiguous
     @autocast_custom_bwd
     def backward(
-        ctx, do
+        ctx,
+        do,
     ) -> tuple[
-        Tensor, Tensor, Tensor, Tensor | Any, Tensor | None, None, None, None, None
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor | Any,
+        Tensor | None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 def parallel_attn(

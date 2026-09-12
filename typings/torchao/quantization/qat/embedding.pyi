@@ -39,10 +39,16 @@ class Int4WeightOnlyEmbeddingQATQuantizer(TwoStepQuantizer):
         zero_point_precision: torch.dtype = ...,
     ) -> None: ...
     def prepare(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
     def convert(
-        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+        self,
+        model: torch.nn.Module,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.nn.Module: ...
 
 class Int4WeightOnlyQATEmbedding(FakeQuantizedEmbedding):

@@ -28,5 +28,9 @@ class ReBasedLinearAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> Any: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
     def forward_reference(
-        self, hidden_states: torch.Tensor, filters: torch.Tensor = ..., *args, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        filters: torch.Tensor = ...,
+        *args,
+        **kwargs,
     ) -> Any: ...

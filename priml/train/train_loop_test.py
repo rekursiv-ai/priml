@@ -885,7 +885,8 @@ def test_a_resume_with_nothing_left_to_do_says_so(
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
         _seed_checkpoints(
-            checkpoint_dir, seeded_checkpoints
+            checkpoint_dir,
+            seeded_checkpoints,
         )  # Trains to max_steps and saves step_20.
 
         cfg = _resume_table_config(checkpoint_dir)
@@ -1272,7 +1273,7 @@ class TestFinalize:
         assert finalized.working_dir == Path("/opt/scratch/runs/my_project/exp000")
         assert isinstance(finalized.checkpointing, Checkpointer.Config)
         assert finalized.checkpointing.working_dir == Path(
-            "/opt/scratch/runs/my_project/exp000/checkpoints"
+            "/opt/scratch/runs/my_project/exp000/checkpoints",
         )
         assert isinstance(finalized.phase_timer, PhaseTimer.Config)
         assert finalized.phase_timer.working_dir == Path("/explicit/child")
@@ -1287,7 +1288,7 @@ class TestFinalize:
 
         assert isinstance(finalized.profiling, TorchProfiling.Config)
         assert finalized.profiling.working_dir == Path(
-            "/opt/scratch/runs/my_project/exp000/profiling"
+            "/opt/scratch/runs/my_project/exp000/profiling",
         )
 
     def test_explicit_profiling_base_dir_wins(self, tmp_path: Path) -> None:
@@ -1314,7 +1315,7 @@ class TestFinalize:
 
         assert isinstance(finalized.checkpointing, Checkpointer.Config)
         assert finalized.checkpointing.working_dir == Path(
-            "/opt/scratch/runs/my_project/exp000/checkpoints"
+            "/opt/scratch/runs/my_project/exp000/checkpoints",
         )
 
     def test_explicit_base_dir_propagates_to_checkpointing(
@@ -1355,7 +1356,7 @@ class TestFinalize:
 
         assert isinstance(finalized.checkpointing, Checkpointer.Config)
         assert finalized.checkpointing.working_dir == Path(
-            "/opt/scratch/runs/checkpoints"
+            "/opt/scratch/runs/checkpoints",
         )
 
     def test_doc_is_sent_to_tracker_via_log_notes(self):
@@ -1539,7 +1540,9 @@ def test_result_line_shows_seconds_a_budget_declined_to_charge(
     config.num_steps_eval = 100  # Finite (RESULT fires) but no cadence eval in 2 steps.
     loop = config.make()
     monkeypatch.setattr(
-        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=100.0)
+        loop.step,
+        "train_step",
+        _timed_train_step(loop, clock, first_step_time=100.0),
     )
     # A budgeted step: it charges only part of the second its update took.
     loop.step.elapsed_sec = 0.4
@@ -1726,7 +1729,10 @@ def _make_max_time_loop_config() -> TrainLoop.Config:
 # The first step takes ``first_step_time`` (simulating the backward-graph compile);
 # every later step takes 1s.
 def _timed_train_step(
-    loop: TrainLoop, clock: _FakeClock, *, first_step_time: float
+    loop: TrainLoop,
+    clock: _FakeClock,
+    *,
+    first_step_time: float,
 ) -> Callable[..., dict[str, Any]]:
     """Wrap the loop's train_step to advance ``clock`` by a scripted duration."""
     inner = loop.step.train_step
@@ -1751,7 +1757,9 @@ def test_max_time_wall_counts_first_step_compile(
     monkeypatch.setattr(time, "perf_counter", clock)
     loop = _make_max_time_loop_config().make()
     monkeypatch.setattr(
-        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=100.0)
+        loop.step,
+        "train_step",
+        _timed_train_step(loop, clock, first_step_time=100.0),
     )
 
     loop.train()
@@ -1769,7 +1777,9 @@ def test_max_time_train_kind_excludes_first_step_compile(
     config.max_time_kind = "train"
     loop = config.make()
     monkeypatch.setattr(
-        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=100.0)
+        loop.step,
+        "train_step",
+        _timed_train_step(loop, clock, first_step_time=100.0),
     )
 
     loop.train()
@@ -1789,7 +1799,9 @@ def test_max_time_train_kind_excludes_cadence_eval_time(
     config.num_steps_eval = 5
     loop = config.make()
     monkeypatch.setattr(
-        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=1.0)
+        loop.step,
+        "train_step",
+        _timed_train_step(loop, clock, first_step_time=1.0),
     )
     eval_calls: list[int] = []
 
@@ -1819,7 +1831,9 @@ def test_max_time_train_kind_excludes_epoch_boundary_eval_time(
     config.eval_every_epoch = True  # 8 samples / batch 4 -> eval every 2 steps.
     loop = config.make()
     monkeypatch.setattr(
-        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=1.0)
+        loop.step,
+        "train_step",
+        _timed_train_step(loop, clock, first_step_time=1.0),
     )
     eval_calls: list[int] = []
 
@@ -1848,7 +1862,9 @@ def test_train_metrics_include_pure_train_elapsed(
     config.tracker = _RecordingTracker.Config()
     loop = config.make()
     monkeypatch.setattr(
-        loop.step, "train_step", _timed_train_step(loop, clock, first_step_time=100.0)
+        loop.step,
+        "train_step",
+        _timed_train_step(loop, clock, first_step_time=100.0),
     )
 
     loop.train()
@@ -2851,7 +2867,9 @@ def test_file_tracker_creates_parent_dirs(tmp_path: Path) -> None:
     """A nested FileTracker path has its parent directories created."""
     target = tmp_path / "nested" / "dir" / "metrics.json"
     FileTracker.Config(working_dir=str(target)).make().log_metrics(
-        {"score": 1.0}, 12, prefix="eval/"
+        {"score": 1.0},
+        12,
+        prefix="eval/",
     )
 
     assert json.loads(target.read_text()) == {"eval/score": 1.0}

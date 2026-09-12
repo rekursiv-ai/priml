@@ -310,7 +310,8 @@ def sample(
     *,
     noise_last_step: bool = False,
     wrap_steps: Callable[
-        [Iterable[SampleResult]], Iterable[SampleResult]
+        [Iterable[SampleResult]],
+        Iterable[SampleResult],
     ] = lambda it: it,
 ) -> SampleResult:
     """Run a diffusion `onestep_fn` to completion and return the final step.

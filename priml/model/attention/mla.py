@@ -383,7 +383,7 @@ class MultiHeadLatentAttention(nn.Module):
         ):
             raise ValueError(
                 f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}."
+                f"channels_out={config.channels_out} for {type(self).__name__}.",
             )
         super().__init__()
         if config.dropout < 0.0 or config.dropout > 1.0:
@@ -679,7 +679,9 @@ class MultiHeadLatentAttention(nn.Module):
         head_rows = qk_nope + self.channels_v_head
         lo = self._head_offset * head_rows
         w = self.kv_b_proj.weight[lo : lo + h_local * head_rows].view(
-            h_local, head_rows, self.kv_lora_rank
+            h_local,
+            head_rows,
+            self.kv_lora_rank,
         )
         out_per_head = self.attn_kernel(
             q_nope,
@@ -784,7 +786,8 @@ class MultiHeadLatentAttention(nn.Module):
         # the fused flash kernel has no DTensor sharding strategy and dies deep
         # in the dispatcher rather than here, naming a stride.
         if isinstance(self.attn_kernel, LatentAttention) and isinstance(
-            self.attn_kernel.attn_kernel, SdpaFused
+            self.attn_kernel.attn_kernel,
+            SdpaFused,
         ):
             raise ValueError(  # noqa: TRY004  -- unsupported config, not a type error
                 "Tensor parallelism requires a DTensor-compatible attention "

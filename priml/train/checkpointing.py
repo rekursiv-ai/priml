@@ -560,7 +560,7 @@ class Checkpointer:
             rendered_filename = config.filename.format(step=0)
         except (IndexError, KeyError, ValueError) as error:
             raise ValueError(
-                f"invalid checkpoint filename template: {config.filename!r}"
+                f"invalid checkpoint filename template: {config.filename!r}",
             ) from error
         prefix: list[str] = []
         suffix: list[str] = []
@@ -578,22 +578,22 @@ class Checkpointer:
             ):
                 raise ValueError(
                     "filename must contain exactly one decimal {step} field, got "
-                    f"{config.filename!r}"
+                    f"{config.filename!r}",
                 )
             found_step = True
         if not found_step:
             raise ValueError(
                 "filename must contain exactly one decimal {step} field, got "
-                f"{config.filename!r}"
+                f"{config.filename!r}",
             )
         if Path(rendered_filename).name != rendered_filename:
             raise ValueError(
-                f"checkpoint filename must not contain a directory: {config.filename!r}"
+                f"checkpoint filename must not contain a directory: {config.filename!r}",
             )
         self.checkpoint_dir = Path(config.working_dir)
         self.filename = config.filename
         self._filename_pattern = re.compile(
-            rf"{re.escape(''.join(prefix))}(?P<step>\d+){re.escape(''.join(suffix))}"
+            rf"{re.escape(''.join(prefix))}(?P<step>\d+){re.escape(''.join(suffix))}",
         )
         self.save_every = config.save_every
         self.keep_last_n = config.keep_last_n
@@ -785,7 +785,9 @@ class Checkpointer:
                 continue  # Malformed (e.g. ``step_latest.pt``) or a temp file.
             out.append(
                 _Checkpoint(
-                    step=step, path=entry, complete=self.storage.is_complete(entry)
+                    step=step,
+                    path=entry,
+                    complete=self.storage.is_complete(entry),
                 ),
             )
         out.sort(key=lambda c: c.step)

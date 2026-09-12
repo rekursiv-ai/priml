@@ -12,7 +12,13 @@ def get_meta_lib(): ...
 def register_meta(op_name, overload_name=...): ...
 @register_meta("roi_align")
 def meta_roi_align(
-    input, rois, spatial_scale, pooled_height, pooled_width, sampling_ratio, aligned
+    input,
+    rois,
+    spatial_scale,
+    pooled_height,
+    pooled_width,
+    sampling_ratio,
+    aligned,
 ): ...
 @register_meta("_roi_align_backward")
 def meta_roi_align_backward(
@@ -30,7 +36,12 @@ def meta_roi_align_backward(
 ): ...
 @register_meta("ps_roi_align")
 def meta_ps_roi_align(
-    input, rois, spatial_scale, pooled_height, pooled_width, sampling_ratio
+    input,
+    rois,
+    spatial_scale,
+    pooled_height,
+    pooled_width,
+    sampling_ratio,
 ): ...
 @register_meta("_ps_roi_align_backward")
 def meta_ps_roi_align_backward(

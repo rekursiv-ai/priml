@@ -101,7 +101,9 @@ def _load(
     """Resume the checkpoint selected by ``resume_step``; return the restored state."""
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=checkpoint_dir, resume_step=resume_step, **config
+            working_dir=checkpoint_dir,
+            resume_step=resume_step,
+            **config,
         ),
     )
     target = _DictTarget({} if into is None else into)
@@ -114,7 +116,8 @@ def _load(
 
 
 def test_save_logs_size_and_duration(
-    temp_checkpoint_dir: Path, caplog: pytest.LogCaptureFixture
+    temp_checkpoint_dir: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A successful save reports path, on-disk size, and duration (telemetry)."""
     ckpt = Checkpointer(
@@ -130,7 +133,9 @@ def test_save_logs_size_and_duration(
 def test_init_validates_and_sets_fields(temp_checkpoint_dir: Path) -> None:
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=100, keep_last_n=3
+            working_dir=temp_checkpoint_dir,
+            save_every=100,
+            keep_last_n=3,
         ),
     )
     assert ckpt.checkpoint_dir == temp_checkpoint_dir
@@ -186,7 +191,9 @@ def test_load_returns_false_when_empty(temp_checkpoint_dir: Path) -> None:
 def test_save_prunes_to_keep_last_n(temp_checkpoint_dir: Path) -> None:
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=100, keep_last_n=2
+            working_dir=temp_checkpoint_dir,
+            save_every=100,
+            keep_last_n=2,
         ),
     )
     for step in (100, 200, 300, 400):
@@ -212,7 +219,9 @@ def test_keep_every_exempts_archival_checkpoints(temp_checkpoint_dir: Path) -> N
 def test_keep_every_zero_keeps_prior_behavior(temp_checkpoint_dir: Path) -> None:
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=100, keep_last_n=2
+            working_dir=temp_checkpoint_dir,
+            save_every=100,
+            keep_last_n=2,
         ),
     )
     for step in (100, 200, 300, 400):
@@ -307,7 +316,8 @@ def test_rejects_nonpositive_save_every(temp_checkpoint_dir: Path) -> None:
         with pytest.raises(ValueError, match="save_every"):
             Checkpointer(
                 Checkpointer.Config(
-                    working_dir=temp_checkpoint_dir, save_every=save_every
+                    working_dir=temp_checkpoint_dir,
+                    save_every=save_every,
                 ),
             )
 
@@ -317,7 +327,8 @@ def test_rejects_invalid_keep_last_n(temp_checkpoint_dir: Path) -> None:
         with pytest.raises(ValueError, match="keep_last_n"):
             Checkpointer(
                 Checkpointer.Config(
-                    working_dir=temp_checkpoint_dir, keep_last_n=keep_last_n
+                    working_dir=temp_checkpoint_dir,
+                    keep_last_n=keep_last_n,
                 ),
             )
 
@@ -340,7 +351,9 @@ def test_prune_ignores_incomplete_checkpoints(temp_checkpoint_dir: Path) -> None
     """
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=10, keep_last_n=2
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            keep_last_n=2,
         ),
     )
     _save(ckpt, 10, {"step": 10})
@@ -384,7 +397,9 @@ def test_load_guard_detects_overlap(temp_checkpoint_dir: Path) -> None:
     # Fresh run (resume=False, start_step=0): future saves would overwrite 10, 20.
     fresh = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=10, resume=False
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            resume=False,
         ),
     )
     with pytest.raises(RuntimeError, match="would overwrite existing"):
@@ -392,7 +407,9 @@ def test_load_guard_detects_overlap(temp_checkpoint_dir: Path) -> None:
     # Resuming from step 20: only steps > 20 are checked, none exist -> no raise.
     resumed = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=10, resume_step=20
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            resume_step=20,
         ),
     )
     assert resumed.load(_DictTarget({}), max_steps=100, guard=True)
@@ -402,7 +419,9 @@ def test_load_guard_ignores_incomplete(temp_checkpoint_dir: Path) -> None:
     """A crashed partial is overwritable, not work worth protecting."""
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=10, resume=False
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            resume=False,
         ),
     )
     _incomplete_shard(temp_checkpoint_dir, 20)
@@ -420,7 +439,9 @@ def test_load_guard_finite_with_inf_max_steps(temp_checkpoint_dir: Path) -> None
     )
     ckpt = Checkpointer(
         Checkpointer.Config(
-            working_dir=temp_checkpoint_dir, save_every=10, resume=False
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            resume=False,
         ),
     )
     with pytest.raises(RuntimeError, match="would overwrite existing"):
@@ -538,7 +559,8 @@ def test_async_reads_a_sync_written_plain_file(
     assert path.is_file(), "sync plain write should be a .pt file, not a dir"
 
     loaded = AsyncLocalStateDictStorer().read(
-        path, {"x": torch.zeros(3, dtype=torch.long)}
+        path,
+        {"x": torch.zeros(3, dtype=torch.long)},
     )
     # A plain ``.pt`` load maps storages onto the current device (CUDA when
     # present), so compare values on CPU rather than assuming the saved device.
@@ -566,7 +588,8 @@ def test_plain_file_read_maps_to_current_device(
         SyncLocalStateDictStorer().write(path, {"x": torch.ones(4, device="cuda")})
     with torch.cuda.device(1):
         loaded = SyncLocalStateDictStorer().read(
-            path, {"x": torch.zeros(4, device="cuda")}
+            path,
+            {"x": torch.zeros(4, device="cuda")},
         )
     assert loaded["x"].device == torch.device("cuda", 1)
 
@@ -732,7 +755,7 @@ def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
             ),
         )
         save_target = _DictTarget(
-            {"model": model.state_dict(), "opt": optimizer.state_dict()}
+            {"model": model.state_dict(), "opt": optimizer.state_dict()},
         )
         # Force-save each step: exercises the collective broadcast in save()
         # interleaved with the async storer's barriers (regression: must not
@@ -743,7 +766,7 @@ def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
         # Retention kept the newest complete checkpoint.
         steps = ckpt.available_steps()
         load_target = _DictTarget(
-            {"model": model.state_dict(), "opt": optimizer.state_dict()}
+            {"model": model.state_dict(), "opt": optimizer.state_dict()},
         )
         merged = ckpt.load(load_target, max_steps=1e9, guard=False)
         ok = steps == [2] and merged
@@ -816,7 +839,7 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
 
         reload_model, reload_opt = _shard_and_step(mesh)
         target = _DictTarget(
-            {"model": reload_model.state_dict(), "opt": reload_opt.state_dict()}
+            {"model": reload_model.state_dict(), "opt": reload_opt.state_dict()},
         )
         loaded = ckpt.load(target, max_steps=1e9, guard=False)
         merged = target.loaded

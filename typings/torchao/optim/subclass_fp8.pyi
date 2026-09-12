@@ -18,7 +18,11 @@ class OptimStateFp8(TorchAOBaseTensor):
         ...
     @classmethod
     def __tensor_unflatten__(
-        cls, tensor_data_dict, tensor_attributes, outer_size=..., outer_stride=...
+        cls,
+        tensor_data_dict,
+        tensor_attributes,
+        outer_size=...,
+        outer_stride=...,
     ):  # -> Self:
         ...
     def dequantize(self, output_dtype=...):  # -> Tensor:
@@ -47,7 +51,7 @@ def _(func, types, args, kwargs):  # -> OptimStateFp8:
         c10d_functional.wait_tensor.default,
         _c10d_functional.wait_tensor.default,
         aten.detach.default,
-    ]
+    ],
 )
 def _(func, types, args, kwargs):  # -> OptimStateFp8:
     ...

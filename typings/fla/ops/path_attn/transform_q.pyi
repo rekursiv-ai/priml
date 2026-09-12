@@ -26,5 +26,12 @@ def transform_q_fwd_kernel(
     IS_VARLEN: tl.constexpr,
 ): ...
 def transform_q_fwd_fn(
-    q, w1, w2, cu_seqlens, BT, BS, S, chunk_indices: torch.LongTensor | None = ...
+    q,
+    w1,
+    w2,
+    cu_seqlens,
+    BT,
+    BS,
+    S,
+    chunk_indices: torch.LongTensor | None = ...,
 ) -> Tensor: ...
