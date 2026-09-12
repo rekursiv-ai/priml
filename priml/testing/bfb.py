@@ -168,6 +168,18 @@ class _TorchProcessState:
 # (``scatter_add_``/``index_add_``/``embedding_dense_backward``, and
 # ``index_put_`` with ``accumulate=True``), which sum float32 in a host-dependent
 # order.
+#
+# Absence from this list upcasts an op only when it HAS a float32 argument. The
+# random factories (``rand``/``randn``/``normal``) have none -- their dtype is a
+# kwarg or the process default -- so they are named in ``_RANDOM_FACTORIES`` and
+# widened by that dtype instead. Sampling is arithmetic: a float32 ``randn`` of
+# 16+ elements runs torch's vectorized Box-Muller, whose ``log``/``cos`` come
+# from SLEEF under AVX2 and from libm elsewhere. Measured, x86 mint vs aarch64
+# replay with the identical generator state: up to 6 ULP on the draws. The
+# float64 fill uses libm ``double`` on every host, and the round to float32
+# absorbs its last-bit error like any other upcast op. In-place samplers
+# (``normal_``/``uniform_``/``bernoulli_``) already carry a tensor argument and
+# need no naming.
 _EXACT_F32_OPS: Final[dict[str, str]] = {
     "add": "arith",
     "add_": "arith",
@@ -242,6 +254,11 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
     "select_backward": "movement",
     "slice_backward": "movement",
 }
+
+# Tensorless aten samplers that produce a float tensor. Matched by overloadpacket
+# name like ``_EXACT_F32_OPS``; a ``normal`` overload with a tensor mean or std
+# already carries a float argument and takes the ordinary upcast path.
+_RANDOM_FACTORIES: Final = frozenset({"randn", "normal"})
 
 
 @contextmanager
@@ -905,7 +922,9 @@ class _Float64Compute(TorchDispatchMode):
     float32 argument and its overloadpacket name is NOT
     in ``_EXACT_F32_OPS``; the float32 args are widened to float64, the op runs,
     and float64 results are narrowed back to float32. Allowlisted ops (exact
-    elementwise arithmetic and pure data movement) pass through untouched.
+    elementwise arithmetic and pure data movement) pass through untouched. A
+    tensorless sampler in ``_RANDOM_FACTORIES`` is widened by its output dtype,
+    since it has no argument to read the width from.
 
     Upcast-by-default is the completeness guarantee: a transcendental or
     reduction absent from every list is still upcast, so it cannot silently mint
@@ -926,10 +945,19 @@ class _Float64Compute(TorchDispatchMode):
         input_dtypes: set[torch.dtype] = set()
         for value in (*args, *kwargs.values()):
             input_dtypes |= _floating_dtypes(value)
+        explicit_dtype = kwargs.get("dtype")
+        # A tensorless sampler's width is its dtype kwarg or the process default;
+        # see the note above ``_EXACT_F32_OPS``.
+        samples = _op_name(func) in _RANDOM_FACTORIES and not input_dtypes
+        if samples:
+            input_dtypes.add(
+                explicit_dtype
+                if isinstance(explicit_dtype, torch.dtype)
+                else torch.get_default_dtype()
+            )
         narrow = {dtype for dtype in input_dtypes if _is_narrow_float(dtype)}
         if exact or not narrow:
             return func(*args, **kwargs)
-        explicit_dtype = kwargs.get("dtype")
         target = (
             explicit_dtype
             if isinstance(explicit_dtype, torch.dtype)
@@ -937,7 +965,9 @@ class _Float64Compute(TorchDispatchMode):
         )
         up_args = tuple(_upcast(a) for a in args)
         up_kwargs = {k: _upcast(v) for k, v in kwargs.items()}
-        if isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype):
+        if samples or (
+            isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype)
+        ):
             up_kwargs["dtype"] = torch.float64
         result = func(*up_args, **up_kwargs)
         if any(
