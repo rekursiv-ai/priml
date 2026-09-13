@@ -222,7 +222,9 @@ class DeepRecurrence(nn.Module):
                     input_emb.detach(),
                     z_slow.detach(),
                     z_fast.detach(),
-                    _detach_pair(cos_sin),
+                    None
+                    if cos_sin is None
+                    else (cos_sin[0].detach(), cos_sin[1].detach()),
                 )
                 z_slow, z_fast = out.z_slow, out.z_fast
                 if collect_intermediates:
@@ -555,13 +557,6 @@ def _count_prefix_tokens(prefix: Makeable[nn.Module] | None) -> int:
         "num_tokens, so the model cannot size its sequence; add the field or "
         "set num_prefix_tokens explicitly.",
     )
-
-
-def _detach_pair(
-    pair: tuple[Tensor, Tensor] | None,
-) -> tuple[Tensor, Tensor] | None:
-    """Detach both halves of an optional tensor pair."""
-    return None if pair is None else (pair[0].detach(), pair[1].detach())
 
 
 def _latent_init(channels_in: int) -> Tensor:
