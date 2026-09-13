@@ -422,7 +422,7 @@ class EMA:
             )
             metadata = getattr(source, "_metadata", None)
             if metadata is not None:
-                cloned._metadata = metadata  # noqa: SLF001
+                cloned._metadata = metadata  # noqa: SLF001 -- EMA tests exercise the private parameter-swapping seam.
             return {
                 "shadow_model": cloned,
                 "global_step": self.global_step,
@@ -461,7 +461,7 @@ class EMA:
             )
             metadata = getattr(source, "_metadata", None)
             if metadata is not None:
-                cloned._metadata = metadata  # noqa: SLF001
+                cloned._metadata = metadata  # noqa: SLF001 -- EMA tests exercise the private parameter-swapping seam.
             if self.shadow_model is None:
                 self._pending_state = {"shadow_model": cloned}
             else:

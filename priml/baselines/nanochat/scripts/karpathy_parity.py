@@ -115,12 +115,12 @@ def clone_upstream(
     """
     if not (root / ".git").is_dir():
         root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- fixed URL and commit from the signature
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607
+        subprocess.run(  # noqa: S603 -- The parity harness invokes the fixed repository command from its signature.
+            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The parity harness uses fixed Git subcommands for the pinned reference.
             check=True,
         )
-        subprocess.run(  # noqa: S603 -- fixed URL and commit from the signature
-            ["git", "checkout", "--quiet", commit],  # noqa: S607
+        subprocess.run(  # noqa: S603 -- The parity harness invokes the fixed repository command from its signature.
+            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The parity harness uses fixed Git subcommands for the pinned reference.
             cwd=root,
             check=True,
         )
@@ -202,7 +202,7 @@ def their_schedules(root: Path, module: types.ModuleType) -> types.ModuleType:
     wanted = {"get_lr_multiplier", "get_muon_momentum", "get_weight_decay"}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            exec(  # noqa: S102 -- their own function definitions, from the pinned clone
+            exec(  # noqa: S102 -- The parity harness executes function definitions from the pinned reference clone.
                 compile(ast.Module([node], []), str(root / "train.py"), "exec"),
                 module.__dict__,
             )
@@ -255,7 +255,7 @@ def load_upstream(
     # Their own knob, at the value that ends their training loop as early as
     # their ``step > 10`` guard allows. Their context length is left alone.
     constants = importlib.import_module("constants")
-    constants.TIME_BUDGET = 1e-9  # ty: ignore[unresolved-attribute] -- dynamically imported module; attributes unknowable  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    constants.TIME_BUDGET = 1e-9  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and has no static attributes.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and has no static attributes.
     _prepare_module(corpus, loader)
 
     # Their 128 rows hold two resident models' activations on no card this runs
@@ -285,7 +285,7 @@ def load_upstream(
     # model is about to draw from. Ours is built from this same state, so the
     # two initializations compare as values rather than as spreads.
     with _capture_rng_after_seeding(rng), contextlib.suppress(_StopModuleScopeError):
-        exec(compile(source, str(root / "train.py"), "exec"), module.__dict__)  # noqa: S102 -- their own script, from the pinned clone
+        exec(compile(source, str(root / "train.py"), "exec"), module.__dict__)  # noqa: S102 -- The parity harness executes the pinned reference script unchanged.
     for required in ("GPT", "GPTConfig", "model", "optimizer"):
         if not hasattr(module, required):
             raise RuntimeError(f"train.py aborted before defining {required}")
@@ -636,7 +636,7 @@ def main() -> int:
         # from under the schedule. The momentum ramp is step-indexed, so the
         # count still has to be pinned to match theirs.
         ours.timer_step.global_count = index - 1
-        ours._apply_update()  # noqa: SLF001 -- the schedules live here, and the loop that calls it also owns the clock
+        ours._apply_update()  # noqa: SLF001 -- The parity comparison must invoke the implementation's private update hook.
         theirs.zero_grad(set_to_none=True)
         state_problems = compare_state(theirs, their_optimizer, ours, mapping)
         weight_problems = compare_all(
@@ -713,7 +713,7 @@ def compare_eval(
     # an argument, and the full 40 x 524,288 tokens take minutes to answer a
     # question a few batches settle.
     original = prepare.EVAL_TOKENS
-    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
     # Under autocast, as their own final eval runs it (train.py:609-611): their
     # tables are held in bfloat16, so the model is only runnable inside one.
     autocast = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -725,7 +725,7 @@ def compare_eval(
                 upstream.evaluate_bpb(_LossAdapter(ours.model), tokenizer, rows),
             )
     finally:
-        prepare.EVAL_TOKENS = original  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+        prepare.EVAL_TOKENS = original  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
 
     print(f"\n[eval] their metric: theirs={their_bpb:.9f} ours={our_bpb:.9f}")
     if their_bpb != our_bpb:
@@ -766,8 +766,8 @@ class _LossAdapter(nn.Module):
 
 def _git(root: Path, *arguments: str) -> str:
     """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- fixed read-only subcommands from the caller
-        ["git", *arguments],  # noqa: S607
+    return subprocess.run(  # noqa: S603 -- The parity harness invokes read-only subcommands supplied by its controlled caller.
+        ["git", *arguments],  # noqa: S607 -- The parity harness uses fixed Git subcommands for the pinned reference.
         cwd=root,
         capture_output=True,
         text=True,
@@ -787,7 +787,7 @@ def _kernels_stub() -> types.ModuleType:
             ),
         )
 
-    module.get_kernel = get_kernel  # ty: ignore[unresolved-attribute] -- stub module built at runtime  # pyright: ignore[reportAttributeAccessIssue] -- stub module built at runtime
+    module.get_kernel = get_kernel  # ty: ignore[unresolved-attribute] -- The test mutates a stub module built at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The test mutates a stub module built at runtime.
     return module
 
 
@@ -807,8 +807,8 @@ def _kernels_stub() -> types.ModuleType:
 def _prepare_module(corpus: Path, loader: dict[str, Any]) -> types.ModuleType:
     """THEIR ``prepare``, pointed at the prepared corpus."""
     module = importlib.import_module("prepare")
-    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
-    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
+    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
     module.Tokenizer.from_directory.__func__.__defaults__ = (str(corpus / "tokenizer"),)
     real_make_dataloader = module.make_dataloader
 
@@ -827,12 +827,12 @@ def _prepare_module(corpus: Path, loader: dict[str, Any]) -> types.ModuleType:
           _StopModuleScopeError: Always, once the loader is captured.
 
         """
-        module.make_dataloader = real_make_dataloader  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+        module.make_dataloader = real_make_dataloader  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
         loader["train"] = real_make_dataloader(*args, **kwargs)
         loader["prepare"] = module
         raise _StopModuleScopeError
 
-    module.make_dataloader = make_dataloader  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    module.make_dataloader = make_dataloader  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
     return module
 
 
@@ -912,7 +912,7 @@ def _capture_rng_after_seeding(rng: dict[str, Any]) -> Generator[None]:
         real_cuda_seed(seed)
         rng.setdefault("state", get_rng_state())
 
-    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- observes their seeding; restored below
+    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- The parity harness mutates attributes on dynamically loaded reference modules..
     try:
         yield
     finally:

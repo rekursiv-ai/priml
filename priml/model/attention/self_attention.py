@@ -313,7 +313,7 @@ class SelfAttention(AttentionProjections):
             self.proj_qkv.weight,
             DTensor,
         ):
-            raise RuntimeError(  # noqa: TRY004  -- unsupported config, not a type error
+            raise RuntimeError(  # noqa: TRY004 -- The invalid sharding configuration is a runtime capability error, not a custom exception type.
                 "Tensor parallelism requires a DTensor-compatible attention "
                 "kernel; set attn_kernel=SdpaNaive (the fused flash kernel has "
                 "no DTensor sharding strategy).",

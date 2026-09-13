@@ -44,7 +44,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- Pytest injects this fixture by name rather than calling the import directly.
 )
 from priml.train.tensor_parallel import apply_tensor_parallel
 
@@ -653,7 +653,7 @@ def _record_case(
             target.write_text("ok")
         else:
             target.write_text(f"FAIL:max={float((full - dense).abs().max()):.2e}")
-    except Exception as error:  # noqa: BLE001 -- surface worker errors to parent
+    except Exception as error:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         target.write_text(f"FAIL:{error!r}")
 
 
@@ -676,7 +676,7 @@ def _record_indivisible_guard(
             shard="colwise",
         ).make()
         target.write_text(_outcome_of_apply(module, mesh))
-    except Exception as error:  # noqa: BLE001 -- surface worker errors to parent
+    except Exception as error:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         target.write_text(f"FAIL:{error!r}")
 
 

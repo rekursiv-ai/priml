@@ -29,7 +29,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- Importing the module registers the attention test implementation..
 )
 
 

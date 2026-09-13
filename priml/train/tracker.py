@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_logged_nonscalar_skip = [False]  # config-globals: ignore -- one-shot log guard.
+_logged_nonscalar_skip = [False]  # house-ignore[globals] -- One-shot log guard.
 """One-shot guard (mutable cell) so WandbTracker logs a skip only once."""
 
 

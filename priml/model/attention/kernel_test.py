@@ -14,7 +14,7 @@ import torch
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- Pytest fixture, injected by name not called.
 )
 
 

@@ -74,7 +74,7 @@ def test_unknown_shard_style_is_refused() -> None:
     and the runtime guard is what catches it.
     """
     config = Linear.Config(channels_in=8, channels_out=8)
-    config.shard = "colwize"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: proves the runtime guard rejects an unknown shard style
+    config.shard = "colwize"  # ty: ignore[invalid-assignment] -- The negative test assigns invalid configuration text to exercise the runtime guard.  # pyright: ignore[reportAttributeAccessIssue] -- The negative test assigns invalid configuration text to exercise the runtime guard.
     with pytest.raises(ValueError, match="Unknown shard style"):
         _shard_style(config.make())
 

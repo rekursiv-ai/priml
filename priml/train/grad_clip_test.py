@@ -38,7 +38,7 @@ def _params_with_grads(grads: list[Tensor]) -> list[torch.nn.Parameter]:
     device = _test_device()
     params: list[torch.nn.Parameter] = []
     for g in grads:
-        g = g.to(device)  # noqa: PLW2901 -- move the fixture grad onto the test device
+        g = g.to(device)  # noqa: PLW2901 -- The test rebinds the loop variable to assert clipping across stages.
         p = torch.nn.Parameter(torch.zeros_like(g))
         p.grad = g.clone()
         params.append(p)

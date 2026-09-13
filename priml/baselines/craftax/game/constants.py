@@ -375,17 +375,15 @@ FLOOR_MOB_SPAWN_CHANCE: Final = torch.tensor(
 
 _LAND: Final = [False, True, True]
 _FLYING: Final = [False, False, False]
-_AQUATIC: Final = [True, False, True]
-_AMPHIBIAN: Final = [False, False, True]
 
 MOB_COLLIDES_WITH: Final = torch.tensor(
     [
         [_LAND, _LAND, _LAND, _FLYING],
         [_FLYING, _LAND, _LAND, _FLYING],
         [_LAND, _LAND, _LAND, _FLYING],
-        [_LAND, _AMPHIBIAN, _LAND, _FLYING],
+        [_LAND, [False, False, True], _LAND, _FLYING],
         [_LAND, _LAND, _LAND, _FLYING],
-        [_LAND, _LAND, _AQUATIC, _FLYING],
+        [_LAND, _LAND, [True, False, True], _FLYING],
         [_LAND, _LAND, _FLYING, _FLYING],
         [_LAND, _LAND, _FLYING, _FLYING],
         [_LAND, _LAND, _LAND, _FLYING],

@@ -27,7 +27,7 @@ from priml.testing.bfb import (
     move_to_device,
 )
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- The fixture import registers pytest cleanup by name.
 )
 
 
@@ -292,7 +292,7 @@ def test_router_rejects_unknown_scoring_func():
     # The literal is what the guard defends against, so the checker rejecting
     # it is correct: a caller reaching this branch got here from JSON, a CLI
     # override, or an untyped dict, none of which the annotation constrains.
-    cfg.scoring_func = "softmaxx"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: the invalid literal is the input under test
+    cfg.scoring_func = "softmaxx"  # ty: ignore[invalid-assignment] -- The test injects a purpose-built model double.  # pyright: ignore[reportAttributeAccessIssue] -- Negative test: the invalid literal is the input under test.
     with pytest.raises(ValueError, match="scoring_func"):
         cfg.make()
 

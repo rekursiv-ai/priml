@@ -28,7 +28,7 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
 )
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- Pytest fixture, injected by name not called.
 )
 
 

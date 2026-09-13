@@ -131,7 +131,7 @@ def trace_compile(
     traces = _compile_traces.setdefault(key, [])
     traces.append(trace)
     if always_print:
-        print(trace)  # noqa: T201
+        print(trace)  # noqa: T201 -- CLI output is this function's product.
     if max_compiles > -1 and len(traces) > max_compiles:
         traces_str = "" if always_print else ("\n" + "\n--------\n".join(traces))
         raise RuntimeError(f"Too many compiles ({len(traces)}) for {key}.{traces_str}")

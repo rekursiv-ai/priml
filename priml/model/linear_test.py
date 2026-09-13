@@ -15,7 +15,7 @@ from priml.model import linear
 from priml.model.linear import EnsembleLinear, Linear
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- The fixture import registers CUDA cleanup by pytest name.
 )
 
 

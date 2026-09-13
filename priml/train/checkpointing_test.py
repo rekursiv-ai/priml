@@ -771,7 +771,7 @@ def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
         merged = ckpt.load(load_target, max_steps=1e9, guard=False)
         ok = steps == [2] and merged
         (Path(result_dir) / f"rank_{rank}").write_text("ok" if ok else f"FAIL:{steps}")
-    except Exception as e:  # noqa: BLE001  -- surface worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -856,7 +856,7 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
         (Path(result_dir) / f"rank_{rank}").write_text(
             "ok" if ok else f"FAIL loaded={loaded}",
         )
-    except Exception as e:  # noqa: BLE001  -- surface worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -881,7 +881,7 @@ def _world2_save_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> Non
         if rank == 0:
             torch.save(full, Path(result_dir) / "full.pt")
         (Path(result_dir) / f"save_rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001  -- surface worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
         (Path(result_dir) / f"save_rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -902,7 +902,7 @@ def _world1_load_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> Non
         (Path(result_dir) / f"load_rank_{rank}").write_text(
             "ok" if ok else f"FAIL loaded={loaded}",
         )
-    except Exception as e:  # noqa: BLE001  -- surface worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
         (Path(result_dir) / f"load_rank_{rank}").write_text(f"FAIL:{e!r}")
 
 

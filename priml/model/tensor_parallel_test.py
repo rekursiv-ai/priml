@@ -128,7 +128,7 @@ def _ensemble_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
             )
         else:
             (result_dir / f"rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         (result_dir / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None
@@ -224,7 +224,7 @@ def _meta_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
             )
         else:
             (result_dir / f"rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         (result_dir / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None
@@ -362,7 +362,7 @@ def _record_case(
             target.write_text("ok")
         else:
             target.write_text(f"FAIL:max={float((full - dense).abs().max()):.2e}")
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         target.write_text(f"FAIL:{e!r}")
 
 
@@ -383,7 +383,7 @@ def _record_fused_kernel_guard(result_dir: Path, rank: int, mesh: DeviceMesh) ->
         torch.manual_seed(0)
         attn = SelfAttention.Config(channels_in=32, num_heads=4, num_heads_kv=2).make()
         target.write_text(_fused_guard_outcome(attn, mesh))
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Worker failures are serialized so the parent can report them.
         target.write_text(f"FAIL:{e!r}")
 
 

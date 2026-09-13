@@ -61,12 +61,12 @@ def test_set_seed_reproducibility():
     set_seed_local(seed=123)
     rand1 = torch.rand(5)
     np_rand1 = numpy_rng.random(5)
-    py_rand1 = random.random()  # noqa: S311
+    py_rand1 = random.random()  # noqa: S311 -- The test samples the standard generator to compare deterministic seeding.
 
     set_seed_local(seed=123)
     rand2 = torch.rand(5)
     np_rand2 = numpy_rng.random(5)
-    py_rand2 = random.random()  # noqa: S311
+    py_rand2 = random.random()  # noqa: S311 -- The test samples the standard generator to compare deterministic seeding.
 
     torch.testing.assert_close(rand1, rand2)
     assert (np_rand1 == np_rand2).all()
@@ -216,7 +216,7 @@ def test_set_seed_distributed_salting_combinations(
     assert torch.initial_seed() == salt("torch", expected_local_seed)
     assert (
         random.getstate()
-        == random.Random(  # noqa: S311
+        == random.Random(  # noqa: S311 -- The test constructs an isolated generator as the deterministic reference.
             salt("python", expected_local_seed),
         ).getstate()
     )
@@ -694,12 +694,12 @@ def test_dataloader_worker_init_fn_reseeds_legacy_numpy_global() -> None:
     """Same fork hazard applies to ``np.random``."""
     set_seed_local(seed=100)
     dataloader_worker_init_fn(0)
-    a = np.random.rand(3)  # noqa: NPY002 -- exercising the legacy reseed contract
+    a = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     dataloader_worker_init_fn(0)
-    b = np.random.rand(3)  # noqa: NPY002 -- exercising the legacy reseed contract
+    b = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     assert (a == b).all(), "worker init must be deterministic per worker_id"
     dataloader_worker_init_fn(1)
-    c = np.random.rand(3)  # noqa: NPY002 -- exercising the legacy reseed contract
+    c = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     assert not (a == c).all(), "worker 0 and worker 1 must differ"
 
 
@@ -861,7 +861,7 @@ def test_make_seed_uses_os_entropy() -> None:
     Timestamp/PID hash with hand-rolled "mixing." The folklore docstring is gone; the
     implementation now uses a 63-bit value the way torch and numpy both accept.
     """
-    import inspect  # noqa: PLC0415
+    import inspect  # noqa: PLC0415 -- Test-only introspection dependency, kept off the production import path.
 
     src = inspect.getsource(make_seed)
     assert "secrets" in src, "make_seed must draw from OS entropy"
@@ -908,12 +908,12 @@ def test_set_seed_local_seeds_legacy_numpy_global() -> None:
     random seed for ... NumPy" -- enforce that this includes the legacy global, not just
     the module-level ``numpy_rng`` Generator.
     """
-    import numpy as np  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415 -- Test-only numerical dependency, imported only by this test path.
 
     set_seed_local(seed=7)
-    a = np.random.rand(3)  # noqa: NPY002 -- exercising the legacy reseed contract
+    a = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     set_seed_local(seed=7)
-    b = np.random.rand(3)  # noqa: NPY002 -- exercising the legacy reseed contract
+    b = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     assert (a == b).all(), f"legacy np.random not reseeded: {a} vs {b}"
 
 

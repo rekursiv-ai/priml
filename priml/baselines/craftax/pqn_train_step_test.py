@@ -43,7 +43,7 @@ def _config(**overrides: object) -> CraftaxPQNTrainStep.Config:
 
 
 def _step() -> CraftaxPQNTrainStep:
-    return cast(CraftaxPQNTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty resolves `Makes[...].make()` only through the class-attribute descriptor; on an INHERITED `Config` instance it is `@Todo`
+    return cast(CraftaxPQNTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- The test cast documents the simulated environment boundary.
 
 
 def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:

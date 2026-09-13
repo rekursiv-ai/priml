@@ -108,7 +108,7 @@ def test_every_sprite_is_named_once() -> None:
 
 
 def test_the_sprite_tables_cover_every_enum_value() -> None:
-    from priml.baselines.craftax.game.constants import (  # noqa: PLC0415
+    from priml.baselines.craftax.game.constants import (  # noqa: PLC0415 -- The optional renderer is loaded only for this asset test.
         BlockType,
         ItemType,
         ProjectileType,

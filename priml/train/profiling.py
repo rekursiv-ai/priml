@@ -200,7 +200,7 @@ class TorchProfiling:
             and step == self.memory_profile_start
             and torch.cuda.is_available()
         ):
-            torch.cuda.memory._record_memory_history()  # noqa: SLF001
+            torch.cuda.memory._record_memory_history()  # noqa: SLF001 -- PyTorch exposes this diagnostic API only through its private namespace.
 
     def on_step_end(self, step: int) -> None:
         """Run at the end of each training step.
@@ -251,8 +251,8 @@ class TorchProfiling:
                 self.working_dir / f"memory_step_{step}{rank_suffix}.pickle",
             )
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.cuda.memory._dump_snapshot(str(snapshot_path))  # noqa: SLF001
-            torch.cuda.memory._record_memory_history(enabled=None)  # noqa: SLF001
+            torch.cuda.memory._dump_snapshot(str(snapshot_path))  # noqa: SLF001 -- PyTorch exposes this diagnostic API only through its private namespace.
+            torch.cuda.memory._record_memory_history(enabled=None)  # noqa: SLF001 -- PyTorch exposes this diagnostic API only through its private namespace.
             logger.info(f"Saved memory snapshot to {snapshot_path}")
 
     def _get_rank_suffix(self) -> str:

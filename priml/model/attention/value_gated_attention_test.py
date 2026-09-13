@@ -16,7 +16,7 @@ from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- The test import registers the attention implementation under test.
 )
 
 

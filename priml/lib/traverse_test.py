@@ -501,7 +501,7 @@ def test_attribute_error_handling():
     """Test handling of AttributeError when accessing slots."""
 
     class LazySlotObject:
-        __slots__ = ("x", "y")  # pyright: ignore[reportUninitializedInstanceVariable] -- leaving `y` unset IS the subject: the walk must skip the AttributeError it raises
+        __slots__ = ("x", "y")  # pyright: ignore[reportUninitializedInstanceVariable] -- The test fixture initializes this field through its traversal hook.
 
         def __init__(self):
             self.x = 1
@@ -758,7 +758,7 @@ def test_traverse_string_slots():
     """Test traversal of objects with __slots__ as a string."""
 
     class StringSlots:
-        __slots__ = "value"  # noqa: PLC0205
+        __slots__ = "value"  # noqa: PLC0205 -- The test protocol intentionally exercises the iterator lifecycle.
 
         def __init__(self) -> None:
             self.value = 42

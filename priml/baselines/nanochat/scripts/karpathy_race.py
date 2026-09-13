@@ -154,12 +154,12 @@ def clone_upstream(
     """
     if not (root / ".git").is_dir():
         root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- fixed URL and commit from the signature
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607
+        subprocess.run(  # noqa: S603 -- The script invokes the fixed git command for the pinned repository.
+            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The script invokes the fixed git executable.
             check=True,
         )
-        subprocess.run(  # noqa: S603 -- fixed URL and commit from the signature
-            ["git", "checkout", "--quiet", commit],  # noqa: S607
+        subprocess.run(  # noqa: S603 -- The script invokes the fixed git command for the pinned repository.
+            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The script invokes the fixed git executable.
             cwd=root,
             check=True,
         )
@@ -204,7 +204,7 @@ def main() -> int:
         "__name__": "__main__",
         "__file__": str(root / "train.py"),
     }
-    exec(compile(source, str(root / "train.py"), "exec"), result)  # noqa: S102 -- their own script, from the pinned clone
+    exec(compile(source, str(root / "train.py"), "exec"), result)  # noqa: S102 -- The script executes only the source-controlled pinned clone.
     elapsed = time.perf_counter() - started
 
     summary = {
@@ -250,11 +250,11 @@ def _resize_microbatch(source: str, *, rows: int) -> str:
 # since their ``train.py`` calls it with no argument.
 def _import_prepare(corpus: Path) -> types.ModuleType:
     """Import their ``prepare`` module, pointed at the shared corpus."""
-    import importlib  # noqa: PLC0415 -- imported after sys.path is prepared
+    import importlib  # noqa: PLC0415 -- The import occurs after sys.path is prepared for the pinned checkout.
 
     prepare = importlib.import_module("prepare")
-    prepare.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
-    prepare.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    prepare.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The dynamically imported module has no statically known attributes.  # pyright: ignore[reportAttributeAccessIssue] -- The dynamically imported module has no statically known attributes.
+    prepare.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The dynamically imported module has no statically known attributes.  # pyright: ignore[reportAttributeAccessIssue] -- The dynamically imported module has no statically known attributes.
     prepare.Tokenizer.from_directory.__func__.__defaults__ = (
         str(corpus / "tokenizer"),
     )
@@ -273,14 +273,14 @@ def _kernels_stub() -> types.ModuleType:
             ),
         )
 
-    module.get_kernel = get_kernel  # ty: ignore[unresolved-attribute] -- stub module built at runtime  # pyright: ignore[reportAttributeAccessIssue] -- stub module built at runtime
+    module.get_kernel = get_kernel  # ty: ignore[unresolved-attribute] -- The stub module is constructed dynamically at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The stub module is constructed dynamically at runtime.
     return module
 
 
 def _git(root: Path, *arguments: str) -> str:
     """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- fixed read-only subcommands from the caller
-        ["git", *arguments],  # noqa: S607
+    return subprocess.run(  # noqa: S603 -- The helper invokes git read-only subcommands without a shell.
+        ["git", *arguments],  # noqa: S607 -- The script invokes the fixed git executable.
         cwd=root,
         capture_output=True,
         text=True,

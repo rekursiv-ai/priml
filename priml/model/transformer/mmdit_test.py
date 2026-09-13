@@ -35,7 +35,7 @@ from priml.testing.bfb import (
     randomize_parameters,
 )
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- The fixture import registers CUDA cleanup by pytest name.
 )
 
 

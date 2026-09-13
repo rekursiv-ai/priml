@@ -154,7 +154,7 @@ def _check_float8_available() -> tuple[bool, str]:
     """Check if float8 training is available."""
     try:
         from torchao.float8 import (
-            convert_to_float8_training,  # noqa: F401  # availability check
+            convert_to_float8_training,  # noqa: F401 -- The import itself probes whether the optional torchao feature is available.
         )
 
         import torch

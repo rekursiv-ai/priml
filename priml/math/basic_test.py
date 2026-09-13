@@ -238,7 +238,7 @@ def test_a_float_grid_promotes_an_integer_input() -> None:
 def test_multiple_rejects_a_type_it_cannot_scale() -> None:
     """A Sequence is ``Tensorable``, so this is caller input and must raise."""
     with pytest.raises(TypeError, match="Unsupported scalar type"):
-        _ = ceil_multiple("nope", 2)  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType] -- negative test: proves the scalar path rejects a type it cannot scale
+        _ = ceil_multiple("nope", 2)  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType] -- The negative test verifies rejection of an unsupported scalar type.
 
 
 def test_multiple_is_exact_beyond_float53() -> None:

@@ -492,8 +492,12 @@ def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
 def test_transformers_compat_shims_restore_module_state() -> None:
     """Shims apply inside the block and leave the modules exactly as found."""
     pytest.importorskip("transformers")
-    from transformers import DynamicCache  # noqa: PLC0415
-    from transformers.utils import import_utils  # noqa: PLC0415
+    from transformers import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        DynamicCache,
+    )
+    from transformers.utils import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        import_utils,
+    )
 
     # ``vars``, not ``getattr``: ``DynamicCache`` inherits from ``Cache``, so a
     # deleted shim would still resolve through the base class and hide a leak.
@@ -513,8 +517,12 @@ def test_transformers_compat_shims_restore_module_state() -> None:
 def _install_transformers_compat_shims() -> Generator[None]:
     """Backfill transformers 4.x symbols removed in transformers 5.x."""
     pytest.importorskip("transformers")
-    from transformers import DynamicCache  # noqa: PLC0415
-    from transformers.utils import import_utils  # noqa: PLC0415
+    from transformers import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        DynamicCache,
+    )
+    from transformers.utils import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        import_utils,
+    )
 
     def unavailable() -> bool:
         return False

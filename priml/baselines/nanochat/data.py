@@ -152,7 +152,7 @@ class Tokenizer:
                 "priml.baselines.nanochat.scripts.prepare_data`.",
             )
         with pickled.open("rb") as file:
-            encoding = pickle.load(file)  # noqa: S301 -- our own prepared artifact
+            encoding = pickle.load(file)  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
         recipe = json.loads(recipe_path.read_text())
         for field in ("bos_token", "token_bytes_sha256"):
             if field not in recipe:
@@ -430,7 +430,7 @@ class _PackedStream:
                     )
                     ready.put((slot, None))
                     drawn += 1
-            except BaseException as error:  # noqa: BLE001 -- re-raised on the consumer
+            except BaseException as error:  # noqa: BLE001 -- Dataset iteration contains malformed-record failures per the loader contract.
                 ready.put((-1, error))
                 return
             ready.put((-1, None))
@@ -515,7 +515,9 @@ def _document_batches(paths: list[Path]) -> Iterator[list[str]]:
     """Yield document batches from parquet shards, wrapping at the end."""
     # Imported here rather than at module scope: parquet is the corpus's own
     # format, and nothing but this reader touches it.
-    from pyarrow import parquet  # noqa: PLC0415 -- corpus-only dependency
+    from pyarrow import (  # noqa: PLC0415 -- The optional tokenizer dependency stays off data-loader import paths.
+        parquet,
+    )
 
     while True:
         for path in paths:

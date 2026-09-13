@@ -89,11 +89,11 @@ def summarize(
     args = parser.parse_args(list(argv) if argv is not None else None)
     path = Path(args.path)
     if not path.exists():
-        print(f"No metrics file at {path}.", file=sys.stderr)  # noqa: T201
+        print(f"No metrics file at {path}.", file=sys.stderr)  # noqa: T201 -- This result-reporting CLI writes its human-readable report to stdout.
         return 1
     metrics = read_metrics(path)
     summary = format_summary(metrics, keys)
     if note is not None:
         summary += note(metrics)
-    print(summary)  # noqa: T201
+    print(summary)  # noqa: T201 -- This result-reporting CLI writes its human-readable report to stdout.
     return 0

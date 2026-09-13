@@ -115,16 +115,16 @@ def test_newton_rejects_dtensor_params(tmp_path: Path) -> None:
     and cannot be sharded, so it must fail loudly. A single-rank gloo group is
     enough to construct a DTensor; the guard fires before any collective.
     """
-    from torch.distributed.device_mesh import (  # noqa: PLC0415 -- distributed import costs ~1s; this is the only test needing it
+    from torch.distributed.device_mesh import (  # noqa: PLC0415 -- defer costly distributed import to its sole test.
         init_device_mesh,
     )
-    from torch.distributed.tensor import (  # noqa: PLC0415 -- distributed import costs ~1s; this is the only test needing it
+    from torch.distributed.tensor import (  # noqa: PLC0415 -- defer costly distributed import to its sole test.
         DTensor,
         Shard,
         distribute_tensor,
     )
 
-    import torch.distributed as dist  # noqa: PLC0415 -- distributed import costs ~1s; this is the only test needing it
+    import torch.distributed as dist  # noqa: PLC0415 -- defer costly distributed import to its sole test.
 
     # A file rendezvous is collision-free across hosts and xdist workers; this
     # single-rank guard test does not need a TCP listener.

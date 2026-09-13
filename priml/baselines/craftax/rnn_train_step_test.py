@@ -43,7 +43,7 @@ def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
 
 
 def _step() -> CraftaxRNNTrainStep:
-    return cast(CraftaxRNNTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty resolves `Makes[...].make()` only through the class-attribute descriptor; on an INHERITED `Config` instance it is `@Todo`
+    return cast(CraftaxRNNTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- Ty resolves `Makes[...].make()` only through the class-attribute descriptor; on an INHERITED `Config` instance it is `@Todo`.
 
 
 def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:

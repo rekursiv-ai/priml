@@ -275,7 +275,7 @@ class QuantizedActivationStorage:
             with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                 return original_forward(*args, **kwargs)
 
-        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- ty checks an INSTANCE assignment against the unbound signature (with `self`), though reading it back yields the bound one; pyright accepts it
+        model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- PyTorch stores this replacement as a bound module method even though ty checks the unbound instance signature.
 
         logger.info(
             f"Applied QuantizedActivationStorage: dtype_storage={self.dtype_storage}, "
@@ -492,7 +492,7 @@ class QuantizedModuleActivationStorage:
                 self.min_size,
             )
 
-        module._conv_forward = quantized_conv_forward  # noqa: SLF001  # ty: ignore[invalid-assignment] -- ty checks an INSTANCE assignment against the unbound signature (with `self`), though reading it back yields the bound one; pyright accepts it
+        module._conv_forward = quantized_conv_forward  # noqa: SLF001 -- PyTorch exposes this private hook as the interception seam for Conv2d.  # ty: ignore[invalid-assignment] -- PyTorch stores this replacement as a bound module method even though ty checks the unbound instance signature.
 
 
 def _pack_quantized(

@@ -506,7 +506,7 @@ def random_gamma(
     )
     concentration = torch.broadcast_to(concentration, samples_size + params_size)
     # Detach: _standard_gamma's gradient is incorrect (not reparameterizable).
-    y = torch._standard_gamma(concentration).detach() / rate  # noqa: SLF001
+    y = torch._standard_gamma(concentration).detach() / rate  # noqa: SLF001 -- The probability helper tests the distribution's private numerical seam.
     y = y.clamp_(min=torch.finfo(y.dtype).tiny)
     return y
 

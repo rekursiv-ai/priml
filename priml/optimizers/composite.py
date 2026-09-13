@@ -59,7 +59,7 @@ def everything(name: str, parameter: Parameter) -> bool:
     return True
 
 
-class excluding:  # noqa: N801 -- reads as a combinator at the call site
+class excluding:  # noqa: N801 -- The lowercase name matches the public combinator syntax.
     """Narrow a selector by dropping parameters whose name contains a fragment.
 
     A comparable object rather than a closure: two identical selectors must be
@@ -102,7 +102,7 @@ class excluding:  # noqa: N801 -- reads as a combinator at the call site
         return f"excluding({_name(self.select)}, {names})"
 
 
-class matching:  # noqa: N801 -- reads as a combinator at the call site
+class matching:  # noqa: N801 -- The lowercase name matches the public combinator syntax.
     """Select parameters whose name contains any of the given fragments.
 
     The positive counterpart to :class:`excluding`, and what a recipe needs to
@@ -140,7 +140,7 @@ class matching:  # noqa: N801 -- reads as a combinator at the call site
         return f"matching({', '.join(repr(f) for f in self.fragments)})"
 
 
-class complement:  # noqa: N801 -- reads as a combinator at the call site
+class complement:  # noqa: N801 -- The lowercase name matches the public combinator syntax.
     """Select exactly what ``select`` does not, so a pair partitions the model.
 
     Args:

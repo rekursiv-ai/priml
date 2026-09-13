@@ -144,7 +144,9 @@ def test_poison_free_pool_leaves_written_allocations_alone() -> None:
 
 def test_test_main_calls_pytest():
     """Test that test_main calls pytest.main with correct arguments."""
-    from priml.lib.testing.main import test_main  # noqa: PLC0415
+    from priml.lib.testing.main import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
+        test_main,
+    )
 
     with (
         patch("pytest.main", return_value=0) as mock_pytest,
@@ -169,7 +171,9 @@ def test_test_main_calls_pytest():
 
 def test_test_main_passes_through_argv():
     """Test that test_main passes through command-line arguments."""
-    from priml.lib.testing.main import test_main  # noqa: PLC0415
+    from priml.lib.testing.main import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
+        test_main,
+    )
 
     original_argv = sys.argv[:]
     try:
@@ -193,7 +197,9 @@ def test_test_main_passes_through_argv():
 
 def test_test_main_exits_with_pytest_return_code():
     """Test that test_main exits with the return code from pytest."""
-    from priml.lib.testing.main import test_main  # noqa: PLC0415
+    from priml.lib.testing.main import (  # noqa: PLC0415 -- The fixture imports optional test dependencies only inside the cases that use them.
+        test_main,
+    )
 
     with patch("pytest.main", return_value=42), patch("sys.exit") as mock_exit:
         test_main("/path/to/test_file.py")

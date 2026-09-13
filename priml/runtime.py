@@ -99,11 +99,9 @@ def get_device(device: torch.device | str | None = "auto") -> torch.device:
 
 _device_mesh: DeviceMesh | None = None
 _runtime_initialized: bool = (
-    False  # config-globals: ignore -- mutable process-init state flag, not a knob
+    False  # house-ignore[globals] -- Mutable process-init state flag, not a knob.
 )
-_single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = (
-    None  # config-globals: ignore -- mutable process-init state, not a knob
-)
+_single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = None
 # Whether THIS module created the torch.distributed process group, as opposed
 # to entering a process where a launcher (torchrun, a jobber run body) or an
 # earlier lifecycle already initialized one. Experiment loops may
@@ -114,7 +112,7 @@ _single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = (
 # destroy_global_device_mesh() tears down only what initialization acquired,
 # and a failed initialization rolls this flag back with the group it created.
 _process_group_owned: bool = (
-    False  # config-globals: ignore -- process-global resource ownership
+    False  # house-ignore[globals] -- Process-global resource ownership.
 )
 
 
@@ -172,7 +170,7 @@ class SingleProcess:
             single-process runtime was initialized with different settings.
 
         """
-        global _runtime_initialized, _single_process_settings  # noqa: PLW0603
+        global _runtime_initialized, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
         settings = (self.deterministic, self.float32_matmul_precision)
         if _runtime_initialized:
             if _single_process_settings is None:
@@ -194,7 +192,7 @@ class SingleProcess:
 
     def destroy(self) -> None:
         """Cleanup runtime resources."""
-        global _runtime_initialized, _single_process_settings  # noqa: PLW0603
+        global _runtime_initialized, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
         if global_device_mesh() is not None:
             raise RuntimeError("Device mesh initialized but single process.")
         _single_process_settings = None
@@ -366,8 +364,8 @@ def initialize_global_device_mesh(
         mesh: The initialized DeviceMesh.
 
     """
-    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
-    global _process_group_owned  # noqa: PLW0603
+    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
+    global _process_group_owned  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
 
     if _runtime_initialized:
         raise RuntimeError("Runtime already initialized.")
@@ -455,8 +453,8 @@ def destroy_global_device_mesh() -> None:
     initialized by a launcher or an earlier same-process lifecycle survives so
     its true owner can tear it down (see ``_process_group_owned``).
     """
-    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603
-    global _process_group_owned  # noqa: PLW0603
+    global _runtime_initialized, _device_mesh, _single_process_settings  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
+    global _process_group_owned  # noqa: PLW0603 -- Runtime init state is process-global by nature; torch's process group is a singleton too.
     if not _runtime_initialized:
         _process_group_owned = False
         return

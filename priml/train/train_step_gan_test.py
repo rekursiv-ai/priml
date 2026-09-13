@@ -209,7 +209,7 @@ def test_gan_checkpointing():
 class _SyncCountingTensor(Tensor):
     """Tensor subclass that records each ``.item()`` call into a shared counter."""
 
-    _item_calls: list[int] = []  # noqa: RUF012  -- shared test counter, set per-use
+    _item_calls: list[int] = []  # noqa: RUF012 -- The shared counter is reset per test to observe subclass calls.
 
     @override
     def item(self) -> Any:

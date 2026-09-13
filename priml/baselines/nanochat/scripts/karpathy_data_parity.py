@@ -70,12 +70,12 @@ def clone_upstream(
     """
     if not (root / ".git").is_dir():
         root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(  # noqa: S603 -- fixed URL and commit from the signature
-            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607
+        subprocess.run(  # noqa: S603 -- The parity script launches fixed local Git commands from a signed source specification.
+            ["git", "clone", "--quiet", url, str(root)],  # noqa: S607 -- The parity script uses fixed command argv and validated paths.
             check=True,
         )
-        subprocess.run(  # noqa: S603 -- fixed URL and commit from the signature
-            ["git", "checkout", "--quiet", commit],  # noqa: S607
+        subprocess.run(  # noqa: S603 -- The parity script launches fixed local Git commands from a signed source specification.
+            ["git", "checkout", "--quiet", commit],  # noqa: S607 -- The parity script uses fixed command argv and validated paths.
             cwd=root,
             check=True,
         )
@@ -111,8 +111,8 @@ def load_upstream(root: Path, *, corpus: Path) -> types.ModuleType:
     """
     sys.path.insert(0, str(root))
     module = importlib.import_module("prepare")
-    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
-    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- dynamically imported module  # pyright: ignore[reportAttributeAccessIssue] -- dynamically imported module
+    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and exposes these integration attributes at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and exposes these integration attributes at runtime.
+    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and exposes these integration attributes at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and exposes these integration attributes at runtime.
     return module
 
 
@@ -295,8 +295,8 @@ def main() -> int:
 
 def _git(root: Path, *arguments: str) -> str:
     """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- fixed read-only subcommands from the caller
-        ["git", *arguments],  # noqa: S607
+    return subprocess.run(  # noqa: S603 -- The parity script runs the caller-selected read-only Git subcommand in the cloned fixture.
+        ["git", *arguments],  # noqa: S607 -- The parity script uses fixed command argv and validated paths.
         cwd=root,
         capture_output=True,
         text=True,

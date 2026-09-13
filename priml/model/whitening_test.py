@@ -17,7 +17,7 @@ from priml.math.stats import pca_eigh, pca_power
 from priml.model.whitening import PCAWhiteningConv2d
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- Pytest discovers this imported fixture by name during collection.
 )
 from priml.testing.golden import assert_text_golden
 

@@ -76,8 +76,8 @@ def cap_math_threads() -> None:
         "VECLIB_MAXIMUM_THREADS",  # macOS Accelerate.
         "BLIS_NUM_THREADS",
     ):
-        os.environ.setdefault(name, "1")  # noqa: TID251 -- test/env knob, not a provisioned cache path
-    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")  # noqa: TID251 -- test/env knob, not a provisioned cache path
+        os.environ.setdefault(name, "1")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
+    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")  # noqa: TID251 -- Kernel pin the operator may override; not a provisioned cache path.
 
 
 cap_math_threads()
@@ -108,7 +108,7 @@ def reset_runtime_global() -> Generator[None]:
     if runtime is not None and getattr(runtime, "_runtime_initialized", False):
         # Private-global reset: the module exposes no setter (none should exist
         # in prod); tests are the only context that may leak it.
-        setattr(runtime, "_runtime_initialized", False)  # noqa: B010 -- dynamic module global, no static attr
+        setattr(runtime, "_runtime_initialized", False)  # noqa: B010 -- The module is a ``sys.modules`` lookup, so the attribute has no static type.
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +158,9 @@ def warm_pools() -> Generator[WarmPoolGetter]:
     """
     # Deferred (not module scope) so collecting non-distributed tests never
     # imports torch.distributed.
-    from priml.distributed.testing import WorkerPool  # noqa: PLC0415
+    from priml.distributed.testing import (  # noqa: PLC0415 -- Keeps torch.distributed off collection of non-distributed tests.
+        WorkerPool,
+    )
 
     pools: dict[tuple[tuple[str, int], ...], WorkerPool] = {}
     with ExitStack() as stack:

@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, cast, overload
 
 import math
 
-from torch import Tensor
 
-import numpy as np
-import torch
+if TYPE_CHECKING:
+    from torch import Tensor
+
+    import numpy as np
+    import torch
+else:
+    from wrapt import lazy_import
+
+    # ~1050 ms (torch) and ~90 ms (numpy); one helper each reaches them, so
+    # the pure-Python arithmetic here stays cheap to import.
+    Tensor = lazy_import("torch", "Tensor")
+    torch = lazy_import("torch")
+    np = lazy_import("numpy")
 
 from priml.math.custom_types import Tensorable
 

@@ -1241,7 +1241,7 @@ def test_host_agnostic_numerics_preserves_mixed_foreach_dtypes() -> None:
     ]
     foreach_sin = cast(
         Callable[[list[Tensor]], list[Tensor]],
-        getattr(torch, "_foreach_sin"),  # noqa: B009 -- stub-less torch member
+        getattr(torch, "_foreach_sin"),  # noqa: B009 -- These tests access stub-less torch members through typed casts.
     )
     expected = foreach_sin(inputs)
 
@@ -1269,7 +1269,7 @@ def test_host_agnostic_numerics_upcasts_foreach_norm() -> None:
     # both type checkers see a known signature for this public foreach op.
     foreach_norm = cast(
         Callable[[list[Tensor], float], list[Tensor]],
-        getattr(torch, "_foreach_norm"),  # noqa: B009 -- stub-less torch member
+        getattr(torch, "_foreach_norm"),  # noqa: B009 -- These tests access stub-less torch members through typed casts.
     )
     with host_agnostic_numerics():
         actual = foreach_norm([x], 2.0)[0]
@@ -1294,7 +1294,7 @@ def test_host_agnostic_foreach_inplace_writes_back_list_targets() -> None:
     # ``torch`` stubs omit the in-place foreach ops; resolve through a typed Callable.
     foreach_mul_ = cast(
         Callable[[list[Tensor], list[Tensor]], None],
-        getattr(torch, "_foreach_mul_"),  # noqa: B009 -- stub-less torch member
+        getattr(torch, "_foreach_mul_"),  # noqa: B009 -- These tests access stub-less torch members through typed casts.
     )
     with host_agnostic_numerics():
         foreach_mul_(xs, ys)

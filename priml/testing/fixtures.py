@@ -69,9 +69,11 @@ def torch_compiler_isolation() -> Generator[None]:
         # all here. An ``if`` rather than an early ``return`` -- a ``return``
         # inside ``finally`` would discard an in-flight exception.
         if torch is not None and "torch._dynamo" in sys.modules:
-            from torch._inductor.utils import clear_caches  # noqa: PLC0415 -- lazy
+            from torch._inductor.utils import (  # noqa: PLC0415 -- Test fixtures load optional training dependencies only when requested.
+                clear_caches,
+            )
 
-            torch._dynamo.reset()  # noqa: SLF001 -- documented cache-clear entrypoint
+            torch._dynamo.reset()  # noqa: SLF001 -- The fixture resets the private runtime state under test.
             clear_caches()
 
 

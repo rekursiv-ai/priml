@@ -103,7 +103,7 @@ def load_transformers_model(
     # as a side effect of import, which breaks fork-safe multiprocessing.
     # We use inline not `lazy_import` because `transformers` replaces its own
     # sys.modules entry during init, which is incompatible with LazyLoader.
-    import transformers  # noqa: PLC0415
+    import transformers  # noqa: PLC0415 -- The loader keeps optional model dependencies off module import.
 
     logger = logging.getLogger(__name__)
     model_class_type = getattr(transformers, model_class)

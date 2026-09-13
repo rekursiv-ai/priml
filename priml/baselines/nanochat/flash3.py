@@ -600,7 +600,7 @@ def _run(
     cwd: Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> None:
-    subprocess.run(  # noqa: S603 -- fixed preparer commands; no shell or user input
+    subprocess.run(  # noqa: S603 -- The preparer passes fixed argv without a shell or user-controlled command text.
         command,
         check=True,
         cwd=cwd,
@@ -609,7 +609,7 @@ def _run(
 
 
 def _run_output(command: list[str]) -> str:
-    return subprocess.run(  # noqa: S603 -- fixed probes; no shell or user input
+    return subprocess.run(  # noqa: S603 -- The probe passes fixed argv without a shell or user-controlled command text.
         command,
         check=True,
         capture_output=True,

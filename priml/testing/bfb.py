@@ -866,7 +866,7 @@ def _write_back(
     target: torch.dtype,
 ) -> object:
     """Restore an in-place / ``out=`` / foreach op's mutation onto the originals."""
-    schema = func._schema  # noqa: SLF001 -- OpOverload exposes its schema only privately
+    schema = func._schema  # noqa: SLF001 -- The benchmark harness inspects private state to compare implementations.
     # Copy each mutated float64 upcast copy back into its float32 original (the
     # side effect), recording (upcast_copy -> original) so a returned element
     # that IS a write target can be swapped to the caller's original. Returns
@@ -973,7 +973,7 @@ class _Float64Compute(TorchDispatchMode):
         result = func(*up_args, **up_kwargs)
         if any(
             arg.alias_info is not None and arg.alias_info.is_write
-            for arg in func._schema.arguments  # noqa: SLF001 -- schema is OpOverload's only write-arg source
+            for arg in func._schema.arguments  # noqa: SLF001 -- The benchmark harness inspects private state to compare implementations..
         ):
             # In-place / ``out=`` / foreach op: it mutated the float64 copies, not
             # the caller's originals. Narrow each back and return the originals

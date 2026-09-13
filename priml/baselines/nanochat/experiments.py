@@ -30,11 +30,17 @@ Prepare the data once, then launch::
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Self, override
+from typing import TYPE_CHECKING, Self, override
+
+
+if TYPE_CHECKING:
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")  # ~1050 ms; experiment setup needs it.
 
 from configgle import Makes, PartialConfig
-
-import torch
 
 from priml.baselines.nanochat.data import NanoChatData
 from priml.baselines.nanochat.flash3 import Flash3Attention

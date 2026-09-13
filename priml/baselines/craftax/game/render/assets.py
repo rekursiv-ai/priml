@@ -63,7 +63,7 @@ def fetch(
     directory.mkdir(parents=True, exist_ok=True)
     url = url_template.format(revision=revision, name=name)
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 -- Craftax assets are fetched from the configured public dataset host.
             payload = cast(bytes, response.read())
     except (urllib.error.URLError, TimeoutError) as error:
         raise RuntimeError(f"Could not download the Craftax sprite {name}") from error

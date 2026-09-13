@@ -290,7 +290,7 @@ def test_graceful_sigterm_raises_keyboardinterrupt_then_restores() -> None:
     context converts it to ``KeyboardInterrupt``. The prior handler is restored
     on exit so repeated launches are unaffected.
     """
-    import signal  # noqa: PLC0415 -- local to this signal-specific test
+    import signal  # noqa: PLC0415 -- The import is local to this signal-specific isolated test.
 
     previous = signal.getsignal(signal.SIGTERM)
     try:

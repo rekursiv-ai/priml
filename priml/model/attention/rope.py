@@ -800,7 +800,7 @@ class RoPEMixed(RoPE):
         freqs = [f.data.clone() for f in self._inv_freqs]
         # The grandparent's ``_apply`` is the only route that moves the module
         # without the parent's rebuild; see the docstring for what that costs.
-        nn.Module._apply(self, fn, recurse)  # noqa: SLF001
+        nn.Module._apply(self, fn, recurse)  # noqa: SLF001 -- The test reaches the private cache seam under test.
         for i, f in enumerate(freqs):
             self._inv_freqs[i].data = f.to(device=self._dtype.device)
         return self

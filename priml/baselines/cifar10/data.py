@@ -209,7 +209,7 @@ def prepare(
         # pulls in PIL and the full dataset registry (~400ms). Every training
         # run calls this function, and the common case -- data already prepared
         # -- returns above without ever needing it.
-        import torchvision.datasets  # noqa: PLC0415 -- 400ms import; only a missing split needs it
+        import torchvision.datasets  # noqa: PLC0415 -- The optional torchvision dependency is loaded only when preparing data.
 
         source = torchvision.datasets.CIFAR10(
             str(destination),

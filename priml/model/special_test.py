@@ -44,7 +44,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- Pytest injects this fixture by name, so the import is not called directly.
 )
 
 

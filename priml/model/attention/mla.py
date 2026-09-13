@@ -789,7 +789,7 @@ class MultiHeadLatentAttention(nn.Module):
             self.attn_kernel.attn_kernel,
             SdpaFused,
         ):
-            raise ValueError(  # noqa: TRY004  -- unsupported config, not a type error
+            raise ValueError(  # noqa: TRY004 -- The configuration is invalid for this kernel, not invalid because of a caller type.
                 "Tensor parallelism requires a DTensor-compatible attention "
                 "kernel; set the latent kernel's attn_kernel to SdpaNaive "
                 "(the fused flash kernel has no DTensor sharding strategy).",

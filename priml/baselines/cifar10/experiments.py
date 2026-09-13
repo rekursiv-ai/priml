@@ -37,11 +37,9 @@ rerun or compared later -- write a fork instead; that is what they are for.
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from configgle import Makes, PartialConfig
-
-import torch
 
 from priml.baselines.cifar10.data import Cifar10Data
 from priml.baselines.cifar10.model import ResNet, SpeedNet
@@ -58,6 +56,14 @@ from priml.optimizers import (
 from priml.optimizers.muon import adjust_lr_conv_heuristic
 from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop
+
+
+if TYPE_CHECKING:
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")
 
 
 NUM_TRAIN_SAMPLES: Final = 50_000

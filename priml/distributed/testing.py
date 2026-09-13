@@ -224,7 +224,7 @@ class WorkerPool:
             try:
                 self._spawn_once()
                 return
-            except BaseException as exc:  # noqa: BLE001 -- retry any spawn failure
+            except BaseException as exc:  # noqa: BLE001 -- Every spawn failure must trigger bounded cleanup and a retry.
                 last_exc = exc
         msg = f"worker pool {self.mesh_dims} failed to rendezvous"
         raise RuntimeError(msg) from last_exc

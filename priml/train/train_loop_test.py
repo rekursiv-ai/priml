@@ -2627,7 +2627,7 @@ def _collective_skip_worker(result_dir: str, mesh: DeviceMesh) -> None:
     try:
         skip = _agreed_across_ranks(rank == 0)
         (Path(result_dir) / f"rank_{rank}").write_text("skip" if skip else "save")
-    except Exception as e:  # noqa: BLE001  -- surface worker error to parent
+    except Exception as e:  # noqa: BLE001 -- The test surfaces any worker failure to its parent process.
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -2884,7 +2884,9 @@ def test_phase_heartbeat_fires_on_stall_and_names_phase(
     emit a per-rank heartbeat naming the exact phase, so a distributed hang is
     self-diagnosing from the logs alone (no external py-spy).
     """
-    from priml.train.train_loop import _phase_heartbeat  # noqa: PLC0415
+    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
+        _phase_heartbeat,
+    )
 
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
@@ -2901,7 +2903,9 @@ def test_phase_heartbeat_silent_when_block_is_fast(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A block that returns before the interval emits no heartbeat (zero cost)."""
-    from priml.train.train_loop import _phase_heartbeat  # noqa: PLC0415
+    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
+        _phase_heartbeat,
+    )
 
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
@@ -2925,7 +2929,9 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     deadline is pushed forward and the dump never fires -- it may only fire
     for a genuine GIL-holding native wedge, whose frames are static.
     """
-    from priml.train.train_loop import _phase_heartbeat  # noqa: PLC0415
+    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
+        _phase_heartbeat,
+    )
 
     with _phase_heartbeat("eval batch 12 eval_loss", interval_s=0.01):
         deadline = time.perf_counter() + 0.08  # >3 watchdog periods.
@@ -2946,7 +2952,9 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
     Big-int multiplication is a single GIL-holding C call with a size knob;
     calibrate it to this machine, then wedge for several watchdog periods.
     """
-    from priml.train.train_loop import _phase_heartbeat  # noqa: PLC0415
+    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
+        _phase_heartbeat,
+    )
 
     def _timed(bits: int) -> float:
         start = time.perf_counter()

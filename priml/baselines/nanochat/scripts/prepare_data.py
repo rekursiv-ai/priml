@@ -191,7 +191,7 @@ def _download(out: Path, *, count: int) -> list[Path]:
             staging = Path(staged)
             # Stream rather than read whole: a shard is hundreds of MB.
             with (
-                urllib.request.urlopen(url) as response,  # noqa: S310 -- fixed https URL from pinned constants
+                urllib.request.urlopen(url) as response,  # noqa: S310 -- The benchmark fetches a URL supplied by its controlled dataset manifest..
                 staging.open("wb") as file,
             ):
                 shutil.copyfileobj(response, file)
@@ -220,8 +220,8 @@ def _fit_vocabulary(
     """Fit a byte-pair vocabulary, or verify the one already fitted."""
     # Imported here, not at module scope: training reads a pickled encoding, so
     # a published install must not need a BPE trainer to import this package.
-    import rustbpe  # noqa: PLC0415 -- preparation-only dependency
-    import tiktoken  # noqa: PLC0415 -- preparation-only dependency
+    import rustbpe  # noqa: PLC0415 -- The data script defers optional dataset dependencies off startup..
+    import tiktoken  # noqa: PLC0415 -- The data script defers optional dataset dependencies off startup..
 
     out.mkdir(parents=True, exist_ok=True)
     pickled = out / "tokenizer.pkl"
@@ -300,7 +300,7 @@ def _fit_vocabulary(
     # Written LAST, and staged: the loader reads the recipe to decide whether
     # the artifact is usable, so an interruption must not leave one that claims
     # a byte table it does not have.
-    import pickle  # noqa: PLC0415 -- serialization for the prepared artifact
+    import pickle  # noqa: PLC0415 -- The data script defers optional dataset dependencies off startup..
 
     staging = pickled.with_suffix(".pkl.partial")
     with staging.open("wb") as file:
@@ -357,7 +357,9 @@ def _documents(
     doc_cap: int,
 ) -> Iterator[str]:
     """Yield capped documents from parquet shards, stopping after ``max_chars``."""
-    from pyarrow import parquet  # noqa: PLC0415 -- preparation-only dependency
+    from pyarrow import (  # noqa: PLC0415 -- The data script defers optional dataset dependencies off startup..
+        parquet,
+    )
 
     seen = 0
     for path in shards:

@@ -284,7 +284,7 @@ def _fsdp_materialize_worker(result_dir: str, mesh: DeviceMesh) -> None:
             (result_path / f"rank_{rank}").write_text("FAIL:non-finite")
         else:
             (result_path / f"rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test process.
         (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None
@@ -378,7 +378,7 @@ def _bn_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
         local = weight.to_local() if isinstance(weight, DTensor) else weight
         ok = local is not None and torch.isfinite(local).all()
         (result_path / f"rank_{rank}").write_text("ok" if ok else "FAIL:non-finite")
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test process.
         (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None

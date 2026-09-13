@@ -227,7 +227,7 @@ def _download(filename: str, *, into: Path) -> Path:
     logger.info("downloading %s", url)
     # Stream rather than read whole: the training CSV is hundreds of MB.
     with (
-        urllib.request.urlopen(url) as response,  # noqa: S310 -- fixed https URL from pinned constants
+        urllib.request.urlopen(url) as response,  # noqa: S310 -- Fixed https URL from pinned constants.
         path.open("wb") as out,
     ):
         shutil.copyfileobj(response, out)

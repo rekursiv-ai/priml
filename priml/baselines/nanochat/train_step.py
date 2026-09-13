@@ -349,7 +349,7 @@ class NanoChatTrainStep(TrainStep):
                     # Popped, not read: the flag tells THIS method whether the
                     # rate scales, and the optimizer it is attached to would
                     # reject it as an unexpected keyword.
-                    kwargs = member._kwargs  # noqa: SLF001 -- PartialConfig exposes no accessor for its keywords
+                    kwargs = member._kwargs  # noqa: SLF001 -- The training step reuses the model's private timing seam.
                     scales = kwargs.pop("width_scaled", False)
                     rate = kwargs.get("lr")
                     # An exempt member steps a per-layer scalar rather than a

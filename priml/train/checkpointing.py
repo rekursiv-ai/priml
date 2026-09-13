@@ -23,21 +23,42 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Formatter
-from typing import Any, Protocol, Self, cast, override
+from typing import TYPE_CHECKING, Any, Protocol, Self, cast, override
 
 import logging
 import re
 import shutil
 import time
 
-from configgle import Fig, Makeable
-from torch import Tensor
-from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
-from torch.distributed.tensor import DTensor
 
-import torch
-import torch.distributed as dist
-import torch.distributed.checkpoint as dcp
+if TYPE_CHECKING:
+    from torch import Tensor
+    from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
+    from torch.distributed.tensor import DTensor
+
+    import torch
+    import torch.distributed as dist
+    import torch.distributed.checkpoint as dcp
+else:
+    from wrapt import lazy_import
+
+    Tensor = lazy_import("torch", "Tensor")  # ~1050 ms; checkpoint helpers need it.
+    DTensor = lazy_import(
+        "torch.distributed.tensor", "DTensor"
+    )  # ~1050 ms; state inspection needs it.
+    state_dict_loader = lazy_import(
+        "torch.distributed.checkpoint", "state_dict_loader"
+    )  # ~1050 ms; checkpoint I/O needs it.
+    state_dict_saver = lazy_import(
+        "torch.distributed.checkpoint", "state_dict_saver"
+    )  # ~1050 ms; checkpoint I/O needs it.
+    torch = lazy_import("torch")  # ~1050 ms; checkpoint I/O needs it.
+    dist = lazy_import(
+        "torch.distributed"
+    )  # ~1050 ms; distributed coordination needs it.
+    dcp = lazy_import("torch.distributed.checkpoint")  # ~1050 ms; async saves need it.
+
+from configgle import Fig, Makeable
 
 from priml.custom_types import CheckpointableProtocol
 from priml.paths import resolve_working_dir, validated_output_path

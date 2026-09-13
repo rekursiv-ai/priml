@@ -12,7 +12,7 @@ from priml.data.augmentation_gpu import (
     random_crop,
 )
 from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- pytest fixture, injected by name not called
+    cleanup_cuda,  # noqa: F401 -- The test imports the backend to register its runtime kernels.
 )
 
 

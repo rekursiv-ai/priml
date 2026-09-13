@@ -127,7 +127,7 @@ def salt(*args: object) -> int:
                 "salt() requires primitive args with stable repr "
                 f"(str/bytes/int/float/bool/None); got {type(arg).__name__}.",
             )
-    return int(hashlib.md5(str(args).encode()).hexdigest(), 16) & 0x7FFFFFFF  # noqa: S324 -- non-cryptographic seed salt; collision risk is acceptable, weak-hash flag does not apply
+    return int(hashlib.md5(str(args).encode()).hexdigest(), 16) & 0x7FFFFFFF  # noqa: S324 -- The digest is only a deterministic seed mixer and never protects secret data.
 
 
 def make_seed() -> int:
@@ -164,7 +164,7 @@ def set_seed_local(seed: int | None = None) -> int:
 
     random.seed(salt("python", seed))
     numpy_rng.bit_generator.state = np.random.PCG64(salt("numpy", seed)).state
-    np.random.seed(salt("numpy_legacy", seed))  # noqa: NPY002 -- deliberate legacy reseed
+    np.random.seed(salt("numpy_legacy", seed))  # noqa: NPY002 -- Existing callers use NumPy's legacy global generator and require reproducible reseeding.
     torch.manual_seed(salt("torch", seed))
 
     if torch.cuda.is_available() and torch.cuda.is_initialized():
@@ -210,7 +210,7 @@ def dataloader_worker_init_fn(worker_id: int) -> None:
     numpy_rng.bit_generator.state = np.random.PCG64(
         salt("numpy_worker", worker_id, worker_seed),
     ).state
-    np.random.seed(salt("numpy_legacy_worker", worker_id, worker_seed))  # noqa: NPY002 -- deliberate legacy reseed for fork-safety
+    np.random.seed(salt("numpy_legacy_worker", worker_id, worker_seed))  # noqa: NPY002 -- Forked workers inherit the legacy generator unless this hook reseeds it.
 
 
 def set_seed_distributed(

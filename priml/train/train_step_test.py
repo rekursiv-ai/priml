@@ -153,7 +153,7 @@ def test_device_init_names_how_not_where() -> None:
     # Assigned as an ``--override`` or a deserialized config delivers it: the
     # annotation rules this out statically, so the runtime guard is what
     # catches text that never met a type checker.
-    config.device_init = "cuda"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue] -- negative test: proves the field refuses a device name
+    config.device_init = "cuda"  # ty: ignore[invalid-assignment] -- The negative test assigns a deliberately invalid device name.  # pyright: ignore[reportAttributeAccessIssue] -- The negative test assigns a deliberately invalid device name.
     with pytest.raises(ValueError, match="device_init"):
         config.make()
 
@@ -367,7 +367,7 @@ class _BadModel(nn.Linear):
         bias: bool = True
 
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Any:  # ty: ignore[invalid-method-override] -- deliberately violates the ModelOutput contract for the negative test
+    def forward(self, x: Tensor, **_kwargs: Any) -> Any:  # ty: ignore[invalid-method-override] -- The negative test deliberately violates the ModelOutput contract.
         del x
         return None
 
@@ -536,7 +536,7 @@ def _uniform_count_worker(result_dir_str: str, mesh: Any) -> None:  # noqa: ANN4
         # Unequal counts (rank 0 -> 3, rank 1 -> 5): must raise on every rank.
         local_count = 3 if rank == 0 else 5
         (result_dir / f"rank_{rank}").write_text(_unequal_outcome(local_count))
-    except Exception as e:  # noqa: BLE001  -- surface any worker error to parent
+    except Exception as e:  # noqa: BLE001 -- The worker must surface any failure to its parent process.
         (result_dir / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None
