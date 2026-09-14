@@ -25,7 +25,7 @@ class tqdm_asyncio(std_tqdm):
         **tqdm_kwargs,
     ) -> Generator[Incomplete, Incomplete]: ...
     @classmethod
-    async def gather(cls, *fs, loop=None, timeout=None, total=None, **tqdm_kwargs): ...  # noqa: ASYNC109 -- Mirrors upstream timeout parameter.
+    async def gather(cls, *fs, loop=None, timeout=None, total=None, **tqdm_kwargs): ...  # noqa: ASYNC109 -- mirrors upstream timeout parameter
 
 def tarange(*args, **kwargs): ...
 
