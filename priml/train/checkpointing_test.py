@@ -19,6 +19,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.train import checkpointing
 from priml.train.checkpointing import (
     AsyncLocalStateDictStorer,
     Checkpointer,
@@ -181,6 +182,100 @@ def test_save_and_load_roundtrip(temp_checkpoint_dir: Path) -> None:
     _save(ckpt, 1000, state)
     assert ckpt.available_steps() == [1000]
     assert _load(temp_checkpoint_dir, resume_step=1000) == state
+
+
+def test_force_save_refuses_stale_off_cadence_destination(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """A terminal save must not silently retain a stale occupied path."""
+    ckpt = Checkpointer(
+        Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=10),
+    )
+    _save(ckpt, 5, {"value": "stale"})
+
+    with pytest.raises(RuntimeError, match="would overwrite existing"):
+        ckpt.save(_DictTarget({"value": "new"}), 5)
+
+
+def test_force_save_rejects_negative_step_before_write(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """A negative step must not create an unparseable checkpoint filename."""
+    ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
+
+    with pytest.raises(ValueError, match="non-negative"):
+        ckpt.save(_DictTarget({"value": "new"}), -1)
+
+    assert list(temp_checkpoint_dir.iterdir()) == []
+
+
+def test_overwrite_rejects_file_to_distributed_format_transition(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One checkpoint step cannot change between plain and distributed formats."""
+    _save(
+        Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir)),
+        1,
+        {"value": "plain"},
+    )
+    ckpt = Checkpointer(
+        Checkpointer.Config(
+            working_dir=temp_checkpoint_dir,
+            allow_checkpoint_overwrite=True,
+        ),
+    )
+
+    def is_distributed(state: object) -> bool:
+        del state
+        return True
+
+    monkeypatch.setattr(checkpointing, "_has_dtensor", is_distributed)
+
+    with pytest.raises(FileExistsError):
+        ckpt.save(_DictTarget({"value": "distributed"}), 1)
+
+
+def test_sync_storer_rejects_directory_to_file_transition(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """A plain write must not replace an existing distributed checkpoint directory."""
+    path = temp_checkpoint_dir / "step_00000001.pt"
+    path.mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        SyncLocalStateDictStorer().write(path, {"value": torch.tensor([1])})
+
+
+def test_async_plain_overwrite_replaces_existing_checkpoint(
+    temp_checkpoint_dir: Path,
+    single_rank_group: None,
+) -> None:
+    """Async writes replace an incomplete prior DCP directory safely."""
+    del single_rank_group
+    ckpt = Checkpointer(
+        Checkpointer.Config(
+            working_dir=temp_checkpoint_dir,
+            allow_checkpoint_overwrite=True,
+            storer=AsyncLocalStateDictStorer.Config(),
+        ),
+    )
+    ckpt.save(_DictTarget({"value": torch.tensor([1])}), 1)
+    ckpt.storage.flush()
+    assert (temp_checkpoint_dir / "step_00000001.pt").is_dir()
+    # A crash after payloads but before the final marker leaves this incomplete;
+    # the backend must be allowed to finish the same destination.
+    (temp_checkpoint_dir / "step_00000001.pt" / ".metadata").unlink()
+
+    ckpt.save(_DictTarget({"value": torch.tensor([2])}), 1)
+    ckpt.storage.flush()
+    loaded = _load(
+        temp_checkpoint_dir,
+        resume_step=1,
+        into={"value": torch.zeros(1, dtype=torch.long)},
+        storer=AsyncLocalStateDictStorer.Config(),
+    )
+    assert torch.equal(loaded["value"], torch.tensor([2]))
 
 
 def test_load_returns_false_when_empty(temp_checkpoint_dir: Path) -> None:
@@ -562,36 +657,54 @@ def test_async_reads_a_sync_written_plain_file(
         path,
         {"x": torch.zeros(3, dtype=torch.long)},
     )
-    # A plain ``.pt`` load maps storages onto the current device (CUDA when
-    # present), so compare values on CPU rather than assuming the saved device.
-    assert torch.equal(loaded["x"].cpu(), torch.tensor([7, 8, 9]))
+    assert torch.equal(loaded["x"], torch.tensor([7, 8, 9]))
+
+
+def test_plain_file_read_stages_before_destination_restore(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """Plain-file reads stage on CPU before each receiver restores its own leaves."""
+    path = temp_checkpoint_dir / "step_0.pt"
+    SyncLocalStateDictStorer().write(path, {"x": torch.ones(4)})
+
+    loaded = SyncLocalStateDictStorer().read(path, {"x": torch.zeros(4)})
+
+    assert loaded["x"].device.type == "cpu"
 
 
 @pytest.mark.gpu_torch_cuda
-def test_plain_file_read_maps_to_current_device(
-    temp_checkpoint_dir: Path,
-    single_rank_group: None,
-) -> None:
-    """A ``.pt`` checkpoint's tensors land on THIS rank's current device.
-
-    Regression: without an explicit ``map_location``, tensors deserialize
-    onto their SAVED device (rank 0's ``cuda:0``), so on a multi-GPU resume
-    every non-zero rank materialized -- and its allocator permanently
-    cached -- a full checkpoint copy on GPU 0, starving rank 0 into an OOM
-    at its first resumed train step (arc2_drm_7m, 2026-07-06).
-    """
-    del single_rank_group
+def test_plain_file_load_uses_receiver_placement(temp_checkpoint_dir: Path) -> None:
+    """CPU-staged state is placed by a receiver on its selected CUDA rank."""
     if torch.cuda.device_count() < 2:
-        pytest.skip("needs >= 2 CUDA devices to observe cross-device mapping")
-    path = temp_checkpoint_dir / "step_0.pt"
+        pytest.skip("needs >= 2 CUDA devices to test receiver placement")
+
+    path = temp_checkpoint_dir / "step_00000000.pt"
     with torch.cuda.device(0):
-        SyncLocalStateDictStorer().write(path, {"x": torch.ones(4, device="cuda")})
-    with torch.cuda.device(1):
-        loaded = SyncLocalStateDictStorer().read(
+        SyncLocalStateDictStorer().write(
             path,
-            {"x": torch.zeros(4, device="cuda")},
+            {"x": torch.ones(4, device="cuda")},
         )
-    assert loaded["x"].device == torch.device("cuda", 1)
+
+    class PlacementTarget(_DictTarget):
+        """Places CPU-staged state on the receiver's selected CUDA device."""
+
+        def __init__(self) -> None:
+            super().__init__({"x": torch.zeros(4, device="cuda:1")})
+
+        @override
+        def load_state_dict(self, state_dict: dict[str, Tensor]) -> None:
+            assert state_dict["x"].device.type == "cpu"
+            self.loaded = {"x": state_dict["x"].to(self._state["x"].device)}
+
+    target = PlacementTarget()
+    ckpt = Checkpointer(
+        Checkpointer.Config(working_dir=temp_checkpoint_dir, resume_step=0),
+    )
+    with torch.cuda.device(1):
+        assert ckpt.load(target, max_steps=1e9, guard=False)
+    assert target.loaded is not None
+    assert target.loaded["x"].device == torch.device("cuda:1")
+    assert torch.equal(target.loaded["x"].cpu(), torch.ones(4))
 
 
 def test_plain_read_preserves_cpu_rng_state(
@@ -600,9 +713,8 @@ def test_plain_read_preserves_cpu_rng_state(
     """A ``.pt`` load must keep the torch RNG blob a CPU ``ByteTensor``.
 
     ``torch.get_rng_state()`` returns a CPU ``uint8`` tensor; ``torch.set_rng_state``
-    rejects anything else. ``_read_checkpoint`` maps model/optimizer storages onto
-    the current device, but that remap must not touch the RNG state -- moving it to
-    CUDA makes the restored state unusable (``RNG state must be a torch.ByteTensor``).
+    rejects anything else. Plain-file reads stage the complete state tree on CPU, so
+    the RNG blob remains usable before the receiver restores model and optimizer leaves.
     """
     path = temp_checkpoint_dir / "step_0.pt"
     rng = torch.get_rng_state()

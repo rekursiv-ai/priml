@@ -586,6 +586,11 @@ class NanoChatTrainStep(TrainStep):
         resume that dropped either would re-anneal from the top or grant
         another warmup costing no budget.
         """
+        if self._pending_passes:
+            raise RuntimeError(
+                "cannot checkpoint with incomplete gradient accumulation; "
+                "per-pass gradients are not serializable",
+            )
         state = super().state_dict()
         state["elapsed_sec"] = self.elapsed_sec
         state["local_step"] = self._steps_this_process

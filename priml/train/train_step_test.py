@@ -273,8 +273,8 @@ def test_autocast_cache_enabled_is_configurable(
     assert seen == [True], seen
 
 
-def test_train_step_state_dict_records_accumulation_counters() -> None:
-    """T-004: state_dict must record grad-accumulation counters."""
+def test_train_step_refuses_to_checkpoint_pending_accumulation() -> None:
+    """A checkpoint cannot resume gradients that its state does not contain."""
     torch.manual_seed(42)
     X = torch.randn(8, 2)
     label = (X.sum(dim=1) > 0).float()
@@ -291,10 +291,8 @@ def test_train_step_state_dict_records_accumulation_counters() -> None:
     trainable.train_step(x=X, label=label)
     assert trainable.accumulation_steps == 2
 
-    state = trainable.state_dict()
-    assert "accumulation_steps" in state
-    assert "accumulated_samples" in state
-    assert state["accumulation_steps"] == 2
+    with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
+        trainable.state_dict()
 
 
 class _DictModel(nn.Module):

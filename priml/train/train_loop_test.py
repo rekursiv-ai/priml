@@ -32,6 +32,7 @@ from priml.custom_types import CheckpointableProtocol
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
 from priml.loss.custom_types import LossOutput
+from priml.math.seed import RngState, get_rng_state
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.timer import CheckpointableStepTimer
@@ -1965,15 +1966,17 @@ def _make_simple_loop_config(
     tmp: str,
     *,
     dataset: Makeable[DatasetProtocol] | None = None,
-) -> TrainLoop.Config:
+) -> TrainLoop.Config[TrainStep.Config[_LinearModel.Config], Makeable[DatasetProtocol]]:
     """Build a minimal CPU TrainLoop.Config over the supplied dataset."""
-    step_config = TrainStep.Config()
+    step_config: TrainStep.Config[_LinearModel.Config] = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
     step_config.loss = PartialConfig(_cross_entropy)
     step_config.parallelism = NoParallel.Config(device="cpu")
     step_config.compile = None
-    config = TrainLoop.Config(
+    config: TrainLoop.Config[
+        TrainStep.Config[_LinearModel.Config], Makeable[DatasetProtocol]
+    ] = TrainLoop.Config(
         step=step_config,
         dataset=dataset if dataset is not None else _simple_dummy_dataset(),
     )
@@ -2051,6 +2054,386 @@ def test_resume_does_not_eval_or_checkpoint_before_first_new_step(
         assert loop.step.global_step == 6
         assert 5 not in maybe_save_steps
         assert 5 not in eval_steps
+
+
+def test_resume_does_not_rewrite_completed_checkpoint_with_partial_accumulation() -> (
+    None
+):
+    """A resumed partial accumulation must not overwrite its completed prefix."""
+    with tempfile.TemporaryDirectory() as tmp:
+        initial = _make_simple_loop_config(tmp)
+        initial.max_steps = 1
+        assert isinstance(initial.step, TrainStep.Config)
+        initial.step.accumulate_grad_batches = 2
+        assert isinstance(initial.checkpointing, Checkpointer.Config)
+        initial.checkpointing.save_every = 1
+        initial.make().train()
+
+        resumed = _make_simple_loop_config(tmp)
+        resumed.max_steps = 2
+        assert isinstance(resumed.step, TrainStep.Config)
+        resumed.step.accumulate_grad_batches = 2
+        assert isinstance(resumed.checkpointing, Checkpointer.Config)
+        resumed.checkpointing.save_every = 1
+        resumed.make().train()
+
+        checkpoint = torch.load(
+            Path(tmp) / "step_00000001.pt",
+            weights_only=True,
+        )
+        assert checkpoint["step"]["accumulation_steps"] == 0
+
+
+@pytest.mark.parametrize(
+    ("consume_eval_rng", "num_steps_eval"),
+    [(False, 1_000), (True, 1)],
+    ids=("no_eval", "stochastic_eval"),
+)
+def test_cadence_checkpoint_replays_next_batch_and_rng(
+    consume_eval_rng: bool,
+    num_steps_eval: int,
+) -> None:
+    """A cadence checkpoint resumes at its exact data and RNG prefix."""
+    with tempfile.TemporaryDirectory() as tmp:
+        reference_config = _make_simple_loop_config(
+            str(Path(tmp) / "reference"),
+            dataset=_ReplayDataset.Config(consume_eval_rng=consume_eval_rng),
+        )
+        reference_config.max_steps = 3
+        reference_config.num_steps_eval = num_steps_eval
+        assert isinstance(reference_config.checkpointing, Checkpointer.Config)
+        reference_config.checkpointing.save_every = 1
+        reference = reference_config.make()
+        reference.train()
+        assert isinstance(reference.dataset, _ReplayDataset)
+        expected_batches = reference.dataset.batches[1:]
+        expected_rng = get_rng_state()["torch"]
+
+        resumed_config = _make_simple_loop_config(
+            str(Path(tmp) / "resumed"),
+            dataset=_ReplayDataset.Config(consume_eval_rng=consume_eval_rng),
+        )
+        resumed_config.max_steps = 3
+        resumed_config.num_steps_eval = num_steps_eval
+        assert isinstance(resumed_config.checkpointing, Checkpointer.Config)
+        resumed_config.checkpointing.save_every = 1
+        checkpoint_dir = Path(tmp) / "resumed"
+        checkpoint_dir.mkdir()
+        shutil.copy2(
+            Path(tmp) / "reference" / "step_00000001.pt",
+            checkpoint_dir / "step_00000001.pt",
+        )
+        resumed = resumed_config.make()
+        assert resumed.step.global_step == 1
+        resumed.train()
+        assert isinstance(resumed.dataset, _ReplayDataset)
+
+        assert resumed.dataset.cursor == reference.dataset.cursor
+        assert len(resumed.dataset.batches) == len(expected_batches)
+        for actual, expected in zip(
+            resumed.dataset.batches, expected_batches, strict=True
+        ):
+            assert torch.equal(actual, expected)
+        assert torch.equal(get_rng_state()["torch"], expected_rng)
+
+
+def test_final_checkpoint_replays_rng_after_final_eval() -> None:
+    """Extending a completed run must continue after its final evaluation."""
+    with tempfile.TemporaryDirectory() as tmp:
+        reference_config = _make_simple_loop_config(
+            str(Path(tmp) / "reference"),
+            dataset=_ReplayDataset.Config(consume_eval_rng=True),
+        )
+        reference_config.max_steps = 2
+        reference_config.num_steps_eval = -1
+        reference = reference_config.make()
+        reference.train()
+        assert isinstance(reference.dataset, _ReplayDataset)
+        expected_batch = next(reference.dataset)["media"]
+
+        resumed_config = _make_simple_loop_config(
+            str(Path(tmp) / "resumed"),
+            dataset=_ReplayDataset.Config(consume_eval_rng=True),
+        )
+        resumed_config.max_steps = 3
+        resumed_config.num_steps_eval = -1
+        checkpoint_dir = Path(tmp) / "resumed"
+        checkpoint_dir.mkdir()
+        shutil.copy2(
+            Path(tmp) / "reference" / "step_00000002.pt",
+            checkpoint_dir / "step_00000002.pt",
+        )
+        resumed = resumed_config.make()
+        resumed.train()
+        assert isinstance(resumed.dataset, _ReplayDataset)
+
+        assert len(resumed.dataset.batches) == 1
+        assert torch.equal(resumed.dataset.batches[0], expected_batch)
+
+
+@pytest.mark.parametrize(
+    ("is_final", "expected_step"),
+    [(False, 1), (True, 2)],
+    ids=("cadence", "final"),
+)
+def test_eval_timeout_saves_and_restores_interrupted_prefix(
+    tmp_path: Path,
+    is_final: bool,
+    expected_step: int,
+) -> None:
+    """A timed-out scheduled eval preserves its completed optimizer prefix."""
+    config = _make_simple_loop_config(
+        str(tmp_path),
+        dataset=_ReplayDataset.Config(consume_eval_rng=True),
+    )
+    config.max_steps = 2
+    config.num_steps_eval = -1 if is_final else 1
+    config.max_eval_time = 0.0
+    assert isinstance(config.checkpointing, Checkpointer.Config)
+    config.checkpointing.save_every = 1
+    loop = config.make()
+
+    with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
+        loop.train()
+
+    interrupted = loop.state_dict()
+    checkpoint = tmp_path / f"step_{expected_step:08d}.pt"
+    _assert_checkpoint_matches_interrupted_state(checkpoint, interrupted=interrupted)
+
+    resumed_config = _make_simple_loop_config(
+        str(tmp_path),
+        dataset=_ReplayDataset.Config(consume_eval_rng=True),
+    )
+    resumed_config.max_steps = expected_step + 1
+    resumed_config.num_steps_eval = math.inf
+    assert isinstance(resumed_config.checkpointing, Checkpointer.Config)
+    resumed_config.checkpointing.save_every = 1
+    resumed = resumed_config.make()
+
+    assert resumed.step.global_step == expected_step
+    _assert_state_dict_equal(resumed.state_dict(), expected=interrupted)
+
+
+def test_cadence_eval_error_after_work_saves_interrupted_rng(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after an eval batch saves the RNG state that eval consumed."""
+    config = _make_simple_loop_config(
+        str(tmp_path),
+        dataset=_ReplayDataset.Config(consume_eval_rng=True),
+    )
+    config.max_steps = 2
+    config.num_steps_eval = 1
+    assert isinstance(config.checkpointing, Checkpointer.Config)
+    config.checkpointing.save_every = 1
+    loop = config.make()
+    monkeypatch.setattr(loop, "eval", functools.partial(_raise_after_eval, loop.eval))
+
+    with pytest.raises(EvalTimeLimitError, match="after eval work"):
+        loop.train()
+
+    _assert_checkpoint_matches_interrupted_state(
+        tmp_path / "step_00000001.pt",
+        interrupted=loop.state_dict(),
+    )
+
+
+@pytest.mark.parametrize("is_final", [False, True], ids=("cadence", "final"))
+def test_eval_error_logs_immediate_checkpoint_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    is_final: bool,
+) -> None:
+    """A checkpoint failure never replaces the scheduled eval's exception."""
+    config = _make_simple_loop_config(str(tmp_path))
+    config.max_steps = 2
+    config.num_steps_eval = -1 if is_final else 1
+    config.max_eval_time = 0.0
+    assert isinstance(config.checkpointing, Checkpointer.Config)
+    config.checkpointing.save_every = 1
+    loop = config.make()
+    checkpointing = loop.checkpointing
+    assert checkpointing is not None
+    if is_final:
+        monkeypatch.setattr(checkpointing, "save", _raise_checkpoint_write)
+    else:
+        monkeypatch.setattr(checkpointing, "maybe_save", _raise_checkpoint_write)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="priml.train.train_loop"),
+        pytest.raises(EvalTimeLimitError, match="max_eval_time"),
+    ):
+        loop.train()
+
+    recovery_records = [
+        record
+        for record in caplog.records
+        if record.message == "Failed to save checkpoint after evaluation error."
+    ]
+    assert len(recovery_records) == 1
+    assert recovery_records[0].exc_info is not None
+
+
+@pytest.mark.parametrize("is_final", [False, True], ids=("cadence", "final"))
+@pytest.mark.parametrize(
+    ("world_size", "expects_checkpoint_io"),
+    [(1, True), (2, False)],
+    ids=("one_rank", "multi_rank"),
+)
+def test_eval_error_recovery_skips_checkpoint_io_only_for_multirank(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_final: bool,
+    world_size: int,
+    expects_checkpoint_io: bool,
+) -> None:
+    """Recovery remains local-only when a distributed group has multiple ranks."""
+    config = _make_simple_loop_config(str(tmp_path))
+    loop = config.make()
+    checkpointing = loop.checkpointing
+    assert checkpointing is not None
+    calls: list[str] = []
+    monkeypatch.setattr(
+        checkpointing,
+        "maybe_save",
+        functools.partial(_record_maybe_save, calls),
+    )
+    monkeypatch.setattr(
+        checkpointing,
+        "save",
+        functools.partial(_record_save, calls),
+    )
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: world_size)
+
+    loop._save_after_evaluation_error(is_final=is_final)
+
+    expected = ["save" if is_final else "maybe_save"] if expects_checkpoint_io else []
+    assert calls == expected
+
+
+def test_interrupted_final_eval_does_not_save_partial_accumulation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Interrupted eval cannot make pending gradients look resumable."""
+    config = _make_simple_loop_config(str(tmp_path))
+    config.max_steps = 2
+    config.num_steps_eval = -1
+    config.max_eval_time = 0.0
+    assert isinstance(config.step, TrainStep.Config)
+    config.step.accumulate_grad_batches = 2
+    loop = config.make()
+    monkeypatch.setattr(loop, "_time_limit_reached", lambda: loop.local_step >= 1)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="priml.train.train_loop"),
+        pytest.raises(EvalTimeLimitError, match="max_eval_time"),
+    ):
+        loop.train()
+
+    assert list(tmp_path.iterdir()) == []
+    assert any(
+        record.message == "Failed to save checkpoint after evaluation error."
+        and record.exc_info is not None
+        for record in caplog.records
+    )
+
+
+def test_terminal_partial_accumulation_fails_without_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal partial accumulation must not publish a resumable checkpoint."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.max_steps = 2
+        assert isinstance(config.step, TrainStep.Config)
+        config.step.accumulate_grad_batches = 2
+        loop = config.make()
+        monkeypatch.setattr(loop, "_time_limit_reached", lambda: loop.local_step >= 1)
+
+        with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
+            loop.train()
+
+        assert list(Path(tmp).iterdir()) == []
+
+
+def test_terminal_partial_accumulation_preserves_prior_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed partial termination leaves the latest completed checkpoint intact."""
+    with tempfile.TemporaryDirectory() as tmp:
+        initial = _make_simple_loop_config(tmp)
+        initial.max_steps = 1
+        assert isinstance(initial.step, TrainStep.Config)
+        initial.step.accumulate_grad_batches = 2
+        assert isinstance(initial.checkpointing, Checkpointer.Config)
+        initial.checkpointing.save_every = 1
+        initial.make().train()
+
+        resumed = _make_simple_loop_config(tmp)
+        resumed.max_steps = 2
+        assert isinstance(resumed.step, TrainStep.Config)
+        resumed.step.accumulate_grad_batches = 2
+        assert isinstance(resumed.checkpointing, Checkpointer.Config)
+        resumed.checkpointing.save_every = 1
+        resumed.checkpointing.allow_checkpoint_overwrite = True
+        loop = resumed.make()
+        monkeypatch.setattr(loop, "_time_limit_reached", lambda: loop.local_step >= 1)
+
+        with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
+            loop.train()
+
+        checkpoint = torch.load(
+            Path(tmp) / "step_00000001.pt",
+            weights_only=True,
+        )
+        assert checkpoint["step"]["accumulation_steps"] == 0
+
+
+def test_terminal_no_update_with_complete_accumulation_saves_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skipped train call with no pending gradients still saves its prefix."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.max_steps = 2
+        loop = config.make()
+        original_train_step = loop._do_train_step
+        calls = [0]
+
+        monkeypatch.setattr(
+            loop,
+            "_do_train_step",
+            functools.partial(_skip_after_first_train_step, original_train_step, calls),
+        )
+        monkeypatch.setattr(loop, "_time_limit_reached", lambda: calls[0] >= 2)
+        loop.train()
+
+        assert calls[0] == 2
+        assert loop.step.global_step == 1
+        assert loop.step.accumulation_steps == 0
+        assert loop.checkpointing is not None
+        assert loop.checkpointing.available_steps() == [1]
+
+
+def test_complete_update_still_writes_terminal_checkpoint_and_resumes() -> None:
+    """A completed update still receives the usual final resumable artifact."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.max_steps = 1
+        assert isinstance(config.step, TrainStep.Config)
+        config.step.accumulate_grad_batches = 2
+        loop = config.make()
+        loop.train()
+
+        assert loop.checkpointing is not None
+        assert loop.checkpointing.available_steps() == [1]
+        resumed = _make_simple_loop_config(tmp).make()
+        assert resumed.step.global_step == 1
 
 
 def test_train_step_logs_gpu_memory_to_tracker(
@@ -2977,6 +3360,145 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
         x = 1 << bits
         _ = x * x  # Holds the GIL ~8 intervals; the watchdog fires at 2.
     assert "Timeout (" in capfd.readouterr().err
+
+
+class _ReplayDataset:
+    """Stateful test dataset whose batches consume and expose RNG progression."""
+
+    class Config(Fig["_ReplayDataset"], make_with_kwargs=True):
+        consume_eval_rng: bool = False
+        """Whether evaluation consumes the training RNG stream."""
+
+    def __init__(self, consume_eval_rng: bool = False) -> None:
+        self.timer_epoch = CheckpointableStepTimer()
+        self.cursor = 0
+        self.batches: list[Tensor] = []
+        self.consume_eval_rng = consume_eval_rng
+
+    def train_dataloader(self) -> Iterator[dict[str, Tensor]]:
+        """Return the cursor-preserving train iterator."""
+        return self
+
+    def eval_dataloader(self) -> Iterator[dict[str, Tensor]]:
+        """Return validation data, optionally consuming the shared RNG stream."""
+        if self.consume_eval_rng:
+            return iter(
+                [
+                    {
+                        "media": torch.stack(
+                            (torch.rand(()), torch.zeros(()))
+                        ).unsqueeze(0),
+                        "label": torch.tensor([0]),
+                    },
+                ],
+            )
+        return iter(())
+
+    def __iter__(self) -> _ReplayDataset:
+        return self
+
+    def __next__(self) -> dict[str, Tensor]:
+        """Yield one cursor-labelled random batch."""
+        if self.cursor == 4:
+            raise StopIteration
+        batch = torch.tensor([[float(self.cursor), torch.rand(()).item()]])
+        self.cursor += 1
+        self.batches.append(batch.clone())
+        return {"media": batch, "label": torch.tensor([self.cursor % 2])}
+
+    def state_dict(self) -> dict[str, object]:
+        """Persist the next unconsumed record."""
+        return {"cursor": self.cursor}
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Restore the next unconsumed record."""
+        cursor = state_dict["cursor"]
+        assert isinstance(cursor, int)
+        self.cursor = cursor
+
+
+def _skip_after_first_train_step(
+    original_train_step: Callable[[dict[str, Tensor]], None],
+    calls: list[int],
+    batch: dict[str, Tensor],
+) -> None:
+    """Run only the first patched train step."""
+    calls[0] += 1
+    if calls[0] == 1:
+        original_train_step(batch)
+
+
+def _raise_after_eval(eval_fn: Callable[[], dict[str, object]]) -> dict[str, object]:
+    """Raise after the real eval consumes its batch and RNG."""
+    eval_fn()
+    raise EvalTimeLimitError("injected failure after eval work")
+
+
+def _raise_checkpoint_write(target: CheckpointableProtocol, step: int) -> None:
+    """Fail a recovery save without replacing the primary eval error."""
+    del target, step
+    raise RuntimeError("injected checkpoint persistence failure")
+
+
+def _record_maybe_save(
+    calls: list[str], target: CheckpointableProtocol, step: int
+) -> bool:
+    """Record a recovery cadence-save call."""
+    del target, step
+    calls.append("maybe_save")
+    return True
+
+
+def _record_save(calls: list[str], target: CheckpointableProtocol, step: int) -> None:
+    """Record a recovery forced-save call."""
+    del target, step
+    calls.append("save")
+
+
+def _assert_checkpoint_matches_interrupted_state(
+    checkpoint: Path,
+    interrupted: dict[str, object],
+) -> None:
+    """Assert a durable checkpoint is the state observed after the eval error."""
+    assert checkpoint.exists()
+    saved = torch.load(checkpoint, weights_only=True)
+    assert isinstance(saved, dict)
+    _assert_state_dict_equal(cast(dict[str, object], saved), expected=interrupted)
+
+
+def _assert_state_dict_equal(
+    actual: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    """Compare the managed model, optimizer, data, and RNG checkpoint state."""
+    torch.testing.assert_close(actual["step"], expected["step"], rtol=0, atol=0)
+    assert actual["dataset"] == expected["dataset"]
+    assert actual["metrics"] == expected["metrics"]
+    _assert_rng_state_equal(
+        cast(RngState, actual["rng"]),
+        expected=cast(RngState, expected["rng"]),
+    )
+
+
+def _assert_rng_state_equal(actual: RngState, expected: RngState) -> None:
+    """Compare every managed CPU and optional CUDA RNG stream exactly."""
+    assert actual.keys() == expected.keys()
+    assert actual["python"] == expected["python"]
+    assert torch.equal(actual["torch"], expected["torch"])
+    if "numpy" in actual:
+        assert "numpy" in expected
+        assert actual["numpy"] == expected["numpy"]
+    if "cuda" in actual:
+        assert "cuda" in expected
+        for actual_state, expected_state in zip(
+            actual["cuda"],
+            expected["cuda"],
+            strict=True,
+        ):
+            assert torch.equal(actual_state, expected_state)
+    if "cuda_uuids" in actual:
+        assert "cuda_uuids" in expected
+        assert actual["cuda_uuids"] == expected["cuda_uuids"]
 
 
 if __name__ == "__main__":

@@ -753,10 +753,8 @@ class TrainStep:
         whatever order the two loads happen to run, and the two would agree
         only by luck.
 
-        The accumulation counters are recorded so a mid-accumulation
-        checkpoint is auditable; restoring resets them (see
-        :meth:`load_state_dict`), because per-microbatch gradients cannot be
-        persisted.
+        A pending accumulation cannot be checkpointed: its parameter gradients
+        are necessary for the next optimizer update but are not serialized.
 
         A subclass adding a timer of its own saves it by extending this, which
         is one line and visible where a reader looks for what a checkpoint
@@ -768,6 +766,11 @@ class TrainStep:
             "accumulated_samples".
 
         """
+        if self.accumulation_steps:
+            raise RuntimeError(
+                "cannot checkpoint with incomplete gradient accumulation; "
+                "per-microbatch gradients are not serializable",
+            )
         return {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),

@@ -112,6 +112,15 @@ def test_an_optimizer_step_waits_for_the_whole_token_batch() -> None:
     assert step.global_step == 1
 
 
+def test_checkpoint_refuses_a_partial_token_batch() -> None:
+    """The incomplete token-batch gradients cannot be reconstructed on resume."""
+    step = _step(tokens_per_optimizer_step=4 * SEQ)
+    step.train_step(**_batch())
+
+    with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
+        step.state_dict()
+
+
 def test_a_token_batch_no_whole_number_of_passes_reaches_is_rejected() -> None:
     """Otherwise the run silently trains at a batch size nobody configured."""
     config = NanoChatTrainStep.Config()

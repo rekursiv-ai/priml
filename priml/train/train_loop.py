@@ -566,6 +566,7 @@ class TrainLoop:
                     "TrainLoop startup: checkpoint load complete (global_step=%d).",
                     self.step.global_step,
                 )
+                self._last_cadence_step = self.step.global_step
 
             # Cadence is expressed in optimizer steps, while the training loop
             # visits this boundary once per micro-batch. Remember the restored
@@ -604,6 +605,29 @@ class TrainLoop:
                 and not self._time_limit_reached()
                 and not self._should_stop_early()
             ):
+                # A cadence checkpoint is a completed prefix. Run it before
+                # fetching the successor batch, whose data cursor and RNG use
+                # belong to the next prefix.
+                # A resumed loop may start exactly on a checkpoint/eval cadence
+                # step. Do not re-save or re-score that restored state before
+                # this process has advanced training at least once.
+                #
+                # ``stepped`` is what keeps a cadence from firing once per
+                # MICROBATCH: this body runs per pass, but both cadences below
+                # count optimizer updates, so under accumulation every pass of
+                # one step is "due". Measured before the guard: an eval costing
+                # 23s ran eight times at step 200, spending three minutes of a
+                # five-minute budget re-scoring identical weights.
+                stepped = self.step.global_step != self._last_cadence_step
+                if self.local_step > 0 and stepped:
+                    self._last_cadence_step = self.step.global_step
+                    try:
+                        self._maybe_eval()
+                    except BaseException:
+                        self._save_after_evaluation_error(is_final=False)
+                        raise
+                    if self.checkpointing is not None:
+                        self.checkpointing.maybe_save(self, self.step.global_step)
                 batch = self._get_next_batch()
                 if self.current_epoch == n + 1:
                     # Flush/discard any partial gradient accumulation from the
@@ -624,22 +648,6 @@ class TrainLoop:
                             is_final=False,
                         )
                 self._maybe_garbage_collect()
-                # A resumed loop may start exactly on a checkpoint/eval cadence
-                # step. Do not re-save or re-score that restored state before
-                # this process has advanced training at least once.
-                #
-                # ``stepped`` is what keeps a cadence from firing once per
-                # MICROBATCH: this body runs per pass, but both cadences below
-                # count optimizer updates, so under accumulation every pass of
-                # one step is "due". Measured before the guard: an eval costing
-                # 23s ran eight times at step 200, spending three minutes of a
-                # five-minute budget re-scoring identical weights.
-                stepped = self.step.global_step != self._last_cadence_step
-                if self.local_step > 0 and stepped:
-                    self._last_cadence_step = self.step.global_step
-                    if self.checkpointing is not None:
-                        self.checkpointing.maybe_save(self, self.step.global_step)
-                    self._maybe_eval()
                 self._do_train_step(batch)
                 trained_any = True
 
@@ -658,8 +666,6 @@ class TrainLoop:
             if not trained_any:
                 self._warn_nothing_to_train()
                 return
-            if self.checkpointing is not None:
-                self.checkpointing.save(self, self.step.global_step)
             # The cadence eval inside the loop never lands on the final step (the
             # while-loop exits once global_step reaches max_steps), so run one
             # last eval here and mark it final: it emits the RESULT line and
@@ -669,7 +675,15 @@ class TrainLoop:
             # step. ``-1`` skips only the cadence and keeps this.
             # (A subclass may suppress this final eval via ``_maybe_eval`` when its
             # last cadence eval already produced the run's terminal metrics.)
-            self._maybe_eval(is_final=True)
+            try:
+                self._maybe_eval(is_final=True)
+            except BaseException:
+                self._save_after_evaluation_error(is_final=True)
+                raise
+            # A terminal checkpoint may be resumed with a larger budget, so it
+            # must include the final evaluation's RNG progression too.
+            if self.checkpointing is not None:
+                self.checkpointing.save(self, self.step.global_step)
         finally:
             self.phase_timer.publish_summary(
                 self.tracker,
@@ -677,6 +691,23 @@ class TrainLoop:
             )
             self.phase_timer.log_summary()
             self._cleanup()
+
+    def _save_after_evaluation_error(self, *, is_final: bool) -> None:
+        """Attempt the scheduled save without masking an evaluation error."""
+        if (
+            torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+        ):
+            return
+        if self.checkpointing is None:
+            return
+        try:
+            if is_final:
+                self.checkpointing.save(self, step=self.step.global_step)
+            else:
+                self.checkpointing.maybe_save(self, step=self.step.global_step)
+        except BaseException:
+            logger.exception("Failed to save checkpoint after evaluation error.")
 
     def _warn_nothing_to_train(self) -> None:
         """Explain a run that resumed a finished experiment and did nothing."""

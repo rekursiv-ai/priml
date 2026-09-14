@@ -298,7 +298,11 @@ def test_gan_preprocess_batch_forwards_to_generator() -> None:
     assert out["media"].device == gan.generator.device
 
 
-def _make_gan(n_discriminator_steps: int = 1) -> GANTrainStep:
+def _make_gan(
+    n_discriminator_steps: int = 1,
+    *,
+    accumulate_grad_batches: int = 1,
+) -> GANTrainStep:
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
         model=SimpleGenerator.Config(latent_dim=10, image_size=8),
@@ -306,15 +310,27 @@ def _make_gan(n_discriminator_steps: int = 1) -> GANTrainStep:
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
+        accumulate_grad_batches=accumulate_grad_batches,
     )
     config.discriminator = TrainStep.Config(
         model=SimpleDiscriminator.Config(image_size=8),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
+        accumulate_grad_batches=accumulate_grad_batches,
     )
     config.n_discriminator_steps = n_discriminator_steps
     return config.make()
+
+
+def test_gan_checkpoint_refuses_pending_substep_accumulation() -> None:
+    """A GAN checkpoint composes both sub-steps' resumability boundaries."""
+    gan = _make_gan(accumulate_grad_batches=2)
+    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    gan.train_step(**batch)
+
+    with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
+        gan.state_dict()
 
 
 def test_gan_generator_phase_does_not_pollute_discriminator_grads() -> None:

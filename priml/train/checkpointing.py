@@ -32,7 +32,6 @@ import time
 
 
 if TYPE_CHECKING:
-    from torch import Tensor
     from torch.distributed.checkpoint import state_dict_loader, state_dict_saver
     from torch.distributed.tensor import DTensor
 
@@ -42,7 +41,6 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    Tensor = lazy_import("torch", "Tensor")  # ~1050 ms; checkpoint helpers need it.
     DTensor = lazy_import(
         "torch.distributed.tensor", "DTensor"
     )  # ~1050 ms; state inspection needs it.
@@ -257,7 +255,8 @@ class SyncLocalStateDictStorer:
           into: Template state dict for resharding (used by DCP only).
 
         Returns:
-          state: Loaded checkpoint with tensors on this rank's device.
+          state: Restored checkpoint; DCP reshards into ``into``, while a plain
+            file stages on CPU for the receiving target to place.
 
         """
         return _read_checkpoint(path, into)
@@ -358,7 +357,8 @@ class AsyncLocalStateDictStorer:
           into: Template state dict for resharding (used by DCP only).
 
         Returns:
-          state: Loaded checkpoint with tensors on this rank's device.
+          state: Restored checkpoint; DCP reshards into ``into``, while a plain
+            file stages on CPU for the receiving target to place.
 
         """
         self._join()
@@ -419,26 +419,6 @@ class AsyncLocalStateDictStorer:
             dist.barrier()
 
 
-# Used to exempt the RNG blob from ``_read_checkpoint``'s device remap: torch's RNG
-# states (``torch.get_rng_state()`` and each entry of
-# ``torch.cuda.get_rng_state_all()``) are CPU ``ByteTensor``s, and ``set_rng_state`` /
-# ``set_rng_state_all`` reject anything on another device.
-def _to_cpu(obj: object) -> object:
-    """Recursively move every tensor in ``obj`` to CPU, preserving structure."""
-    if isinstance(obj, Tensor):
-        return obj.cpu()
-    if isinstance(obj, Mapping):
-        mapping = cast(Mapping[object, object], obj)
-        return {k: _to_cpu(v) for k, v in mapping.items()}
-    if isinstance(obj, list):
-        items = cast(list[object], obj)
-        return [_to_cpu(v) for v in items]
-    if isinstance(obj, tuple):
-        elems = cast(tuple[object, ...], obj)
-        return tuple(_to_cpu(v) for v in elems)
-    return obj
-
-
 # A DCP *directory* is loaded in place into ``into``, resharding each tensor to this
 # rank's current placement (so a load survives a world-size change), and returned. A
 # plain ``.pt`` *file* is ``torch.load``ed and the fresh dict returned. Shared by every
@@ -446,28 +426,20 @@ def _to_cpu(obj: object) -> object:
 # backend wrote it -- so a dir written by one backend loads through another. ``path`` is
 # assumed complete.
 #
-# The ``.pt`` load maps storages to this rank's current device. Without a
-# ``map_location``, tensors deserialize onto their saved device.
-#
-# The RNG blob is exempt: ``torch.get_rng_state()`` is a CPU ``uint8`` tensor and
-# ``torch.set_rng_state`` rejects anything that is not a CPU ``ByteTensor``. Mapping it
-# onto CUDA alongside the model/optimizer tensors would make the restored RNG state
-# unusable, so its subtree is pulled back to CPU after the load.
+# The ``.pt`` load stages every tensor on CPU. The receiving target's
+# ``load_state_dict`` owns the actual placement: models, optimizers, and other
+# leaves can each have different destinations, so visible hardware cannot choose
+# one valid map location for the whole serialized tree. CPU staging also preserves
+# the RNG blob's required CPU ``ByteTensor`` placement.
 def _read_checkpoint(path: Path, into: StateDict) -> StateDict:
     """Load a checkpoint, dispatching on its on-disk format (backend-agnostic)."""
     if path.is_dir():
         state_dict_loader.load(into, checkpoint_id=str(path))
         return into
-    if torch.cuda.is_available():
-        map_location = torch.device("cuda", torch.cuda.current_device())
-    else:
-        map_location = torch.device("cpu")
     blob = cast(
         StateDict,
-        torch.load(path, weights_only=True, map_location=map_location),
+        torch.load(path, weights_only=True, map_location=torch.device("cpu")),
     )
-    if "rng" in blob:
-        blob["rng"] = _to_cpu(blob["rng"])
     return blob
 
 
@@ -639,13 +611,15 @@ class Checkpointer:
           saved: True if checkpoint was written; False if not on cadence.
 
         """
+        if step < 0:
+            raise ValueError(f"checkpoint step must be non-negative, got {step}")
         if step == 0 or step % self.save_every != 0:
             return False
         self._write(target, step)
         return True
 
     def save(self, target: CheckpointableProtocol, step: int) -> None:
-        """Force-save ``target`` at ``step`` unless that step already exists.
+        """Force-save ``target`` at ``step`` or reject an occupied destination.
 
         For the end-of-training save at an off-cadence step. The exists-check is
         collective (rank 0's verdict broadcast) so ranks never disagree and
@@ -657,13 +631,19 @@ class Checkpointer:
 
         Args:
           target: Checkpointable object (typically TrainLoop) to serialize.
-          step: Training step number (saved only if not already on disk).
+          step: Non-negative training step number.
 
         """
+        if step < 0:
+            raise ValueError(f"checkpoint step must be non-negative, got {step}")
         self.storage.flush()
         exists = step in self.available_steps()
-        if _agreed_across_ranks(exists):
-            return
+        if _agreed_across_ranks(exists) and not self.allow_checkpoint_overwrite:
+            raise RuntimeError(
+                f"a forced save would overwrite existing checkpoint at step "
+                f"{step} in {self.checkpoint_dir}; set "
+                "allow_checkpoint_overwrite=True to deliberately re-mint it.",
+            )
         self._write(target, step)
 
     def load(
@@ -775,8 +755,9 @@ class Checkpointer:
 
     def _write(self, target: CheckpointableProtocol, step: int) -> None:
         """Serialize ``target`` and write it at ``step``; retention rides the write."""
+        path = validated_output_path(self._path(step))
         self.storage.write(
-            validated_output_path(self._path(step)),
+            path,
             target.state_dict(),
             after_write=self._prune,
         )
