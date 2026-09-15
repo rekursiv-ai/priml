@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import json
+import math
 import pickle
 
 from pyarrow import parquet
@@ -27,9 +28,12 @@ import torch
 
 from priml.baselines.nanochat.data import (
     NanoChatData,
+    ReferenceEvaluation,
     Tokenizer,
     token_bytes_fingerprint,
 )
+from priml.lib.custom_json import DictCodec
+from priml.metrics.bits_per_byte import BitsPerByte
 
 
 SEQ = 16
@@ -257,6 +261,23 @@ def test_the_training_stream_does_not_end(corpus: Path) -> None:
         assert next(stream)["media"].shape == (2, SEQ)
 
 
+def test_empty_online_corpus_fails_instead_of_spinning(corpus: Path) -> None:
+    """A complete unproductive corpus pass cannot fill even one token row."""
+    _write_shard(corpus, 0, [])
+    stream = iter(_data(corpus).train_dataloader())
+    with pytest.raises(ValueError, match="no documents"):
+        next(stream)
+
+
+def test_empty_shard_beside_productive_shard_is_supported(corpus: Path) -> None:
+    """Empty individual shards do not make a nonempty corpus invalid."""
+    _write_shard(corpus, 0, [])
+    _write_shard(corpus, 2, ["z"])
+    data = _data(corpus, train_shard_indices=(0, 2))
+    batch = next(iter(data.train_dataloader()))
+    assert set(batch["label"].flatten().tolist()) == {256, ord("z")}
+
+
 def test_the_byte_table_travels_with_the_batch(corpus: Path) -> None:
     """The score divides by it, so it must reach the metric unmediated."""
     batch = next(iter(_data(corpus).eval_dataloader()))
@@ -381,6 +402,8 @@ def test_a_fresh_stream_round_trips(corpus: Path) -> None:
         ("eval_batch_size", -1),
         ("buffer_size", 0),
         ("max_seq_len", 1),
+        ("num_train_shards", 0),
+        ("num_train_shards", -1),
     ],
 )
 def test_a_nonpositive_size_is_rejected_by_name(
@@ -409,6 +432,284 @@ def _refingerprint(directory: Path, table: np.ndarray) -> None:
     recipe = json.loads((directory / "tokenizer_recipe.json").read_text())
     recipe["token_bytes_sha256"] = token_bytes_fingerprint(table)
     (directory / "tokenizer_recipe.json").write_text(json.dumps(recipe))
+
+
+@pytest.fixture
+def prepared_config(tmp_path: Path) -> NanoChatData.Config:
+    """Write tiny frozen arrays, including misleading obsolete evaluation rows."""
+    train = tmp_path / "train"
+    evaluation = tmp_path / "evaluation"
+    train.mkdir()
+    evaluation.mkdir()
+    rows = np.array([[4, 0, 1, 2, 3], [4, 3, 2, 1, 0]], dtype=np.uint16)
+    inputs = np.array([[4, 2, 0, 4], [4, 1, 2, 3]], dtype=np.uint16)
+    targets = np.array([[2, 0, 4, 1], [1, 2, 3, 0]], dtype=np.uint16)
+    primary = np.array([1, 2, 3, 4, 0], dtype=np.int64)
+    literal = np.array([1, 1, 3, 4, 0], dtype=np.int64)
+    np.save(train / "train_rows.npy", rows)
+    np.save(train / "eval_x.npy", np.zeros_like(inputs))
+    np.save(train / "eval_y.npy", np.zeros_like(targets))
+    for name, array in (
+        ("eval_x.npy", inputs),
+        ("eval_y.npy", targets),
+        ("token_bytes_primary.npy", primary),
+        ("token_bytes_literal.npy", literal),
+    ):
+        np.save(evaluation / name, array)
+    train_manifest = {
+        "vocab_size": 5,
+        "bos_id": 4,
+        "train": {
+            "batch_size": 1,
+            "seq_len": 4,
+            "total_rows": 2,
+            "train_shard_indices": [0],
+            "buffer_size": 8,
+            "documents_per_refill": 128,
+        },
+    }
+    eval_manifest = {
+        "protocol": "standard-packed-shard7-tokensub-v1",
+        "vocab_size": 5,
+        "bos_token_id": 4,
+        "eval_batch_size": 1,
+        "max_seq_len": 4,
+        "rows": 2,
+        "batches": 2,
+        "physical_positions": 8,
+        "val_shard": 1,
+        "buffer_size": 1000,
+        "documents_per_refill": 128,
+        "byte_tables": {
+            "primary": {
+                "file": "token_bytes_primary.npy",
+                "total_on_eval_y": 16,
+            },
+            "literal": {
+                "file": "token_bytes_literal.npy",
+                "total_on_eval_y": 14,
+            },
+            "scored_positions": 7,
+        },
+    }
+    train_path = train / "PREPARED_MANIFEST.json"
+    eval_path = evaluation / "packed-eval-manifest.json"
+    train_path.write_text(json.dumps(train_manifest))
+    eval_path.write_text(json.dumps(eval_manifest))
+    config = NanoChatData.Config()
+    config.base_dir = "/"
+    config.device = "cpu"
+    config.batch_size = config.eval_batch_size = 1
+    config.max_seq_len = 4
+    config.vocab_size = 5
+    config.eval_tokens = 8
+    config.num_train_shards = 1
+    config.val_shard = 1
+    config.train_buffer_size = 8
+    config.prepared_train_manifest = train_path
+    config.prepared_eval_manifest = eval_path
+    return config
+
+
+def test_prepared_training_preserves_order_and_refuses_to_wrap(
+    prepared_config: NanoChatData.Config,
+) -> None:
+    data = prepared_config.make()
+    stream = iter(data.train_dataloader())
+    first = next(stream)
+    assert first["media"].tolist() == [[4, 0, 1, 2]]
+    assert first["label"].tolist() == [[0, 1, 2, 3]]
+    assert next(stream)["label"].tolist() == [[3, 2, 1, 0]]
+    assert data.state_dict()["batches"] == 2
+    with pytest.raises(RuntimeError, match="PREPARED_EXHAUSTED"):
+        next(stream)
+    with pytest.raises(ValueError, match="fresh run"):
+        data.load_state_dict(data.state_dict())
+
+
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_non_cuda_batches_use_the_configured_device(
+    prepared_config: NanoChatData.Config, device: str
+) -> None:
+    """Device placement does not depend on CUDA's pinned-memory capability."""
+    prepared_config.device = device
+    data = prepared_config.make()
+    for batches in (data.train_dataloader(), data.eval_dataloader()):
+        batch = next(iter(batches))
+        for tensor in (batch["media"], batch["label"], batch["token_bytes"]):
+            assert tensor.device.type == device
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_host_packing_ignores_the_ambient_default_device(
+    corpus: Path, prepared_config: NanoChatData.Config, prepared: bool
+) -> None:
+    """Configured CPU batches stay on CPU even inside a different device context."""
+    dataset = prepared_config.make() if prepared else _data(corpus)
+    for stream in (dataset.train_dataloader(), dataset.eval_dataloader()):
+        with torch.device("meta"):
+            batch = next(iter(stream))
+        for tensor in (batch["media"], batch["label"], batch["token_bytes"]):
+            assert tensor.device.type == "cpu"
+
+
+def test_prepared_evaluation_replays_packed_rows_and_primary_byte_rule(
+    prepared_config: NanoChatData.Config,
+) -> None:
+    data = prepared_config.make()
+    for _ in range(2):
+        metric = BitsPerByte.Config().make()
+        seen: list[list[int]] = []
+        for batch in data.eval_dataloader():
+            seen.extend(batch["label"].tolist())
+            metric.update(torch.ones_like(batch["label"], dtype=torch.float32), **batch)
+        assert seen == [[2, 0, 4, 1], [1, 2, 3, 0]]
+        assert metric.bytes == 16
+        assert metric.nats == 7
+        assert metric.compute()["bpb"] == pytest.approx(7 / (math.log(2) * 16))
+
+
+@pytest.mark.parametrize(
+    "name", ["train_rows.npy", "eval_y.npy", "token_bytes_primary.npy"]
+)
+def test_prepared_array_geometry_is_checked(
+    prepared_config: NanoChatData.Config, name: str
+) -> None:
+    manifest = (
+        prepared_config.prepared_train_manifest
+        if name == "train_rows.npy"
+        else prepared_config.prepared_eval_manifest
+    )
+    path = Path(manifest).parent / name
+    array = np.load(path)
+    np.save(path, array[1:])
+    with pytest.raises(ValueError, match=r"geometry|one integer per token"):
+        prepared_config.make()
+
+
+def test_prepared_metadata_ignores_obsolete_checksums(
+    prepared_config: NanoChatData.Config,
+) -> None:
+    path = Path(prepared_config.prepared_eval_manifest)
+    metadata = DictCodec.coerce(json.loads(path.read_text()), default=None)
+    metadata["eval_x_sha256"] = "obsolete"
+    metadata["eval_y_sha256"] = "obsolete"
+    metadata["loaded_modules_and_assets"] = {
+        "tokenizer_assets": {"tokenizer.json": {"sha256": "obsolete"}}
+    }
+    path.write_text(json.dumps(metadata) + " \n")
+    batch = next(iter(prepared_config.make().eval_dataloader()))
+    assert batch["label"].tolist() == [[2, 0, 4, 1]]
+
+
+def test_prepared_geometry_cannot_silently_change_the_evaluation(
+    prepared_config: NanoChatData.Config,
+) -> None:
+    prepared_config.eval_tokens = 4
+    with pytest.raises(ValueError, match="geometry"):
+        prepared_config.make()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("train_shard_indices", (2,)), ("val_shard", 2), ("buffer_size", 8)],
+)
+def test_prepared_inputs_cannot_misreport_their_corpus_or_packing(
+    prepared_config: NanoChatData.Config, field: str, value: object
+) -> None:
+    setattr(prepared_config, field, value)
+    with pytest.raises(ValueError, match="geometry"):
+        prepared_config.make()
+
+
+@pytest.mark.parametrize("obsolete_metadata", [False, True])
+def test_archive_replay_without_checksum_pins(
+    tmp_path: Path, obsolete_metadata: bool
+) -> None:
+    """Keep BPE tensors and batch boundaries unchanged, including masked padding."""
+    path = tmp_path / "rows.npz"
+    inputs = np.array([[5, 1, 2], [5, 3, 5], [5, 2, 1]], dtype=np.int64)
+    targets = np.array([[1, 2, 3], [3, 5, 5], [2, 1, 5]], dtype=np.int64)
+    np.savez(
+        path,
+        allow_pickle=False,
+        inputs=inputs,
+        targets=targets,
+        score_mask=targets != 5,
+        reference_bytes=np.array([3, 1, 2]),
+        literal_bytes=np.array([3, 1, 2]),
+        batch_size=2,
+        vocab_size=6,
+        bos_token_id=5,
+        protocol="karpathy-reference-bytes-v1",
+        token_bytes=np.array([1, 1, 1, 1, 1, 0], dtype=np.int64),
+        **(
+            {
+                "source_sha256": "obsolete",
+                "scored_bytes_sha256": "obsolete",
+                "tokenizer_sha256": "obsolete",
+            }
+            if obsolete_metadata
+            else {}
+        ),
+    )
+    config = ReferenceEvaluation.Config()
+    config.path = path
+    rows = config.make()
+    batches = list(rows.batches(device="cpu", vocab_size=6))
+    assert len(batches) == 2
+    assert torch.equal(torch.cat([b["media"] for b in batches]), torch.tensor(inputs))
+    assert torch.equal(torch.cat([b["label"] for b in batches]), torch.tensor(targets))
+    assert [b.get("reference_bytes") for b in batches] == [4, 2]
+    assert [b.get("evaluation_batch") for b in batches] == [0, 1]
+    with pytest.raises(ValueError, match="vocabulary"):
+        list(rows.batches(device="cpu", vocab_size=7))
+
+
+def test_reference_loader_leaves_training_unchanged(corpus: Path) -> None:
+    data = _data(corpus)
+    batches = list(data.eval_dataloader())
+    # The native stream reuses its buffer, so use one cloned batch as the fixture.
+    inputs = batches[-1]["media"].clone().numpy()
+    targets = batches[-1]["label"].clone().numpy()
+    path = corpus / "reference.npz"
+    table = data.tokenizer.token_bytes.astype(np.int64)
+    counts = table[targets].sum(axis=1)
+    np.savez(
+        path,
+        inputs=inputs,
+        targets=targets,
+        score_mask=table[targets] > 0,
+        reference_bytes=counts,
+        literal_bytes=counts,
+        token_bytes=table,
+        batch_size=2,
+        vocab_size=VOCAB,
+        bos_token_id=256,
+        protocol="karpathy-reference-bytes-v1",
+    )
+    reference = ReferenceEvaluation.Config()
+    reference.path = path
+    changed = _data(
+        corpus,
+        reference_evaluation=reference,
+    )
+    original_train = next(iter(data.train_dataloader()))
+    changed_train = next(iter(changed.train_dataloader()))
+    assert torch.equal(original_train["media"], changed_train["media"])
+    replay = list(changed.eval_dataloader())
+    assert len(replay) == 1
+    assert torch.equal(replay[0]["media"], torch.tensor(inputs))
+    assert replay[0].get("reference_bytes") == int(counts.sum())
+
+
+def test_prepared_data_requires_both_manifests(corpus: Path) -> None:
+    """Require both training and evaluation descriptions before reading rows."""
+    config = NanoChatData.Config()
+    config.prepared_train_manifest = corpus / "missing.json"
+    config.device = "cpu"
+    with pytest.raises(ValueError, match="both manifests"):
+        config.make()
 
 
 if __name__ == "__main__":

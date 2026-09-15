@@ -20,17 +20,20 @@ import pickle
 
 from configgle import PartialConfig
 from configgle.pprinting import pformat
+from configgle.testing import assert_pprint_golden
 from pyarrow import parquet
 
 import numpy as np
 import pyarrow as pa
 import pytest
 import tiktoken
+import torch
 
 from priml.baselines.nanochat import experiments
+from priml.baselines.nanochat.attention import Flash3Attention
 from priml.baselines.nanochat.data import token_bytes_fingerprint
-from priml.baselines.nanochat.experiments import NanoChatLoop
-from priml.baselines.nanochat.flash3 import Flash3Attention
+from priml.baselines.nanochat.experiments import NanoChatLoop, NgramTrainLoop
+from priml.baselines.nanochat.model import MemoryNanoChatLM
 from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     nanochat_optimizer,
@@ -43,10 +46,160 @@ from priml.optimizers.normuon import NorMuon
 from priml.runtime import SingleProcess
 from priml.train.checkpointing import Checkpointer
 from priml.train.parallelism import NoParallel
-from priml.train.tracker import AsyncTracker, TrackerList, WandbTracker
+from priml.train.tracker import (
+    AsyncTracker,
+    FileTracker,
+    TrackerList,
+    WandbTracker,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("factory", [experiments.exp013, experiments.exp022])
+def test_hash_configuration_ignores_the_default_device(
+    factory: Callable[[], NgramTrainLoop.Config],
+) -> None:
+    """Hash coefficients are CPU integers even inside a model device context."""
+    expected = factory().step.model
+    with torch.device("meta"):
+        actual = factory().step.model
+    assert isinstance(expected, MemoryNanoChatLM.Config)
+    assert isinstance(actual, MemoryNanoChatLM.Config)
+    for before, after in (
+        (expected.bigrams, actual.bigrams),
+        (expected.trigrams, actual.trigrams),
+    ):
+        assert tuple(before) == tuple(after)
+        for layer, table in before.items():
+            assert after[layer].hash_multipliers == table.hash_multipliers
+    assert tuple(
+        coefficient
+        for table in (*actual.bigrams.values(), *actual.trigrams.values())
+        for row in table.hash_multipliers
+        for coefficient in row
+    ) == (
+        922_969,
+        611_423,
+        871_659,
+        235_905,
+        878_215,
+        304_631,
+        716_167,
+        719_567,
+        608_275,
+        245_159,
+        172_587,
+        896_485,
+        749_129,
+        423_087,
+        424_077,
+        621_489,
+        341_169,
+        629_529,
+        160_373,
+        34_179,
+        850_893,
+        300_111,
+        741_551,
+        1_020_253,
+        441_521,
+        726_691,
+        511_307,
+        164_915,
+        972_443,
+        995_473,
+        800_275,
+        864_041,
+        659_687,
+        665_505,
+    )
+
+
+def test_experiment_ladder_has_twenty_three_rungs() -> None:
+    """Expose all twenty-three numbered experiment factories."""
+    expected = {f"exp{index:03d}" for index in range(23)}
+    assert expected == {
+        name
+        for name in vars(experiments)
+        if name.startswith("exp") and name[3:].isdigit()
+    }
+
+
+@pytest.mark.compute_large_fixture
+def test_exp022_matches_its_full_config_golden() -> None:
+    assert_pprint_golden(
+        test_file=__file__,
+        name="exp022",
+        config=experiments.exp022(),
+    )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [experiments.exp020, experiments.exp021, experiments.exp022],
+)
+def test_16k_experiments_use_safe_large_matrix_compilation(
+    factory: Callable[[], NgramTrainLoop.Config],
+) -> None:
+    """Keep large vocabulary matrices off overflowing Triton GEMM templates."""
+    compiler = factory().step.compile
+    assert isinstance(compiler, PartialConfig)
+    options = compiler._kwargs.get("options")
+    assert options == {
+        "max_autotune": True,
+        "triton.cudagraphs": True,
+        "coordinate_descent_tuning": True,
+        "max_autotune_gemm_backends": "ATEN",
+    }
+    assert "mode" not in compiler._kwargs
+    assert compiler._kwargs["fullgraph"] is True
+    assert compiler._kwargs["dynamic"] is False
+
+
+@pytest.mark.parametrize(
+    ("name", "factory"),
+    [
+        ("exp004", experiments.exp004),
+        ("exp005", experiments.exp005),
+        ("exp006", experiments.exp006),
+        ("exp007", experiments.exp007),
+        ("exp008", experiments.exp008),
+        ("exp009", experiments.exp009),
+        ("exp010", experiments.exp010),
+        ("exp011", experiments.exp011),
+        ("exp012", experiments.exp012),
+        ("exp013", experiments.exp013),
+        ("exp014", experiments.exp014),
+        ("exp015", experiments.exp015),
+        ("exp016", experiments.exp016),
+        ("exp017", experiments.exp017),
+        ("exp018", experiments.exp018),
+        ("exp019", experiments.exp019),
+        ("exp020", experiments.exp020),
+        ("exp021", experiments.exp021),
+        ("exp022", experiments.exp022),
+    ],
+)
+def test_memory_experiments_finalize_without_runtime_io(
+    name: str,
+    factory: Callable[[], NgramTrainLoop.Config],
+) -> None:
+    """Every numbered configuration is inspectable without data or a device."""
+    documentation = factory.__doc__
+    assert documentation is not None
+    parent = "exp000" if name == "exp004" else f"exp{int(name[3:]) - 1:03d}"
+    assert parent in documentation.splitlines()[0]
+    assert any(line.strip().startswith("- ") for line in documentation.splitlines())
+    config = factory().copy_tree().finalize()
+    assert config.experiment_name == name
+    assert config.study_name == "nanochat"
+    assert config.max_time == config.step.train_budget_sec
+    assert config.step.train_budget_sec == 525.0
+    assert config.dataset.batch_size == config.step.rows_per_pass
+    assert config.dataset.vocab_size == config.step.model.vocab_size
+    assert config.dataset.max_seq_len == config.step.model.max_seq_len
 
 
 LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
@@ -108,14 +261,32 @@ def test_exp001_changes_only_the_kernel() -> None:
     )
     assert fork.step.train_budget_sec == base.step.train_budget_sec
     assert fork.seed == base.seed
+    assert fork.tracker == base.tracker
 
 
-def test_exp001_reports_to_wandb_asynchronously() -> None:
-    """The portable parent owns non-blocking dashboard delivery."""
-    config = experiments.exp001()
+@pytest.mark.parametrize(
+    "factory",
+    [
+        experiments.exp000,
+        experiments.exp001,
+        experiments.exp002,
+        experiments.exp003,
+        experiments.exp004,
+        experiments.exp022,
+    ],
+)
+def test_experiments_share_file_and_async_wandb_tracking(
+    factory: Callable[[], NanoChatLoop.Config],
+) -> None:
+    """Both experiment sequences inherit local metrics and asynchronous W&B."""
+    config = factory().copy_tree().finalize()
 
     assert isinstance(config.tracker, TrackerList.Config)
-    assert list(config.tracker.trackers) == ["wandb"]
+    assert list(config.tracker.trackers) == ["metrics", "wandb"]
+    metrics = config.tracker.trackers["metrics"]
+    assert isinstance(metrics, FileTracker.Config)
+    assert metrics.working_dir == Path(config.working_dir) / "metrics.json"
+    assert metrics.capture_prefix == "eval/"
     wrapper = config.tracker.trackers["wandb"]
     assert isinstance(wrapper, AsyncTracker.Config)
     assert isinstance(wrapper.tracker, WandbTracker.Config)
@@ -465,7 +636,7 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
     Marked rather than shrunk: the claim IS the whole tree, so every lever that
     would bring the render under the unit budget -- a narrower model, fewer
     layers, hiding defaults -- pins a config no experiment runs. Measured 0.25s
-    on colossus, essentially all of it inside ``pformat``, which walks the
+    on a CPU host, essentially all of it inside ``pformat``, which walks the
     finalized tree and tokenizes each rendered node to find replacements
     outside string literals.
 

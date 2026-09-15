@@ -43,7 +43,11 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.nanochat.data import NanoChatData
+from priml.baselines.nanochat.data import (
+    NanoChatBatch,
+    NanoChatData,
+    PackedTokenStream,
+)
 from priml.baselines.nanochat.scripts.prepare_data import prepare
 
 
@@ -183,7 +187,7 @@ def compare(label: str, theirs: Tensor, ours: Tensor) -> str | None:
 
 def compare_stream(
     theirs: Iterator[tuple[Tensor, Tensor, int]],
-    ours: Iterator[dict[str, Tensor]],
+    ours: Iterator[NanoChatBatch],
     *,
     batches: int,
     tag: str,
@@ -281,7 +285,9 @@ def main() -> int:
     # somewhere else, and their count is read off their own module rather than
     # retyped here.
     their_batches = upstream.EVAL_TOKENS // (args.rows * ours.config.max_seq_len)
-    our_batches = len(ours.eval_dataloader())
+    evaluation = ours.eval_dataloader()
+    assert isinstance(evaluation, PackedTokenStream)
+    our_batches = len(evaluation)
     if their_batches != our_batches:
         failures += 1
         print(f"\neval extent: theirs {their_batches} batches, ours {our_batches}")

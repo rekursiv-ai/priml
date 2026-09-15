@@ -272,11 +272,13 @@ class ValueGatedAttention(nn.Module):
         self.attention = config.kernel.make()
 
     def reset_parameters(self) -> None:
-        """Re-initialize every projection."""
+        """Re-initialize every projection and injected normalization."""
         for module in (self.proj_q, self.proj_k, self.proj_v, self.proj_out):
             module.reset_parameters()
         if self.value_gate is not None:
             self.value_gate.reset_parameters()
+        for norm in (self.norm_q, self.norm_k):
+            norm.reset_parameters()
 
     @override
     def forward(

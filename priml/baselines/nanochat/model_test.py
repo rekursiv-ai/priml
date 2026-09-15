@@ -13,14 +13,26 @@ import pytest
 import torch
 
 from priml.baselines.nanochat import experiments
-from priml.baselines.nanochat.model import NanoChatLM
+from priml.baselines.nanochat.attention import CausalAttention
+from priml.baselines.nanochat.model import (
+    GatedResidualMix,
+    MemoryNanoChatLM,
+    NanoChatLM,
+    OutputNormFeedForward,
+    SourceReuseTransformerBlock,
+)
+from priml.baselines.nanochat.ngram import HashedNgramTables
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.linear import Linear
+from priml.model.norm import RMSNorm
 from priml.model.softcap import SoftCap
+from priml.model.special import Identity
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
+from priml.train.parallelism import materialize_meta
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -49,6 +61,26 @@ def _config(**overrides: object) -> NanoChatLM.Config:
 def _model(**overrides: object) -> NanoChatLM:
     torch.manual_seed(0)
     return _config(**overrides).make()
+
+
+def _memory_config(*, buckets: int = 16) -> MemoryNanoChatLM.Config:
+    config = MemoryNanoChatLM.Config()
+    config.vocab_size = VOCAB
+    config.max_seq_len = 4
+    config.channels_in = 16
+    config.num_layers = 1
+    attention = CausalAttention.Config()
+    attention.channels_head = 8
+    attention.num_heads = 2
+    attention.gate_channels = 8
+    attention.window_pattern = "L"
+    attention.bigram = True
+    config.block = TransformerBlock.Config(attn=attention)
+    config.bigrams["0"] = HashedNgramTables.Config(
+        num_embeddings=buckets,
+        hash_multipliers=((1, 3), (5, 7)),
+    )
+    return config
 
 
 # Every output projection is zero-initialized -- that is the recipe, so a fresh block is
@@ -499,6 +531,177 @@ def test_the_shipped_experiments_forward_bfb() -> None:
         seed=0,
         run=run,
     )
+
+
+def test_memory_model_defaults_preserve_the_base_decoder() -> None:
+    memory = MemoryNanoChatLM.Config()
+    memory.channels_in = 16
+    memory.vocab_size = 16
+    memory.num_layers = 2
+    memory.max_seq_len = 4
+    memory.value_embedding_stride = 2
+    attention = memory.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.channels_head = 8
+    attention.gate_channels = 4
+    base = NanoChatLM.Config().update(memory, skip_missing=True)
+
+    models: list[NanoChatLM] = []
+    states: list[Tensor] = []
+    for config in (base, memory):
+        torch.manual_seed(42)
+        models.append(config.make())
+        states.append(torch.get_rng_state())
+    reference, candidate = models
+    assert isinstance(candidate, MemoryNanoChatLM)
+    assert candidate.pool_weights is None
+    assert not candidate.bigrams
+    assert not candidate.trigrams
+    assert torch.equal(states[0], states[1])
+    assert (
+        dict(candidate.named_parameters()).keys()
+        == dict(reference.named_parameters()).keys()
+    )
+    for name, value in candidate.state_dict().items():
+        assert torch.equal(value, reference.state_dict()[name]), name
+    tokens = torch.tensor([[1, 2, 3, 4], [4, 1, 0, 2]])
+    assert torch.equal(candidate(tokens), reference(tokens))
+
+
+def test_memory_model_direct_make_applies_storage_dtype_without_extra_draws() -> None:
+    states: list[Tensor] = []
+    models: list[MemoryNanoChatLM] = []
+    for dtype in (None, torch.bfloat16):
+        config = _memory_config()
+        config.dtype = dtype
+        config.fused_ngram = True
+        torch.manual_seed(43)
+        models.append(config.make())
+        states.append(torch.get_rng_state())
+
+    assert torch.equal(states[0], states[1])
+    narrowed = models[1]
+    assert all(parameter.dtype == torch.bfloat16 for parameter in narrowed.parameters())
+    table = narrowed.bigrams["0"]
+    assert isinstance(table, HashedNgramTables)
+    assert len(table.gradient_sinks) == len(table.tables) == 2
+    assert all(sink.dtype == torch.float32 for sink in table.gradient_sinks)
+
+
+def test_memory_model_direct_fused_make_supports_forward_and_backward() -> None:
+    config = _memory_config()
+    config.fused_ngram = True
+    model = config.make()
+    attention = model.blocks[0].attn
+    assert isinstance(attention, CausalAttention)
+    with torch.no_grad():
+        attention.proj_out.weight.normal_()
+    table = model.bigrams["0"]
+    assert isinstance(table, HashedNgramTables)
+
+    model(torch.tensor([[1, 2, 3, 4]])).sum().backward()
+
+    assert all(torch.count_nonzero(sink) > 0 for sink in table.gradient_sinks)
+    assert all(part.weight.grad is None for part in table.tables)
+
+
+def test_memory_model_meta_materialization_preserves_dtype_and_fused_sinks() -> None:
+    config = _memory_config()
+    config.dtype = torch.bfloat16
+    config.fused_ngram = True
+    with torch.device("meta"):
+        model = config.make()
+    table = model.bigrams["0"]
+    assert isinstance(table, HashedNgramTables)
+    assert all(parameter.is_meta for parameter in model.parameters())
+    assert all(parameter.dtype == torch.bfloat16 for parameter in model.parameters())
+    assert len(table.gradient_sinks) == len(table.tables) == 2
+    assert all(sink.is_meta for sink in table.gradient_sinks)
+
+    materialize_meta(model, torch.device("cpu"))
+
+    assert all(not parameter.is_meta for parameter in model.parameters())
+    assert all(parameter.dtype == torch.bfloat16 for parameter in model.parameters())
+    assert all(
+        not sink.is_meta and sink.dtype == torch.float32
+        for sink in table.gradient_sinks
+    )
+
+
+def test_memory_table_width_matches_attention_values_not_residual_stream() -> None:
+    config = _memory_config()
+    attention = config.template.attn
+    assert isinstance(attention, CausalAttention.Config)
+    attention.num_heads = 4
+
+    finalized = config.copy_tree().finalize()
+    table = finalized.bigrams["0"]
+
+    assert table.channels_out == 4 * 8
+    assert finalized.make()(torch.tensor([[1, 2, 3, 4]])).shape == (1, 4, VOCAB)
+
+
+def test_memory_table_capacity_does_not_change_flops() -> None:
+    small = _memory_config(buckets=16).make().flops_per_token()
+    large = _memory_config(buckets=64).make().flops_per_token()
+
+    assert large == small
+
+
+def test_source_reuse_transformer_reads_attention_from_the_saved_source() -> None:
+    config = SourceReuseTransformerBlock.Config()
+    config.channels_in = 4
+    config.attn = Linear.Config(4, 4)
+    config.ffn = Identity.Config()
+    config.norm1 = Identity.Config()
+    config.norm2 = Identity.Config()
+    block = config.make()
+    with torch.no_grad():
+        block.attn.weight.copy_(2 * torch.eye(4))
+    current = torch.ones(1, 2, 4, requires_grad=True)
+    source = torch.full((1, 2, 4), 3.0, requires_grad=True)
+    output = block(current, attention_source=source)
+    torch.testing.assert_close(output, torch.full_like(current, 14.0))
+    output.sum().backward()
+    torch.testing.assert_close(current.grad, torch.full_like(current, 2.0))
+    torch.testing.assert_close(source.grad, torch.full_like(source, 4.0))
+
+
+def test_gated_residual_starts_with_a_neutral_gate() -> None:
+    config = GatedResidualMix.Config()
+    config.num_layers = 1
+    mix = config.make()
+    current = torch.tensor([[[1.0, 3.0]]])
+    original = torch.tensor([[[2.0, 4.0]]])
+    torch.testing.assert_close(
+        mix(current, original=original, layer=0),
+        current + 0.1 * original,
+    )
+
+
+def test_output_norm_feed_forward_config_builds_the_specialized_class() -> None:
+    config = OutputNormFeedForward.Config()
+    config.channels_in = 4
+    config.channels_out = 4
+    config.round_to = 1
+    assert isinstance(config.make(), OutputNormFeedForward)
+
+
+def test_output_norm_feed_forward_reset_initializes_affine_output_norm() -> None:
+    config = OutputNormFeedForward.Config()
+    config.channels_in = 4
+    config.channels_out = 4
+    config.round_to = 1
+    config.norm_out = RMSNorm.Config(elementwise_affine=True)
+    ffn = config.make()
+    assert isinstance(ffn.norm_out, RMSNorm)
+    assert ffn.norm_out.weight is not None
+    with torch.no_grad():
+        ffn.norm_out.weight.fill_(float("nan"))
+
+    ffn.reset_parameters()
+
+    assert torch.equal(ffn.norm_out.weight, torch.ones(4))
 
 
 if __name__ == "__main__":

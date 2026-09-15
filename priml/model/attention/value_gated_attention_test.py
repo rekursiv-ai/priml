@@ -14,6 +14,7 @@ import torch
 
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.fixtures import (
     cleanup_cuda,  # noqa: F401 -- The test import registers the attention implementation under test.
@@ -99,6 +100,29 @@ def test_value_gated_attention_ungated_reset() -> None:
 
     attention.reset_parameters()
     assert attention.value_gate is None
+
+
+def test_value_gated_attention_reset_initializes_affine_qk_norms() -> None:
+    config = ValueGatedAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        gate_channels=4,
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+    )
+    attention = config.make()
+    assert isinstance(attention.norm_q, RMSNorm)
+    assert isinstance(attention.norm_k, RMSNorm)
+    assert attention.norm_q.weight is not None
+    assert attention.norm_k.weight is not None
+    with torch.no_grad():
+        attention.norm_q.weight.fill_(float("nan"))
+        attention.norm_k.weight.fill_(float("nan"))
+
+    attention.reset_parameters()
+
+    assert torch.equal(attention.norm_q.weight, torch.ones(8))
+    assert torch.equal(attention.norm_k.weight, torch.ones(8))
 
 
 @pytest.mark.parametrize(

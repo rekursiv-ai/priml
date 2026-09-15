@@ -21,16 +21,21 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import field
 from functools import partial
 from typing import Self, override
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 
 import torch
 
+from priml.baselines.nanochat.ngram import (
+    HashedNgramTables,
+    NgramSource,
+    clear_marked_sinks,
+)
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
@@ -53,6 +58,7 @@ from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
 from priml.model.residual_mix import ResidualMix
 from priml.model.softcap import SoftCap
+from priml.model.special import Identity
 from priml.model.swiglu import SwiGLUReluSquared
 from priml.model.transformer.block import TransformerBlock
 
@@ -250,6 +256,7 @@ class NanoChatLM(nn.Module):
             )
             self.mix.num_layers = self.num_layers
             self.rope.channels_head = _head_shape(self.block[0], self.channels_in)[0]
+            self._propagate_layer_table_widths()
             finalized = super().finalize()
             # AFTER the cascade: a block that left ``num_heads`` at its sentinel
             # derives it in its own finalize, so checking earlier would compare
@@ -263,6 +270,9 @@ class NanoChatLM(nn.Module):
             assert isinstance(finalized.block, list)
             _reject_ragged_heads(finalized.block, channels_in=finalized.channels_in)
             return finalized
+
+        def _propagate_layer_table_widths(self) -> None:
+            """Propagate attention-value widths into subclass-owned layer tables."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -446,7 +456,14 @@ def _head_shape(block: object, channels_in: int) -> tuple[int, int]:
     """Return a block's per-head and total uniform-attention widths."""
     if not isinstance(block, NumHeads) or not isinstance(block, ChannelsHead):
         return channels_in, channels_in
-    return block.channels_head, block.num_heads * block.channels_head
+    num_heads = block.num_heads
+    if (
+        num_heads == -1
+        and block.channels_head > 0
+        and channels_in % block.channels_head == 0
+    ):
+        num_heads = channels_in // block.channels_head
+    return block.channels_head, num_heads * block.channels_head
 
 
 def _reject_ragged_heads(
@@ -462,3 +479,386 @@ def _reject_ragged_heads(
             "the value embeddings and rotary factors are shared across layers; "
             f"got (channels_head, num_heads * channels_head) of {sorted(shapes)}.",
         )
+
+
+def thresholded_relu_squared(x: Tensor, *, threshold: float) -> Tensor:
+    """Apply squared ReLU after subtracting the threshold."""
+    return torch.relu(x - threshold).square()
+
+
+class OutputNormFeedForward(SwiGLUReluSquared):
+    """Apply an injected transform to the FFN output; identity by default."""
+
+    class Config(SwiGLUReluSquared.Config):
+        norm_out: Makeable[TensorModule] = field(
+            default_factory=Identity.Config,
+        )
+        """Parameter-free normalization of the output projection."""
+
+        @override
+        def finalize(self) -> Self:
+            propagate_attr(
+                self.norm_out,
+                "channels_in",
+                self.channels_out if self.channels_out > 0 else self.channels_in,
+            )
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.norm_out = config.norm_out.make()
+
+    @override
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        self.norm_out.reset_parameters()
+
+    @override
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        return self.norm_out(super().forward(x, **kwargs))
+
+
+class ScaledSoftCap(SoftCap):
+    """Cap in the projection dtype, then return float32 loss/evaluation logits."""
+
+    class Config(Makes["ScaledSoftCap"], SoftCap.Config):
+        output_cap: float = 15.0
+        """Output amplitude, independent of the inherited input divisor ``cap``."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.output_cap = config.output_cap
+
+    @override
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        return (
+            self.output_cap * torch.tanh(self.inner(x, **kwargs) / self.cap)
+        ).float()
+
+
+class GatedResidualMix(ResidualMix):
+    """Modulate the original-input skip by the running stream's mean."""
+
+    class Config(Makes["GatedResidualMix"], ResidualMix.Config):
+        gate_scale: float = 0.0
+        """Initial gate scale; zero gives a neutral multiplier of one."""
+
+    def __init__(self, config: Config) -> None:
+        # The parent's constructor invokes reset before this added vector exists.
+        nn.Module.__init__(self)
+        self.config = config
+        self.running = nn.Parameter(torch.empty(config.num_layers))
+        self.original = nn.Parameter(torch.empty(config.num_layers))
+        self.gate_scales = nn.Parameter(torch.empty(config.num_layers))
+        self.gate_scale = config.gate_scale
+        self.reset_parameters()
+
+    @override
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        nn.init.constant_(self.gate_scales, self.gate_scale)
+
+    @override
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        original: Tensor,
+        layer: int,
+        **kwargs: object,
+    ) -> Tensor:
+        """Mix the current residual with a gated original-input skip.
+
+        Args:
+          x: Current residual stream.
+          original: Initial embedding stream with the same shape.
+          layer: Index selecting the mixing coefficients.
+          **kwargs: Unused model messages.
+
+        Returns:
+          mixed: Gated residual mixture with the shape of ``x``.
+
+        """
+        del kwargs
+        gate = 2 * torch.sigmoid(
+            self.gate_scales[layer] * x.float().mean(-1, keepdim=True),
+        ).to(x.dtype)
+        return self.running[layer] * x + self.original[layer] * gate * original
+
+
+class SourceReuseTransformerBlock(TransformerBlock):
+    """Read attention from a saved stream while keeping the current residual."""
+
+    class Config(
+        Makes["SourceReuseTransformerBlock"],
+        TransformerBlock.Config,
+    ):
+        """Configure a prenorm block accepting an earlier attention source."""
+
+    @override
+    def _forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        source = kwargs.pop("attention_source", None)
+        if source is None:
+            return super()._forward(x, **kwargs)
+        assert self.prenorm
+        assert isinstance(source, Tensor)
+        attention = self.attn(self.norm1(source, **kwargs), **kwargs)
+        assert isinstance(attention, Tensor)
+        x = x + attention
+        return x + self.ffn(self.norm2(x, **kwargs), **kwargs)
+
+
+class MemoryNanoChatLM(NanoChatLM):
+    """Decoder with optional per-layer memory and pooling, disabled by default."""
+
+    class Config(Makes["MemoryNanoChatLM"], NanoChatLM.Config):
+        fused_ngram: bool = False
+        """Fuse hashed value gathers and accumulate table gradients directly in FP32."""
+
+        ngram_dirty_clear: bool = False
+        """Mark touched sink rows in the backward and clear only those rows."""
+
+        bigrams: dict[str, HashedNgramTables.Config] = field(
+            default_factory=dict[str, HashedNgramTables.Config]
+        )
+        """Bigram table configs, keyed by the receiving layer index."""
+
+        trigrams: dict[str, HashedNgramTables.Config] = field(
+            default_factory=dict[str, HashedNgramTables.Config]
+        )
+        """Trigram table configs, keyed by the receiving layer index."""
+
+        num_pool_layers: int = 1
+        """Final layers pooled; the last is the unweighted residual stream."""
+
+        dtype: torch.dtype | None = None
+        """Optional whole-model storage dtype; None preserves component dtypes."""
+
+        attention_source_layers: tuple[int, ...] = ()
+        """Layers whose attention reads the saved earlier block output."""
+
+        attention_source_after_layer: int = 0
+        """Save the residual after this zero-based layer, without detaching it."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.num_pool_layers < 1 or self.num_pool_layers > self.num_layers:
+                raise ValueError("num_pool_layers must be between one and num_layers.")
+            if self.attention_source_layers and (
+                self.attention_source_after_layer < 0
+                or any(
+                    layer <= self.attention_source_after_layer
+                    or layer >= self.num_layers
+                    for layer in self.attention_source_layers
+                )
+            ):
+                raise ValueError("Attention source must precede every receiving layer.")
+            return super().finalize()
+
+        @override
+        def _propagate_layer_table_widths(self) -> None:
+            assert isinstance(self.block, Sequence)
+            for name, table in (*self.bigrams.items(), *self.trigrams.items()):
+                layer = int(name)
+                if layer < 0 or layer >= len(self.block):
+                    raise ValueError(
+                        f"Memory table layer {layer} is outside "
+                        f"the {len(self.block)}-layer model.",
+                    )
+                table.channels_out = _head_shape(
+                    self.block[layer],
+                    self.channels_in,
+                )[1]
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.bigrams = nn.ModuleDict(
+            {name: cfg.make() for name, cfg in config.bigrams.items()},
+        )
+        self.trigrams = nn.ModuleDict(
+            {name: cfg.make() for name, cfg in config.trigrams.items()},
+        )
+        self.pool_weights = (
+            nn.Parameter(torch.zeros(config.num_pool_layers - 1))
+            if config.num_pool_layers > 1
+            else None
+        )
+        self.pool_start = config.num_layers - config.num_pool_layers
+        self.dtype = config.dtype
+        self.attention_source_layers = config.attention_source_layers
+        self.attention_source_after_layer = config.attention_source_after_layer
+        self.fused_ngram = config.fused_ngram
+        self.ngram_dirty_clear = config.ngram_dirty_clear
+        self._finalize_storage()
+
+    @override
+    def reset_parameters(self) -> None:
+        if self.dtype is not None:
+            self.float()
+        super().reset_parameters()
+        device = self._materialized_device()
+        if device is not None:
+            self.materialize_rotation_table(device=device)
+        for table in (*self.bigrams.values(), *self.trigrams.values()):
+            table.reset_parameters()
+        if self.pool_weights is not None:
+            nn.init.zeros_(self.pool_weights)
+        self._finalize_storage()
+
+    def _finalize_storage(self) -> None:
+        """Apply storage dtype and allocate fused buffers without redrawing state."""
+        if self.dtype is not None:
+            self.to(dtype=self.dtype)
+        if self.fused_ngram:
+            for table in (*self.bigrams.values(), *self.trigrams.values()):
+                table.prepare_gradient_sinks(dirty_bitmaps=self.ngram_dirty_clear)
+
+    @override
+    def flops_per_token(self) -> int:
+        table_parameters = sum(
+            parameter.numel()
+            for table in (*self.bigrams.values(), *self.trigrams.values())
+            for parameter in table.parameters()
+        )
+        return super().flops_per_token() - 6 * table_parameters
+
+    @override
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        """Clear parameter gradients and persistent FP32 table-gradient buffers.
+
+        Call after the optimizer consumes the buffers. Selective clearing also resets
+        the row flags used by sparse updates.
+
+        Args:
+          set_to_none: Drop parameter gradients instead of zeroing them.
+
+        """
+        super().zero_grad(set_to_none=set_to_none)
+        for table in (*self.bigrams.values(), *self.trigrams.values()):
+            if self.ngram_dirty_clear and table.gradient_bitmaps:
+                clear_marked_sinks(table.gradient_sinks, table.gradient_bitmaps)
+                continue
+            for sink in table.gradient_sinks:
+                sink.zero_()
+
+    @override
+    def forward(self, tokens: Tensor, *args: object, **kwargs: object) -> Tensor:
+        """Compute causal token logits with configured memories and layer pooling.
+
+        Args:
+          tokens: Token IDs with sequence on the last axis.
+          *args: Unused model arguments.
+          **kwargs: Unused model messages.
+
+        Returns:
+          logits: Token logits with vocabulary on the last axis.
+
+        """
+        del args, kwargs
+        length = tokens.shape[-1]
+        if length > self.config.max_seq_len:
+            raise ValueError(
+                f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}."
+            )
+        cos_sin = self._rotation_table(length, device=tokens.device)
+        x = self.norm_embed(self.embed(tokens))
+        original = x
+        attention_source = x
+        pooled: Tensor | None = None
+        for layer, block in enumerate(self.blocks):
+            name = str(layer)
+            x = self.mix(x, original=original, layer=layer)
+            messages: dict[str, object] = {"cos_sin": cos_sin}
+            if name in self.value_embeds:
+                messages["value_embedding"] = self.value_embeds[name](tokens)
+            if layer in self.attention_source_layers:
+                messages["attention_source"] = attention_source
+            if self.fused_ngram:
+                if name in self.bigrams or name in self.trigrams:
+                    messages["fused_tables"] = self._fused_sources(name, tokens)
+            else:
+                if name in self.bigrams:
+                    messages["bigram_value"] = self.bigrams[name](tokens)
+                if name in self.trigrams:
+                    messages["trigram_value"] = self.trigrams[name](tokens)
+            out = block(x, **messages)
+            assert isinstance(out, Tensor)
+            x = out
+            if layer == self.attention_source_after_layer:
+                attention_source = x
+            if (
+                self.pool_weights is not None
+                and self.pool_start <= layer < len(self.blocks) - 1
+            ):
+                weighted = self.pool_weights[layer - self.pool_start] * x
+                pooled = weighted if pooled is None else pooled + weighted
+        if pooled is not None:
+            x = x + pooled
+        return self.lm_head(self.norm_out(x))
+
+    def materialize_rotation_table(self, *, device: torch.device) -> None:
+        """Build rotary factors on the model device before compilation.
+
+        Allocating inside compilation risks CUDA-graph storage reuse. Moving factors
+        between devices preserves the source device's transcendental rounding.
+
+        Args:
+          device: Materialized model device.
+
+        """
+        positions = torch.arange(self.config.max_seq_len, device=device)
+        self._rotation = self.rope(positions)
+
+    @override
+    def _rotation_table(
+        self,
+        length: int,
+        *,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor]:
+        """Slice rotary factors, rebuilding outside compilation on device changes."""
+        if (
+            self._rotation is None
+            or self._rotation[0].device != device
+            or self._rotation[0].dtype != self.rope.dtype
+        ):
+            if torch.compiler.is_compiling():
+                raise RuntimeError(
+                    "The rotation table must be materialized outside compilation. "
+                    "Call materialize_rotation_table(device=...) before the "
+                    "first compiled forward.",
+                )
+            # Recompute on the target device; moving factors retains different
+            # transcendental rounding.
+            self.materialize_rotation_table(device=device)
+        assert self._rotation is not None
+        cos, sin = self._rotation
+        return cos[:length], sin[:length]
+
+    @override
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
+        """Rebuild factors after the rope's device or dtype changes."""
+        super()._apply(fn, recurse)
+        # Plain tuples are not moved by Module._apply. Whole-model precision
+        # casts to float before base reset and back to BF16 afterwards.
+        device = self._materialized_device()
+        if device is None:
+            self._rotation = None
+        else:
+            self.materialize_rotation_table(device=device)
+        return self
+
+    def _materialized_device(self) -> torch.device | None:
+        """Return the first parameter's device, excluding meta tensors."""
+        for tensor in self.parameters():
+            return None if tensor.device.type == "meta" else tensor.device
+        return None
+
+    def _fused_sources(self, name: str, tokens: Tensor) -> list[NgramSource]:
+        sources: list[NgramSource] = []
+        for gate_index, tables in ((1, self.bigrams), (2, self.trigrams)):
+            if name in tables:
+                table = tables[name]
+                assert isinstance(table, HashedNgramTables)
+                sources.append(NgramSource(gate_index, table, table.indices(tokens)))
+        return sources

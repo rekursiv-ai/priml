@@ -309,7 +309,7 @@ wheels = [
 [[package]]
 name = "configgle"
 version = "1.4.0"
-source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#9c5db89d7cf254fd1d09fa1d581bc96c5cba21e8" }
+source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#2d03a0c6a1a1ccbb3dbf325d9436aefc90214b59" }
 dependencies = [
     { name = "typing-extensions" },
 ]
@@ -1417,6 +1417,7 @@ dependencies = [
     { name = "rustbpe" },
     { name = "scipy" },
     { name = "tiktoken" },
+    { name = "tokenizers" },
     { name = "torch" },
     { name = "torchao" },
     { name = "torchvision" },
@@ -1514,6 +1515,7 @@ requires-dist = [
     { name = "safetensors", marker = "extra == 'hub'" },
     { name = "scipy" },
     { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "tokenizers", specifier = ">=0.23.1" },
     { name = "torch", specifier = "==2.11.0" },
     { name = "torchao", specifier = "==0.17.0" },
     { name = "torchvision", specifier = "==0.26.0" },

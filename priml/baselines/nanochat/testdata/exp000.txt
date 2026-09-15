@@ -656,6 +656,9 @@ NanoChatLoop.Config(
                         base_dir='/opt/scratch',
                         working_dir=PosixPath('/opt/scratch/datasets/nanochat'),
                         tokenizer_dir=PosixPath('/opt/scratch/datasets/nanochat/tokenizer'),
+                        prepared_train_manifest='',
+                        prepared_eval_manifest='',
+                        reference_evaluation=None,
                         num_train_shards=7,
                         train_shard_indices=(),
                         val_shard=7,
@@ -690,7 +693,40 @@ NanoChatLoop.Config(
                         heartbeat_interval_sec=30.0,
                         cuda_events=False
                 ),
-                tracker=None,
+                tracker=TrackerList.Config(
+                        trackers={       'metrics': FileTracker.Config(
+                                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp000'),
+                                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp000/metrics.json'),
+                                        capture_prefix='eval/'
+                                ),
+                                'wandb': AsyncTracker.Config(
+                                        tracker=WandbTracker.Config(
+                                                project='nanochat',
+                                                name='',
+                                                run_id='',
+                                                group='',
+                                                mode='online',
+                                                base_dir=PosixPath('/opt/scratch/runs/nanochat/exp000'),
+                                                working_dir=PosixPath('/opt/scratch/runs/nanochat/exp000/wandb'),
+                                                capture_console=True,
+                                                replay_startup_logs=False,
+                                                allow_startup_failure=True,
+                                                ingestion=WandbIngestion(
+                                                        init_timeout_sec=30.0,
+                                                        service_wait_sec=30.0,
+                                                        flush_interval_sec=15.0,
+                                                        system_metrics=True,
+                                                        system_metrics_interval_sec=60.0
+                                                ),
+                                                metric_step_metrics={},
+                                                run_config={},
+                                                notes=''
+                                        ),
+                                        enabled=True
+                                )},
+                        base_dir=PosixPath('/opt/scratch/runs/nanochat/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/nanochat/exp000')
+                ),
                 max_steps=inf,
                 max_epochs=inf,
                 max_time=300.0,

@@ -11,10 +11,10 @@ quantity the recipe is tuned against.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Any, Self, override
+from typing import Protocol, Self, override
 
 import math
 import time
@@ -24,10 +24,17 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 import torch
+import torch.distributed as dist
 
-from priml.baselines.nanochat.model import NanoChatLM
+from priml.baselines.nanochat.model import (
+    MemoryNanoChatLM,
+    NanoChatLM,
+    ScaledSoftCap,
+)
+from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
 from priml.loss.custom_types import LossOutput
 from priml.math.schedules import Schedule, trapezoidal
+from priml.model.softcap import SoftCap
 from priml.optimizers import (
     CompositeOptimizer,
     FusedAdamW,
@@ -38,6 +45,10 @@ from priml.optimizers import (
 from priml.optimizers.composite import Selector, excluding, matching
 from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
+
+
+class _Compile(Protocol):
+    def __call__[**P, R](self, model: Callable[P, R], /) -> Callable[P, R]: ...
 
 
 class TokenCrossEntropy:
@@ -211,8 +222,8 @@ class NanoChatTrainStep(TrainStep):
         dtype_autocast: torch.dtype | None = torch.bfloat16
         """Autocast dtype; ``None`` trains in full precision."""
 
-        compile: Makeable[Callable[[Callable[..., Any]], Callable[..., Any]]] | None = (
-            field(default_factory=lambda: PartialConfig(torch.compile))
+        compile: Makeable[_Compile] | None = field(
+            default_factory=lambda: PartialConfig(torch.compile)
         )
         """Compile the model AND the loss with ``torch.compile``; ``None`` runs
         them eagerly.
@@ -337,6 +348,25 @@ class NanoChatTrainStep(TrainStep):
                     f"{tokens_per_pass}, so no whole number of passes reaches "
                     "the token batch.",
                 )
+            if isinstance(self.loss, BoundedTokenCrossEntropy.Config):
+                head = self.model.lm_head
+                cap = (
+                    abs(head.output_cap)
+                    if isinstance(head, ScaledSoftCap.Config)
+                    else head.cap
+                    if isinstance(head, SoftCap.Config)
+                    else math.inf
+                )
+                if (
+                    not math.isfinite(cap)
+                    or cap <= 0
+                    or cap > self.loss.logit_upper_bound
+                ):
+                    raise ValueError(
+                        "BoundedTokenCrossEntropy requires a symmetric readout "
+                        "bound no larger than logit_upper_bound. Use "
+                        "TokenCrossEntropy for an unbounded readout."
+                    )
             # Rescaled here, not in the factory: the factory runs before the
             # caller has chosen a width, so a rate baked there is right for one
             # model and wrong for every fork that changes ``channels_in``. The
@@ -385,7 +415,7 @@ class NanoChatTrainStep(TrainStep):
         # Optimizer steps this PROCESS has completed, restored across a resume
         # so a restarted run does not spend the warmup twice. Not the timer's
         # ``local_step``, which a fresh process zeroes.
-        self._steps_this_process = 0
+        self._steps_this_process: int = 0
         # ``model`` stays the UNCOMPILED module, as the base assumes: it is what
         # the optimizer partition routed over and what the checkpoint holds,
         # and a compiled wrapper prefixes every ``state_dict`` key with
@@ -407,12 +437,15 @@ class NanoChatTrainStep(TrainStep):
         assert isinstance(logits, Tensor)
         return self.loss(logits, media=media, label=label)["loss"]
 
-    def _per_token_loss(self, batch: dict[str, Any]) -> Tensor:
+    def _per_token_loss(self, batch: Mapping[str, object]) -> Tensor:
         """Score one batch through the compiled forward when there is one."""
+        media, label = batch["media"], batch["label"]
+        assert isinstance(media, Tensor)
+        assert isinstance(label, Tensor)
         forward = self._compiled_model if self._compiled_model is not None else None
         if forward is None:
-            return self._forward(batch["media"], batch["label"])
-        result = forward(batch["media"], batch["label"])
+            return self._forward(media, label)
+        result = forward(media, label)
         assert isinstance(result, Tensor)
         return result
 
@@ -424,7 +457,7 @@ class NanoChatTrainStep(TrainStep):
         return min(spent, 1.0)
 
     @override
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: Mapping[str, object]) -> dict[str, object]:
         """Move a batch to the training device."""
         return {
             key: value.to(self.device, non_blocking=self.device.type == "cuda")
@@ -579,7 +612,7 @@ class NanoChatTrainStep(TrainStep):
             self._pending_worst = None
 
     @override
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> dict[str, object]:
         """Extend the base state with this baseline's own budget clock.
 
         The clock drives every schedule and the step count gates it, so a
@@ -591,13 +624,20 @@ class NanoChatTrainStep(TrainStep):
                 "cannot checkpoint with incomplete gradient accumulation; "
                 "per-pass gradients are not serializable",
             )
-        state = super().state_dict()
+        state: dict[str, object] = {**super().state_dict()}
         state["elapsed_sec"] = self.elapsed_sec
         state["local_step"] = self._steps_this_process
         return state
 
     @override
-    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
+    def load_state_dict(
+        self,
+        state_dict: dict[str, object],
+        *,
+        strict: bool = True,
+        load_optimizer: bool = True,
+        remap: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
+    ) -> None:
         """Restore state produced by :meth:`state_dict`."""
         # Checked BEFORE anything is assigned, so a caller that catches this is
         # not left holding the checkpoint's clock beside its own step counter.
@@ -608,9 +648,14 @@ class NanoChatTrainStep(TrainStep):
                 "reconstructed; resuming would grant uncharged training. "
                 "Start a fresh run.",
             )
-        super().load_state_dict(state_dict, **kwargs)
-        self.elapsed_sec = float(state_dict["elapsed_sec"])
-        self._steps_this_process = int(state_dict["local_step"])
+        super().load_state_dict(
+            state_dict, strict=strict, load_optimizer=load_optimizer, remap=remap
+        )
+        elapsed_sec, local_step = state_dict["elapsed_sec"], state_dict["local_step"]
+        assert isinstance(elapsed_sec, (int, float))
+        assert isinstance(local_step, int)
+        self.elapsed_sec = float(elapsed_sec)
+        self._steps_this_process = int(local_step)
         self._pending_passes = 0
         self._pending_worst = None
 
@@ -648,12 +693,7 @@ class NanoChatTrainStep(TrainStep):
     def _apply_update(self) -> dict[str, float | Tensor]:
         """Set every schedule for this step, then step the optimizer."""
         config = self.config
-        metrics: dict[str, float | Tensor] = {}
-        if math.isfinite(config.gradient_clip_norm):
-            metrics["grad_norm"] = nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                config.gradient_clip_norm,
-            ).detach()
+        metrics = self._clip_gradients()
         progress = self.progress_learning_schedule
         multiplier = self.schedule(progress)
         apply_lr_scale([self.optimizer], multiplier)
@@ -676,6 +716,16 @@ class NanoChatTrainStep(TrainStep):
         metrics["momentum"] = momentum
         return metrics
 
+    def _clip_gradients(self) -> dict[str, float | Tensor]:
+        """Clip ordinary parameter gradients when the configured bound is finite."""
+        if not math.isfinite(self.config.gradient_clip_norm):
+            return {}
+        return {
+            "grad_norm": nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.config.gradient_clip_norm
+            ).detach()
+        }
+
     def _synchronize(self) -> None:
         """Wait for queued device work, so the clock measures this step alone."""
         if self.device.type == "cuda":
@@ -696,6 +746,329 @@ class NanoChatTrainStep(TrainStep):
             yield
 
 
+def _memory_model_config() -> NanoChatLM.Config:
+    """Build the memory-model default through the inherited model-config interface."""
+    config = MemoryNanoChatLM.Config()
+    assert isinstance(config, NanoChatLM.Config)
+    return config
+
+
+class NgramTrainStep(NanoChatTrainStep):
+    """Train n-gram memory with persistent gradient sinks and configurable updates."""
+
+    class Config(NanoChatTrainStep.Config):
+        """Extend the existing training configuration without duplicating its fields."""
+
+        model: NanoChatLM.Config = field(default_factory=_memory_model_config)
+        """Model with optional n-gram memory, pooling and attention-source reuse."""
+
+        optimizer_update: (
+            Makeable[Callable[[NgramTrainStep], dict[str, float | Tensor]]] | None
+        ) = None
+        """Injected update policy; None preserves the original optimizer schedules."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self._optimizer_update = (
+            config.optimizer_update.make()
+            if config.optimizer_update is not None
+            else None
+        )
+        model = self.model
+        if isinstance(model, MemoryNanoChatLM) and model.fused_ngram:
+            self._bind_ngram_gradients(model)
+        if self._optimizer_update is not None:
+            for group in self.optimizer.param_groups:
+                group["initial_lr"] = group["lr"]
+                if "betas" in group:
+                    group["initial_betas"] = group["betas"]
+                if "beta2" in group:
+                    group["initial_beta2"] = group["beta2"]
+
+    @property
+    def completed_updates(self) -> int:
+        """Return the checkpointed optimizer-update count."""
+        return self._steps_this_process
+
+    @override
+    def train_step(self, **batch: object) -> TrainStepOutput:
+        """Accumulate gradients and charge the update receiving this batch.
+
+        Args:
+          **batch: Preprocessed media and labels.
+
+        Returns:
+          result: Detached loss, per-token losses and optimizer metrics.
+
+        """
+        update = self._steps_this_process + 1
+        if self._pending_passes == 0:
+            self._synchronize()
+        started = time.perf_counter()
+        self.model.train()
+        with self._autocast():
+            per_token = self._per_token_loss(batch)
+            loss = per_token.mean()
+        (loss / self.accumulate_passes).backward()
+        worst = loss.detach()
+        if self._pending_worst is not None:
+            worst = torch.maximum(worst, self._pending_worst)
+        self._pending_worst = worst
+        self._pending_passes += 1
+        metrics: dict[str, float | Tensor] = {}
+        if self._pending_passes >= self.accumulate_passes:
+            with self.timer_step:
+                metrics = self._apply_update()
+            self._pending_passes = 0
+            self._steps_this_process += 1
+        if update > self.config.budget_warmup_steps:
+            if self._pending_passes == 0:
+                self._synchronize()
+            self.elapsed_sec += time.perf_counter() - started
+        if self._pending_passes == 0:
+            self._assert_not_diverged()
+        return {
+            "loss": loss.detach().reshape(1),
+            "model": per_token.detach(),
+            "metrics": metrics,
+        }
+
+    @override
+    def charge_budget(self, seconds: float) -> None:
+        """Charge loading after warmup using the receiving update's index."""
+        if self._steps_this_process + 1 > self.config.budget_warmup_steps:
+            self.elapsed_sec += seconds
+
+    @override
+    def _apply_update(self) -> dict[str, float | Tensor]:
+        """Apply the injected policy or the unchanged original update."""
+        if self._optimizer_update is None:
+            return super()._apply_update()
+        metrics = self._clip_gradients()
+        metrics.update(self._optimizer_update(self))
+        return metrics
+
+    @override
+    @torch.no_grad()
+    def _clip_gradients(self) -> dict[str, float | Tensor]:
+        """Clip the gradients actually consumed, including persistent FP32 sinks."""
+        if not math.isfinite(self.config.gradient_clip_norm):
+            return {}
+        members = (
+            self.optimizer.optimizers
+            if isinstance(self.optimizer, CompositeOptimizer)
+            else [self.optimizer]
+        )
+        sinks = {
+            parameter: sink
+            for member in members
+            if isinstance(member, BiasCorrectedRMSProp)
+            for parameter, sink in member.gradient_sinks.items()
+        }
+        gradients = [
+            gradient
+            for parameter in self.model.parameters()
+            if (gradient := sinks.get(parameter, parameter.grad)) is not None
+        ]
+        total = nn.utils.get_total_norm(gradients)
+        coefficient = torch.clamp(
+            self.config.gradient_clip_norm / (total + 1e-6), max=1.0
+        )
+        for gradient in gradients:
+            gradient.mul_(coefficient.to(gradient.device))
+        return {"grad_norm": total.detach()}
+
+    def _bind_ngram_gradients(self, model: MemoryNanoChatLM) -> None:
+        """Bind each persistent table sink to exactly its RMSProp owner."""
+        sinks = {
+            part.weight: sink
+            for table in (*model.bigrams.values(), *model.trigrams.values())
+            for part, sink in zip(table.tables, table.gradient_sinks, strict=True)
+        }
+        marks = {
+            part.weight: bitmap
+            for table in (*model.bigrams.values(), *model.trigrams.values())
+            for part, bitmap in zip(table.tables, table.gradient_bitmaps, strict=False)
+        }
+        assert isinstance(self.optimizer, CompositeOptimizer)
+        bound: set[Tensor] = set()
+        for member in self.optimizer.optimizers:
+            if isinstance(member, BiasCorrectedRMSProp):
+                member.gradient_sinks = {
+                    parameter: sinks[parameter]
+                    for group in member.param_groups
+                    for parameter in group["params"]
+                }
+                member.gradient_bitmaps = {
+                    parameter: marks[parameter]
+                    for group in member.param_groups
+                    for parameter in group["params"]
+                    if parameter in marks
+                }
+                bound.update(member.gradient_sinks)
+        if bound != set(sinks):
+            raise ValueError("Every fused n-gram table must route to RMSProp.")
+
+
+class ReferenceBitsPerByte:
+    """Use the reference reduction and denominator with explicit scoring masks."""
+
+    class Config(Fig["ReferenceBitsPerByte"]):
+        """Receive all evaluation accounting through batch metadata."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.reset()
+
+    def reset(self) -> None:
+        """Start an empty evaluation."""
+        self.nats = 0.0
+        self.bytes = 0
+        self.literal_bytes = 0
+        self.batches = 0
+        self.expected_batches = 0
+
+    def update(self, logits: Tensor, **batch: object) -> None:
+        """Accumulate the next complete reference batch.
+
+        Args:
+          logits: Per-token losses from the unchanged training-step evaluation API.
+          **batch: Prepared mask, denominators, and ordered batch counters.
+
+        """
+        mask = batch["score_mask"]
+        index = batch["evaluation_batch"]
+        count = batch["evaluation_batches"]
+        reference_bytes = batch["reference_bytes"]
+        literal_bytes = batch["literal_bytes"]
+        assert isinstance(mask, Tensor)
+        assert isinstance(index, int)
+        assert isinstance(count, int)
+        assert isinstance(reference_bytes, int)
+        assert isinstance(literal_bytes, int)
+        if (
+            index != self.batches
+            or count <= index
+            or (self.expected_batches and self.expected_batches != count)
+        ):
+            raise ValueError("Reference evaluation batch order or extent changed.")
+        if mask.shape != logits.shape or mask.dtype != torch.bool:
+            raise ValueError("Reference scoring mask differs from loss geometry.")
+        # Preserve prepare.py's multiplication and native-dtype reduction. Selecting
+        # masked elements or upcasting changes the reference's floating-point sum.
+        self.nats += (logits.detach().view(-1) * mask.view(-1)).sum().item()
+        self.bytes += reference_bytes
+        self.literal_bytes += literal_bytes
+        self.batches += 1
+        self.expected_batches = count
+
+    def compute(self) -> dict[str, float]:
+        """Report BPB after complete evaluation coverage.
+
+        Returns:
+          metrics: Reference-denominator BPB and literal-byte BPB.
+
+        """
+        if self.batches != self.expected_batches or self.bytes <= 0:
+            raise ValueError("Reference evaluation is incomplete.")
+        if dist.is_initialized() and dist.get_world_size() != 1:
+            raise ValueError("Exact reference evaluation requires one process.")
+        return {
+            "bpb": self.nats / (math.log(2) * self.bytes),
+            "literal_bpb": self.nats / (math.log(2) * self.literal_bytes),
+        }
+
+    def state_dict(self) -> dict[str, int | float]:
+        """Snapshot evaluation progress.
+
+        Returns:
+          state: Accumulated loss, denominators and batch counters.
+
+        """
+        return {
+            "nats": self.nats,
+            "bytes": self.bytes,
+            "literal_bytes": self.literal_bytes,
+            "batches": self.batches,
+            "expected_batches": self.expected_batches,
+        }
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Restore evaluation progress.
+
+        Args:
+          state_dict: Accumulated loss, denominators and batch counters.
+
+        """
+        nats = state_dict["nats"]
+        assert isinstance(nats, float)
+        self.nats = nats
+        for name in ("bytes", "literal_bytes", "batches", "expected_batches"):
+            value = state_dict[name]
+            assert isinstance(value, int)
+            setattr(self, name, value)
+
+
+class BoundedTokenCrossEntropy:
+    """Cross-entropy for symmetrically bounded logits, saving narrow logits and LSE.
+
+    All logits, including ignored positions, must lie in ``[-B, B]`` where B is
+    logit_upper_bound. NanoChatTrainStep checks the readout config before training;
+    direct callers own this precondition. Use TokenCrossEntropy for arbitrary logits.
+    """
+
+    class Config(Fig["BoundedTokenCrossEntropy"]):
+        """The logit bound, saved precision, and ignored target."""
+
+        logit_upper_bound: float = 15.0
+        """Symmetric logit bound B in (0, 40]; the fixed exponential shift is B."""
+
+        dtype: torch.dtype = torch.float32
+        """Logit storage precision used in both the forward and backward."""
+
+        ignore_index: int = -1
+        """Target marking a position excluded from the loss."""
+
+    def __init__(self, config: Config) -> None:
+        # With logits in [-B, B], the smallest exponential is exp(-2B). Keeping B
+        # at most 40 stays above FP32's normal floor even after narrow-logit rounding.
+        if (
+            not math.isfinite(config.logit_upper_bound)
+            or config.logit_upper_bound <= 0
+            or config.logit_upper_bound > 40
+        ):
+            raise ValueError("logit_upper_bound must lie in (0, 40].")
+        if config.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            raise ValueError("dtype must be bfloat16, float16, or float32.")
+        self.logit_upper_bound = config.logit_upper_bound
+        self.dtype = config.dtype
+        self.ignore_index = config.ignore_index
+
+    def __call__(self, prediction: Tensor, **batch: object) -> LossOutput:
+        """Compute per-token cross-entropy for bounded logits.
+
+        Args:
+          prediction: Finite logits with vocabulary last, all in ``[-B, B]``.
+          **batch: Integer targets under ``label``.
+
+        Returns:
+          result: Float32 losses shaped like the targets, zero at ignored positions.
+
+        """
+        label = batch["label"]
+        assert isinstance(label, Tensor)
+        # Save logits at the configured precision to avoid retaining a vocabulary-sized
+        # FP32 tensor.
+        return {
+            "loss": _BoundedCrossEntropy.apply(
+                prediction.to(self.dtype),
+                label,
+                self.logit_upper_bound,
+                self.ignore_index,
+            ).reshape(label.shape),
+        }
+
+
 # A composite holds every member's groups in one flat list, so a group's position says
 # nothing about which algorithm owns it.
 def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
@@ -707,3 +1080,48 @@ def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
         for member in optimizer.optimizers
         if member.param_groups
     }
+
+
+class _LossContext(Protocol):
+    saved_tensors: tuple[Tensor, Tensor, Tensor, Tensor]
+
+    def save_for_backward(self, *tensors: Tensor) -> None: ...
+
+
+def _bounded_forward(
+    ctx: _LossContext,
+    logits: Tensor,
+    targets: Tensor,
+    logit_upper_bound: float,
+    ignore_index: int,
+) -> Tensor:
+    flat = logits.reshape(-1, logits.shape[-1])
+    flat_targets = targets.reshape(-1).long()
+    kept = flat_targets != ignore_index
+    safe = torch.where(kept, flat_targets, torch.zeros_like(flat_targets))
+    sumexp = torch.exp(flat.float() - logit_upper_bound).sum(dim=-1)
+    lse = torch.log(sumexp) + logit_upper_bound
+    picked = flat.gather(1, safe.unsqueeze(1)).squeeze(1).float()
+    ctx.save_for_backward(logits, flat_targets, lse, kept)
+    return torch.where(kept, lse - picked, torch.zeros_like(lse))
+
+
+def _bounded_backward(
+    ctx: _LossContext, /, *grad_outputs: Tensor
+) -> tuple[Tensor, None, None, None]:
+    (grad_output,) = grad_outputs
+    logits, flat_targets, lse, kept = ctx.saved_tensors
+    flat = logits.reshape(-1, logits.shape[-1])
+    scale = torch.where(kept, grad_output, torch.zeros_like(grad_output))
+    probability = torch.exp(flat.float() - lse.unsqueeze(1))
+    columns = torch.arange(flat.shape[-1], device=flat.device)
+    selected = columns.unsqueeze(0) == flat_targets.unsqueeze(1)
+    # Subtract and scale in FP32 before casting; earlier rounding changes gradients.
+    gradient = (probability - selected.to(probability.dtype)) * scale.unsqueeze(1)
+    return gradient.to(flat.dtype).reshape_as(logits), None, None, None
+
+
+class _BoundedCrossEntropy(torch.autograd.Function):
+    # Dynamo requires unbound callbacks; classmethods bind the class twice.
+    forward = staticmethod(_bounded_forward)
+    backward = staticmethod(_bounded_backward)
