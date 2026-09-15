@@ -28,9 +28,6 @@ from priml.testing.bfb import (
     first_tensor,
     move_to_device,
 )
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Importing the module registers the attention test implementation..
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

@@ -23,9 +23,6 @@ from priml.model.norm import (
     RMSNorm,
 )
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Re-exported fixture is discovered by pytest by imported name.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

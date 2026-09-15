@@ -22,9 +22,6 @@ from priml.model.attention.rope import (
     YarnScaling,
 )
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- The fixture import registers CUDA cleanup by pytest name.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

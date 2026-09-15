@@ -34,9 +34,6 @@ from priml.testing.bfb import (
     bfb_devices,
     move_to_device,
 )
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest fixture, injected by name not called.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

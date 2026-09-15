@@ -35,9 +35,6 @@ from priml.testing.bfb import (
     move_to_device,
     randomize_parameters,
 )
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- The fixture import registers CUDA cleanup by pytest name.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

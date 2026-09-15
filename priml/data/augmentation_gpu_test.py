@@ -11,9 +11,6 @@ from priml.data.augmentation_gpu import (
     pad_crop_flip,
     random_crop,
 )
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- The test imports the backend to register its runtime kernels.
-)
 
 
 def test_flip_lr_shape():

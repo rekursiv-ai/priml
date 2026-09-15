@@ -35,9 +35,6 @@ from priml.model.moe import MoE, Router
 from priml.model.norm import CenteredRMSNorm
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest fixture, injected by name not called.
-)
 from priml.testing.golden import assert_text_golden
 
 

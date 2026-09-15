@@ -21,9 +21,6 @@ from priml.optimizers.muon import (
     adjust_lr_conv_heuristic,
     adjust_lr_match_rms_adamw,
 )
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest discovers this imported autouse fixture during collection.
-)
 
 
 if TYPE_CHECKING:

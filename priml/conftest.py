@@ -26,6 +26,7 @@ from priml.lib.testing.userdirs_fixture import (
     isolate_user_dirs,
     pytest_configure,
 )
+from priml.testing.fixtures import cleanup_cuda
 
 
 if TYPE_CHECKING:
@@ -55,8 +56,11 @@ class _TorchModule(Protocol):
 
 # Re-exported, not merely imported: an autouse fixture reaches only the
 # directory of the conftest that names it, so binding it here is what points
-# every priml test's XDG lookups at a tmp dir instead of the developer's own.
+# every priml test's XDG lookups at a tmp dir instead of the developer's own,
+# and what reclaims CUDA memory around every priml test instead of only the
+# files that remembered to import ``cleanup_cuda``.
 __all__ = [
+    "cleanup_cuda",
     "isolate_user_dirs",
     "pytest_collection_modifyitems",
     "pytest_configure",

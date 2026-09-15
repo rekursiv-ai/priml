@@ -13,9 +13,6 @@ import torch
 
 from priml.model.patchify import Patchify, Unpatchify
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- The test import registers the patchify backend under test.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

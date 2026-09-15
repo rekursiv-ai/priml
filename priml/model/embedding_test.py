@@ -13,9 +13,6 @@ import torch
 from priml.model.embedding import Embedding
 from priml.model.init import normal
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest injects this fixture by name during teardown.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

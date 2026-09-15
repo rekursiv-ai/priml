@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 from priml.sharding import parse_shard_spec
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest fixture, injected by name not called.
-)
 
 
 def test_parse_shard_spec_individual_shards() -> None:

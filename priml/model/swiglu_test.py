@@ -23,9 +23,6 @@ from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU, SwiGLUReluSquared, relu_squared
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Importing the module registers the SwiGLU test implementation..
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

@@ -43,9 +43,6 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
     move_to_device,
 )
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest injects this fixture by name rather than calling the import directly.
-)
 from priml.train.tensor_parallel import apply_tensor_parallel
 
 

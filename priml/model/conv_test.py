@@ -12,9 +12,6 @@ import torch
 
 from priml.model.conv import Conv1d, Conv2d, Conv3d
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest fixture, injected by name not called.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

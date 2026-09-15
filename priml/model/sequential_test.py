@@ -18,9 +18,6 @@ from priml.model.special import Skip
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest discovers this fixture through the imported module namespace.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent

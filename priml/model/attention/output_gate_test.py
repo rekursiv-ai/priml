@@ -15,9 +15,6 @@ from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
-from priml.testing.fixtures import (
-    cleanup_cuda,  # noqa: F401 -- Pytest injects this fixture by name, so the import is not called directly.
-)
 
 
 _CWD: Final = Path(__file__).resolve().parent
