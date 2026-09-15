@@ -12,33 +12,33 @@ import pytest
 
 
 if TYPE_CHECKING:
-    import torch as torch_typed
-
-
-try:
     import torch
-except ImportError:  # `torch` is optional; cleanup_cuda + get_device no-op without it.
-    torch = None
+else:
+    from wrapt import lazy_import
+
+    # Deferred, not `try: import torch`: the repo-root conftest re-exports
+    # ``cleanup_cuda`` through ``priml.conftest``, so an eager import here
+    # would load torch at collection time for every package in the repo.
+    torch = lazy_import("torch")
 
 
-def get_device() -> torch_typed.device:
+def get_device() -> torch.device:
     """Return the preferred test device, CUDA when available.
 
     Returns:
       device: ``cuda`` if a CUDA device is present, else ``cpu``.
 
-    Raises:
-      RuntimeError: If torch is not installed.
-
     """
-    if torch is None:
-        raise RuntimeError("torch is not installed")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture(autouse=True)
 def cleanup_cuda() -> Generator[None]:
     """Reclaim CUDA memory symmetrically around each test (no-op on CPU).
+
+    Only acts when torch is already imported: a test that never loaded torch
+    has no CUDA cache to reclaim, and importing it here would make torch a
+    dependency of every test the autouse scope reaches.
 
     Yields:
       item: Each yielded value.
@@ -68,7 +68,7 @@ def torch_compiler_isolation() -> Generator[None]:
         # neither Dynamo nor Inductor, so most tests avoid loading Inductor at
         # all here. An ``if`` rather than an early ``return`` -- a ``return``
         # inside ``finally`` would discard an in-flight exception.
-        if torch is not None and "torch._dynamo" in sys.modules:
+        if "torch._dynamo" in sys.modules:
             from torch._inductor.utils import (  # noqa: PLC0415 -- Test fixtures load optional training dependencies only when requested.
                 clear_caches,
             )
@@ -99,12 +99,7 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
         still come back clean.
       blocks: How many blocks to fill and free per shape.
 
-    Raises:
-      RuntimeError: If torch is not installed.
-
     """
-    if torch is None:
-        raise RuntimeError("torch is not installed")
     for shape in shapes:
         # Built and dropped one at a time rather than held in a list: each block
         # has to be freed before the next same-size allocation can receive it.
@@ -115,6 +110,6 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
 
 def _reclaim_cuda() -> None:
     """Synchronize and empty the CUDA cache when a CUDA device is present."""
-    if torch is not None and torch.cuda.is_available():
+    if "torch" in sys.modules and torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
