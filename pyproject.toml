@@ -301,7 +301,6 @@ ignore = [
     "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.) https://github.com/astral-sh/ruff/issues/9216
     "E501",    # Line too long.
     "TC001",   # Typing-only first-party import.
-    "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
     "TC003",   # Typing-only standard library import.
     # Documentation.
     "D105",    # Undocumented magic method.
@@ -350,6 +349,8 @@ ignore = [
     "TC006",   # Runtime cast value.
     "TRY003",  # Raise vanilla args.
     "TRY300",  # Try consider else.
+    # Extra.
+    "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
@@ -532,19 +533,22 @@ ignore = [
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"
+
+# Authorized.
+reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
-reportInvalidCast = false                  # All cast() calls are intentional.
+reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
 reportPrivateUsage = false                 # Redundant with ruff SLF001.
 reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
-reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
-reportUnusedImport = false                 # Redundant with ruff F401.
-# Extra suppressions.
-reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
-reportIncompatibleMethodOverride = false   # Subclasses may rename parameters.
-reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
-reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
-# reportConstantRedefinition = false       # Uppercase locals treated as constants (math). [Violates PEP8]
+reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
+
+# Dubious.
+reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
+reportInvalidCast = false                  # All cast() calls are intentional.
+reportUnusedImport = false                 # Redundant with ruff F401.
+
+# Extra.
 reportMissingModuleSource = false
 reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
 
