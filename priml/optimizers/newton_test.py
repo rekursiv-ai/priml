@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast, override
+from typing import override
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
@@ -51,7 +51,7 @@ class _LinearModel(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, x: Tensor, **_kwargs: object) -> Tensor:
         return self.linear(x).squeeze(-1)
 
     def reset_parameters(self) -> None:
@@ -98,9 +98,10 @@ def test_newton_logistic_regression():
 
     # Check accuracy on training data (should be near perfect)
     metric = BinaryAccuracy.Config().make()
+    model = trainable.model
+    assert isinstance(model, _LinearModel)
     with torch.no_grad():
-        output = trainable.model(X)
-        metric.update(output, label=y)
+        metric.update(model(X), label=y)
 
     metrics = metric.compute()
     accuracy = metrics["accuracy"]
@@ -141,7 +142,8 @@ def test_newton_rejects_dtensor_params(tmp_path: Path) -> None:
         optimizer = Newton([param], lr=1.0, damping=0.0)
 
         def closure() -> Tensor:
-            return cast(DTensor, param.data).to_local().pow(2).sum()
+            assert isinstance(param.data, DTensor)
+            return param.data.to_local().pow(2).sum()
 
         with pytest.raises(
             NotImplementedError,

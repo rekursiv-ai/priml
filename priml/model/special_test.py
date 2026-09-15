@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Final, override
+from typing import Final, Protocol, override
 
 from configgle import Fig, Makeable
 from configgle.testing import assert_pprint_golden
@@ -147,10 +147,10 @@ _SKIP_CONFIG_TYPES = [
 @pytest.mark.parametrize(
     "config_type",
     _SKIP_CONFIG_TYPES,
-    ids=lambda cls: cls.__qualname__,
+    ids=[config_type.__qualname__ for config_type in _SKIP_CONFIG_TYPES],
 )
 def test_skip_preserving_configs_infer_either_channel_boundary(
-    config_type: type,
+    config_type: type[_ChannelsConfig],
 ) -> None:
     from_output = config_type()
     from_output.channels_out = 128
@@ -166,9 +166,11 @@ def test_skip_preserving_configs_infer_either_channel_boundary(
 @pytest.mark.parametrize(
     "config_type",
     _SKIP_CONFIG_TYPES,
-    ids=lambda cls: cls.__qualname__,
+    ids=[config_type.__qualname__ for config_type in _SKIP_CONFIG_TYPES],
 )
-def test_skip_preserving_modules_reject_width_changes(config_type: type) -> None:
+def test_skip_preserving_modules_reject_width_changes(
+    config_type: type[_ChannelsConfig],
+) -> None:
     config = config_type()
     config.channels_in = 128
     config.channels_out = 64
@@ -310,6 +312,10 @@ def test_tied_linear_built_alone_is_unbound() -> None:
     """A bare make binds against the leaf itself, which owns no weight."""
     with pytest.raises(AttributeError):
         TiedLinear.Config(tied="embed").make()
+
+
+class _ChannelsConfig(Makeable[object], ChannelsInOut, Protocol):
+    """A width-carrying config; ``make()`` may build any module (MMDiT is a pair)."""
 
 
 if __name__ == "__main__":

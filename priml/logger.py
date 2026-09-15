@@ -8,7 +8,7 @@ Provides :class:`Timer` for scoped elapsed-time logging,
 from __future__ import annotations
 
 from types import TracebackType
-from typing import ClassVar, Self, TextIO, cast, override
+from typing import ClassVar, Protocol, Self, TextIO, cast, override
 
 import datetime
 import logging
@@ -19,7 +19,13 @@ from configgle import Fig
 from wrapt import lazy_import
 
 
-dist = lazy_import("torch.distributed")
+class _Distributed(Protocol):
+    def is_initialized(self) -> bool: ...
+    def get_rank(self) -> int: ...
+    def get_world_size(self) -> int: ...
+
+
+dist: _Distributed = cast(_Distributed, lazy_import("torch.distributed"))
 
 
 class Timer:

@@ -12,6 +12,10 @@ import pytest
 from priml.baselines.craftax.conftest import reference, requires_craftax
 from priml.baselines.craftax.game import world_config
 from priml.baselines.craftax.game.constants import NUM_LEVELS
+from priml.baselines.craftax.game.world_config import (
+    DungeonConfig,
+    SmoothWorldConfig,
+)
 
 
 pytestmark = pytest.mark.usefixtures("warm_reference")
@@ -87,21 +91,41 @@ def test_only_lit_floors_declare_ambient_light() -> None:
 def test_recipe_matches_reference(ported: str, upstream_name: str) -> None:
     upstream = reference("craftax.world_gen.world_gen_configs")
 
-    ours = getattr(world_config, ported)
-    theirs = getattr(upstream, upstream_name)
+    ours_value: object = getattr(  # pyright: ignore[reportAny] -- Test data selects a module attribute.
+        world_config,
+        ported,
+    )
+    ours = cast(SmoothWorldConfig | DungeonConfig, ours_value)
+    theirs_value: object = getattr(  # pyright: ignore[reportAny] -- Test data selects a vendor attribute.
+        upstream,
+        upstream_name,
+    )
+    theirs = cast(SmoothWorldConfig | DungeonConfig, theirs_value)
     for field in dataclasses.fields(ours):
-        actual = getattr(ours, field.name)
-        expected = getattr(theirs, field.name)
+        actual: object = getattr(  # pyright: ignore[reportAny] -- Dataclass fields are selected by reference data.
+            ours,
+            field.name,
+        )
+        expected: object = getattr(  # pyright: ignore[reportAny] -- Dataclass fields are selected by reference data.
+            theirs,
+            field.name,
+        )
         # The reference stores its probabilities as float32 while these are
         # written as ordinary Python floats, so every comparison is made at
         # the precision the game actually runs at.
         if isinstance(actual, tuple):
             values = cast(tuple[float, ...], actual)
-            assert [np.float32(value) for value in values] == np.asarray(
+            expected_values = cast(
+                np.ndarray | tuple[float, ...],
                 expected,
+            )
+            assert [np.float32(value) for value in values] == np.asarray(
+                expected_values,
                 dtype=np.float32,
             ).tolist(), field.name
             continue
+        assert isinstance(actual, (int, float))
+        assert isinstance(expected, (int, float))
         assert np.float32(actual) == np.float32(expected), field.name
 
 

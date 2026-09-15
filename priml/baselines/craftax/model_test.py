@@ -53,13 +53,21 @@ def test_gradients_reach_both_towers() -> None:
     logits, value = model(torch.randn(4, 32))
     (logits.sum() + value.sum()).backward()
     assert all(p.grad is not None for p in model.parameters())
-    assert bool(model.policy[0].weight.grad.any())
-    assert bool(model.value[0].weight.grad.any())
+    policy_layer = model.policy[0]
+    value_layer = model.value[0]
+    assert isinstance(policy_layer, torch.nn.Linear)
+    assert isinstance(value_layer, torch.nn.Linear)
+    assert policy_layer.weight.grad is not None
+    assert value_layer.weight.grad is not None
+    assert bool(policy_layer.weight.grad.any())
+    assert bool(value_layer.weight.grad.any())
 
 
 def test_depth_and_width_follow_the_configuration() -> None:
     model = _model(channels_in=24, num_layers=3)
-    assert model.policy[0].out_features == 24
+    policy_layer = model.policy[0]
+    assert isinstance(policy_layer, torch.nn.Linear)
+    assert policy_layer.out_features == 24
     # Three hidden layers, each followed by an activation, then the head.
     assert len(model.policy) == 7
 
@@ -67,7 +75,9 @@ def test_depth_and_width_follow_the_configuration() -> None:
 def test_weights_are_orthogonally_initialized() -> None:
     # Orthogonal columns keep activations from collapsing or exploding as
     # they pass through a deep tanh stack.
-    weight = _model(channels_in=32, observation_size=32).policy[0].weight.detach()
+    layer = _model(channels_in=32, observation_size=32).policy[0]
+    assert isinstance(layer, torch.nn.Linear)
+    weight = layer.weight.detach()
     product = weight @ weight.T
     identity = torch.eye(product.shape[0]) * ((2.0**0.5) ** 2)
     assert torch.allclose(product, identity, atol=1e-5)

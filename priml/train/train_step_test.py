@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import functools
 import tempfile
@@ -23,7 +23,13 @@ from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
 
 
 if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
+
     from priml.distributed.testing import WarmPoolGetter
+
+
+class _LogitsOutput(Protocol):
+    logits: Tensor
 
 
 class _LinearModel(nn.Module):
@@ -43,7 +49,7 @@ class _LinearModel(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, x: Tensor, **_kwargs: object) -> Tensor:
         return self.linear(x).squeeze(-1)
 
     def reset_parameters(self) -> None:
@@ -83,7 +89,9 @@ def test_trainable_logistic_regression():
 
     metric = BinaryAccuracy.Config().make()
     with torch.no_grad():
-        output = trainable.model(X)
+        model = trainable.model
+        assert isinstance(model, _LinearModel)
+        output = model(X)
         metric.update(output, label=label)
 
     accuracy = metric.compute()["accuracy"]
@@ -153,7 +161,7 @@ def test_device_init_names_how_not_where() -> None:
     # Assigned as an ``--override`` or a deserialized config delivers it: the
     # annotation rules this out statically, so the runtime guard is what
     # catches text that never met a type checker.
-    config.device_init = "cuda"  # ty: ignore[invalid-assignment] -- The negative test assigns a deliberately invalid device name.  # pyright: ignore[reportAttributeAccessIssue] -- The negative test assigns a deliberately invalid device name.
+    object.__setattr__(config, "device_init", "cuda")
     with pytest.raises(ValueError, match="device_init"):
         config.make()
 
@@ -200,7 +208,6 @@ def test_trainable_eval_loss():
     trainable = config.make()
 
     result = trainable.eval_loss(x=X, label=label)
-    assert isinstance(result, dict)
     assert "loss" in result
     assert result["loss"].mean().item() > 0
 
@@ -228,7 +235,9 @@ def test_trainable_checkpointing():
     state = trainable.state_dict()
 
     with torch.no_grad():
-        output_before = trainable.model(X)
+        model = trainable.model
+        assert isinstance(model, _LinearModel)
+        output_before = model(X)
         loss_before = trainable.loss(output_before, label=label)
 
     trainable2 = config.make()
@@ -238,7 +247,9 @@ def test_trainable_checkpointing():
     assert trainable2.global_step == 10
 
     with torch.no_grad():
-        output_after = trainable2.model(X)
+        model = trainable2.model
+        assert isinstance(model, _LinearModel)
+        output_after = model(X)
         loss_after = trainable2.loss(output_after, label=label)
 
     torch.testing.assert_close(loss_before, loss_after)
@@ -263,9 +274,20 @@ def test_autocast_cache_enabled_is_configurable(
     seen: list[bool | None] = []
     orig = torch.amp.autocast
 
-    def spy(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
-        seen.append(kwargs.get("cache_enabled"))
-        return orig(*args, **kwargs)
+    def spy(*args: object, **kwargs: object) -> object:
+        cache_enabled = kwargs.get("cache_enabled")
+        assert cache_enabled is None or isinstance(cache_enabled, bool)
+        device_type = kwargs.get("device_type")
+        assert isinstance(device_type, str)
+        enabled = kwargs.get("enabled", True)
+        assert isinstance(enabled, bool)
+        seen.append(cache_enabled)
+        return orig(
+            *args,
+            device_type=device_type,
+            enabled=enabled,
+            cache_enabled=cache_enabled,
+        )
 
     monkeypatch.setattr(torch.amp, "autocast", spy)
     step(x=torch.randn(4, 2))
@@ -308,7 +330,7 @@ class _DictModel(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> dict[str, Tensor]:
+    def forward(self, x: Tensor, **_kwargs: object) -> dict[str, Tensor]:
         return {"logits": self.linear(x).squeeze(-1)}
 
     def reset_parameters(self) -> None:
@@ -318,15 +340,19 @@ class _DictModel(nn.Module):
 
 
 def _loss_from_logits_dict(
-    output: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+    output: object,
     *,
     label: Tensor,
-    **_kwargs: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+    **_kwargs: object,
 ) -> LossOutput:
     """Loss that consumes a ModelOutput by indexing its ``logits`` entry."""
+    assert isinstance(output, dict)
+    output_dict = cast(dict[str, object], output)
+    logits: object = output_dict["logits"]
+    assert isinstance(logits, Tensor)
     return {
         "loss": torch.nn.functional.binary_cross_entropy_with_logits(
-            output["logits"],
+            logits,
             label,
             reduction="none",
         ),
@@ -356,7 +382,7 @@ def test_multi_output_model_conforms_to_model_output_protocol() -> None:
     assert result["loss"].mean().item() > 0
 
 
-class _BadModel(nn.Linear):
+class _BadModel(nn.Module):
     """Model whose output violates the ModelOutput contract (None)."""
 
     class Config(Fig["_BadModel"], make_with_kwargs=True):
@@ -364,8 +390,12 @@ class _BadModel(nn.Linear):
         out_features: int = -1
         bias: bool = True
 
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        del in_features, out_features, bias
+        super().__init__()
+
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Any:  # ty: ignore[invalid-method-override] -- The negative test deliberately violates the ModelOutput contract.
+    def forward(self, x: Tensor, **_kwargs: object) -> object:
         del x
         return None
 
@@ -443,13 +473,21 @@ def test_grad_accum_equals_single_batch_unequal_micro_sizes() -> None:
 
 
 def _binary_cross_entropy_with_logits(
-    output: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+    output: object,
     *,
     label: Tensor,
-    **_kwargs: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+    **_kwargs: object,
 ) -> LossOutput:
     """Per-element BCE-with-logits loss (reduction='none')."""
-    logits = output.logits if hasattr(output, "logits") else output
+    if isinstance(output, dict):
+        output_dict = cast(dict[str, object], output)
+        logits: object = output_dict["logits"]
+    elif isinstance(output, Tensor):
+        logits = output
+    else:
+        assert hasattr(output, "logits")
+        logits = cast(_LogitsOutput, output).logits
+    assert isinstance(logits, Tensor)
     return {
         "loss": torch.nn.functional.binary_cross_entropy_with_logits(
             logits,
@@ -474,7 +512,7 @@ class _CountingModel(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, x: Tensor, **_kwargs: object) -> Tensor:
         self.forward_count += 1
         return self.linear(x).squeeze(-1)
 
@@ -521,7 +559,7 @@ def test_assert_uniform_microbatch_count_single_process_noop() -> None:
     _assert_uniform_microbatch_count(5)
 
 
-def _uniform_count_worker(result_dir_str: str, mesh: Any) -> None:  # noqa: ANN401 -- forwarded to an upstream Any.
+def _uniform_count_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
     """Worker: equal per-rank counts pass; unequal counts raise ValueError."""
     result_dir = Path(result_dir_str)
     rank = mesh.get_rank()

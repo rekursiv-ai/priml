@@ -68,10 +68,10 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Self, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, Self, cast, override
 
 import argparse
 import fcntl
@@ -106,6 +106,7 @@ from numpy import (
     uint16,
 )
 from numpy.lib.format import open_memmap
+from numpy.typing import NDArray
 
 import numpy as np
 import rustbpe
@@ -153,6 +154,15 @@ from priml.train.train_loop import TrainLoop
 
 
 logger = logging.getLogger(__name__)
+
+
+class _TokenizerToken(Protocol):
+    id: int
+
+
+class _TokenizerModel(Protocol):
+    def tokenize(self, text: str) -> list[_TokenizerToken]: ...
+
 
 _CWD: Final = Path(__file__).resolve().parent
 
@@ -295,7 +305,7 @@ def _download(out: Path, *, count: int) -> list[Path]:
             staging = Path(staged)
             # Stream rather than read whole: a shard is hundreds of MB.
             with (
-                urllib.request.urlopen(url) as response,  # noqa: S310 -- The benchmark fetches a URL supplied by its controlled dataset manifest..
+                cast(io.BufferedIOBase, urllib.request.urlopen(url)) as response,  # noqa: S310 -- The benchmark fetches a URL supplied by its controlled dataset manifest.
                 staging.open("wb") as file,
             ):
                 shutil.copyfileobj(response, file)
@@ -346,7 +356,11 @@ def _fit_vocabulary(
     # hand serves nobody. Only what THIS function writes is replaced; the
     # downloaded shards beside it are never touched.
     recorded = (
-        dict(DictCodec.coerce(json.loads(recipe_path.read_text()), default=None))
+        dict(
+            DictCodec.coerce(
+                cast(object, json.loads(recipe_path.read_text())), default=None
+            )
+        )
         if pickled.is_file() and recipe_path.is_file()
         else None
     )
@@ -459,9 +473,11 @@ def _documents(
     for path in shards:
         shard = parquet.ParquetFile(path)
         for group in range(shard.num_row_groups):
-            column = shard.read_row_group(group).column("text").to_pylist()
+            column = cast(
+                list[str], shard.read_row_group(group).column("text").to_pylist()
+            )
             for document in column:
-                text = str(document)[:doc_cap]
+                text = document[:doc_cap]
                 seen += len(text)
                 yield text
                 if seen >= max_chars:
@@ -520,7 +536,10 @@ def fetch_file(url: str, *, destination: Path) -> None:
         ) as temporary:
             staged = Path(temporary) / destination.name
             with (
-                urllib.request.urlopen(url, timeout=120) as response,  # noqa: S310 -- HTTPS checked above.
+                cast(
+                    io.BufferedIOBase,
+                    urllib.request.urlopen(url, timeout=120),  # noqa: S310 -- HTTPS checked above.
+                ) as response,
                 staged.open("wb") as output,
             ):
                 shutil.copyfileobj(response, output)
@@ -830,8 +849,12 @@ class RowPreparation:
 
     def _manifests(self, output: Path, *, encoder: ByteLevelTokenizer) -> None:
         """Write portable loader geometry and byte-table metadata."""
-        rows = load(output / "train/train_rows.npy", mmap_mode="r")
-        targets = load(output / "eval/eval_y.npy", mmap_mode="r")
+        rows: NDArray[np.uint16] = cast(
+            NDArray[np.uint16], load(output / "train/train_rows.npy", mmap_mode="r")
+        )
+        targets: NDArray[np.uint16] = cast(
+            NDArray[np.uint16], load(output / "eval/eval_y.npy", mmap_mode="r")
+        )
         write_mapping(
             output / "train/PREPARED_MANIFEST.json",
             value={
@@ -867,7 +890,9 @@ class RowPreparation:
                     **{
                         name: {
                             "file": f"token_bytes_{name}.npy",
-                            "total_on_eval_y": int(table[targets].sum()),
+                            "total_on_eval_y": int(
+                                cast(NDArray[np.int32], table)[targets].sum()
+                            ),
                         }
                         for name, table in (
                             ("primary", encoder.token_bytes),
@@ -891,7 +916,7 @@ class RowPreparation:
         documents = _document_batches(self.config)
         buffer: list[list[int]] = []
         lengths: list[int] = []
-        for index, row in enumerate(rows):
+        for index, row in enumerate(cast(Iterator[NDArray[np.uint16]], rows)):
             position = 0
             while position < len(row):
                 while len(buffer) < self.config.train_buffer_size:
@@ -1183,7 +1208,8 @@ class Preparation:
         module = importlib.import_module("priml.baselines.nanochat.experiments")
         if name not in {f"exp{index:03d}" for index in range(4, 24)}:
             raise ValueError(f"Unknown NanoChat experiment: {name}.")
-        config = getattr(module, name)()
+        factory = cast(Callable[[], object], getattr(module, name))
+        config = factory()
         if not isinstance(config, NgramTrainLoop.Config):
             raise TypeError("The experiment must return NgramTrainLoop.Config.")
         config.base_dir = "/"
@@ -1226,11 +1252,11 @@ def build_reference_eval(
     """
     manifest = read_mapping(reference_dir / "PACKED_EVAL_MANIFEST.json")
     pickled = (reference_dir / "tokenizer.pkl").read_bytes()
-    reference = pickle.loads(pickled)  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
+    reference = cast(object, pickle.loads(pickled))  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
     if not isinstance(reference, tiktoken.Encoding):
         raise TypeError("Reference pickle does not contain a tiktoken encoding.")
     inputs, targets = (
-        load(reference_dir / name, allow_pickle=False)
+        cast(NDArray[np.int64], load(reference_dir / name, allow_pickle=False))
         for name in ("eval_x.npy", "eval_y.npy")
     )
     unigram = tokenizers.Tokenizer.from_file(str(unigram_path))
@@ -1273,12 +1299,12 @@ def encode_fragment(raw: bytes, *, tokenizer: tokenizers.Tokenizer) -> list[int]
             ) from error
         text = raw[: error.start].decode("utf-8", errors="strict")
         suffix = raw[error.start :]
-    ids = tokenizer.encode(text, add_special_tokens=False).ids
+    ids: list[int] = tokenizer.encode(text, add_special_tokens=False).ids
     alphabet = byte_alphabet()
     if suffix:
         ids.extend(
             token.id
-            for token in tokenizer.model.tokenize(
+            for token in cast(_TokenizerModel, tokenizer.model).tokenize(
                 "".join(alphabet[value] for value in suffix)
             )
         )
@@ -1295,9 +1321,9 @@ def encode_fragment(raw: bytes, *, tokenizer: tokenizers.Tokenizer) -> list[int]
 
 
 def prepare_reference_rows(
-    inputs: ndarray,
+    inputs: NDArray[np.int64],
     *,
-    targets: ndarray,
+    targets: NDArray[np.int64],
     reference: tiktoken.Encoding,
     tokenizer: tokenizers.Tokenizer | None,
     batch_size: int,
@@ -1321,37 +1347,50 @@ def prepare_reference_rows(
         or inputs.ndim != 2
         or len(inputs) == 0
         or not array_equal(inputs[:, 1:], targets[:, :-1])
-        or np.any(inputs[:, 0] != bos)
+        or np.any(cast(NDArray[np.bool_], inputs[:, 0] != bos))
         or batch_size <= 0
     ):
         raise ValueError("Reference rows are not BOS-aligned shifted targets.")
     if tokenizer is not None and (
-        tokenizer.normalizer is not None
-        or tokenizer.post_processor is not None
+        cast(object, tokenizer.normalizer) is not None
+        or cast(object, tokenizer.post_processor) is not None
         or tokenizer.get_vocab_size()
         != tokenizer.get_vocab_size(with_added_tokens=False)
     ):
         raise ValueError("Unigram replay requires an unnormalized ordinary tokenizer.")
     pieces = [reference.decode_single_token_bytes(i) for i in range(bos)]
-    historical = array(
+    historical: NDArray[np.int64] = array(
         [len(reference.decode([i]).encode()) for i in range(bos)]
         + [0] * (reference.n_vocab - bos),
         dtype=int64,
     )
-    output_bos = tokenizer.get_vocab_size() if tokenizer is not None else bos
+    output_bos = int(tokenizer.get_vocab_size()) if tokenizer is not None else bos
     output_vocab = output_bos + 16 if tokenizer is not None else reference.n_vocab
+    width = int(cast(int, inputs.shape[1]))
     output: list[tuple[ndarray, ndarray, ndarray]] = []
     reference_counts: list[int] = []
     literal_counts: list[int] = []
     original_rows: list[int] = []
     fragment_lengths: list[int] = []
     incomplete_suffixes = 0
-    for row_index, row in enumerate(targets):
+    for row_index, row in enumerate(cast(Iterator[NDArray[np.int64]], targets)):
         sequence: list[int] = []
         literal_count = 0
         start = 0
-        for end in [*flatnonzero(row == bos), len(row)]:
-            raw = b"".join(pieces[int(token)] for token in row[start:end])
+        ends: list[int] = [
+            *cast(
+                list[int],
+                cast(
+                    NDArray[np.int64],
+                    flatnonzero(cast(NDArray[np.bool_], row == bos)),
+                ).tolist(),
+            ),
+            len(row),
+        ]
+        for end in ends:
+            raw = b"".join(
+                pieces[int(token)] for token in cast(list[int], row[start:end].tolist())
+            )
             fragment_lengths.append(len(raw))
             literal_count += len(raw)
             try:
@@ -1366,12 +1405,12 @@ def prepare_reference_rows(
         if tokenizer is None:
             output.append((inputs[row_index], row, historical[row] > 0))
         else:
-            if len(sequence) > inputs.shape[1] + 1:
+            if len(sequence) > width + 1:
                 raise ValueError(
                     f"Reference row {row_index} exceeds the model context: "
-                    f"{len(sequence) - 1} targets > {inputs.shape[1]}."
+                    f"{len(sequence) - 1} targets > {width}."
                 )
-            output.append(_pad_row(sequence, bos=output_bos, width=inputs.shape[1]))
+            output.append(_pad_row(sequence, bos=output_bos, width=width))
         reference_counts.append(int(historical[row].sum()))
         literal_counts.append(literal_count)
         original_rows.append(row_index)
@@ -1413,7 +1452,9 @@ def _pad_row(
     targets = inputs.copy()
     inputs[: len(window) - 1] = window[:-1]
     targets[: len(window) - 1] = window[1:]
-    mask = (arange(width) < len(window) - 1) & (targets != bos)
+    mask: NDArray[np.bool_] = cast(
+        NDArray[np.bool_], (arange(width) < len(window) - 1) & (targets != bos)
+    )
     return inputs, targets, mask
 
 
@@ -1968,9 +2009,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
-    args = parser.parse_args()
+    args = cast(_Arguments, parser.parse_args())
     module, _, name = args.factory.rpartition(".")
-    factory = getattr(importlib.import_module(module), name)
+    factory = cast(Callable[[], object], getattr(importlib.import_module(module), name))
     config = factory()
     if not isinstance(config, Preparation.Config):
         raise TypeError("The factory must return Preparation.Config.")
@@ -2063,9 +2104,30 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _Arguments(Protocol):
+    factory: str
+    directory: Path
+    stage: str
+    num_train_shards: int | None
+    vocab_size: int | None
+    tokenizer_train_chars: int | None
+    tokenizer_doc_cap: int | None
+    print_config: bool
+    experiment: str
+    seed: int
+    save_checkpoint: bool
+    run_directory: Path
+    output: Path
+
+
 if __name__ == "__main__":
     # Factories must share the importable Config identity rather than __main__'s.
     raise SystemExit(
-        importlib.import_module("priml.baselines.nanochat.scripts.prepare_data").main()
+        cast(
+            Callable[[], int],
+            importlib.import_module(
+                "priml.baselines.nanochat.scripts.prepare_data"
+            ).main,
+        )()
     )
 # vim: ft=python

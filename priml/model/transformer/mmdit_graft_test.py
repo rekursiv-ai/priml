@@ -11,6 +11,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.lib.custom_json import DictCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.linear import Linear
@@ -73,12 +74,10 @@ def test_graft_config_pprint() -> None:
 def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
     del module, input
     model = _config(conditioned=True).make()
+    state = DictCodec.coerce(model.state_dict(), Tensor)
     return torch.cat(
         [
-            *(
-                value.detach().flatten().float()
-                for value in model.state_dict().values()
-            ),
+            *(value.detach().flatten().float() for value in state.values()),
             torch.get_rng_state().float(),
         ],
     )
@@ -97,7 +96,8 @@ def test_graft_constructor_bfb() -> None:
 def _assert_same_state(source: object, target: object) -> None:
     assert isinstance(source, nn.Module)
     assert isinstance(target, nn.Module)
-    before, after = source.state_dict(), target.state_dict()
+    before = DictCodec.coerce(source.state_dict(), Tensor)
+    after = DictCodec.coerce(target.state_dict(), Tensor)
     assert before.keys() == after.keys()
     for name, value in before.items():
         assert torch.equal(value, after[name]), name
@@ -124,13 +124,12 @@ def test_weights_logits_and_stream_isolation(depth: int, tie: bool) -> None:
     source = _backbone(depth=depth, tie=tie).make().eval()
     graft = _config(depth=depth, tie=tie).make().eval()
     randomize_parameters(source, seed=7, std=0.2)
-    other_before = {
-        name: value.clone()
-        for name, value in graft.blocks[0].ffns[1].state_dict().items()
-    }
+    other_state = DictCodec.coerce(graft.blocks[0].ffns[1].state_dict(), Tensor)
+    other_before = {name: value.clone() for name, value in other_state.items()}
     graft.load_backbone(source)
     _assert_transferred(source, graft)
-    for name, value in graft.blocks[0].ffns[1].state_dict().items():
+    other_after = DictCodec.coerce(graft.blocks[0].ffns[1].state_dict(), Tensor)
+    for name, value in other_after.items():
         assert torch.equal(value, other_before[name])
     tokens = torch.tensor([[1, 2, 3]])
     other = torch.randn(1, 2, 16)
@@ -236,12 +235,12 @@ def test_loading_preflights_every_layer_before_copying() -> None:
     graft = _config(depth=2).make()
     assert isinstance(source.blocks[1], TransformerBlock)
     source.blocks[1].ffn = SwiGLU.Config(16, channels_hidden=48).make()
-    before = {name: value.clone() for name, value in graft.state_dict().items()}
+    graft_state = DictCodec.coerce(graft.state_dict(), Tensor)
+    before = {name: value.clone() for name, value in graft_state.items()}
     with pytest.raises(ValueError, match="shape"):
         graft.load_backbone(source)
-    assert all(
-        torch.equal(before[name], value) for name, value in graft.state_dict().items()
-    )
+    after = DictCodec.coerce(graft.state_dict(), Tensor)
+    assert all(torch.equal(before[name], value) for name, value in after.items())
 
 
 def test_factory_keeps_caller_configuration_unchanged() -> None:

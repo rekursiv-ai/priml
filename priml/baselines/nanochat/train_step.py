@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Protocol, Self, override
+from typing import Protocol, Self, cast, override
 
 import math
 import time
@@ -31,7 +31,9 @@ from priml.baselines.nanochat.model import (
     NanoChatLM,
     ScaledSoftCap,
 )
+from priml.baselines.nanochat.ngram import HashedNgramTables
 from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
+from priml.lib.custom_json import FloatCodec
 from priml.loss.custom_types import LossOutput
 from priml.math.schedules import Schedule, trapezoidal
 from priml.model.softcap import SoftCap
@@ -424,7 +426,10 @@ class NanoChatTrainStep(TrainStep):
         if self._compile_fn is not None:
             self._compiled_model = self._compile_fn(self._forward)
         for group in self.optimizer.param_groups:
-            group.setdefault("initial_weight_decay", group.get("weight_decay", 0.0))
+            group.setdefault(
+                "initial_weight_decay",
+                FloatCodec.coerce(group.get("weight_decay"), 0.0),
+            )
         self.schedule = config.schedule.make()
 
     # Model and loss in ONE function so the two compile together; see
@@ -433,7 +438,7 @@ class NanoChatTrainStep(TrainStep):
     # 54.49 ms/pass).
     def _forward(self, media: Tensor, label: Tensor) -> Tensor:
         """Score one batch, returning the per-token loss."""
-        logits = self.model(media)
+        logits = cast(object, self.model(media))
         assert isinstance(logits, Tensor)
         return self.loss(logits, media=media, label=label)["loss"]
 
@@ -588,16 +593,17 @@ class NanoChatTrainStep(TrainStep):
         }
 
     @override
-    def call_eval(self, **batch: object) -> Tensor:
+    def call_eval(self, *args: object, **batch: object) -> Tensor:
         """Return evaluation logits for one batch.
 
         Eager: the compiled forward returns a per-token LOSS, having fused the
         logits away, and materializing them again is the whole cost that
         fusion removes. Callers wanting a score use :meth:`eval_loss`.
         """
+        del args
         self.model.eval()
         with torch.inference_mode(), self._autocast():
-            logits = self.model(batch["media"])
+            logits = cast(object, self.model(batch["media"]))
         assert isinstance(logits, Tensor)
         return logits
 
@@ -611,8 +617,14 @@ class NanoChatTrainStep(TrainStep):
             # the next batch, a discarded pass could abort a healthy one.
             self._pending_worst = None
 
+    class StateDict(TrainStep.StateDict):
+        """The base state plus this baseline's own budget clock."""
+
+        elapsed_sec: float
+        local_step: int
+
     @override
-    def state_dict(self) -> dict[str, object]:
+    def state_dict(self) -> StateDict:
         """Extend the base state with this baseline's own budget clock.
 
         The clock drives every schedule and the step count gates it, so a
@@ -624,19 +636,20 @@ class NanoChatTrainStep(TrainStep):
                 "cannot checkpoint with incomplete gradient accumulation; "
                 "per-pass gradients are not serializable",
             )
-        state: dict[str, object] = {**super().state_dict()}
-        state["elapsed_sec"] = self.elapsed_sec
-        state["local_step"] = self._steps_this_process
-        return state
+        return {
+            **super().state_dict(),
+            "elapsed_sec": self.elapsed_sec,
+            "local_step": self._steps_this_process,
+        }
 
     @override
     def load_state_dict(
         self,
-        state_dict: dict[str, object],
+        state_dict: Mapping[str, object],
         *,
         strict: bool = True,
         load_optimizer: bool = True,
-        remap: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
+        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
     ) -> None:
         """Restore state produced by :meth:`state_dict`."""
         # Checked BEFORE anything is assigned, so a caller that catches this is
@@ -648,14 +661,12 @@ class NanoChatTrainStep(TrainStep):
                 "reconstructed; resuming would grant uncharged training. "
                 "Start a fresh run.",
             )
+        state = cast(NanoChatTrainStep.StateDict, state_dict)
         super().load_state_dict(
-            state_dict, strict=strict, load_optimizer=load_optimizer, remap=remap
+            state, strict=strict, load_optimizer=load_optimizer, remap=remap
         )
-        elapsed_sec, local_step = state_dict["elapsed_sec"], state_dict["local_step"]
-        assert isinstance(elapsed_sec, (int, float))
-        assert isinstance(local_step, int)
-        self.elapsed_sec = float(elapsed_sec)
-        self._steps_this_process = int(local_step)
+        self.elapsed_sec = float(state["elapsed_sec"])
+        self._steps_this_process = state["local_step"]
         self._pending_passes = 0
         self._pending_worst = None
 
@@ -880,14 +891,22 @@ class NgramTrainStep(NanoChatTrainStep):
 
     def _bind_ngram_gradients(self, model: MemoryNanoChatLM) -> None:
         """Bind each persistent table sink to exactly its RMSProp owner."""
+        tables = cast(
+            "Mapping[str, HashedNgramTables]",
+            cast(object, model.bigrams),
+        )
+        trigram_tables = cast(
+            "Mapping[str, HashedNgramTables]",
+            cast(object, model.trigrams),
+        )
         sinks = {
             part.weight: sink
-            for table in (*model.bigrams.values(), *model.trigrams.values())
+            for table in (*tables.values(), *trigram_tables.values())
             for part, sink in zip(table.tables, table.gradient_sinks, strict=True)
         }
         marks = {
             part.weight: bitmap
-            for table in (*model.bigrams.values(), *model.trigrams.values())
+            for table in (*tables.values(), *trigram_tables.values())
             for part, bitmap in zip(table.tables, table.gradient_bitmaps, strict=False)
         }
         assert isinstance(self.optimizer, CompositeOptimizer)
@@ -897,12 +916,12 @@ class NgramTrainStep(NanoChatTrainStep):
                 member.gradient_sinks = {
                     parameter: sinks[parameter]
                     for group in member.param_groups
-                    for parameter in group["params"]
+                    for parameter in cast("list[Tensor]", group["params"])
                 }
                 member.gradient_bitmaps = {
                     parameter: marks[parameter]
                     for group in member.param_groups
-                    for parameter in group["params"]
+                    for parameter in cast("list[Tensor]", group["params"])
                     if parameter in marks
                 }
                 bound.update(member.gradient_sinks)
@@ -1074,9 +1093,15 @@ class BoundedTokenCrossEntropy:
 def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
     """Return one rate per optimizer member, keyed by its class name."""
     if not isinstance(optimizer, CompositeOptimizer):
-        return {"all": float(optimizer.param_groups[0]["lr"])}
+        return {
+            "all": FloatCodec.coerce(
+                cast(object, optimizer.param_groups[0]["lr"]), None
+            )
+        }
     return {
-        type(member).__name__.lower(): float(member.param_groups[0]["lr"])
+        type(member).__name__.lower(): FloatCodec.coerce(
+            cast(object, member.param_groups[0]["lr"]), None
+        )
         for member in optimizer.optimizers
         if member.param_groups
     }

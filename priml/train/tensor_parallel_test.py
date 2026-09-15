@@ -69,12 +69,12 @@ def test_shard_style_stored_on_runtime_module() -> None:
 def test_unknown_shard_style_is_refused() -> None:
     """A style outside the declared set raises instead of silently replicating.
 
-    The annotation rules this out statically, so the assignment is suppressed
-    rather than cast: a config from JSON or a ``--override`` is unchecked text,
-    and the runtime guard is what catches it.
+    The annotation rules this out statically; ``setattr`` is the seam a config
+    from JSON or a ``--override`` comes through -- unchecked text the runtime
+    guard, not the checker, has to catch.
     """
     config = Linear.Config(channels_in=8, channels_out=8)
-    config.shard = "colwize"  # ty: ignore[invalid-assignment] -- The negative test assigns invalid configuration text to exercise the runtime guard.  # pyright: ignore[reportAttributeAccessIssue] -- The negative test assigns invalid configuration text to exercise the runtime guard.
+    setattr(config, "shard", "colwize")  # noqa: B010 -- Bypasses the static type deliberately; see docstring.
     with pytest.raises(ValueError, match="Unknown shard style"):
         _shard_style(config.make())
 
@@ -102,6 +102,7 @@ def test_meta_model_is_materialized_rather_than_copied(
     placed = strategy(model)
 
     assert not any(t.is_meta for t in placed.parameters())
+    assert isinstance(placed, Linear)
     assert not torch.isnan(placed.weight).any()
 
 
@@ -144,6 +145,7 @@ def test_tp1_applier_is_structural_noop() -> None:
     expected = model(x)
     sharded = apply_tensor_parallel(model, cast(DeviceMesh, _TpOneMesh()))
     assert sharded is model
+    assert isinstance(sharded, TwoLinear)
     assert not any(p.__class__.__name__ == "DTensor" for p in sharded.parameters())
     assert torch.equal(sharded(x), expected)
 

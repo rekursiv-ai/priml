@@ -96,7 +96,7 @@ def spawn_mobs(
         ("melee_mobs", 1, 1),
         ("ranged_mobs", 2, 2),
     ):
-        mobs = getattr(state, field)
+        mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
         assert isinstance(mobs, Mobs)
         alive = _on_level(mobs.mask, state.player_level)
         # Night is when the surface becomes dangerous: the fourth column is
@@ -293,9 +293,10 @@ def _update_projectiles(state: EnvState) -> EnvState:
         ("mob_projectiles", "mob_projectile_directions", True),
         ("player_projectiles", "player_projectile_directions", False),
     ):
-        mobs = getattr(state, field)
+        mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
         assert isinstance(mobs, Mobs)
-        directions = getattr(state, directions_field)
+        directions: object = getattr(state, directions_field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
+        assert isinstance(directions, Tensor)
         for slot in range(mobs.mask.shape[-1]):
             alive = _slot(mobs.mask, state, slot)
             position = _slot(mobs.position, state, slot)
@@ -462,7 +463,7 @@ def _relocate(
     despawns: Tensor,
 ) -> EnvState:
     """Move one creature slot and keep the occupancy grid in step with it."""
-    mobs = getattr(state, field)
+    mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
     assert isinstance(mobs, Mobs)
     rows = torch.arange(state.num_envs, device=state.device)
     level = state.player_level.long()
@@ -507,7 +508,7 @@ def _place_mob(
     spawning: Tensor,
 ) -> EnvState:
     """Fill one free slot with a new creature."""
-    mobs = getattr(state, field)
+    mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
     assert isinstance(mobs, Mobs)
     rows = torch.arange(state.num_envs, device=state.device)
     level = state.player_level.long()

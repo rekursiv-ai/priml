@@ -12,9 +12,9 @@ Two kinds of assertion, and the distinction matters:
 
 from __future__ import annotations
 
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Final, cast
 from unittest.mock import patch
 
 from configgle import InlineConfig
@@ -39,9 +39,11 @@ from priml.baselines.craftax.experiments import (
 )
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
 from priml.baselines.craftax.metric import CraftaxScore
+from priml.baselines.craftax.model import ActorCritic
 from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
+from priml.testing.experiments import ExperimentFactory
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
@@ -49,22 +51,11 @@ from priml.train.train_loop import TrainLoop
 _CWD: Final = Path(__file__).resolve().parent
 
 
-class _Experiment(Protocol):
-    """An experiment factory, named so tests can report which one failed."""
+type _CraftaxLoop = (
+    CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop | CraftaxPQNTrainLoop
+)
 
-    __name__: str
-
-    def __call__(
-        self,
-    ) -> (
-        CraftaxTrainLoop
-        | CraftaxGTrXLTrainLoop
-        | CraftaxRNNTrainLoop
-        | CraftaxPQNTrainLoop
-    ): ...
-
-
-ALL_EXPERIMENTS: list[_Experiment] = [
+ALL_EXPERIMENTS: list[ExperimentFactory[_CraftaxLoop]] = [
     exp000,
     exp001,
     exp002,
@@ -74,7 +65,7 @@ ALL_EXPERIMENTS: list[_Experiment] = [
     exp_smoke,
 ]
 
-PUBLISHED_EXPERIMENTS: list[_Experiment] = [
+PUBLISHED_EXPERIMENTS: list[ExperimentFactory[_CraftaxLoop]] = [
     exp000,
     exp001,
     exp002,
@@ -84,12 +75,7 @@ PUBLISHED_EXPERIMENTS: list[_Experiment] = [
 ]
 
 
-type _AnyLoop = (
-    CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop | CraftaxPQNTrainLoop
-)
-
-
-def shrink(config: _AnyLoop) -> _AnyLoop:
+def shrink(config: _CraftaxLoop) -> _CraftaxLoop:
     """Narrow ``config`` to a size a CPU test can run, preserving its recipe.
 
     Only SIZE changes -- workers, rollout, widths, horizon. Objective,
@@ -127,9 +113,12 @@ def shrink(config: _AnyLoop) -> _AnyLoop:
     ):
         # Neither recurrence has depth to shrink: the state is its width.
         config.step.rollout_steps = 2
-    elif isinstance(config.step, CraftaxTrainStep.Config):
-        config.step.rollout_steps = 2
-        config.step.model.num_layers = 1
+    else:
+        assert type(config.step) is CraftaxTrainStep.Config
+        train_step = config.step
+        train_step.rollout_steps = 2
+        assert isinstance(train_step.model, ActorCritic.Config)
+        train_step.model.num_layers = 1
 
     config.base_dir = None
     config.dataset.updates_per_epoch = 2
@@ -172,20 +161,30 @@ def test_experiment_makes_a_train_loop() -> None:
     assert CraftaxGTrXLTrainLoop.parent_class is TrainLoop
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
-def test_every_experiment_finalizes(factory: _Experiment) -> None:
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
+def test_every_experiment_finalizes(factory: ExperimentFactory[_CraftaxLoop]) -> None:
     assert factory().copy_tree().finalize() is not None
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
-def test_experiment_name_matches_the_factory(factory: _Experiment) -> None:
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
+def test_experiment_name_matches_the_factory(
+    factory: ExperimentFactory[_CraftaxLoop],
+) -> None:
     # The launcher derives run identity, and therefore the output directory,
     # from this field; a mismatch silently writes one run over another.
     assert factory().experiment_name == factory.__name__
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
-def test_the_network_is_sized_from_the_environment(factory: _Experiment) -> None:
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
+def test_the_network_is_sized_from_the_environment(
+    factory: ExperimentFactory[_CraftaxLoop],
+) -> None:
     # An experiment must not have to remember the observation width; the
     # environment renders it and ``finalize`` propagates it.
     step = factory().step.copy_tree().finalize()
@@ -193,9 +192,11 @@ def test_the_network_is_sized_from_the_environment(factory: _Experiment) -> None
     assert step.model.num_actions == 43
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
 def test_the_schedule_horizon_matches_the_step_budget(
-    factory: _Experiment,
+    factory: ExperimentFactory[_CraftaxLoop],
 ) -> None:
     # A horizon shorter than the run leaves the tail at zero learning rate;
     # longer, and the run stops before the schedule anneals.
@@ -203,18 +204,22 @@ def test_the_schedule_horizon_matches_the_step_budget(
     assert cfg.step.total_train_steps == cfg.max_steps
 
 
-@pytest.mark.parametrize("factory", PUBLISHED_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", PUBLISHED_EXPERIMENTS, ids=[f.__name__ for f in PUBLISHED_EXPERIMENTS]
+)
 def test_every_published_experiment_resets_optimistically(
-    factory: _Experiment,
+    factory: ExperimentFactory[_CraftaxLoop],
 ) -> None:
     # The reference baseline sets this on every run; it is a throughput
     # treatment, so a fork that dropped it would be slower without saying so.
     assert factory().step.env.optimistic_reset_ratio == 16
 
 
-@pytest.mark.parametrize("factory", PUBLISHED_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", PUBLISHED_EXPERIMENTS, ids=[f.__name__ for f in PUBLISHED_EXPERIMENTS]
+)
 def test_every_published_experiment_scores_identically(
-    factory: _Experiment,
+    factory: ExperimentFactory[_CraftaxLoop],
 ) -> None:
     # Two runs are comparable only when their evaluation geometry matches, so
     # a fork that changed it would be reporting on a different benchmark.
@@ -223,9 +228,13 @@ def test_every_published_experiment_scores_identically(
     assert (score.num_envs, score.steps, score.seed) == (64, 10_000, 42)
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
 @pytest.mark.compute_training
-def test_experiment_trains_at_minimum_size(factory: _Experiment) -> None:
+def test_experiment_trains_at_minimum_size(
+    factory: ExperimentFactory[_CraftaxLoop],
+) -> None:
     """Each published recipe runs end to end, shrunk to test size."""
     loop = shrink(factory()).make()
     loop.train()
@@ -236,6 +245,7 @@ def test_experiment_trains_at_minimum_size(factory: _Experiment) -> None:
 def test_metric_only_evaluation_runs_no_discarded_trainer_rollout() -> None:
     loop = shrink(exp000()).make()
 
+    assert isinstance(loop.step, CraftaxTrainStep)
     with patch.object(loop.step, "collect", wraps=loop.step.collect) as collect:
         metrics = loop.eval()
 
@@ -442,17 +452,19 @@ def _deltas(parent: object, child: object) -> set[str]:
     }
 
 
-def _flatten(config: Any, prefix: str = "") -> dict[str, Any]:  # noqa: ANN401 -- forwarded to an upstream Any.
+def _flatten(config: object, prefix: str = "") -> dict[str, object]:
     """Return a dotted-name to value map, descending into nested Configs."""
-    flat: dict[str, Any] = {}
-    fields = cast(dict[str, Any], type(config).__dataclass_fields__)
-    for name in fields:
-        value: Any = getattr(config, name)
+    if not is_dataclass(config):
+        raise TypeError(f"Expected a dataclass, got {type(config).__name__}.")
+    flat: dict[str, object] = {}
+    for field in fields(config):
+        name = field.name
+        value: object = getattr(config, name)  # pyright: ignore[reportAny] -- Dataclass fields are dynamically accessed by name.
         dotted = f"{prefix}{name}"
         if isinstance(value, InlineConfig):
-            flat[dotted] = repr(cast(InlineConfig[Any], value))
+            flat[dotted] = repr(cast(InlineConfig[object], value))
         elif isinstance(value, list):
-            flat[dotted] = [repr(item) for item in cast(list[Any], value)]
+            flat[dotted] = [repr(item) for item in cast(list[object], value)]
         elif is_dataclass(value):
             # Record the class itself, so swapping in a different Config
             # registers as one change rather than a diff of every field.

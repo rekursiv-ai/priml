@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import functools
@@ -14,9 +14,13 @@ import socket
 import tempfile
 import time
 
+
+if TYPE_CHECKING:
+    from torch import multiprocessing as tm
+
 import pytest
 
-from priml.distributed.testing import WorkerPool
+from priml.distributed.testing import PoolWorker, WorkerPool
 
 
 if TYPE_CHECKING:
@@ -69,13 +73,15 @@ def test_terminate_force_kills_wedged_child_after_join_timeout() -> None:
     healthy.is_alive.return_value = False
 
     pool = _pool(2)
-    pool.queue = MagicMock()
-    pool.processes = [healthy, wedged]
+    pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
+    pool.processes = [cast(PoolWorker, healthy), cast(PoolWorker, wedged)]
 
     pool.terminate()
 
     # Bounded join, then force-kill the still-alive child.
-    assert wedged.join.call_args_list[0].kwargs["timeout"] > 0
+    timeout = wedged.join.call_args_list[0].kwargs["timeout"]
+    assert isinstance(timeout, (int, float))
+    assert timeout > 0
     wedged.kill.assert_called_once()
     healthy.kill.assert_not_called()
 
@@ -116,10 +122,11 @@ def test_call_retries_then_raises_when_worker_keeps_dying(
     proc.exitcode = 1
     proc.is_alive.return_value = False
     pool = _pool(1)
-    pool.queue = MagicMock()
-    pool.ack_queue = MagicMock()
-    pool.ack_queue.get.side_effect = queue_mod.Empty
-    pool.processes = [proc]
+    pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
+    pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
+    assert pool.ack_queue is not None
+    cast(MagicMock, pool.ack_queue).get.side_effect = queue_mod.Empty
+    pool.processes = [cast(PoolWorker, proc)]
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
     respawns: list[int] = []
 
@@ -151,10 +158,12 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     proc.exitcode = None  # Alive: never produces a _WorkerDiedError.
     proc.is_alive.return_value = True
     pool = _pool(1)
-    pool.queue = MagicMock()
-    pool.ack_queue = MagicMock()
-    pool.ack_queue.get.side_effect = queue_mod.Empty  # Never acks -> timeout.
-    pool.processes = [proc]
+    pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
+    pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
+    cast(
+        MagicMock, pool.ack_queue
+    ).get.side_effect = queue_mod.Empty  # Never acks -> timeout.
+    pool.processes = [cast(PoolWorker, proc)]
     # Make the ack deadline elapse immediately so the test does not sleep.
     monkeypatch.setattr(WorkerPool, "_RENDEZVOUS_TIMEOUT", timedelta(0))
     monkeypatch.setattr(WorkerPool, "_READY_POLL_SEC", 0.0)
@@ -195,8 +204,7 @@ def test_enter_recovers_from_a_port_collision(
     # bind probe must reject it and pick another.
     dead = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     dead.bind(("127.0.0.1", 0))
-    dead_port = dead.getsockname()[1]
-    assert isinstance(dead_port, int)
+    dead_port = int(dead.getsockname()[1])  # pyright: ignore[reportAny] -- socket.getsockname is Any in typeshed; int() pins the port.
     real_find_free_port = WorkerPool.find_free_port
 
     ports: list[int] = []
@@ -247,7 +255,7 @@ def test_port_selection_sees_a_holder_on_a_non_loopback_address() -> None:
     except OSError as error:  # pragma: no cover -- host lacks a second local addr
         holder.close()
         pytest.skip(f"no non-loopback local address to hold: {error}")
-    held_port = holder.getsockname()[1]
+    held_port = int(holder.getsockname()[1])  # pyright: ignore[reportAny] -- socket.getsockname is Any in typeshed; int() pins the port.
     try:
         # The pool must reject a port it cannot actually listen on. Feeding the
         # held port as the first candidate makes the probe the only thing that

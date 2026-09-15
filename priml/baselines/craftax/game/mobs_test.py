@@ -8,6 +8,7 @@ import torch
 from priml.baselines.craftax.game import constants, mobs
 from priml.baselines.craftax.game.constants import Achievement, BlockType
 from priml.baselines.craftax.game.state import EnvState, empty_state
+from priml.lib.custom_json import ListCodec
 
 
 def _state(num_envs: int = 2) -> EnvState:
@@ -95,7 +96,7 @@ def test_a_creature_will_not_walk_into_stone() -> None:
     state.map[:, 0, 9, 13] = int(BlockType.STONE)
     state.map[:, 0, 11, 13] = int(BlockType.STONE)
     state = mobs.update_mobs(state, generator=_seed())
-    landed = state.melee_mobs.position[0, 0, 0].tolist()
+    landed = ListCodec.coerce(state.melee_mobs.position[0, 0, 0].tolist(), int)
     assert landed != [10, 12]
     assert state.map[0, 0, landed[0], landed[1]].item() != int(BlockType.STONE)
 

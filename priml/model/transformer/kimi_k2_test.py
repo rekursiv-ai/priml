@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
 import warnings
@@ -17,9 +17,9 @@ import pytest
 import torch
 
 from priml import hub
+from priml.lib.custom_json import DictCodec
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
-from priml.model.custom_types import TensorBlockConfig
 from priml.model.embedding import Embedding
 from priml.model.moe import MoE, Router
 from priml.model.norm import RMSNorm
@@ -27,15 +27,19 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer import kimi_k2, qwen3, qwen3_test
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.kimi_k2 import KimiK2, remap_hf_state_dict
-from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
+
+
+if TYPE_CHECKING:
+    from transformers.modeling_outputs import CausalLMOutputWithPast
+    from transformers.modeling_utils import PreTrainedModel
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _hf_config(**overrides: object) -> dict[str, Any]:
-    base: dict[str, Any] = {
+def _hf_config(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
         "model_type": "kimi_k2",
         "vocab_size": 128,
         "hidden_size": 64,
@@ -328,11 +332,10 @@ class TestSlots:
     def test_make_returns_kimik2_instance(self):
         model = KimiK2.Config.from_hf(_hf_config()).make()
         assert isinstance(model, KimiK2)
-        assert isinstance(model, Transformer)
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
         cfg = KimiK2.Config.from_hf(_hf_config())
-        block = cast(TensorBlockConfig, RMSNorm.Config())
+        block = RMSNorm.Config()
         cfg._size_block(block, 0)
         assert block.channels_in == cfg.channels_in
 
@@ -365,7 +368,6 @@ class TestLoad:
 
         model = KimiK2.load("moonshotai/tiny-kimi", device="cpu", dtype=torch.float32)
 
-        assert isinstance(model, KimiK2)
         assert isinstance(model.in_proj, Embedding)
         assert model.in_proj.weight.dtype == torch.float32
         assert model.in_proj.weight.device.type == "cpu"
@@ -442,7 +444,7 @@ class TestRemap:
         block = cfg.block
         assert isinstance(block, TransformerBlock.Config)
         if bad_part == "block":
-            cfg.block = cast(TensorBlockConfig, RMSNorm.Config())
+            cfg.block = RMSNorm.Config()
             match = "not a transformer"
         elif bad_part == "attention":
             block.attn = RMSNorm.Config()
@@ -481,7 +483,16 @@ def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             with host_agnostic_numerics(), torch.no_grad():
-                hf_out = hf_model(input_ids=tokens, use_cache=False).logits
+                # ``forward`` rather than ``__call__``: the stub's ``__call__``
+                # cannot bind a ``forward`` taking ``**kwargs: Unpack[...]``, and
+                # an eval-mode parity model registers no hooks to skip. The
+                # remote-code class has no stub, so its output is narrowed here.
+                hf_result = cast(
+                    "CausalLMOutputWithPast",
+                    hf_model.forward(input_ids=tokens, use_cache=False),
+                )
+                hf_out = hf_result.logits
+                assert hf_out is not None
                 loop_out = loop_model(tokens)
     diff = (hf_out - loop_out).abs().max().item()
     assert torch.allclose(hf_out, loop_out, atol=5e-5, rtol=1e-4), (
@@ -502,8 +513,8 @@ def test_transformers_compat_shims_restore_module_state() -> None:
     # ``vars``, not ``getattr``: ``DynamicCache`` inherits from ``Cache``, so a
     # deleted shim would still resolve through the base class and hide a leak.
     absent = object()
-    fx_before: object = vars(import_utils).get("is_torch_fx_available", absent)
-    legacy_before: object = vars(DynamicCache).get("from_legacy_cache", absent)
+    fx_before: object = vars(import_utils).get("is_torch_fx_available", absent)  # pyright: ignore[reportAny] -- vars() exposes dynamic module state as Any.
+    legacy_before: object = vars(DynamicCache).get("from_legacy_cache", absent)  # pyright: ignore[reportAny] -- vars() exposes dynamic class state as Any.
 
     with _install_transformers_compat_shims():
         assert callable(import_utils.is_torch_fx_available)
@@ -527,7 +538,7 @@ def _install_transformers_compat_shims() -> Generator[None]:
     def unavailable() -> bool:
         return False
 
-    def passthrough_cache(cls: type[DynamicCache], pkv: object) -> Any:  # noqa: ANN401 -- forwards an upstream Any.
+    def passthrough_cache(cls: type[DynamicCache], pkv: object) -> object:
         del cls
         return pkv
 
@@ -549,10 +560,19 @@ def _install_transformers_compat_shims() -> Generator[None]:
             delattr(owner, name)
 
 
-def _build_hf_model(q_lora_rank: int | None) -> Any:  # noqa: ANN401 -- forwards an upstream Any.
+# ``PreTrainedModel``, not ``DeepseekV3ForCausalLM``: ``trust_remote_code`` loads
+# the checkpoint's own module class, which shares the name but not the identity.
+def _build_hf_model(q_lora_rank: int | None) -> PreTrainedModel:
     """Instantiate HF's real ``DeepseekV3ForCausalLM`` at tiny size."""
-    transformers = pytest.importorskip("transformers")
-    config = transformers.AutoConfig.from_pretrained(
+    pytest.importorskip("transformers")
+    from transformers.models.auto.configuration_auto import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        AutoConfig,
+    )
+    from transformers.models.auto.modeling_auto import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        AutoModelForCausalLM,
+    )
+
+    config = AutoConfig.from_pretrained(
         "deepseek-ai/DeepSeek-V3",
         trust_remote_code=True,
     )
@@ -583,16 +603,19 @@ def _build_hf_model(q_lora_rank: int | None) -> Any:  # noqa: ANN401 -- forwards
     config.norm_topk_prob = True
     config.routed_scaling_factor = 1.0
     config._attn_implementation = "eager"
-    model = transformers.AutoModelForCausalLM.from_config(
+    model = AutoModelForCausalLM.from_config(
         config,
         trust_remote_code=True,
     )
     return model.to(torch.float32).eval()
 
 
-def _our_config_from_hf(hf_model: Any, q_lora_rank: int | None) -> KimiK2.Config:  # noqa: ANN401 -- forwarded to an upstream Any.
+def _our_config_from_hf(
+    hf_model: PreTrainedModel,
+    q_lora_rank: int | None,
+) -> KimiK2.Config:
     """Mirror an HF model's config into a ``KimiK2.Config``."""
-    hf_cfg = hf_model.config.to_dict()
+    hf_cfg = DictCodec.coerce(hf_model.config.to_dict())
     hf_cfg.setdefault("model_type", "deepseek_v3")
     hf_cfg["q_lora_rank"] = q_lora_rank
     hf_cfg["rope_scaling"] = None
@@ -601,7 +624,7 @@ def _our_config_from_hf(hf_model: Any, q_lora_rank: int | None) -> KimiK2.Config
 
 
 def _hf_state_dict_with_bias_fill(
-    hf_model: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+    hf_model: PreTrainedModel,
     config: KimiK2.Config,
 ) -> dict[str, Tensor]:
     """Extract HF weights and backfill absent router correction biases."""

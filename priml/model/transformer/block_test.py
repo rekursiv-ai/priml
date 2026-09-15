@@ -65,7 +65,6 @@ def test_transformer_block_prenorm():
     ).make()
     x = torch.randn(2, 8, 64)
     out = m(x)
-    assert isinstance(out, torch.Tensor)
     assert out.shape == (2, 8, 64)
 
 
@@ -77,7 +76,6 @@ def test_transformer_block_postnorm():
     ).make()
     x = torch.randn(2, 8, 64)
     out = m(x)
-    assert isinstance(out, torch.Tensor)
     assert out.shape == (2, 8, 64)
 
 
@@ -237,7 +235,6 @@ def test_block_checkpoint_skipped_under_eval():
     for ctx in (torch.no_grad, torch.inference_mode):
         with patch("priml.model.transformer.block.torch_checkpoint", _boom), ctx():
             out = m(x)
-            assert isinstance(out, torch.Tensor)
             assert out.shape == (2, 8, 64)
 
 
@@ -253,7 +250,6 @@ def test_block_checkpoint_wraps_under_grad():
 
     with patch("priml.model.transformer.block.torch_checkpoint", spy):
         out = m(x)
-        assert isinstance(out, torch.Tensor)
         out.sum().backward()
     assert spy.call_count > 0, "checkpoint=True did not checkpoint during training"
 

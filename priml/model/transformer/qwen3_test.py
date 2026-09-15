@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
 import importlib.util
@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from priml import hub
+from priml.lib.custom_json import IntCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import (
     GeometricFrequencies,
@@ -25,7 +26,6 @@ from priml.model.attention.rope import (
     RoPE,
 )
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.custom_types import TensorBlockConfig
 from priml.model.embedding import Embedding
 from priml.model.norm import RMSNorm
 from priml.model.sequential import Sequential
@@ -38,11 +38,16 @@ from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
 
 
+if TYPE_CHECKING:
+    from torch import LongTensor
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+
+
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _hf_config(**overrides: object) -> dict[str, Any]:
-    base: dict[str, Any] = {
+def _hf_config(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
         "model_type": "qwen3",
         "vocab_size": 128,
         "hidden_size": 64,
@@ -182,14 +187,15 @@ class TestConfig:
         cfg.pop("head_dim")
         parsed = Qwen3.Config.from_hf(cfg)
         assert _attn(parsed).channels_head == (
-            cfg["hidden_size"] // cfg["num_attention_heads"]
+            IntCodec.coerce(cfg["hidden_size"])
+            // IntCodec.coerce(cfg["num_attention_heads"])
         )
 
     def test_num_key_value_heads_inferred_when_missing(self):
         cfg = _hf_config()
         cfg.pop("num_key_value_heads")
         parsed = Qwen3.Config.from_hf(cfg)
-        assert _attn(parsed).num_heads_kv == cfg["num_attention_heads"]
+        assert _attn(parsed).num_heads_kv == IntCodec.coerce(cfg["num_attention_heads"])
 
     @pytest.mark.parametrize("field_name", ["num_key_value_heads", "head_dim"])
     def test_explicit_zero_head_geometry_rejected(self, field_name: str):
@@ -247,7 +253,6 @@ class TestConfig:
         """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
         model = Qwen3.Config.from_hf(_hf_config()).make()
         assert isinstance(model, Qwen3)
-        assert isinstance(model, Transformer)
 
 
 class TestSlots:
@@ -295,7 +300,7 @@ class TestSlots:
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
         cfg = Qwen3.Config.from_hf(_hf_config())
-        block = cast(TensorBlockConfig, RMSNorm.Config())
+        block = RMSNorm.Config()
         cfg._size_block(block)
         assert block.channels_in == cfg.channels_in
 
@@ -314,7 +319,6 @@ class TestLoad:
 
         model = Qwen3.load(tmp_path, device="cpu", dtype=torch.float32)
 
-        assert isinstance(model, Qwen3)
         assert isinstance(model.in_proj, Embedding)
         assert model.in_proj.weight.dtype == torch.float32
         assert model.num_layers == 1
@@ -337,9 +341,8 @@ class TestLoad:
             load_transformers_model,
         )
 
-        model = Qwen3.load("Qwen/tiny-qwen", dtype=torch.float32)
+        Qwen3.load("Qwen/tiny-qwen", dtype=torch.float32)
 
-        assert isinstance(model, Qwen3)
         load_transformers_model.assert_called_once_with(
             "Qwen/tiny-qwen",
             "AutoModelForCausalLM",
@@ -413,11 +416,21 @@ class TestRemap:
         hf_sd["model.layers.0.self_attn.k_norm.weight"].fill_(3.0)
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(hf_sd, cfg))
-        q_norm = model.blocks[0].attn.norm_q
-        k_norm = model.blocks[0].attn.norm_k
+        block = model.blocks[0]
+        assert isinstance(block, TransformerBlock)
+        attn = block.attn
+        assert isinstance(attn, SelfAttention)
+        q_norm = attn.norm_q
+        k_norm = attn.norm_k
+        assert isinstance(q_norm, RMSNorm)
+        assert isinstance(k_norm, RMSNorm)
         assert q_norm is not k_norm
-        assert torch.all(q_norm.weight == 2.0)
-        assert torch.all(k_norm.weight == 3.0)
+        q_weight = q_norm.weight
+        k_weight = k_norm.weight
+        assert isinstance(q_weight, Tensor)
+        assert isinstance(k_weight, Tensor)
+        assert torch.equal(q_weight, torch.full_like(q_weight, 2.0))
+        assert torch.equal(k_weight, torch.full_like(k_weight, 3.0))
 
     @pytest.mark.parametrize("bad_part", ["block", "attention"])
     def test_remap_rejects_incompatible_layer_configs(self, bad_part: str):
@@ -425,7 +438,7 @@ class TestRemap:
         block = cfg.block
         assert isinstance(block, TransformerBlock.Config)
         if bad_part == "block":
-            cfg.block = cast(TensorBlockConfig, RMSNorm.Config())
+            cfg.block = RMSNorm.Config()
             match = "not a transformer"
         else:
             block.attn = RMSNorm.Config()
@@ -576,7 +589,7 @@ def test_parity_test_restores_process_state_when_setup_fails(
         torch.set_rng_state(rng_state)
 
 
-def _tiny_hf_config() -> dict[str, Any]:
+def _tiny_hf_config() -> dict[str, object]:
     return {
         "vocab_size": 128,
         "hidden_size": 64,
@@ -594,16 +607,21 @@ def _tiny_hf_config() -> dict[str, Any]:
     }
 
 
-def _build_qwen3_hf_model(cfg_dict: dict[str, Any]) -> Any:  # noqa: ANN401 -- forwards an upstream Any.
-    transformers = pytest.importorskip("transformers")
-    config = transformers.Qwen3Config(**cfg_dict, attn_implementation="eager")
-    model = transformers.Qwen3ForCausalLM(config)
-    model.eval()
-    return model.to(dtype=torch.float32)
+def _build_qwen3_hf_model(cfg_dict: dict[str, object]) -> Qwen3ForCausalLM:
+    pytest.importorskip("transformers")
+    from transformers.models.qwen3.configuration_qwen3 import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        Qwen3Config,
+    )
+    from transformers.models.qwen3.modeling_qwen3 import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        Qwen3ForCausalLM,
+    )
+
+    config = Qwen3Config(**cfg_dict, attn_implementation="eager")
+    return Qwen3ForCausalLM(config).eval().to(dtype=torch.float32)
 
 
 def _hf_state_dict_to_loop_format(
-    hf_model: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
+    hf_model: Qwen3ForCausalLM,
     config: Qwen3.Config,
 ) -> dict[str, Tensor]:
     raw = {key: value.detach().cpu() for key, value in hf_model.state_dict().items()}
@@ -631,10 +649,14 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     loop_model.load_state_dict(_hf_state_dict_to_loop_format(hf_model, config))
     loop_model.eval().to(dtype=torch.float32)
 
-    tokens = torch.randint(0, cfg_dict["vocab_size"], (2, 5))
+    tokens = torch.randint(0, IntCodec.coerce(cfg_dict["vocab_size"]), (2, 5))
     with torch.no_grad():
-        hf_out = cast(Tensor, hf_model(input_ids=tokens).logits)
+        # ``forward`` rather than ``__call__``: the stub's ``__call__`` cannot
+        # bind a ``forward`` taking ``**kwargs: Unpack[...]``, and an eval-mode
+        # parity model registers no hooks to skip.
+        hf_out = hf_model.forward(input_ids=cast("LongTensor", tokens)).logits
         loop_out = loop_model(tokens)
+    assert hf_out is not None
     return hf_out, loop_out
 
 

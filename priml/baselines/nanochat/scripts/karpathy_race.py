@@ -87,8 +87,9 @@ See Also:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Protocol, cast
 
 import argparse
 import json
@@ -178,29 +179,34 @@ def main() -> int:
       result: Exit code; 0 on success, non-zero if the upstream script fails.
 
     """
-    args = _parse_args()
-    root = clone_upstream(args.clone)
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_arguments(parser)
+    flags = cast(_Flags, parser.parse_args())
+    root = clone_upstream(flags.clone)
 
     sys.path.insert(0, str(root))
-    sys.modules["kernels"] = _kernels_stub()
+    sys.modules["kernels"] = cast(types.ModuleType, _kernels_stub())
 
     # Their corpus location, and the microbatch this card can hold. Both are
     # module-level constants their script reads at import, so they are set
     # before it runs rather than edited into it.
-    prepare = _import_prepare(args.corpus)
-    source = _resize_microbatch((root / "train.py").read_text(), rows=args.rows)
+    prepare = _import_prepare(flags.corpus)
+    source = _resize_microbatch((root / "train.py").read_text(), rows=flags.rows)
 
     print(f"upstream:  {root}/train.py")
-    print(f"corpus:    {args.corpus}")
+    print(f"corpus:    {flags.corpus}")
     print(f"kernel:    {their_attention.__qualname__} (SDPA; FA3 needs SM90)")
-    print(f"rows/pass: {args.rows} (theirs is 128; 45 GiB on H100)")
+    print(f"rows/pass: {flags.rows} (theirs is 128; 45 GiB on H100)")
     print(f"vocab:     {prepare.Tokenizer.from_directory().get_vocab_size():,}")
     print(f"device:    {torch.cuda.get_device_name(0)}", flush=True)
 
     started = time.perf_counter()
     # Run as ``__main__`` with its own globals: their file is a script, not a
     # module, and its whole training loop is at module scope.
-    result: dict[str, Any] = {
+    result: dict[str, object] = {
         "__name__": "__main__",
         "__file__": str(root / "train.py"),
     }
@@ -212,88 +218,28 @@ def main() -> int:
         "steps": result.get("step"),
         "training_seconds": result.get("total_training_time"),
         "wall_seconds": elapsed,
-        "rows_per_pass": args.rows,
+        "rows_per_pass": flags.rows,
         "device": torch.cuda.get_device_name(0),
     }
     print(f"\nRESULT: {json.dumps(summary, indent=2, sort_keys=True)}")
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(summary, indent=2, sort_keys=True))
-        print(f"wrote {args.output}")
+    if flags.output:
+        flags.output.parent.mkdir(parents=True, exist_ok=True)
+        flags.output.write_text(json.dumps(summary, indent=2, sort_keys=True))
+        print(f"wrote {flags.output}")
     return 0
 
 
-# Their script assigns it at module scope, so it cannot be injected: any value handed in
-# beforehand is overwritten the moment the line runs. It is replaced in the source text
-# instead, and the substitution is asserted -- a silent miss would OOM 128 rows into 31
-# GiB, which is exactly the failure this exists to avoid.
-#
-# The TOKEN batch per optimizer step is untouched (their ``TOTAL_BATCH_SIZE`` is
-# unchanged), so this buys passes, not gradient.
-def _resize_microbatch(source: str, *, rows: int) -> str:
-    """Rewrite their ``DEVICE_BATCH_SIZE`` constant to what this card holds."""
-    pattern = re.compile(r"^DEVICE_BATCH_SIZE = \d+", re.MULTILINE)
-    patched, count = pattern.subn(f"DEVICE_BATCH_SIZE = {rows}", source)
-    if count != 1:
-        raise RuntimeError(
-            f"expected one DEVICE_BATCH_SIZE assignment in train.py; found {count}.",
-        )
-    return patched
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    clone: Path
+    corpus: Path
+    rows: int
+    output: Path | None
 
 
-# Their file computes both directories at import from ``~/.cache``. They are rebound
-# afterwards -- and only they -- so both sides of the race read the identical shards and
-# the identical vocabulary.
-#
-# ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of their ``Tokenizer.from_directory``,
-# bound at definition and so unaffected by the rebinding; the default is replaced too,
-# since their ``train.py`` calls it with no argument.
-def _import_prepare(corpus: Path) -> types.ModuleType:
-    """Import their ``prepare`` module, pointed at the shared corpus."""
-    import importlib  # noqa: PLC0415 -- The import occurs after sys.path is prepared for the pinned checkout.
-
-    prepare = importlib.import_module("prepare")
-    prepare.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The dynamically imported module has no statically known attributes.  # pyright: ignore[reportAttributeAccessIssue] -- The dynamically imported module has no statically known attributes.
-    prepare.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The dynamically imported module has no statically known attributes.  # pyright: ignore[reportAttributeAccessIssue] -- The dynamically imported module has no statically known attributes.
-    prepare.Tokenizer.from_directory.__func__.__defaults__ = (
-        str(corpus / "tokenizer"),
-    )
-    return prepare
-
-
-def _kernels_stub() -> types.ModuleType:
-    """Return a ``kernels`` module whose ``get_kernel`` yields the portable kernel."""
-    module = types.ModuleType("kernels")
-
-    def get_kernel(name: str) -> types.SimpleNamespace:
-        assert "flash-attention-3" in name, name
-        return types.SimpleNamespace(
-            flash_attn_interface=types.SimpleNamespace(
-                flash_attn_func=their_attention,
-            ),
-        )
-
-    module.get_kernel = get_kernel  # ty: ignore[unresolved-attribute] -- The stub module is constructed dynamically at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The stub module is constructed dynamically at runtime.
-    return module
-
-
-def _git(root: Path, *arguments: str) -> str:
-    """Run a read-only git command in the clone."""
-    return subprocess.run(  # noqa: S603 -- The helper invokes git read-only subcommands without a shell.
-        ["git", *arguments],  # noqa: S607 -- The script invokes the fixed git executable.
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-
-def _parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register flags on ``parser``."""
     parser.add_argument(
         "--clone",
         type=Path,
@@ -321,7 +267,124 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Write the result summary as JSON.",
     )
-    return parser.parse_args()
+
+
+# Their script assigns it at module scope, so it cannot be injected: any value handed in
+# beforehand is overwritten the moment the line runs. It is replaced in the source text
+# instead, and the substitution is asserted -- a silent miss would OOM 128 rows into 31
+# GiB, which is exactly the failure this exists to avoid.
+#
+# The TOKEN batch per optimizer step is untouched (their ``TOTAL_BATCH_SIZE`` is
+# unchanged), so this buys passes, not gradient.
+def _resize_microbatch(source: str, *, rows: int) -> str:
+    """Rewrite their ``DEVICE_BATCH_SIZE`` constant to what this card holds."""
+    pattern = re.compile(r"^DEVICE_BATCH_SIZE = \d+", re.MULTILINE)
+    patched, count = pattern.subn(f"DEVICE_BATCH_SIZE = {rows}", source)
+    if count != 1:
+        raise RuntimeError(
+            f"expected one DEVICE_BATCH_SIZE assignment in train.py; found {count}.",
+        )
+    return patched
+
+
+# Their file computes both directories at import from ``~/.cache``. They are rebound
+# afterwards -- and only they -- so both sides of the race read the identical shards and
+# the identical vocabulary.
+#
+# ``TOKENIZER_DIR`` is also a DEFAULT ARGUMENT of their ``Tokenizer.from_directory``,
+# bound at definition and so unaffected by the rebinding; the default is replaced too,
+# since their ``train.py`` calls it with no argument.
+def _import_prepare(corpus: Path) -> _Prepare:
+    """Import their ``prepare`` module, pointed at the shared corpus."""
+    import importlib  # noqa: PLC0415 -- The import occurs after sys.path is prepared for the pinned checkout.
+
+    prepare = cast(_Prepare, importlib.import_module("prepare"))
+    prepare.DATA_DIR = str(corpus)
+    prepare.TOKENIZER_DIR = str(corpus / "tokenizer")
+    method = cast(_BoundTokenizerFactory, prepare.Tokenizer.from_directory)
+    method.__func__.__defaults__ = (str(corpus / "tokenizer"),)
+    return prepare
+
+
+def _kernels_stub() -> _KernelModule:
+    """Return a ``kernels`` module whose ``get_kernel`` yields the portable kernel."""
+    module = cast(_KernelModule, types.ModuleType("kernels"))
+
+    def get_kernel(name: str) -> _Kernel:
+        assert "flash-attention-3" in name, name
+        return cast(
+            _Kernel,
+            types.SimpleNamespace(
+                flash_attn_interface=types.SimpleNamespace(
+                    flash_attn_func=their_attention,
+                ),
+            ),
+        )
+
+    module.get_kernel = get_kernel
+    return module
+
+
+def _git(root: Path, *arguments: str) -> str:
+    """Run a read-only git command in the clone."""
+    return subprocess.run(  # noqa: S603 -- The helper invokes git read-only subcommands without a shell.
+        ["git", *arguments],  # noqa: S607 -- The script invokes the fixed git executable.
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+class _Tokenizer(Protocol):
+    """The tokenizer API used by the upstream preparation module."""
+
+    def get_vocab_size(self) -> int: ...
+
+
+class _TokenizerClass(Protocol):
+    """The upstream tokenizer class API."""
+
+    @classmethod
+    def from_directory(cls, path: str = ...) -> _Tokenizer: ...
+
+
+class _DefaultsFunction(Protocol):
+    """The function metadata changed for the shared corpus path."""
+
+    __defaults__: tuple[str] | None
+
+
+class _BoundTokenizerFactory(Protocol):
+    """The bound classmethod slice used to replace its default path."""
+
+    __func__: _DefaultsFunction
+
+
+class _Prepare(Protocol):
+    """The preparation-module members used by this runner."""
+
+    DATA_DIR: str
+    TOKENIZER_DIR: str
+    Tokenizer: _TokenizerClass
+
+
+class _FlashAttentionInterface(Protocol):
+    """The upstream kernel interface used by the training script."""
+
+    flash_attn_func: Callable[..., Tensor]
+
+
+class _Kernel(Protocol):
+    """The upstream kernel object slice used by the training script."""
+
+    flash_attn_interface: _FlashAttentionInterface
+
+
+class _KernelModule(Protocol):
+    """The dynamically injected kernels module slice."""
+
+    get_kernel: Callable[[str], _Kernel]
 
 
 if __name__ == "__main__":

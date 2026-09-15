@@ -61,6 +61,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Protocol, cast
 
 import argparse
 import importlib
@@ -81,6 +82,14 @@ from priml.custom_types import JobProtocol, LaunchableExperiment
 from priml.logger import setup_logging
 
 
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    config: str
+    loglevel: str
+    override: list[str]
+
+
 @record
 def main() -> int:
     """Run the program; return the process exit code.
@@ -95,13 +104,13 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
     )
-    args, unparsed = _parse_args(parser)
+    flags, unparsed = _parse_args(parser)
 
     # Setup logging with specified level.
-    setup_logging(level=args.loglevel)
+    setup_logging(level=flags.loglevel)
 
     _log_hardware()
-    config_str = args.config
+    config_str = flags.config
     module_name, function_name = config_str.rsplit(".", 1)
 
     config = resolve_config(config_str)
@@ -109,12 +118,14 @@ def main() -> int:
     # Apply --override before the name auto-derive so an explicit
     # ``--override experiment_name=...`` wins (and derived fields key off it at
     # finalize).
-    apply_overrides(config, args.override)
+    apply_overrides(config, flags.override)
 
     # ``resolve_config`` already imported the module, so this is a cache hit.
     # The factory's docstring is the experiment's contract; it is stamped onto
     # the config and logged below.
-    function = getattr(importlib.import_module(module_name), function_name)
+    function: object = getattr(  # pyright: ignore[reportAny] -- The factory name is supplied by the CLI.
+        importlib.import_module(module_name), function_name
+    )
     docstring = inspect.getdoc(function) or ""
     _log_docstring(config_str, docstring)
     # A LaunchableExperiment gets its run identity + docstring stamped here when
@@ -151,7 +162,7 @@ def main() -> int:
 def _parse_args(
     parser: argparse.ArgumentParser,
     argv: list[str] | None = None,
-) -> tuple[argparse.Namespace, list[str]]:
+) -> tuple[_Flags, list[str]]:
     """Register the launcher's flags; return ``(parsed, leftover)`` for the job."""
     _ = parser.add_argument(
         "config",
@@ -173,7 +184,8 @@ def _parse_args(
         help="Override a (possibly nested) config field, e.g. --override "
         "step.lr=3e-4. Repeatable. The value is cast to the field's type.",
     )
-    return parser.parse_known_args(argv)
+    parsed, remaining = parser.parse_known_args(argv)
+    return cast(_Flags, parsed), remaining
 
 
 # Logs every field (defaults included) of the launched config so a run's exact setup is

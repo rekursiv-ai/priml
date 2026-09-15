@@ -13,6 +13,7 @@ reference itself; these run without a corpus or a network.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import json
 import math
@@ -32,7 +33,7 @@ from priml.baselines.nanochat.data import (
     Tokenizer,
     token_bytes_fingerprint,
 )
-from priml.lib.custom_json import DictCodec
+from priml.lib.custom_json import DictCodec, ListCodec, loads
 from priml.metrics.bits_per_byte import BitsPerByte
 
 
@@ -319,7 +320,7 @@ def test_a_byte_table_that_does_not_match_its_fingerprint_is_rejected(
     check still passes, and two runs become incomparable with nothing on disk
     to tell them apart.
     """
-    lengths = np.load(corpus / "tokenizer" / "token_bytes.npy")
+    lengths = _load_array(corpus / "tokenizer" / "token_bytes.npy")
     lengths[3] = 7  # Same shape, different accounting.
     np.save(corpus / "tokenizer" / "token_bytes.npy", lengths)
     with pytest.raises(ValueError, match="fingerprint"):
@@ -332,7 +333,7 @@ def test_a_negative_byte_length_is_rejected(corpus: Path) -> None:
     It would vanish from both sums -- excluded from the measurement rather than
     rejected -- which is a quiet change to what the score covers.
     """
-    lengths = np.load(corpus / "tokenizer" / "token_bytes.npy")
+    lengths = _load_array(corpus / "tokenizer" / "token_bytes.npy")
     lengths[3] = -2
     _refingerprint(corpus / "tokenizer", lengths)
     with pytest.raises(ValueError, match="negative byte length"):
@@ -429,9 +430,17 @@ def test_the_tokenizer_prepends_the_document_marker(corpus: Path) -> None:
 def _refingerprint(directory: Path, table: np.ndarray) -> None:
     """Rewrite the recipe so the fingerprint matches a replaced table."""
     np.save(directory / "token_bytes.npy", table)
-    recipe = json.loads((directory / "tokenizer_recipe.json").read_text())
+    recipe_path = directory / "tokenizer_recipe.json"
+    recipe = DictCodec.coerce(loads(recipe_path.read_text()), default=None)
     recipe["token_bytes_sha256"] = token_bytes_fingerprint(table)
-    (directory / "tokenizer_recipe.json").write_text(json.dumps(recipe))
+    recipe_path.write_text(json.dumps(recipe))
+
+
+def _load_array(path: Path) -> np.ndarray:
+    """Load a ``.npy`` the fixture wrote, as a mutable in-memory array."""
+    array = cast(object, np.load(path))
+    assert isinstance(array, np.ndarray)
+    return array
 
 
 @pytest.fixture
@@ -561,7 +570,10 @@ def test_prepared_evaluation_replays_packed_rows_and_primary_byte_rule(
         metric = BitsPerByte.Config().make()
         seen: list[list[int]] = []
         for batch in data.eval_dataloader():
-            seen.extend(batch["label"].tolist())
+            seen.extend(
+                ListCodec.coerce(row, int)
+                for row in ListCodec.coerce(batch["label"].tolist())
+            )
             metric.update(torch.ones_like(batch["label"], dtype=torch.float32), **batch)
         assert seen == [[2, 0, 4, 1], [1, 2, 3, 0]]
         assert metric.bytes == 16
@@ -581,7 +593,7 @@ def test_prepared_array_geometry_is_checked(
         else prepared_config.prepared_eval_manifest
     )
     path = Path(manifest).parent / name
-    array = np.load(path)
+    array = _load_array(path)
     np.save(path, array[1:])
     with pytest.raises(ValueError, match=r"geometry|one integer per token"):
         prepared_config.make()
@@ -591,7 +603,7 @@ def test_prepared_metadata_ignores_obsolete_checksums(
     prepared_config: NanoChatData.Config,
 ) -> None:
     path = Path(prepared_config.prepared_eval_manifest)
-    metadata = DictCodec.coerce(json.loads(path.read_text()), default=None)
+    metadata = DictCodec.coerce(loads(path.read_text()), default=None)
     metadata["eval_x_sha256"] = "obsolete"
     metadata["eval_y_sha256"] = "obsolete"
     metadata["loaded_modules_and_assets"] = {
@@ -635,7 +647,7 @@ def test_archive_replay_without_checksum_pins(
         allow_pickle=False,
         inputs=inputs,
         targets=targets,
-        score_mask=targets != 5,
+        score_mask=np.not_equal(targets, 5),
         reference_bytes=np.array([3, 1, 2]),
         literal_bytes=np.array([3, 1, 2]),
         batch_size=2,

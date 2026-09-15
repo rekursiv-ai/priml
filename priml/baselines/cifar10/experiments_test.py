@@ -12,15 +12,19 @@ Two kinds of assertion, and the distinction matters:
 
 from __future__ import annotations
 
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
-
-from configgle import InlineConfig
-from configgle.pprinting import pformat
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 import torch
+
+
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
+
+from configgle import InlineConfig
+from configgle.pprinting import pformat
 
 from priml.baselines.cifar10 import experiments
 from priml.baselines.cifar10.data import Cifar10Data
@@ -37,6 +41,7 @@ from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep
 from priml.metrics.topk import TopK
 from priml.optimizers import CompositeOptimizer
+from priml.testing.experiments import ExperimentFactory
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
@@ -44,15 +49,7 @@ from priml.train.train_loop import TrainLoop
 _CWD: Final = Path(__file__).resolve().parent
 
 
-class _Experiment(Protocol):
-    """An experiment factory, named so tests can report which one failed."""
-
-    __name__: str
-
-    def __call__(self) -> Cifar10TrainLoop: ...
-
-
-ALL_EXPERIMENTS: list[_Experiment] = [
+ALL_EXPERIMENTS: list[ExperimentFactory[Cifar10TrainLoop]] = [
     exp000,
     exp001,
     exp002,
@@ -133,23 +130,31 @@ def test_experiment_makes_a_train_loop() -> None:
     assert Cifar10TrainLoop.parent_class is TrainLoop
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
-def test_every_experiment_finalizes(factory: _Experiment) -> None:
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
+def test_every_experiment_finalizes(
+    factory: ExperimentFactory[Cifar10TrainLoop],
+) -> None:
     assert factory().copy_tree().finalize() is not None
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
 def test_experiment_name_matches_the_factory(
-    factory: _Experiment,
+    factory: ExperimentFactory[Cifar10TrainLoop],
 ) -> None:
     # The launcher derives run identity, and therefore the output directory,
     # from this field; a mismatch silently writes one run over another.
     assert factory().experiment_name == factory.__name__
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
 def test_construction_reads_no_files(
-    factory: _Experiment,
+    factory: ExperimentFactory[Cifar10TrainLoop],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,9 +173,11 @@ def test_construction_reads_no_files(
     _ = factory().copy_tree().finalize()
 
 
-@pytest.mark.parametrize("factory", ALL_EXPERIMENTS, ids=lambda f: f.__name__)
+@pytest.mark.parametrize(
+    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+)
 def test_experiment_trains_at_minimum_size(
-    factory: _Experiment,
+    factory: ExperimentFactory[Cifar10TrainLoop],
     tmp_path: Path,
 ) -> None:
     """Each published recipe runs end to end, shrunk to test size."""
@@ -299,28 +306,30 @@ def _deltas(parent: Cifar10TrainLoop, child: Cifar10TrainLoop) -> set[str]:
     }
 
 
-def _flatten(config: Any, prefix: str = "") -> dict[str, Any]:  # noqa: ANN401 -- forwarded to an upstream Any.
+def _flatten(config: DataclassInstance, prefix: str = "") -> dict[str, object]:
     """Return a dotted-name to value map, descending into nested Configs."""
-    flat: dict[str, Any] = {}
-    fields = cast(dict[str, Any], type(config).__dataclass_fields__)
-    for name in fields:
-        value: Any = getattr(config, name)
+    flat: dict[str, object] = {}
+    for field in fields(config):
+        name = field.name
+        value: object = getattr(config, name)  # pyright: ignore[reportAny] -- Dataclass fields are accessed dynamically by name.
         dotted = f"{prefix}{name}"
         if isinstance(value, InlineConfig):
             # An injected callable: its identity is the function plus its bound
             # arguments, which ``repr`` captures and ``==`` does not (comparing
             # two raises on the absent ``parent_class``).
-            flat[dotted] = repr(cast(InlineConfig[Any], value))
+            flat[dotted] = repr(cast(InlineConfig[object], value))
         elif isinstance(value, list):
             # A list of injected members (optimizers, selectors): compare by
             # element repr for the same reason, since ``==`` on the list would
             # reach each element's absent ``parent_class``.
-            flat[dotted] = [repr(item) for item in cast(list[Any], value)]
+            flat[dotted] = [repr(item) for item in cast(list[object], value)]
         elif is_dataclass(value):
             # Record the class itself, so swapping in a different Config
             # registers as one change rather than a diff of every field.
             flat[dotted] = type(value)
-            flat.update(_flatten(value, prefix=f"{dotted}."))
+            flat.update(
+                _flatten(cast("DataclassInstance", value), prefix=f"{dotted}."),
+            )
         else:
             flat[dotted] = value
     return flat

@@ -27,7 +27,7 @@ is simply unused without one.
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Any, NamedTuple, Protocol, Self, override, runtime_checkable
+from typing import NamedTuple, Protocol, Self, cast, override, runtime_checkable
 
 import copy
 import functools
@@ -39,7 +39,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding, HasChannels
-from priml.model.custom_types import ChannelsIn
+from priml.model.custom_types import ChannelsIn, TensorModule
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
@@ -264,7 +264,7 @@ class SudokuNet(nn.Module):
         )
         """Input embedding: tokens plus whatever additive channels_in apply."""
 
-        block: Makeable[nn.Module] = field(
+        block: Makeable[TensorModule] = field(
             default_factory=lambda: TransformerBlock.Config(prenorm=False),
         )
         """Token-mixing block, repeated ``num_layers`` times.
@@ -355,7 +355,6 @@ class SudokuNet(nn.Module):
         # is reproducible: embedding -> head -> blocks -> latent inits. The halt
         # head draws nothing (zeros and a constant bias).
         embedding = config.embedding.make()
-        assert isinstance(embedding, GridEmbedding)
         self.embedding = embedding
 
         self.head = Linear.Config(
@@ -458,7 +457,7 @@ class SudokuNet(nn.Module):
         z_fast: Tensor | None = None,
         *,
         collect_intermediates: bool = False,
-        **prefix_kwargs: Any,
+        **prefix_kwargs: object,
     ) -> ForwardOutput:
         """Embed, run the core (once or recurrently), and strip the prefix.
 
@@ -513,21 +512,19 @@ class SudokuNet(nn.Module):
             result.all_logits,
         )
 
-    def _embed(self, tokens: Tensor, prefix_kwargs: dict[str, Any]) -> Tensor:
+    def _embed(self, tokens: Tensor, prefix_kwargs: dict[str, object]) -> Tensor:
         """Embed the grid and prepend the prefix module's tokens, if any."""
         embeddings = self.embedding(tokens)
         if self.prefix is None:
             return embeddings
         # The prefix is per-batch, not per-token, so it takes the row count and
         # whatever the batch carries (puzzle ids, say) rather than the grid.
-        prefix = self.prefix(tokens.shape[0], **prefix_kwargs)
-        assert isinstance(prefix, Tensor)
+        prefix = cast(Tensor, self.prefix(tokens.shape[0], **prefix_kwargs))
         return torch.cat([prefix.to(dtype=embeddings.dtype), embeddings], dim=1)
 
     def _mix(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
         """Run the block stack once over a latent state."""
         out = self.reasoning(z, cos_sin=cos_sin)
-        assert isinstance(out, Tensor)
         return out
 
 

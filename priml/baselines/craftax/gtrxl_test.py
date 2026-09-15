@@ -197,7 +197,6 @@ def test_the_gate_starts_closed() -> None:
     model = _model(gating_bias=20.0)
     hidden = torch.randn(2, 3, 16)
     layer = model.layers[0]
-    assert isinstance(layer, torch.nn.Module)
     gated = layer.gate_attention(hidden, torch.randn(2, 3, 16))
     assert torch.allclose(gated, hidden, atol=1e-6)
 

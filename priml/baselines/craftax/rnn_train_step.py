@@ -15,9 +15,9 @@ make a shorter window cheaper, so there is nothing to gain by truncating.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 from configgle import Makes, PartialConfig
 from torch import Tensor
@@ -33,9 +33,15 @@ from priml.baselines.craftax.evaluation import (
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.rnn import ActorCriticRNN
-from priml.loss.policy_gradient import categorical_entropy, clipped_policy_loss
+from priml.lib.custom_json import ListCodec
+from priml.loss.policy_gradient import (
+    ClippedPolicyLoss,
+    categorical_entropy,
+    clipped_policy_loss,
+)
 from priml.math.advantage import explained_variance, generalized_advantage
 from priml.math.schedules import linear
+from priml.optimizers.lr import learning_rate
 from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
 
@@ -44,7 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-type _Callable = Callable[..., Any]
+type _Callable = Callable[..., object]
 """One of the model's recurrent entry points, compiled or not."""
 
 
@@ -220,6 +226,8 @@ class CraftaxRNNTrainStep(TrainStep):
             self.model.num_actions = len(Action)
             return super().finalize()
 
+    config: Config
+
     def __init__(self, config: Config) -> None:
         """Build the model, environment, and optimizer.
 
@@ -261,7 +269,7 @@ class CraftaxRNNTrainStep(TrainStep):
             super().__init__(config)
         finally:
             torch.set_rng_state(saved_rng)
-        self.config: CraftaxRNNTrainStep.Config = config
+        self.config = config
         self.env = config.env.make()
         model = self.model
         # The compiled handles wrap the two RECURRENT entry points, not
@@ -274,11 +282,12 @@ class CraftaxRNNTrainStep(TrainStep):
         )
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(config.seed)
-        self._observation = self.env.reset()
+        self._observation: Tensor = self.env.reset()
 
         num_envs = int(self._observation.shape[0])
         if num_envs % config.num_minibatches:
             raise ValueError("num_minibatches must divide the worker count")
+        self._state: Tensor
         self._state = self.model.initial_state(num_envs, device=self.device)
         self._previous_done = torch.zeros(
             num_envs,
@@ -316,7 +325,7 @@ class CraftaxRNNTrainStep(TrainStep):
         return 1.0 if spent > 1.0 else float(spent)
 
     @override
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Pass the loop's batch through: the rollout is collected here."""
         return batch
 
@@ -345,11 +354,16 @@ class CraftaxRNNTrainStep(TrainStep):
         metrics["explained_variance"] = float(
             explained_variance(rollout.value.flatten(), rollout.target.flatten()),
         )
-        return {
-            "loss": metrics.pop("_loss_tensor"),
-            "model": metrics.pop("_logits"),
-            "metrics": metrics,
+        loss = metrics.pop("_loss_tensor")
+        logits = metrics.pop("_logits")
+        assert isinstance(loss, Tensor)
+        assert isinstance(logits, Tensor)
+        typed_metrics = {
+            name: value
+            for name, value in metrics.items()
+            if isinstance(value, (float, Tensor))
         }
+        return {"loss": loss, "model": logits, "metrics": typed_metrics}
 
     @torch.no_grad()
     def collect(self) -> RecurrentRollout:
@@ -438,7 +452,7 @@ class CraftaxRNNTrainStep(TrainStep):
         del batch
         rollout = self.collect()
         minibatch = next(rollout.minibatches(count=1, generator=self._generator))
-        loss, logits, _ = self._loss(minibatch)
+        loss, logits, _terms = self._loss(minibatch)
         return {"loss": loss.detach(), "model": logits.detach()}
 
     @override
@@ -460,17 +474,20 @@ class CraftaxRNNTrainStep(TrainStep):
             return self.train_loss(**batch)
 
     @override
-    def call_eval(self, *, observation: Tensor, **_batch: object) -> Tensor:
+    def call_eval(self, *args: object, **batch: object) -> Tensor:
         """Return action logits for a batch of observations.
 
         Args:
-          observation: Batched observations, ``[batch, observation_size]``.
-          **_batch: Ignored; only ``observation`` is scored.
+          *args: Unused; the base signature admits positionals.
+          **batch: Batch fields; only ``observation`` is scored.
 
         Returns:
           logits: Unnormalized action scores, computed with a fresh state.
 
         """
+        assert not args
+        observation = batch["observation"]
+        assert isinstance(observation, Tensor)
         with evaluation_mode(self.model), torch.no_grad():
             logits, _ = self.model.forward(observation)
         return logits
@@ -492,10 +509,24 @@ class CraftaxRNNTrainStep(TrainStep):
     def on_epoch_end(self) -> None:
         """Nothing to flush: every update completes within one step."""
 
+    class StateDict(TrainStep.StateDict):
+        """The base state plus the environment, the GRU state, and the cursor."""
+
+        env: CraftaxEnv.StateDict
+        generator: Tensor
+        observation: Tensor
+        recurrent_state: Tensor
+        previous_done: Tensor
+        episode_return: Tensor
+        episode_length: Tensor
+        finished_returns: list[float]
+        finished_lengths: list[int]
+
     @override
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> StateDict:
         """Return model, optimizer, environment, state, and counters."""
-        return super().state_dict() | {
+        return {
+            **super().state_dict(),
             "env": self.env.state_dict(),
             "generator": self._generator.get_state(),
             "observation": self._observation,
@@ -508,22 +539,35 @@ class CraftaxRNNTrainStep(TrainStep):
         }
 
     @override
-    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+        load_optimizer: bool = True,
+        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
+    ) -> None:
         """Restore everything :meth:`state_dict` saved."""
-        super().load_state_dict(state_dict, **kwargs)
-        self.env.load_state_dict(state_dict["env"])
-        self._generator.set_state(state_dict["generator"])
-        self._observation = _tensor(state_dict["observation"])
-        self._state = _tensor(state_dict["recurrent_state"])
-        self._previous_done = _tensor(state_dict["previous_done"])
-        self._episode_return = _tensor(state_dict["episode_return"])
-        self._episode_length = _tensor(state_dict["episode_length"])
-        self._finished_returns = cast(list[float], state_dict["finished_returns"])
-        self._finished_lengths = cast(list[int], state_dict["finished_lengths"])
+        super().load_state_dict(
+            state_dict,
+            strict=strict,
+            load_optimizer=load_optimizer,
+            remap=remap,
+        )
+        state = cast(CraftaxRNNTrainStep.StateDict, state_dict)
+        self.env.load_state_dict(state["env"])
+        self._generator.set_state(state["generator"])
+        self._observation = state["observation"]
+        self._state = state["recurrent_state"]
+        self._previous_done = state["previous_done"]
+        self._episode_return = state["episode_return"]
+        self._episode_length = state["episode_length"]
+        self._finished_returns = list(state["finished_returns"])
+        self._finished_lengths = list(state["finished_lengths"])
 
-    def _optimize(self, rollout: RecurrentRollout) -> dict[str, Any]:
+    def _optimize(self, rollout: RecurrentRollout) -> dict[str, object]:
         """Take every configured pass over the rollout."""
-        metrics: dict[str, Any] = {}
+        metrics: dict[str, object] = {}
         for _ in range(self.config.num_epochs):
             for minibatch in rollout.minibatches(
                 count=self.config.num_minibatches,
@@ -544,13 +588,15 @@ class CraftaxRNNTrainStep(TrainStep):
                     "approx_kl": float(terms.approx_kl.detach()),
                     "clip_fraction": float(terms.clip_fraction.detach()),
                     "grad_norm": float(grad_norm.detach()),
-                    "learning_rate": self.optimizer.param_groups[0]["lr"],
+                    "learning_rate": learning_rate(self.optimizer),
                     "_loss_tensor": loss.detach(),
                     "_logits": logits.detach(),
                 }
         return metrics
 
-    def _loss(self, minibatch: dict[str, Tensor]) -> tuple[Tensor, Tensor, Any]:
+    def _loss(
+        self, minibatch: dict[str, Tensor]
+    ) -> tuple[Tensor, Tensor, ClippedPolicyLoss]:
         """Evaluate the clipped objective over one set of trajectories."""
         _, logits, value = self._sequence(
             minibatch["initial_state"],
@@ -589,8 +635,12 @@ class CraftaxRNNTrainStep(TrainStep):
         self._episode_return = self._episode_return + reward
         self._episode_length = self._episode_length + 1
         if bool(done.any()):
-            self._finished_returns.extend(self._episode_return[done].tolist())
-            self._finished_lengths.extend(self._episode_length[done].tolist())
+            self._finished_returns.extend(
+                ListCodec.coerce(self._episode_return[done].tolist(), float),
+            )
+            self._finished_lengths.extend(
+                ListCodec.coerce(self._episode_length[done].tolist(), int),
+            )
             self._episode_return = self._episode_return * ~done
             self._episode_length = self._episode_length * ~done
 
@@ -653,16 +703,6 @@ class _EvaluationActor:
 
 # Compiling the recurrent entry points rather than the module is what keeps the rollout
 # on the compiled path: a rollout calls ``step``, never ``forward``.
-def _compiled(function: _Callable, *, enabled: bool) -> _Callable:
+def _compiled[FunctionT: _Callable](function: FunctionT, *, enabled: bool) -> FunctionT:
     """Compile one bound method, or return it untouched."""
-    return torch.compile(function) if enabled else function
-
-
-# A state dict is untyped by construction, and assigning straight from it would widen
-# every restored attribute to ``Any`` -- erasing the shapes the rest of this file
-# depends on.
-def _tensor(value: object) -> Tensor:
-    """Narrow one checkpoint entry to a tensor."""
-    if not isinstance(value, Tensor):
-        raise TypeError(f"checkpoint entry must be a tensor, got {type(value)}")
-    return value
+    return cast(FunctionT, torch.compile(function) if enabled else function)

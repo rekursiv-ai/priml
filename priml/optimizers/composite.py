@@ -20,10 +20,10 @@ frozen only if the recipe says so.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol, overload, override
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast, overload, override
 
 from configgle import Fig, Makeable
 from torch.optim import Optimizer
@@ -170,7 +170,7 @@ class complement:  # noqa: N801 -- The lowercase name matches the public combina
         return f"complement({_name(self.select)})"
 
 
-class _ChainedState(dict[Any, Any]):
+class _ChainedState(dict[object, object]):
     """A live view of every member's per-parameter state.
 
     ``Optimizer.state`` is a plain attribute, so the composite
@@ -184,7 +184,7 @@ class _ChainedState(dict[Any, Any]):
         self._optimizers = optimizers
 
     @override
-    def __getitem__(self, key: Any) -> Any:
+    def __getitem__(self, key: object) -> object:
         self._refresh()
         return super().__getitem__(key)
 
@@ -194,7 +194,7 @@ class _ChainedState(dict[Any, Any]):
         return super().__len__()
 
     @override
-    def __iter__(self) -> Iterator[Any]:
+    def __iter__(self) -> Iterator[object]:
         self._refresh()
         return super().__iter__()
 
@@ -208,7 +208,8 @@ def _reject_shared_parameters(optimizers: Sequence[Optimizer]) -> None:
     seen: set[int] = set()
     for optimizer in optimizers:
         for group in optimizer.param_groups:
-            for parameter in group["params"]:
+            parameters = cast("list[Parameter]", group["params"])
+            for parameter in parameters:
                 if id(parameter) in seen:
                     raise ValueError(
                         "A parameter belongs to more than one optimizer in the "
@@ -354,16 +355,16 @@ class CompositeOptimizer(Optimizer):
             raise ValueError("CompositeOptimizer requires at least one optimizer.")
         _reject_shared_parameters(optimizers)
         self.optimizers = list(optimizers)
-        self.defaults: dict[str, Any] = {}
+        self.defaults: dict[str, object] = {}
         # The members' OWN group dicts and state, aliased rather than copied:
         # a scheduler writing ``composite.param_groups[i]["lr"]`` must reach the
         # optimizer that will read it, and a copy would silently discard the
         # write. ``super().__init__`` is skipped because it would build fresh
         # groups from a parameter list instead.
-        self.param_groups: list[dict[str, Any]] = [
+        self.param_groups = [
             group for optimizer in self.optimizers for group in optimizer.param_groups
         ]
-        self.state: dict[Any, Any] = _ChainedState(self.optimizers)
+        self.state: dict[object, object] = _ChainedState(self.optimizers)
 
     @overload
     def step(self, closure: None = None) -> None: ...
@@ -405,18 +406,28 @@ class CompositeOptimizer(Optimizer):
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=set_to_none)
 
+    class StateDict(TypedDict):
+        """Every member's state, keyed by position."""
+
+        optimizers: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch's own opaque optimizer payload.
+
+    # Returns torch's ``dict[str, Any]`` rather than ``StateDict``: a TypedDict
+    # is a ``Mapping``, not a ``dict``, so it cannot override ``Optimizer.state_dict``.
     @override
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny] -- torch's own opaque optimizer payload; shaped as StateDict.
         """Return every member's state, keyed by position.
 
         Returns:
           state: ``{"optimizers": [<member state>, ...]}``.
 
         """
-        return {"optimizers": [o.state_dict() for o in self.optimizers]}
+        state: CompositeOptimizer.StateDict = {
+            "optimizers": [o.state_dict() for o in self.optimizers],
+        }
+        return {**state}
 
     @override
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore state produced by :meth:`state_dict`.
 
         Raises:
@@ -424,7 +435,7 @@ class CompositeOptimizer(Optimizer):
             which means the recipe changed and the state cannot be matched up.
 
         """
-        saved = state_dict["optimizers"]
+        saved = cast(CompositeOptimizer.StateDict, state_dict)["optimizers"]
         if len(saved) != len(self.optimizers):
             raise ValueError(
                 f"Checkpoint holds {len(saved)} optimizers but this composite "
@@ -441,7 +452,7 @@ class CompositeOptimizer(Optimizer):
         ]
 
     @override
-    def add_param_group(self, param_group: dict[str, Any]) -> None:
+    def add_param_group(self, param_group: dict[str, object]) -> None:
         """Reject: a composite cannot know which member should own the group."""
         del param_group
         raise NotImplementedError(

@@ -16,7 +16,7 @@ choice not to redistribute is about package weight, not permission.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Protocol, Self, cast
 
 import hashlib
 import os
@@ -63,8 +63,15 @@ def fetch(
     directory.mkdir(parents=True, exist_ok=True)
     url = url_template.format(revision=revision, name=name)
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310 -- Craftax assets are fetched from the configured public dataset host.
-            payload = cast(bytes, response.read())
+        response = cast(
+            _ReadableBody,
+            urllib.request.urlopen(  # noqa: S310 -- Craftax assets use a fixed public dataset host.
+                url,
+                timeout=30,
+            ),
+        )
+        with response:
+            payload = response.read()
     except (urllib.error.URLError, TimeoutError) as error:
         raise RuntimeError(f"Could not download the Craftax sprite {name}") from error
 
@@ -101,3 +108,13 @@ def digest(directory: Path | None = None) -> str:
         accumulator.update(path.name.encode())
         accumulator.update(path.read_bytes())
     return accumulator.hexdigest()
+
+
+class _ReadableBody(Protocol):
+    """The response slice used by the downloader."""
+
+    def read(self) -> bytes: ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(self, *exc: object) -> None: ...

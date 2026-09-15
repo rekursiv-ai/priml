@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 from unittest.mock import patch
 
 from priml.compile import (
@@ -12,11 +11,11 @@ from priml.compile import (
 )
 
 
-def _identity(fn: Callable[..., Any]) -> Callable[..., Any]:
+def _identity(fn: Callable[..., object]) -> Callable[..., object]:
     return fn
 
 
-def _identity_compile(*_args: object, **_kwargs: object) -> Callable[..., Any]:
+def _identity_compile(*_args: object, **_kwargs: object) -> Callable[..., object]:
     """Stand-in for torch.compile: returns a no-op decorator."""
     return _identity
 
@@ -45,7 +44,9 @@ class TestLazyTorchCompile:
     def test_compile_deferred_to_first_call(self) -> None:
         calls: list[int] = []
 
-        def _tracking_compile(*_args: object, **_kwargs: object) -> Callable[..., Any]:
+        def _tracking_compile(
+            *_args: object, **_kwargs: object
+        ) -> Callable[..., object]:
             calls.append(1)
             return _identity
 

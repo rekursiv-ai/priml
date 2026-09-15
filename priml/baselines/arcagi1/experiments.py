@@ -66,7 +66,10 @@ rather than training a smaller model. The dataset cannot supply this: a config
 must build with no data on disk, so ``finalize`` may not read the tree."""
 
 
-class ArcTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class ArcTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[SudokuTrainStep.Config, ArcData.Config],
+):
     """A training loop with the ARC step and dataset already in place.
 
     Narrowing both slots here rather than at each call site lets a factory

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import ast
 import os
@@ -20,6 +20,7 @@ import torch
 if TYPE_CHECKING:
     from torch._ops import OpOverload
 
+from priml.lib.custom_json import DictCodec
 from priml.math.custom_types import TensorFn
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.transformer.block import TransformerBlock
@@ -249,7 +250,7 @@ def test_bfb_preserves_a_falsey_runner(tmp_path: Path) -> None:
 
         def __call__(self, module: nn.Module, inp: Tensor) -> Tensor:
             self.calls += 1
-            output = module(inp)
+            output = cast(object, module(inp))
             assert isinstance(output, Tensor)
             return output
 
@@ -533,12 +534,14 @@ def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
 # annotation.
 def _loaded_golden(path: Path) -> dict[str, dict[str, Tensor]]:
     """Read a golden's two state dicts, which are all this check reads."""
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    assert isinstance(payload, dict)
+    payload = DictCodec.coerce(
+        cast(object, torch.load(path, map_location="cpu", weights_only=False)),
+        default=None,
+    )
     return {
-        key: value
-        for key, value in cast(dict[str, object], payload).items()
-        if key in ("state_dict", "post_state_dict") and isinstance(value, dict)
+        key: DictCodec.coerce(payload[key], Tensor)
+        for key in ("state_dict", "post_state_dict")
+        if key in payload
     }
 
 
@@ -598,12 +601,13 @@ class _BufferMutatingModule(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.lin = nn.Linear(4, 3, bias=True)
-        self.register_buffer("running_sum", torch.zeros(3))
+        self._running_sum: Tensor = torch.zeros(3)
+        self.register_buffer("running_sum", self._running_sum)
+        self.running_sum = self._running_sum
 
     @override
     def forward(self, input: Tensor) -> Tensor:
         out = self.lin(input)
-        assert isinstance(self.running_sum, Tensor)
         self.running_sum.add_(out.detach().sum(dim=0))
         return out
 
@@ -631,11 +635,7 @@ def test_bfb_captures_forward_buffer_mutation(tmp_path: Path) -> None:
         build_input=_build_min_input,
         seed=0,
     )
-    payload = torch.load(
-        tmp_path / "buffer_mutating.pt",
-        weights_only=False,
-        map_location="cpu",
-    )
+    payload = _loaded_golden(tmp_path / "buffer_mutating.pt")
     pre = payload["state_dict"]["running_sum"]
     post = payload["post_state_dict"]["running_sum"]
     assert torch.equal(pre, torch.zeros(3))
@@ -656,7 +656,6 @@ def test_bfb_detects_forward_buffer_drift(tmp_path: Path) -> None:
         @override
         def forward(self, input: Tensor) -> Tensor:
             out = super().forward(input)
-            assert isinstance(self.running_sum, Tensor)
             self.running_sum.add_(1.0)
             return out
 
@@ -681,7 +680,7 @@ def test_regenerate_round_trips_immediately(tmp_path: Path) -> None:
     def flaky_runner(module: nn.Module, inp: Tensor) -> Tensor:
         # First call (capture) returns the clean output; the verification
         # rerun returns a perturbed output, so the golden cannot round-trip.
-        out = module(inp)
+        out = cast(object, module(inp))
         assert isinstance(out, Tensor)
         drift["n"] += 1
         if drift["n"] >= 2:
@@ -713,7 +712,7 @@ def test_failed_regeneration_preserves_the_last_valid_golden(tmp_path: Path) -> 
     def flaky_runner(module: nn.Module, inp: Tensor) -> Tensor:
         nonlocal calls
         calls += 1
-        output = module(inp)
+        output = cast(object, module(inp))
         assert isinstance(output, Tensor)
         return output + calls * 1e-3
 
@@ -816,7 +815,10 @@ _NONARITHMETIC_PROBES: dict[str, TensorFn] = {
     "stack": lambda a: torch.stack([a, a.flip(0)]),
     "clone": lambda a: a.clone(),
     "copy_": lambda a: torch.empty_like(a).copy_(a),
-    "_to_copy": lambda a: torch.ops.aten._to_copy(a, dtype=a.dtype),
+    "_to_copy": lambda a: cast(
+        Tensor,
+        torch.ops.aten._to_copy(a, dtype=a.dtype),
+    ),
     "fill_": lambda a: a.clone().fill_(0.123),
     "to": lambda a: a.to(torch.float32),
     "where": lambda a: torch.where(a > 0, a, a.flip(0)),
@@ -921,7 +923,7 @@ def _divergent_allowlisted_single_tensor_ops() -> set[str]:
     for name in sorted(_EXACT_F32_OPS):
         if name in _ALLOCATION_OPS:
             continue
-        packet = getattr(torch.ops.aten, name)
+        packet = cast(_AtenPacket, getattr(torch.ops.aten, name))
         # Fresh seeded input per op: an in-place or alias op must not corrupt the
         # input a later op sees, and ``op(f32)`` and ``op(f64)`` must run on the
         # same values. Clone so an in-place op mutates a private copy.
@@ -1239,14 +1241,10 @@ def test_host_agnostic_numerics_preserves_mixed_foreach_dtypes() -> None:
         torch.tensor([0.5], dtype=torch.float16),
         torch.tensor([0.5], dtype=torch.float32),
     ]
-    foreach_sin = cast(
-        Callable[[list[Tensor]], list[Tensor]],
-        getattr(torch, "_foreach_sin"),  # noqa: B009 -- These tests access stub-less torch members through typed casts.
-    )
-    expected = foreach_sin(inputs)
+    expected = torch._foreach_sin(inputs)
 
     with host_agnostic_numerics():
-        actual = foreach_sin(inputs)
+        actual = torch._foreach_sin(inputs)
 
     assert [value.dtype for value in actual] == [value.dtype for value in expected]
     assert all(
@@ -1265,14 +1263,8 @@ def test_host_agnostic_numerics_upcasts_foreach_norm() -> None:
     """
     x = torch.tensor([1e20, 1.0, -1e20, 3.0], dtype=torch.float32)
     expected = torch.linalg.vector_norm(x.double(), ord=2).float()
-    # ``torch`` stubs omit _foreach_norm; resolve it through a typed Callable so
-    # both type checkers see a known signature for this public foreach op.
-    foreach_norm = cast(
-        Callable[[list[Tensor], float], list[Tensor]],
-        getattr(torch, "_foreach_norm"),  # noqa: B009 -- These tests access stub-less torch members through typed casts.
-    )
     with host_agnostic_numerics():
-        actual = foreach_norm([x], 2.0)[0]
+        actual = torch._foreach_norm([x], 2.0)[0]
     assert torch.equal(actual, expected)
 
 
@@ -1291,13 +1283,8 @@ def test_host_agnostic_foreach_inplace_writes_back_list_targets() -> None:
         (x.double() * y.double()).float()
         for x, y in zip([torch.full((3,), 0.5) for _ in range(2)], ys, strict=True)
     ]
-    # ``torch`` stubs omit the in-place foreach ops; resolve through a typed Callable.
-    foreach_mul_ = cast(
-        Callable[[list[Tensor], list[Tensor]], None],
-        getattr(torch, "_foreach_mul_"),  # noqa: B009 -- These tests access stub-less torch members through typed casts.
-    )
     with host_agnostic_numerics():
-        foreach_mul_(xs, ys)
+        torch._foreach_mul_(xs, ys)
     for got, exp in zip(xs, expected, strict=True):
         assert torch.equal(got, exp)
 
@@ -1318,25 +1305,31 @@ def test_host_agnostic_multi_output_write_op_keeps_all_returns() -> None:
     weight = torch.ones(3, dtype=torch.float32)
     bias = torch.zeros(3, dtype=torch.float32)
     with host_agnostic_numerics():
-        out, save_mean, save_invstd = torch.ops.aten._native_batch_norm_legit(
-            x,
-            weight,
-            bias,
-            running_mean,
-            running_var,
+        out, save_mean, save_invstd = cast(
+            tuple[Tensor, Tensor, Tensor],
+            torch.ops.aten._native_batch_norm_legit(
+                x,
+                weight,
+                bias,
+                running_mean,
+                running_var,
+                True,
+                0.1,
+                1e-5,
+            ),
+        )
+    expected = cast(
+        tuple[Tensor, Tensor, Tensor],
+        torch.ops.aten._native_batch_norm_legit(
+            x.double(),
+            weight.double(),
+            bias.double(),
+            running_mean.double(),
+            running_var.double(),
             True,
             0.1,
             1e-5,
-        )
-    expected = torch.ops.aten._native_batch_norm_legit(
-        x.double(),
-        weight.double(),
-        bias.double(),
-        running_mean.double(),
-        running_var.double(),
-        True,
-        0.1,
-        1e-5,
+        ),
     )[0].float()
     assert out.shape == x.shape
     assert out.dtype == torch.float32
@@ -1365,9 +1358,17 @@ def test_inplace_arith_matches_functional_recompute(name: str) -> None:
     assert torch.equal(f32, f64.float())
 
 
+class _AtenPacket(Protocol):
+    """The typed slice of an Aten packet used by the divergence scan."""
+
+    default: Callable[[Tensor], object]
+
+
 def _f64_output_runner(module: nn.Module, inp: Tensor) -> Tensor:
     """Return the float64 scratch, skipping the round back to float32."""
-    return cast(Tensor, module(inp)).double()
+    output = cast(object, module(inp))
+    assert isinstance(output, Tensor)
+    return output.double()
 
 
 def test_bfb_rejects_a_float64_golden_output(tmp_path: Path) -> None:
@@ -1408,8 +1409,13 @@ def test_bfb_rejects_a_float64_golden_on_replay(tmp_path: Path) -> None:
         seed=0,
     )
     path = tmp_path / "legacy_f64.pt"
-    payload = torch.load(path, weights_only=False, map_location="cpu")
-    payload["output"] = payload["output"].double()
+    payload = DictCodec.coerce(
+        cast(object, torch.load(path, weights_only=False, map_location="cpu")),
+        default=None,
+    )
+    output = payload["output"]
+    assert isinstance(output, Tensor)
+    payload["output"] = output.double()
     torch.save(payload, path)
     with pytest.raises(TypeError, match="float64"):
         assert_bfb_against_golden(

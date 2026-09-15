@@ -49,7 +49,7 @@ def test_adam_atan2_matches_reference_bias_corrections() -> None:
         opt.step()
         torch.testing.assert_close(param, expected, rtol=0, atol=1e-15)
 
-    state = opt.state[param]
+    state = cast(dict[str, object], opt.state[param])
     # ``step`` is intentionally a Python int (not a 0-dim Tensor) to avoid
     # per-step GPU<->CPU syncs; see adam_atan2.py for the rationale.
     assert isinstance(state["step"], int)

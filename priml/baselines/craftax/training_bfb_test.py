@@ -26,7 +26,7 @@ Regenerate after an intentional numeric change::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Final, override
+from typing import Final, cast, override
 
 from torch import Tensor, nn
 
@@ -175,10 +175,13 @@ def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:
     A golden that only pinned a forward pass would still match after the
     optimizer changed, which is the regression this file exists to catch.
     """
-    payload: dict[str, Any] = torch.load(
-        _CWD / "testdata" / "craftax_ppo_training.pt",
-        weights_only=False,
-        map_location="cpu",
+    payload = cast(
+        dict[str, dict[str, Tensor]],
+        torch.load(
+            _CWD / "testdata" / "craftax_ppo_training.pt",
+            weights_only=False,
+            map_location="cpu",
+        ),
     )
     before = payload["post_state_dict"]["policy.policy.0.weight"]
     after = payload["state_dict"]["policy.policy.0.weight"]

@@ -49,7 +49,8 @@ def test_padding_counts_for_neither_side() -> None:
     labels[2:] = -100  # The padded tail.
     metric.update(_packed(labels.clone()), label=labels)
     assert metric.compute()["exact"] == 1.0
-    assert metric.puzzles == 2
+    puzzles = metric.puzzles
+    assert puzzles == 2
 
 
 def test_valid_count_truncates_before_scoring() -> None:

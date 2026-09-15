@@ -76,7 +76,10 @@ def test_potions_reach_mana_and_energy_too(
     state.inventory.potions[:, 0] = 1
     state.potion_mapping[:, 0] = effect
     drunk = abilities.drink_potion(state, _act(Action.DRINK_POTION_RED))
-    assert getattr(drunk, field).tolist() == [expected, expected]
+    values: object = getattr(drunk, field)  # pyright: ignore[reportAny] -- field names select Tensor state attributes.
+    assert isinstance(values, Tensor)
+    values_list = [int(value) for value in values]
+    assert values_list == [expected, expected]
 
 
 def test_shooting_an_arrow_needs_a_bow_and_spends_one() -> None:

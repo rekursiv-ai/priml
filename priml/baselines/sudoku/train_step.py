@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Any, Self, cast, override
+from typing import NotRequired, Protocol, Self, TypedDict, cast, override
 
 import math
 
@@ -36,7 +36,12 @@ import torch
 
 from priml.baselines.sudoku.act import ActPool
 from priml.baselines.sudoku.model import SudokuNet
-from priml.optimizers import CompositeOptimizer, apply_lr_scale, lr_scale
+from priml.optimizers import (
+    CompositeOptimizer,
+    apply_lr_scale,
+    learning_rate,
+    lr_scale,
+)
 from priml.optimizers.composite import complement, excluding
 from priml.optimizers.muon import Muon
 from priml.train.custom_types import TrainStepOutput
@@ -64,6 +69,10 @@ def _default_optimizer() -> CompositeOptimizer.Config:
     ]
     config.select = [complement(on_muon), on_muon]
     return config
+
+
+class _PrefixKwargs(TypedDict, total=False):
+    puzzle_identifiers: object
 
 
 class SudokuTrainStep(TrainStep):
@@ -246,7 +255,7 @@ class SudokuTrainStep(TrainStep):
                 self.config.lr_min_ratio,
             )
             apply_lr_scale([self.optimizer], scale)
-            metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+            metrics["lr"] = learning_rate(self.optimizer)
             self.optimizer.step()
             self.model.zero_grad(set_to_none=True)
             self._ema(self.model)
@@ -320,8 +329,9 @@ class SudokuTrainStep(TrainStep):
         return {"loss": loss.detach().reshape(1), "model": packed, "metrics": metrics}
 
     @override
-    def call_eval(self, **batch: object) -> Tensor:
+    def call_eval(self, *args: object, **batch: object) -> Tensor:
         """Return evaluation logits under the EMA weights."""
+        assert not args
         media = batch["media"]
         assert isinstance(media, Tensor)
         with self._eval_weights():
@@ -334,8 +344,13 @@ class SudokuTrainStep(TrainStep):
     def on_epoch_end(self) -> None:
         """Do nothing: this step accumulates nothing across a boundary."""
 
+    class StateDict(TrainStep.StateDict):
+        """Base state plus the ACT pool's halt bookkeeping; see :meth:`state_dict`."""
+
+        act: NotRequired[ActPool.StateDict]
+
     @override
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> StateDict:
         """Extend the base state with the EMA shadow and the ACT pool.
 
         The EMA is written as a bare name-keyed dict rather than the base's
@@ -347,7 +362,7 @@ class SudokuTrainStep(TrainStep):
         a resumed run continues with the next batch rather than replaying
         interrupted ones -- but its halt bookkeeping is carried.
         """
-        state = super().state_dict()
+        state: SudokuTrainStep.StateDict = {**super().state_dict()}
         shadow = self.ema_shadow
         if shadow is not None:
             state["ema"] = dict(shadow)
@@ -356,28 +371,38 @@ class SudokuTrainStep(TrainStep):
         return state
 
     @override
-    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+        load_optimizer: bool = True,
+        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
+    ) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        # The EMA is restored here from this baseline's flat shape, so the
-        # base is told to leave it alone -- it would otherwise look for its
-        # own nested form and find a dict of parameter names.
-        ema_state = state_dict.pop("ema", None)
+        state = cast(SudokuTrainStep.StateDict, state_dict)
         # A checkpoint predating the shared step timer records the count as a
         # bare ``global_step``; the base reads it off ``timer_step``. Named
         # rather than silently starting from zero, which would re-anneal the
         # learning rate from the top of a schedule the run had half spent.
-        if "timer_step" not in state_dict and "global_step" in state_dict:
+        if "timer_step" not in state and "global_step" in state:
             raise ValueError(
                 "this checkpoint records a bare 'global_step' and no "
                 "'timer_step', so it predates the shared step timer; resuming "
                 "would restart the schedule's clock at zero and re-apply decay "
                 "the run had already spent. Start a fresh run.",
             )
-        try:
-            super().load_state_dict(state_dict, **kwargs)
-        finally:
-            if ema_state is not None:
-                state_dict["ema"] = ema_state
+        # The EMA is restored here from this baseline's flat shape, so the
+        # base is handed a copy without it -- it would otherwise look for its
+        # own nested form and find a dict of parameter names.
+        ema_state = state.get("ema")
+        base_state = {key: value for key, value in state.items() if key != "ema"}
+        super().load_state_dict(
+            base_state,
+            strict=strict,
+            load_optimizer=load_optimizer,
+            remap=remap,
+        )
         if ema_state is not None and not isinstance(self._ema, NoEMA):
             self._ema.global_step = self.global_step
             self._ema.load_state_dict(
@@ -386,8 +411,8 @@ class SudokuTrainStep(TrainStep):
                     "global_step": self.global_step,
                 },
             )
-        if self.act is not None and "act" in state_dict:
-            self.act.load_state_dict(state_dict["act"])
+        if self.act is not None and "act" in state:
+            self.act.load_state_dict(state["act"])
 
     def _ingest(self, batch: Mapping[str, object]) -> tuple[Tensor, Tensor, Tensor]:
         """Return the ``(media, labels, active)`` this step trains on."""
@@ -417,13 +442,18 @@ class SudokuTrainStep(TrainStep):
     def _eval_rollout(
         self,
         media: Tensor,
-        prefix_kwargs: dict[str, Any],
+        prefix_kwargs: _PrefixKwargs,
     ) -> tuple[Tensor, Tensor]:
         """Run the model to its full depth, carrying latents when ACT is on."""
         if self.act is None:
             out = self.net(media, **prefix_kwargs)
             return out.logits, out.halt
-        return self.act.rollout(self.net, media=media, prefix_kwargs=prefix_kwargs)
+        pool = cast(_ActRollout, self.act)
+        return pool.rollout(
+            self.net,
+            media=media,
+            prefix_kwargs=dict(prefix_kwargs),
+        )
 
     # Only active rows contribute, and the mean is over those rows: a pool slot holding
     # no puzzle must not dilute the gradient.
@@ -494,7 +524,17 @@ class SudokuTrainStep(TrainStep):
 
 # A per-puzzle prefix needs to know WHICH puzzle each row is; the grid alone cannot say.
 # Passing the whole batch would instead hand the model its own labels.
-def _prefix_kwargs(batch: dict[str, Any]) -> dict[str, Any]:
+def _prefix_kwargs(batch: dict[str, object]) -> _PrefixKwargs:
     """Return the batch fields a prefix module consumes, if any."""
     identifiers = batch.get("puzzle_identifiers")
     return {} if identifiers is None else {"puzzle_identifiers": identifiers}
+
+
+class _ActRollout(Protocol):
+    def rollout(
+        self,
+        model: SudokuNet,
+        *,
+        media: Tensor,
+        prefix_kwargs: dict[str, object],
+    ) -> tuple[Tensor, Tensor]: ...

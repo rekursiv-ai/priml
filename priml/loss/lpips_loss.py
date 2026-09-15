@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import Protocol, cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -13,7 +13,8 @@ import torch
 from priml.loss.custom_types import LossOutput
 
 
-lpips = lazy_import("lpips")
+class _LPIPSModule(Protocol):
+    def __call__(self, input: Tensor, target: Tensor) -> Tensor: ...
 
 
 class LPIPSLoss(nn.Module):
@@ -29,7 +30,7 @@ class LPIPSLoss(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.max_num_random_frames = config.max_num_random_frames
-        self.lpips_criterion = lpips.LPIPS(net=config.net)
+        self.lpips_criterion: _LPIPSModule = lpips.LPIPS(net=config.net)
 
     @override
     def forward(
@@ -75,3 +76,10 @@ class LPIPSLoss(nn.Module):
         loss = loss.reshape(b, t).mean(dim=1)
 
         return {"loss": loss}
+
+
+class _LPIPS(Protocol):
+    def LPIPS(self, *, net: str) -> _LPIPSModule: ...  # noqa: N802 -- Matches the vendor constructor.
+
+
+lpips: _LPIPS = cast(_LPIPS, lazy_import("lpips"))

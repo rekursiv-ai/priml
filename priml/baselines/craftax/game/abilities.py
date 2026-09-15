@@ -63,7 +63,8 @@ def drink_potion(state: EnvState, action: Tensor) -> EnvState:
         ("player_energy", 4, 5),
     ):
         delta = 8 * (effect == benefit).int() - 3 * (effect == harm).int()
-        current = getattr(state, target)
+        current = getattr(state, target)  # pyright: ignore[reportAny] -- State attribute names are selected from the fixed tuple above.
+        assert isinstance(current, Tensor)
         setattr(
             state,
             target,
@@ -310,7 +311,8 @@ def level_up(state: EnvState, action: Tensor) -> EnvState:
         (Action.LEVEL_UP_STRENGTH, "player_strength"),
         (Action.LEVEL_UP_INTELLIGENCE, "player_intelligence"),
     ):
-        current = getattr(state, attribute)
+        current = getattr(state, attribute)  # pyright: ignore[reportAny] -- State attribute names are selected from the fixed tuple above.
+        assert isinstance(current, Tensor)
         raising = (
             (action == int(chosen_action))
             & (state.player_xp >= 1)

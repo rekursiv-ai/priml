@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import hashlib
 import logging
@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 # Opaque round-trip types: the formats are implementation-defined by
 # ``random.getstate`` / ``numpy_rng.bit_generator.state`` respectively,
 # and we never inspect them -- only round-trip through ``set_rng_state``.
-PythonRngState = tuple[Any, ...]
-NumpyRngState = Any
+PythonRngState = tuple[object, ...]
+NumpyRngState = object
 
 
 class RngState(TypedDict):
@@ -335,7 +335,9 @@ def set_rng_state(state: RngState) -> None:
     random.setstate(state["python"])
     torch.set_rng_state(state["torch"])
     if "numpy" in state:
-        numpy_rng.bit_generator.state = state["numpy"]
+        numpy_state = state["numpy"]
+        assert isinstance(numpy_state, dict)
+        numpy_rng.bit_generator.state = numpy_state
     if "cuda" in state:
         cuda_states = state["cuda"]
         n_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -396,7 +398,7 @@ def _cuda_device_identity(index: int) -> str:
     """Return a stable identifier for CUDA device ``index``."""
     props = torch.cuda.get_device_properties(index)
     for attr in ("uuid", "pci_bus_id", "name"):
-        value = getattr(props, attr, None)
+        value: object = getattr(props, attr, None)
         if value:
             return str(value)
     return f"cuda:{index}"

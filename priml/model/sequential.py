@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Self, override
+from typing import Self, cast, override
 
 from configgle import Fig, Makeable, Maker
 from torch import Tensor, nn
@@ -13,6 +13,8 @@ from priml.model.custom_types import (
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
+    Resettable,
+    TensorModule,
 )
 
 
@@ -51,8 +53,8 @@ class Sequential(nn.Sequential):
 
         _: KW_ONLY
 
-        elements: Makeable[nn.Module] | list[Makeable[nn.Module]] = field(
-            default_factory=list[Makeable[nn.Module]],
+        elements: Makeable[TensorModule] | list[Makeable[TensorModule]] = field(
+            default_factory=list[Makeable[TensorModule]],
         )
         """Module config(s) to compose sequentially."""
 
@@ -65,10 +67,10 @@ class Sequential(nn.Sequential):
         @override
         def finalize(self) -> Self:
             elements = self.elements
-            base: list[Makeable[nn.Module]] = (
+            base: list[Makeable[TensorModule]] = (
                 list(elements) if isinstance(elements, list) else [elements]
             )
-            expanded: list[Makeable[nn.Module]] = []
+            expanded: list[Makeable[TensorModule]] = []
             for index in range(self.repeat):
                 for element in base:
                     copied = element.copy_tree()
@@ -125,13 +127,12 @@ class Sequential(nn.Sequential):
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
         for module in self:
-            if hasattr(module, "reset_parameters"):
+            if isinstance(module, Resettable):
                 module.reset_parameters()
 
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         for module in self:
-            output = module(input, **kwargs)
-            assert isinstance(output, Tensor)
+            output = cast(Tensor, module(input, **kwargs))
             input = output
         return input

@@ -31,19 +31,20 @@ constructing a config never touches the network.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any, Self, cast, override
+from typing import NotRequired, Self, TypedDict, cast, override
 
-import json
 import logging
 
 from configgle import Fig
+from numpy.typing import NDArray
 from torch import Tensor
 
 import numpy as np
 import torch
 
+from priml.lib.custom_json import DictCodec, IntCodec, loads
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir
@@ -52,6 +53,15 @@ from priml.timer import CheckpointableStepTimer
 
 
 logger = logging.getLogger(__name__)
+
+
+class _Split(TypedDict):
+    inputs: Tensor
+    labels: Tensor
+    puzzle_indices: NDArray[np.int64]
+    group_indices: NDArray[np.int64]
+    puzzle_identifiers: NDArray[np.int64]
+    ignore_label_id: int
 
 
 class _ArcBatches:
@@ -74,17 +84,24 @@ class _ArcBatches:
         puzzles = data["puzzle_indices"]
         if num_tasks is not None and num_tasks < len(groups) - 1:
             groups = groups[: num_tasks + 1]
-            puzzles = puzzles[: int(groups[-1]) + 1]
-            rows = int(puzzles[-1])
+            puzzles = puzzles[
+                : int(groups[-1])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                + 1
+            ]
+            rows = int(
+                puzzles[-1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+            )
         else:
             rows = len(data["inputs"])
 
         self.device = get_device(device)
         self.inputs: Tensor = data["inputs"][:rows].to(self.device)
         self.labels: Tensor = data["labels"][:rows].to(self.device)
-        self.groups: np.ndarray = groups
-        self.puzzles: np.ndarray = puzzles
-        self.identifiers: np.ndarray = data["puzzle_identifiers"][: len(puzzles) - 1]
+        self.groups: NDArray[np.int64] = groups
+        self.puzzles: NDArray[np.int64] = puzzles
+        self.identifiers: NDArray[np.int64] = data["puzzle_identifiers"][
+            : len(puzzles) - 1
+        ]
         self.ignore_label_id = int(data["ignore_label_id"])
         self.batch_size = batch_size
         self.sample_by_task = sample_by_task
@@ -98,7 +115,7 @@ class _ArcBatches:
         """Tasks in this split."""
         return len(self.groups) - 1
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
+    def __iter__(self) -> Iterator[dict[str, object]]:
         """Yield batches: sampled by task for training, in order for eval."""
         if self.sample_by_task:
             yield from self._iter_sampled()
@@ -108,15 +125,27 @@ class _ArcBatches:
     def __len__(self) -> int:
         """Return the batches in the active or next pass."""
         if not self.sample_by_task:
-            return ceil_div(int(self.puzzles[-1]), self.batch_size)
+            return ceil_div(
+                int(
+                    self.puzzles[-1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                ),
+                self.batch_size,
+            )
         pass_index = self.passes if self._active_pass is None else self._active_pass
         return sum(1 for _ in self._plan_sampled(pass_index))
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Where an interrupted pass stopped; ``active_pass`` is None between passes."""
+
+        passes: int
+        active_pass: int | None
+        next_batch: int
+
+    def state_dict(self) -> StateDict:
         """Return enough state to resume an unfinished sampled pass.
 
         Returns:
-          result: The dict[str, Any].
+          state: The pass counter, the pass mid-iteration, and its next batch.
 
         """
         return {
@@ -125,22 +154,22 @@ class _ArcBatches:
             "next_batch": self._next_batch,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore an unfinished sampled pass.
 
         Args:
           state_dict: State dict.
 
         """
-        self.passes = int(state_dict.get("passes", self.passes))
-        active_pass = state_dict.get("active_pass")
-        self._active_pass = None if active_pass is None else int(active_pass)
-        self._next_batch = int(state_dict.get("next_batch", 0))
+        state = cast(_ArcBatches.StateDict, state_dict)
+        self.passes = state.get("passes", self.passes)
+        self._active_pass = state.get("active_pass")
+        self._next_batch = state.get("next_batch", 0)
 
     # Each batch walks a shuffled task order, taking one random puzzle per task and as
     # many of its augmented views as still fit. A short final batch is dropped: it would
     # be a partial task rather than a partial epoch.
-    def _iter_sampled(self) -> Iterator[dict[str, Any]]:
+    def _iter_sampled(self) -> Iterator[dict[str, object]]:
         """Draw whole tasks, so every task carries the same weight."""
         if self._active_pass is None:
             self._active_pass = self.passes
@@ -169,14 +198,28 @@ class _ArcBatches:
             puzzle_ids: list[np.ndarray] = []
             filled = 0
             while cursor < order.size and filled < self.batch_size:
-                task = int(order[cursor])
+                task = int(
+                    order[cursor]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                )
                 cursor += 1
-                lo, hi = int(self.groups[task]), int(self.groups[task + 1])
+                lo = int(
+                    self.groups[task]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                )
+                hi = int(
+                    self.groups[task + 1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                )
                 if hi <= lo:
                     continue
                 puzzle = int(rng.integers(lo, hi))
-                start = int(self.puzzles[puzzle])
-                size = int(self.puzzles[puzzle + 1]) - start
+                start = int(
+                    self.puzzles[puzzle]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                )
+                size = (
+                    int(
+                        self.puzzles[puzzle + 1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                    )
+                    - start
+                )
                 take = min(size, self.batch_size - filled)
                 rows.append(start + rng.choice(size, take, replace=False))
                 puzzle_ids.append(np.full(take, puzzle, dtype=np.int64))
@@ -184,13 +227,15 @@ class _ArcBatches:
             if filled < self.batch_size:
                 return
             yield (
-                np.concatenate(rows).astype(np.int64),
+                np.concatenate(rows),
                 np.concatenate(puzzle_ids),
             )
 
-    def _iter_ordered(self) -> Iterator[dict[str, Any]]:
+    def _iter_ordered(self) -> Iterator[dict[str, object]]:
         """Walk every row once, so pass@K sees every ballot."""
-        total = int(self.puzzles[-1])
+        total = int(
+            self.puzzles[-1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+        )
         for start in range(0, total, self.batch_size):
             end = min(total, start + self.batch_size)
             rows = np.arange(start, end, dtype=np.int64)
@@ -204,7 +249,7 @@ class _ArcBatches:
         puzzle_ids: np.ndarray,
         *,
         valid: int,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         """Gather one batch, padding it to full width."""
         index = torch.from_numpy(rows).to(self.device)
         media = self.inputs[index]
@@ -232,7 +277,7 @@ class _ArcBatches:
         }
 
 
-def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
+def _load_split(dataset_dir: Path, split: str) -> _Split:
     """Read one prepared split into tensors."""
     path = Path(dataset_dir).expanduser() / split
     metadata_path = path / "dataset.json"
@@ -242,13 +287,13 @@ def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
             "`uv --quiet run --frozen python -m "
             "priml.baselines.arcagi1.scripts.prepare_data`.",
         )
-    metadata = json.loads(metadata_path.read_text())
+    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
     logger.info("loading ARC split %r from %s", split, path)
     inputs = torch.from_numpy(np.load(path / "all__inputs.npy")).to(torch.int32)
     labels = torch.from_numpy(np.load(path / "all__labels.npy")).to(torch.int32)
-    puzzles = np.load(path / "all__puzzle_indices.npy").astype(np.int64)
-    groups = np.load(path / "all__group_indices.npy").astype(np.int64)
-    identifiers = np.load(path / "all__puzzle_identifiers.npy").astype(np.int64)
+    puzzles = cast(NDArray[np.int64], np.load(path / "all__puzzle_indices.npy"))
+    groups = cast(NDArray[np.int64], np.load(path / "all__group_indices.npy"))
+    identifiers = cast(NDArray[np.int64], np.load(path / "all__puzzle_identifiers.npy"))
     logger.info(
         "ARC %r: %d rows, %d puzzles, %d tasks",
         split,
@@ -262,7 +307,7 @@ def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
         "puzzle_indices": puzzles,
         "group_indices": groups,
         "puzzle_identifiers": identifiers,
-        "ignore_label_id": metadata.get("ignore_label_id", 0),
+        "ignore_label_id": IntCodec.coerce(metadata.get("ignore_label_id", 0)),
     }
 
 
@@ -346,7 +391,7 @@ class ArcData:
         # the sampling sequence instead of replaying the first pass.
         self._passes = 0
         self._live: _ArcBatches | None = None
-        self._pending_loader_state: dict[str, Any] | None = None
+        self._pending_loader_state: _ArcBatches.StateDict | None = None
 
     def train_dataloader(self) -> _ArcBatches:
         """Build the re-iterable training stream.
@@ -396,11 +441,22 @@ class ArcData:
             passes=0,
         )
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The pass counter, the live loader's cursor, and the pass timer.
+
+        ``loader`` is None when no pass has started and none was pending.
+        """
+
+        passes: int
+        loader: _ArcBatches.StateDict | None
+        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
+
+    def state_dict(self) -> StateDict:
         """Snapshot the sampled pass and its next batch.
 
         Returns:
-          result: Dict with passes, loader state, and epoch timer.
+          state: ``"passes"``, ``"loader"`` (nested loader state), and
+            ``"timer_epoch"``.
 
         """
         loader_state = (
@@ -414,23 +470,22 @@ class ArcData:
             "timer_epoch": self.timer_epoch.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore state produced by :meth:`state_dict`.
 
         Args:
           state_dict: Dict from state_dict() to restore from.
 
         """
-        if "passes" in state_dict:
-            self._passes = int(state_dict["passes"])
-        loader_state_raw = state_dict.get("loader")
-        if isinstance(loader_state_raw, dict):
-            loader_state = cast(dict[str, Any], loader_state_raw)
+        state = cast(ArcData.StateDict, state_dict)
+        self._passes = state["passes"]
+        loader_state = state.get("loader")
+        if loader_state is not None:
             self._pending_loader_state = loader_state
             if self._live is not None:
                 self._live.load_state_dict(loader_state)
                 self._pending_loader_state = None
         elif self._live is not None:
             self._live.passes = self._passes
-        if "timer_epoch" in state_dict:
-            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
+        if "timer_epoch" in state:
+            self.timer_epoch.load_state_dict(state["timer_epoch"])

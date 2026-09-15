@@ -33,7 +33,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final, Protocol, Self, cast, runtime_checkable
 
 import argparse
 import csv
@@ -51,7 +51,12 @@ from priml.baselines.sudoku.data import SudokuData
 from priml.train.train_loop import TrainLoop
 
 
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+
 logger = logging.getLogger(__name__)
+
 
 SOURCE_URL: Final = "https://huggingface.co/datasets/sapientinc/sudoku-extreme/resolve"
 """Base URL of the source CSVs.
@@ -65,6 +70,7 @@ SOURCE_REVISION: Final = "58942f96baeb572ca3127e2a9e9c70f330783d6b"
 
 A dataset that moves under you silently changes every result measured against
 it, so the revision is pinned and the downloaded bytes are digest-checked."""
+
 
 SOURCE_SHA256: Final = {
     "train.csv": "64b46674db0148e0d73a16346dadeb2b1c00824d3fca3f85b2ae7037f6b4b38e",
@@ -91,13 +97,13 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
-    args = parser.parse_args()
+    flags = cast(_Flags, parser.parse_args())
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     prepare(
-        args.directory,
-        num_puzzles=args.num_puzzles,
-        copies_per_puzzle=args.copies_per_puzzle,
-        seed=args.seed,
+        flags.directory,
+        num_puzzles=flags.num_puzzles,
+        copies_per_puzzle=flags.copies_per_puzzle,
+        seed=flags.seed,
     )
     return 0
 
@@ -181,14 +187,15 @@ def _build_split(
     if num_puzzles is not None and num_puzzles < len(puzzles):
         # ``choice`` returns an untyped array; naming the index list keeps the
         # comprehensions' element type from widening to Unknown.
-        keep: list[int] = [
-            int(i) for i in rng.choice(len(puzzles), size=num_puzzles, replace=False)
-        ]
+        selected: NDArray[np.int64] = rng.choice(
+            len(puzzles), size=num_puzzles, replace=False
+        )
+        keep = cast(list[int], selected.tolist())
         puzzles = [puzzles[i] for i in keep]
         solutions = [solutions[i] for i in keep]
 
-    all_inputs: list[np.ndarray] = []
-    all_labels: list[np.ndarray] = []
+    all_inputs: list[NDArray[np.int64]] = []
+    all_labels: list[NDArray[np.int64]] = []
     bounds = [0]
     written = 0
     for puzzle, solution in zip(puzzles, solutions, strict=True):
@@ -226,18 +233,21 @@ def _download(filename: str, *, into: Path) -> Path:
     path = Path(staged)
     logger.info("downloading %s", url)
     # Stream rather than read whole: the training CSV is hundreds of MB.
-    with (
-        urllib.request.urlopen(url) as response,  # noqa: S310 -- Fixed https URL from pinned constants.
-        path.open("wb") as out,
-    ):
+    response = cast(
+        _Readable,
+        urllib.request.urlopen(url),  # noqa: S310 -- The URL is a fixed HTTPS dataset endpoint.
+    )
+    with response, path.open("wb") as out:
         shutil.copyfileobj(response, out)
     return path
 
 
-def _read_csv(csv_path: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def _read_csv(
+    csv_path: Path,
+) -> tuple[list[NDArray[np.int64]], list[NDArray[np.int64]]]:
     """Parse the source CSV into digit grids, empty cells as zero."""
-    puzzles: list[np.ndarray] = []
-    solutions: list[np.ndarray] = []
+    puzzles: list[NDArray[np.int64]] = []
+    solutions: list[NDArray[np.int64]] = []
     with csv_path.open(newline="") as handle:
         reader = csv.reader(handle)
         next(reader)  # Header.
@@ -247,14 +257,17 @@ def _read_csv(csv_path: Path) -> tuple[list[np.ndarray], list[np.ndarray]]:
     return puzzles, solutions
 
 
-def _grid(text: str) -> np.ndarray:
+def _grid(text: str) -> NDArray[np.int64]:
     """Return an 81-character row as a ``[9, 9]`` digit array."""
-    return np.frombuffer(text.encode(), dtype=np.uint8).reshape(GRID, GRID) - ord("0")
+    return np.asarray(
+        np.frombuffer(text.encode(), dtype=np.uint8).reshape(GRID, GRID) - ord("0"),
+        dtype=np.int64,
+    )
 
 
 # Digits arrive as 0-9 with 0 meaning empty; the model's vocabulary reserves 0 for
 # padding, so everything shifts up by one: 0 pad, 1 empty, 2-10 digits.
-def _tokenize(grids: list[np.ndarray]) -> np.ndarray:
+def _tokenize(grids: list[NDArray[np.int64]]) -> NDArray[np.int64]:
     """Stack digit grids and shift into the token vocabulary."""
     stacked = np.concatenate(grids).reshape(len(grids), -1)
     assert np.all((stacked >= 0) & (stacked <= 9))
@@ -268,19 +281,26 @@ def _tokenize(grids: list[np.ndarray]) -> np.ndarray:
 #
 # The draw order is pinned -- digits, transpose, bands, rows, stacks, columns -- because
 # the whole build's byte-identity depends on it.
+def _permutation(rng: np.random.Generator, size: int) -> list[int]:
+    values: NDArray[np.int64] = rng.permutation(size)
+    return cast(list[int], values.tolist())
+
+
 def _transform(
-    puzzle: np.ndarray,
+    puzzle: NDArray[np.int64],
     *,
-    solution: np.ndarray,
+    solution: NDArray[np.int64],
     rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
     """Return a different valid puzzle with the correspondingly moved solution."""
-    digits = np.pad(rng.permutation(np.arange(1, GRID + 1)), (1, 0))
+    digits = np.pad(np.arange(1, GRID + 1)[_permutation(rng, GRID)], (1, 0))
     transpose = rng.random() < 0.5
-    bands = rng.permutation(BOX)
-    rows = np.concatenate([b * BOX + rng.permutation(BOX) for b in bands])
-    stacks = rng.permutation(BOX)
-    columns = np.concatenate([s * BOX + rng.permutation(BOX) for s in stacks])
+    bands = _permutation(rng, BOX)
+    rows = np.concatenate([b * BOX + np.array(_permutation(rng, BOX)) for b in bands])
+    stacks = _permutation(rng, BOX)
+    columns = np.concatenate(
+        [s * BOX + np.array(_permutation(rng, BOX)) for s in stacks]
+    )
     mapping = np.array(
         [rows[i // GRID] * GRID + columns[i % GRID] for i in range(GRID * GRID)],
     )
@@ -292,12 +312,12 @@ def _transform(
 
 
 def _permuted(
-    grid: np.ndarray,
+    grid: NDArray[np.int64],
     *,
-    mapping: np.ndarray,
-    digits: np.ndarray,
+    mapping: NDArray[np.int64],
+    digits: NDArray[np.int64],
     transpose: bool,
-) -> np.ndarray:
+) -> NDArray[np.int64]:
     """Apply one cell permutation and digit relabeling to ``grid``."""
     if transpose:
         grid = grid.T
@@ -345,6 +365,26 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         default=42,
         help="seeds the whole build",
     )
+
+
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    directory: str | None
+    num_puzzles: int
+    copies_per_puzzle: int
+    seed: int
+
+
+@runtime_checkable
+class _Readable(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
+    def close(self) -> None: ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(self, *args: object) -> None: ...
 
 
 if __name__ == "__main__":

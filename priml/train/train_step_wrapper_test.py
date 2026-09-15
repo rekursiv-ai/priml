@@ -8,7 +8,14 @@ timers, EMA-aware evaluation, and what a checkpoint carries.
 
 from __future__ import annotations
 
-from typing import Any, override
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, TypedDict, Unpack, cast, override
+
+
+if TYPE_CHECKING:
+    from configgle import Makeable
+
+    from priml.train.custom_types import EMAProtocol
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
@@ -16,7 +23,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.math.schedules import linear, warmup
+from priml.math.schedules import Schedule, constant, linear, warmup
 from priml.timer import CheckpointableStepTimer
 from priml.train.ema import EMA, NoEMA
 from priml.train.parallelism import NoParallel
@@ -34,18 +41,18 @@ class _Tiny(nn.Module):
         self.fc = nn.Linear(dim, dim, bias=False)
 
     @override
-    def forward(self, x: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, x: Tensor, **_kwargs: object) -> Tensor:
         """Apply the linear layer."""
         return self.fc(x)
 
 
-def _make(ema_config: Any) -> TrainStep:  # noqa: ANN401 -- forwarded to an upstream Any.
+def _make(ema_config: EMA.Config | NoEMA.Config) -> TrainStep:
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
         optimizer=PartialConfig(torch.optim.SGD, lr=0.0),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
-        ema=ema_config,
+        ema=cast("Makeable[EMAProtocol]", ema_config),
     ).make()
 
 
@@ -71,9 +78,10 @@ def test_call_eval_param_dict_uses_shadow_not_live_weights() -> None:
     learnable.ema(learnable.model)  # Shadow = 0.5*orig + 0.5*(orig+5)
 
     # Reference: forward with the shadow swapped in.
-    with torch.inference_mode(), learnable.ema.apply_to(learnable.model):
-        shadow_out = learnable.model(x).clone()
-    live_out = learnable.model(x).clone()
+    model = _tiny_model(learnable)
+    with torch.inference_mode(), learnable.ema.apply_to(model):
+        shadow_out = model(x).clone()
+    live_out = model(x).clone()
 
     eval_out = learnable.call_eval(x)
 
@@ -95,8 +103,9 @@ def test_call_eval_module_shadow_uses_shadow() -> None:
             p.add_(5.0)
     learnable.ema(learnable.model)
 
-    with torch.inference_mode(), learnable.ema.apply_to(learnable.model):
-        shadow_out = learnable.model(x).clone()
+    model = _tiny_model(learnable)
+    with torch.inference_mode(), learnable.ema.apply_to(model):
+        shadow_out = model(x).clone()
     torch.testing.assert_close(learnable.call_eval(x), shadow_out)
 
 
@@ -106,19 +115,19 @@ def test_call_eval_no_ema_uses_live() -> None:
     learnable = _make(NoEMA.Config())
 
     x = torch.randn(2, 4)
+    model = _tiny_model(learnable)
     with torch.inference_mode():
-        live_out = learnable.model(x).clone()
+        live_out = model(x).clone()
     torch.testing.assert_close(learnable.call_eval(x), live_out)
 
 
-def _learnable_with(**config_kwargs: Any) -> TrainStep:  # noqa: ANN401 -- forwarded to an upstream Any.
+def _learnable_with() -> TrainStep:
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
         optimizer=PartialConfig(torch.optim.SGD, lr=0.0),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
         ema=NoEMA.Config(),
-        **config_kwargs,
     ).make()
 
 
@@ -130,7 +139,9 @@ def test_load_strict_false_tolerates_missing_keys() -> None:
     """
     full = _learnable_with()
     state = full.state_dict()
-    del state["model"]["fc.weight"]  # Simulate a checkpoint lacking this param.
+    model_state = state["model"]
+    assert isinstance(model_state, dict)
+    del model_state["fc.weight"]  # Simulate a checkpoint lacking this param.
 
     strict = _learnable_with()
     with pytest.raises(RuntimeError, match="Missing key"):
@@ -148,14 +159,17 @@ def test_parameter_remap_transforms_before_load() -> None:
             p.fill_(3.0)
     state = source.state_dict()
     # Rename fc.weight -> renamed.weight in the checkpoint; remap puts it back.
-    state["model"] = {"renamed.weight": state["model"]["fc.weight"]}
+    model_state = state["model"]
+    assert isinstance(model_state, dict)
+    state["model"] = {"renamed.weight": model_state["fc.weight"]}
 
-    def _remap(sd: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
+    def _remap(sd: Mapping[str, Tensor]) -> Mapping[str, Tensor]:
         return {"fc.weight": sd["renamed.weight"]}
 
     target = _learnable_with()
     target.load_state_dict(state, remap=_remap)
-    assert float(target.model.fc.weight.detach()[0, 0]) == 3.0
+    target_model = _tiny_model(target)
+    assert float(target_model.fc.weight.detach()[0, 0]) == 3.0
 
 
 def _adam_learnable() -> TrainStep:
@@ -176,10 +190,12 @@ def test_load_optimizer_false_skips_optimizer_restore() -> None:
     ``strict=False`` finetuning succeed without a mismatched optimizer.
     """
     source = _adam_learnable()
-    source.model(torch.randn(2, 4)).sum().backward()
+    _tiny_model(source)(torch.randn(2, 4)).sum().backward()
     source.optimizer.step()  # Populates Adam state.
     state = source.state_dict()
-    del state["model"]["fc.weight"]  # Architecture changed.
+    model_state = state["model"]
+    assert isinstance(model_state, dict)
+    del model_state["fc.weight"]  # Architecture changed.
 
     finetune = _adam_learnable()
     finetune.load_state_dict(state, strict=False, load_optimizer=False)
@@ -189,7 +205,7 @@ def test_load_optimizer_false_skips_optimizer_restore() -> None:
 def test_load_optimizer_true_restores_optimizer_by_default() -> None:
     """The default policy restores optimizer state (ordinary resume)."""
     source = _adam_learnable()
-    source.model(torch.randn(2, 4)).sum().backward()
+    _tiny_model(source)(torch.randn(2, 4)).sum().backward()
     source.optimizer.step()
     state = source.state_dict()
 
@@ -198,7 +214,14 @@ def test_load_optimizer_true_restores_optimizer_by_default() -> None:
     assert target.optimizer.state_dict()["state"], "optimizer state not restored"
 
 
-def _scheduled(**config_kwargs: Any) -> TrainStep:  # noqa: ANN401 -- forwarded to an upstream Any.
+class _ScheduledKwargs(TypedDict, total=False):
+    train_budget_steps: float
+    train_budget_sec: float
+    train_budget_epochs: float
+    learning_rate_scheduler: object
+
+
+def _scheduled(**config_kwargs: Unpack[_ScheduledKwargs]) -> TrainStep:
     """Return a learnable with a nonzero rate, so a schedule has something to scale."""
     return TrainStep.Config(
         model=_Tiny.Config(dim=4),
@@ -206,7 +229,13 @@ def _scheduled(**config_kwargs: Any) -> TrainStep:  # noqa: ANN401 -- forwarded 
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
         ema=NoEMA.Config(),
-        **config_kwargs,
+        train_budget_steps=config_kwargs.get("train_budget_steps", float("inf")),
+        train_budget_sec=config_kwargs.get("train_budget_sec", float("inf")),
+        train_budget_epochs=config_kwargs.get("train_budget_epochs", float("inf")),
+        learning_rate_scheduler=cast(
+            "Makeable[Schedule[float]]",
+            config_kwargs.get("learning_rate_scheduler", PartialConfig(constant)),
+        ),
     ).make()
 
 
@@ -303,7 +332,7 @@ def test_a_budget_that_cannot_be_divided_by_is_rejected(
     NaN -- the run trains at an undefined rate rather than failing.
     """
     with pytest.raises(ValueError, match=field):
-        _scheduled(**{field: value})
+        _scheduled(**cast(_ScheduledKwargs, {field: value}))
 
 
 def test_the_schedule_scales_the_rate_the_recipe_was_tuned_at() -> None:
@@ -333,10 +362,11 @@ def test_the_rate_is_scheduled_before_the_update_it_applies_to() -> None:
         train_budget_steps=10,
         learning_rate_scheduler=PartialConfig(warmup, fraction=0.5),
     )
-    before = learnable.model.fc.weight.detach().clone()
-    learnable.model(torch.randn(2, 4)).sum().backward()
+    model = _tiny_model(learnable)
+    before = model.fc.weight.detach().clone()
+    model(torch.randn(2, 4)).sum().backward()
     learnable.step()
-    torch.testing.assert_close(learnable.model.fc.weight.detach(), before)
+    torch.testing.assert_close(model.fc.weight.detach(), before)
 
 
 def test_each_activity_is_counted_separately() -> None:
@@ -346,7 +376,7 @@ def test_each_activity_is_counted_separately() -> None:
     training, which is the number the budget bounds.
     """
     learnable = _scheduled(train_budget_steps=10)
-    learnable.model(torch.randn(2, 4)).sum().backward()
+    _tiny_model(learnable)(torch.randn(2, 4)).sum().backward()
     learnable(torch.randn(2, 4))
     learnable.call_eval(torch.randn(2, 4))
     learnable.call_eval(torch.randn(2, 4))
@@ -370,7 +400,7 @@ def test_the_budget_clock_charges_updates_only() -> None:
     assert learnable.timer_step.global_sec == 0.0
     assert learnable.progress_learning_schedule == 0.0
 
-    learnable.model(torch.randn(2, 4)).sum().backward()
+    _tiny_model(learnable)(torch.randn(2, 4)).sum().backward()
     learnable.step()
     assert learnable.timer_step.global_sec > 0.0
     assert learnable.progress_learning_schedule > 0.0
@@ -391,7 +421,7 @@ def test_a_resume_keeps_the_global_count_and_restarts_the_local_one() -> None:
     schedule and a stop condition read the global one.
     """
     source = _scheduled()
-    source.model(torch.randn(2, 4)).sum().backward()
+    _tiny_model(source)(torch.randn(2, 4)).sum().backward()
     source.step()
     source.step()
 
@@ -432,6 +462,13 @@ def test_the_clock_survives_a_resume() -> None:
     target.load_state_dict(source.state_dict())
     assert target.timer_step.global_sec == pytest.approx(40.0)
     assert target.progress_learning_schedule == pytest.approx(0.4)
+
+
+def _tiny_model(learnable: TrainStep) -> _Tiny:
+    """Narrow the generic train step's model to the test fixture type."""
+    model = learnable.model
+    assert isinstance(model, _Tiny)
+    return model
 
 
 if __name__ == "__main__":

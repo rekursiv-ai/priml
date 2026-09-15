@@ -39,13 +39,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import cache, partial
-from typing import TYPE_CHECKING, Any, overload, override
+from typing import TYPE_CHECKING, cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
 
 import torch
+
+from priml.lib.custom_json import FloatCodec
 
 
 if TYPE_CHECKING:
@@ -262,7 +264,7 @@ class NorMuon(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor] | Iterable[dict[str, Any]],
+        params: Iterable[Tensor] | Iterable[dict[str, object]],
         lr: float = 0.04,
         *,
         momentum: float = 0.95,
@@ -334,16 +336,16 @@ class NorMuon(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            for shape_params in _by_shape(group["params"]):
+            for shape_params in _by_shape(cast(list[Tensor], group["params"])):
                 self._step_shape(shape_params, group)
         return loss
 
-    def _step_shape(self, params: list[Tensor], group: dict[str, Any]) -> None:
+    def _step_shape(self, params: list[Tensor], group: dict[str, object]) -> None:
         """Update one batch of identically-shaped parameters together."""
         shape = params[0].shape
         if len(shape) < 2:
             raise ValueError(f"NorMuon requires ndim >= 2; got shape {tuple(shape)}.")
-        state = self.state[params[0]]
+        state = cast(dict[str, object], self.state[params[0]])
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros(
                 len(params),
@@ -362,14 +364,18 @@ class NorMuon(Optimizer):
             )
         stacked_grads = torch.stack([_gradient(p) for p in params])
         stacked_params = torch.stack(list(params))
+        momentum = FloatCodec.coerce(group["momentum"], None)
+        lr = FloatCodec.coerce(group["lr"], None)
+        weight_decay = FloatCodec.coerce(group["weight_decay"], None)
+        beta2 = FloatCodec.coerce(group["beta2"], None)
         for name, value in (
-            ("momentum", group["momentum"]),
+            ("momentum", momentum),
             # A tall matrix's orthogonal update has more rows than it has
             # independent directions, so its step is scaled to match a square
             # one's per-element magnitude.
-            ("lr", group["lr"] * max(1.0, shape[-2] / shape[-1]) ** 0.5),
-            ("weight_decay", group["weight_decay"]),
-            ("beta2", group["beta2"]),
+            ("lr", lr * max(1.0, shape[-2] / shape[-1]) ** 0.5),
+            ("weight_decay", weight_decay),
+            ("beta2", beta2),
         ):
             self._scalars[name].fill_(value)
         self._update(

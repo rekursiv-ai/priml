@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from priml import hub
+from priml.lib.custom_json import DictCodec, ListCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.transformer.block import TransformerBlock
@@ -22,12 +23,21 @@ from priml.testing.bfb import host_agnostic_numerics
 def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the real-checkpoint memory test")
-    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers")
+    from transformers.models.auto.configuration_auto import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
+        AutoConfig,
+    )
+
     repo = "Qwen/Qwen3-0.6B"
-    hf_config = transformers.AutoConfig.from_pretrained(repo, cache_dir=tmp_path / "hf")
+    hf_config = AutoConfig.from_pretrained(repo, cache_dir=tmp_path / "hf")
     hf_config.num_hidden_layers = 1
-    hf_config.layer_types = hf_config.layer_types[:1]
-    config = Qwen3.Config.from_hf(hf_config.to_dict())
+    # ``PretrainedConfig`` resolves model fields through ``__getattribute__``,
+    # so the checker sees no ``layer_types``; read it through ``to_dict``.
+    layer_types = ListCodec.coerce(
+        DictCodec.coerce(hf_config.to_dict())["layer_types"], str
+    )
+    hf_config.layer_types = layer_types[:1]
+    config = Qwen3.Config.from_hf(DictCodec.coerce(hf_config.to_dict()))
     assert isinstance(config.block, TransformerBlock.Config)
     assert isinstance(config.block.attn, SelfAttention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()

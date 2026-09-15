@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast, override
+from typing import Final, override
 
 from torch import Tensor, nn
 
 import pytest
 import torch
 
+from priml.lib.custom_json import ListCodec
 from priml.model.attention.kvcache import KVCache
 from priml.model.generate import _sample, _topp_filter, generate
 from priml.testing.bfb import assert_bfb_against_golden
@@ -22,7 +23,7 @@ _CWD: Final = Path(__file__).resolve().parent
 def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
     prompt = torch.tensor([[0, 1]])
     generated = _canonical_generate(_Transformer(), prompt)
-    tokens = cast(list[list[int]], generated.tolist())
+    tokens = [ListCodec.coerce(row, int) for row in generated.tolist()]
     assert_text_golden(
         request,
         test_file=__file__,

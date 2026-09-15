@@ -137,7 +137,10 @@ def test_beyond_the_map_edge_is_flat_grey(renderer: Renderer) -> None:
     state = _state()
     state.player_position[:] = torch.tensor([0, 0], dtype=torch.int32)
     frame = renderer.render(state)
-    assert tuple(frame[0, 0]) == sprites.OUT_OF_BOUNDS_COLOR
+    pixel = tuple(
+        frame[0, 0],  # pyright: ignore[reportAny] -- numpy indexing is dtype-erased.
+    )
+    assert pixel == sprites.OUT_OF_BOUNDS_COLOR
 
 
 def test_an_unlit_tile_is_black(renderer: Renderer) -> None:
@@ -146,7 +149,10 @@ def test_an_unlit_tile_is_black(renderer: Renderer) -> None:
     state = _state()
     state.light_map[:] = 0.0
     frame = renderer.render(state)
-    assert int(_center(frame).max()) == 0
+    maximum = int(
+        _center(frame).max(),  # pyright: ignore[reportAny] -- numpy reduction is dtype-erased.
+    )
+    assert maximum == 0
 
 
 def test_night_tints_the_surface_but_not_the_caves(renderer: Renderer) -> None:

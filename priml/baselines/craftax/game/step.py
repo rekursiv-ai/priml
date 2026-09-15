@@ -215,10 +215,12 @@ def _unlock_from_inventory(state: EnvState) -> EnvState:
         ("sword", 4, Achievement.MAKE_DIAMOND_SWORD),
     )
     for field, amount, achievement in thresholds:
+        value: object = getattr(state.inventory, field)  # pyright: ignore[reportAny] -- Inventory fields are dynamically selected.
+        assert isinstance(value, Tensor)
         state.achievements = mechanics.unlock_achievement(
             state,
             torch.full((state.num_envs,), int(achievement), device=state.device),
-            getattr(state.inventory, field) >= amount,
+            value >= amount,
         )
     return state
 

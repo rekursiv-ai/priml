@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from priml.baselines.nanochat.model import NanoChatLM
+from priml.lib.custom_json import DictCodec
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.self_attention import SelfAttention
@@ -74,12 +75,16 @@ def test_reference_initialization(kind: str, std: float) -> None:
         )
     torch.manual_seed(13)
     model = config.make()
-    initial = {name: value.clone() for name, value in model.state_dict().items()}
+    initial_state = DictCodec.coerce(model.state_dict(), Tensor)
+    initial: dict[str, Tensor] = {
+        name: value.clone() for name, value in initial_state.items()
+    }
     initial_rng = torch.get_rng_state()
     torch.manual_seed(13)
     model.reset_parameters()
     assert torch.equal(torch.get_rng_state(), initial_rng)
-    for name, value in model.state_dict().items():
+    state = DictCodec.coerce(model.state_dict(), Tensor)
+    for name, value in state.items():
         assert torch.equal(value, initial[name]), name
     for name, module in model.named_modules():
         if isinstance(module, RMSNorm):
@@ -266,7 +271,10 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         cfg_nano.block.attn.channels_head = 4
         cfg_nano.block.attn.gate_channels = 4
         model = cfg_nano.make()
-    values = [value.detach().flatten().float() for value in model.state_dict().values()]
+    state = DictCodec.coerce(model.state_dict(), Tensor)
+    values: list[Tensor] = [
+        value.detach().flatten().float() for value in state.values()
+    ]
     values.append(torch.get_rng_state().float())
     x = torch.randn(1, 3, 8)
     if isinstance(model, MMDiTBlock):

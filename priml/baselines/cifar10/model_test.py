@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import pytest
 import torch
 
-from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
+from priml.baselines.cifar10.model import (
+    ConvBlock,
+    ResidualBlock,
+    ResNet,
+    SpeedNet,
+)
 from priml.model.init import dirac
 from priml.testing.bfb import assert_bfb_against_golden
 
@@ -44,7 +49,7 @@ def test_resnet_downsamples_once_per_stage_after_the_first() -> None:
     model = config.make()
     x = model.stem(torch.randn(1, 3, 32, 32))
     for stage in model.stages:
-        x = stage(x)
+        x = cast(torch.Tensor, stage(x))
     # Three stages, the first at full resolution: 32 -> 32 -> 16 -> 8.
     assert x.shape[-1] == 8
 
@@ -53,6 +58,7 @@ def test_resnet_residual_path_is_identity_when_shape_is_preserved() -> None:
     config = tiny_resnet()
     config.channels_hidden = (8,)
     block = config.make().stages[0]
+    assert isinstance(block, ResidualBlock)
     assert isinstance(block.shortcut, torch.nn.Identity)
 
 
@@ -104,7 +110,10 @@ def test_speednet_width_follows_channels_hidden() -> None:
     """The template is copied per stage, so each block gets its own width."""
     config = tiny_speednet()
     model = config.make()
-    widths = [block.convs[0].weight.shape[0] for block in model.blocks]
+    widths: list[int] = []
+    for block in model.blocks:
+        assert isinstance(block, ConvBlock)
+        widths.append(block.convs[0].weight.shape[0])
     assert widths == list(config.channels_hidden)
 
 
@@ -140,6 +149,7 @@ def test_speednet_dirac_init_passes_input_through_each_block() -> None:
     config.init_conv = dirac
     model = config.make()
     block = model.blocks[1]
+    assert isinstance(block, ConvBlock)
     # An identity kernel reproduces its input channel-for-channel, so a
     # freshly-initialized block is a no-op up to pooling and normalization.
     weight = block.convs[0].weight.data

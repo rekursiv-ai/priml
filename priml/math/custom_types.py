@@ -9,7 +9,6 @@ Protocols) don't pay the ~1.2s torch + jaxtyping import on startup.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
 
 import functools
 
@@ -38,7 +37,12 @@ Numeric = bool | int | float | complex | np.number | np.bool_
 
 # "Tensorable" follows Python's -able convention (Callable, Hashable, Iterable)
 # and avoids collision with torch._prims_common.TensorLike.
-Tensorable = Sequence["Tensorable"] | np.ndarray[Any, Any] | Tensor | Numeric
+Tensorable = (
+    Sequence["Tensorable"]
+    | np.ndarray[tuple[int, ...], np.dtype[np.generic]]
+    | Tensor
+    | Numeric
+)
 TensorableNest = (
     Sequence["TensorableNest"] | Mapping[str, "TensorableNest"] | Tensorable
 )

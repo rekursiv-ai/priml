@@ -30,6 +30,7 @@ from priml.math.numeric import (
     safe_rsqrt,
     safe_sqrt,
     safe_xlogy,
+    shifted_geometric_mean,
     sinh_arcsinh,
     sinh_arcsinh_inverse,
     smootherstep,
@@ -147,7 +148,6 @@ def test_log1mexp_with_numpy():
     """Test log1mexp with numpy input."""
     x = np.array([-0.5, -1.5])
     result = log1mexp(x)
-    assert isinstance(result, Tensor)
     assert result.shape == (2,)
 
 
@@ -156,7 +156,6 @@ def test_logsubexp_without_return_sign():
     x = torch.tensor([2.0, 3.0, 1.0])
     y = torch.tensor([1.0, 2.0, 0.5])
     result = logsubexp(x, y)
-    assert isinstance(result, Tensor)
     # Verify: log(exp(x) - exp(y))
     expected = torch.log(torch.exp(x) - torch.exp(y))
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
@@ -167,7 +166,6 @@ def test_logsubexp_with_return_sign():
     x = torch.tensor([2.0, 1.0])
     y = torch.tensor([1.0, 2.0])
     result_pair = logsubexp(x, y, return_sign=True)
-    assert isinstance(result_pair, tuple)
     _, sign = result_pair
     # When x > y, sign should be +1; when x < y, sign should be -1.
     expected_sign = torch.tensor([1, -1])
@@ -180,7 +178,6 @@ def test_logsubexp_equal_values():
     y = torch.tensor([1.0, 2.0])
     result = logsubexp(x, y)
     # log(exp(x) - exp(x)) = log(0) = -inf.
-    assert isinstance(result, Tensor)
     assert torch.all(torch.isinf(result))
 
 
@@ -189,7 +186,7 @@ def test_logsubexp_numpy_inputs():
     x = np.array([2.0, 3.0])
     y = np.array([1.0, 2.0])
     result = logsubexp(x, y)
-    assert isinstance(result, Tensor)
+    assert result.shape == (2,)
 
 
 def test_softcap_basic():
@@ -197,7 +194,6 @@ def test_softcap_basic():
     x = torch.tensor([0.5, 1.0, 2.0, 5.0])
     cap = 1.0
     result = softcap(x, cap)
-    assert isinstance(result, Tensor)
     # Result should be bounded by cap.
     assert torch.all(result <= cap)
     assert torch.all(result >= -cap)
@@ -209,7 +205,6 @@ def test_softcap_with_different_caps():
     for cap in [0.5, 1.0, 2.0, 5.0]:
         result = softcap(x, cap)
         # Check that values are bounded by cap.
-        assert isinstance(result, Tensor)
         assert torch.all(torch.abs(result) <= cap * 1.001)  # Small tolerance.
 
 
@@ -217,7 +212,6 @@ def test_softcap_preserves_dtype():
     """Test that softcap preserves input dtype."""
     x = torch.tensor([1.0, 2.0], dtype=torch.float16)
     result = softcap(x, 1.0)
-    assert isinstance(result, Tensor)
     assert result.dtype == torch.float16
 
 
@@ -225,7 +219,7 @@ def test_softcap_with_numpy():
     """Test softcap with numpy input."""
     x = np.array([1.0, 2.0, 3.0])
     result = softcap(x, 1.5)
-    assert isinstance(result, Tensor)
+    assert result.shape == (3,)
 
 
 def test_softcap_zero():
@@ -335,7 +329,9 @@ def test_safe_sqrt():
 
 
 def test_safe_xlogy():
-    expected = torch.tensor([0.0, float(np.log(2.0))])
+    expected = torch.tensor(
+        [0.0, float(np.log(2.0))],  # pyright: ignore[reportAny] -- NumPy's scalar return is untyped.
+    )
     actual = safe_xlogy([0.0, 1.0], [0.0, 2.0])
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
@@ -992,6 +988,91 @@ def test_log_modulus_gradient_is_finite_in_the_tails() -> None:
 def test_log_modulus_preserves_dtype() -> None:
     for dtype in (torch.bfloat16, torch.float32, torch.float64):
         assert log_modulus(torch.zeros(3, dtype=dtype)).dtype == dtype
+
+
+def test_shifted_geometric_mean_unit_shift_closed_form() -> None:
+    """``exp(mean(log(1 + x))) - 1`` in closed form, from a plain list."""
+    torch.testing.assert_close(
+        shifted_geometric_mean([0.0, 1.0]),
+        torch.tensor(2.0**0.5 - 1.0),
+    )
+
+
+def test_shifted_geometric_mean_general_shift_closed_form() -> None:
+    """``exp(mean(log(x + d))) - d`` for ``d != 1``: geomean(x + d) - d."""
+    x = torch.tensor([0.0, 6.0], dtype=torch.float64)
+    torch.testing.assert_close(
+        shifted_geometric_mean(x, shift=2.0),
+        torch.tensor((2.0 * 8.0) ** 0.5 - 2.0, dtype=torch.float64),
+    )
+
+
+def test_shifted_geometric_mean_zero_shift_is_the_geometric_mean() -> None:
+    x = torch.tensor([1.0, 4.0], dtype=torch.float64)
+    torch.testing.assert_close(
+        shifted_geometric_mean(x, shift=0.0),
+        torch.tensor(2.0, dtype=torch.float64),
+    )
+    # And a zero annihilates it, which is what a positive shift prevents.
+    assert float(shifted_geometric_mean([0.0, 4.0], shift=0.0)) == 0.0
+    assert float(shifted_geometric_mean([0.0, 4.0], shift=1.0)) > 0.0
+
+
+def test_shifted_geometric_mean_of_a_constant_is_that_constant() -> None:
+    for shift in (1.0, 0.5, 3.0):
+        torch.testing.assert_close(
+            shifted_geometric_mean(torch.full((5,), 12.0), shift=shift),
+            torch.tensor(12.0),
+        )
+
+
+def test_shifted_geometric_mean_reduces_the_named_dim() -> None:
+    x = torch.tensor([[0.0, 0.0], [3.0, 3.0]], dtype=torch.float64)
+    torch.testing.assert_close(
+        shifted_geometric_mean(x, dim=-1),
+        torch.tensor([0.0, 3.0], dtype=torch.float64),
+    )
+    assert shifted_geometric_mean(x, dim=0, keepdim=True).shape == (1, 2)
+
+
+def test_shifted_geometric_mean_unit_shift_is_exact_near_zero() -> None:
+    """The unit shift routes through ``log1p``/``expm1``; ``log(1 + x)`` would cancel."""
+    x = torch.full((4,), 1e-12, dtype=torch.float64)
+    torch.testing.assert_close(
+        shifted_geometric_mean(x),
+        torch.tensor(1e-12, dtype=torch.float64),
+    )
+    # The generic path cannot be exact here; the unit path must not match it.
+    naive = torch.exp(torch.log(x + 1.0).mean()) - 1.0
+    assert float((shifted_geometric_mean(x) - naive).abs()) > 0.0
+
+
+@pytest.fixture(scope="module")
+def warm_dynamo() -> None:
+    """Load Dynamo once per module, billed as setup (~1.1s import + first trace)."""
+    torch._dynamo.reset()
+    _ = torch.compile(torch.log1p, fullgraph=True, backend="eager")(torch.zeros(1))
+    torch._dynamo.reset()
+
+
+@pytest.mark.usefixtures("warm_dynamo")
+def test_shifted_geometric_mean_compiles_fullgraph_for_both_shifts() -> None:
+    """The ``shift == 1`` branch is Python control flow on a float, not a tensor.
+
+    Dynamo specializes on the constant, so each shift traces to one graph; a
+    data-dependent branch would raise ``Unsupported`` under ``fullgraph``.
+    ``backend="eager"`` runs the traced graph with torch ops: the subject is
+    tracing, not Inductor's kernel.
+    """
+    x = torch.tensor([0.0, 6.0], dtype=torch.float64)
+    torch._dynamo.reset()
+    compiled = torch.compile(shifted_geometric_mean, fullgraph=True, backend="eager")
+    torch.testing.assert_close(compiled(x), shifted_geometric_mean(x))
+    torch.testing.assert_close(
+        compiled(x, shift=2.0),
+        shifted_geometric_mean(x, shift=2.0),
+    )
+    torch._dynamo.reset()
 
 
 def test_logmeanexp_survives_an_empty_reduction() -> None:

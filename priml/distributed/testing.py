@@ -10,7 +10,7 @@ from dataclasses import field
 from datetime import timedelta
 from multiprocessing.process import BaseProcess
 from types import TracebackType
-from typing import Any, Protocol, Self, cast
+from typing import Protocol, Self, cast
 
 import math
 import os
@@ -96,9 +96,9 @@ class WorkerPool:
         # copies locked (the owning thread is absent in the child), deadlocking
         # any child that runs a torch op. Spawn sidesteps both by construction.
         ctx = tm.get_context("spawn")
-        queue: tm.Queue[Any] = ctx.Queue()
-        ack_queue: tm.Queue[Any] = ctx.Queue()
-        ready_queue: tm.Queue[Any] = ctx.Queue()
+        queue: tm.Queue[bytes | None] = cast("tm.Queue[bytes | None]", ctx.Queue())
+        ack_queue: tm.Queue[bool] = cast("tm.Queue[bool]", ctx.Queue())
+        ready_queue: tm.Queue[int] = cast("tm.Queue[int]", ctx.Queue())
         processes: list[PoolWorker] = []
         # ``__exit__`` does not run when ``__enter__`` raises (PEP 343), so a
         # failure mid-spawn must kill the children already started here.
@@ -138,7 +138,7 @@ class WorkerPool:
     def _await_ready(
         self,
         processes: Sequence[PoolWorker],
-        ready_queue: tm.Queue[Any],
+        ready_queue: tm.Queue[int],
         world_size: int,
     ) -> None:
         """Block until all ``world_size`` ranks ack readiness, else raise."""
@@ -329,9 +329,9 @@ class WorkerPool:
         """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
-            # getsockname() is `Any`; AF_INET always yields (host, port).
-            port = s.getsockname()[1]
-            assert isinstance(port, int)
+            # getsockname() is `object`; AF_INET always yields (host, port).
+            port_raw = cast(tuple[str, int], s.getsockname())[1]
+            port = port_raw
             return port
 
     @classmethod
@@ -340,10 +340,10 @@ class WorkerPool:
         rank: int,
         mesh_dims: dict[str, int],
         port: int,
-        command_queue: tm.Queue[Any],
-        ack_queue: tm.Queue[Any],
+        command_queue: tm.Queue[bytes | None],
+        ack_queue: tm.Queue[bool],
         *,
-        ready_queue: tm.Queue[Any],
+        ready_queue: tm.Queue[int],
     ) -> None:
         """Run one worker.
 
@@ -384,7 +384,7 @@ class WorkerPool:
 
         device_mesh: DeviceMesh = DeviceMesh(
             "cpu",
-            mesh=torch.arange(world_size).reshape(mesh_dim_sizes).tolist(),
+            mesh=torch.arange(world_size).reshape(mesh_dim_sizes),
             mesh_dim_names=tuple(mesh_dims.keys()),
         )
 

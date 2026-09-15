@@ -19,6 +19,7 @@ from priml.model.custom_types import (
     DepthIndex,
     HasDepthIndex,
     NumHeads,
+    TensorModule,
     propagate_attr,
 )
 from priml.model.linear import Linear
@@ -65,7 +66,7 @@ class OutputGate(nn.Module):
 
         _: KW_ONLY
 
-        inner: Makeable[nn.Module] = field(default_factory=SelfAttention.Config)
+        inner: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
         """Wrapped attention module config."""
 
         bias: bool = False
@@ -132,8 +133,7 @@ class OutputGate(nn.Module):
 
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
-        if hasattr(self.inner, "reset_parameters"):
-            self.inner.reset_parameters()
+        self.inner.reset_parameters()
         self.gate_proj.reset_parameters()
 
     def alloc_kv_cache(
@@ -171,7 +171,7 @@ class OutputGate(nn.Module):
         **kwargs: object,
     ) -> Tensor:
         gate = torch.sigmoid(self.gate_proj(x))
-        return cast(Tensor, self.inner(x, **kwargs)) * gate
+        return self.inner(x, **kwargs) * gate
 
     def forward_cached(
         self,

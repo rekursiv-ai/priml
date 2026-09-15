@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from priml.custom_types import CheckpointableProtocol
 from priml.timer import CheckpointableStepTimer
@@ -35,7 +35,7 @@ class DatasetProtocol(CheckpointableProtocol, Protocol):
     say so (see ``NanoChatData.load_state_dict``) rather than report a count
     that silently re-walks data."""
 
-    def train_dataloader(self) -> Iterable[Any]:
+    def train_dataloader(self) -> Iterable[object]:
         """Get training dataloader.
 
         Returns:
@@ -44,7 +44,7 @@ class DatasetProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def eval_dataloader(self) -> Iterable[Any]:
+    def eval_dataloader(self) -> Iterable[object]:
         """Get evaluation dataloader.
 
         Returns:

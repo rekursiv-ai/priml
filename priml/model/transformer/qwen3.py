@@ -28,12 +28,11 @@ Only the dense Qwen3 family is handled here; Qwen3-MoE is a follow-up.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Self, override
-
-import json
+from typing import Self, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -41,7 +40,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec
+from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, loads
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
@@ -68,7 +67,7 @@ def _load_hf_checkpoint(
     """Read Qwen checkpoint metadata and tensors once, locally or through the hub."""
     path = Path(path_or_repo)
     if path.is_dir() and (path / "config.json").exists():
-        hf_config = DictCodec.coerce(json.loads((path / "config.json").read_text()))
+        hf_config = DictCodec.coerce(loads((path / "config.json").read_text()))
         return hf_config, hub.load_local_state_dict(path)
     hf_model = hub.load_transformers_model(
         str(path_or_repo),
@@ -178,7 +177,7 @@ class Qwen3(Transformer):
         """Block template (broadcast ``num_layers`` times), or a list."""
 
         @classmethod
-        def from_hf(cls, config: dict[str, Any]) -> Self:
+        def from_hf(cls, config: Mapping[str, object]) -> Self:
             """Parse an HF ``config.json`` dict. Validates model_type.
 
             Args:
@@ -202,13 +201,13 @@ class Qwen3(Transformer):
                 # ``AttributeError`` from inside ``.get`` instead.
                 rope_params = DictCodec.coerce(config.get("rope_parameters") or {})
                 rope_theta = FloatCodec.coerce(rope_params.get("rope_theta"), 1e6)
-            channels_in = int(config["hidden_size"])
-            num_heads = int(config["num_attention_heads"])
+            channels_in = IntCodec.coerce(config["hidden_size"])
+            num_heads = IntCodec.coerce(config["num_attention_heads"])
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
             norm = RMSNorm.Config(elementwise_affine=True)
-            norm.eps = float(config.get("rms_norm_eps", 1e-6))
+            norm.eps = FloatCodec.coerce(config.get("rms_norm_eps", 1e-6), 1e-6)
 
             frequencies = HuggingFaceFrequencies.Config()
             frequencies.base = FloatCodec.coerce(rope_theta, 1e6)
@@ -217,7 +216,9 @@ class Qwen3(Transformer):
 
             attn = SelfAttention.Config(bias=False, causal=True, share_qk_norm=False)
             attn.num_heads = num_heads
-            num_heads_kv = int(config.get("num_key_value_heads", num_heads))
+            num_heads_kv = IntCodec.coerce(
+                config.get("num_key_value_heads", num_heads), num_heads
+            )
             if num_heads_kv < 1:
                 raise ValueError(
                     f"num_key_value_heads must be > 0, got {num_heads_kv}.",
@@ -226,7 +227,7 @@ class Qwen3(Transformer):
             # Qwen3 states the head width, so it need not divide the model
             # width -- the attention's inner width is decoupled from the
             # residual. Falling back to the quotient matches HF's own default.
-            channels_head = int(
+            channels_head = IntCodec.coerce(
                 config["head_dim"]
                 if "head_dim" in config
                 else channels_in // num_heads,
@@ -252,7 +253,7 @@ class Qwen3(Transformer):
                 init_weight_out=init_weight,
                 gate=True,
                 bias=False,
-                channels_hidden=int(config["intermediate_size"]),
+                channels_hidden=IntCodec.coerce(config["intermediate_size"]),
             )
             block.norm1 = norm.copy_tree()
             block.norm2 = norm.copy_tree()
@@ -264,8 +265,8 @@ class Qwen3(Transformer):
             )
             return cls(
                 channels_in=channels_in,
-                channels_out=int(config["vocab_size"]),
-                num_layers=int(config["num_hidden_layers"]),
+                channels_out=IntCodec.coerce(config["vocab_size"]),
+                num_layers=IntCodec.coerce(config["num_hidden_layers"]),
                 in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 out_proj=Sequential.Config(elements=[norm.copy_tree(), head]),
                 block=block,

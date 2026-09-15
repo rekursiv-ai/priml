@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple, override
+from typing import NamedTuple, override
 
 from priml.lib.traverse import (
     could_path_lead_to_pattern,
@@ -10,10 +10,6 @@ from priml.lib.traverse import (
     recursively_iterate_over_object_descendants,
     should_recurse_for_patterns,
 )
-
-
-if TYPE_CHECKING:
-    from typing import Any
 
 
 def test_path_matches_pattern_exact():
@@ -315,7 +311,7 @@ def test_set_traversal():
 
 def test_cycle_detection():
     """Test that circular references are handled correctly."""
-    data: list[int | list[Any]] = [1, 2]
+    data: list[object] = [1, 2]
     data.append(data)  # Create cycle.
 
     results = [
@@ -780,7 +776,8 @@ def test_traverse_dict_attr_raises():
         def __getattribute__(self, name: str) -> object:
             if name == "broken_key":
                 raise AttributeError("boom")
-            return super().__getattribute__(name)
+            value: object = super().__getattribute__(name)  # pyright: ignore[reportAny] -- object.__getattribute__ is stubbed as Any.
+            return value
 
     obj = Tricky()
     # Put a key in __dict__ that __getattribute__ blocks.

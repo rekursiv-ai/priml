@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Final, cast, override
 
 from configgle.testing import assert_pprint_golden
-from torch import nn
+from torch import Tensor, nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -427,7 +427,8 @@ def _constructor_rng_and_forward(config: SwiGLU.Config) -> torch.Tensor:
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         module = config.make()
-        values = [value.reshape(-1).float() for value in module.state_dict().values()]
+        state_values: list[Tensor] = list(module.state_dict().values())
+        values = [value.reshape(-1).float() for value in state_values]
         values.append(torch.get_rng_state().float())
         x = torch.randn(2, 3, config.channels_in)
         values.extend([x.reshape(-1), module(x).reshape(-1).float()])

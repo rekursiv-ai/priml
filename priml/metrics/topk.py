@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import field
-from typing import Any
+from typing import TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -86,24 +87,28 @@ class TopK:
 
         return {f"top{k}": self.correct[k] / self.total for k in self.k_values}
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed counts, ``correct`` keyed by ``k``."""
+
+        correct: dict[int, int]
+        total: int
+
+    def state_dict(self) -> StateDict:
         """Get metric state for checkpointing.
 
         Returns:
-          result: The dict[str, Any].
+          state: The per-``k`` correct counts and the total.
 
         """
-        return {
-            "correct": self.correct,
-            "total": self.total,
-        }
+        return {"correct": self.correct, "total": self.total}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load metric state from checkpoint.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.correct = state_dict.get("correct", dict.fromkeys(self.k_values, 0))
-        self.total = state_dict.get("total", 0)
+        state = cast(TopK.StateDict, state_dict)
+        self.correct = dict(state["correct"])
+        self.total = state["total"]

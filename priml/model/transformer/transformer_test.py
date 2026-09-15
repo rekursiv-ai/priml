@@ -220,7 +220,11 @@ def test_transformer_reports_the_head_width_when_composed() -> None:
 def test_num_layers_materialized():
     m = _tiny_config().make()
     assert len(m.blocks) == 2
-    assert [block.depth_index for block in m.blocks] == [((0, 2),), ((1, 2),)]
+    depth_indices: list[DepthIndex] = []
+    for block in m.blocks:
+        assert isinstance(block, TransformerBlock)
+        depth_indices.append(block.depth_index)
+    assert depth_indices == [((0, 2),), ((1, 2),)]
 
 
 def test_explicit_block_list_gets_global_depth_indices() -> None:
@@ -230,7 +234,11 @@ def test_explicit_block_list_gets_global_depth_indices() -> None:
 
     model = config.make()
 
-    assert [block.depth_index for block in model.blocks] == [((0, 2),), ((1, 2),)]
+    depth_indices: list[DepthIndex] = []
+    for block in model.blocks:
+        assert isinstance(block, TransformerBlock)
+        depth_indices.append(block.depth_index)
+    assert depth_indices == [((0, 2),), ((1, 2),)]
 
 
 def test_generate_interop():

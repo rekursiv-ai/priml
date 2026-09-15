@@ -14,7 +14,8 @@ on the policy.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -26,6 +27,9 @@ from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import evaluation_mode
 from priml.baselines.craftax.game import constants
+from priml.lib.custom_json import ListCodec
+from priml.math.custom_types import Tensorable
+from priml.math.numeric import shifted_geometric_mean
 
 
 class CraftaxScore:
@@ -93,7 +97,7 @@ class CraftaxScore:
             raise TypeError("CraftaxScore requires an EvaluationActor batch entry.")
         self._play(actor)
 
-    def compute(self) -> dict[str, Any]:
+    def compute(self) -> dict[str, object]:
         """Summarize every episode seen since the last reset.
 
         Returns:
@@ -124,7 +128,15 @@ class CraftaxScore:
         self._unlocked = []
         self._rollout_index = 0
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Every finished episode seen so far, plus the next rollout's seed offset."""
+
+        returns: list[float]
+        lengths: list[int]
+        unlocked: list[list[float]]
+        rollout_index: int
+
+    def state_dict(self) -> StateDict:
         """Return the accumulated episodes.
 
         Returns:
@@ -138,17 +150,20 @@ class CraftaxScore:
             "rollout_index": self._rollout_index,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore episodes saved by :meth:`state_dict`.
 
         Args:
           state_dict: State dict.
 
         """
-        self._returns = list(state_dict["returns"])
-        self._lengths = list(state_dict["lengths"])
-        self._unlocked = [list(row) for row in state_dict["unlocked"]]
-        self._rollout_index = int(state_dict["rollout_index"])
+        state = cast(CraftaxScore.StateDict, state_dict)
+        self._returns = list(state["returns"])
+        self._lengths = list(state["lengths"])
+        # A checkpoint reader may hand the rates back as ints; the rows are
+        # averaged as floats, so each is coerced on the way in.
+        self._unlocked = [[float(value) for value in row] for row in state["unlocked"]]
+        self._rollout_index = state["rollout_index"]
 
     @torch.no_grad()
     def _play(self, actor: EvaluationActor) -> None:
@@ -202,23 +217,32 @@ class CraftaxScore:
 
                 if bool(transition.done.any()):
                     finished = transition.done
-                    self._returns.extend(episode_return[finished].tolist())
-                    self._lengths.extend(episode_length[finished].tolist())
+                    self._returns.extend(
+                        ListCodec.coerce(episode_return[finished].tolist(), float),
+                    )
+                    self._lengths.extend(
+                        ListCodec.coerce(episode_length[finished].tolist(), int),
+                    )
                     unlocked = torch.stack(
                         [transition.info[name] for name in sorted(transition.info)],
                         dim=-1,
                     )
-                    self._unlocked.extend(unlocked[finished].tolist())
+                    self._unlocked.extend(
+                        ListCodec.coerce(row, float)
+                        for row in unlocked[finished].tolist()
+                    )
                     episode_return = episode_return * ~finished
                     episode_length = episode_length * ~finished
 
 
-def crafter_score_pct(success_rates_pct: np.ndarray) -> float:
+def crafter_score_pct(success_rates_pct: Tensorable) -> float:
     """Aggregate per-achievement success rates the way Crafter does.
 
-    The geometric mean, computed in log space so that a zero rate does not
-    annihilate the whole score. Breadth is what this rewards: unlocking many
-    achievements rarely beats unlocking one reliably.
+    The shifted geometric mean ``exp(mean(log(1 + s))) - 1``: a plain geometric
+    mean is zero whenever any rate is zero, and the shift is what keeps one
+    never-unlocked achievement from annihilating the score. Breadth is what
+    this rewards: unlocking many achievements rarely beats unlocking one
+    reliably.
 
     Args:
       success_rates_pct: Per-achievement success percentages.
@@ -231,4 +255,4 @@ def crafter_score_pct(success_rates_pct: np.ndarray) -> float:
         Hafner 2021. Benchmarking the spectrum of agent capabilities.
 
     """
-    return float(np.expm1(np.log1p(success_rates_pct).mean()))
+    return float(shifted_geometric_mean(success_rates_pct))

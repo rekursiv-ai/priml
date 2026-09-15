@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import json
-
 import pytest
 
+from priml.lib.custom_json import DictCodec, loads
 from priml.train.progress import write_progress
 
 
@@ -19,11 +18,13 @@ def test_write_progress_lands_step_total_metrics(tmp_path: Path) -> None:
         metrics={"loss": 0.25},
     )
     assert path == tmp_path / "progress.json"
-    data = json.loads(path.read_text())
+    data = DictCodec.coerce(loads(path.read_text()))
     assert data["step"] == 5
     assert data["total"] == 100
     assert data["metrics"] == {"loss": 0.25}
-    assert data["updated_at"].endswith("Z")
+    updated_at = data["updated_at"]
+    assert isinstance(updated_at, str)
+    assert updated_at.endswith("Z")
 
 
 def test_write_progress_rejects_empty_working_dir() -> None:
@@ -35,7 +36,7 @@ def test_write_progress_overwrites_atomically(tmp_path: Path) -> None:
     """Successive writes replace the file; no tmp residue is left behind."""
     _ = write_progress(1, 10, working_dir=tmp_path)
     path = write_progress(2, 10, working_dir=tmp_path)
-    assert json.loads(path.read_text())["step"] == 2
+    assert DictCodec.coerce(loads(path.read_text()))["step"] == 2
     assert sorted(p.name for p in tmp_path.iterdir()) == ["progress.json"]
 
 

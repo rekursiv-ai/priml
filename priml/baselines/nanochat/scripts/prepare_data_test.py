@@ -8,11 +8,12 @@ the fit runs on a few hundred characters.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from threading import Event
-from typing import Final
+from typing import Final, Protocol, cast
 from unittest.mock import patch
 
 import io
@@ -25,6 +26,7 @@ import sys
 import tarfile
 
 from numpy import array, array_equal, int64, zeros
+from numpy.typing import NDArray
 from pyarrow import Table, parquet
 
 import numpy as np
@@ -37,7 +39,7 @@ from priml.baselines.nanochat.data import (
     ReferenceEvaluation,
     token_bytes_fingerprint,
 )
-from priml.baselines.nanochat.experiments import exp022
+from priml.baselines.nanochat.experiments import NgramTrainLoop, exp022
 from priml.baselines.nanochat.scripts.prepare_data import (
     BOS_TOKEN,
     RESERVED_TOKENS,
@@ -55,12 +57,19 @@ from priml.baselines.nanochat.scripts.prepare_data import (
     unique_rows,
 )
 from priml.baselines.nanochat.scripts.prepare_tokenizer import byte_alphabet
+from priml.lib.custom_json import DictCodec
 from priml.train.checkpointing import Checkpointer
 
 
 VOCAB = 300  # Above the 16 reserved tokens and the 256 byte-level merges.
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+def _json_object(path: Path) -> dict[str, object]:
+    return dict(
+        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None)
+    )
 
 
 def _write_shard(root: Path, index: int, documents: list[str]) -> None:
@@ -112,8 +121,10 @@ def test_the_recorded_fingerprint_matches_the_table_written(corpus: Path) -> Non
     """
     _prepare(corpus)
     directory = corpus / "tokenizer"
-    table = np.load(directory / "token_bytes.npy")
-    recipe = json.loads((directory / "tokenizer_recipe.json").read_text())
+    table: NDArray[np.int32] = cast(
+        NDArray[np.int32], np.load(directory / "token_bytes.npy")
+    )
+    recipe = _json_object(directory / "tokenizer_recipe.json")
     assert recipe["token_bytes_sha256"] == token_bytes_fingerprint(table)
 
 
@@ -124,7 +135,10 @@ def test_reserved_tokens_carry_no_bytes(corpus: Path) -> None:
     which is a property of the corpus rather than of the model.
     """
     _prepare(corpus)
-    table = np.load(corpus / "tokenizer" / "token_bytes.npy")
+    table: NDArray[np.int32] = cast(
+        NDArray[np.int32],
+        np.load(corpus / "tokenizer" / "token_bytes.npy"),
+    )
     assert int(table[-len(RESERVED_TOKENS) :].sum()) == 0
     assert int(table[: -len(RESERVED_TOKENS)].min()) > 0
 
@@ -136,7 +150,7 @@ def test_the_recipe_records_what_the_vocabulary_was_fitted_on(corpus: Path) -> N
     would then mean something else.
     """
     _prepare(corpus)
-    recipe = json.loads((corpus / "tokenizer" / "tokenizer_recipe.json").read_text())
+    recipe = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
     assert recipe["vocab_size"] == VOCAB
     assert recipe["train_chars"] == 1_000
     assert recipe["doc_cap"] == 100
@@ -147,8 +161,8 @@ def test_the_recipe_records_what_the_vocabulary_was_fitted_on(corpus: Path) -> N
 def test_the_validation_shard_is_excluded_from_the_fit(corpus: Path) -> None:
     """The vocabulary must not be fitted on the text it will be scored on."""
     _prepare(corpus, num_train_shards=1)
-    recipe = json.loads((corpus / "tokenizer" / "tokenizer_recipe.json").read_text())
-    assert "shard_00001.parquet" not in recipe["shards"]
+    recipe = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
+    assert "shard_00001.parquet" not in cast(list[str], recipe["shards"])
 
 
 def test_a_vocabulary_fitted_under_other_flags_is_refitted(corpus: Path) -> None:
@@ -159,11 +173,9 @@ def test_a_vocabulary_fitted_under_other_flags_is_refitted(corpus: Path) -> None
     vocabulary gets one instead of an instruction to delete a file.
     """
     _prepare(corpus)
-    before = json.loads(
-        (corpus / "tokenizer" / "tokenizer_recipe.json").read_text(),
-    )
+    before = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
     _prepare(corpus, tokenizer_train_chars=2_000)
-    after = json.loads((corpus / "tokenizer" / "tokenizer_recipe.json").read_text())
+    after = _json_object(corpus / "tokenizer" / "tokenizer_recipe.json")
     assert before["train_chars"] != after["train_chars"]
     assert after["train_chars"] == 2_000
 
@@ -203,9 +215,14 @@ def test_an_intact_vocabulary_at_the_same_flags_is_reused(corpus: Path) -> None:
     identical table rather than refit and produce another one.
     """
     _prepare(corpus)
-    before = np.load(corpus / "tokenizer" / "token_bytes.npy").copy()
+    before: NDArray[np.int32] = cast(
+        NDArray[np.int32], np.load(corpus / "tokenizer" / "token_bytes.npy")
+    ).copy()
     assert _prepare(corpus) == corpus
-    assert np.array_equal(np.load(corpus / "tokenizer" / "token_bytes.npy"), before)
+    assert np.array_equal(
+        cast(NDArray[np.int32], np.load(corpus / "tokenizer" / "token_bytes.npy")),
+        before,
+    )
 
 
 def test_a_corpus_short_a_shard_is_refused(corpus: Path) -> None:
@@ -257,9 +274,10 @@ def test_training_handoff_preserves_config_and_uses_priml(
     assert process.call_args.kwargs["cwd"] == config.working_dir
     assert process.call_args.kwargs["check"] is True
     namespace = runpy.run_path(str(config.working_dir / "prepared_experiment.py"))
-    restored = namespace["experiment"]()
+    experiment = cast(Callable[[], NgramTrainLoop.Config], namespace["experiment"])
+    restored = experiment()
     if save_checkpoint:
-        checkpoint = restored.checkpointing
+        checkpoint = cast(Checkpointer.Config, restored.checkpointing)
         assert isinstance(checkpoint, Checkpointer.Config)
         assert checkpoint.save_every == sys.maxsize
         assert checkpoint.resume is False
@@ -350,8 +368,14 @@ def test_preparation_builds_and_relocates(
     shutil.move(str(config.working_dir), moved)
     config.working_dir = moved
     relocated = config.copy_tree().finalize().rows.make().verify()
-    assert (original.train_rows == relocated.train_rows).all()
-    assert (original.eval_targets == relocated.eval_targets).all()
+    assert np.array_equal(
+        cast(NDArray[np.uint16], original.train_rows),
+        cast(NDArray[np.uint16], relocated.train_rows),
+    )
+    assert np.array_equal(
+        cast(NDArray[np.uint16], original.eval_targets),
+        cast(NDArray[np.uint16], relocated.eval_targets),
+    )
     assert (moved / "reference-eval/bpe.npz").exists()
     assert (moved / "reference-eval/unigram.npz").exists()
     preparation = config.make()
@@ -591,12 +615,27 @@ def test_cli_prints_factory_without_preparing_inputs(
     assert not destination.exists()
 
 
+class _TokenizersModels(Protocol):
+    Unigram: Callable[..., object]
+
+
+class _TokenizersPreTokenizers(Protocol):
+    ByteLevel: Callable[..., object]
+
+
+class _TokenizersDecoders(Protocol):
+    ByteLevel: Callable[..., object]
+
+
 def _unigram() -> tokenizers.Tokenizer:
+    models = cast(_TokenizersModels, tokenizers.models)
+    pre_tokenizers = cast(_TokenizersPreTokenizers, tokenizers.pre_tokenizers)
+    decoders = cast(_TokenizersDecoders, tokenizers.decoders)
     backend = tokenizers.Tokenizer(
-        tokenizers.models.Unigram([(piece, -6.0) for piece in byte_alphabet().values()])
+        models.Unigram([(piece, -6.0) for piece in byte_alphabet().values()])
     )
-    backend.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
-    backend.decoder = tokenizers.decoders.ByteLevel()
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.decoder = decoders.ByteLevel()
     return backend
 
 
@@ -652,26 +691,48 @@ def test_reference_replay() -> None:
     inverse = {char: byte for byte, char in byte_alphabet().items()}
     backend = _unigram()
     for original, replay, mask in zip(
-        targets, unigram["targets"], unigram["score_mask"], strict=True
+        cast(Iterator[NDArray[np.int64]], targets),
+        cast(Iterator[NDArray[np.int64]], unigram["targets"]),
+        cast(Iterator[NDArray[np.bool_]], unigram["score_mask"]),
+        strict=True,
     ):
         expected = b"".join(
             reference.decode_single_token_bytes(int(token))
-            for token in original
+            for token in cast(list[int], original.tolist())
             if token < 257
         )
-        pieces = [backend.id_to_token(int(token)) for token in replay[mask]]
+        pieces = [
+            backend.id_to_token(int(token))
+            for token in cast(list[int], replay[mask].tolist())
+        ]
         assert all(piece is not None for piece in pieces)
         actual = bytes(
             inverse[char] for piece in pieces if piece is not None for char in piece
         )
         assert actual == expected
-    assert int(bpe["literal_bytes"].sum()) == int(unigram["literal_bytes"].sum()) == 5
     assert (
-        int(bpe["reference_bytes"].sum()) == int(unigram["reference_bytes"].sum()) == 7
+        int(cast(NDArray[np.int64], bpe["literal_bytes"]).sum())
+        == int(cast(NDArray[np.int64], unigram["literal_bytes"]).sum())
+        == 5
     )
-    assert int(unigram["score_mask"].sum()) == 5
+    assert (
+        int(cast(NDArray[np.int64], bpe["reference_bytes"]).sum())
+        == int(cast(NDArray[np.int64], unigram["reference_bytes"]).sum())
+        == 7
+    )
+    assert int(cast(NDArray[np.bool_], unigram["score_mask"]).sum()) == 5
     assert len(unigram["inputs"]) == len(inputs)
-    assert (unigram["targets"][unigram["score_mask"]] < 256).all()
+    assert bool(
+        cast(
+            object,
+            (
+                cast(NDArray[np.int64], unigram["targets"])[
+                    cast(NDArray[np.bool_], unigram["score_mask"])
+                ]
+                < 256
+            ).all(),
+        )
+    )
 
 
 def test_overflow_is_rejected_without_changing_context() -> None:

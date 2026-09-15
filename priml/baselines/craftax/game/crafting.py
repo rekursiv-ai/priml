@@ -147,18 +147,18 @@ def craft(state: EnvState, action: Tensor) -> EnvState:
         if recipe.needs_furnace:
             making = making & near_furnace
         for material, amount in recipe.costs.items():
-            making = making & (getattr(state.inventory, material) >= amount)
+            making = making & (_inventory_tensor(state, material) >= amount)
         if recipe.tool is not None:
             # A tier already held cannot be re-crafted, which stops the
             # player from spending materials to downgrade.
             name, tier = recipe.tool
-            making = making & (getattr(state.inventory, name) < tier)
+            making = making & (_inventory_tensor(state, name) < tier)
 
         for material, amount in recipe.costs.items():
             setattr(
                 state.inventory,
                 material,
-                getattr(state.inventory, material) - amount * making.int(),
+                _inventory_tensor(state, material) - amount * making.int(),
             )
         if recipe.tool is not None:
             name, tier = recipe.tool
@@ -167,8 +167,8 @@ def craft(state: EnvState, action: Tensor) -> EnvState:
                 name,
                 torch.where(
                     making,
-                    torch.full_like(getattr(state.inventory, name), tier),
-                    getattr(state.inventory, name),
+                    torch.full_like(_inventory_tensor(state, name), tier),
+                    _inventory_tensor(state, name),
                 ),
             )
         if recipe.stock is not None:
@@ -176,7 +176,7 @@ def craft(state: EnvState, action: Tensor) -> EnvState:
             setattr(
                 state.inventory,
                 name,
-                getattr(state.inventory, name) + amount * making.int(),
+                _inventory_tensor(state, name) + amount * making.int(),
             )
         if recipe.achievement is not None:
             state.achievements = mechanics.unlock_achievement(
@@ -249,13 +249,13 @@ def place(state: EnvState, action: Tensor) -> EnvState:
         placing = (
             (action == int(action_kind))
             & free
-            & (getattr(state.inventory, material) >= cost)
+            & (_inventory_tensor(state, material) >= cost)
         )
         state = _write_block(state, target, int(block_kind), placing)
         setattr(
             state.inventory,
             material,
-            getattr(state.inventory, material) - cost * placing.int(),
+            _inventory_tensor(state, material) - cost * placing.int(),
         )
         state.achievements = mechanics.unlock_achievement(
             state,
@@ -297,7 +297,7 @@ def _craft_armour(
         if needs_furnace:
             making = making & near_furnace
         for material, amount in costs.items():
-            making = making & (getattr(state.inventory, material) >= amount)
+            making = making & (_inventory_tensor(state, material) >= amount)
         # Armour is made a piece at a time: the recipe fills the first slot
         # that is not already at this tier.
         upgradeable = (state.inventory.armour < tier).any(-1)
@@ -308,7 +308,7 @@ def _craft_armour(
             setattr(
                 state.inventory,
                 material,
-                getattr(state.inventory, material) - amount * making.int(),
+                _inventory_tensor(state, material) - amount * making.int(),
             )
         rows = torch.arange(state.num_envs, device=state.device)
         current = state.inventory.armour[rows, slot]
@@ -408,6 +408,13 @@ def _sow_plant(state: EnvState, target: Tensor, placing: Tensor) -> EnvState:
         state.growing_plants_mask[rows, slot] | sowing
     )
     return state
+
+
+def _inventory_tensor(state: EnvState, name: str) -> Tensor:
+    """Read a named inventory field with the dataclass boundary narrowed."""
+    value: object = getattr(state.inventory, name)  # pyright: ignore[reportAny] -- inventory fields are dynamically selected by recipe data.
+    assert isinstance(value, Tensor)
+    return value
 
 
 def _write_block(

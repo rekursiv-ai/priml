@@ -65,7 +65,7 @@ from priml.runtime import is_rank_zero
 
 logger = logging.getLogger(__name__)
 
-type StateDict = dict[str, Any]
+type StateDict = dict[str, Any]  # pyright: ignore[reportExplicitAny] -- Opaque payload owned by each CheckpointableProtocol implementation.
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -311,7 +311,7 @@ class AsyncLocalStateDictStorer:
 
     def __init__(self, config: Config | None = None) -> None:
         del config
-        self._pending: Future[Any] | None = None
+        self._pending: Future[object] | None = None
         self._after_write: Callable[[], None] = lambda: None
         self._pending_path: Path | None = None
         self._pending_start: float = 0.0
@@ -342,7 +342,7 @@ class AsyncLocalStateDictStorer:
         self._pending_start = time.perf_counter()
         response: object = dcp.async_save(state_dict, checkpoint_id=str(path))
         upload: object = getattr(response, "upload_completion", response)
-        self._pending = cast(Future[Any], upload)
+        self._pending = cast(Future[object], upload)
         self._pending_path = path
         self._after_write = after_write
 
@@ -723,7 +723,7 @@ class Checkpointer:
                 )
                 return None
         logger.info("Resuming from checkpoint %s.", chosen.path)
-        blob = self.storage.read(chosen.path, target.state_dict())
+        blob = self.storage.read(chosen.path, dict(target.state_dict()))
         target.load_state_dict(blob)
         return chosen.step
 
@@ -758,7 +758,7 @@ class Checkpointer:
         path = validated_output_path(self._path(step))
         self.storage.write(
             path,
-            target.state_dict(),
+            dict(target.state_dict()),
             after_write=self._prune,
         )
 

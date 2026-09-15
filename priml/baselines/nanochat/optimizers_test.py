@@ -7,11 +7,31 @@ from typing import cast
 
 import math
 
+from torch import Tensor
+from torch.optim import Optimizer
+
 import pytest
 import torch
 
 from priml.baselines.nanochat import optimizers
+from priml.lib.custom_json import DictCodec, FloatCodec
 from priml.optimizers.normuon import NorMuon
+
+
+def _state(optimizer: Optimizer, parameter: Tensor) -> dict[str, object]:
+    return cast("dict[str, object]", optimizer.state[parameter])
+
+
+def _tensor(state: dict[str, object], name: str) -> Tensor:
+    value = state[name]
+    assert isinstance(value, Tensor)
+    return value
+
+
+def _number(value: object) -> float:
+    if isinstance(value, Tensor):
+        return float(value)
+    return FloatCodec.coerce(value, None)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -71,12 +91,15 @@ def test_zero_beta_rmsprop_survives_checkpoint_and_positive_beta_update(
     optimizer.step()
     assert torch.equal(weight, torch.tensor([[0.875, 2.125], [3.0, 4.0]], dtype=dtype))
     assert torch.equal(
-        optimizer.state[weight]["second_moment"], torch.tensor([[4.0], [0.0]])
+        _tensor(_state(optimizer, weight), "second_moment"),
+        torch.tensor([[4.0], [0.0]]),
     )
     if sparse:
-        assert optimizer.state[weight]["cum_log"] == -math.inf
-        assert optimizer.state[weight]["sparse_scalars"]["cum_before"] == 0.0
-        assert optimizer.state[weight]["sparse_scalars"]["cum_after"] == -math.inf
+        state = _state(optimizer, weight)
+        sparse_scalars = DictCodec.coerce(state["sparse_scalars"])
+        assert _number(state["cum_log"]) == -math.inf
+        assert _number(sparse_scalars["cum_before"]) == 0.0
+        assert _number(sparse_scalars["cum_after"]) == -math.inf
 
     restored_weight = torch.nn.Parameter(weight.detach().clone())
     restored = config.make()([restored_weight])
@@ -90,14 +113,15 @@ def test_zero_beta_rmsprop_survives_checkpoint_and_positive_beta_update(
     assert torch.isfinite(weight).all()
     assert torch.equal(restored_weight, weight)
     assert torch.equal(
-        restored.state[restored_weight]["second_moment"],
-        optimizer.state[weight]["second_moment"],
+        _tensor(_state(restored, restored_weight), "second_moment"),
+        _tensor(_state(optimizer, weight), "second_moment"),
     )
     if sparse:
-        for state in (optimizer.state[weight], restored.state[restored_weight]):
-            assert state["cum_log"] == -math.inf
-            assert state["sparse_scalars"]["cum_before"] == -math.inf
-            assert state["sparse_scalars"]["cum_after"] == -math.inf
+        for state in (_state(optimizer, weight), _state(restored, restored_weight)):
+            sparse_scalars = DictCodec.coerce(state["sparse_scalars"])
+            assert _number(state["cum_log"]) == -math.inf
+            assert _number(sparse_scalars["cum_before"]) == -math.inf
+            assert _number(sparse_scalars["cum_after"]) == -math.inf
 
 
 @pytest.mark.parametrize(
@@ -144,24 +168,29 @@ def test_rowwise_checkpoint_preserves_state_precision_and_next_update(
     restored.gradient_sinks[restored_weight] = sink
     restored.gradient_bitmaps[restored_weight] = bitmap
     restored.load_state_dict(optimizer.state_dict())
-    before = optimizer.state[weight]
-    after = restored.state[restored_weight]
+    before = _state(optimizer, weight)
+    after = _state(restored, restored_weight)
     for name, value in before.items():
         if isinstance(value, torch.Tensor):
-            assert after[name].dtype == value.dtype, name
-            assert torch.equal(after[name], value), name
-            assert after[name].data_ptr() != value.data_ptr(), name
+            after_value = _tensor(after, name)
+            assert after_value.dtype == value.dtype, name
+            assert torch.equal(after_value, value), name
+            assert after_value.data_ptr() != value.data_ptr(), name
         elif isinstance(value, dict):
             for key, scalar in cast(dict[str, object], value).items():
                 assert isinstance(scalar, torch.Tensor)
-                assert after[name][key].dtype == scalar.dtype, key
-                assert torch.equal(after[name][key], scalar), key
+                after_scalars = DictCodec.coerce(after[name], Tensor)
+                assert after_scalars[key].dtype == scalar.dtype, key
+                assert torch.equal(after_scalars[key], scalar), key
     sink.mul_(0.37)
     bitmap.fill_(1)
     optimizer.step()
     restored.step()
     assert torch.equal(restored_weight, weight)
-    assert torch.equal(after["second_moment"], before["second_moment"])
+    assert torch.equal(
+        _tensor(after, "second_moment"),
+        _tensor(before, "second_moment"),
+    )
 
 
 def test_rmsprop_bias_correction_follows_scheduled_beta() -> None:
@@ -183,7 +212,7 @@ def test_rmsprop_bias_correction_follows_scheduled_beta() -> None:
         expected.sub_(gradient / (denominator + torch.tensor(config.eps)) * lr)
         optimizer.step()
         assert torch.equal(weight, expected)
-        assert torch.equal(optimizer.state[weight]["second_moment"], moment)
+        assert torch.equal(_tensor(_state(optimizer, weight), "second_moment"), moment)
 
 
 def test_sparse_rmsprop_keeps_idle_weights_and_advances_idle_moments() -> None:
@@ -203,7 +232,7 @@ def test_sparse_rmsprop_keeps_idle_weights_and_advances_idle_moments() -> None:
     optimizer.gradient_bitmaps[weight] = bitmap
     optimizer.step()
     before = weight.detach().clone()
-    moment = optimizer.state[weight]["second_moment"].clone()
+    moment = _tensor(_state(optimizer, weight), "second_moment").clone()
     bitmap.zero_()
     optimizer.param_groups[0]["beta2"] = 0.95
     optimizer.step()
@@ -211,8 +240,9 @@ def test_sparse_rmsprop_keeps_idle_weights_and_advances_idle_moments() -> None:
         moment, torch.zeros_like(moment), 1 - float(torch.tensor(0.95))
     )
     assert torch.equal(weight, before)
-    assert torch.equal(optimizer.state[weight]["second_moment"], expected)
-    assert optimizer.state[weight]["second_moment"].dtype == torch.float32
+    second_moment = _tensor(_state(optimizer, weight), "second_moment")
+    assert torch.equal(second_moment, expected)
+    assert second_moment.dtype == torch.float32
 
 
 def test_sparse_rmsprop_refuses_missing_bitmap() -> None:
@@ -237,7 +267,10 @@ def test_ffn_multiplier_changes_both_rectangular_projections() -> None:
     config.optimizer.compile = False
     optimizer = config.make()(parameters)
     rates = {
-        tuple(group["params"][0].shape): group["lr"] for group in optimizer.param_groups
+        tuple(cast("list[Tensor]", group["params"])[0].shape): FloatCodec.coerce(
+            cast(object, group["lr"]), None
+        )
+        for group in optimizer.param_groups
     }
     assert rates == pytest.approx(
         {(4, 4): 0.04, (8, 4): 0.05 * 2**0.5, (4, 8): 0.05, (2, 3): 0.04}

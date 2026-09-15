@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import logging
@@ -13,12 +13,29 @@ import time
 
 import pytest
 
+from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
 from priml.train.profiling import PhaseTimer, TorchProfiling
 
 
-def _phase_timer_config(**kwargs: Any) -> PhaseTimer.Config:  # noqa: ANN401 -- forwarded to an upstream Any.
-    kwargs.setdefault("working_dir", "/scratch/profiling")
-    return PhaseTimer.Config(**kwargs)
+if TYPE_CHECKING:
+    import torch
+
+
+def _phase_timer_config(
+    *,
+    enabled: bool = False,
+    torch_profile: bool = False,
+    working_dir: Path | str = "/scratch/profiling",
+    heartbeat_interval_sec: float = 30.0,
+    cuda_events: bool = False,
+) -> PhaseTimer.Config:
+    return PhaseTimer.Config(
+        enabled=enabled,
+        torch_profile=torch_profile,
+        working_dir=working_dir,
+        heartbeat_interval_sec=heartbeat_interval_sec,
+        cuda_events=cuda_events,
+    )
 
 
 class TestPhaseTimerDisabled:
@@ -101,9 +118,9 @@ class TestPhaseTimerEnabled:
         timer.record("train_step", 2.0)
         timer.record("train_step", 3.0)
 
-        first = timer.publish_interval(tracker, step=4)
+        first = timer.publish_interval(cast(TrackerProtocol, tracker), step=4)
         timer.record("train_step", 7.0)
-        second = timer.publish_interval(tracker, step=5)
+        second = timer.publish_interval(cast(TrackerProtocol, tracker), step=5)
 
         assert first["interval_train_batch_fetch_sec"] == 1.0
         assert first["interval_train_batch_fetch_count"] == 1.0
@@ -123,7 +140,7 @@ class TestPhaseTimerEnabled:
         timer.record("train_step", 3.0)
         timer.record("train_step", 2.0)
 
-        summary = timer.publish_summary(tracker, step=8)
+        summary = timer.publish_summary(cast(TrackerProtocol, tracker), step=8)
 
         assert summary["train_step_sec"] == 5.0
         assert summary["train_step_count"] == 2.0
@@ -307,20 +324,16 @@ class TestPhaseTimerTorchProfile:
     def test_creates_trace_file(self, monkeypatch: pytest.MonkeyPatch):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "nested" / "phase_trace.json.gz"
+            averages = MagicMock()
+            averages.table.return_value = "ops"
             profiler = MagicMock()
-            profiler.key_averages.return_value.table.return_value = "ops"
+            profiler.key_averages.return_value = averages
 
-            fake_profiler_module = MagicMock()
-            fake_profiler_module.profile.return_value = profiler
-            fake_profiler_module.ProfilerActivity.CPU = "cpu"
-            fake_profiler_module.ProfilerActivity.CUDA = "cuda"
             fake_torch = MagicMock()
             fake_torch.cuda.is_available.return_value = False
-
-            monkeypatch.setattr(
-                "priml.train.profiling.torch_profiler",
-                fake_profiler_module,
-            )
+            fake_torch.profiler.profile.return_value = profiler
+            fake_torch.profiler.ProfilerActivity.CPU = "cpu"
+            fake_torch.profiler.ProfilerActivity.CUDA = "cuda"
             monkeypatch.setattr("priml.train.profiling.torch", fake_torch)
             timer = _phase_timer_config(
                 enabled=True,
@@ -342,20 +355,16 @@ class TestPhaseTimerTorchProfile:
         """COLD-008: a second log_summary() is a no-op, never double-stops."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "phase_trace.json.gz"
+            averages = MagicMock()
+            averages.table.return_value = "ops"
             profiler = MagicMock()
-            profiler.key_averages.return_value.table.return_value = "ops"
+            profiler.key_averages.return_value = averages
 
-            fake_profiler_module = MagicMock()
-            fake_profiler_module.profile.return_value = profiler
-            fake_profiler_module.ProfilerActivity.CPU = "cpu"
-            fake_profiler_module.ProfilerActivity.CUDA = "cuda"
             fake_torch = MagicMock()
             fake_torch.cuda.is_available.return_value = False
-
-            monkeypatch.setattr(
-                "priml.train.profiling.torch_profiler",
-                fake_profiler_module,
-            )
+            fake_torch.profiler.profile.return_value = profiler
+            fake_torch.profiler.ProfilerActivity.CPU = "cpu"
+            fake_torch.profiler.ProfilerActivity.CUDA = "cuda"
             monkeypatch.setattr("priml.train.profiling.torch", fake_torch)
             timer = _phase_timer_config(
                 enabled=True,
@@ -468,7 +477,9 @@ class TestPhaseTimerCudaEvents:
         end = MagicMock()
         start.elapsed_time.return_value = 12.5
 
-        timer.record_cuda_events("forward", start, end)
+        timer.record_cuda_events(
+            "forward", cast(CudaEventProtocol, start), cast(CudaEventProtocol, end)
+        )
 
         with caplog.at_level(logging.INFO):
             timer.log_summary()
@@ -485,10 +496,18 @@ class TestPhaseTimerCudaEvents:
         second_start = MagicMock()
         second_end = MagicMock()
         second_start.elapsed_time.return_value = 20.0
-        timer.record_cuda_events("eval", first_start, first_end)
+        timer.record_cuda_events(
+            "eval",
+            cast(CudaEventProtocol, first_start),
+            cast(CudaEventProtocol, first_end),
+        )
         first = timer.publish_summary(None, step=1)
 
-        timer.record_cuda_events("eval", second_start, second_end)
+        timer.record_cuda_events(
+            "eval",
+            cast(CudaEventProtocol, second_start),
+            cast(CudaEventProtocol, second_end),
+        )
         second = timer.publish_summary(None, step=2)
 
         assert first["gpu.eval_sec"] == pytest.approx(0.01)
@@ -502,7 +521,9 @@ class TestPhaseTimerCudaEvents:
         start = MagicMock()
         end = MagicMock()
 
-        timer.record_cuda_events("forward", start, end)
+        timer.record_cuda_events(
+            "forward", cast(CudaEventProtocol, start), cast(CudaEventProtocol, end)
+        )
         timer.log_summary()
 
         end.synchronize.assert_not_called()
@@ -575,9 +596,11 @@ class TestTorchProfilingCleanup:
             working_dir=str(tmp_path),
         )
         profiling = config.make()
+        averages = MagicMock()
+        averages.table.return_value = "ops"
         profiler = MagicMock()
-        profiler.key_averages.return_value.table.return_value = "ops"
-        profiling.profiler = profiler
+        profiler.key_averages.return_value = averages
+        profiling.profiler = cast("torch.profiler.profile", profiler)
         profiling._profiler_started = True
 
         profiling.on_step_end(6)
@@ -598,7 +621,7 @@ class TestTorchProfilingCleanup:
 
         # Simulate: profiler started at step 5, training stopped before step 10.
         profiler = MagicMock()
-        profiling.profiler = profiler
+        profiling.profiler = cast("torch.profiler.profile", profiler)
         profiling._profiler_started = True
 
         profiling.cleanup()

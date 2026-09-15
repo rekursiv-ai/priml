@@ -9,6 +9,7 @@ import os
 import random
 
 from torch import Tensor
+from torch.distributed.device_mesh import DeviceMesh
 
 import numpy as np
 import pytest
@@ -32,7 +33,6 @@ from priml.math.seed import (
 def test_make_seed_returns_nonzero():
     seed = make_seed()
     assert seed > 0
-    assert isinstance(seed, int)
     assert seed < 2**63  # PyTorch / numpy accept 64-bit seeds.
 
 
@@ -69,7 +69,7 @@ def test_set_seed_reproducibility():
     py_rand2 = random.random()  # noqa: S311 -- The test samples the standard generator to compare deterministic seeding.
 
     torch.testing.assert_close(rand1, rand2)
-    assert (np_rand1 == np_rand2).all()
+    assert np.array_equal(np_rand1, np_rand2)
     assert py_rand1 == py_rand2
 
 
@@ -202,7 +202,7 @@ def test_set_seed_distributed_salting_combinations(
     _patch_dist(monkeypatch, rank=rank, broadcast=broadcast)
     base_seed, local_seed = set_seed_distributed(
         seed=100,
-        mesh=mesh,
+        mesh=cast(DeviceMesh | None, mesh),
         salt_by_rank=salt_by_rank,
     )
     assert base_seed == 100
@@ -643,7 +643,8 @@ def test_enable_determinism_disables_sdpa_by_default() -> None:
     every explicit caller in the codebase, so flip the default to ``True``.
     """
     sig = inspect.signature(enable_determinism)
-    assert sig.parameters["sdpa"].default is True
+    default = cast(bool, sig.parameters["sdpa"].default)
+    assert default is True
 
 
 def test_enable_determinism_sets_cublas_env_when_unset(
@@ -697,10 +698,10 @@ def test_dataloader_worker_init_fn_reseeds_legacy_numpy_global() -> None:
     a = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     dataloader_worker_init_fn(0)
     b = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
-    assert (a == b).all(), "worker init must be deterministic per worker_id"
+    assert np.array_equal(a, b), "worker init must be deterministic per worker_id"
     dataloader_worker_init_fn(1)
     c = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
-    assert not (a == c).all(), "worker 0 and worker 1 must differ"
+    assert not np.array_equal(a, c), "worker 0 and worker 1 must differ"
 
 
 def test_get_rng_state_warns_when_mps_backend_active(
@@ -914,7 +915,7 @@ def test_set_seed_local_seeds_legacy_numpy_global() -> None:
     a = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
     set_seed_local(seed=7)
     b = np.random.rand(3)  # noqa: NPY002 -- The regression test exercises the legacy reseed contract.
-    assert (a == b).all(), f"legacy np.random not reseeded: {a} vs {b}"
+    assert np.array_equal(a, b), f"legacy np.random not reseeded: {a} vs {b}"
 
 
 def test_salt_rejects_objects_with_default_repr() -> None:

@@ -7,6 +7,9 @@ floors connect, and each floor uses its own materials.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Protocol, cast
+
 import numpy as np
 import pytest
 import torch
@@ -24,6 +27,7 @@ from priml.baselines.craftax.game.world_gen import (
     generate_dungeon,
     generate_smooth_world,
 )
+from priml.lib.custom_json import ListCodec
 
 
 _DEVICE = torch.device("cpu")
@@ -71,7 +75,7 @@ def test_the_surface_ladder_starts_open() -> None:
 def test_potion_effects_are_shuffled_independently_per_environment() -> None:
     state = _world(num_envs=8, seed=3)
     for row in state.potion_mapping:
-        assert sorted(row.tolist()) == list(range(6))
+        assert sorted(ListCodec.coerce(row.tolist(), int)) == list(range(6))
     assert len({tuple(row.tolist()) for row in state.potion_mapping}) > 1
 
 
@@ -102,7 +106,7 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
         generator=torch.Generator().manual_seed(0),
         device=_DEVICE,
     )
-    present = set(blocks.unique().tolist())
+    present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
     assert int(BlockType.GRASS) in present
     assert int(BlockType.STONE) in present
     assert int(BlockType.TREE) in present
@@ -131,7 +135,7 @@ def test_a_dungeon_is_rooms_joined_by_corridors() -> None:
         generator=torch.Generator().manual_seed(0),
         device=_DEVICE,
     )
-    present = set(blocks.unique().tolist())
+    present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
     assert int(BlockType.PATH) in present
     assert int(BlockType.WALL) in present
     assert int(BlockType.CHEST) in present
@@ -156,7 +160,7 @@ def test_the_sewers_use_their_own_materials() -> None:
         generator=torch.Generator().manual_seed(0),
         device=_DEVICE,
     )
-    present = set(blocks.unique().tolist())
+    present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
     assert int(BlockType.ENCHANTMENT_TABLE_ICE) in present
     assert int(BlockType.WATER) in present
 
@@ -179,15 +183,30 @@ def test_daylight_repeats_every_day() -> None:
 
 @requires_craftax
 def test_daylight_matches_the_reference() -> None:
-    calculate_light_level = reference(
-        "craftax_classic.game_logic",
-    ).calculate_light_level
-    params = reference("craftax_classic.envs.craftax_state").EnvParams()
+    game_logic = cast(_GameLogic, reference("craftax_classic.game_logic"))
+    calculate_light_level = game_logic.calculate_light_level
+    state_module = cast(
+        _StateModule,
+        reference("craftax_classic.envs.craftax_state"),
+    )
+    params = state_module.EnvParams()
     steps = torch.arange(0, 600, 7)
     expected = np.array(
         [float(calculate_light_level(int(step), params)) for step in steps],
     )
     assert np.allclose(daylight(steps).numpy(), expected, atol=1e-6)
+
+
+class _GameLogic(Protocol):
+    """Subset of the reference module used by the comparison test."""
+
+    calculate_light_level: Callable[[int, object], float]
+
+
+class _StateModule(Protocol):
+    """Subset of the reference state module used by the comparison test."""
+
+    EnvParams: Callable[[], object]
 
 
 if __name__ == "__main__":

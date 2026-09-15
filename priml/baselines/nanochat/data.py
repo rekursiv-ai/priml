@@ -17,7 +17,6 @@ from typing import (
 
 import contextlib
 import hashlib
-import json
 import logging
 import math
 import pickle
@@ -25,28 +24,28 @@ import queue
 import threading
 
 from configgle import Fig
+from numpy.lib.npyio import NpzFile
+from numpy.typing import NDArray
 from torch import Tensor
 
 import numpy as np
 import torch
 
-from priml.lib.custom_json import DictCodec, IntCodec, StrCodec
+from priml.lib.custom_json import DictCodec, IntCodec, StrCodec, loads
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
-    # Annotation-only: unpickling the encoding imports tiktoken itself.
-    import tiktoken
-
-
-if TYPE_CHECKING:
     from pyarrow import parquet
+
+    import tiktoken
 else:
     from wrapt import lazy_import
 
     parquet = lazy_import("pyarrow.parquet")
+    tiktoken = lazy_import("tiktoken")
 
 
 logger = logging.getLogger(__name__)
@@ -70,13 +69,6 @@ class NanoChatBatch(TypedDict):
     literal_bytes: NotRequired[int]
     evaluation_batch: NotRequired[int]
     evaluation_batches: NotRequired[int]
-
-
-class NanoChatState(TypedDict):
-    """Consumed training batches and persisted epoch timing."""
-
-    batches: int
-    timer_epoch: dict[str, int | float]
 
 
 class TokenEncoder(Protocol):
@@ -169,6 +161,12 @@ class NanoChatData:
                     self.prepared_eval_manifest,
                 )
             return super().finalize()
+
+    class StateDict(TypedDict):
+        """Consumed training batches and persisted epoch timing."""
+
+        batches: int
+        timer_epoch: CheckpointableStepTimer.StateDict
 
     def __init__(self, config: Config) -> None:
         if config.batch_size <= 0:
@@ -329,7 +327,7 @@ class NanoChatData:
             // (self.eval_batch_size * self.config.max_seq_len),
         )
 
-    def state_dict(self) -> NanoChatState:
+    def state_dict(self) -> StateDict:
         """Snapshot how far the training stream has advanced.
 
         Returns:
@@ -350,13 +348,10 @@ class NanoChatData:
           state_dict: Checkpoint containing the consumed batch count.
 
         Raises:
-          TypeError: The batch count is not an integer.
           ValueError: The checkpoint has consumed batches.
 
         """
-        served = state_dict.get("batches", 0)
-        if not isinstance(served, int):
-            raise TypeError("Checkpoint batches must be an integer.")
+        served = cast(NanoChatData.StateDict, state_dict)["batches"]
         if served:
             raise ValueError(
                 f"this checkpoint had served {served} batches, and the packed "
@@ -427,8 +422,9 @@ class Tokenizer:
                 "priml.baselines.nanochat.scripts.prepare_data`.",
             )
         with pickled.open("rb") as file:
-            encoding = pickle.load(file)  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
-        recipe = DictCodec.coerce(json.loads(recipe_path.read_text()), default=None)
+            encoding = cast(object, pickle.load(file))  # noqa: S301 -- The artifact is a trusted tokenizer file created by this pipeline.
+        assert isinstance(encoding, tiktoken.Encoding)
+        recipe = DictCodec.coerce(loads(recipe_path.read_text()), default=None)
         for field in ("bos_token", "token_bytes_sha256"):
             if field not in recipe:
                 raise ValueError(
@@ -436,7 +432,8 @@ class Tokenizer:
                     "current preparer, so what it holds cannot be established. "
                     "Re-prepare the vocabulary.",
                 )
-        raw = np.load(tokenizer_dir / "token_bytes.npy")
+        raw = cast(object, np.load(tokenizer_dir / "token_bytes.npy"))
+        assert isinstance(raw, np.ndarray)
         if raw.ndim != 1:
             raise ValueError(
                 f"{tokenizer_dir}/token_bytes.npy has shape {raw.shape}; it must "
@@ -463,7 +460,7 @@ class Tokenizer:
         # The metric's scoring mask is ``lengths > 0``, so a negative length
         # drops that token from BOTH sums -- a token silently excluded from the
         # score rather than a rejected table.
-        if int(raw.min(initial=0)) < 0:
+        if np.any(raw < 0):
             raise ValueError(
                 f"{tokenizer_dir} holds a negative byte length; the score's "
                 "denominator counts bytes, and a negative one would silently "
@@ -788,8 +785,8 @@ class PreparedTokenRows:
     def __init__(self, config: NanoChatData.Config) -> None:
         train_path = Path(config.prepared_train_manifest)
         eval_path = Path(config.prepared_eval_manifest)
-        train = _mapping(json.loads(train_path.read_text()))
-        evaluation = _mapping(json.loads(eval_path.read_text()))
+        train = _mapping(loads(train_path.read_text()))
+        evaluation = _mapping(loads(eval_path.read_text()))
         self.vocab_size = _integer(train["vocab_size"])
         self.bos_token_id = _integer(train["bos_id"])
         geometry = _mapping(train["train"])
@@ -848,8 +845,15 @@ class PreparedTokenRows:
         )
         if (
             np.any(self.token_bytes[: self.bos_token_id] <= 0)
-            or np.any(self.token_bytes[self.bos_token_id :] != 0)
-            or np.any((self.token_bytes > 0) != (literal > 0))
+            or np.any(
+                cast(NDArray[np.bool_], self.token_bytes[self.bos_token_id :] != 0)
+            )
+            or np.any(
+                cast(
+                    NDArray[np.bool_],
+                    (self.token_bytes > 0) != (literal > 0),
+                )
+            )
             or np.any(literal < 0)
         ):
             raise ValueError("Prepared byte tables disagree on the scoring mask.")
@@ -916,15 +920,18 @@ class ReferenceEvaluation:
         """Archive containing token rows, masks, and byte denominators."""
 
     def __init__(self, config: Config) -> None:
-        with np.load(config.path, allow_pickle=False) as archive:
+        loaded = cast(object, np.load(config.path, allow_pickle=False))
+        assert isinstance(loaded, NpzFile)
+        with loaded as archive:
             if str(archive["protocol"]) != "karpathy-reference-bytes-v1":
                 raise ValueError("Unsupported reference evaluation protocol.")
-            self.inputs = archive["inputs"]
-            self.targets = archive["targets"]
-            self.mask = archive["score_mask"]
-            self.token_bytes = archive["token_bytes"]
-            self.reference_bytes = archive["reference_bytes"]
-            self.literal_bytes = archive["literal_bytes"]
+            # The dtypes are claims about the archive; ``_validate`` checks each.
+            self.inputs = cast(NDArray[np.int64], archive["inputs"])
+            self.targets = cast(NDArray[np.int64], archive["targets"])
+            self.mask = cast(NDArray[np.bool_], archive["score_mask"])
+            self.token_bytes = cast(NDArray[np.int64], archive["token_bytes"])
+            self.reference_bytes = cast(NDArray[np.int64], archive["reference_bytes"])
+            self.literal_bytes = cast(NDArray[np.int64], archive["literal_bytes"])
             self.batch_size = int(archive["batch_size"])
             self.vocab_size = int(archive["vocab_size"])
             self.bos_token_id = int(archive["bos_token_id"])
@@ -996,7 +1003,8 @@ class ReferenceEvaluation:
 
 
 def _array(path: Path, *, shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
-    array = np.load(path, mmap_mode="r", allow_pickle=False)
+    array = cast(object, np.load(path, mmap_mode="r", allow_pickle=False))
+    assert isinstance(array, np.ndarray)
     if array.shape != shape or array.dtype != dtype or not array.flags.c_contiguous:
         raise ValueError(f"Prepared array geometry/dtype mismatch: {path}.")
     return array
@@ -1004,10 +1012,11 @@ def _array(path: Path, *, shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray
 
 def _byte_table(
     directory: Path, *, metadata: dict[str, object], vocab: int
-) -> np.ndarray:
+) -> NDArray[np.int64]:
     name = metadata["file"]
     assert isinstance(name, str)
-    array = np.load(directory / name, allow_pickle=False)
+    array = cast(object, np.load(directory / name, allow_pickle=False))
+    assert isinstance(array, np.ndarray)
     if array.shape != (vocab,) or not np.issubdtype(array.dtype, np.integer):
         raise ValueError("Prepared byte table must contain one integer per token.")
     return np.ascontiguousarray(array, dtype=np.int64)

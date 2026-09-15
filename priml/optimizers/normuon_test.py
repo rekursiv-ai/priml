@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 from torch import Tensor
 
@@ -142,8 +143,10 @@ def test_row_rescaling_redistributes_without_resizing() -> None:
         )
         optimizer.step()
         if skew:
-            state = optimizer.state[params[0]]
-            state["second_moment"][:, :8] *= 0.25
+            state = cast(dict[str, object], optimizer.state[params[0]])
+            second_moment = state["second_moment"]
+            assert isinstance(second_moment, Tensor)
+            second_moment[:, :8] *= 0.25
         assert params[0].grad is not None
         params[0].grad = torch.randn_like(params[0])
         optimizer.step()
@@ -202,7 +205,6 @@ def test_config_builds_a_constructor_awaiting_parameters() -> None:
     """A config tree has no parameters, so ``make`` cannot return an optimizer."""
     build = NorMuon.Config(lr=0.5, compile=False).make()
     optimizer = build(_parameters((4, 4)))
-    assert isinstance(optimizer, NorMuon)
     assert optimizer.param_groups[0]["lr"] == 0.5
 
 

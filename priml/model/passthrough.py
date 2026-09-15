@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Self, cast, overload, override
+from typing import ClassVar, Protocol, Self, cast, overload, override
 
 
 class PassthroughAttribute[T]:
@@ -52,24 +52,26 @@ class ReadPassthroughMixin:
     def _passthrough_target(self, attribute: str) -> object:
         """Get the passthrough target object by attribute name."""
         try:
-            return object.__getattribute__(self, attribute)
+            value: object = object.__getattribute__(self, attribute)  # pyright: ignore[reportAny] -- The object protocol returns Any for dynamic attribute access.
+            return value
         except AttributeError:
-            parent_getattr = getattr(super(), "__getattr__", None)
+            parent_getattr: object = getattr(super(), "__getattr__", None)
             if parent_getattr is None:
                 raise
-            return parent_getattr(attribute)
+            return cast(_GetAttr, parent_getattr)(attribute)
 
     def __getattr__(self, name: str) -> object:
         """Get an attribute, delegating to the passthrough target."""
-        parent_getattr = getattr(super(), "__getattr__", None)
+        parent_getattr: object = getattr(super(), "__getattr__", None)
         if parent_getattr is not None:
             try:
-                return parent_getattr(name)
+                return cast(_GetAttr, parent_getattr)(name)
             except AttributeError:
                 pass
         try:
             target = self._passthrough_target(self._passthrough)
-            return getattr(target, name)
+            value: object = getattr(target, name)  # pyright: ignore[reportAny] -- The delegated target attribute is intentionally dynamic.
+            return value
         except AttributeError:
             raise AttributeError(
                 f"{type(self).__name__!s} has no attribute {name!r}.",
@@ -94,3 +96,9 @@ class ReadWritePassthroughMixin(ReadPassthroughMixin):
         raise AttributeError(
             f"{type(self).__name__!s} passthrough targets have no attribute {name!r}.",
         )
+
+
+class _GetAttr(Protocol):
+    """The callable surface needed from a dynamic superclass lookup."""
+
+    def __call__(self, name: str) -> object: ...

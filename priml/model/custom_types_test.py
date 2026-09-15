@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast, override
+from typing import Final, override
 
 import ast
 
@@ -15,10 +15,8 @@ import torch
 
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
-    ChannelsHead,
     ChannelsIn,
     ChannelsOut,
-    NumHeads,
     flatten_depth_index,
     has_weight,
     propagate_attr,
@@ -80,8 +78,6 @@ def test_head_capabilities_are_direct_attributes() -> None:
 
     attention = Attention(num_heads=4, channels_head=32)
 
-    assert isinstance(attention, NumHeads)
-    assert isinstance(attention, ChannelsHead)
     assert attention.num_heads * attention.channels_head == 128
 
 
@@ -130,7 +126,6 @@ def test_propagate_non_participant_skipped():
 
 def test_propagate_norm_width_is_mutable_but_checked_at_construction():
     cfg = RMSNorm.Config(channels_in=32)
-    assert isinstance(cfg, ChannelsOut)
     propagate_attr(cfg, "channels_out", 999, protocol=ChannelsOut)
     assert cfg.channels_out == 999
     with pytest.raises(ValueError, match="channels_in=32 must equal channels_out=999"):
@@ -203,11 +198,15 @@ def test_channel_config_fields_are_uniform() -> None:
 class _FlattenDepthIndex(nn.Module):
     @override
     def forward(self, depth_indices: Tensor) -> Tensor:
-        nested = cast(list[list[list[int]]], depth_indices.tolist())
         return torch.tensor(
             [
-                flatten_depth_index(tuple((index, count) for index, count in levels))
-                for levels in nested
+                flatten_depth_index(
+                    tuple(
+                        (int(levels[i, 0].item()), int(levels[i, 1].item()))
+                        for i in range(levels.shape[0])
+                    ),
+                )
+                for levels in depth_indices
             ],
         )
 

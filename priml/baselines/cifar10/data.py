@@ -14,9 +14,9 @@ constructing a config never touches the network.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self, cast, override
+from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
 import logging
 
@@ -93,7 +93,7 @@ class Cifar10Data:
         self.timer_epoch = CheckpointableStepTimer()
         """Passes over the data; ticked by the loop when the loader runs out."""
         self._live: _BatchIterator | None = None
-        self._pending_loader_state: dict[str, Any] | None = None
+        self._pending_loader_state: _BatchIterator.StateDict | None = None
 
         device = get_device(config.device)
         directory = Path(config.working_dir)
@@ -143,11 +143,20 @@ class Cifar10Data:
             drop_last=False,
         )
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The live loader's cursor and the pass timer.
+
+        ``loader`` is None when no pass has started and none was pending.
+        """
+
+        loader: _BatchIterator.StateDict | None
+        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
+
+    def state_dict(self) -> StateDict:
         """Return the pass count and active permutation position.
 
         Returns:
-          result: Dict with loader state and timer_epoch checkpoint.
+          state: ``"loader"`` (nested loader state) and ``"timer_epoch"``.
 
         """
         loader_state = (
@@ -160,18 +169,18 @@ class Cifar10Data:
             "timer_epoch": self.timer_epoch.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the pass count and active permutation position.
 
         Args:
           state_dict: Checkpoint from state_dict() to restore training.
 
         """
-        if "timer_epoch" in state_dict:
-            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
-        loader_state_raw = state_dict.get("loader")
-        if isinstance(loader_state_raw, dict):
-            loader_state = cast(dict[str, Any], loader_state_raw)
+        state = cast(Cifar10Data.StateDict, state_dict)
+        if "timer_epoch" in state:
+            self.timer_epoch.load_state_dict(state["timer_epoch"])
+        loader_state = state.get("loader")
+        if loader_state is not None:
             self._pending_loader_state = loader_state
             if self._live is not None:
                 self._live.load_state_dict(loader_state)
@@ -285,11 +294,17 @@ class _BatchIterator:
             return count // self.batch_size
         return (count + self.batch_size - 1) // self.batch_size
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The active permutation (None between passes) and its next batch."""
+
+        order: Tensor | None
+        next_batch: int
+
+    def state_dict(self) -> StateDict:
         """Return the active permutation and next batch index.
 
         Returns:
-          result: The dict[str, Any].
+          state: The permutation, moved to CPU, and the next batch index.
 
         """
         return {
@@ -297,16 +312,17 @@ class _BatchIterator:
             "next_batch": self._next_batch,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the active permutation and next batch index.
 
         Args:
           state_dict: State dict.
 
         """
-        order = state_dict.get("order")
-        self._order = order.to(self.media.device) if isinstance(order, Tensor) else None
-        self._next_batch = int(state_dict.get("next_batch", 0))
+        state = cast(_BatchIterator.StateDict, state_dict)
+        order = state.get("order")
+        self._order = None if order is None else order.to(self.media.device)
+        self._next_batch = state.get("next_batch", 0)
 
 
 def _load_split(

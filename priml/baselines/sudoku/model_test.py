@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Final
+from typing import Final, Protocol, cast, runtime_checkable
 
 from torch import Tensor, nn
 
@@ -205,9 +205,20 @@ def test_recurrent_forward_bfb() -> None:
 
 def _logits(module: nn.Module, tokens: object) -> Tensor:
     """Run the model and return the logits the golden compares."""
-    out = module(tokens)
-    assert isinstance(out, ForwardOutput)
-    return out.logits
+    runner = cast(_CallableModule, module)
+    raw = runner(tokens)
+    assert isinstance(raw, ForwardOutput)
+    return raw.logits
+
+
+@runtime_checkable
+class _CallableModule(Protocol):
+    def __call__(self, tokens: object) -> object: ...
+
+
+@runtime_checkable
+class _AutogradNode(Protocol):
+    next_functions: tuple[tuple[_AutogradNode | None, int], ...]
 
 
 def _graph_size(slow_cycles: int) -> int:
@@ -220,17 +231,19 @@ def _graph_size(slow_cycles: int) -> int:
     loss = out.logits.square().mean()
     # Hold a reference to every node: ``next_functions`` yields fresh wrappers,
     # so a set of ids alone undercounts once one is collected.
-    keep: list[Any] = []
-    seen: set[Any] = set()
-    stack: list[Any] = [loss.grad_fn]
+    keep: list[_AutogradNode] = []
+    seen: set[_AutogradNode] = set()
+    initial = loss.grad_fn
+    assert isinstance(initial, _AutogradNode)
+    stack: list[_AutogradNode] = [initial]
     while stack:
         node = stack.pop()
-        if node is None or node in seen:
+        if node in seen:
             continue
         seen.add(node)
         keep.append(node)
         # Autograd nodes are untyped at the Python boundary.
-        stack.extend(nxt for nxt, _ in node.next_functions)
+        stack.extend(nxt for nxt, _ in node.next_functions if nxt is not None)
     return len(keep)
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Any, Final, override
+from typing import Final, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -26,7 +26,10 @@ from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.custom_types import HasAttention, TensorModule
+from priml.model.embedding import Embedding
 from priml.model.linear import Linear
+from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
 from priml.model.softcap import SoftCap
 from priml.model.special import Identity
@@ -198,12 +201,11 @@ def test_the_value_gate_starts_transparent() -> None:
     """
     model = _model(value_embedding_stride=1)
     for block in model.blocks:
-        assert torch.equal(
-            block.attn.value_gate.weight,
-            torch.zeros_like(
-                block.attn.value_gate.weight,
-            ),
-        )
+        assert isinstance(block, TransformerBlock)
+        assert isinstance(block.attn, ValueGatedAttention)
+        gate = block.attn.value_gate
+        assert isinstance(gate, Linear)
+        assert torch.equal(gate.weight, torch.zeros_like(gate.weight))
 
 
 def test_a_negative_stride_is_rejected() -> None:
@@ -238,7 +240,7 @@ def test_layers_disagreeing_on_head_shape_are_rejected() -> None:
     assert isinstance(template, ValueGatedAttention.Config)
     template.num_heads = 2
 
-    blocks: list[Any] = []
+    blocks: list[HasAttention] = []
     for num_heads in (2, 4):  # 2 * 8 = 16 inner, against 4 * 8 = 32.
         block = config.template.copy_tree()
         attention = block.attn
@@ -374,6 +376,8 @@ def test_the_token_table_is_drawn_at_unit_variance() -> None:
     attention.channels_head = 8
     attention.gate_channels = 4
     model = config.finalize().make()
+    assert isinstance(model.embed, NarrowEmbedding)
+    assert isinstance(model.embed.inner, Embedding)
     weight = model.embed.inner.weight.detach().float()
     # Loose enough for the draw, far tighter than the 0.707 the bug produced.
     assert abs(float(weight.std()) - 1.0) < 0.02
@@ -438,7 +442,7 @@ class ResetlessBlock(nn.Module):
     """A parameterless injected block with no reset capability."""
 
     class Config(Fig["ResetlessBlock"]):
-        attn: Makeable[nn.Module] = field(default_factory=SelfAttention.Config)
+        attn: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
         """Attention metadata consumed by the model config."""
 
     def __init__(self, config: Config) -> None:
@@ -506,19 +510,18 @@ def test_the_shipped_experiments_forward_bfb() -> None:
     away.
     """
 
-    def _model() -> Any:  # noqa: ANN401 -- forwards an upstream Any.
-        return experiments.exp_smoke().step.model
+    def _model() -> NanoChatLM.Config:
+        model = experiments.exp_smoke().step.model
+        assert isinstance(model, NanoChatLM.Config)
+        return model
 
     def build() -> nn.Module:
-        built = _model().make()
-        assert isinstance(built, NanoChatLM)
-        return built
+        return _model().make()
 
     def run(module: nn.Module, tokens: Tensor) -> Tensor:
+        assert isinstance(module, NanoChatLM)
         with torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16):
-            out = module(tokens)
-        assert isinstance(out, Tensor)
-        return out
+            return module(tokens)
 
     def build_input() -> Tensor:
         return torch.randint(0, _model().vocab_size, (2, _model().max_seq_len))
@@ -592,7 +595,9 @@ def test_memory_model_direct_fused_make_supports_forward_and_backward() -> None:
     config = _memory_config()
     config.fused_ngram = True
     model = config.make()
-    attention = model.blocks[0].attn
+    block = model.blocks[0]
+    assert isinstance(block, TransformerBlock)
+    attention = block.attn
     assert isinstance(attention, CausalAttention)
     with torch.no_grad():
         attention.proj_out.weight.normal_()
@@ -656,6 +661,7 @@ def test_source_reuse_transformer_reads_attention_from_the_saved_source() -> Non
     config.norm1 = Identity.Config()
     config.norm2 = Identity.Config()
     block = config.make()
+    assert isinstance(block.attn, Linear)
     with torch.no_grad():
         block.attn.weight.copy_(2 * torch.eye(4))
     current = torch.ones(1, 2, 4, requires_grad=True)
@@ -694,14 +700,15 @@ def test_output_norm_feed_forward_reset_initializes_affine_output_norm() -> None
     config.round_to = 1
     config.norm_out = RMSNorm.Config(elementwise_affine=True)
     ffn = config.make()
-    assert isinstance(ffn.norm_out, RMSNorm)
-    assert ffn.norm_out.weight is not None
+    norm_out = ffn.norm_out
+    assert isinstance(norm_out, RMSNorm)
+    assert norm_out.weight is not None
     with torch.no_grad():
-        ffn.norm_out.weight.fill_(float("nan"))
+        norm_out.weight.fill_(float("nan"))
 
     ffn.reset_parameters()
 
-    assert torch.equal(ffn.norm_out.weight, torch.ones(4))
+    assert torch.equal(norm_out.weight, torch.ones(4))
 
 
 if __name__ == "__main__":

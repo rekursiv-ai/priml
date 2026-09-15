@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from priml.custom_types import CheckpointableProtocol
 
@@ -34,7 +35,7 @@ class MetricProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def compute(self) -> dict[str, Any]:
+    def compute(self) -> Mapping[str, object]:
         """Compute final metric values.
 
         Returns:

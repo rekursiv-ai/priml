@@ -9,6 +9,7 @@ forward per *active* expert, not per registered expert.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import KW_ONLY, field
 from typing import Literal, Protocol, Self, cast, override, runtime_checkable
 
@@ -17,12 +18,15 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.lib.custom_json import ListCodec
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
+    Resettable,
     Shardable,
+    TensorModule,
     propagate_attr,
 )
 from priml.model.swiglu import SwiGLU
@@ -281,14 +285,14 @@ class MoE(nn.Module):
         """Token-to-expert assignment. Its ``num_experts`` is how many experts
         ``MoE`` builds from the ``expert`` template."""
 
-        expert: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
+        expert: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
         """Routed expert module config."""
 
         num_shared_experts: int = 0
         """Always-active experts summed onto every token's output.
         DSV3/Kimi-K2 use 1. 0 = no shared experts."""
 
-        shared_expert: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
+        shared_expert: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
         """Shared expert config (instantiated ``num_shared_experts`` times).
         Ignored when ``num_shared_experts=0``."""
 
@@ -339,12 +343,18 @@ class MoE(nn.Module):
         self.aux_loss_weight = config.aux_loss_weight
         self.depth_index = config.depth_index
         self.router = config.router.make()
-        self.experts = nn.ModuleList(
-            [config.expert.make() for _ in range(self.num_experts)],
-        )
-        self.shared_experts = nn.ModuleList(
-            [config.shared_expert.make() for _ in range(config.num_shared_experts)],
-        )
+        experts: list[nn.Module] = []
+        for _ in range(self.num_experts):
+            expert = config.expert.make()
+            assert isinstance(expert, nn.Module)
+            experts.append(expert)
+        self.experts = nn.ModuleList(experts)
+        shared_experts: list[nn.Module] = []
+        for _ in range(config.num_shared_experts):
+            expert = config.shared_expert.make()
+            assert isinstance(expert, nn.Module)
+            shared_experts.append(expert)
+        self.shared_experts = nn.ModuleList(shared_experts)
         # Buffer (not a plain attribute) so ``.to(device)`` tracks it;
         # non-persistent since it is recomputed every training forward and
         # carries no learned state. The trailing assignment is routed into
@@ -362,7 +372,7 @@ class MoE(nn.Module):
         self.router.reset_parameters()
         for group in (self.experts, self.shared_experts):
             for expert in group:
-                if hasattr(expert, "reset_parameters"):
+                if isinstance(expert, Resettable):
                     expert.reset_parameters()
 
     @override
@@ -387,8 +397,8 @@ class MoE(nn.Module):
             **kwargs,
         )
         for shared in self.shared_experts:
-            y = y + shared(x_flat, **kwargs)
-        assert isinstance(y, Tensor)
+            shared_out = cast(Tensor, shared(x_flat, **kwargs))
+            y = y + shared_out
         return y.reshape(*shape[:-1], self.channels_out)
 
     # Produces one expert forward per *active* expert (at most ``top_k * num_tokens``,
@@ -415,7 +425,12 @@ class MoE(nn.Module):
         sorted_tok = token_ix[order]
         sorted_w = flat_w[order]
 
-        active, counts = torch.unique_consecutive(sorted_expert, return_counts=True)
+        unique_consecutive = cast(
+            Callable[..., tuple[Tensor, Tensor]],
+            torch.unique_consecutive,
+        )
+        result = unique_consecutive(sorted_expert, return_counts=True)
+        active, counts = result
         offsets = torch.cumsum(counts, dim=0)
         starts = torch.cat([offsets.new_zeros(1), offsets[:-1]], dim=0)
 
@@ -430,11 +445,8 @@ class MoE(nn.Module):
             tok_slice = sorted_tok[start:end]
             w_slice = sorted_w[start:end].unsqueeze(-1)
             x_e = x_flat.index_select(0, tok_slice)
-            y.index_add_(
-                0,
-                tok_slice,
-                self.experts[expert_id](x_e, **kwargs) * w_slice,
-            )
+            expert_out = cast(Tensor, self.experts[expert_id](x_e, **kwargs))
+            y.index_add_(0, tok_slice, expert_out * w_slice)
         return y
 
     def _load_balance_loss(self, logits: Tensor, indices: Tensor) -> Tensor:
@@ -457,8 +469,6 @@ class MoE(nn.Module):
         return self.num_experts * (freq * mean_probs).sum() * self.aux_loss_weight
 
 
-# Central chokepoint for the upstream torch stubs, whose ``Tensor.tolist()`` return type
-# is ``list[Unknown]``.
 def _as_int_list(t: Tensor) -> list[int]:
     """Materialize a 1-D tensor as ``list[int]``."""
-    return cast(list[int], t.tolist())
+    return ListCodec.coerce(t.tolist(), int)

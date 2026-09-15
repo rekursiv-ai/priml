@@ -26,20 +26,21 @@ move with the input, which the train step never sees.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any, Self, cast, override
+from typing import NotRequired, Self, TypedDict, cast, override
 
 import functools
-import json
 import logging
 
 from configgle import Fig
+from numpy.typing import NDArray
 from torch import Tensor
 
 import numpy as np
 import torch
 
+from priml.lib.custom_json import DictCodec, IntCodec, loads
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
 from priml.paths import resolve_working_dir
@@ -48,6 +49,19 @@ from priml.timer import CheckpointableStepTimer
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SudokuSplit(TypedDict):
+    inputs: Tensor
+    labels: Tensor
+    group_indices: Tensor
+    vocab_size: int
+
+
+class _SudokuBatch(TypedDict):
+    media: Tensor
+    label: Tensor
+    valid_count: int
 
 
 def augment_sudoku(
@@ -141,7 +155,7 @@ class _SudokuBatches:
         self._active_epoch: int | None = None
         self._next_batch = 0
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
+    def __iter__(self) -> Iterator[_SudokuBatch]:
         """Yield every row once, shuffled within and across puzzles."""
         if self._active_epoch is None:
             self._active_epoch = self.epoch
@@ -200,11 +214,18 @@ class _SudokuBatches:
         """Batches per epoch, counting a short final batch."""
         return ceil_div(int(self.bounds[-1]), self.batch_size)
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Where an interrupted epoch stopped; ``active_epoch`` is None between epochs."""
+
+        epoch: int
+        active_epoch: int | None
+        next_batch: int
+
+    def state_dict(self) -> StateDict:
         """Return enough state to resume an unfinished epoch.
 
         Returns:
-          result: The dict[str, Any].
+          state: The epoch counter, the epoch mid-iteration, and its next batch.
 
         """
         return {
@@ -213,17 +234,17 @@ class _SudokuBatches:
             "next_batch": self._next_batch,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore an unfinished epoch.
 
         Args:
           state_dict: State dict.
 
         """
-        self.epoch = int(state_dict.get("epoch", self.epoch))
-        active_epoch = state_dict.get("active_epoch")
-        self._active_epoch = None if active_epoch is None else int(active_epoch)
-        self._next_batch = int(state_dict.get("next_batch", 0))
+        state = cast(_SudokuBatches.StateDict, state_dict)
+        self.epoch = state.get("epoch", self.epoch)
+        self._active_epoch = state.get("active_epoch")
+        self._next_batch = state.get("next_batch", 0)
 
     def _shuffle_generator(self, epoch: int) -> torch.Generator | None:
         """Return a named per-epoch generator, or the ambient stream."""
@@ -248,7 +269,7 @@ class _SudokuBatches:
         return generator
 
 
-def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
+def _load_split(dataset_dir: Path, split: str) -> _SudokuSplit:
     """Read one prepared split into tensors."""
     path = Path(dataset_dir).expanduser() / split
     metadata_path = path / "dataset.json"
@@ -258,11 +279,14 @@ def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
             "`uv --quiet run --frozen python -m "
             "priml.baselines.sudoku.scripts.prepare_data`.",
         )
-    metadata = json.loads(metadata_path.read_text())
+    metadata = DictCodec.coerce(loads(metadata_path.read_text()))
     logger.info("loading sudoku split %r from %s", split, path)
-    inputs = torch.from_numpy(np.load(path / "all__inputs.npy")).to(torch.int32)
-    labels = torch.from_numpy(np.load(path / "all__labels.npy")).to(torch.int32)
-    bounds = torch.from_numpy(np.load(path / "all__group_indices.npy")).long()
+    inputs_array = cast(NDArray[np.int64], np.load(path / "all__inputs.npy"))
+    labels_array = cast(NDArray[np.int64], np.load(path / "all__labels.npy"))
+    bounds_array = cast(NDArray[np.int64], np.load(path / "all__group_indices.npy"))
+    inputs = torch.from_numpy(inputs_array).to(torch.int32)
+    labels = torch.from_numpy(labels_array).to(torch.int32)
+    bounds = torch.from_numpy(bounds_array).long()
     logger.info(
         "sudoku %r: %d rows across %d puzzles",
         split,
@@ -273,7 +297,7 @@ def _load_split(dataset_dir: Path, split: str) -> dict[str, Any]:
         "inputs": inputs,
         "labels": labels,
         "group_indices": bounds,
-        "vocab_size": metadata["vocab_size"],
+        "vocab_size": IntCodec.coerce(metadata["vocab_size"]),
     }
 
 
@@ -376,7 +400,7 @@ class SudokuData:
         # the shuffle sequence instead of replaying epoch 0.
         self._epochs = 0
         self._live: _SudokuBatches | None = None
-        self._pending_loader_state: dict[str, Any] | None = None
+        self._pending_loader_state: _SudokuBatches.StateDict | None = None
 
     def train_dataloader(self) -> _SudokuBatches:
         """Build the re-iterable training stream.
@@ -431,7 +455,17 @@ class SudokuData:
             augment_seed=None,
         )
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The epoch counter, the live loader's cursor, and the pass timer.
+
+        ``loader`` is None when no epoch has started and none was pending.
+        """
+
+        epoch: int
+        loader: _SudokuBatches.StateDict | None
+        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
+
+    def state_dict(self) -> StateDict:
         """Snapshot the active epoch and its next batch.
 
         Returns:
@@ -450,7 +484,7 @@ class SudokuData:
             "timer_epoch": self.timer_epoch.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore state produced by :meth:`state_dict`.
 
         Args:
@@ -458,12 +492,11 @@ class SudokuData:
             the next batch position.
 
         """
-        if "timer_epoch" in state_dict:
-            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
-        self._epochs = int(state_dict.get("epoch", self.timer_epoch.global_count))
-        loader_state_raw = state_dict.get("loader")
-        if isinstance(loader_state_raw, dict):
-            loader_state = cast(dict[str, Any], loader_state_raw)
+        state = cast(SudokuData.StateDict, state_dict)
+        if "timer_epoch" in state:
+            self.timer_epoch.load_state_dict(state["timer_epoch"])
+        loader_state = state.get("loader")
+        if loader_state is not None:
             self._pending_loader_state = loader_state
             if self._live is not None:
                 self._live.load_state_dict(loader_state)

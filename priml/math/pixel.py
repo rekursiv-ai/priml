@@ -38,7 +38,7 @@ def rgb2float(
     ``unit_interval=True`` to `x.to(float).div(255)`.
 
     Args:
-      x: RGB values in [0, 255]. Anything ``convert_to_tensor`` accepts, but
+      x: RGB values in [0, 255]. objectthing ``convert_to_tensor`` accepts, but
         the RESULT must be floating point: a uint8 tensor -- what a decoder
         emits -- needs ``float_dtype``, since choosing a width for it is a
         memory-versus-precision call this function will not make silently.
@@ -132,7 +132,7 @@ def float2rgb(
     `x.mul(255).round().clamp(0, 255).to(uint8)`.
 
     Args:
-      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set. Anything
+      x: Floats in [-1, 1], or [0, 1] when ``unit_interval`` is set. objectthing
         ``convert_to_tensor`` accepts -- a list or array is materialized here,
         and the resulting private buffer is scaled in place whatever
         ``inplace`` says. Out-of-range values are clamped.

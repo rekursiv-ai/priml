@@ -359,11 +359,12 @@ def clip_meters(state: EnvState) -> EnvState:
         "armour",
         "potions",
     ):
-        setattr(
+        value = getattr(  # pyright: ignore[reportAny] -- Dynamic inventory selection returns Any.
             state.inventory,
             name,
-            getattr(state.inventory, name).clamp(max=99),
         )
+        assert isinstance(value, Tensor)
+        setattr(state.inventory, name, value.clamp(max=99))
     state.player_health = state.player_health.clamp(min=0).minimum(
         max_health(state).float(),
     )

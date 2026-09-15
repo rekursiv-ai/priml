@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from configgle.testing import assert_pprint_golden
+from torch import Tensor, nn
 
 import torch
 
@@ -55,12 +56,19 @@ def test_residual_mix_bfb() -> None:
             torch.randn(2, 3, 4),
         ),
         seed=0,
-        run=lambda module, inputs: module(
-            inputs[0],
-            original=inputs[1],
-            layer=1,
-            message=object(),
-        ),
+        run=_run_residual,
+    )
+
+
+def _run_residual(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
+    """Run the residual module for the golden harness."""
+    residual = module
+    assert isinstance(residual, ResidualMix)
+    return residual(
+        inputs[0],
+        original=inputs[1],
+        layer=1,
+        message=object(),
     )
 
 

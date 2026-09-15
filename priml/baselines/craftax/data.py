@@ -12,7 +12,15 @@ can score the policy that is actually training.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import (
+    TYPE_CHECKING,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    cast,
+    runtime_checkable,
+)
 
 from configgle import Fig
 
@@ -20,7 +28,7 @@ from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from torch import Tensor, nn
 
@@ -70,7 +78,7 @@ class _Cadence:
         self.count = count
         self.position = position
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
+    def __iter__(self) -> Iterator[dict[str, object]]:
         for index in range(self.position, self.count):
             self.position = index + 1
             yield {"valid_count": 1}
@@ -143,7 +151,7 @@ class CraftaxRollouts:
         self._live_train = stream
         return stream
 
-    def eval_dataloader(self) -> Iterator[dict[str, Any]]:
+    def eval_dataloader(self) -> Iterator[dict[str, object]]:
         """Yield evaluation ticks carrying one isolated stateful actor.
 
         Returns:
@@ -152,14 +160,20 @@ class CraftaxRollouts:
         """
         if not isinstance(self._step, _SupportsEvaluationActor):
             raise TypeError("Evaluation requires a bound training step with an actor.")
-        batch: dict[str, Any] = {
+        batch: dict[str, object] = {
             "valid_count": 1,
             "metric_only": True,
             "actor": self._step.make_evaluation_actor(),
         }
         return iter([dict(batch) for _ in range(self.config.eval_batches)])
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed cadence: the cursor and the pass count."""
+
+        train_position: int
+        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
+
+    def state_dict(self) -> StateDict:
         """Return the pass count and active cadence position.
 
         Returns:
@@ -176,16 +190,17 @@ class CraftaxRollouts:
             "timer_epoch": self.timer_epoch.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the pass count and active cadence position.
 
         Args:
           state_dict: Dict from a prior state_dict call for resuming.
 
         """
-        if "timer_epoch" in state_dict:
-            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
-        position = int(state_dict.get("train_position", 0))
+        state = cast(CraftaxRollouts.StateDict, state_dict)
+        if "timer_epoch" in state:
+            self.timer_epoch.load_state_dict(state["timer_epoch"])
+        position = state.get("train_position", 0)
         self._pending_train_position = position
         if self._live_train is not None:
             self._live_train.position = position

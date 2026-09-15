@@ -155,9 +155,13 @@ _CASES = (
 
 
 def _snapshot(step: CraftaxStep, fields: tuple[str, ...]) -> dict[str, object]:
+    field_values: dict[str, object] = {}
+    for name in fields:
+        value: object = getattr(step, name)  # pyright: ignore[reportAny] -- fields are recorded as opaque state.
+        field_values[name] = copy.deepcopy(value)
     return {
         "state_dict": copy.deepcopy(step.state_dict()),
-        "fields": {name: copy.deepcopy(getattr(step, name)) for name in fields},
+        "fields": field_values,
         "training": step.model.training,
     }
 
@@ -189,7 +193,7 @@ def _seed_finished_banks(step: CraftaxStep) -> None:
     step._finished_lengths.append(456)
 
 
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("case", _CASES, ids=[case.name for case in _CASES])
 def test_eval_loss_preserves_complete_training_lifecycle(case: _Case) -> None:
     step = case.build()
     step.train_step()
@@ -202,7 +206,7 @@ def test_eval_loss_preserves_complete_training_lifecycle(case: _Case) -> None:
     _assert_tree_equal(before, _snapshot(step, case.fields))
 
 
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.name)
+@pytest.mark.parametrize("case", _CASES, ids=[case.name for case in _CASES])
 def test_checkpoint_round_trips_complete_training_lifecycle(case: _Case) -> None:
     step = case.build()
     step.train_step()

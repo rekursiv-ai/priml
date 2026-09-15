@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from importlib.util import find_spec
+from typing import TYPE_CHECKING, Protocol, cast
 
 import math
 
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 from torch import Tensor
 from wrapt import lazy_import
 
@@ -41,13 +45,25 @@ from priml.math.probability import (
 from priml.memory import convert_to_tensor
 
 
+class _ScipySpecial(Protocol):
+    def ndtr(self, x: NDArray[np.float64]) -> NDArray[np.float64]: ...
+
+    def ndtri(self, x: NDArray[np.float64]) -> NDArray[np.float64]: ...
+
+    def gammaln(self, x: NDArray[np.float64]) -> NDArray[np.float64]: ...
+
+    def betaln(
+        self, x: NDArray[np.float64], y: NDArray[np.float64]
+    ) -> NDArray[np.float64]: ...
+
+
 # ``scipy`` is the reference oracle for the special-function parity tests only; it
 # is an optional test dependency. The lazy proxy defers the real import to
 # first attribute access, which only happens inside a parity test body -- and
 # those are skipped (not errored) when scipy is absent.
 _HAS_SCIPY = find_spec("scipy") is not None
 requires_scipy = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
-scipy_special = lazy_import("scipy.special")
+scipy_special = cast(_ScipySpecial, lazy_import("scipy.special"))
 
 
 def test_ndtr():

@@ -5,7 +5,7 @@ Bundles TrainStep + dataset + metrics + training loop orchestration.
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable, Iterator, Sized
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sized
 from dataclasses import field
 from pathlib import Path
 from typing import (
@@ -13,7 +13,9 @@ from typing import (
     Any,
     Generic,
     Literal,
+    NotRequired,
     Protocol,
+    TypedDict,
     cast,
     override,
     runtime_checkable,
@@ -37,13 +39,17 @@ import torch.distributed
 
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
+from priml.lib.custom_json import IntCodec
 
 
 if TYPE_CHECKING:
     from typing import Self
 
-from priml.custom_types import HasNormalizedWorkingDirPattern
+from priml.custom_types import (
+    HasNormalizedWorkingDirPattern,
+)
 from priml.math.seed import (
+    RngState,
     get_rng_state,
     salt,
     set_rng_state,
@@ -63,6 +69,7 @@ from priml.timer import CheckpointableStepTimer
 from priml.train.checkpointing import Checkpointer
 from priml.train.custom_types import (
     CheckpointingProtocol,
+    CudaEventProtocol,
     PhaseTimerProtocol,
     ProfileProtocol,
     TrackerProtocol,
@@ -76,20 +83,22 @@ from priml.train.train_step import TrainStep
 logger = logging.getLogger(__name__)
 
 
-# Defaults are ``Any`` so a bare, unparameterized ``TrainLoop.Config`` accepts
-# any specialization -- existing call sites that don't care about the concrete
-# step/dataset types keep working unchanged. Code that wants the concrete fields
-# (no ``isinstance`` narrow) parameterizes explicitly,
+# Defaults are the bounds so a bare, unparameterized ``TrainLoop.Config``
+# accepts any specialization -- existing call sites that don't care about the
+# concrete step/dataset types keep working unchanged. Code that wants the
+# concrete fields (no ``isinstance`` narrow) parameterizes explicitly,
 # e.g. ``TrainLoop.Config[TRMTrainStep.Config, PuzzleDataset.Config]``.
-_StepConfigT = TypeVar(
-    "_StepConfigT",
+_StepConfigT_co = TypeVar(
+    "_StepConfigT_co",
     bound=Makeable[TrainStepProtocol],
-    default=Any,
+    default=Makeable[TrainStepProtocol],
+    covariant=True,
 )
-_DatasetConfigT = TypeVar(
-    "_DatasetConfigT",
+_DatasetConfigT_co = TypeVar(
+    "_DatasetConfigT_co",
     bound=Makeable[DatasetProtocol],
-    default=Any,
+    default=Makeable[DatasetProtocol],
+    covariant=True,
 )
 
 
@@ -125,7 +134,7 @@ class TrainLoop:
 
     """
 
-    class Config(Fig["TrainLoop"], Generic[_StepConfigT, _DatasetConfigT]):
+    class Config(Fig["TrainLoop"], Generic[_StepConfigT_co, _DatasetConfigT_co]):
         """TrainLoop configuration.
 
         Generic over the ``step`` and ``dataset`` config types. Both parameters
@@ -161,13 +170,13 @@ class TrainLoop:
         when a tracker is configured and the experiment left tracker notes
         empty. Set it directly to override the docstring."""
 
-        step: _StepConfigT = field(
-            default_factory=lambda: cast(_StepConfigT, TrainStep.Config()),
+        step: _StepConfigT_co = field(
+            default_factory=lambda: cast(_StepConfigT_co, TrainStep.Config()),
         )
         """What one optimizer update does: model, loss, optimizer, schedule."""
 
-        dataset: _DatasetConfigT = field(
-            default_factory=lambda: cast(_DatasetConfigT, DummyDataset.Config()),
+        dataset: _DatasetConfigT_co = field(
+            default_factory=lambda: cast(_DatasetConfigT_co, DummyDataset.Config()),
         )
         """Supplies the train and eval loaders, and owns the epoch count."""
 
@@ -439,7 +448,8 @@ class TrainLoop:
             self.phase_timer = config.phase_timer.make()
             with self.phase_timer.phase("model_init"):
                 self.step = config.step.make()
-            cast(_HasTimer, self.step).timer = self.phase_timer
+            if isinstance(self.step, _HasTimer):
+                self.step.timer = self.phase_timer
             self.metrics = {name: cfg.make() for name, cfg in config.metrics.items()}
 
             if mesh:
@@ -453,11 +463,7 @@ class TrainLoop:
                     ),
                 )
             with self.phase_timer.phase("data_load"):
-                # Declared, not merely assigned: the config slot is a TypeVar
-                # defaulting to ``Any``, so ``make()`` returns ``Any`` and every
-                # read below -- the epoch timer, the loaders -- would be
-                # unchecked without this.
-                self.dataset: DatasetProtocol = config.dataset.make()
+                self.dataset = config.dataset.make()
             _bind_dataset_step(self.dataset, self.step)
             # One timer, two holders: only the loader knows when the data ran
             # out, so it owns the count and checkpoints it, while a step
@@ -574,8 +580,8 @@ class TrainLoop:
             # accumulation cannot score the same weights repeatedly.
             self._last_eval_step = self.step.global_step
 
-            self.train_loader: Iterable[Any] | None = None
-            self.train_iter: Iterator[Any] | None = None
+            self.train_loader: Iterable[dict[str, object]] | None = None
+            self.train_iter: Iterator[dict[str, object]] | None = None
             self._time_limit_latched = False
             logger.info(
                 "TrainLoop startup: warm eval compile begin "
@@ -793,8 +799,11 @@ class TrainLoop:
     # train clock.
     def _billed_train_sec(self) -> float:
         """Seconds the recipe's own schedule charged against its budget."""
-        billed = getattr(self.step, "elapsed_sec", None)
-        return self._pure_train_sec() if billed is None else float(billed)
+        billed: object = getattr(self.step, "elapsed_sec", None)
+        if billed is None:
+            return self._pure_train_sec()
+        assert isinstance(billed, (int, float))
+        return float(billed)
 
     # The four terms sum to ``elapsed`` by construction, which is the point: a lever
     # that moves training out of the charged bucket -- a longer warmup exclusion, work
@@ -868,7 +877,7 @@ class TrainLoop:
     # payload forwarding. Each child tracker keeps only the keys it understands.
     def _publish_eval_metrics(
         self,
-        eval_metrics: dict[str, Any],
+        eval_metrics: dict[str, object],
         *,
         eval_time: float,
         step: int,
@@ -877,7 +886,7 @@ class TrainLoop:
         """Publish eval metrics to the tracker; final-ness is expressed as data."""
         eval_scalar_metrics = scalar_metrics(eval_metrics)
         if self.tracker:
-            payload: dict[str, Any] = (
+            payload: dict[str, object] = (
                 dict(eval_metrics)
                 if is_final or self.eval_extras_every_eval
                 else dict(eval_scalar_metrics)
@@ -898,12 +907,12 @@ class TrainLoop:
         step: int,
         *,
         is_final: bool,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         """Extra ``eval/``-prefixed keys to merge into the eval payload."""
         del eval_scalar_metrics, step, is_final
         return {}
 
-    def _get_next_batch(self) -> dict[str, Any]:
+    def _get_next_batch(self) -> dict[str, object]:
         """Get next batch, handle epoch boundary and eval at end of epoch."""
         batch_start = time.perf_counter()
         if self.train_loader is None:
@@ -911,13 +920,17 @@ class TrainLoop:
                 "TrainLoop step %d: creating train dataloader.",
                 self.step.global_step + 1,
             )
-            self.train_loader = self.dataset.train_dataloader()
+            self.train_loader = cast(
+                Iterable[dict[str, object]],
+                self.dataset.train_dataloader(),
+            )
         if self.train_iter is None:
             logger.info(
                 "TrainLoop step %d: creating train iterator for epoch %d.",
                 self.step.global_step + 1,
                 self.current_epoch,
             )
+            assert self.train_loader is not None
             _set_loader_epoch(self.train_loader, self.current_epoch)
             self.train_iter = iter(self.train_loader)
         for _ in range(2):
@@ -931,7 +944,9 @@ class TrainLoop:
                     "TrainLoop step %d: fetching raw train batch.",
                     self.step.global_step + 1,
                 )
-                batch = next(self.train_iter)
+                assert self.train_iter is not None
+                raw_batch = next(self.train_iter)
+                batch = {str(key): value for key, value in raw_batch.items()}
                 batch_time = time.perf_counter() - batch_start
                 logger.debug(
                     "TrainLoop step %d: raw train batch ready (batch_time=%.3fs).",
@@ -970,6 +985,7 @@ class TrainLoop:
                     self.current_epoch,
                 )
                 _set_loader_epoch(self.train_loader, self.current_epoch)
+                assert self.train_loader is not None
                 self.train_iter = iter(self.train_loader)
         raise RuntimeError("Failed to get next batch after epoch reset")
 
@@ -988,7 +1004,7 @@ class TrainLoop:
         """Record each train step's wall-clock duration."""
         del step_time, is_first
 
-    def _do_train_step(self, batch: dict[str, Any]) -> None:
+    def _do_train_step(self, batch: dict[str, object]) -> None:
         """Execute one training step with profiling and logging."""
         if self.profiling:
             self.profiling.on_step_start(self.step.global_step)
@@ -1224,7 +1240,10 @@ class TrainLoop:
                 self.eval_warmup_batches,
             )
             batch_start = time.perf_counter()
-            batch = self.step.preprocess_batch(raw_batch)
+            raw_batch = cast(dict[str, object], raw_batch)
+            batch = self.step.preprocess_batch(
+                {str(key): value for key, value in raw_batch.items()},
+            )
             if batch.get("metric_only", False):
                 logger.info(
                     "Warm eval compile: batch %d/%d is metric-only; skipping.",
@@ -1248,7 +1267,7 @@ class TrainLoop:
                 time.perf_counter() - eval_start,
             )
 
-    def _cuda_event_pair(self) -> tuple[Any, Any] | None:
+    def _cuda_event_pair(self) -> tuple[CudaEventProtocol, CudaEventProtocol] | None:
         """Start a CUDA event pair when event timing is enabled."""
         if (
             not getattr(self.phase_timer, "cuda_events_enabled", False)
@@ -1258,12 +1277,12 @@ class TrainLoop:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        return start, end
+        return cast(CudaEventProtocol, start), cast(CudaEventProtocol, end)
 
     def _record_cuda_timing(
         self,
         name: str,
-        events: tuple[Any, Any] | None,
+        events: tuple[CudaEventProtocol, CudaEventProtocol] | None,
     ) -> None:
         """End and enqueue a CUDA event pair when event timing is enabled."""
         if events is None:
@@ -1272,7 +1291,7 @@ class TrainLoop:
         end.record()
         self.phase_timer.record_cuda_events(name, *events)
 
-    def eval(self) -> dict[str, Any]:
+    def eval(self) -> dict[str, object]:
         """Run validation.
 
         Returns:
@@ -1312,15 +1331,18 @@ class TrainLoop:
                     f"({elapsed_eval:.0f}s > {self.max_eval_time:.0f}s) after "
                     f"{num_batches} batches; reduce eval cost.",
                 )
-            batch = self.step.preprocess_batch(raw_batch)
-            weight = int(batch.get("valid_count", 1))
+            raw_batch = cast(dict[str, object], raw_batch)
+            batch = self.step.preprocess_batch(
+                {str(key): value for key, value in raw_batch.items()},
+            )
+            weight = IntCodec.coerce(batch.get("valid_count", 1))
             if weight == 0:
                 batch_start = time.perf_counter()
                 continue
             metric_only = bool(batch.pop("metric_only", False))
             extra_votes = None
             if metric_only:
-                model_output: Any = torch.empty(0)
+                model_output: object = torch.empty(0)
             else:
                 # Phase heartbeat (all ranks): names the exact phase + batch this rank
                 # is in, so a distributed eval stall reports WHERE each rank is stuck
@@ -1390,7 +1412,7 @@ class TrainLoop:
             batch_start = time.perf_counter()
 
         # Collect results with metric name prefix.
-        results: dict[str, Any] = {}
+        results: dict[str, object] = {}
 
         # Only add eval total_loss if we processed any batches.
         if total_weight > 0:
@@ -1402,6 +1424,7 @@ class TrainLoop:
         for name, metric in self.metrics.items():
             cuda_events = self._cuda_event_pair()
             metric_results = metric.compute()
+            assert isinstance(metric_results, dict)
             self._record_cuda_timing(f"eval_metric_{name}_compute", cuda_events)
             for key, value in metric_results.items():
                 results[f"{name}_{key}" if name else key] = value
@@ -1418,14 +1441,22 @@ class TrainLoop:
         del args
         self.train()
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed loop state: each owner's payload under its own key."""
+
+        step: Mapping[str, Any]  # pyright: ignore[reportExplicitAny] -- The step's own schema (TrainStep.StateDict or a subclass's).
+        dataset: Mapping[str, Any]  # pyright: ignore[reportExplicitAny] -- DatasetProtocol implementations each own their schema.
+        metrics: dict[str, Mapping[str, Any]]  # pyright: ignore[reportExplicitAny] -- MetricProtocol implementations each own their schema.
+        rng: NotRequired[RngState]
+
+    def state_dict(self) -> StateDict:
         """Get training state for checkpointing.
 
         Returns:
           state: All model, dataset, and RNG state for resume.
 
         """
-        state: dict[str, Any] = {
+        return {
             "step": self.step.state_dict(),
             "dataset": self.dataset.state_dict(),
             "metrics": {
@@ -1433,26 +1464,25 @@ class TrainLoop:
             },
             "rng": get_rng_state(),
         }
-        return state
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load training state from checkpoint (full restore for resume).
 
         Args:
-          state_dict: State from a prior state_dict() call.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.step.load_state_dict(state_dict["step"])
-        self.dataset.load_state_dict(state_dict["dataset"])
-        for name, metric_state in state_dict["metrics"].items():
+        state = cast(TrainLoop.StateDict, state_dict)
+        self.step.load_state_dict(state["step"])
+        self.dataset.load_state_dict(state["dataset"])
+        for name, metric_state in state["metrics"].items():
             if name in self.metrics:
                 self.metrics[name].load_state_dict(metric_state)
         # No epoch to restore here: it rode the dataset's own state above.
         self.local_step = 0
 
-        # Restore RNG states.
-        if self.restore_rng_state and "rng" in state_dict:
-            set_rng_state(state_dict["rng"])
+        if self.restore_rng_state and "rng" in state:
+            set_rng_state(state["rng"])
 
 
 @runtime_checkable
@@ -1466,8 +1496,11 @@ class _DeclaresDevice(Protocol):
     device: torch.device | str | None
 
 
+@runtime_checkable
 class _HasTimer(Protocol):
-    timer: PhaseTimerProtocol
+    """A step that declares a slot for the loop's phase timer."""
+
+    timer: PhaseTimerProtocol | None
 
 
 @runtime_checkable

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from configgle import PartialConfig
 from torch import Tensor, nn
 
@@ -34,7 +36,8 @@ def split_optimizer(model: nn.Module) -> CompositeOptimizer:
 
 def backward(model: nn.Module) -> None:
     """Populate gradients on every parameter."""
-    model(torch.randn(8, 3, 8, 8)).sum().backward()
+    output = cast(Tensor, model(torch.randn(8, 3, 8, 8)))
+    output.sum().backward()
 
 
 def test_is_an_optimizer() -> None:
@@ -45,7 +48,10 @@ def test_is_an_optimizer() -> None:
 def test_exposes_every_members_parameter_groups() -> None:
     model = split_model()
     optimizer = split_optimizer(model)
-    owned = [id(p) for group in optimizer.param_groups for p in group["params"]]
+    owned: list[int] = []
+    for group in optimizer.param_groups:
+        params = cast(list[Tensor], group["params"])
+        owned.extend(id(parameter) for parameter in params)
     assert sorted(owned) == sorted(id(p) for p in model.parameters())
 
 
@@ -217,7 +223,6 @@ def test_config_builds_over_the_models_parameters() -> None:
     config = CompositeOptimizer.Config()
     config.optimizers = [Muon.Config()]
     optimizer = config.make()(model)
-    assert isinstance(optimizer, CompositeOptimizer)
     assert isinstance(optimizer.optimizers[0], Muon)
 
 
@@ -234,9 +239,12 @@ def test_config_routes_each_member_to_its_own_selector() -> None:
     config.optimizers = [PartialConfig(torch.optim.SGD, lr=0.1), Muon.Config()]
     config.select = [complement(on_muon), on_muon]
     optimizer = config.make()(model)
-    matrix = optimizer.optimizers[1].param_groups[0]["params"]
+    matrix = cast(list[Tensor], optimizer.optimizers[1].param_groups[0]["params"])
     assert [p.ndim for p in matrix] == [4]
-    owned = [id(p) for group in optimizer.param_groups for p in group["params"]]
+    owned: list[int] = []
+    for group in optimizer.param_groups:
+        params = cast(list[Tensor], group["params"])
+        owned.extend(id(parameter) for parameter in params)
     assert sorted(owned) == sorted(id(p) for p in model.parameters())
 
 

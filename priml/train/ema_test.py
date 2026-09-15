@@ -100,6 +100,7 @@ def test_ema_respects_update_after_step() -> None:
 def test_ema_copies_buffers_when_track_buffers_true() -> None:
     """Default ``track_buffers=True`` copies buffers verbatim (no lerp)."""
     model = nn.BatchNorm1d(2)
+    assert model.running_mean is not None
     with torch.no_grad():
         model.weight.fill_(2.0)
         model.running_mean.fill_(0.5)
@@ -107,6 +108,8 @@ def test_ema_copies_buffers_when_track_buffers_true() -> None:
     ema(model)
     ema(model)
     assert ema.shadow_model is not None
+    assert isinstance(ema.shadow_model, nn.BatchNorm1d)
+    assert ema.shadow_model.running_mean is not None
     torch.testing.assert_close(
         ema.shadow_model.running_mean,
         torch.full_like(model.running_mean, 0.5),
@@ -123,10 +126,12 @@ def test_ema_track_buffers_false_skips_buffers() -> None:
     confirming the shadow does NOT follow.
     """
     model = nn.BatchNorm1d(2)
+    assert model.running_mean is not None
     ema = EMA.Config(decay=0.5, track_buffers=False).make()
     ema(model)  # lazy-init shadow.
     assert ema.shadow_model is not None
     shadow_bn = cast(nn.BatchNorm1d, ema.shadow_model)
+    assert shadow_bn.running_mean is not None
     snapshot = shadow_bn.running_mean.detach().clone()
 
     with torch.no_grad():
@@ -158,6 +163,7 @@ def test_ema_apply_to_swaps_params_and_restores() -> None:
 def test_ema_apply_to_does_not_swap_buffers() -> None:
     """``apply_to`` must leave buffers at live-model values."""
     model = nn.BatchNorm1d(2)
+    assert model.running_mean is not None
     with torch.no_grad():
         model.running_mean.fill_(0.5)
     ema = EMA.Config(decay=0.0).make()
@@ -166,6 +172,7 @@ def test_ema_apply_to_does_not_swap_buffers() -> None:
         model.running_mean.fill_(9.0)
     with ema.apply_to(model):
         # Inside: buffer must still be the live value, not shadowed.
+        assert model.running_mean is not None
         torch.testing.assert_close(
             model.running_mean,
             torch.full_like(model.running_mean, 9.0),
@@ -213,18 +220,15 @@ def test_ema_param_filter_excludes_matching_params() -> None:
     ema.set_param_filter(exclude_layer_1)
     ema(model)
     # Mutate the excluded layer's weights; EMA should not track.
-    layer_1_live = cast(nn.Linear, model[1])
+    layer_1_live = model[1]
     with torch.no_grad():
         layer_1_live.weight.fill_(9.0)
     ema(model)
     # Shadow's layer-1 weight stays at its initial value (whatever init was).
     # Concretely: shadow_model[1].weight must NOT equal 9.0.
     assert ema.shadow_model is not None
-    layer_1_shadow = cast(
-        nn.Linear,
-        cast(nn.Sequential, ema.shadow_model)[1],
-    )
-    diff = (layer_1_shadow.weight - layer_1_live.weight).abs().max().item()
+    shadow_weight = dict(ema.shadow_model.named_parameters())["1.weight"]
+    diff = (shadow_weight - layer_1_live.weight).abs().max().item()
     assert diff > 0.0, "param_filter did not exclude layer 1"
 
 
@@ -240,12 +244,12 @@ def test_ema_state_dict_returns_independent_tensors() -> None:
     # an independent clone of the live shadow_model's parameter storage.
     assert ema.shadow_model is not None
     live_state = ema.shadow_model.state_dict()
+    assert "shadow_model" in state
     for name, value in state["shadow_model"].items():
         live = live_state[name]
-        if torch.is_tensor(value) and torch.is_tensor(live):
-            assert value.data_ptr() != live.data_ptr(), (
-                f"state_dict()[shadow_model][{name}] aliases live shadow"
-            )
+        assert value.data_ptr() != live.data_ptr(), (
+            f"state_dict()[shadow_model][{name}] aliases live shadow"
+        )
 
 
 def test_ema_two_instances_loaded_from_one_state_are_independent() -> None:
@@ -266,8 +270,6 @@ def test_ema_two_instances_loaded_from_one_state_are_independent() -> None:
     a_state = a.shadow_model.state_dict()
     b_state = b.shadow_model.state_dict()
     for name in a_state:
-        if not torch.is_tensor(a_state[name]):
-            continue
         assert a_state[name].data_ptr() != b_state[name].data_ptr(), (
             f"a.shadow_model[{name}] aliases b.shadow_model[{name}]"
         )
@@ -278,7 +280,6 @@ def test_ema_two_instances_loaded_from_one_state_are_independent() -> None:
 
 def test_ema_config_make() -> None:
     ema = EMA.Config(decay=0.25).make()
-    assert isinstance(ema, EMA)
     assert ema.decay == 0.25
 
 
@@ -300,6 +301,7 @@ def test_ema_state_dict_preserves_metadata() -> None:
     ema(model)  # Lazy init shadow.
 
     state = ema.state_dict()
+    assert "shadow_model" in state
     shadow_sd = state["shadow_model"]
 
     # nn.Module.state_dict attaches _metadata used by load_state_dict
@@ -569,7 +571,7 @@ def test_ema_karras_resume_continues_the_ramp() -> None:
     restarts the ramp and diverges the shadow.
     """
 
-    def advance(ema: EMA, model: nn.Module, values: list[float]) -> None:
+    def advance(ema: EMA, model: nn.Linear, values: list[float]) -> None:
         for value in values:
             with torch.no_grad():
                 model.weight.fill_(value)

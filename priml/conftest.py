@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Mapping
 from contextlib import ExitStack
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 import os
 import random
@@ -30,6 +30,27 @@ from priml.lib.testing.userdirs_fixture import (
 
 if TYPE_CHECKING:
     from priml.distributed.testing import WarmPoolGetter
+
+
+class _BitGenerator(Protocol):
+    state: object
+
+
+class _NumpyRandom(Protocol):
+    def seed(self, value: int) -> None: ...
+    def PCG64(self, value: int) -> _BitGenerator: ...  # noqa: N802 -- NumPy exposes this generator with its public name.
+
+
+class _NumpyModule(Protocol):
+    random: _NumpyRandom
+
+
+class _NumpyGenerator(Protocol):
+    bit_generator: _BitGenerator
+
+
+class _TorchModule(Protocol):
+    def manual_seed(self, value: int) -> object: ...
 
 
 # Re-exported, not merely imported: an autouse fixture reaches only the
@@ -127,15 +148,16 @@ def seed_rng() -> None:
     ``sys.modules`` rather than importing keeps that true.
     """
     random.seed(1337)
-    numpy = sys.modules.get("numpy")
+    numpy = cast(_NumpyModule | None, sys.modules.get("numpy"))
     if numpy is not None:
         numpy.random.seed(1337)
         # ``priml.math.seed.numpy_rng`` is the house Generator; it is a
         # separate stream from the legacy module RNG seeded above.
         seed = sys.modules.get("priml.math.seed")
         if seed is not None:
-            seed.numpy_rng.bit_generator.state = numpy.random.PCG64(1337).state
-    torch = sys.modules.get("torch")
+            rng = cast(_NumpyGenerator, seed.numpy_rng)
+            rng.bit_generator.state = numpy.random.PCG64(1337).state
+    torch = cast(_TorchModule | None, sys.modules.get("torch"))
     if torch is not None:
         # Seeds CPU and every visible CUDA device (through its lazy-init
         # path when no context exists yet), as ``set_seed_local`` does.

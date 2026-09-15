@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast, override
+from typing import TYPE_CHECKING, TypedDict, cast, override
 
 import functools
 import json
@@ -31,6 +31,7 @@ from configgle import Fig, Makeable, PartialConfig
 from priml.custom_types import CheckpointableProtocol
 from priml.data.custom_types import DatasetProtocol
 from priml.data.dummy import DummyDataset
+from priml.lib.custom_json import ListCodec
 from priml.loss.custom_types import LossOutput
 from priml.math.seed import RngState, get_rng_state
 from priml.metrics.binary_accuracy import BinaryAccuracy
@@ -45,6 +46,7 @@ from priml.train.tracker import FileTracker
 from priml.train.train_loop import (
     EvalTimeLimitError,
     TrainLoop,
+    _HasTimer,
     _set_loader_epoch,
 )
 from priml.train.train_step import TrainStep
@@ -108,16 +110,10 @@ class _RuntimeAwareModel(nn.Module):
     def forward(
         self,
         media: Tensor,
-        **_kwargs: Any,
+        **_kwargs: object,
     ) -> Tensor:
         """Forward pass."""
         return self.linear(media)
-
-
-class _HasTimer(Protocol):
-    """Minimal timer attribute protocol for test narrowing."""
-
-    timer: PhaseTimer
 
 
 class _WarmupDataset:
@@ -141,11 +137,14 @@ class _WarmupDataset:
             {"media": torch.tensor([[2.0]]), "label": torch.tensor([0])},
         ]
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Stateless."""
+
+    def state_dict(self) -> StateDict:
         """Get dataset state for checkpointing."""
         return {}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load dataset state for checkpointing."""
         del state_dict
 
@@ -181,11 +180,14 @@ class _ScopedEvalDataset:
             {"media": torch.tensor([[0.0, 1.0]]), "label": torch.tensor([1])},
         ]
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Stateless."""
+
+    def state_dict(self) -> StateDict:
         """Get dataset state for checkpointing."""
         return {}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load dataset state for checkpointing."""
         del state_dict
 
@@ -204,20 +206,26 @@ class _WeightedEvalDataset:
         """Return an unused train loader."""
         return []
 
-    def eval_dataloader(self) -> list[dict[str, Any]]:
+    def eval_dataloader(self) -> list[dict[str, object]]:
         """Return eval batches with uneven valid counts."""
         return [
             {"media": torch.tensor([[1.0]]), "valid_count": 4},
             {"media": torch.tensor([[0.0]]), "valid_count": 1},
         ]
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The epoch timer's state."""
+
+        timer_epoch: CheckpointableStepTimer.StateDict
+
+    def state_dict(self) -> StateDict:
         """Get dataset state for checkpointing."""
         return {"timer_epoch": self.timer_epoch.state_dict()}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load dataset state for checkpointing."""
-        self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
+        state = cast(_WeightedEvalDataset.StateDict, state_dict)
+        self.timer_epoch.load_state_dict(state["timer_epoch"])
 
 
 class _WeightedEvalStep:
@@ -231,31 +239,45 @@ class _WeightedEvalStep:
         self.global_step = 0
         self.local_step = 0
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Return the batch unchanged."""
         return batch
 
-    def eval_loss(self, **preprocessed_batch: object) -> dict[str, Any]:
+    def eval_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Return loss and metric equal to the batch media scalar."""
-        media = cast(Tensor, preprocessed_batch["media"])
+        media = preprocessed_batch["media"]
+        assert isinstance(media, Tensor)
         return {"loss": media.flatten(), "model": media, "metrics": {"score": media}}
 
-    def train_loss(self, **preprocessed_batch: object) -> dict[str, Any]:
+    def train_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Delegate to eval_loss."""
         return self.eval_loss(**preprocessed_batch)
 
-    def train_step(self, **preprocessed_batch: object) -> dict[str, Tensor]:
+    def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Unused train step."""
         del preprocessed_batch
         return {"loss": torch.zeros(1), "model": torch.zeros(1, 1)}
 
-    def state_dict(self) -> dict[str, Any]:
+    def call_eval(self, **preprocessed_batch: object) -> object:
+        """Return the batch media."""
+        return preprocessed_batch["media"]
+
+    def on_epoch_end(self) -> None:
+        """No-op epoch hook."""
+
+    def state_dict(self) -> _StepStateDict:
         """Get train-step state."""
         return {"global_step": self.global_step}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load train-step state."""
-        self.global_step = int(state_dict["global_step"])
+        self.global_step = cast(_StepStateDict, state_dict)["global_step"]
+
+
+class _StepStateDict(TypedDict):
+    """The step counter a fake train step checkpoints."""
+
+    global_step: int
 
 
 class _WarmupStep:
@@ -270,41 +292,42 @@ class _WarmupStep:
         self.local_step = 0
         self.eval_calls: list[Tensor] = []
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Return the batch unchanged."""
         return batch
 
-    def eval_loss(self, **preprocessed_batch: object) -> dict[str, Tensor]:
+    def eval_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Record eval batch media."""
-        media = cast(Tensor, preprocessed_batch["media"])
+        media = preprocessed_batch["media"]
+        assert isinstance(media, Tensor)
         self.eval_calls.append(media.clone())
         return {"loss": torch.zeros(1), "model": media}
 
-    def train_loss(self, **preprocessed_batch: object) -> dict[str, Tensor]:
+    def train_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Delegate to eval_loss."""
         return self.eval_loss(**preprocessed_batch)
 
-    def train_step(self, **preprocessed_batch: object) -> dict[str, Tensor]:
+    def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Advance one train step."""
         del preprocessed_batch
         self.global_step += 1
         self.local_step += 1
         return {"loss": torch.zeros(1), "model": torch.zeros(1, 1)}
 
-    def call_eval(self, **preprocessed_batch: object) -> Tensor:
+    def call_eval(self, **preprocessed_batch: object) -> object:
         """Return eval logits placeholder."""
-        return cast(Tensor, preprocessed_batch["media"])
+        return preprocessed_batch["media"]
 
     def on_epoch_end(self) -> None:
         """No-op epoch hook."""
 
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> _StepStateDict:
         """Get train-step state."""
         return {"global_step": self.global_step}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load train-step state."""
-        self.global_step = int(state_dict["global_step"])
+        self.global_step = cast(_StepStateDict, state_dict)["global_step"]
 
 
 class _RecordingTracker:
@@ -315,13 +338,13 @@ class _RecordingTracker:
 
     def __init__(self, config: Config) -> None:
         del config
-        self.metrics_by_step: list[tuple[dict[str, Any], int]] = []
+        self.metrics_by_step: list[tuple[dict[str, object], int]] = []
         self.notes: list[str] = []
         self.closed = False
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -331,7 +354,7 @@ class _RecordingTracker:
             ({f"{prefix}{key}": value for key, value in metrics.items()}, step),
         )
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """Ignore image payloads in scalar tracker tests."""
         del key, images, step
 
@@ -357,18 +380,21 @@ class _ExtrasMetric:
         """Ignore batches; the payload is constant."""
         del logits, batch
 
-    def compute(self) -> dict[str, Any]:
+    def compute(self) -> dict[str, object]:
         """Return one scalar plus a non-scalar ``extras`` payload."""
         return {"metric_score": 2.0, "extras": {"payload": ("opaque",)}}
 
     def reset(self) -> None:
         """Stateless."""
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Stateless."""
+
+    def state_dict(self) -> StateDict:
         """Stateless."""
         return {}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Stateless."""
         del state_dict
 
@@ -391,7 +417,7 @@ class _LinearModel(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     @override
-    def forward(self, media: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
         """Forward pass."""
         return self.linear(media)
 
@@ -499,7 +525,7 @@ class _LogisticModel(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     @override
-    def forward(self, media: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
         """Forward pass."""
         return self.linear(media).squeeze(-1)
 
@@ -554,11 +580,14 @@ class _BinaryDataset:
             collate_fn=collate_eval,
         )
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Stateless."""
+
+    def state_dict(self) -> StateDict:
         """Get dataset state for checkpointing."""
         return {}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load dataset state from checkpoint."""
         _ = state_dict
 
@@ -602,7 +631,8 @@ def test_train_loop_comprehensive():
         assert (checkpoint_dir / "step_00000020.pt").exists()
 
         # Get final loss.
-        ds1: Any = loop1.dataset
+        ds1 = loop1.dataset
+        assert isinstance(ds1, _BinaryDataset)
         final_loss_result_1 = loop1.step.eval_loss(media=ds1.X, label=ds1.y)
         final_loss_1 = final_loss_result_1["loss"]
 
@@ -633,7 +663,8 @@ def test_train_loop_comprehensive():
         assert loop2.step.global_step == 20
 
         # Should have same loss as end of first run.
-        ds2: Any = loop2.dataset
+        ds2 = loop2.dataset
+        assert isinstance(ds2, _BinaryDataset)
         resumed_loss_result = loop2.step.eval_loss(media=ds2.X, label=ds2.y)
         torch.testing.assert_close(final_loss_1, resumed_loss_result["loss"])
 
@@ -649,7 +680,9 @@ def test_train_loop_comprehensive():
         # Check that accuracy improved.
         eval_metrics = loop2.eval()
         assert "accuracy_accuracy" in eval_metrics
-        assert eval_metrics["accuracy_accuracy"] > 0.75  # Should get > 75% accuracy.
+        accuracy = eval_metrics["accuracy_accuracy"]
+        assert isinstance(accuracy, (int, float))
+        assert accuracy > 0.75  # Should get > 75% accuracy.
 
 
 def _eval_only_step_config() -> TrainStep.Config:
@@ -1074,7 +1107,7 @@ def _make_recording_train_loop_config(
 def test_eval_weights_scalar_metrics_by_valid_count() -> None:
     """Eval scalar means weight partial batches by valid example count."""
     config = TrainLoop.Config(
-        step=cast(Any, _WeightedEvalStep.Config()),
+        step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
     config.metrics = {}
@@ -1091,7 +1124,7 @@ def test_eval_weights_scalar_metrics_by_valid_count() -> None:
 def test_eval_fails_when_exceeding_max_eval_time() -> None:
     """An eval pass over its wall-clock budget raises EvalTimeLimitError."""
     config = TrainLoop.Config(
-        step=cast(Any, _WeightedEvalStep.Config()),
+        step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
     config.metrics = {}
@@ -1110,7 +1143,7 @@ def test_eval_fails_when_exceeding_max_eval_time() -> None:
 def test_eval_stop_on_time_limit_publishes_partial_results() -> None:
     """Opt-in data-generation eval stops at the budget instead of raising."""
     config = TrainLoop.Config(
-        step=cast(Any, _WeightedEvalStep.Config()),
+        step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
     config.metrics = {}
@@ -1129,7 +1162,7 @@ def test_eval_stop_on_time_limit_publishes_partial_results() -> None:
 def test_eval_respects_generous_max_eval_time() -> None:
     """A large budget leaves eval unaffected (no spurious failure)."""
     config = TrainLoop.Config(
-        step=cast(Any, _WeightedEvalStep.Config()),
+        step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
     config.metrics = {}
@@ -1147,7 +1180,7 @@ def test_eval_respects_generous_max_eval_time() -> None:
 def test_eval_warmup_runs_configured_eval_batches() -> None:
     """Eval warmup runs eval_loss once per configured batch before training."""
     config = TrainLoop.Config(
-        step=cast(Any, _WarmupStep.Config()),
+        step=_WarmupStep.Config(),
         dataset=_WarmupDataset.Config(),
     )
     config.metrics = {}
@@ -1158,7 +1191,8 @@ def test_eval_warmup_runs_configured_eval_batches() -> None:
     config.eval_every_epoch = False
 
     loop = config.make()
-    step = cast(_WarmupStep, loop.step)
+    step = loop.step
+    assert isinstance(step, _WarmupStep)
 
     assert len(step.eval_calls) == 1
     torch.testing.assert_close(step.eval_calls[0], torch.tensor([[1.0]]))
@@ -1372,7 +1406,8 @@ class TestFinalize:
             cfg.tracker = _RecordingTracker.Config()
             cfg.doc = "Hypothesis: X. Change: Y. Result: TODO."
             loop = cfg.make()
-            tracker = cast(_RecordingTracker, loop.tracker)
+            tracker = loop.tracker
+            assert isinstance(tracker, _RecordingTracker)
             assert tracker.notes == ["Hypothesis: X. Change: Y. Result: TODO."]
 
     def test_empty_doc_does_not_call_log_notes(self):
@@ -1383,7 +1418,8 @@ class TestFinalize:
             cfg.tracker = _RecordingTracker.Config()
             cfg.doc = ""
             loop = cfg.make()
-            tracker = cast(_RecordingTracker, loop.tracker)
+            tracker = loop.tracker
+            assert isinstance(tracker, _RecordingTracker)
             assert tracker.notes == []
 
     def test_doc_without_tracker_is_noop(self):
@@ -1477,7 +1513,7 @@ def test_result_line_accounts_for_every_second(
     # however the parts are counted, so the invariant would not bite.
     inner_eval = loop.eval
 
-    def slow_eval() -> dict[str, Any]:
+    def slow_eval() -> dict[str, object]:
         metrics = inner_eval()
         clock.now += 0.05
         return metrics
@@ -1516,11 +1552,15 @@ def test_the_runtime_device_places_the_model() -> None:
     """
     config = _make_step_logging_loop_config()
     config.runtime = SingleProcess.Config(device="cpu")
-    config.step.parallelism = NoParallel.Config()  # Unset: defer to the runtime.
+    step_config = config.step
+    assert isinstance(step_config, TrainStep.Config)
+    step_config.parallelism = NoParallel.Config()  # Unset: defer to the runtime.
     loop = config.copy_tree().finalize().make()
+    step = loop.step
+    assert isinstance(step, TrainStep)
 
     assert loop.runtime.device == torch.device("cpu")
-    assert next(loop.step.model.parameters()).device == torch.device("cpu")
+    assert next(step.model.parameters()).device == torch.device("cpu")
 
 
 def test_result_line_shows_seconds_a_budget_declined_to_charge(
@@ -1546,10 +1586,12 @@ def test_result_line_shows_seconds_a_budget_declined_to_charge(
         _timed_train_step(loop, clock, first_step_time=100.0),
     )
     # A budgeted step: it charges only part of the second its update took.
-    loop.step.elapsed_sec = 0.4
-    monkeypatch.setattr(loop, "_train_elapsed", lambda: loop.step.elapsed_sec)
+    step = loop.step
+    assert isinstance(step, TrainStep)
+    monkeypatch.setattr(step, "elapsed_sec", 0.4, raising=False)
+    monkeypatch.setattr(loop, "_train_elapsed", lambda: 0.4)
 
-    def timed_eval() -> dict[str, Any]:
+    def timed_eval() -> dict[str, object]:
         clock.now += 5.0
         return {"score": 1.0}
 
@@ -1621,7 +1663,7 @@ def test_per_step_log_includes_step_metrics(
 
     inner = loop.step.train_step
 
-    def _with_metrics(**batch: object) -> dict[str, Any]:
+    def _with_metrics(**batch: object) -> dict[str, object]:
         out = dict(inner(**batch))
         out["metrics"] = {"cell_accuracy": 0.875, "act_steps": 4.0}
         return out
@@ -1664,16 +1706,18 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
     calls: list[tuple[float, ...]] = []
 
     def all_reduce(tensor: Tensor) -> None:
-        calls.append(tuple(float(value) for value in tensor.tolist()))
+        calls.append(tuple(ListCodec.coerce(tensor.tolist(), float)))
         tensor.mul_(8)
 
     loop = _make_step_logging_loop_config().make()
+    step = loop.step
+    assert isinstance(step, TrainStep)
 
-    def _with_metrics(**batch: object) -> dict[str, Any]:
+    def _with_metrics(**batch: object) -> dict[str, object]:
         del batch
         # Advance the step counter the way the real step does -- by charging
         # the timer global_step reads -- since it is a read-only property.
-        cast(TrainStep, loop.step).timer_step.global_count += 1
+        step.timer_step.global_count += 1
         return {
             "loss": torch.tensor([1.0]),
             "model": torch.zeros(1, 2),
@@ -1691,7 +1735,8 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 8)
     monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
     for _ in range(2):
-        loop._do_train_step(loop.step.preprocess_batch(next(iterator)))
+        batch = cast(dict[str, object], next(iterator))
+        loop._do_train_step(loop.step.preprocess_batch(batch))
 
     assert calls == [(1.0, 2.0, 3.0), (1.0, 2.0, 3.0)]
 
@@ -1734,11 +1779,11 @@ def _timed_train_step(
     clock: _FakeClock,
     *,
     first_step_time: float,
-) -> Callable[..., dict[str, Any]]:
+) -> Callable[..., TrainStepOutput]:
     """Wrap the loop's train_step to advance ``clock`` by a scripted duration."""
     inner = loop.step.train_step
 
-    def timed_step(**batch: object) -> dict[str, Any]:
+    def timed_step(**batch: object) -> TrainStepOutput:
         clock.now += first_step_time if loop.step.global_step == 0 else 1.0
         return inner(**batch)
 
@@ -1806,7 +1851,7 @@ def test_max_time_train_kind_excludes_cadence_eval_time(
     )
     eval_calls: list[int] = []
 
-    def timed_eval() -> dict[str, Any]:
+    def timed_eval() -> dict[str, object]:
         eval_calls.append(loop.step.global_step)
         clock.now += 50.0  # Each eval alone would blow the 10s budget.
         return {"score": 1.0}
@@ -1838,7 +1883,7 @@ def test_max_time_train_kind_excludes_epoch_boundary_eval_time(
     )
     eval_calls: list[int] = []
 
-    def timed_eval() -> dict[str, Any]:
+    def timed_eval() -> dict[str, object]:
         eval_calls.append(loop.step.global_step)
         clock.now += 50.0  # Each eval alone would blow the 10s budget.
         return {"score": 1.0}
@@ -1870,7 +1915,8 @@ def test_train_metrics_include_pure_train_elapsed(
 
     loop.train()
 
-    tracker = cast(_RecordingTracker, loop.tracker)
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
     elapsed_by_step = {
         step: payload["train/elapsed"]
         for payload, step in tracker.metrics_by_step
@@ -1944,8 +1990,8 @@ def test_phase_timer_passed_to_step():
     config.phase_timer = PhaseTimer.Config(enabled=True)
 
     loop = config.make()
-    assert hasattr(loop.step, "timer")
-    assert cast(_HasTimer, loop.step).timer is loop.phase_timer
+    assert isinstance(loop.step, _HasTimer)
+    assert loop.step.timer is loop.phase_timer
 
 
 # -- Regression tests (Issue#286 trainloop + checkpoint-loop group) ----------
@@ -2002,7 +2048,7 @@ def test_no_eval_or_checkpoint_at_step_zero(monkeypatch: pytest.MonkeyPatch) -> 
         eval_steps: list[int] = []
         orig_eval = loop.eval
 
-        def spy_eval() -> dict[str, Any]:
+        def spy_eval() -> dict[str, object]:
             eval_steps.append(loop.step.global_step)
             return orig_eval()
 
@@ -2044,7 +2090,7 @@ def test_resume_does_not_eval_or_checkpoint_before_first_new_step(
         eval_steps: list[int] = []
         orig_eval = loop.eval
 
-        def spy_eval() -> dict[str, Any]:
+        def spy_eval() -> dict[str, object]:
             eval_steps.append(loop.step.global_step)
             return orig_eval()
 
@@ -2077,11 +2123,9 @@ def test_resume_does_not_rewrite_completed_checkpoint_with_partial_accumulation(
         resumed.checkpointing.save_every = 1
         resumed.make().train()
 
-        checkpoint = torch.load(
-            Path(tmp) / "step_00000001.pt",
-            weights_only=True,
-        )
-        assert checkpoint["step"]["accumulation_steps"] == 0
+        checkpoint = _load_loop_checkpoint(Path(tmp) / "step_00000001.pt")
+        step_state = cast(TrainStep.StateDict, checkpoint["step"])
+        assert step_state["accumulation_steps"] == 0
 
 
 @pytest.mark.parametrize(
@@ -2387,11 +2431,9 @@ def test_terminal_partial_accumulation_preserves_prior_checkpoint(
         with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
             loop.train()
 
-        checkpoint = torch.load(
-            Path(tmp) / "step_00000001.pt",
-            weights_only=True,
-        )
-        assert checkpoint["step"]["accumulation_steps"] == 0
+        checkpoint = _load_loop_checkpoint(Path(tmp) / "step_00000001.pt")
+        step_state = cast(TrainStep.StateDict, checkpoint["step"])
+        assert step_state["accumulation_steps"] == 0
 
 
 def test_terminal_no_update_with_complete_accumulation_saves_prefix(
@@ -2414,8 +2456,10 @@ def test_terminal_no_update_with_complete_accumulation_saves_prefix(
         loop.train()
 
         assert calls[0] == 2
-        assert loop.step.global_step == 1
-        assert loop.step.accumulation_steps == 0
+        step = loop.step
+        assert isinstance(step, TrainStep)
+        assert step.global_step == 1
+        assert step.accumulation_steps == 0
         assert loop.checkpointing is not None
         assert loop.checkpointing.available_steps() == [1]
 
@@ -2447,7 +2491,8 @@ def test_train_step_logs_gpu_memory_to_tracker(
         config.max_steps = 1
         config.num_steps_eval = math.inf
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         original_train_step = loop.step.train_step
 
@@ -2474,9 +2519,9 @@ def test_train_step_logs_gpu_memory_to_tracker(
         for metrics, _step in tracker.metrics_by_step
         if "train/total_loss" in metrics
     )
-    assert train_log["train/total_loss"] >= 0.0
-    assert train_log["train/step_time"] >= 0.0
-    assert train_log["train/time_since_start"] >= 0.0
+    assert _metric_float(train_log, "train/total_loss") >= 0.0
+    assert _metric_float(train_log, "train/step_time") >= 0.0
+    assert _metric_float(train_log, "train/time_since_start") >= 0.0
     assert train_log["train/gpu_mem_allocated_gb"] == 2.0
     assert train_log["train/gpu_mem_reserved_gb"] == 3.0
 
@@ -2491,7 +2536,8 @@ def test_train_step_omits_gpu_memory_on_cpu_tracker() -> None:
         config.max_steps = 1
         config.num_steps_eval = math.inf
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
@@ -2520,7 +2566,8 @@ def test_train_tracker_logging_respects_num_steps_log_cadence() -> None:
         config.num_steps_log = 5
         config.early_train_log_steps = 0
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
@@ -2555,13 +2602,16 @@ def test_accumulation_logs_once_per_update_not_once_per_microbatch() -> None:
         )
         config.checkpointing = None
         config.tracker = _RecordingTracker.Config()
-        config.step.accumulate_grad_batches = 4
+        step_config = config.step
+        assert isinstance(step_config, TrainStep.Config)
+        step_config.accumulate_grad_batches = 4
         config.max_steps = 3
         config.num_steps_eval = math.inf
         config.num_steps_log = 1
         config.early_train_log_steps = 100
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
@@ -2594,7 +2644,9 @@ def test_accumulation_evaluates_once_per_update_not_once_per_microbatch(
             ),
         )
         config.checkpointing = None
-        config.step.accumulate_grad_batches = 4
+        step_config = config.step
+        assert isinstance(step_config, TrainStep.Config)
+        step_config.accumulate_grad_batches = 4
         config.max_steps = 4
         config.num_steps_eval = 2
         loop = config.make()
@@ -2602,7 +2654,7 @@ def test_accumulation_evaluates_once_per_update_not_once_per_microbatch(
         evaluated: list[int] = []
         inner = loop.eval
 
-        def spy() -> dict[str, Any]:
+        def spy() -> dict[str, object]:
             evaluated.append(loop.step.global_step)
             return inner()
 
@@ -2625,7 +2677,8 @@ def test_train_tracker_logs_every_startup_step_then_cadence() -> None:
         config.num_steps_log = 5
         config.early_train_log_steps = 3
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
@@ -2648,16 +2701,14 @@ def test_epoch_eval_logs_eval_time_to_tracker() -> None:
         config.num_steps_eval = math.inf
         config.eval_every_epoch = True
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
     epoch_logs = [metrics for metrics, step in tracker.metrics_by_step if step == 1]
     assert any("eval/total_loss" in metrics for metrics in epoch_logs)
-    assert any(
-        isinstance(metrics.get("eval/time"), float) and metrics["eval/time"] >= 0.0
-        for metrics in epoch_logs
-    )
+    assert any(_metric_float(metrics, "eval/time") >= 0.0 for metrics in epoch_logs)
     assert tracker.closed
 
 
@@ -2671,21 +2722,17 @@ def test_step_eval_logs_eval_time_to_tracker() -> None:
         config.num_steps_eval = 1
         config.eval_every_epoch = False
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
     eval_logs = [metrics for metrics, step in tracker.metrics_by_step if step == 1]
     assert any("eval/total_loss" in metrics for metrics in eval_logs)
-    assert any(
-        isinstance(metrics.get("eval/time"), float) and metrics["eval/time"] >= 0.0
-        for metrics in eval_logs
-    )
+    assert any(_metric_float(metrics, "eval/time") >= 0.0 for metrics in eval_logs)
     # Per-batch eval step time is logged like train/step_time.
     assert any(
-        isinstance(metrics.get("eval/mean_batch_time"), float)
-        and metrics["eval/mean_batch_time"] >= 0.0
-        for metrics in eval_logs
+        _metric_float(metrics, "eval/mean_batch_time") >= 0.0 for metrics in eval_logs
     )
     assert tracker.closed
 
@@ -2707,7 +2754,8 @@ def test_final_eval_uses_same_bounded_loader_as_cadence() -> None:
 
         loop.train()
 
-    dataset = cast(_ScopedEvalDataset, loop.dataset)
+    dataset = loop.dataset
+    assert isinstance(dataset, _ScopedEvalDataset)
     # Cadence eval at step 1, then the final eval; both bounded, never "full".
     assert dataset.eval_scopes == ["bounded", "bounded"]
     assert "full" not in dataset.eval_scopes
@@ -2727,8 +2775,10 @@ def test_phase_timer_summary_logs_after_final_eval(
         config.eval_every_epoch = False
         config.phase_timer = PhaseTimer.Config(enabled=True)
         loop = config.make()
-        dataset = cast(_ScopedEvalDataset, loop.dataset)
-        timer = cast(PhaseTimer, loop.phase_timer)
+        dataset = loop.dataset
+        assert isinstance(dataset, _ScopedEvalDataset)
+        timer = loop.phase_timer
+        assert isinstance(timer, PhaseTimer)
         eval_dataloader = dataset.eval_dataloader
         log_summary = timer.log_summary
 
@@ -2768,7 +2818,8 @@ def test_phase_timer_publishes_interval_and_summary_metrics() -> None:
 
         loop.train()
 
-    tracker = cast(_RecordingTracker, loop.tracker)
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
     timing_payloads = [
         metrics
         for metrics, _step in tracker.metrics_by_step
@@ -2798,7 +2849,8 @@ def test_eval_disabled_when_num_steps_eval_says_never(never: float) -> None:
 
         loop.train()
 
-    dataset = cast(_ScopedEvalDataset, loop.dataset)
+    dataset = loop.dataset
+    assert isinstance(dataset, _ScopedEvalDataset)
     assert dataset.eval_scopes == []
 
 
@@ -2820,7 +2872,8 @@ def test_num_steps_eval_minus_one_runs_the_final_eval_only() -> None:
 
         loop.train()
 
-    dataset = cast(_ScopedEvalDataset, loop.dataset)
+    dataset = loop.dataset
+    assert isinstance(dataset, _ScopedEvalDataset)
     assert len(dataset.eval_scopes) == 1
 
 
@@ -2841,7 +2894,8 @@ def test_final_post_training_eval_logs_to_tracker() -> None:
         config.num_steps_eval = 5
         config.eval_every_epoch = False
         loop = config.make()
-        tracker = cast(_RecordingTracker, loop.tracker)
+        tracker = loop.tracker
+        assert isinstance(tracker, _RecordingTracker)
 
         loop.train()
 
@@ -2870,7 +2924,7 @@ def test_cadence_eval_runs_once_per_optimizer_step(
         eval_count = 0
         original_eval = loop.eval
 
-        def count_eval() -> dict[str, Any]:
+        def count_eval() -> dict[str, object]:
             nonlocal eval_count
             eval_count += 1
             return original_eval()
@@ -2893,7 +2947,7 @@ def test_no_post_loop_eval_when_no_training(monkeypatch: pytest.MonkeyPatch) -> 
         eval_count = [0]
         orig_eval = loop.eval
 
-        def spy_eval() -> dict[str, Any]:
+        def spy_eval() -> dict[str, object]:
             eval_count[0] += 1
             return orig_eval()
 
@@ -2977,7 +3031,9 @@ def test_partial_accumulation_dropped_at_epoch_end_by_default() -> None:
     assert loop.step.global_step == 0
     # Boundary dropped epoch-0's 3 pending; only epoch-1's first micro-batch
     # remains accumulated.
-    assert cast(TrainStep, loop.step).accumulation_steps == 1
+    step = loop.step
+    assert isinstance(step, TrainStep)
+    assert step.accumulation_steps == 1
 
 
 def test_partial_accumulation_carries_across_epoch_when_opted_out() -> None:
@@ -2996,8 +3052,10 @@ def test_partial_accumulation_carries_across_epoch_when_opted_out() -> None:
     loop.train()
 
     assert loop.current_epoch == 1
-    assert cast(TrainStep, loop.step).accumulation_steps == 4
-    assert loop.step.global_step == 0
+    step = loop.step
+    assert isinstance(step, TrainStep)
+    assert step.accumulation_steps == 4
+    assert step.global_step == 0
 
 
 # Only rank 0's verdict is True. A correct collective decision broadcasts rank 0's view
@@ -3037,7 +3095,7 @@ def test_set_loader_epoch_tolerates_loader_without_dataset() -> None:
         def __iter__(self) -> Iterator[dict[str, Tensor]]:
             return iter(())
 
-    _set_loader_epoch(cast(DataLoader[Any], _LoaderWithoutDataset()), epoch=3)
+    _set_loader_epoch(_LoaderWithoutDataset(), epoch=3)
 
 
 def test_dataset_receives_the_step_before_the_first_batch() -> None:
@@ -3048,13 +3106,14 @@ def test_dataset_receives_the_step_before_the_first_batch() -> None:
     the first rollout has no model to act with.
     """
     config = TrainLoop.Config(
-        step=cast(Any, _WarmupStep.Config()),
+        step=_WarmupStep.Config(),
         dataset=_BindingDataset.Config(),
     )
     config.checkpointing = None
     config.max_steps = 1
     loop = config.make()
-    dataset = cast(_BindingDataset, loop.dataset)
+    dataset = loop.dataset
+    assert isinstance(dataset, _BindingDataset)
 
     assert dataset.bound is loop.step
     assert dataset.batches_before_binding == 0
@@ -3066,7 +3125,7 @@ def test_dataset_receives_the_step_before_the_first_batch() -> None:
 def test_dataset_without_the_hook_is_left_alone() -> None:
     """A dataset that reads a corpus must not be required to accept a step."""
     config = TrainLoop.Config(
-        step=cast(Any, _WarmupStep.Config()),
+        step=_WarmupStep.Config(),
         dataset=_WarmupDataset.Config(),
     )
     config.checkpointing = None
@@ -3102,11 +3161,14 @@ class _BindingDataset:
         """Return one eval batch."""
         return [{"media": torch.tensor([[1.0]]), "label": torch.tensor([1])}]
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Stateless."""
+
+    def state_dict(self) -> StateDict:
         """Get dataset state for checkpointing."""
         return {}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load dataset state for checkpointing."""
         del state_dict
 
@@ -3114,7 +3176,7 @@ class _BindingDataset:
 def _make_extras_publish_config() -> TrainLoop.Config:
     """Eval-publish config with a payload metric and a recording tracker."""
     config = TrainLoop.Config(
-        step=cast(Any, _WeightedEvalStep.Config()),
+        step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
     config.metrics = {"": _ExtrasMetric.Config()}
@@ -3134,8 +3196,10 @@ def test_eval_extras_only_passed_on_final_eval() -> None:
     A FileTracker (scalars only) ignores ``extras`` either way.
     """
     loop = _make_extras_publish_config().make()
-    tracker = cast(_RecordingTracker, loop.tracker)
-    loop.step.global_step = 12
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
+    step = cast(_WeightedEvalStep, loop.step)
+    step.global_step = 12
 
     loop._maybe_eval(force=True)
     assert len(tracker.metrics_by_step) == 1
@@ -3162,8 +3226,10 @@ def test_eval_extras_every_eval_forwards_payload_on_cadence_evals() -> None:
     config = _make_extras_publish_config()
     config.eval_extras_every_eval = True
     loop = config.make()
-    tracker = cast(_RecordingTracker, loop.tracker)
-    loop.step.global_step = 12
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
+    step = cast(_WeightedEvalStep, loop.step)
+    step.global_step = 12
 
     loop._maybe_eval(force=True)  # A non-final (cadence-style) eval.
     assert len(tracker.metrics_by_step) == 1
@@ -3185,7 +3251,7 @@ def test_load_state_dict_can_skip_rng_restore(
     monkeypatch.setattr(train_loop, "set_rng_state", fail_rng_restore)
 
     config = TrainLoop.Config(
-        step=cast(Any, _WeightedEvalStep.Config()),
+        step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
     config.checkpointing = None
@@ -3406,21 +3472,24 @@ class _ReplayDataset:
         self.batches.append(batch.clone())
         return {"media": batch, "label": torch.tensor([self.cursor % 2])}
 
-    def state_dict(self) -> dict[str, object]:
+    class StateDict(TypedDict):
+        """The next unconsumed record."""
+
+        cursor: int
+
+    def state_dict(self) -> StateDict:
         """Persist the next unconsumed record."""
         return {"cursor": self.cursor}
 
-    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the next unconsumed record."""
-        cursor = state_dict["cursor"]
-        assert isinstance(cursor, int)
-        self.cursor = cursor
+        self.cursor = cast(_ReplayDataset.StateDict, state_dict)["cursor"]
 
 
 def _skip_after_first_train_step(
-    original_train_step: Callable[[dict[str, Tensor]], None],
+    original_train_step: Callable[[dict[str, object]], None],
     calls: list[int],
-    batch: dict[str, Tensor],
+    batch: dict[str, object],
 ) -> None:
     """Run only the first patched train step."""
     calls[0] += 1
@@ -3457,27 +3526,31 @@ def _record_save(calls: list[str], target: CheckpointableProtocol, step: int) ->
 
 def _assert_checkpoint_matches_interrupted_state(
     checkpoint: Path,
-    interrupted: dict[str, object],
+    interrupted: TrainLoop.StateDict,
 ) -> None:
     """Assert a durable checkpoint is the state observed after the eval error."""
     assert checkpoint.exists()
-    saved = torch.load(checkpoint, weights_only=True)
+    _assert_state_dict_equal(_load_loop_checkpoint(checkpoint), expected=interrupted)
+
+
+def _load_loop_checkpoint(path: Path) -> TrainLoop.StateDict:
+    """Read a checkpoint the loop wrote; its schema is the loop's."""
+    saved = cast(object, torch.load(path, weights_only=True))
     assert isinstance(saved, dict)
-    _assert_state_dict_equal(cast(dict[str, object], saved), expected=interrupted)
+    return cast(TrainLoop.StateDict, saved)
 
 
 def _assert_state_dict_equal(
-    actual: dict[str, object],
-    expected: dict[str, object],
+    actual: TrainLoop.StateDict,
+    expected: TrainLoop.StateDict,
 ) -> None:
     """Compare the managed model, optimizer, data, and RNG checkpoint state."""
     torch.testing.assert_close(actual["step"], expected["step"], rtol=0, atol=0)
     assert actual["dataset"] == expected["dataset"]
     assert actual["metrics"] == expected["metrics"]
-    _assert_rng_state_equal(
-        cast(RngState, actual["rng"]),
-        expected=cast(RngState, expected["rng"]),
-    )
+    assert "rng" in actual
+    assert "rng" in expected
+    _assert_rng_state_equal(actual["rng"], expected=expected["rng"])
 
 
 def _assert_rng_state_equal(actual: RngState, expected: RngState) -> None:
@@ -3499,6 +3572,12 @@ def _assert_rng_state_equal(actual: RngState, expected: RngState) -> None:
     if "cuda_uuids" in actual:
         assert "cuda_uuids" in expected
         assert actual["cuda_uuids"] == expected["cuda_uuids"]
+
+
+def _metric_float(metrics: Mapping[str, object], key: str) -> float:
+    """Return a numeric tracker metric, or a failing sentinel when absent."""
+    value = metrics.get(key)
+    return float(value) if isinstance(value, (int, float)) else -1.0
 
 
 if __name__ == "__main__":

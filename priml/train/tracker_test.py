@@ -5,13 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from threading import Event, Thread, get_ident
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import json
 import tempfile
 
 from configgle import Fig
-from wandb.sdk.wandb_run import Run
 
 import pytest
 import torch
@@ -37,7 +36,7 @@ class _FakeWriter:
     """Records add_scalar / close calls in place of a real SummaryWriter."""
 
     def __init__(self) -> None:
-        self.scalars: list[tuple[str, Any, int]] = []
+        self.scalars: list[tuple[str, object, int]] = []
         self.close_count = 0
 
     def add_scalar(self, tag: str, scalar_value: object, global_step: int) -> None:
@@ -123,7 +122,7 @@ class _FakeRun:
     """Records log / finish calls in place of a real wandb run."""
 
     def __init__(self) -> None:
-        self.logged: list[tuple[dict[str, Any], int]] = []
+        self.logged: list[tuple[dict[str, object], int]] = []
         self.defined_metrics: list[tuple[str, str | None]] = []
         self.finish_count = 0
         self.notes: str | None = None
@@ -133,7 +132,7 @@ class _FakeRun:
 
     def log(
         self,
-        data: dict[str, Any],
+        data: dict[str, object],
         step: int | None = None,
         commit: bool | None = None,
     ) -> None:
@@ -149,7 +148,7 @@ def _wandb_tracker_with_fake_run() -> tuple[WandbTracker, _FakeRun]:
     """Build a WandbTracker on a recording fake run (rank-0 path, no wandb.init)."""
     tracker = WandbTracker.__new__(WandbTracker)
     run = _FakeRun()
-    tracker._run = cast(Run, run)
+    tracker._run = cast("priml.train.tracker._WandbRun", run)
     return tracker, run
 
 
@@ -187,7 +186,8 @@ def test_wandb_logs_images(monkeypatch: pytest.MonkeyPatch) -> None:
     tracker.log_images("eval/samples", ["samples.png"], step=5)
     logged, step = run.logged[0]
     assert step == 5
-    image = logged["eval/samples"][0]
+    images = cast(list[object], logged["eval/samples"])
+    image: object = images[0]
     assert isinstance(image, _FakeImage)
     assert image.image == "samples.png"
 
@@ -244,9 +244,9 @@ def test_wandb_non_rank_zero_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
 def _init_tracker(
     monkeypatch: pytest.MonkeyPatch,
     config: WandbTracker.Config,
-) -> tuple[dict[str, Any], _FakeRun]:
+) -> tuple[dict[str, object], _FakeRun]:
     """Build a rank-0 WandbTracker against a fake W&B run."""
-    captured: dict[str, Any] = {}
+    captured: dict[str, object] = {}
     run = _FakeRun()
 
     class _FakeWandb:
@@ -270,7 +270,7 @@ def _init_tracker(
 def _init_kwargs(
     monkeypatch: pytest.MonkeyPatch,
     config: WandbTracker.Config,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Build a rank-0 WandbTracker against a fake wandb; return init kwargs."""
     captured, _ = _init_tracker(monkeypatch, config)
     return captured
@@ -353,6 +353,7 @@ def test_wandb_defaults_bound_startup_and_capture_console(
     kwargs = _init_kwargs(monkeypatch, WandbTracker.Config(project="trm"))
     settings = kwargs["settings"]
     assert settings is not None
+    settings = cast(_Settings, settings)
     assert "console" not in settings.kwargs
     assert settings.kwargs["init_timeout"] == 30.0
     assert settings.kwargs["x_service_wait"] == 30.0
@@ -368,6 +369,7 @@ def test_wandb_capture_console_false_disables_console(
     )
     settings = kwargs["settings"]
     assert settings is not None
+    settings = cast(_Settings, settings)
     assert settings.kwargs["console"] == "off"
 
 
@@ -434,6 +436,7 @@ def test_wandb_flush_interval_bounds_history_buffering(
     )
     settings = kwargs["settings"]
     assert settings is not None
+    settings = cast(_Settings, settings)
     assert settings.kwargs["x_file_stream_transmit_interval"] == 15.0
 
 
@@ -454,6 +457,7 @@ def test_wandb_system_metrics_interval_throttles_sampling(
     )
     settings = kwargs["settings"]
     assert settings is not None
+    settings = cast(_Settings, settings)
     assert settings.kwargs["x_stats_sampling_interval"] == 60.0
     # System metrics stay ON (sampled, not disabled).
     assert "x_disable_stats" not in settings.kwargs
@@ -472,6 +476,7 @@ def test_wandb_system_metrics_off_disables_stats(
     )
     settings = kwargs["settings"]
     assert settings is not None
+    settings = cast(_Settings, settings)
     assert settings.kwargs["x_disable_stats"] is True
     # Disabling supersedes the sampling-interval knob.
     assert "x_stats_sampling_interval" not in settings.kwargs
@@ -610,21 +615,21 @@ class _RecordingChild:
 
     def __init__(self, config: Config) -> None:
         del config
-        self.metrics: list[tuple[dict[str, Any], int, str]] = []
-        self.images: list[tuple[str, list[Any], int]] = []
+        self.metrics: list[tuple[dict[str, object], int, str]] = []
+        self.images: list[tuple[str, list[object], int]] = []
         self.notes: list[str] = []
         self.closed = 0
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
     ) -> None:
         self.metrics.append((dict(metrics), step, prefix))
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         self.images.append((key, images, step))
 
     def log_notes(self, notes: str) -> None:
@@ -717,13 +722,13 @@ class _BlockingAsyncChild:
         del config
         self.entered = Event()
         self.release = Event()
-        self.metrics: list[dict[str, Any]] = []
+        self.metrics: list[dict[str, object]] = []
         self.thread_ids: list[int] = []
         self.closed = False
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -735,7 +740,7 @@ class _BlockingAsyncChild:
         self.metrics.append(dict(metrics))
         self.thread_ids.append(get_ident())
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
@@ -747,7 +752,8 @@ class _BlockingAsyncChild:
 
 def test_async_tracker_is_enabled_ordered_and_nonblocking_by_default() -> None:
     tracker = AsyncTracker.Config(tracker=_BlockingAsyncChild.Config()).make()
-    child = cast(_BlockingAsyncChild, tracker.tracker)
+    child = tracker.tracker
+    assert isinstance(child, _BlockingAsyncChild)
     caller_thread = get_ident()
 
     first = {"index": 1}
@@ -780,7 +786,8 @@ def test_async_tracker_can_be_disabled() -> None:
         tracker=_RecordingChild.Config(),
         enabled=False,
     ).make()
-    child = cast(_RecordingChild, tracker.tracker)
+    child = tracker.tracker
+    assert isinstance(child, _RecordingChild)
 
     tracker.log_metrics({"loss": 1.0}, 1)
     tracker.flush()
@@ -809,6 +816,10 @@ def test_tracker_list_scopes_wrapped_child_working_directory(
     child = wrapper.tracker
     assert isinstance(child, FileTracker.Config)
     assert child.working_dir == tmp_path / "run/metrics.json"
+
+
+class _Settings(Protocol):
+    kwargs: dict[str, object]
 
 
 if __name__ == "__main__":

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import copy
 import math
 
 from configgle import PartialConfig
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.baselines.craftax.train_step import CraftaxTrainStep
+from priml.optimizers import learning_rate
 from priml.testing.fixtures import torch_compiler_isolation
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
@@ -43,7 +42,9 @@ def _config(**overrides: object) -> CraftaxTrainStep.Config:
 
 
 def _step() -> CraftaxTrainStep:
-    return cast(CraftaxTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- The inherited Config descriptor is opaque to ty at this call site.
+    step = _config().make()
+    assert isinstance(step, CraftaxTrainStep)
+    return step
 
 
 def test_it_satisfies_the_training_step_protocol() -> None:
@@ -54,8 +55,12 @@ def test_the_network_is_sized_from_the_environment() -> None:
     # An experiment that changes the environment must not have to remember to
     # resize the network by hand.
     step = _step()
-    assert step.model.policy[0].in_features == step.env.observation_size
-    assert step.model.policy[-1].out_features == step.env.num_actions
+    policy = step.model.policy
+    first, last = policy[0], policy[-1]
+    assert isinstance(first, nn.Linear)
+    assert isinstance(last, nn.Linear)
+    assert first.in_features == step.env.observation_size
+    assert last.out_features == step.env.num_actions
 
 
 def test_eval_scores_without_advancing_the_training_environment() -> None:
@@ -104,9 +109,12 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
 
 def test_a_step_changes_the_policy() -> None:
     step = _step()
-    before = step.model.policy[0].weight.detach().clone()
+    policy = step.model.policy
+    layer = policy[0]
+    assert isinstance(layer, nn.Linear)
+    before = layer.weight.detach().clone()
     step.train_step()
-    assert not torch.equal(before, step.model.policy[0].weight.detach())
+    assert not torch.equal(before, layer.weight.detach())
 
 
 def test_the_step_counter_advances() -> None:
@@ -121,7 +129,7 @@ def test_the_learning_rate_anneals_toward_zero() -> None:
     rates: list[float] = []
     for _ in range(3):
         step.train_step()
-        rates.append(float(step.optimizer.param_groups[0]["lr"]))
+        rates.append(learning_rate(step.optimizer))
     assert rates == sorted(rates, reverse=True)
     assert rates[-1] < rates[0]
 
@@ -178,10 +186,13 @@ def test_the_same_seed_reproduces_the_same_update() -> None:
 
 def test_evaluation_does_not_change_the_policy() -> None:
     step = _step()
-    before = step.model.policy[0].weight.detach().clone()
+    policy = step.model.policy
+    layer = policy[0]
+    assert isinstance(layer, nn.Linear)
+    before = layer.weight.detach().clone()
     result = step.eval_loss()
     assert math.isfinite(float(result["loss"]))
-    assert torch.equal(before, step.model.policy[0].weight.detach())
+    assert torch.equal(before, layer.weight.detach())
 
 
 def test_action_logits_can_be_read_for_arbitrary_observations() -> None:

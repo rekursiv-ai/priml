@@ -23,6 +23,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol, cast
 
 import argparse
 import logging
@@ -43,9 +44,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
-    args = parser.parse_args()
+    flags = cast(_Flags, parser.parse_args())
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    prepare(args.directory)
+    prepare(flags.directory)
     return 0
 
 
@@ -69,6 +70,12 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         default=default_directory(),
         help="Destination for train.pt and test.pt.",
     )
+
+
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    directory: Path
 
 
 if __name__ == "__main__":

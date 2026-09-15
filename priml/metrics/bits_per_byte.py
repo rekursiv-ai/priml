@@ -18,7 +18,8 @@ full one.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 import math
 
@@ -118,7 +119,8 @@ class BitsPerByte:
                 totals = totals.to(torch.device("cuda", torch.cuda.current_device()))
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
             totals = totals.cpu()
-        nats, counted = totals.tolist()
+        nats = float(totals[0])
+        counted = float(totals[1])
         if counted <= 0:
             raise ValueError(
                 "bits per byte has no scored tokens: the evaluation produced "
@@ -126,21 +128,28 @@ class BitsPerByte:
             )
         return {"bpb": nats / (math.log(2) * counted)}
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed sums."""
+
+        nats: float
+        bytes: int
+
+    def state_dict(self) -> StateDict:
         """Return the accumulated sums.
 
         Returns:
-          result: The dict[str, Any].
+          state: The nat and byte totals.
 
         """
         return {"nats": self.nats, "bytes": self.bytes}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore sums produced by :meth:`state_dict`.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.nats = state_dict.get("nats", 0.0)
-        self.bytes = state_dict.get("bytes", 0)
+        state = cast(BitsPerByte.StateDict, state_dict)
+        self.nats = state["nats"]
+        self.bytes = state["bytes"]

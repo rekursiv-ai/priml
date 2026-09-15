@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import field
 from functools import partial
-from typing import Self, override
+from typing import Protocol, Self, cast, override
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
@@ -110,7 +110,7 @@ class NanoChatLM(nn.Module):
         against one depth go stale the moment a fork changes ``num_layers`` --
         the list is a snapshot, this is the rule that produced it."""
 
-        embedding: Makeable[nn.Module] = field(
+        embedding: Makeable[TensorModule] = field(
             default_factory=lambda: NarrowEmbedding.Config(
                 inner=Embedding.Config(init_weight=partial(normal, std=1.0)),
             ),
@@ -287,7 +287,12 @@ class NanoChatLM(nn.Module):
         assert isinstance(embedding, nn.Module)
         self.embed = embedding
         self.lm_head = config.lm_head.make()
-        self.blocks = nn.ModuleList([block.make() for block in config.block])
+        blocks: list[nn.Module] = []
+        for block in config.block:
+            built = block.make()
+            assert isinstance(built, nn.Module)
+            blocks.append(built)
+        self.blocks = nn.ModuleList(blocks)
         self.value_embeds = nn.ModuleDict(
             {
                 str(layer): self._value_table(config, width=width)
@@ -322,7 +327,6 @@ class NanoChatLM(nn.Module):
         if isinstance(config.embedding, NarrowEmbedding.Config):
             table.dtype = config.embedding.dtype
         built = table.make()
-        assert isinstance(built, nn.Module)
         return built
 
     def reset_parameters(self) -> None:
@@ -370,7 +374,8 @@ class NanoChatLM(nn.Module):
                 f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}.",
             )
         cos_sin = self._rotation_table(length, device=tokens.device)
-        x = self.norm_embed(self.embed(tokens))
+        embed = cast(_TensorCallable, self.embed)
+        x = self.norm_embed(embed(tokens))
         original = x
         for layer, block in enumerate(self.blocks):
             x = self.mix(x, original=original, layer=layer)
@@ -378,12 +383,12 @@ class NanoChatLM(nn.Module):
             # membership is tested before the lookup.
             name = str(layer)
             gated = name in self.value_embeds
-            out = block(
+            block_call = cast(_BlockCallable, block)
+            out = block_call(
                 x,
                 cos_sin=cos_sin,
                 value_embedding=self.value_embeds[name](tokens) if gated else None,
             )
-            assert isinstance(out, Tensor)
             x = out
         return self.lm_head(self.norm_out(x))
 
@@ -442,6 +447,24 @@ class NanoChatLM(nn.Module):
         return 6 * matrix + attention
 
 
+class _BlockCallable(Protocol):
+    """Transformer-block call slice used where ``nn.Module`` is untyped."""
+
+    def __call__(
+        self,
+        x: Tensor,
+        *,
+        cos_sin: tuple[Tensor, Tensor],
+        value_embedding: Tensor | None,
+    ) -> Tensor: ...
+
+
+class _TensorCallable(Protocol):
+    """Callable tensor module slice used where ``nn.Module`` is untyped."""
+
+    def __call__(self, x: Tensor) -> Tensor: ...
+
+
 def _window(block: nn.Module) -> int:
     """How far back a built block attends."""
     attention = getattr(block, "attn", None)
@@ -489,7 +512,10 @@ def thresholded_relu_squared(x: Tensor, *, threshold: float) -> Tensor:
 class OutputNormFeedForward(SwiGLUReluSquared):
     """Apply an injected transform to the FFN output; identity by default."""
 
-    class Config(SwiGLUReluSquared.Config):
+    class Config(  # pyright: ignore[reportGeneralTypeIssues] -- The base Config is already Makes[SwiGLUReluSquared]; re-parenting is what makes make() return this subclass.
+        Makes["OutputNormFeedForward"],
+        SwiGLUReluSquared.Config,
+    ):
         norm_out: Makeable[TensorModule] = field(
             default_factory=Identity.Config,
         )
@@ -699,7 +725,7 @@ class MemoryNanoChatLM(NanoChatLM):
         device = self._materialized_device()
         if device is not None:
             self.materialize_rotation_table(device=device)
-        for table in (*self.bigrams.values(), *self.trigrams.values()):
+        for table in self._tables():
             table.reset_parameters()
         if self.pool_weights is not None:
             nn.init.zeros_(self.pool_weights)
@@ -710,17 +736,25 @@ class MemoryNanoChatLM(NanoChatLM):
         if self.dtype is not None:
             self.to(dtype=self.dtype)
         if self.fused_ngram:
-            for table in (*self.bigrams.values(), *self.trigrams.values()):
+            for table in self._tables():
                 table.prepare_gradient_sinks(dirty_bitmaps=self.ngram_dirty_clear)
 
     @override
     def flops_per_token(self) -> int:
         table_parameters = sum(
             parameter.numel()
-            for table in (*self.bigrams.values(), *self.trigrams.values())
+            for table in self._tables()
             for parameter in table.parameters()
         )
         return super().flops_per_token() - 6 * table_parameters
+
+    def _tables(self) -> list[HashedNgramTables]:
+        """Every n-gram table, bigrams then trigrams; ``ModuleDict`` erases the type."""
+        tables: list[HashedNgramTables] = []
+        for table in (*self.bigrams.values(), *self.trigrams.values()):
+            assert isinstance(table, HashedNgramTables)
+            tables.append(table)
+        return tables
 
     @override
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -734,7 +768,7 @@ class MemoryNanoChatLM(NanoChatLM):
 
         """
         super().zero_grad(set_to_none=set_to_none)
-        for table in (*self.bigrams.values(), *self.trigrams.values()):
+        for table in self._tables():
             if self.ngram_dirty_clear and table.gradient_bitmaps:
                 clear_marked_sinks(table.gradient_sinks, table.gradient_bitmaps)
                 continue
@@ -781,9 +815,7 @@ class MemoryNanoChatLM(NanoChatLM):
                     messages["bigram_value"] = self.bigrams[name](tokens)
                 if name in self.trigrams:
                     messages["trigram_value"] = self.trigrams[name](tokens)
-            out = block(x, **messages)
-            assert isinstance(out, Tensor)
-            x = out
+            x = cast(Tensor, block(x, **messages))
             if layer == self.attention_source_after_layer:
                 attention_source = x
             if (

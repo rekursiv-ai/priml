@@ -33,10 +33,10 @@ Examples:
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, cast, override
+from typing import NoReturn, Protocol, cast, override
 
 import argparse
 import ast
@@ -59,6 +59,55 @@ from priml.math.seed import RngState, get_rng_state, set_rng_state
 from priml.model.attention.value_gated_attention import sdpa_attention
 from priml.optimizers.composite import CompositeOptimizer
 from priml.train.parallelism import NoParallel
+
+
+class _AttentionCallable(Protocol):
+    __qualname__: str
+
+    def __call__(self, *args: object, **kwargs: object) -> Tensor: ...
+
+
+class _AttentionKernel(Protocol):
+    flash_attn_func: _AttentionCallable
+
+
+class _AttentionConfig(Protocol):
+    window: int
+
+
+class _NanoChatConfig(Protocol):
+    num_layers: int
+
+
+class _ReferenceModule(Protocol):
+    __file__: str
+    fa3: _AttentionKernel
+    model: nn.Module
+    optimizer: torch.optim.Optimizer
+    window_sizes: list[tuple[int, int]]
+    tokenizer: object
+    DEVICE_BATCH_SIZE: int
+    get_lr_multiplier: Callable[[float], float]
+    get_muon_momentum: Callable[[int], float]
+    get_weight_decay: Callable[[float], float]
+    evaluate_bpb: Callable[[nn.Module, object, int], float]
+
+
+class _TokenizerMethod(Protocol):
+    __func__: types.FunctionType
+
+
+class _TokenizerClass(Protocol):
+    from_directory: _TokenizerMethod
+
+
+class _PrepareModule(Protocol):
+    DATA_DIR: str
+    TOKENIZER_DIR: str
+    EVAL_TOKENS: int
+    MAX_SEQ_LEN: int
+    Tokenizer: _TokenizerClass
+    make_dataloader: Callable[..., Iterator[tuple[Tensor, Tensor, object]]]
 
 
 def their_attention(
@@ -137,10 +186,10 @@ def build_theirs(
     root: Path,
     *,
     corpus: Path,
-    loader: dict[str, Any],
+    loader: dict[str, object],
     rows: int,
-    rng: dict[str, Any],
-) -> tuple[nn.Module, torch.optim.Optimizer, types.ModuleType]:
+    rng: dict[str, object],
+) -> tuple[nn.Module, torch.optim.Optimizer, _ReferenceModule]:
     """Return the reference's own model and optimizer, built by its own module scope.
 
     Neither is constructed here. Their script derives the geometry from its
@@ -173,14 +222,14 @@ def build_theirs(
     # sides then run eager, which is the only pairing that isolates the port:
     # a compiled graph fuses reductions differently, so comparing one side
     # compiled against the other eager measures inductor, not the recipe.
-    model = getattr(upstream.model, "_orig_mod", upstream.model)
+    model = upstream.model
     optimizer = upstream.optimizer
     assert isinstance(model, nn.Module), type(model).__name__
     assert isinstance(optimizer, torch.optim.Optimizer), type(optimizer).__name__
-    return model, optimizer, their_schedules(root, upstream)
+    return model, optimizer, their_schedules(root, cast(types.ModuleType, upstream))
 
 
-def their_schedules(root: Path, module: types.ModuleType) -> types.ModuleType:
+def their_schedules(root: Path, module: types.ModuleType) -> _ReferenceModule:
     """Bind their schedule functions onto their module.
 
     The three live below the point where module scope is stopped -- stopping
@@ -209,17 +258,17 @@ def their_schedules(root: Path, module: types.ModuleType) -> types.ModuleType:
     missing = wanted - set(module.__dict__)
     if missing:
         raise RuntimeError(f"train.py defines no {sorted(missing)}")
-    return module
+    return cast(_ReferenceModule, module)
 
 
 def load_upstream(
     root: Path,
     *,
     corpus: Path,
-    loader: dict[str, Any],
+    loader: dict[str, object],
     rows: int,
-    rng: dict[str, Any],
-) -> types.ModuleType:
+    rng: dict[str, object],
+) -> _ReferenceModule:
     """Import their ``train.py`` as itself, with its training loop cut short.
 
     Their file is a script: its module scope builds a tokenizer and a
@@ -291,7 +340,7 @@ def load_upstream(
             raise RuntimeError(f"train.py aborted before defining {required}")
     if "train" not in loader:
         raise RuntimeError("train.py never asked for a dataloader")
-    return module
+    return cast(_ReferenceModule, module)
 
 
 def build_ours(*, device: str) -> NanoChatTrainStep:
@@ -486,11 +535,17 @@ def compare_state(
     assert isinstance(ours.optimizer, CompositeOptimizer)
     problems: list[str] = []
     for our_name, their_name in mapping.items():
-        mine: dict[str, Any] = {}
+        mine: dict[str, Tensor] = {}
         for member in ours.optimizer.optimizers:
-            if dst[our_name] in member.state:
-                mine = member.state[dst[our_name]]
-        other = their_optimizer.state.get(src[their_name], {})
+            member_state = cast(dict[Tensor, object], member.state)
+            if dst[our_name] in member_state:
+                value = member_state[dst[our_name]]
+                assert isinstance(value, dict)
+                mine = cast(dict[str, Tensor], value)
+        their_state = cast(dict[Tensor, object], their_optimizer.state)
+        other_value = their_state.get(src[their_name], {})
+        assert isinstance(other_value, dict)
+        other = cast(dict[str, Tensor], other_value)
         for our_key, their_key in names.items():
             key = their_key if their_key in other else "second_momentum_buffer"
             if our_key not in mine or key not in other:
@@ -511,28 +566,34 @@ def main() -> int:
       result: Exit code (0 on success).
 
     """
-    args = _parse_args()
-    root = clone_upstream(args.clone)
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_arguments(parser)
+    flags = cast(_Flags, parser.parse_args())
+    root = clone_upstream(flags.clone)
 
     # THEIRS first, and the RNG state captured at the moment their module scope
     # has seeded (train.py:456-457) and is about to draw. Ours is then built
     # from that same state, so the two initializations are compared as VALUES
     # rather than as distributions -- a draw-order or a fan-in difference shows
     # up here instead of hiding behind a matching standard deviation.
-    their_loader: dict[str, Any] = {}
+    their_loader: dict[str, object] = {}
     theirs, their_optimizer, upstream = build_theirs(
         root,
-        corpus=args.corpus,
+        corpus=flags.corpus,
         loader=their_loader,
-        rows=args.rows,
+        rows=flags.rows,
         rng=(seeded := {}),
     )
-    train_loader = their_loader["train"]
+    train_loader = cast(Iterator[tuple[Tensor, Tensor, object]], their_loader["train"])
 
     set_rng_state(cast(RngState, seeded["state"]))
-    ours = build_ours(device=args.device)
-    model = ours.config.model
-    mapping = name_map(theirs, layers=model.num_layers)
+    ours = build_ours(device=flags.device)
+    model = ours.model
+    typed_model = cast(_NanoChatModel, model)
+    mapping = name_map(theirs, layers=typed_model.config.num_layers)
 
     # BEFORE the copy: it overwrites our draws with theirs, so this is the only
     # point at which our initialization still exists to be checked.
@@ -551,12 +612,14 @@ def main() -> int:
     # Read off the built ATTENTIONS: each layer carries its own window, so this
     # reports what the stack will actually attend over rather than the pattern
     # it was asked for.
+    reference = cast(_UpstreamModel, theirs)
+    blocks = cast(Iterator[_ModelBlock], model.blocks)
     print(
-        f"    windows ours={[b.attn.config.window for b in ours.model.blocks]} "
-        f"theirs={[w[0] for w in theirs.window_sizes]}",
+        f"    windows ours={[b.attn.window for b in blocks]} "
+        f"theirs={[w[0] for w in reference.window_sizes]}",
     )
 
-    autocast = torch.amp.autocast(device_type=args.device, dtype=torch.bfloat16)
+    autocast = torch.amp.autocast(device_type=flags.device, dtype=torch.bfloat16)
     theirs.train()
     ours.model.train()
     # The recipe expresses its window as a MASK, which disqualifies every
@@ -569,7 +632,7 @@ def main() -> int:
     stack.enter_context(sdpa_kernel(SDPBackend.MATH))
     failures = len(problems)
 
-    for index in range(1, args.steps + 1):
+    for index in range(1, flags.steps + 1):
         # THEIR loader, over the real corpus. The packer is a stateful stream --
         # best-fit out of a document buffer refilled a fixed number at a time --
         # so it is part of the recipe rather than a fixture, and random ids left
@@ -580,9 +643,9 @@ def main() -> int:
         tokens, targets, _ = next(train_loader)
 
         with autocast:
-            their_loss = theirs(tokens, targets)
+            their_loss = reference(tokens, targets)
         with autocast:
-            logits = ours.model(tokens)
+            logits = cast(Tensor, ours.model(tokens))
         # Their forward folds the loss in; ours returns logits, so the same
         # cross-entropy is spelled here rather than compared through a
         # different reduction.
@@ -619,8 +682,8 @@ def main() -> int:
         # comparison instead of sampling one point of each.
         progress = _progress_at(
             index,
-            warmup=args.warmup,
-            budget_steps=args.budget_steps,
+            warmup=flags.warmup,
+            budget_steps=flags.budget_steps,
         )
         multiplier = upstream.get_lr_multiplier(progress)
         for group in their_optimizer.param_groups:
@@ -663,20 +726,20 @@ def main() -> int:
         theirs,
         ours,
         upstream,
-        their_loader["prepare"],
-        batches=args.eval_batches,
+        cast(_PrepareModule, their_loader["prepare"]),
+        batches=flags.eval_batches,
     )
 
     verdict = f"{failures} DIFFERENCE(S)" if failures else "BIT-IDENTICAL"
-    print(f"\n{args.steps} steps, FA3->FA2 only: {verdict}")
+    print(f"\n{flags.steps} steps, FA3->FA2 only: {verdict}")
     return 1 if failures else 0
 
 
 def compare_eval(
     theirs: nn.Module,
     ours: NanoChatTrainStep,
-    upstream: types.ModuleType,
-    prepare: types.ModuleType,
+    upstream: _ReferenceModule,
+    prepare: _PrepareModule,
     *,
     batches: int,
 ) -> int:
@@ -713,7 +776,7 @@ def compare_eval(
     # an argument, and the full 40 x 524,288 tokens take minutes to answer a
     # question a few batches settle.
     original = prepare.EVAL_TOKENS
-    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
+    prepare.EVAL_TOKENS = batches * rows * int(prepare.MAX_SEQ_LEN)
     # Under autocast, as their own final eval runs it (train.py:609-611): their
     # tables are held in bfloat16, so the model is only runnable inside one.
     autocast = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -725,7 +788,7 @@ def compare_eval(
                 upstream.evaluate_bpb(_LossAdapter(ours.model), tokenizer, rows),
             )
     finally:
-        prepare.EVAL_TOKENS = original  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
+        prepare.EVAL_TOKENS = original
 
     print(f"\n[eval] their metric: theirs={their_bpb:.9f} ours={our_bpb:.9f}")
     if their_bpb != our_bpb:
@@ -754,8 +817,7 @@ class _LossAdapter(nn.Module):
         targets: Tensor,
         reduction: str = "mean",
     ) -> Tensor:
-        logits = self.inner(tokens)
-        assert isinstance(logits, Tensor)
+        logits = cast(Tensor, self.inner(tokens))
         return functional.cross_entropy(
             logits.reshape(-1, logits.shape[-1]).float(),
             targets.reshape(-1).long(),
@@ -804,15 +866,17 @@ def _kernels_stub() -> types.ModuleType:
 # Their ``make_dataloader`` is wrapped rather than replaced: the real one is called, its
 # generator handed to ``loader``, and module scope then ended before their training loop
 # -- so the comparison drives their own packer while their weights stay untouched.
-def _prepare_module(corpus: Path, loader: dict[str, Any]) -> types.ModuleType:
+def _prepare_module(corpus: Path, loader: dict[str, object]) -> _PrepareModule:
     """THEIR ``prepare``, pointed at the prepared corpus."""
-    module = importlib.import_module("prepare")
-    module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
-    module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
-    module.Tokenizer.from_directory.__func__.__defaults__ = (str(corpus / "tokenizer"),)
+    module = cast(_PrepareModule, importlib.import_module("prepare"))
+    module.DATA_DIR = str(corpus)
+    module.TOKENIZER_DIR = str(corpus / "tokenizer")
+    cast(types.FunctionType, module.Tokenizer.from_directory.__func__).__defaults__ = (
+        str(corpus / "tokenizer"),
+    )
     real_make_dataloader = module.make_dataloader
 
-    def make_dataloader(*args: object, **kwargs: object) -> None:
+    def make_dataloader(*args: object, **kwargs: object) -> NoReturn:
         """Build their loader, keep it, and end their module scope.
 
         Restores their own function first: their ``evaluate_bpb`` builds a
@@ -827,21 +891,82 @@ def _prepare_module(corpus: Path, loader: dict[str, Any]) -> types.ModuleType:
           _StopModuleScopeError: Always, once the loader is captured.
 
         """
-        module.make_dataloader = real_make_dataloader  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
+        module.make_dataloader = real_make_dataloader
         loader["train"] = real_make_dataloader(*args, **kwargs)
         loader["prepare"] = module
         raise _StopModuleScopeError
 
-    module.make_dataloader = make_dataloader  # ty: ignore[unresolved-attribute] -- The parity harness mutates a dynamically imported reference module.  # pyright: ignore[reportAttributeAccessIssue] -- The parity harness mutates a dynamically imported reference module.
+    module.make_dataloader = make_dataloader
     return module
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+class _StopModuleScopeError(Exception):
+    """Ends ``train.py``'s training loop from the dataloader it asks us for."""
+
+
+# Their ``torch.manual_seed(42)`` (``train.py:456``) is followed by the CUDA seed and
+# then by every draw their model makes. Wrapping the CUDA call is what puts the capture
+# between the two: after both seeds are set, and before ``GPT(config)`` consumes any of
+# it.
+#
+# Their init draws on the CUDA generator -- the model is materialized on the device
+# (``train.py:482``) before ``init_weights`` runs -- so that generator is the one the
+# comparison must rewind. ``torch.cuda.manual_seed`` does NOT initialize CUDA, and
+# ``get_rng_state`` omits the CUDA entries until it is (``seed.py:353``), so the context
+# is forced up first. Without it the capture holds CPU state only, the restore leaves
+# the CUDA generator wherever their draws left it, and the init comparison reports
+# differences it manufactured.
+@contextlib.contextmanager
+def _capture_rng_after_seeding(rng: dict[str, object]) -> Generator[None]:
+    """Record the RNG state their module scope seeds, before it draws."""
+    real_cuda_seed = torch.cuda.manual_seed
+
+    def capture(seed: int) -> None:
+        torch.cuda.init()
+        real_cuda_seed(seed)
+        rng.setdefault("state", get_rng_state())
+
+    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- The parity harness mutates attributes on dynamically loaded reference modules..
+    try:
+        yield
+    finally:
+        torch.cuda.manual_seed = real_cuda_seed
+
+
+# The first ``warmup`` updates are unbilled on both sides, so progress is zero across
+# them; each update after charges one step's share of a run that lasts ``budget_steps``
+# billed updates.
+def _progress_at(index: int, *, warmup: int, budget_steps: int) -> float:
+    """Budget progress a real run sits at on its ``index``-th update."""
+    billed = max(0, index - 1 - warmup)
+    return min(billed / budget_steps, 1.0)
+
+
+class _ModelBlock(Protocol):
+    attn: _AttentionConfig
+
+
+class _UpstreamModel(Protocol):
+    window_sizes: list[tuple[int, int]]
+
+    def __call__(self, tokens: Tensor, targets: Tensor) -> Tensor: ...
+
+
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    clone: Path
+    corpus: Path
+    rows: int
+    device: str
+    steps: int
+    warmup: int
+    budget_steps: int
+    eval_batches: int
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register flags on ``parser``."""
     parser.add_argument(
         "--clone",
         type=Path,
@@ -883,49 +1008,10 @@ def _parse_args() -> argparse.Namespace:
         default=Path("/opt/scratch/datasets/nanochat-priml"),
         help="Prepared shards and tokenizer, read by THEIR loader.",
     )
-    return parser.parse_args()
 
 
-class _StopModuleScopeError(Exception):
-    """Ends ``train.py``'s training loop from the dataloader it asks us for."""
-
-
-# Their ``torch.manual_seed(42)`` (``train.py:456``) is followed by the CUDA seed and
-# then by every draw their model makes. Wrapping the CUDA call is what puts the capture
-# between the two: after both seeds are set, and before ``GPT(config)`` consumes any of
-# it.
-#
-# Their init draws on the CUDA generator -- the model is materialized on the device
-# (``train.py:482``) before ``init_weights`` runs -- so that generator is the one the
-# comparison must rewind. ``torch.cuda.manual_seed`` does NOT initialize CUDA, and
-# ``get_rng_state`` omits the CUDA entries until it is (``seed.py:353``), so the context
-# is forced up first. Without it the capture holds CPU state only, the restore leaves
-# the CUDA generator wherever their draws left it, and the init comparison reports
-# differences it manufactured.
-@contextlib.contextmanager
-def _capture_rng_after_seeding(rng: dict[str, Any]) -> Generator[None]:
-    """Record the RNG state their module scope seeds, before it draws."""
-    real_cuda_seed = torch.cuda.manual_seed
-
-    def capture(seed: int) -> None:
-        torch.cuda.init()
-        real_cuda_seed(seed)
-        rng.setdefault("state", get_rng_state())
-
-    torch.cuda.manual_seed = capture  # ty: ignore[invalid-assignment] -- The parity harness mutates attributes on dynamically loaded reference modules..
-    try:
-        yield
-    finally:
-        torch.cuda.manual_seed = real_cuda_seed
-
-
-# The first ``warmup`` updates are unbilled on both sides, so progress is zero across
-# them; each update after charges one step's share of a run that lasts ``budget_steps``
-# billed updates.
-def _progress_at(index: int, *, warmup: int, budget_steps: int) -> float:
-    """Budget progress a real run sits at on its ``index``-th update."""
-    billed = max(0, index - 1 - warmup)
-    return min(billed / budget_steps, 1.0)
+class _NanoChatModel(Protocol):
+    config: _NanoChatConfig
 
 
 if __name__ == "__main__":

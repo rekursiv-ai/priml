@@ -231,7 +231,7 @@ def test_gated_delta_net_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
         seed=0,
-        run=lambda m, x: first_tensor(m(x)),
+        run=lambda m, x: first_tensor(m(x)),  # pyright: ignore[reportAny] -- the test helper accepts the model's untyped tuple output.
     )
 
 

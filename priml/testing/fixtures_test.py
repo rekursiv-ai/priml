@@ -20,7 +20,6 @@ from priml.testing.fixtures import (
 def test_get_device_returns_device():
     """Test that get_device returns a torch.device."""
     device = get_device()
-    assert isinstance(device, torch.device)
     assert device.type in ("cpu", "cuda")
 
 
@@ -156,7 +155,10 @@ def test_test_main_calls_pytest():
 
         # Verify pytest.main was called.
         assert mock_pytest.called
-        call_args = mock_pytest.call_args[0][0]
+        call = mock_pytest.call_args
+        assert call is not None
+        call_args = call.args[0]
+        assert isinstance(call_args, list)
 
         # Verify the test file is in the arguments.
         assert "/path/to/test_file.py" in call_args
@@ -185,7 +187,10 @@ def test_test_main_passes_through_argv():
         ):
             test_main("/path/to/test_file.py")
 
-            call_args = mock_pytest.call_args[0][0]
+            call = mock_pytest.call_args
+            assert call is not None
+            call_args = call.args[0]
+            assert isinstance(call_args, list)
 
             # Verify extra args were passed through.
             assert "-k" in call_args

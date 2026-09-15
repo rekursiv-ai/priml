@@ -27,13 +27,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import cache, partial
-from typing import Any, overload, override
+from typing import cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
 from torch.optim import Optimizer
 
 import torch
+
+from priml.lib.custom_json import FloatCodec
 
 
 __all__ = ["FusedAdamW"]
@@ -139,7 +141,7 @@ class FusedAdamW(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor] | Iterable[dict[str, Any]],
+        params: Iterable[Tensor] | Iterable[dict[str, object]],
         lr: float = 1e-3,
         *,
         betas: tuple[float, float] = (0.9, 0.999),
@@ -189,7 +191,7 @@ class FusedAdamW(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            for parameter in group["params"]:
+            for parameter in cast(list[Tensor], group["params"]):
                 gradient = parameter.grad
                 if gradient is None:
                     continue
@@ -200,24 +202,32 @@ class FusedAdamW(Optimizer):
         self,
         parameter: Tensor,
         gradient: Tensor,
-        group: dict[str, Any],
+        group: dict[str, object],
     ) -> None:
         """Update one parameter, filling the shared scalars from its group."""
-        state = self.state[parameter]
+        state = cast(dict[str, object], self.state[parameter])
         if not state:
             state["step"] = 0
             state["first_moment"] = torch.zeros_like(parameter)
             state["second_moment"] = torch.zeros_like(parameter)
-        state["step"] += 1
-        beta1, beta2 = group["betas"]
-        for name, value in (
-            ("step", state["step"]),
-            ("lr", group["lr"]),
-            ("beta1", beta1),
-            ("beta2", beta2),
-            ("eps", group["eps"]),
-            ("weight_decay", group["weight_decay"]),
-        ):
+        step = state["step"]
+        assert isinstance(step, int)
+        state["step"] = step + 1
+        betas = group["betas"]
+        assert isinstance(betas, tuple)
+        beta1, beta2 = cast(tuple[float, float], betas)
+        lr = FloatCodec.coerce(group["lr"], None)
+        eps = FloatCodec.coerce(group["eps"], None)
+        weight_decay = FloatCodec.coerce(group["weight_decay"], None)
+        scalar_values: dict[str, float] = {
+            "step": float(state["step"]),
+            "lr": lr,
+            "beta1": beta1,
+            "beta2": beta2,
+            "eps": eps,
+            "weight_decay": weight_decay,
+        }
+        for name, value in scalar_values.items():
             self._scalars[name].fill_(value)
         self._update(
             parameter,

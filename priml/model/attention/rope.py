@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import KW_ONLY, field
 from typing import (
-    Any,
     Literal,
     Protocol,
     Self,
@@ -367,7 +366,7 @@ class RoPE(nn.Module):
         self._mscale = 1.0
         self._inv_freqs: FrequencySequence = []
         self._build_inv_freqs(torch.device("cpu"))
-        if all(not f.numel() for f in self._inv_freqs):
+        if not any(self.channels_head):
             raise ValueError(
                 f"At least one dim must be nonzero, got {self.channels_head}.",
             )
@@ -608,7 +607,7 @@ class RoPE(nn.Module):
         return out.to(dtype)
 
     @override
-    def _apply(self, fn: Callable[..., Any], recurse: bool = True) -> Self:
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
         super()._apply(fn, recurse)
         self._build_inv_freqs(self._dtype.device)
         return self
@@ -795,7 +794,7 @@ class RoPEMixed(RoPE):
     # assign 'list' as child module '_inv_freqs'``), so ``super()`` here breaks every
     # ``.to(device)``.
     @override
-    def _apply(self, fn: Callable[..., Any], recurse: bool = True) -> Self:
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
         """Move the module, carrying the LEARNED frequencies across."""
         freqs = [f.data.clone() for f in self._inv_freqs]
         # The grandparent's ``_apply`` is the only route that moves the module

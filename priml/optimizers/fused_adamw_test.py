@@ -170,7 +170,6 @@ def test_the_config_builds_a_constructor_awaiting_parameters() -> None:
     config.betas = (0.8, 0.95)
     build = config.make()
     optimizer = build([torch.zeros(2, requires_grad=True)])
-    assert isinstance(optimizer, FusedAdamW)
     assert optimizer.param_groups[0]["lr"] == 0.02
     assert optimizer.param_groups[0]["betas"] == (0.8, 0.95)
 

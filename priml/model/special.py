@@ -93,7 +93,6 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         inner = self.inner(x, **kwargs)
-        assert isinstance(inner, Tensor)
         return x + inner
 
 
@@ -144,7 +143,7 @@ class TiedLinear(nn.Module, LateBound):
           ValueError: The path names nothing with a tensor ``weight``.
 
         """
-        source = attrgetter(self.tied)(root)
+        source: object = attrgetter(self.tied)(root)  # pyright: ignore[reportAny] -- runtime path resolution returns the configured module.
         if not has_weight(source):
             raise ValueError(f"tied={self.tied!r} must name a module with a weight.")
         # Not ``self._source = source``: nn.Module registers a Module value as

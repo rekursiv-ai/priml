@@ -30,7 +30,16 @@ identical weights stay identical regardless of what else drew in between.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Self, override
+from collections.abc import Mapping
+from typing import (
+    TYPE_CHECKING,
+    NotRequired,
+    Protocol,
+    Self,
+    TypedDict,
+    cast,
+    override,
+)
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -39,7 +48,7 @@ import torch
 
 
 if TYPE_CHECKING:
-    from priml.baselines.sudoku.model import SudokuNet
+    from priml.baselines.sudoku.model import ForwardOutput, SudokuNet
 
 
 class ActPool:
@@ -240,7 +249,7 @@ class ActPool:
         model: SudokuNet,
         *,
         media: Tensor,
-        prefix_kwargs: dict[str, Any] | None = None,
+        prefix_kwargs: dict[str, Tensor] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Run one puzzle batch to the step cap, carrying latents throughout.
 
@@ -262,7 +271,9 @@ class ActPool:
         logits = halt = None
         for _ in range(self.config.max_steps):
             self._set_feedback(model, feedback=feedback)
-            out = model(media, z_slow, z_fast, **(prefix_kwargs or {}))
+            out = cast(_SudokuForward, model)(
+                media, z_slow, z_fast, **(prefix_kwargs or {})
+            )
             z_slow, z_fast = out.z_slow, out.z_fast
             logits, halt = out.logits, out.halt
             if feedback is not None:
@@ -336,7 +347,12 @@ class ActPool:
         given = (media >= self.config.given_low) & (media <= self.config.given_high)
         return torch.where(given, media.to(decoded.dtype), decoded)
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The halting RNG; absent in a checkpoint written before it existed."""
+
+        halt_rng: NotRequired[Tensor]
+
+    def state_dict(self) -> StateDict:
         """Snapshot the halting RNG.
 
         The pool's puzzles and latents are deliberately NOT saved: they are
@@ -350,17 +366,18 @@ class ActPool:
         """
         return {"halt_rng": self._generator.get_state()}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the halting RNG produced by :meth:`state_dict`.
 
         Args:
           state_dict: State dict.
 
         """
-        if "halt_rng" in state_dict:
+        state = cast(ActPool.StateDict, state_dict)
+        if "halt_rng" in state:
             # ``set_state`` wants a CPU byte tensor; a checkpoint read onto the
             # compute device would otherwise be rejected here.
-            self._generator.set_state(state_dict["halt_rng"].cpu())
+            self._generator.set_state(state["halt_rng"].cpu())
 
     def _set_feedback(self, model: SudokuNet, *, feedback: Tensor | None) -> None:
         """Hand the fed-back grid to whichever channel consumes it."""
@@ -397,3 +414,15 @@ class ActPool:
             minimum = torch.where(explore, sampled, torch.ones_like(sampled))
             return at_cap | (fired & (self.steps >= minimum))
         return at_cap | (fired & ~explore)
+
+
+class _SudokuForward(Protocol):
+    """Callable slice needed from the model during a rollout."""
+
+    def __call__(
+        self,
+        media: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        **prefix_kwargs: object,
+    ) -> ForwardOutput: ...

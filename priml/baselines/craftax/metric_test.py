@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import math
@@ -37,7 +36,9 @@ def _policy() -> ActorCritic:
 class _Actor:
     def __init__(self, policy: ActorCritic) -> None:
         self.model = policy
-        self.observation_size = policy.policy[0].in_features
+        layer = policy.policy[0]
+        assert isinstance(layer, torch.nn.Linear)
+        self.observation_size = layer.in_features
         self.device = next(policy.parameters()).device
         self.reset_count = 0
         self.previous_dones: list[torch.Tensor] = []
@@ -188,8 +189,12 @@ def test_playing_banks_the_episodes_that_finish(
     computed = score.compute()
     assert computed["episodes"] == 4.0
     assert computed["episode_length"] == pytest.approx(2.0)
-    assert math.isfinite(computed["score_pct"])
-    assert math.isfinite(computed["normalized_return_pct"])
+    score_pct = computed["score_pct"]
+    normalized_return_pct = computed["normalized_return_pct"]
+    assert isinstance(score_pct, float)
+    assert isinstance(normalized_return_pct, float)
+    assert math.isfinite(score_pct)
+    assert math.isfinite(normalized_return_pct)
 
 
 @pytest.mark.compute_large_fixture
@@ -199,7 +204,7 @@ def test_the_same_seed_scores_the_same_episodes(
     monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
     policy = _policy()
 
-    def played() -> dict[str, Any]:
+    def played() -> dict[str, object]:
         score = _score(steps=5)
         score.update(torch.zeros(2, 43), actor=_Actor(policy))
         return score.compute()

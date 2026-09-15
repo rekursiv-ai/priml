@@ -101,7 +101,7 @@ def recursively_iterate_over_object_descendants(
                         continue
                     seen_slots.add(slot)
                     try:
-                        slot_value = getattr(value, slot)
+                        slot_value: object = getattr(value, slot)  # pyright: ignore[reportAny] -- The traversed value is arbitrary; getattr_static would yield the slot descriptor, not the value.
                     except AttributeError:
                         continue
                     yield from recursively_iterate_over_object_descendants(
@@ -113,7 +113,7 @@ def recursively_iterate_over_object_descendants(
         if hasattr(value, "__dict__"):
             for key in sorted(vars(value)):
                 try:
-                    attr_value = getattr(value, key)
+                    attr_value: object = getattr(value, key)  # pyright: ignore[reportAny] -- The traversed value is arbitrary.
                 except AttributeError:
                     continue
                 yield from recursively_iterate_over_object_descendants(

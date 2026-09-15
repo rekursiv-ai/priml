@@ -149,5 +149,4 @@ class MLPMixerBlock(nn.Module):
                 x + self.channel_mixer(x, **kwargs),
                 **kwargs,
             )
-        assert isinstance(x, Tensor)
         return x

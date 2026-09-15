@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Self
+from typing import Self, TypedDict, cast
 
 import time
+
+from priml.lib.custom_json import FloatCodec, IntCodec
 
 
 __all__ = [
@@ -93,23 +95,32 @@ class CheckpointableStepTimer:
         self.global_sec += elapsed
         self.local_sec += elapsed
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed totals; the local counters are never persisted."""
+
+        global_count: int
+        global_sec: float
+
+    def state_dict(self) -> StateDict:
         """Return the global totals; the local ones belong to this process.
 
         Returns:
-          result: The dict[str, Any].
+          state: The global count and seconds.
 
         """
         return {"global_count": self.global_count, "global_sec": self.global_sec}
 
-    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the global totals and zero the local ones.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.global_count = int(state_dict["global_count"])
-        self.global_sec = float(state_dict["global_sec"])
+        state = cast(CheckpointableStepTimer.StateDict, state_dict)
+        # A checkpoint reader may hand back a float or a numeric string; a
+        # value that is none of those is corruption, so the coercion raises.
+        self.global_count = IntCodec.coerce(state["global_count"], None)
+        self.global_sec = FloatCodec.coerce(state["global_sec"], None)
         self.local_count = 0
         self.local_sec = 0.0

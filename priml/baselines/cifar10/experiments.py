@@ -70,7 +70,10 @@ NUM_TRAIN_SAMPLES: Final = 50_000
 """Images in the CIFAR-10 training split, fixed by the dataset itself."""
 
 
-class Cifar10TrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class Cifar10TrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[Cifar10TrainStep.Config, Cifar10Data.Config],
+):
     """A training loop with the CIFAR-10 step and dataset already in place.
 
     Narrowing the two slots here rather than at each call site is what lets a
@@ -78,10 +81,14 @@ class Cifar10TrainLoop(Makes["TrainLoop"], TrainLoop.Config):
     reach a field it is about to set.
     """
 
-    step: Cifar10TrainStep.Config = field(default_factory=Cifar10TrainStep.Config)
+    step: Cifar10TrainStep.Config = field(
+        default_factory=Cifar10TrainStep.Config,
+    )
     """Model, optimization, and augmentation."""
 
-    dataset: Cifar10Data.Config = field(default_factory=Cifar10Data.Config)
+    dataset: Cifar10Data.Config = field(
+        default_factory=Cifar10Data.Config,
+    )
     """Prepared CIFAR-10 tensors, served from device memory."""
 
 

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, TypedDict, cast, override
 
 import functools
 import shutil
 import tempfile
 
+from configgle import Makeable
 from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
@@ -19,10 +20,12 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from priml.lib.custom_json import DictCodec
 from priml.train import checkpointing
 from priml.train.checkpointing import (
     AsyncLocalStateDictStorer,
     Checkpointer,
+    StateDictStorer,
     SyncLocalStateDictStorer,
     _read_checkpoint,
 )
@@ -73,20 +76,29 @@ class _DictTarget:
     captures the restored blob in ``loaded`` so a test can assert on it.
     """
 
-    def __init__(self, state: dict[str, Any]) -> None:
+    def __init__(self, state: dict[str, object]) -> None:
         self._state = state
-        self.loaded: dict[str, Any] | None = None
+        self.loaded: dict[str, object] | None = None
 
-    def state_dict(self) -> dict[str, Any]:
-        return self._state
+    class StateDict(TypedDict):
+        """No declared keys: the payload is whatever the test handed in."""
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.loaded = state_dict
+    def state_dict(self) -> StateDict:
+        return cast(_DictTarget.StateDict, self._state)
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        self.loaded = dict(state_dict)
 
 
-def _save(ckpt: Checkpointer, step: int, state: dict[str, Any]) -> None:
+def _tensor(value: object) -> Tensor:
+    """Narrow one restored leaf; every payload written by these tests is a tensor."""
+    assert isinstance(value, Tensor)
+    return value
+
+
+def _save(ckpt: Checkpointer, step: int, state: Mapping[str, object]) -> None:
     """Force-save ``state`` at ``step`` (unconditional, to set up a checkpoint)."""
-    ckpt.save(_DictTarget(state), step)
+    ckpt.save(_DictTarget(dict(state)), step)
 
 
 # Loading a specific step is a per-config concern now, so a fresh Checkpointer is built
@@ -96,17 +108,19 @@ def _load(
     checkpoint_dir: Path,
     *,
     resume_step: int = -1,
-    into: dict[str, Any] | None = None,
-    **config: Any,  # noqa: ANN401 -- forwarded to an upstream Any.
-) -> dict[str, Any]:
+    into: dict[str, object] | None = None,
+    save_every: int = 1,
+    storer: Makeable[StateDictStorer] | None = None,
+) -> dict[str, object]:
     """Resume the checkpoint selected by ``resume_step``; return the restored state."""
-    ckpt = Checkpointer(
-        Checkpointer.Config(
-            working_dir=checkpoint_dir,
-            resume_step=resume_step,
-            **config,
-        ),
+    config = Checkpointer.Config(
+        working_dir=checkpoint_dir,
+        resume_step=resume_step,
+        save_every=save_every,
     )
+    if storer is not None:
+        config.storer = storer
+    ckpt = Checkpointer(config)
     target = _DictTarget({} if into is None else into)
     assert ckpt.load(target, max_steps=1e9, guard=False)
     assert target.loaded is not None
@@ -275,7 +289,7 @@ def test_async_plain_overwrite_replaces_existing_checkpoint(
         into={"value": torch.zeros(1, dtype=torch.long)},
         storer=AsyncLocalStateDictStorer.Config(),
     )
-    assert torch.equal(loaded["value"], torch.tensor([2]))
+    assert torch.equal(_tensor(loaded["value"]), torch.tensor([2]))
 
 
 def test_load_returns_false_when_empty(temp_checkpoint_dir: Path) -> None:
@@ -395,9 +409,9 @@ def test_load_uses_weights_only(
     _save(ckpt, 0, {"step": torch.tensor([1, 2, 3])})
 
     seen: list[str] = []
-    orig = torch.load
+    orig = cast(Callable[..., object], torch.load)
 
-    def spy(path: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
+    def spy(path: object, **kwargs: object) -> object:
         seen.append(f"weights_only={kwargs.get('weights_only')}")
         return orig(path, **kwargs)
 
@@ -591,9 +605,12 @@ def test_distributed_save_barriers(
     calls: list[str] = []
     orig = dist.barrier
 
-    def spy(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to an upstream Any.
+    def spy(*args: object, **kwargs: object) -> object:
+        del args
         calls.append("barrier")
-        return orig(*args, **kwargs)
+        group = kwargs.get("group")
+        assert group is None
+        return orig()
 
     monkeypatch.setattr(dist, "barrier", spy)
     _save(ckpt, 0, {"model": fake.state_dict()})
@@ -634,8 +651,15 @@ def test_async_storage_roundtrip(
     # flush() awaits the write; afterwards the checkpoint is durable.
     storage.flush()
     assert storage.is_complete(path)
-    loaded = storage.read(path, {"x": torch.zeros(3, dtype=torch.long)})
-    assert torch.equal(loaded["x"], torch.tensor([1, 2, 3]))
+    loaded: dict[str, object] = {
+        **storage.read(
+            path,
+            {"x": torch.zeros(3, dtype=torch.long)},
+        ),
+    }
+    value = loaded["x"]
+    assert isinstance(value, Tensor)
+    assert torch.equal(value, torch.tensor([1, 2, 3]))
 
 
 def test_async_reads_a_sync_written_plain_file(
@@ -657,7 +681,7 @@ def test_async_reads_a_sync_written_plain_file(
         path,
         {"x": torch.zeros(3, dtype=torch.long)},
     )
-    assert torch.equal(loaded["x"], torch.tensor([7, 8, 9]))
+    assert torch.equal(_tensor(cast(object, loaded["x"])), torch.tensor([7, 8, 9]))
 
 
 def test_plain_file_read_stages_before_destination_restore(
@@ -669,7 +693,7 @@ def test_plain_file_read_stages_before_destination_restore(
 
     loaded = SyncLocalStateDictStorer().read(path, {"x": torch.zeros(4)})
 
-    assert loaded["x"].device.type == "cpu"
+    assert _tensor(cast(object, loaded["x"])).device.type == "cpu"
 
 
 @pytest.mark.gpu_torch_cuda
@@ -692,9 +716,10 @@ def test_plain_file_load_uses_receiver_placement(temp_checkpoint_dir: Path) -> N
             super().__init__({"x": torch.zeros(4, device="cuda:1")})
 
         @override
-        def load_state_dict(self, state_dict: dict[str, Tensor]) -> None:
-            assert state_dict["x"].device.type == "cpu"
-            self.loaded = {"x": state_dict["x"].to(self._state["x"].device)}
+        def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+            staged = _tensor(state_dict["x"])
+            assert staged.device.type == "cpu"
+            self.loaded = {"x": staged.to(_tensor(self._state["x"]).device)}
 
     target = PlacementTarget()
     ckpt = Checkpointer(
@@ -703,8 +728,9 @@ def test_plain_file_load_uses_receiver_placement(temp_checkpoint_dir: Path) -> N
     with torch.cuda.device(1):
         assert ckpt.load(target, max_steps=1e9, guard=False)
     assert target.loaded is not None
-    assert target.loaded["x"].device == torch.device("cuda:1")
-    assert torch.equal(target.loaded["x"].cpu(), torch.ones(4))
+    placed = _tensor(target.loaded["x"])
+    assert placed.device == torch.device("cuda:1")
+    assert torch.equal(placed.cpu(), torch.ones(4))
 
 
 def test_plain_read_preserves_cpu_rng_state(
@@ -720,9 +746,16 @@ def test_plain_read_preserves_cpu_rng_state(
     rng = torch.get_rng_state()
     torch.save({"rng": {"torch": rng}, "weight": torch.zeros(3)}, path)
 
-    loaded = _read_checkpoint(path, {"rng": {"torch": torch.get_rng_state()}})
+    loaded: dict[str, object] = {
+        **_read_checkpoint(
+            path,
+            {"rng": {"torch": torch.get_rng_state()}},
+        ),
+    }
 
-    restored = loaded["rng"]["torch"]
+    rng_state = DictCodec.coerce(loaded["rng"])
+    restored = rng_state["torch"]
+    assert isinstance(restored, Tensor)
     assert restored.device.type == "cpu", (
         f"RNG state must stay on CPU, got {restored.device}"
     )
@@ -768,8 +801,15 @@ def test_async_storage_state_safe_to_mutate_after_write(
     src = torch.tensor([1, 2, 3])
     storage.write(path, {"x": src})
     src.add_(100)  # Mutate after write returns.
-    loaded = storage.read(path, {"x": torch.zeros(3, dtype=torch.long)})
-    assert torch.equal(loaded["x"], torch.tensor([1, 2, 3])), "stale snapshot"
+    loaded: dict[str, object] = {
+        **storage.read(
+            path,
+            {"x": torch.zeros(3, dtype=torch.long)},
+        ),
+    }
+    value = loaded["x"]
+    assert isinstance(value, Tensor)
+    assert torch.equal(value, torch.tensor([1, 2, 3])), "stale snapshot"
     storage.flush()
 
 
@@ -791,7 +831,9 @@ def test_async_checkpointer_end_to_end(
     target = _DictTarget({"step": torch.zeros(1, dtype=torch.long)})
     assert ckpt.load(target, max_steps=1e9, guard=False)
     assert target.loaded is not None
-    assert int(target.loaded["step"][0]) == 10
+    step = target.loaded["step"]
+    assert isinstance(step, Tensor)
+    assert int(step[0]) == 10
     assert ckpt.available_steps() == [10]  # Now flushed -> visible.
 
 
@@ -883,7 +925,7 @@ def _async_multisave_worker(result_dir: str, mesh: DeviceMesh) -> None:
         merged = ckpt.load(load_target, max_steps=1e9, guard=False)
         ok = steps == [2] and merged
         (Path(result_dir) / f"rank_{rank}").write_text("ok" if ok else f"FAIL:{steps}")
-    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -933,14 +975,20 @@ def _shard_and_step(mesh: DeviceMesh) -> tuple[nn.Module, torch.optim.Optimizer]
     return model, optimizer
 
 
+def _first_exp_avg(optimizer: torch.optim.Optimizer) -> Tensor:
+    """Read the first parameter's Adam ``exp_avg`` moment off the state dict."""
+    exp_avg = optimizer.state_dict()["state"][0]["exp_avg"]  # pyright: ignore[reportAny] -- torch's own opaque optimizer payload.
+    assert isinstance(exp_avg, Tensor)
+    return exp_avg
+
+
 def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
     """Save+reload model and optimizer DTensors; compare full param + opt state."""
     rank = mesh.get_rank()
     try:
         model, optimizer = _shard_and_step(mesh)
         orig_weight = _full_tensor(next(model.parameters())).clone()
-        opt_state = optimizer.state_dict()["state"]
-        orig_exp_avg = _full_tensor(opt_state[0]["exp_avg"]).clone()
+        orig_exp_avg = _full_tensor(_first_exp_avg(optimizer)).clone()
         ckpt = Checkpointer(
             Checkpointer.Config(working_dir=Path(result_dir) / "ck"),
         )
@@ -956,10 +1004,12 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
         loaded = ckpt.load(target, max_steps=1e9, guard=False)
         merged = target.loaded
         if merged is not None:
-            reload_model.load_state_dict(merged["model"])
-            reload_opt.load_state_dict(merged["opt"])
+            reload_model.load_state_dict(
+                DictCodec.coerce(merged["model"], default=None)
+            )
+            reload_opt.load_state_dict(DictCodec.coerce(merged["opt"], default=None))
         weight = _full_tensor(next(reload_model.parameters()))
-        exp_avg = _full_tensor(reload_opt.state_dict()["state"][0]["exp_avg"])
+        exp_avg = _full_tensor(_first_exp_avg(reload_opt))
         ok = (
             loaded
             and torch.equal(weight, orig_weight)
@@ -968,7 +1018,7 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
         (Path(result_dir) / f"rank_{rank}").write_text(
             "ok" if ok else f"FAIL loaded={loaded}",
         )
-    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
         (Path(result_dir) / f"rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -993,7 +1043,7 @@ def _world2_save_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> Non
         if rank == 0:
             torch.save(full, Path(result_dir) / "full.pt")
         (Path(result_dir) / f"save_rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
         (Path(result_dir) / f"save_rank_{rank}").write_text(f"FAIL:{e!r}")
 
 
@@ -1007,14 +1057,15 @@ def _world1_load_worker(ckpt_dir: str, result_dir: str, mesh: DeviceMesh) -> Non
         loaded = ckpt.load(target, max_steps=1e9, guard=False)
         merged = target.loaded
         if merged is not None:
-            model.load_state_dict(merged["model"])
+            model.load_state_dict(DictCodec.coerce(merged["model"], default=None))
         full = _full_tensor(next(model.parameters()))
-        ref = torch.load(Path(result_dir) / "full.pt")
+        ref = cast(object, torch.load(Path(result_dir) / "full.pt"))
+        assert isinstance(ref, Tensor)
         ok = loaded and torch.equal(full, ref)
         (Path(result_dir) / f"load_rank_{rank}").write_text(
             "ok" if ok else f"FAIL loaded={loaded}",
         )
-    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test.
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
         (Path(result_dir) / f"load_rank_{rank}").write_text(f"FAIL:{e!r}")
 
 

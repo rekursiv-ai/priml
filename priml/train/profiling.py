@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Sequence
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, Self, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 import contextlib
 import logging
 import threading
 import time
 
+
+if TYPE_CHECKING:
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")  # ~1050 ms; only the profiler paths need it.
+
 from configgle import Fig
-from wrapt import lazy_import
 
 from priml.paths import resolve_working_dir
 from priml.runtime import is_rank_zero
 from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
-
-
-torch = lazy_import("torch")
-torch_profiler = lazy_import("torch.profiler")
 
 
 logger = logging.getLogger(__name__)
@@ -145,20 +148,20 @@ class TorchProfiling:
         # Setup torch profiler (only if we should profile on this rank).
         # CUDA activities are optional: CUPTI collection hangs on some stacks
         # (Issue#412), so ``profile_cuda=False`` traces CPU only.
-        self.profiler: _TorchProfiler | None = None
+        self.profiler: torch.profiler.profile | None = None
         if self.torch_profile and self._should_profile():
-            activities = [torch_profiler.ProfilerActivity.CPU]
+            activities = [torch.profiler.ProfilerActivity.CPU]
             if self.profile_cuda:
-                activities.append(torch_profiler.ProfilerActivity.CUDA)
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
             schedule = None
             if self.schedule.wait is not None:
-                schedule = torch_profiler.schedule(
+                schedule = torch.profiler.schedule(
                     wait=self.schedule.wait,
                     warmup=self.schedule.warmup,
                     active=self.schedule.active,
                     repeat=1,
                 )
-            self.profiler = _torch_profile()(
+            self.profiler = torch.profiler.profile(
                 activities=activities,
                 with_stack=self.with_stack,
                 record_shapes=self.record_shapes,
@@ -342,15 +345,15 @@ class PhaseTimer:
         ] = {}
         self._cuda_summary: dict[str, tuple[float, int]] | None = None
         self._start_time = time.perf_counter()
-        self._profiler: _TorchProfiler | None = None
+        self._profiler: torch.profiler.profile | None = None
         self._summary_logged = False
         self._summary_published = False
 
         if self._enabled and self._torch_profile:
-            activities = [torch_profiler.ProfilerActivity.CPU]
+            activities = [torch.profiler.ProfilerActivity.CPU]
             if torch.cuda.is_available():
-                activities.append(torch_profiler.ProfilerActivity.CUDA)
-            profiler = _torch_profile()(
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+            profiler = torch.profiler.profile(
                 activities=activities,
                 with_stack=True,
                 acc_events=True,
@@ -779,36 +782,3 @@ class _PhaseFrame:
     started_at: float
 
     child_sec: float = 0.0
-
-
-class _ProfilerAverages(Protocol):
-    def table(self, *, sort_by: str, row_limit: int) -> str: ...
-
-
-class _TorchProfiler(Protocol):
-    def start(self) -> None: ...
-
-    def step(self) -> None: ...
-
-    def stop(self) -> None: ...
-
-    def export_chrome_trace(self, path: str) -> None: ...
-
-    def key_averages(self) -> _ProfilerAverages: ...
-
-
-class _ProfilerFactory(Protocol):
-    def __call__(
-        self,
-        *,
-        activities: Sequence[object],
-        with_stack: bool,
-        acc_events: bool = False,
-        record_shapes: bool = False,
-        profile_memory: bool = False,
-        schedule: object | None = None,
-    ) -> _TorchProfiler: ...
-
-
-def _torch_profile() -> _ProfilerFactory:
-    return cast(_ProfilerFactory, torch_profiler.profile)

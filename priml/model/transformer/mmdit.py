@@ -34,6 +34,7 @@ from priml.model.custom_types import (
     DepthIndex,
     HasDepthIndex,
     NumHeads,
+    Resettable,
     TensorModule,
     propagate_attr,
 )
@@ -161,9 +162,15 @@ class MMDiTStream(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.norm1 = cast(nn.Module, config.norm1.make())
-        self.norm2 = cast(nn.Module, config.norm2.make())
-        self.ffn = cast(nn.Module, config.ffn.make())
+        norm1 = config.norm1.make()
+        norm2 = config.norm2.make()
+        ffn = config.ffn.make()
+        assert isinstance(norm1, nn.Module)
+        assert isinstance(norm2, nn.Module)
+        assert isinstance(ffn, nn.Module)
+        self.norm1 = norm1
+        self.norm2 = norm2
+        self.ffn = ffn
         self.adaln = config.adaln.make() if config.adaln is not None else None
 
 
@@ -208,7 +215,7 @@ class MMDiTBlock(nn.Module):
         Explicit streams own adaln.
         """
 
-        ffn: Makeable[nn.Module] = field(default_factory=SwiGLU.Config)
+        ffn: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
         """FFN template for implicit streams; explicit streams own their FFNs."""
 
         depth_index: DepthIndex = ()
@@ -319,7 +326,12 @@ class MMDiTBlock(nn.Module):
         )
 
         # Per-stream FFNs (dims propagated in finalize).
-        self.ffns = nn.ModuleList(config.ffn.make() for _ in range(N))
+        ffns: list[nn.Module] = []
+        for _ in range(N):
+            ffn = config.ffn.make()
+            assert isinstance(ffn, nn.Module)
+            ffns.append(ffn)
+        self.ffns = nn.ModuleList(ffns)
 
         # Optional per-stream adaLN-Zero.
         if config.cond_dim > 0:
@@ -338,11 +350,11 @@ class MMDiTBlock(nn.Module):
         self.attn.reset_parameters()
         for modules in (self.norms1, self.norms2, self.ffns):
             for m in modules:
-                if hasattr(m, "reset_parameters"):
+                if isinstance(m, Resettable):
                     m.reset_parameters()
         if self.adalns is not None:
             for m in self.adalns.values():
-                if hasattr(m, "reset_parameters"):
+                if isinstance(m, Resettable):
                     m.reset_parameters()
 
     def load_stream(self, index: int, *, source: TransformerBlock) -> None:

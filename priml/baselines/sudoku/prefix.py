@@ -21,8 +21,9 @@ carries the gradient, and the optimizer scatters those few rows back.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import field
-from typing import Any, Self, cast, override
+from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -88,12 +89,11 @@ class RegisterTokens(nn.Module):
         )
 
     @override
-    def forward(self, batch_size: int, **kwargs: Any) -> Tensor:
+    def forward(self, batch_size: int, **kwargs: object) -> Tensor:
         """Return ``[B, num_tokens, C]``, the same tokens for every row."""
         del kwargs
         tokens: Tensor = self.register_tokens.unsqueeze(0).expand(batch_size, -1, -1)
-        scaled = cast(Tensor, self.embed_scale * tokens)
-        return scaled
+        return self.embed_scale * tokens
 
 
 class SparsePuzzleEmbedding(nn.Module):
@@ -185,7 +185,7 @@ class SparsePuzzleEmbedding(nn.Module):
         )
 
     @override
-    def forward(self, batch_size: int, **kwargs: Any) -> Tensor:
+    def forward(self, batch_size: int, **kwargs: object) -> Tensor:
         """Return ``[B, num_tokens, hidden]`` for this batch's puzzle ids.
 
         Args:
@@ -211,8 +211,7 @@ class SparsePuzzleEmbedding(nn.Module):
         if vectors.shape[-1] < width:
             vectors = nn.functional.pad(vectors, (0, width - vectors.shape[-1]))
         prefix: Tensor = vectors.reshape(batch_size, config.num_tokens, config.channels)
-        scaled = cast(Tensor, self.embed_scale * prefix)
-        return scaled
+        return self.embed_scale * prefix
 
     def _lookup(self, identifiers: Tensor) -> Tensor:
         """Read the batch's rows, via the gradient buffer when training."""
@@ -234,7 +233,7 @@ class SparsePuzzleEmbedding(nn.Module):
     # gradients the moment the model moves to a GPU, and the table silently never
     # trains.
     @override
-    def _apply(self, fn: Any, recurse: bool = True) -> Self:
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> Self:
         """Re-establish the gradient buffer after a device or dtype move."""
         module = super()._apply(fn, recurse=recurse)
         self.local_weights = nn.Buffer(
@@ -286,7 +285,7 @@ class PrefixStack(nn.Module):
         self.parts = nn.ModuleList(built)
 
     @override
-    def forward(self, batch_size: int, **kwargs: Any) -> Tensor:
+    def forward(self, batch_size: int, **kwargs: object) -> Tensor:
         """Concatenate every part's tokens along the sequence axis."""
         pieces = [part(batch_size, **kwargs) for part in self.parts]
         return torch.cat(pieces, dim=1)

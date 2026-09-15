@@ -321,6 +321,51 @@ def logmeanexp(
     return torch.logsumexp(x, dim=dim, keepdim=keepdim) - math.log(n)
 
 
+def shifted_geometric_mean(
+    x: Tensorable,
+    dim: int | Sequence[int] | None = None,
+    keepdim: bool = False,
+    *,
+    shift: float = 1.0,
+) -> Tensor:
+    """Shifted geometric mean: ``exp(mean(log(x + shift), dim)) - shift``.
+
+    The geometric mean of ``x + shift``, minus the shift. A plain geometric
+    mean (``shift=0``) is zero whenever any element is zero; a positive shift
+    keeps a single zero from annihilating the aggregate. ``shift=1`` is the
+    Williams mean of ecology and parasitology (log-transformed counts with
+    zeros), the geometric mean return of finance, and the aggregate the
+    Crafter benchmark uses over per-achievement success rates; it routes
+    through ``log1p``/``expm1``, which stay exact in the small-``x`` regime
+    where ``log(1 + x)`` and ``exp(y) - 1`` cancel.
+
+    Args:
+      x: Input tensor; every element is ``> -shift``.
+      dim: Dimension(s) to reduce. None reduces every element.
+      keepdim: Whether to keep the reduced dimension.
+      shift: Constant added before the log and removed after.
+
+    Returns:
+      result: ``exp(mean(log(x + shift), dim)) - shift``.
+
+    References:
+      https://doi.org/10.1111/j.1744-7348.1937.tb05042.x
+        Williams 1937. The use of logarithms in the interpretation of certain
+        entomological problems. (The ``shift=1`` case: the "Williams mean".)
+      https://arxiv.org/abs/1806.06403
+        de la Cruz & Kreft 2018. Geometric mean extension for data sets with
+        zeros. (The general shift, and how to choose it.)
+
+    """
+    x = convert_to_tensor(x)
+    dim_ = None if dim is None else (dim,) if isinstance(dim, int) else tuple(dim)
+    # `shift` is a Python float, so Dynamo specializes on it and this stays one
+    # graph; a tensor-valued shift would make the branch a graph break.
+    if shift == 1.0:
+        return torch.expm1(torch.log1p(x).mean(dim=dim_, keepdim=keepdim))
+    return torch.exp(torch.log(x + shift).mean(dim=dim_, keepdim=keepdim)) - shift
+
+
 def mesh_arange(
     end: int | Sequence[int],
     *,

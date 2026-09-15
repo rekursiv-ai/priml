@@ -30,7 +30,6 @@ subject is "does this reach the compiler in one graph" loses nothing.
 
 def test_single_python_scalar():
     result = convert_to_tensor(42)
-    assert isinstance(result, Tensor)
     assert result.item() == 42
 
 
@@ -189,7 +188,9 @@ def test_numpy_dtype_mapping(
     np_dtype: type[np.generic],
     expected_torch_dtype: torch.dtype,
 ) -> None:
-    x = np.array([1, 2, 3], dtype=np_dtype)
+    x: np.ndarray[tuple[int, ...], np.dtype[np.generic]] = np.array(
+        [1, 2, 3], dtype=np_dtype
+    )
     result = convert_to_tensor(x)
     assert result[0].dtype == expected_torch_dtype
 

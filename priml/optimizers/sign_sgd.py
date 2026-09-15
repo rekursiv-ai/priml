@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, overload, override
+from typing import cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -28,8 +28,10 @@ from torch.optim import Optimizer
 import torch
 import torch.distributed as dist
 
+from priml.lib.custom_json import FloatCodec
 
-_ParamLike = Iterable[Tensor] | Iterable[dict[str, Any]]
+
+_ParamLike = Iterable[Tensor] | Iterable[dict[str, object]]
 
 
 def _is_distributed() -> bool:
@@ -240,7 +242,7 @@ class SignSGD(Optimizer):
             raise ValueError(f"Invalid learning rate: {lr}.")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay: {weight_decay}.")
-        defaults: dict[str, Any] = {"lr": lr, "weight_decay": weight_decay}
+        defaults: dict[str, object] = {"lr": lr, "weight_decay": weight_decay}
         super().__init__(params, defaults)
         # Whether the sparse-embedding step all-gathers gradient rows across
         # ranks (the data-parallel default). MUST be False for TASK-PARALLEL use
@@ -267,56 +269,60 @@ class SignSGD(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            lr = float(group["lr"])
-            wd = float(group["weight_decay"])
-            params = list(group["params"])
-            if group.get("sparse_embedding", False):
-                sparse_parts = _sparse_embedding_parts(params)
-                if sparse_parts is None:
-                    raise ValueError(
-                        "sparse_embedding=True requires params=[weights (2D), "
-                        "local_weights (2D, requires_grad), local_ids (1D)].",
-                    )
-                local_weights_grad, local_ids, weights = sparse_parts
-                if local_weights_grad is not None:
-                    _sparse_embedding_step(
-                        local_weights_grad,
-                        local_ids,
-                        weights,
-                        lr=lr,
-                        weight_decay=wd,
-                        aggregate_distributed=self.aggregate_distributed,
-                    )
-                continue
-            for p in params:
-                grad = p.grad
-                if grad is None:
-                    continue
-                if self.aggregate_distributed and _is_distributed() and p.ndim >= 2:
-                    _sparse_distributed_step(p, grad, lr=lr, weight_decay=wd)
-                    continue
-                if wd != 0.0:
-                    if p.ndim >= 2:
-                        # Sparse-row WD: only decay rows whose gradient has
-                        # any non-zero element. ``reshape(N, -1).any(-1)``
-                        # avoids materialising a full ``grad != 0`` mask
-                        # (which would allocate a model-sized bool tensor).
-                        touched = grad.reshape(grad.shape[0], -1).any(dim=-1)
-                        # Per-row decay multiplier: (1 - lr*wd) where touched,
-                        # 1.0 elsewhere. Allocate only an [N]-shaped tensor.
-                        decay = touched.to(p.dtype).mul_(-lr * wd).add_(1.0)
-                        p.mul_(decay.view(-1, *([1] * (p.ndim - 1))))
-                    else:
-                        # 1D params (biases etc.): plain decoupled WD.
-                        # No "untouched row" notion in 1D.
-                        p.mul_(1.0 - lr * wd)
-                # ``torch.sign(grad)`` allocates a same-shape temp so the
-                # caller's ``.grad`` survives intact -- downstream readers
-                # (logging, clipping, a second optimizer on shared params)
-                # need it. ``sign(0) = 0`` → untouched rows receive no
-                # update.
-                p.add_(torch.sign(grad), alpha=-lr)
+            self._step_group(group)
         return loss
+
+    def _step_group(self, group: dict[str, object]) -> None:
+        """Update every parameter in one group."""
+        lr = FloatCodec.coerce(group["lr"], None)
+        wd = FloatCodec.coerce(group["weight_decay"], None)
+        params = cast(list[Tensor], group["params"])
+        if group.get("sparse_embedding", False):
+            sparse_parts = _sparse_embedding_parts(params)
+            if sparse_parts is None:
+                raise ValueError(
+                    "sparse_embedding=True requires params=[weights (2D), "
+                    "local_weights (2D, requires_grad), local_ids (1D)].",
+                )
+            local_weights_grad, local_ids, weights = sparse_parts
+            if local_weights_grad is not None:
+                _sparse_embedding_step(
+                    local_weights_grad,
+                    local_ids,
+                    weights,
+                    lr=lr,
+                    weight_decay=wd,
+                    aggregate_distributed=self.aggregate_distributed,
+                )
+            return
+        for p in params:
+            grad = p.grad
+            if grad is None:
+                continue
+            if self.aggregate_distributed and _is_distributed() and p.ndim >= 2:
+                _sparse_distributed_step(p, grad, lr=lr, weight_decay=wd)
+                continue
+            if wd != 0.0:
+                if p.ndim >= 2:
+                    # Sparse-row WD: only decay rows whose gradient has
+                    # any non-zero element. ``reshape(N, -1).any(-1)``
+                    # avoids materialising a full ``grad != 0`` mask
+                    # (which would allocate a model-sized bool tensor).
+                    touched = grad.reshape(grad.shape[0], -1).any(dim=-1)
+                    # Per-row decay multiplier: (1 - lr*wd) where touched,
+                    # 1.0 elsewhere. Allocate only an [N]-shaped tensor.
+                    decay = touched.to(p.dtype).mul_(-lr * wd).add_(1.0)
+                    p.mul_(decay.view(-1, *([1] * (p.ndim - 1))))
+                else:
+                    # 1D params (biases etc.): plain decoupled WD.
+                    # No "untouched row" notion in 1D.
+                    p.mul_(1.0 - lr * wd)
+            # ``torch.sign(grad)`` allocates a same-shape temp so the
+            # caller's ``.grad`` survives intact -- downstream readers
+            # (logging, clipping, a second optimizer on shared params)
+            # need it. ``sign(0) = 0`` → untouched rows receive no
+            # update.
+            p.add_(torch.sign(grad), alpha=-lr)
 
     @torch.no_grad()
     def step_sparse_embedding(
@@ -337,16 +343,27 @@ class SignSGD(Optimizer):
 
         """
         for group in self.param_groups:
-            params = list(group["params"])
-            sparse_parts = _sparse_embedding_parts(params)
-            if sparse_parts is None:
-                continue
-            _, _, weights = sparse_parts
-            _sparse_embedding_step(
-                local_weights_grad,
-                local_ids,
-                weights,
-                lr=group["lr"],
-                weight_decay=group["weight_decay"],
-                aggregate_distributed=self.aggregate_distributed,
-            )
+            self._step_sparse_group(group, local_weights_grad, local_ids)
+
+    def _step_sparse_group(
+        self,
+        group: dict[str, object],
+        local_weights_grad: Tensor,
+        local_ids: Tensor,
+    ) -> None:
+        """Apply the sparse embedding update when ``group`` holds one."""
+        params = cast(list[Tensor], group["params"])
+        sparse_parts = _sparse_embedding_parts(params)
+        if sparse_parts is None:
+            return
+        _, _, weights = sparse_parts
+        lr = FloatCodec.coerce(group["lr"], None)
+        wd = FloatCodec.coerce(group["weight_decay"], None)
+        _sparse_embedding_step(
+            local_weights_grad,
+            local_ids,
+            weights,
+            lr=lr,
+            weight_decay=wd,
+            aggregate_distributed=self.aggregate_distributed,
+        )

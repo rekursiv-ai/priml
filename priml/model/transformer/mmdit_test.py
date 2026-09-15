@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Final
 
 from configgle.testing import assert_pprint_golden
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -81,7 +82,7 @@ def test_adaln_zero_bfb() -> None:
         build_module=lambda: _canonical_adaln_config().make(),
         build_input=lambda: torch.randn(2, 4),
         seed=0,
-        run=lambda module, conditioning: torch.cat(module(conditioning), dim=-1),
+        run=_run_adaln,
     )
 
 
@@ -301,7 +302,7 @@ def test_mmdit_block_bfb(device: str) -> None:
             device,
         ),
         seed=0,
-        run=lambda module, streams: torch.cat(module(streams), dim=-2),
+        run=_run_mmdit,
     )
 
 
@@ -356,7 +357,8 @@ def test_native_stream_loading_matches_transformer_and_freezes_independently() -
     ]
     for module in frozen:
         module.requires_grad_(False)
-    before = {k: v.clone() for k, v in mixed.state_dict().items()}
+    state = mixed.state_dict()
+    before: dict[str, Tensor] = {k: v.clone() for k, v in state.items()}
     other = torch.randn(1, 2, 8)
     mask = torch.cat((torch.zeros(3, 3), torch.full((3, 2), float("-inf"))), -1)
     with host_agnostic_numerics():
@@ -367,12 +369,17 @@ def test_native_stream_loading_matches_transformer_and_freezes_independently() -
     gradient = mixed.attn.streams[1].proj_qkv.weight.grad
     assert gradient is not None
     assert gradient.abs().sum() > 0
-    assert mixed.ffns[1].up_proj.weight.grad.abs().sum() > 0
+    ffn0 = mixed.ffns[0]
+    ffn1 = mixed.ffns[1]
+    assert isinstance(ffn0, SwiGLU)
+    assert isinstance(ffn1, SwiGLU)
+    assert ffn1.up_proj.weight.grad is not None
+    assert ffn1.up_proj.weight.grad.abs().sum() > 0
     torch.optim.SGD(mixed.parameters(), lr=0.1).step()
-    assert torch.equal(before["ffns.0.up_proj.weight"], mixed.ffns[0].up_proj.weight)
+    assert torch.equal(before["ffns.0.up_proj.weight"], ffn0.up_proj.weight)
     assert not torch.equal(
         before["ffns.1.up_proj.weight"],
-        mixed.ffns[1].up_proj.weight,
+        ffn1.up_proj.weight,
     )
 
 
@@ -393,8 +400,12 @@ def test_mixed_conditioning_has_no_unconditioned_parameters() -> None:
     assert torch.equal(actual[0], xs[0])
     assert not torch.equal(actual[1], xs[1])
     assert not any(name.startswith("adalns.1.") for name, _ in model.named_parameters())
-    assert model.ffns[0].up_proj.weight.shape[0] == 24
-    assert model.ffns[1].up_proj.weight.shape[0] == 32
+    ffn0 = model.ffns[0]
+    ffn1 = model.ffns[1]
+    assert isinstance(ffn0, SwiGLU)
+    assert isinstance(ffn1, SwiGLU)
+    assert ffn0.up_proj.weight.shape[0] == 24
+    assert ffn1.up_proj.weight.shape[0] == 32
     with pytest.raises(ValueError, match="conditioning"):
         model(xs, c=[None, None])
     model.reset_parameters()
@@ -460,14 +471,14 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
     cfg.attn.num_heads_kv = 1
     cfg.streams = [mmdit.MMDiTStream.Config().update(source_cfg, skip_missing=True)]
     model = cfg.make()
-    before = {name: value.clone() for name, value in model.state_dict().items()}
+    state = model.state_dict()
+    before: dict[str, Tensor] = {name: value.clone() for name, value in state.items()}
     assert isinstance(source_cfg.ffn, SwiGLU.Config)
     source_cfg.ffn.channels_hidden = 16
     with pytest.raises(ValueError, match="shape"):
         model.load_stream(0, source=source_cfg.make())
-    assert all(
-        torch.equal(before[name], value) for name, value in model.state_dict().items()
-    )
+    current = model.state_dict()
+    assert all(torch.equal(before[name], value) for name, value in current.items())
     source_cfg.prenorm = False
     with pytest.raises(ValueError, match="prenorm"):
         model.load_stream(0, source=source_cfg.make())
@@ -476,6 +487,18 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
             0,
             source=_native_stream_config().make(),
         )
+
+
+def _run_adaln(module: nn.Module, conditioning: Tensor) -> Tensor:
+    """Run AdaLN-Zero with its typed tensor output."""
+    assert isinstance(module, AdaLNZero)
+    return torch.cat(module(conditioning), dim=-1)
+
+
+def _run_mmdit(module: nn.Module, streams: list[Tensor]) -> Tensor:
+    """Run MMDiT and concatenate its stream outputs."""
+    assert isinstance(module, MMDiTBlock)
+    return torch.cat(module(streams), dim=-2)
 
 
 if __name__ == "__main__":

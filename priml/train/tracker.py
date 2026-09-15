@@ -9,7 +9,6 @@ from numbers import Real
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Any,
     Literal,
     Protocol,
     cast,
@@ -31,22 +30,34 @@ from priml.runtime import is_rank_zero
 from priml.train.custom_types import TrackerProtocol
 
 
-wandb = lazy_import("wandb")
-
-
 if TYPE_CHECKING:
     from typing import Self
 
-    from wandb.sdk.wandb_run import Run as _Run
+
+class _WandbRun(Protocol):
+    notes: str | None
+
+    def define_metric(self, name: str, *, step_metric: str | None = None) -> None: ...
+
+    def finish(self) -> None: ...
+
+    def log(self, data: dict[str, float | list[object]], *, step: int) -> None: ...
+
+
+class _Wandb(Protocol):
+    Settings: Callable[..., object]
+    Image: Callable[[object], object]
+
+    def init(self, **kwargs: object) -> _WandbRun: ...
+
+
+wandb = cast(_Wandb, lazy_import("wandb"))
 
 
 logger = logging.getLogger(__name__)
 
-_logged_nonscalar_skip = [False]  # house-ignore[globals] -- One-shot log guard.
-"""One-shot guard (mutable cell) so WandbTracker logs a skip only once."""
 
-
-def scalar_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
+def scalar_metrics(metrics: Mapping[str, object]) -> dict[str, float]:
     """Return tracker-safe scalar metrics, dropping non-scalar values.
 
     A value is scalar when it is a real number or a single-element ``Tensor``;
@@ -106,7 +117,7 @@ class FileTracker:
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -140,7 +151,7 @@ class FileTracker:
         tmp.replace(path)
         logger.info("Wrote metrics to %s", path)
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """No-op image logging; a metrics file holds scalars only.
 
         Args:
@@ -168,6 +179,8 @@ class _Writer(Protocol):
     """Minimal scalar-logging writer interface (satisfied by SummaryWriter)."""
 
     def add_scalar(self, tag: str, scalar_value: float, global_step: int) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class _WriterFactory(Protocol):
@@ -215,7 +228,7 @@ class TensorBoardTracker:
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -233,7 +246,7 @@ class TensorBoardTracker:
         for name, value in scalar_metrics(metrics).items():
             self.writer.add_scalar(f"{prefix}{name}", value, step)
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """No-op image logging fallback for scalar-only TensorBoard tracker.
 
         Args:
@@ -255,10 +268,9 @@ class TensorBoardTracker:
 
     def close(self) -> None:
         """Cleanup tracker resources (idempotent)."""
-        writer = getattr(self, "writer", None)
-        if writer is None:
+        if "writer" not in self.__dict__ or self.writer is None:
             return
-        writer.close()
+        self.writer.close()
         self.writer = None
 
     def __del__(self) -> None:
@@ -361,7 +373,7 @@ class WandbTracker:
         metric_step_metrics: dict[str, str] = field(default_factory=dict[str, str])
         """Metric paths mapped to the metric path used as their W&B x-axis."""
 
-        run_config: dict[str, Any] = field(default_factory=dict[str, Any])
+        run_config: dict[str, object] = field(default_factory=dict[str, object])
         """Hyperparameters recorded on the run (shown in the W&B config tab)."""
 
         notes: str = ""
@@ -377,9 +389,13 @@ class WandbTracker:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
+    # A class default rather than an ``__init__`` assignment: tests build the
+    # tracker with ``__new__`` and a fake run, bypassing ``__init__``.
+    _logged_nonscalar_skip = False
+
     def __init__(self, config: Config) -> None:
         """Open a W&B run on rank 0; no-op on every other rank."""
-        self._run: _Run | None = None
+        self._run: _WandbRun | None = None
         if not is_rank_zero():
             return
         mode = cast(
@@ -397,7 +413,7 @@ class WandbTracker:
         # transmit cadence, throttle the high-cardinality built-in system
         # metrics (or disable them), all via wandb's experimental settings.
         ingestion = config.ingestion
-        settings_kwargs: dict[str, Any] = {}
+        settings_kwargs: dict[str, object] = {}
         if not config.capture_console:
             settings_kwargs["console"] = "off"
         if ingestion.init_timeout_sec > 0:
@@ -458,7 +474,7 @@ class WandbTracker:
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -477,17 +493,17 @@ class WandbTracker:
         if self._run is None:
             return
         scalars = scalar_metrics(metrics)
-        if not _logged_nonscalar_skip[0]:
+        if not self._logged_nonscalar_skip:
             skipped = [name for name in metrics if name not in scalars]
             if skipped:
                 logger.debug("WandbTracker skipping non-scalar metrics: %s", skipped)
-                _logged_nonscalar_skip[0] = True
+                self._logged_nonscalar_skip = True
         self._run.log(
             {f"{prefix}{name}": value for name, value in scalars.items()},
             step=step,
         )
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """Log images to W&B at ``step``.
 
         Args:
@@ -518,10 +534,9 @@ class WandbTracker:
 
     def close(self) -> None:
         """Finish the W&B run (idempotent)."""
-        run = getattr(self, "_run", None)
-        if run is None:
+        if "_run" not in self.__dict__ or self._run is None:
             return
-        run.finish()
+        self._run.finish()
         self._run = None
 
     def __del__(self) -> None:
@@ -568,7 +583,7 @@ class AsyncTracker:
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -584,7 +599,7 @@ class AsyncTracker:
         payload = dict(metrics) if self._executor is not None else metrics
         self._submit(self.tracker.log_metrics, payload, step, prefix=prefix)
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """Queue a shallow call-time snapshot of one image batch.
 
         Args:
@@ -682,7 +697,7 @@ class TrackerList:
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -698,7 +713,7 @@ class TrackerList:
         for tracker in self.trackers.values():
             tracker.log_metrics(metrics, step, prefix=prefix)
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """Forward images to every child tracker.
 
         Args:

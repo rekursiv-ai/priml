@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, overload, override
+from typing import cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -26,8 +26,10 @@ from torch.optim import Optimizer
 
 import torch
 
+from priml.lib.custom_json import FloatCodec
 
-_ParamLike = Iterable[Tensor] | Iterable[dict[str, Any]]
+
+_ParamLike = Iterable[Tensor] | Iterable[dict[str, object]]
 
 
 class AdamATan2(Optimizer):
@@ -79,7 +81,7 @@ class AdamATan2(Optimizer):
             raise ValueError(f"Invalid betas: {betas}.")
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay: {weight_decay}.")
-        defaults: dict[str, Any] = {
+        defaults: dict[str, object] = {
             "lr": lr,
             "betas": betas,
             "weight_decay": weight_decay,
@@ -103,40 +105,50 @@ class AdamATan2(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            beta1, beta2 = group["betas"]
-            lr = float(group["lr"])
-            wd = float(group["weight_decay"])
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                grad = p.grad
-                state = self.state[p]
-                if not state:
-                    # ``step`` was previously stored as a 0-dim CUDA tensor
-                    # for foreach/grad-scaler compatibility. ``int(.item())``
-                    # at every step sync'd GPU->CPU once per parameter and
-                    # dominated wall-clock (~85% per profile traces). Plain
-                    # Python int avoids the sync; foreach kernels aren't used
-                    # here so the tensor form bought us nothing.
-                    state["step"] = 0
-                    state["exp_avg"] = torch.zeros_like(
-                        p,
-                        memory_format=torch.preserve_format,
-                    )
-                    state["exp_avg_sq"] = torch.zeros_like(
-                        p,
-                        memory_format=torch.preserve_format,
-                    )
-                state["step"] = int(state["step"]) + 1
-                step = int(state["step"])
-                m = state["exp_avg"]
-                v = state["exp_avg_sq"]
-                m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-                v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                if wd != 0.0:
-                    p.mul_(1.0 - lr * wd)
-                step_size = lr / (1.0 - beta1**step)
-                bias_correction2_sqrt = (1.0 - beta2**step) ** 0.5
-                update = torch.atan2(m, v.sqrt() / bias_correction2_sqrt)
-                p.add_(update, alpha=-step_size)
+            self._step_group(group)
         return loss
+
+    def _step_group(self, group: dict[str, object]) -> None:
+        """Update every parameter in one group."""
+        betas = group["betas"]
+        assert isinstance(betas, tuple)
+        beta1, beta2 = cast(tuple[float, float], betas)
+        lr = FloatCodec.coerce(group["lr"], None)
+        wd = FloatCodec.coerce(group["weight_decay"], None)
+        for p in cast(list[Tensor], group["params"]):
+            if p.grad is None:
+                continue
+            grad = p.grad
+            state = cast(dict[str, object], self.state[p])
+            if not state:
+                # ``step`` was previously stored as a 0-dim CUDA tensor
+                # for foreach/grad-scaler compatibility. ``int(.item())``
+                # at every step sync'd GPU->CPU once per parameter and
+                # dominated wall-clock (~85% per profile traces). Plain
+                # Python int avoids the sync; foreach kernels aren't used
+                # here so the tensor form bought us nothing.
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(
+                    p,
+                    memory_format=torch.preserve_format,
+                )
+                state["exp_avg_sq"] = torch.zeros_like(
+                    p,
+                    memory_format=torch.preserve_format,
+                )
+            step = state["step"]
+            assert isinstance(step, int)
+            step += 1
+            state["step"] = step
+            m = state["exp_avg"]
+            v = state["exp_avg_sq"]
+            assert isinstance(m, Tensor)
+            assert isinstance(v, Tensor)
+            m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+            v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+            if wd != 0.0:
+                p.mul_(1.0 - lr * wd)
+            step_size = lr / (1.0 - beta1**step)
+            bias_correction2_sqrt = (1.0 - beta2**step) ** 0.5
+            update = torch.atan2(m, v.sqrt() / bias_correction2_sqrt)
+            p.add_(update, alpha=-step_size)

@@ -487,11 +487,13 @@ def test_every_experiments_eval_geometry_is_constructible(
     # and every assertion after it would read the last batch. Each is stepped
     # where it is drawn, which is also how the training loop takes them.
     drawn = 0
-    for batch in built.eval_dataloader():
+    batches = built.eval_dataloader()
+    for batch in batches:
         # RUN it: drawing proves the batch exists, not that the model can
         # consume it. A token id the embedding rejects passes the first check
         # and fails the second.
-        step.eval_loss(**step.preprocess_batch(batch))
+        prepared = step.preprocess_batch(dict(batch))
+        step.eval_loss(**prepared)
         drawn += 1
     assert drawn == 2, name
 
@@ -566,7 +568,7 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     assert smoke.step.model.channels_in < base.step.model.channels_in
     assert smoke.step.model.num_layers < base.step.model.num_layers
     assert smoke.step.model.max_seq_len < base.step.model.max_seq_len
-    assert not smoke.step.compile
+    assert smoke.step.compile is None
     # A finite bound: exp000 stops on its time budget and leaves max_steps at
     # infinity, against which any value would compare smaller.
     assert smoke.max_steps < 100

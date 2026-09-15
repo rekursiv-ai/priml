@@ -54,13 +54,13 @@ def test_factored_positions_share_a_row() -> None:
     positions = embedding.channels[0]
     assert isinstance(positions, FactoredPositions)
     # Cells 0..8 are row 0; cells 9..17 are row 1.
-    assert positions.row_index[:9].unique().tolist() == [0]
-    assert positions.row_index[9:18].unique().tolist() == [1]
+    assert set(positions.row_index[:9].tolist()) == {0}
+    assert set(positions.row_index[9:18].tolist()) == {1}
     # Column indices cycle within a row.
     assert positions.col_index[:9].tolist() == list(range(9))
     # The first three cells of the first three rows are one box.
     box = positions.box_index.reshape(9, 9)
-    assert box[:3, :3].unique().tolist() == [0]
+    assert set(box[:3, :3].flatten().tolist()) == {0}
 
 
 def test_box_shape_must_tile_the_grid() -> None:

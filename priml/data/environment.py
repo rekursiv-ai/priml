@@ -19,7 +19,8 @@ which is what lets a rollout keep a rectangular shape.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
@@ -96,20 +97,20 @@ class BatchedEnvironmentProtocol(Protocol):
         """
         ...
 
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> Mapping[str, object]:
         """Return the simulator state required to resume mid-rollout.
 
         Returns:
-          result: The dict[str, Any].
+          state: The state mapping; the schema belongs to the environment.
 
         """
         ...
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore simulator state produced by :meth:`state_dict`.
 
         Args:
-          state_dict: State dict.
+          state_dict: State mapping as returned by :meth:`state_dict`.
 
         """
         ...

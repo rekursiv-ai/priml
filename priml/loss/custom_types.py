@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 from typing_extensions import TypedDict
 
 from torch import Tensor
@@ -46,7 +46,7 @@ class SimpleLossFn(Protocol):
 class LossProtocol(Protocol):
     """Protocol for loss functions."""
 
-    def __call__(self, **batch: dict[str, Any]) -> LossOutput:
+    def __call__(self, **batch: object) -> LossOutput:
         """Compute loss.
 
         Args:

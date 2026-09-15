@@ -129,6 +129,8 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
 
+from priml.lib.custom_json import ListCodec
+
 
 if TYPE_CHECKING:
     from torch._ops import OpOverload
@@ -308,6 +310,8 @@ def bfb_devices() -> list[str]:
     return ["cpu"]
 
 
+@overload
+def move_to_device(value: Tensor, device: str) -> Tensor: ...
 @overload
 def move_to_device[ValueT](
     value: dict[str, ValueT],
@@ -595,10 +599,14 @@ def _replay_golden[InputT](
 
 def _default_runner(module: nn.Module, inp: object) -> Tensor:
     if isinstance(inp, dict):
-        return cast(Tensor, module(**inp))
-    if isinstance(inp, (list, tuple)):
-        return cast(Tensor, module(*inp))
-    return cast(Tensor, module(inp))
+        result = cast(object, module(**inp))
+    elif isinstance(inp, (list, tuple)):
+        result = cast(object, module(*inp))
+    else:
+        result = cast(object, module(inp))
+    if not isinstance(result, Tensor):
+        raise TypeError("The default runner requires a module that returns a Tensor.")
+    return result
 
 
 def _assert_state_match(module: nn.Module, golden: Mapping[str, Tensor]) -> None:
@@ -657,8 +665,10 @@ def _assert_equal(a: object, b: object, *, label: str) -> None:
         if a.dtype.is_floating_point or a.dtype.is_complex:
             max_abs_diff = f"{float((a - b).abs().max().item()):.3e}"
         else:
-            values_a = cast(list[int], a.detach().cpu().reshape(-1).tolist())
-            values_b = cast(list[int], b.detach().cpu().reshape(-1).tolist())
+            # Python ints: the int64 extremes differ by 2**64 - 1, which a
+            # tensor subtraction would overflow.
+            values_a = ListCodec.coerce(a.detach().cpu().reshape(-1).tolist(), int)
+            values_b = ListCodec.coerce(b.detach().cpu().reshape(-1).tolist(), int)
             max_abs_diff = str(
                 max(
                     abs(value_a - value_b)

@@ -4,22 +4,32 @@ Triton parses source annotations as device code. Keep tuple annotations quoted
 and omit future annotations, which makes the formatter remove those quotes.
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from importlib import import_module
 from types import FunctionType
-from typing import TYPE_CHECKING, Final, Protocol, cast, overload, override
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    Protocol,
+    TypedDict,
+    cast,
+    overload,
+    override,
+)
 
 import math
 
 from configgle import Fig
 from torch import Tensor
 from torch._dynamo import config as torch_dynamo_config
-from torch.optim import Optimizer
+from torch.optim import Optimizer, optimizer
 
 import torch
 
+from priml.lib.custom_json import FloatCodec
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 
@@ -92,8 +102,23 @@ class BiasCorrectedRMSProp(Optimizer):
             else _rmsprop_update
         )
 
+    class StateDict(TypedDict):
+        """Torch optimizer checkpoint payload."""
+
+        state: dict[int, dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch owns the opaque state schema.
+        param_groups: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch owns the opaque group schema.
+
     @override
-    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+    def state_dict(self) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny] -- torch owns the checkpoint payload schema.
+        raw = super().state_dict()
+        state: BiasCorrectedRMSProp.StateDict = {
+            "state": raw["state"],
+            "param_groups": raw["param_groups"],
+        }
+        return {**state}
+
+    @override
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore moments and indices without casting them to the weight dtype.
 
         Args:
@@ -115,7 +140,7 @@ class BiasCorrectedRMSProp(Optimizer):
                 partial(self._restore_state_precision, incoming), prepend=True
             ),
         ):
-            super().load_state_dict(state_dict)
+            super().load_state_dict(cast(optimizer.StateDict, state_dict))
 
     def _restore_state_precision(
         self, incoming: dict[str, object], optimizer: Optimizer
@@ -125,7 +150,8 @@ class BiasCorrectedRMSProp(Optimizer):
         states = cast("dict[int, dict[str, object]]", incoming["state"])
         for saved, current in zip(groups, self.param_groups, strict=True):
             indices = cast("list[int]", saved["params"])
-            for index, parameter in zip(indices, current["params"], strict=True):
+            parameters = cast("list[Tensor]", current["params"])
+            for index, parameter in zip(indices, parameters, strict=True):
                 if index in states:
                     self.state[parameter] = cast(
                         "dict[str, object]",
@@ -149,11 +175,12 @@ class BiasCorrectedRMSProp(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            for parameter in group["params"]:
+            group_values = cast("dict[str, object]", group)
+            for parameter in cast("list[Tensor]", group_values["params"]):
                 gradient = self.gradient_sinks.get(parameter, parameter.grad)
                 if gradient is None:
                     continue
-                state = self.state[parameter]
+                state = cast("dict[str, object]", self.state[parameter])
                 if not state:
                     state["step"] = 0
                     state["second_moment"] = (
@@ -165,17 +192,24 @@ class BiasCorrectedRMSProp(Optimizer):
                         if self.rowwise
                         else torch.zeros_like(parameter)
                     )
-                state["step"] += 1
+                step_count = cast(int, state["step"]) + 1
+                state["step"] = step_count
                 if self.sparse_rows:
                     self._sparse_step(parameter, gradient, state, group)
                     continue
-                self.scalars["step"].fill_(state["step"])
-                for name in ("lr", "beta2", "eps", "weight_decay"):
-                    self.scalars[name].fill_(group[name])
+                self.scalars["step"].fill_(step_count)
+                self.scalars["lr"].fill_(FloatCodec.coerce(group_values["lr"], None))
+                self.scalars["beta2"].fill_(
+                    FloatCodec.coerce(group_values["beta2"], None)
+                )
+                self.scalars["eps"].fill_(FloatCodec.coerce(group_values["eps"], None))
+                self.scalars["weight_decay"].fill_(
+                    FloatCodec.coerce(group_values["weight_decay"], None)
+                )
                 self.update(
                     parameter,
                     gradient,
-                    state["second_moment"],
+                    cast(Tensor, state["second_moment"]),
                     rowwise=self.rowwise,
                     **self.scalars,
                 )
@@ -195,7 +229,7 @@ class BiasCorrectedRMSProp(Optimizer):
                 "sparse_rows is set but this table has no dirty bitmap; refusing to "
                 "fall back to the dense path and report it as a sparse step",
             )
-        weight_decay = float(cast(float, group["weight_decay"]))
+        weight_decay = FloatCodec.coerce(group["weight_decay"], None)
         if weight_decay != 0.0:
             raise ValueError(
                 f"sparse_rows does not implement decoupled decay; group carries "
@@ -252,16 +286,18 @@ class BiasCorrectedRMSProp(Optimizer):
                 )
             }
         # Round before the bias correction; using the Python float changes updates.
-        beta2 = float(torch.tensor(cast(float, group["beta2"]), dtype=torch.float32))
+        beta2 = float(
+            torch.tensor(FloatCodec.coerce(group["beta2"], None), dtype=torch.float32)
+        )
         cum_before = cast(float, state["cum_log"])
         state["cum_log"] = cum_before + (math.log(beta2) if beta2 != 0.0 else -math.inf)
-        lr = float(cast(float, group["lr"]))
+        lr = FloatCodec.coerce(group["lr"], None)
         scalars = cast("dict[str, Tensor]", state["sparse_scalars"])
         for name, value in (
             ("step", float(cast(int, state["step"]))),
             ("lr", lr),
             ("beta2", beta2),
-            ("eps", float(cast(float, group["eps"]))),
+            ("eps", FloatCodec.coerce(group["eps"], None)),
             ("one_minus_lr_wd", 1.0 - lr * weight_decay),
             ("cum_before", cum_before),
             ("cum_after", state["cum_log"]),
@@ -438,7 +474,9 @@ class ScheduledOptimizerUpdate:
                         muon_lr if index == cfg.skip_member else adam_lr
                     )
                     if index in cfg.adam_beta1_members:
-                        beta1, beta2 = group["initial_betas"]
+                        beta1, beta2 = cast(
+                            "tuple[float, float]", group["initial_betas"]
+                        )
                         group["betas"] = (
                             beta1 + adam_fraction * (cfg.adam_beta1_final - beta1),
                             beta2,

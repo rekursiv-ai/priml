@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY
 from functools import partial
-from typing import TYPE_CHECKING, Any, Self, override
+from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -204,8 +204,8 @@ class _EnsembleParallel(ParallelStyle):
 def _replicate_input(
     device_mesh: DeviceMesh,
     module: nn.Module,
-    inputs: tuple[Any, ...],
-) -> tuple[Any, ...]:
+    inputs: tuple[Tensor, ...],
+) -> tuple[Tensor, ...]:
     """Forward-pre-hook: coerce the einsum input to a replicated DTensor."""
     del module
     x = inputs[0]

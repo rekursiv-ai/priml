@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, override
+from typing import override
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
@@ -31,7 +31,7 @@ class SimpleGenerator(nn.Module):
         self.image_size = image_size
 
     @override
-    def forward(self, noise: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, noise: Tensor, **_kwargs: object) -> Tensor:
         """Generate images from noise."""
         x = self.fc(noise)
         return x.view(-1, 3, self.image_size, self.image_size)
@@ -49,7 +49,7 @@ class SimpleDiscriminator(nn.Module):
         self.image_size = image_size
 
     @override
-    def forward(self, media: Tensor, **_kwargs: Any) -> Tensor:
+    def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
         """Classify media as real (1) or fake (0)."""
         x = media.view(media.shape[0], -1)
         return self.fc(x)
@@ -212,7 +212,7 @@ class _SyncCountingTensor(Tensor):
     _item_calls: list[int] = []  # noqa: RUF012 -- The shared counter is reset per test to observe subclass calls.
 
     @override
-    def item(self) -> Any:
+    def item(self) -> float:
         type(self)._item_calls[0] += 1
         return super().item()
 
@@ -290,12 +290,17 @@ def test_gan_preprocess_batch_forwards_to_generator() -> None:
 
     gan = config.make()
 
-    raw = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    raw: dict[str, object] = {
+        "noise": torch.randn(4, 10),
+        "media": torch.randn(4, 3, 8, 8),
+    }
     out = gan.preprocess_batch(raw)
 
     # Same keys, tensors on the generator's device.
     assert set(out.keys()) == set(raw.keys())
-    assert out["media"].device == gan.generator.device
+    media = out["media"]
+    assert isinstance(media, Tensor)
+    assert media.device == gan.generator.device
 
 
 def _make_gan(
@@ -403,8 +408,8 @@ def test_gan_discriminator_receives_media_under_consistent_key() -> None:
 
     def record(
         module: nn.Module,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
     ) -> None:
         del module, args
         seen_keys.extend(kwargs.keys())

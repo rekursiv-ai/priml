@@ -52,10 +52,11 @@ def test_load_local_checkpoint(tmp_path: Path, tie: bool, dtype: torch.dtype) ->
     graft = Qwen3MMDiTGraft.load(tmp_path, config=config, dtype=dtype, device="cpu")
     source = Qwen3.load(tmp_path, dtype=dtype)
     _assert_transferred(source, graft)
-    assert isinstance(graft, Qwen3MMDiTGraft)
     assert graft.num_streams == 3
     assert isinstance(graft.blocks[0].ffns[2], SwiGLU)
-    assert graft.blocks[0].ffns[2].up_proj.weight.shape[-2] == 48
+    ffn = graft.blocks[0].ffns[2]
+    assert isinstance(ffn, SwiGLU)
+    assert ffn.up_proj.weight.shape[-2] == 48
     assert all(parameter.dtype == dtype for parameter in graft.parameters())
     assert config.pformat(finalize=False) == before
 

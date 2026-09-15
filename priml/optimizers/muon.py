@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import TYPE_CHECKING, Any, overload, override
+from typing import TYPE_CHECKING, cast, overload, override
 
 import math
 
@@ -14,6 +14,7 @@ from torch.optim import Optimizer
 
 import torch
 
+from priml.lib.custom_json import BoolCodec, FloatCodec, IntCodec
 from priml.math.numeric import matrix_signum_via_newtonschulz
 
 
@@ -191,7 +192,7 @@ class Muon(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor] | Iterable[dict[str, Any]],
+        params: Iterable[Tensor] | Iterable[dict[str, object]],
         lr: float = 1e-3,
         *,
         weight_decay: float | None = 0.1,
@@ -247,50 +248,61 @@ class Muon(Optimizer):
             with torch.enable_grad():
                 loss = closure()
         for group in self.param_groups:
-            lr = group["lr"]
-            weight_decay = group["weight_decay"]
-            momentum = group["momentum"]
-            nesterov = group["nesterov"]
-            ns_coefficients = group["ns_coefficients"]
-            eps = group["eps"]
-            ns_steps = group["ns_steps"]
-            ensemble_dims = group["ensemble_dims"]
-
-            for p in group["params"]:
-                g = p.grad
-                if g is None:
-                    continue
-                if g.ndim < 2:
-                    raise ValueError(
-                        f"Muon requires ndim >= 2, got shape {p.shape}.",
-                    )
-
-                state = self.state[p]
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-
-                buf = state["momentum_buffer"]
-                buf.lerp_(g, 1 - momentum)
-                g = g.lerp(buf, momentum) if nesterov else buf
-
-                msgn_g = matrix_signum_via_newtonschulz(
-                    g.reshape(
-                        math.prod(g.shape[:ensemble_dims]),
-                        g.shape[ensemble_dims],
-                        -1,
-                    ),
-                    coefficients=ns_coefficients,
-                    steps=ns_steps,
-                    eps=eps,
-                ).reshape(g.shape)
-
-                if weight_decay is not None:
-                    p.data.mul_(1 - lr * weight_decay)
-
-                adjusted_lr = self.adjust_lr_fn(lr, p, ensemble_dims)
-                if isinstance(adjusted_lr, Tensor):
-                    p.data.add_(msgn_g * (-adjusted_lr))
-                else:
-                    p.data.add_(msgn_g, alpha=-adjusted_lr)
+            self._step_group(group)
 
         return loss
+
+    def _step_group(self, group: dict[str, object]) -> None:
+        lr = FloatCodec.coerce(group["lr"], None)
+        weight_decay = (
+            None
+            if group["weight_decay"] is None
+            else FloatCodec.coerce(group["weight_decay"], None)
+        )
+        momentum = FloatCodec.coerce(group["momentum"], None)
+        nesterov = BoolCodec.coerce(group["nesterov"], None)
+        ns_coefficients = group["ns_coefficients"]
+        assert isinstance(ns_coefficients, tuple)
+        ns_coefficients = cast(tuple[float, float, float], ns_coefficients)
+        assert len(ns_coefficients) == 3
+        eps = FloatCodec.coerce(group["eps"], None)
+        ns_steps = IntCodec.coerce(group["ns_steps"], None)
+        ensemble_dims = IntCodec.coerce(group["ensemble_dims"], None)
+
+        for p in cast(list[Tensor], group["params"]):
+            g = p.grad
+            if g is None:
+                continue
+            if g.ndim < 2:
+                raise ValueError(
+                    f"Muon requires ndim >= 2, got shape {p.shape}.",
+                )
+
+            state = cast(dict[str, object], self.state[p])
+            if "momentum_buffer" not in state:
+                state["momentum_buffer"] = torch.zeros_like(g)
+
+            buf = state["momentum_buffer"]
+            assert isinstance(buf, Tensor)
+            buf.lerp_(g, 1 - momentum)
+            g = g.lerp(buf, momentum) if nesterov else buf
+
+            msgn_g = matrix_signum_via_newtonschulz(
+                g.reshape(
+                    math.prod(g.shape[:ensemble_dims]),
+                    g.shape[ensemble_dims],
+                    -1,
+                ),
+                coefficients=ns_coefficients,
+                steps=ns_steps,
+                eps=eps,
+            ).reshape(g.shape)
+
+            if weight_decay is not None:
+                p.data.mul_(1 - lr * weight_decay)
+
+            adjusted_lr = self.adjust_lr_fn(lr, p, ensemble_dims)
+            if isinstance(adjusted_lr, Tensor):
+                p.data.add_(msgn_g * (-adjusted_lr))
+            else:
+                p.data.add_(msgn_g, alpha=-adjusted_lr)

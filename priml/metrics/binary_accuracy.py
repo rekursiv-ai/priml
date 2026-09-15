@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -30,7 +31,8 @@ class BinaryAccuracy:
 
         """
         self.threshold = config.threshold
-        self.reset()
+        self.correct: int = 0
+        self.total: int = 0
 
     def reset(self) -> None:
         """Reset metric state."""
@@ -68,24 +70,28 @@ class BinaryAccuracy:
 
         return {"accuracy": self.correct / self.total}
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed counts."""
+
+        correct: int
+        total: int
+
+    def state_dict(self) -> StateDict:
         """Get metric state for checkpointing.
 
         Returns:
-          result: The dict[str, Any].
+          state: The correct and total counts.
 
         """
-        return {
-            "correct": self.correct,
-            "total": self.total,
-        }
+        return {"correct": self.correct, "total": self.total}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load metric state from checkpoint.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.correct = state_dict.get("correct", 0)
-        self.total = state_dict.get("total", 0)
+        state = cast(BinaryAccuracy.StateDict, state_dict)
+        self.correct = state["correct"]
+        self.total = state["total"]

@@ -153,3 +153,8 @@ wandb/
 # references the tests compare against); re-admit them past the *.pt rule.
 !**/testdata/
 !**/testdata/*.pt
+
+# Patched copy of the type checkers' bundled stdlib stubs. `tools/typeshed_build.py`
+# regenerates it from the installed basedpyright/ty plus `typings/typeshed.patch`
+# (the `typeshed-build` pre-commit hook runs it); only the patch is tracked.
+/typings/typeshed.d/

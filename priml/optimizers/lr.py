@@ -11,6 +11,8 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.lib.custom_json import FloatCodec
+
 
 @runtime_checkable
 class HasParamGroups(Protocol):
@@ -21,7 +23,7 @@ class HasParamGroups(Protocol):
     inherits that class is still accepted.
     """
 
-    param_groups: list[dict[str, Any]]
+    param_groups: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch's own `Optimizer.param_groups` type; `list` is invariant, so anything narrower rejects every torch optimizer.
 
 
 def lr_scale(
@@ -61,7 +63,7 @@ def remember_initial_lrs(optimizers: Iterable[HasParamGroups]) -> None:
     """
     for optimizer in optimizers:
         for group in optimizer.param_groups:
-            group.setdefault("initial_lr", group["lr"])
+            _remember_initial_lr(group)
 
 
 def apply_lr_scale(
@@ -88,7 +90,12 @@ def apply_lr_scale(
     """
     for optimizer in optimizers:
         for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * scale
+            _scale_lr(group, scale)
+
+
+def learning_rate(optimizer: HasParamGroups, *, group_index: int = 0) -> float:
+    """Return one parameter group's current learning rate."""
+    return _rate(optimizer.param_groups[group_index], "lr")
 
 
 def step_optimizers(optimizers: Iterable[torch.optim.Optimizer]) -> None:
@@ -135,3 +142,15 @@ def clip_grad_norm(
     if max_norm is None:
         return None
     return torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+
+
+def _remember_initial_lr(group: dict[str, object]) -> None:
+    group.setdefault("initial_lr", group["lr"])
+
+
+def _scale_lr(group: dict[str, object], scale: float) -> None:
+    group["lr"] = _rate(group, "initial_lr") * scale
+
+
+def _rate(group: dict[str, object], key: str) -> float:
+    return FloatCodec.coerce(group[key], None)

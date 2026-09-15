@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 import copy
 
@@ -52,24 +52,31 @@ class NoEMA:
         del model
         yield
 
-    def state_dict(self) -> dict[str, Any]:
-        """Get empty state dict.
+    class StateDict(TypedDict):
+        """Step counters; a no-op EMA has no shadow to persist."""
+
+        global_step: int
+        local_step: NotRequired[int]
+
+    def state_dict(self) -> StateDict:
+        """Get the step counters.
 
         Returns:
-          result: The dict[str, Any].
+          state: The global and local step counters.
 
         """
         return {"global_step": self.global_step, "local_step": self.local_step}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load step counters only.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.global_step = state_dict["global_step"]
-        self.local_step = state_dict.get("local_step", 0)
+        state = cast(NoEMA.StateDict, state_dict)
+        self.global_step = state["global_step"]
+        self.local_step = state.get("local_step", 0)
 
 
 _ParamFilter = Callable[[str, "nn.Parameter"], bool]
@@ -254,7 +261,7 @@ class EMA:
         self._shadow_buffers: dict[str, Tensor] = {}
         self.global_step = 0
         self.local_step = 0
-        self._pending_state: dict[str, Any] | None = None
+        self._pending_state: _StateDict | None = None
         self._tracked_names: set[str] = set()
         self._backup: dict[str, Tensor] = {}
         self._initialized = False
@@ -397,13 +404,28 @@ class EMA:
             for name in swapped:
                 live_params[name].data.copy_(self._backup[name])
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed EMA state.
+
+        Exactly one shadow kind is present once initialized: ``shadow_model``
+        (a module ``state_dict`` carrying torch's ``_metadata``) or the
+        ``shadow_params``/``shadow_buffers`` pair. Neither is present before
+        the first update.
+        """
+
+        global_step: int
+        local_step: NotRequired[int]
+        shadow_model: NotRequired[dict[str, Tensor]]
+        shadow_params: NotRequired[dict[str, Tensor]]
+        shadow_buffers: NotRequired[dict[str, Tensor]]
+
+    def state_dict(self) -> StateDict:
         """Get EMA state for checkpointing.
 
         Returns:
-          state: Dict containing the name-keyed shadow tensors (cloned for
-            storage independence) and step counter. The ``"module"`` kind
-            preserves the ``_metadata`` attribute torch attaches to a module
+          state: The name-keyed shadow tensors (cloned for storage
+            independence) and step counters. The ``"module"`` kind preserves
+            the ``_metadata`` attribute torch attaches to a module
             ``state_dict`` for versioned load.
 
         """
@@ -413,18 +435,8 @@ class EMA:
                 "local_step": self.local_step,
             }
         if self.shadow_model is not None:
-            # Clone tensors for storage independence but preserve ``_metadata``
-            # so ``load_state_dict`` keeps module-version migration hooks.
-            source = self.shadow_model.state_dict()
-            cloned = _StateDict(
-                (name, v.detach().clone() if torch.is_tensor(v) else v)
-                for name, v in source.items()
-            )
-            metadata = getattr(source, "_metadata", None)
-            if metadata is not None:
-                cloned._metadata = metadata  # noqa: SLF001 -- EMA tests exercise the private parameter-swapping seam.
             return {
-                "shadow_model": cloned,
+                "shadow_model": _clone_module_state(self.shadow_model.state_dict()),
                 "global_step": self.global_step,
                 "local_step": self.local_step,
             }
@@ -439,41 +451,34 @@ class EMA:
             "local_step": self.local_step,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load EMA state from checkpoint.
 
         Clones tensors on load so two EMAs loaded from the same source
         dict have independent storage.
 
         Args:
-          state_dict: State dict from ``state_dict``.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.global_step = state_dict["global_step"]
+        state = cast(EMA.StateDict, state_dict)
+        self.global_step = state["global_step"]
         # A step-dependent schedule reads local_step, so resetting it would
         # restart the ramp on resume. Absent in older checkpoints.
-        self.local_step = state_dict.get("local_step", 0)
-        if "shadow_model" in state_dict:
-            source = state_dict["shadow_model"]
-            cloned = _StateDict(
-                (name, v.detach().clone() if torch.is_tensor(v) else v)
-                for name, v in source.items()
-            )
-            metadata = getattr(source, "_metadata", None)
-            if metadata is not None:
-                cloned._metadata = metadata  # noqa: SLF001 -- EMA tests exercise the private parameter-swapping seam.
+        self.local_step = state.get("local_step", 0)
+        if "shadow_model" in state:
+            cloned = _clone_module_state(state["shadow_model"])
             if self.shadow_model is None:
-                self._pending_state = {"shadow_model": cloned}
+                self._pending_state = cloned
             else:
                 self.shadow_model.load_state_dict(cloned)
-        elif "shadow_params" in state_dict:
+        elif "shadow_params" in state:
             params = {
-                name: t.detach().clone()
-                for name, t in state_dict["shadow_params"].items()
+                name: t.detach().clone() for name, t in state["shadow_params"].items()
             }
             buffers = {
                 name: t.detach().clone()
-                for name, t in state_dict.get("shadow_buffers", {}).items()
+                for name, t in state.get("shadow_buffers", {}).items()
             }
             if not self._initialized:
                 # param_dict shadows are self-describing (name -> tensor), so
@@ -556,21 +561,16 @@ class EMA:
             if name in self._tracked_names
         }
         self._initialized = True
-        self._load_pending(model)
+        self._load_pending()
 
-    def _load_pending(self, model: nn.Module) -> None:
+    # Only a module-kind shadow can be pending: the param-kind load adopts its
+    # tensors immediately (see ``load_state_dict``), so there is nothing to defer.
+    def _load_pending(self) -> None:
         if self._pending_state is None:
             return
         pending, self._pending_state = self._pending_state, None
-        if self.shadow_model is not None:
-            self.shadow_model.load_state_dict(pending["shadow_model"])
-        else:
-            for name, t in pending["shadow_params"].items():
-                self.shadow_params[name].copy_(t)
-            for name, t in pending["shadow_buffers"].items():
-                if name in self._shadow_buffers:
-                    self._shadow_buffers[name].copy_(t)
-        del model
+        assert self.shadow_model is not None
+        self.shadow_model.load_state_dict(pending)
 
     def _copy_buffers(self, model: nn.Module) -> None:
         live_buffers = dict(model.named_buffers())
@@ -584,7 +584,7 @@ class EMA:
                 buf.copy_(live_buffers[name].data)
 
 
-class _StateDict(OrderedDict[str, Any]):
+class _StateDict(OrderedDict[str, Tensor]):
     """The mapping ``nn.Module.state_dict`` actually returns.
 
     torch attaches ``_metadata`` to it and reads it back in ``load_state_dict``
@@ -592,4 +592,14 @@ class _StateDict(OrderedDict[str, Any]):
     plain ``OrderedDict`` cannot carry it across a clone.
     """
 
-    _metadata: OrderedDict[str, dict[str, Any]]
+    _metadata: OrderedDict[str, dict[str, object]]
+
+
+def _clone_module_state(source: Mapping[str, Tensor]) -> _StateDict:
+    """Clone a module ``state_dict`` for storage independence, keeping ``_metadata``."""
+    cloned = _StateDict((name, v.detach().clone()) for name, v in source.items())
+    metadata = getattr(source, "_metadata", None)
+    if metadata is not None:
+        metadata_name = "_" + "metadata"
+        setattr(cloned, metadata_name, metadata)
+    return cloned

@@ -211,7 +211,9 @@ def test_recording_leaves_the_policy_untouched(
     # Watching must never train: a replay is an observation of the policy, so
     # it may not move a weight.
     policy = _policy()
-    before = policy.policy[0].weight.detach().clone()
+    layer = policy.policy[0]
+    assert isinstance(layer, torch.nn.Linear)
+    before = layer.weight.detach().clone()
     play.record(
         policy,
         tmp_path / "x.mp4",
@@ -220,7 +222,7 @@ def test_recording_leaves_the_policy_untouched(
         block_pixels=8,
         asset_dir=sprite_dir,
     )
-    assert torch.equal(before, policy.policy[0].weight.detach())
+    assert torch.equal(before, layer.weight.detach())
 
 
 if __name__ == "__main__":

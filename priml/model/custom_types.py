@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, Self, TypeGuard, cast, runtime_checkable
+from typing import Literal, Protocol, Self, TypeGuard, runtime_checkable
+from typing_extensions import ParamSpec
 
 from configgle import Makeable
 from torch import Tensor, nn
@@ -40,6 +41,15 @@ __all__ = [
     "propagate_attr",
 ]
 
+_Kwargs = ParamSpec("_Kwargs", default=...)
+"""The open keyword bus a module accepts beyond its positional contract.
+
+Defaults to ``...`` (gradual), so a bare ``TensorModule`` accepts every
+module whose ``forward`` starts with the named tensors: ``nn.Module.__call__``
+is generic over the subclass's ``forward``, and a fixed ``**kwargs: object``
+rejects a kernel that names its own keywords (``window: int = -1``).
+"""
+
 type DepthIndex = tuple[tuple[int, int], ...]
 """Global-to-local ``(index, count)`` pairs; empty means unspecified."""
 
@@ -60,14 +70,20 @@ every ``self.act(x)`` infer ``Any``. Pass a Module through a ``Makeable``.
 """
 
 
-class TensorModule(Protocol):
+class TensorModule(Protocol[_Kwargs]):
     """A module that maps a Tensor to a Tensor.
 
     ``nn.Module.__call__`` is untyped, so a plain ``nn.Module`` annotation makes
     every call site ``Any``. This names the contract those call sites need.
     """
 
-    def __call__(self, x: Tensor, /, **kwargs: Any) -> Tensor:  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
+    def __call__(
+        self,
+        x: Tensor,
+        /,
+        *args: _Kwargs.args,
+        **kwargs: _Kwargs.kwargs,
+    ) -> Tensor:
         """Apply to the input."""
         ...
 
@@ -103,7 +119,7 @@ class RotaryFactors(Protocol):
 
 
 @runtime_checkable
-class AttentionKernel(Protocol):
+class AttentionKernel(Protocol[_Kwargs]):
     """Windowed causal attention over ``[..., S, num_heads, channels_head]``.
 
     The layout is the one every priml projection emits and the one a fused
@@ -124,14 +140,15 @@ class AttentionKernel(Protocol):
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        **kwargs: Any,  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
+        *args: _Kwargs.args,
+        **kwargs: _Kwargs.kwargs,
     ) -> Tensor:
         """Apply to the input."""
         ...
 
 
 @runtime_checkable
-class LatentAttentionKernel(Protocol):
+class LatentAttentionKernel(Protocol[_Kwargs]):
     """Attends over a COMPRESSED kv latent rather than materialized K and V.
 
     A separate protocol from :class:`AttentionKernel` because the inputs differ
@@ -167,17 +184,15 @@ class LatentAttentionKernel(Protocol):
         q_pe: Tensor,
         c_kv: Tensor,
         k_pe: Tensor,
-        *,
-        w_kr: Tensor,
-        w_uv: Tensor,
-        **kwargs: Any,  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
+        *args: _Kwargs.args,
+        **kwargs: _Kwargs.kwargs,
     ) -> Tensor:
         """Apply to the input."""
         ...
 
 
 @runtime_checkable
-class LookupTable(Protocol):
+class LookupTable(Protocol[_Kwargs]):
     """A table mapping integer ids to rows, whose rows are readable.
 
     Wider than :class:`TensorModule` in the two ways a wrapper needs: the
@@ -188,7 +203,13 @@ class LookupTable(Protocol):
 
     weight: Tensor
 
-    def __call__(self, tokens: Tensor, /, **kwargs: Any) -> Tensor:  # noqa: ANN401 -- Protocol conformance: nn.Module.__call__ is generic over its forward, and only Any unifies with every kernel's **kwargs.
+    def __call__(
+        self,
+        tokens: Tensor,
+        /,
+        *args: _Kwargs.args,
+        **kwargs: _Kwargs.kwargs,
+    ) -> Tensor:
         """Apply to the input."""
         ...
 
@@ -212,9 +233,13 @@ class HasAttention(Makeable[nn.Module], Protocol):
 
     Declared as a shape rather than as a block CLASS, so a wrapper or a
     replacement qualifies by exposing an attention instead of by inheriting.
+    Builds a bare ``nn.Module``, not a :class:`TensorModule`: the stack holds
+    its blocks in a ``ModuleList`` and resets only those that are
+    :class:`Resettable`, so a block without ``reset_parameters`` is a valid
+    layer here.
     """
 
-    attn: Makeable[nn.Module]
+    attn: Makeable[TensorModule]
     """The attention sublayer; the stack narrows it to the one it requires."""
 
 
@@ -301,22 +326,20 @@ class Shardable(Protocol):
     shard: ShardStyle | None
 
 
-def has_weight(module: TensorModule | None) -> TypeGuard[WeightedTensorModule]:
+def has_weight(module: object) -> TypeGuard[WeightedTensorModule]:
     """Check tensor weights, including parameters registered through nn.Module.
 
     Runtime protocol checks use static lookup, missing registered parameters.
 
     Args:
-      module: Module to check for a weight attribute.
+      module: Candidate to check for a weight attribute; any object qualifies
+        because the tie path is resolved by name at runtime.
 
     Returns:
       guard: True if module has a weight attribute that is a Tensor.
 
     """
-    return hasattr(module, "weight") and isinstance(
-        cast(_WeightAttribute, module).weight,
-        Tensor,
-    )
+    return isinstance(getattr(module, "weight", None), Tensor)
 
 
 def flatten_depth_index(depth_index: DepthIndex) -> int:
@@ -388,7 +411,3 @@ def propagate_attr(
             f"no attribute {name!r}; cannot propagate value {value!r}.",
         )
     setattr(config, name, value)
-
-
-class _WeightAttribute(Protocol):
-    weight: object

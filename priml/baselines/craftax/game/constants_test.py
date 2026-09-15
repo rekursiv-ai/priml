@@ -7,6 +7,11 @@ later, so each is compared elementwise against the reference package.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from typing import Protocol, cast
+
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -77,16 +82,16 @@ def test_torch_light_map_peaks_at_its_own_tile_and_falls_to_zero() -> None:
     ],
 )
 def test_table_matches_reference(ported: str, upstream_name: str) -> None:
-    upstream = reference("craftax.constants")
-    expected = as_tensor(getattr(upstream, upstream_name))
-    actual = getattr(constants, ported)
+    upstream = cast(_ReferenceConstants, reference("craftax.constants"))
+    expected = as_tensor(_reference_value(upstream, upstream_name))
+    actual = _ported_tensor(ported)
     assert actual.shape == expected.shape, ported
     assert torch.equal(actual.to(expected.dtype), expected), ported
 
 
 @requires_craftax
 def test_enumerations_match_reference_values() -> None:
-    upstream = reference("craftax.constants")
+    upstream = cast(_ReferenceConstants, reference("craftax.constants"))
     for ported, expected in (
         (constants.BlockType, upstream.BlockType),
         (constants.ItemType, upstream.ItemType),
@@ -108,7 +113,7 @@ def test_torch_light_map_matches_reference_to_one_ulp() -> None:
     deliberately less accurate square root; the tolerance here is the size of
     that rounding step, not a slackened comparison.
     """
-    upstream = reference("craftax.constants")
+    upstream = cast(_ReferenceConstants, reference("craftax.constants"))
     expected = as_tensor(upstream.TORCH_LIGHT_MAP)
     difference = (constants.TORCH_LIGHT_MAP - expected).abs()
     assert float(difference.max()) <= 2.0**-23
@@ -128,7 +133,7 @@ def test_movement_directions_match_the_reference_where_it_is_defined() -> None:
     out-of-range lookup is silently clamped. Torch raises instead, so the
     table here covers every action and the extra rows are zero.
     """
-    upstream = reference("craftax.constants")
+    upstream = cast(_ReferenceConstants, reference("craftax.constants"))
     expected = as_tensor(upstream.DIRECTIONS)
     actual = constants.DIRECTIONS.to(expected.dtype)
     assert len(actual) == len(constants.Action)
@@ -138,8 +143,8 @@ def test_movement_directions_match_the_reference_where_it_is_defined() -> None:
 
 @requires_craftax
 def test_scalar_rules_match_reference() -> None:
-    upstream = reference("craftax.constants")
-    state = reference("craftax.craftax_state")
+    upstream = cast(_ReferenceConstants, reference("craftax.constants"))
+    state = cast(_ReferenceState, reference("craftax.craftax_state"))
     EnvParams, StaticEnvParams = state.EnvParams, state.StaticEnvParams
     assert constants.OBS_DIM == upstream.OBS_DIM
     assert constants.MAX_OBS_DIM == upstream.MAX_OBS_DIM
@@ -163,6 +168,79 @@ def test_scalar_rules_match_reference() -> None:
     assert params.day_length == constants.DAY_LENGTH
     assert params.mob_despawn_distance == constants.MOB_DESPAWN_DISTANCE
     assert params.max_attribute == constants.MAX_ATTRIBUTE
+
+
+class _EnumType(Protocol):
+    def __iter__(self) -> Iterator[_EnumMember]: ...
+
+
+class _EnumMember(Protocol):
+    name: str
+    value: int
+
+
+class _ReferenceConstants(Protocol):
+    SOLID_BLOCK_MAPPING: object
+    CAN_PLACE_ITEM_MAPPING: object
+    FLOOR_MOB_MAPPING: object
+    FLOOR_MOB_SPAWN_CHANCE: object
+    MOB_TYPE_COLLISION_MAPPING: object
+    MOB_TYPE_DAMAGE_MAPPING: object
+    MOB_TYPE_HEALTH_MAPPING: object
+    MOB_TYPE_DEFENSE_MAPPING: object
+    RANGED_MOB_TYPE_TO_PROJECTILE_TYPE_MAPPING: object
+    ACHIEVEMENT_REWARD_MAP: object
+    LEVEL_ACHIEVEMENT_MAP: object
+    MOB_ACHIEVEMENT_MAP: object
+    CLOSE_BLOCKS: object
+    BlockType: _EnumType
+    ItemType: _EnumType
+    Action: _EnumType
+    Achievement: _EnumType
+    ProjectileType: _EnumType
+    TORCH_LIGHT_MAP: object
+    DIRECTIONS: object
+    OBS_DIM: tuple[int, int]
+    MAX_OBS_DIM: int
+    MONSTERS_KILLED_TO_CLEAR_LEVEL: int
+    BOSS_FIGHT_EXTRA_DAMAGE: float
+    BOSS_FIGHT_SPAWN_TURNS: int
+
+
+class _StaticEnvParams(Protocol):
+    map_size: int
+    num_levels: int
+    max_melee_mobs: int
+    max_passive_mobs: int
+    max_ranged_mobs: int
+    max_mob_projectiles: int
+    max_player_projectiles: int
+    max_growing_plants: int
+
+
+class _EnvParams(Protocol):
+    max_timesteps: int
+    day_length: int
+    mob_despawn_distance: int
+    max_attribute: int
+
+
+class _ReferenceState(Protocol):
+    EnvParams: Callable[[], _EnvParams]
+    StaticEnvParams: Callable[[], _StaticEnvParams]
+
+
+def _reference_value(module: _ReferenceConstants, name: str) -> object:
+    """Return a dynamically selected reference table."""
+    value: object = getattr(module, name)  # pyright: ignore[reportAny] -- The reference module is dynamically imported.
+    return value
+
+
+def _ported_tensor(name: str) -> Tensor:
+    """Return a ported table after narrowing the dynamic attribute lookup."""
+    value: object = getattr(constants, name)  # pyright: ignore[reportAny] -- The table name is selected by pytest parameters.
+    assert isinstance(value, Tensor)
+    return value
 
 
 if __name__ == "__main__":

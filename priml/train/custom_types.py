@@ -56,7 +56,7 @@ class ModelOutput(Protocol):
     silently mis-casting the output to ``Tensor``.
     """
 
-    def __getitem__(self, key: Any) -> Any:  # noqa: ANN401 -- Tensor.__getitem__ is typed Any in the torch stubs; anything narrower rejects it.
+    def __getitem__(self, key: object) -> Any:  # noqa: ANN401 -- The output's schema belongs to the model, not this protocol.  # pyright: ignore[reportExplicitAny,reportAny] -- The output's schema belongs to the model, not this protocol.
         """Index into the model output (per-key tensor or per-position tensor)."""
         ...
 
@@ -82,7 +82,7 @@ class TrainStepOutput(TypedDict):
 
     metrics: NotRequired[dict[str, float | Tensor]]
 
-    eval_extra_votes: NotRequired[list[tuple[Tensor, dict[str, Any]]]]
+    eval_extra_votes: NotRequired[list[tuple[Tensor, dict[str, object]]]]
 
 
 if TYPE_CHECKING:
@@ -93,7 +93,7 @@ if TYPE_CHECKING:
 class OptimizerProtocol(CheckpointableProtocol, Protocol):
     """Protocol for optimizers."""
 
-    param_groups: list[dict[str, Any]]
+    param_groups: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch's own `Optimizer.param_groups` type; `list` is invariant, so anything narrower rejects every torch optimizer.
     """Parameter groups, each carrying its own ``lr``.
 
     Part of the protocol because the learning rate is set by WRITING here: a
@@ -331,7 +331,7 @@ class TrackerProtocol(Protocol):
 
     def log_metrics(
         self,
-        metrics: Mapping[str, Any],
+        metrics: Mapping[str, object],
         step: int,
         *,
         prefix: str = "",
@@ -349,7 +349,7 @@ class TrackerProtocol(Protocol):
         """
         ...
 
-    def log_images(self, key: str, images: list[Any], step: int) -> None:
+    def log_images(self, key: str, images: list[object], step: int) -> None:
         """Log images at given step.
 
         Args:
@@ -546,10 +546,11 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
 
     Defines interface for models with training logic.
 
-    ``**preprocessed_batch`` is ``Any`` so an implementation can narrow it to
-    the batch it actually takes (``**batch: Tensor``); ``object`` would reject
-    those. ``call_eval`` returns ``Any`` for the same reason: a step returning
-    a ``Tensor`` or a typed output container must still satisfy it.
+    ``**preprocessed_batch`` is ``object`` so an implementation can narrow it to
+    the batch it actually takes (``**batch: Tensor``). ``call_eval`` returns
+    ``Any`` because the output's schema is the model's, decided by the
+    implementation: a step returning a ``Tensor`` or a typed output container
+    both satisfy it, and a caller narrows to the model it configured.
     """
 
     @property
@@ -562,19 +563,19 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Preprocess batch (move tensors to device, etc.).
 
         Args:
           batch: Batch.
 
         Returns:
-          result: The dict[str, Any].
+          result: The dict[str, object].
 
         """
         ...
 
-    def train_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.
+    def train_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Compute loss in train mode (no backprop).
 
         Args:
@@ -586,7 +587,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def eval_loss(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.
+    def eval_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Compute loss in eval mode (no backprop).
 
         Args:
@@ -598,7 +599,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def train_step(self, **preprocessed_batch: Any) -> TrainStepOutput:  # noqa: ANN401 -- see the class docstring.
+    def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Train mode + loss + backprop + optimizer step.
 
         Args:
@@ -610,7 +611,7 @@ class TrainStepProtocol(CheckpointableProtocol, Protocol):
         """
         ...
 
-    def call_eval(self, **preprocessed_batch: Any) -> Any:  # noqa: ANN401 -- see the class docstring.
+    def call_eval(self, **preprocessed_batch: object) -> Any:  # noqa: ANN401 -- The output's schema is the configured model's, unknown to the protocol.  # pyright: ignore[reportExplicitAny,reportAny] -- The output's schema is the configured model's, unknown to the protocol.
         """Run the evaluation forward pass.
 
         EMA if available, under inference_mode and autocast.

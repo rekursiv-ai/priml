@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol, cast
 
 import argparse
-import json
 import sys
 
-from priml.lib.custom_json import DictCodec, FloatCodec
+from priml.lib.custom_json import DictCodec, FloatCodec, loads
 
 
 def read_metrics(path: Path) -> dict[str, float]:
@@ -32,7 +32,7 @@ def read_metrics(path: Path) -> dict[str, float]:
       FileNotFoundError: If ``path`` does not exist.
 
     """
-    decoded = json.loads(path.read_text())
+    decoded = loads(path.read_text())
     return {k: FloatCodec.coerce(v) for k, v in DictCodec.coerce(decoded).items()}
 
 
@@ -86,14 +86,20 @@ def summarize(
         default="metrics.json",
         help="Metrics JSON path (default: metrics.json).",
     )
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    path = Path(args.path)
+    flags = cast(_Flags, parser.parse_args(argv))
+    path = Path(flags.path)
     if not path.exists():
-        print(f"No metrics file at {path}.", file=sys.stderr)  # noqa: T201 -- This result-reporting CLI writes its human-readable report to stdout.
+        sys.stderr.write(f"No metrics file at {path}.\n")
         return 1
     metrics = read_metrics(path)
     summary = format_summary(metrics, keys)
     if note is not None:
         summary += note(metrics)
-    print(summary)  # noqa: T201 -- This result-reporting CLI writes its human-readable report to stdout.
+    sys.stdout.write(f"{summary}\n")
     return 0
+
+
+class _Flags(Protocol):
+    """Parsed command-line flags."""
+
+    path: str

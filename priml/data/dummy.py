@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import NotRequired, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -69,56 +70,64 @@ class DummyDataset:
 
         self.dataset = TensorDataset(data, labels)
 
-    def train_dataloader(self) -> DataLoader[Any]:
+    def train_dataloader(self) -> DataLoader[tuple[Tensor, Tensor]]:
         """Get training dataloader.
 
         Returns:
           result: Shuffled DataLoader wrapping the dummy dataset.
 
         """
-        return DataLoader(
+        loader = DataLoader(
             self.dataset,
             batch_size=self.config.batch_size,
             shuffle=True,
             num_workers=self.config.num_workers,
             collate_fn=self._collate_fn,
         )
+        return cast(DataLoader[tuple[Tensor, Tensor]], loader)
 
-    def eval_dataloader(self) -> DataLoader[Any]:
+    def eval_dataloader(self) -> DataLoader[tuple[Tensor, Tensor]]:
         """Get evaluation dataloader.
 
         Returns:
           result: Non-shuffled DataLoader wrapping the dummy dataset.
 
         """
-        return DataLoader(
+        loader = DataLoader(
             self.dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=self.config.num_workers,
             collate_fn=self._collate_fn,
         )
+        return cast(DataLoader[tuple[Tensor, Tensor]], loader)
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The pass count; absent in checkpoints written before the timer existed."""
+
+        timer_epoch: NotRequired[CheckpointableStepTimer.StateDict]
+
+    def state_dict(self) -> StateDict:
         """Return the pass count, the only state this dataset carries.
 
         Returns:
-          result: The dict[str, Any].
+          state: The epoch timer's state.
 
         """
         return {"timer_epoch": self.timer_epoch.state_dict()}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the pass count.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        if "timer_epoch" in state_dict:
-            self.timer_epoch.load_state_dict(state_dict["timer_epoch"])
+        state = cast(DummyDataset.StateDict, state_dict)
+        if "timer_epoch" in state:
+            self.timer_epoch.load_state_dict(state["timer_epoch"])
 
-    def _collate_fn(self, batch: list[tuple[Tensor, ...]]) -> dict[str, Tensor]:
+    def _collate_fn(self, batch: list[tuple[Tensor, Tensor]]) -> dict[str, Tensor]:
         """Collate batch into dict format."""
         data_list, label_list = zip(*batch, strict=True)
         device = get_device(self.config.device)

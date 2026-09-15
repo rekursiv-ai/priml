@@ -41,10 +41,11 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import KW_ONLY, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Self, override
+from typing import Literal, Self, cast, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -231,7 +232,7 @@ class KimiK2(Transformer):
         """
 
         @classmethod
-        def from_hf(cls, config: dict[str, Any]) -> Self:
+        def from_hf(cls, config: Mapping[str, object]) -> Self:
             """Parse an HF ``config.json`` dict.
 
             Args:
@@ -242,26 +243,28 @@ class KimiK2(Transformer):
 
             """
             model_type = config.get("model_type")
+            assert isinstance(model_type, str)
             if model_type not in _VALID_MODEL_TYPES:
                 raise ValueError(
                     f"Expected model_type in {sorted(_VALID_MODEL_TYPES)}, "
                     f"got {model_type!r}.",
                 )
-            scoring_func = config.get("scoring_func", "sigmoid")
-            if scoring_func not in ("softmax", "sigmoid"):
+            scoring_func_value = config.get("scoring_func", "sigmoid")
+            if scoring_func_value not in ("softmax", "sigmoid"):
                 raise ValueError(
                     f"Expected scoring_func in ('softmax', 'sigmoid'), "
-                    f"got {scoring_func!r}.",
+                    f"got {scoring_func_value!r}.",
                 )
+            scoring_func = cast(Literal["softmax", "sigmoid"], scoring_func_value)  # pyright: ignore[reportUnnecessaryCast] -- Pyright narrows from the `in` check above; ty does not, so the cast stays.
             # HF's schema is parsed into the CHILD configs; the parent does
             # not mirror foreign names onto itself. Everything below hangs off
             # the ONE block template, which is where each value lives.
-            eps = float(config.get("rms_norm_eps", 1e-6))
+            eps = FloatCodec.coerce(config.get("rms_norm_eps"), 1e-6)
             norm = RMSNorm.Config(elementwise_affine=True)
             norm.eps = eps
 
             frequencies = HuggingFaceFrequencies.Config()
-            frequencies.base = float(config.get("rope_theta", 10_000.0))
+            frequencies.base = FloatCodec.coerce(config.get("rope_theta"), 10_000.0)
             rope = RoPE.Config()
             rope.frequencies = _parse_yarn(config.get("rope_scaling")) or frequencies
 
@@ -277,29 +280,33 @@ class KimiK2(Transformer):
                 causal=True,
                 init_weight=init_weight,
             )
-            attn.num_heads = int(config["num_attention_heads"])
-            attn.channels_qk_nope_head = int(config.get("qk_nope_head_dim", 128))
-            attn.channels_qk_rope_head = int(config.get("qk_rope_head_dim", 64))
-            attn.channels_v_head = int(config.get("v_head_dim", 128))
+            attn.num_heads = IntCodec.coerce(config["num_attention_heads"])
+            attn.channels_qk_nope_head = IntCodec.coerce(
+                config.get("qk_nope_head_dim"), 128
+            )
+            attn.channels_qk_rope_head = IntCodec.coerce(
+                config.get("qk_rope_head_dim"), 64
+            )
+            attn.channels_v_head = IntCodec.coerce(config.get("v_head_dim"), 128)
             attn.q_lora_rank = (
-                int(config["q_lora_rank"])
+                IntCodec.coerce(config["q_lora_rank"])
                 if config.get("q_lora_rank") is not None
                 else None
             )
-            attn.kv_lora_rank = int(config.get("kv_lora_rank", 512))
+            attn.kv_lora_rank = IntCodec.coerce(config.get("kv_lora_rank"), 512)
             attn.rope = rope
             attn.norm_q_lora = norm.copy_tree()
             attn.norm_kv_lora = norm.copy_tree()
 
             router = Router.Config()
-            router.top_k = int(config.get("num_experts_per_tok", 1))
+            router.top_k = IntCodec.coerce(config.get("num_experts_per_tok"), 1)
             router.scoring_func = scoring_func
             router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
-            router.routed_scaling_factor = float(
-                config.get("routed_scaling_factor", 1.0),
+            router.routed_scaling_factor = FloatCodec.coerce(
+                config.get("routed_scaling_factor"), 1.0
             )
-            router.n_group = int(config.get("n_group", 1))
-            router.topk_group = int(config.get("topk_group", 1))
+            router.n_group = IntCodec.coerce(config.get("n_group"), 1)
+            router.topk_group = IntCodec.coerce(config.get("topk_group"), 1)
 
             moe = MoE.Config(
                 expert=SwiGLU.Config(
@@ -312,8 +319,8 @@ class KimiK2(Transformer):
                 ),
             )
             moe.router = router
-            moe.num_shared_experts = int(config.get("n_shared_experts", 0))
-            router.num_experts = int(config.get("n_routed_experts", 0))
+            moe.num_shared_experts = IntCodec.coerce(config.get("n_shared_experts"), 0)
+            router.num_experts = IntCodec.coerce(config.get("n_routed_experts"), 0)
 
             block = TransformerBlock.Config(prenorm=True)
             block.attn = attn
@@ -326,11 +333,8 @@ class KimiK2(Transformer):
             # ``moe_intermediate_size: 0``, which then built every expert at the
             # 18432-wide dense size and only surfaced as a shape mismatch when
             # the checkpoint failed to load.
-            channels_hidden_expert = int(
-                config.get(
-                    "moe_intermediate_size",
-                    config["intermediate_size"],
-                ),
+            channels_hidden_expert = IntCodec.coerce(
+                config.get("moe_intermediate_size", config["intermediate_size"]),
             )
             if channels_hidden_expert < 1:
                 raise ValueError(
@@ -343,14 +347,16 @@ class KimiK2(Transformer):
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
             return cls(
-                channels_in=int(config["hidden_size"]),
-                channels_out=int(config["vocab_size"]),
-                num_layers=int(config["num_hidden_layers"]),
+                channels_in=IntCodec.coerce(config["hidden_size"]),
+                channels_out=IntCodec.coerce(config["vocab_size"]),
+                num_layers=IntCodec.coerce(config["num_hidden_layers"]),
                 in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
                 out_proj=Sequential.Config(elements=[norm.copy_tree(), head]),
-                channels_hidden_dense=int(config["intermediate_size"]),
+                channels_hidden_dense=IntCodec.coerce(config["intermediate_size"]),
                 channels_hidden_expert=channels_hidden_expert,
-                first_k_dense_replace=int(config.get("first_k_dense_replace", 0)),
+                first_k_dense_replace=IntCodec.coerce(
+                    config.get("first_k_dense_replace"), 0
+                ),
                 block=block,
             )
 
@@ -437,7 +443,7 @@ class KimiK2(Transformer):
                 dtype=dtype,
                 trust_remote_code=True,
             )
-            hf_config = hf_model.config.to_dict()
+            hf_config = DictCodec.coerce(hf_model.config.to_dict())
             hf_sd = {k: v.detach().cpu() for k, v in hf_model.state_dict().items()}
             del hf_model
 

@@ -87,12 +87,16 @@ def test_each_ore_needs_its_own_pickaxe_tier(
     too_weak = _facing(_state(), block)
     too_weak.inventory.pickaxe[:] = tier - 1
     blocked = interact.interact(too_weak, doing=_all(), generator=_quiet())
-    assert getattr(blocked.inventory, resource).tolist() == [0, 0]
+    blocked_resource: object = getattr(blocked.inventory, resource)  # pyright: ignore[reportAny] -- resource names are validated by the parametrized cases.
+    assert isinstance(blocked_resource, Tensor)
+    assert blocked_resource.tolist() == [0, 0]
 
     ready = _facing(_state(), block)
     ready.inventory.pickaxe[:] = tier
     mined = interact.interact(ready, doing=_all(), generator=_quiet())
-    assert getattr(mined.inventory, resource).tolist() == [1, 1]
+    mined_resource: object = getattr(mined.inventory, resource)  # pyright: ignore[reportAny] -- resource names are validated by the parametrized cases.
+    assert isinstance(mined_resource, Tensor)
+    assert mined_resource.tolist() == [1, 1]
 
 
 def test_drinking_water_fills_the_meter_and_resets_thirst() -> None:

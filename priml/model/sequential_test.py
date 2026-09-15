@@ -51,7 +51,9 @@ def test_sequential_bfb() -> None:
 def test_single_layer():
     seq = Sequential.Config(elements=Linear.Config(64, 128)).make()
     assert len(seq) == 1
-    assert seq[0].weight.shape == (128, 64)
+    layer = seq[0]
+    assert isinstance(layer, Linear)
+    assert layer.weight.shape == (128, 64)
 
 
 def test_repeat():
@@ -63,6 +65,7 @@ def test_depth_index_propagation():
     """Each repeated layer gets a one-level global position."""
     seq = Sequential.Config(elements=Linear.Config(128, 128), repeat=4).make()
     for i, layer in enumerate(seq):
+        assert isinstance(layer, Linear)
         assert layer.depth_index == ((i, 4),), (
             f"layer {i} depth_index={layer.depth_index}"
         )
@@ -75,6 +78,7 @@ def test_depth_propagation_nested():
     for i, inner in enumerate(seq):
         assert isinstance(inner, Sequential)
         linear = inner[0]
+        assert isinstance(linear, Linear)
         assert linear.depth_index == ((i, 4),), (
             f"block {i} linear depth_index={linear.depth_index}"
         )
@@ -87,8 +91,12 @@ def test_nested_depth_index_appends_local_position() -> None:
         depth_index=((1, 3),),
     ).make()
 
-    assert sequence[0].depth_index == ((1, 3), (0, 2))
-    assert sequence[1].depth_index == ((1, 3), (1, 2))
+    first = sequence[0]
+    last = sequence[1]
+    assert isinstance(first, Linear)
+    assert isinstance(last, Linear)
+    assert first.depth_index == ((1, 3), (0, 2))
+    assert last.depth_index == ((1, 3), (1, 2))
 
 
 def test_repeat_isolates_nested_config_trees() -> None:
@@ -100,8 +108,14 @@ def test_repeat_isolates_nested_config_trees() -> None:
         repeat=2,
     ).make()
 
-    assert repeated[0].attn.depth_index == ((0, 2),)
-    assert repeated[1].attn.depth_index == ((1, 2),)
+    first = repeated[0]
+    last = repeated[1]
+    assert isinstance(first, TransformerBlock)
+    assert isinstance(last, TransformerBlock)
+    assert isinstance(first.attn, SelfAttention)
+    assert isinstance(last.attn, SelfAttention)
+    assert first.attn.depth_index == ((0, 2),)
+    assert last.attn.depth_index == ((1, 2),)
 
 
 def test_depth_based_init():
@@ -109,8 +123,12 @@ def test_depth_based_init():
     torch.manual_seed(0)
     seq = Sequential.Config(elements=Linear.Config(128, 128), repeat=4).make()
     # Index 0 is unscaled; flattened index 3 divides by sqrt(4).
-    std_first = seq[0].weight.std().item()
-    std_last = seq[3].weight.std().item()
+    first = seq[0]
+    last = seq[3]
+    assert isinstance(first, Linear)
+    assert isinstance(last, Linear)
+    std_first = first.weight.std().item()
+    std_last = last.weight.std().item()
     assert std_first > std_last
 
 
@@ -121,6 +139,7 @@ def test_mup_output_with_depth():
         repeat=4,
     ).make()
     for i, layer in enumerate(seq):
+        assert isinstance(layer, Linear)
         assert layer.depth_index == ((i, 4),)
 
 

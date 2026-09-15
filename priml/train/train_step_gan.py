@@ -6,8 +6,9 @@ Uses train_step() for alternating discriminator/generator training.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import field
-from typing import Any, cast
+from typing import TypedDict, cast
 
 from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
@@ -82,7 +83,7 @@ class GANTrainStep:
         self.global_step: int = 0
         self.local_step: int = 0
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Preprocess batch by delegating to the generator's device transfer.
 
         Args:
@@ -133,7 +134,8 @@ class GANTrainStep:
         d_loss_total: Tensor | None = None
         for _ in range(self.n_discriminator_steps):
             with torch.no_grad():
-                fake_media_d = self.generator.model(**batch)
+                fake_media_d = cast(object, self.generator.model(**batch))
+            assert isinstance(fake_media_d, Tensor)
 
             media = torch.cat([real_media, fake_media_d.detach()], dim=0)
             targets = torch.cat(
@@ -166,8 +168,10 @@ class GANTrainStep:
         }
         self.discriminator.model.requires_grad_(False)
         try:
-            fake_media = self.generator.model(**batch)
-            fake_logits = self.discriminator.model(fake_media)
+            fake_media = cast(object, self.generator.model(**batch))
+            assert isinstance(fake_media, Tensor)
+            fake_logits = cast(object, self.discriminator.model(fake_media))
+            assert isinstance(fake_logits, Tensor)
             g_loss_result = self.generator.train_step(
                 fake_logits=fake_logits,
                 fake_media=fake_media,
@@ -187,7 +191,7 @@ class GANTrainStep:
         # GAN loss and the model output with the generated media. The
         # discriminator term is a scalar broadcast for logging only.
         d_loss_avg = d_loss_sum / (self.n_discriminator_steps * batch_size * 2)
-        result: dict[str, Any] = dict(g_loss_result)
+        result: dict[str, object] = dict(g_loss_result)
         result["loss"] = g_loss_result["loss"] + d_loss_avg
         result["model"] = fake_media
         return cast(TrainStepOutput, result)
@@ -212,6 +216,7 @@ class GANTrainStep:
         for _ in range(self.n_discriminator_steps):
             with torch.no_grad():
                 fake_media_d = self.generator.call_eval(**batch)
+            assert isinstance(fake_media_d, Tensor)
 
             media = torch.cat([real_media, fake_media_d.detach()], dim=0)
             targets = torch.cat(
@@ -229,8 +234,10 @@ class GANTrainStep:
         d_loss_sum = d_loss_total.item() if d_loss_total is not None else 0.0
 
         # Compute generator loss.
-        fake_media = self.generator.model(**batch)
-        fake_logits = self.discriminator.model(fake_media)
+        fake_media = cast(object, self.generator.model(**batch))
+        assert isinstance(fake_media, Tensor)
+        fake_logits = cast(object, self.discriminator.model(fake_media))
+        assert isinstance(fake_logits, Tensor)
         g_loss_result = self.generator.train_loss(
             fake_logits=fake_logits,
             fake_media=fake_media,
@@ -240,7 +247,7 @@ class GANTrainStep:
 
         # Combine losses (consistent with train_step), preserving aux keys.
         d_loss_avg = d_loss_sum / (self.n_discriminator_steps * batch_size * 2)
-        result: dict[str, Any] = dict(g_loss_result)
+        result: dict[str, object] = dict(g_loss_result)
         result["loss"] = g_loss_result["loss"] + d_loss_avg
         result["model"] = fake_media
         return cast(TrainStepOutput, result)
@@ -264,6 +271,7 @@ class GANTrainStep:
         d_loss_total: Tensor | None = None
         for _ in range(self.n_discriminator_steps):
             fake_media_d = self.generator.call_eval(**batch)
+            assert isinstance(fake_media_d, Tensor)
 
             media = torch.cat([real_media, fake_media_d], dim=0)
             targets = torch.cat(
@@ -292,16 +300,23 @@ class GANTrainStep:
 
         # Combine losses (consistent with train_step), preserving aux keys.
         d_loss_avg = d_loss_sum / (self.n_discriminator_steps * batch_size * 2)
-        result: dict[str, Any] = dict(g_loss_result)
+        result: dict[str, object] = dict(g_loss_result)
         result["loss"] = g_loss_result["loss"] + d_loss_avg
         result["model"] = fake_media
         return cast(TrainStepOutput, result)
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Both sub-steps' state plus the GAN's own step counter."""
+
+        generator: TrainStep.StateDict
+        discriminator: TrainStep.StateDict
+        global_step: int
+
+    def state_dict(self) -> StateDict:
         """Get checkpoint state for both generator and discriminator.
 
         Returns:
-          result: The dict[str, Any].
+          state: The generator and discriminator states and the global step.
 
         """
         return {
@@ -310,14 +325,15 @@ class GANTrainStep:
             "global_step": self.global_step,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load checkpoint state for both generator and discriminator.
 
         Args:
-          state_dict: State dict.
+          state_dict: State as returned by :meth:`state_dict`.
 
         """
-        self.generator.load_state_dict(state_dict["generator"])
-        self.discriminator.load_state_dict(state_dict["discriminator"])
-        self.global_step = state_dict["global_step"]
+        state = cast(GANTrainStep.StateDict, state_dict)
+        self.generator.load_state_dict(state["generator"])
+        self.discriminator.load_state_dict(state["discriminator"])
+        self.global_step = state["global_step"]
         self.local_step = 0

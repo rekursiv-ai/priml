@@ -15,8 +15,8 @@ def _state(num_envs: int = 4) -> EnvState:
 
 def test_every_field_carries_the_environment_axis() -> None:
     state = _state(num_envs=3)
-    for name, tensor in state.state_dict().items():
-        assert tensor.shape[0] == 3, name
+    for name, value in state.state_dict().items():
+        assert value.shape[0] == 3, name
 
 
 def test_shapes_follow_the_declared_world_size() -> None:
@@ -64,7 +64,7 @@ def test_state_dict_round_trips_through_a_checkpoint() -> None:
     state = _state()
     state.player_health += 3.0
     state.inventory.wood += 7
-    saved = {name: tensor.clone() for name, tensor in state.state_dict().items()}
+    saved = {name: value.clone() for name, value in state.state_dict().items()}
 
     restored = _state()
     restored.load_state_dict(saved)
@@ -100,7 +100,9 @@ def test_potion_mapping_is_per_environment() -> None:
     ],
 )
 def test_field_dtypes_match_their_meaning(field: str, dtype: torch.dtype) -> None:
-    assert getattr(_state(), field).dtype == dtype
+    value: object = getattr(_state(), field)  # pyright: ignore[reportAny] -- Field names are selected dynamically by pytest parameters.
+    assert isinstance(value, torch.Tensor)
+    assert value.dtype == dtype
 
 
 def test_take_deals_one_batch_across_another() -> None:

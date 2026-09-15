@@ -7,7 +7,7 @@ with consistent caching behavior across all users.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import logging
 import os
@@ -21,6 +21,9 @@ from priml.lib.userdirs import cache_dir
 
 if TYPE_CHECKING:
     from safetensors.torch import load_file
+    from transformers.modeling_utils import PreTrainedModel
+    from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
 else:
     from wrapt import lazy_import
 
@@ -66,7 +69,7 @@ def load_transformers_model(
     trust_remote_code: bool = False,
     force_redownload: bool = False,
     **kwargs: object,
-) -> Any:  # noqa: ANN401 -- forwards transformers' untyped ``from_pretrained`` result.
+) -> PreTrainedModel:
     """Load a model from HuggingFace with consistent caching.
 
     By default, attempts to load from cache first (offline mode), then falls back
@@ -106,7 +109,11 @@ def load_transformers_model(
     import transformers  # noqa: PLC0415 -- The loader keeps optional model dependencies off module import.
 
     logger = logging.getLogger(__name__)
-    model_class_type = getattr(transformers, model_class)
+    # ``transformers`` resolves attribute names lazily, so the lookup is untyped;
+    # every ``Auto*`` class it names derives from ``_BaseAutoModelClass``.
+    model_class_type = cast(
+        "type[_BaseAutoModelClass]", getattr(transformers, model_class)
+    )
 
     # No ``cache_dir=``: an explicit value OVERRIDES ``HF_HOME``, so passing
     # one here made every provisioned shared cache inert for this loader and
@@ -213,7 +220,10 @@ def load_local_state_dict(path: Path) -> dict[str, Tensor]:
         pt_sd: dict[str, Tensor] = {}
         for shard in shards:
             pt_sd.update(
-                torch.load(str(shard), map_location="cpu", weights_only=True),
+                cast(
+                    dict[str, Tensor],
+                    torch.load(str(shard), map_location="cpu", weights_only=True),
+                ),
             )
         return pt_sd
     raise FileNotFoundError(

@@ -6,6 +6,7 @@ Hermetic: every test feeds local CSV text, so nothing here touches the network.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import json
 
@@ -16,6 +17,15 @@ from priml.baselines.sudoku.scripts.prepare_data import (
     default_directory,
     prepare,
 )
+
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+
+def _load_array(path: Path) -> NDArray[np.int64]:
+    result = cast("NDArray[np.int64]", np.load(path))
+    return result
 
 
 SOLUTION = (
@@ -53,8 +63,8 @@ def test_training_split_expands_and_test_split_does_not(
         copies_per_puzzle=2,
         csv_directory=csv_dir,
     )
-    train = np.load(out / "train" / "all__inputs.npy")
-    test = np.load(out / "test" / "all__inputs.npy")
+    train = _load_array(out / "train" / "all__inputs.npy")
+    test = _load_array(out / "test" / "all__inputs.npy")
     assert train.shape == (3 * 3, 81)  # 3 puzzles x (1 original + 2 copies)
     assert test.shape == (4, 81)  # Every source puzzle, untouched.
 
@@ -67,7 +77,7 @@ def test_group_indices_bound_each_puzzles_copies(tmp_path: Path, csv_dir: Path) 
         copies_per_puzzle=2,
         csv_directory=csv_dir,
     )
-    bounds = np.load(out / "train" / "all__group_indices.npy")
+    bounds = _load_array(out / "train" / "all__group_indices.npy")
     assert bounds.tolist() == [0, 3, 6, 9]
 
 
@@ -82,11 +92,12 @@ def test_tokens_land_in_the_documented_vocabulary(
         copies_per_puzzle=1,
         csv_directory=csv_dir,
     )
-    inputs = np.load(out / "train" / "all__inputs.npy")
-    labels = np.load(out / "train" / "all__labels.npy")
+    inputs = _load_array(out / "train" / "all__inputs.npy")
+    labels = _load_array(out / "train" / "all__labels.npy")
     assert inputs.min() >= 1  # No padding in stored rows.
     assert inputs.max() <= 10
-    assert set(np.unique(labels).tolist()) <= set(range(2, 11))  # Solved: no empties.
+    unique_labels = cast(list[int], np.unique(labels).tolist())
+    assert set(unique_labels) <= set(range(2, 11))  # Solved: no empties.
     assert json.loads((out / "train" / "dataset.json").read_text()) == {
         "vocab_size": 11,
         "seq_len": 81,
@@ -106,15 +117,17 @@ def test_transformations_keep_the_solution_valid(tmp_path: Path, csv_dir: Path) 
         copies_per_puzzle=4,
         csv_directory=csv_dir,
     )
-    labels = np.load(out / "train" / "all__labels.npy")
-    for row in labels:
-        grid = row.reshape(9, 9)
+    labels = _load_array(out / "train" / "all__labels.npy")
+    label_rows = cast(list[list[int]], labels.tolist())
+    for row in label_rows:
+        grid = [row[index : index + 9] for index in range(0, 81, 9)]
         expected = set(range(2, 11))
-        assert all(set(line.tolist()) == expected for line in grid)
-        assert all(set(line.tolist()) == expected for line in grid.T)
+        assert all(set(line) == expected for line in grid)
+        assert all(set(column) == expected for column in zip(*grid, strict=True))
         for r in range(0, 9, 3):
             for c in range(0, 9, 3):
-                assert set(grid[r : r + 3, c : c + 3].flatten().tolist()) == expected
+                box = [line[c : c + 3] for line in grid[r : r + 3]]
+                assert {value for line in box for value in line} == expected
 
 
 def test_the_clues_survive_transformation(tmp_path: Path, csv_dir: Path) -> None:
@@ -125,8 +138,8 @@ def test_the_clues_survive_transformation(tmp_path: Path, csv_dir: Path) -> None
         copies_per_puzzle=4,
         csv_directory=csv_dir,
     )
-    inputs = np.load(out / "train" / "all__inputs.npy")
-    labels = np.load(out / "train" / "all__labels.npy")
+    inputs = _load_array(out / "train" / "all__inputs.npy")
+    labels = _load_array(out / "train" / "all__labels.npy")
     given = inputs > 1  # Token 1 is an empty cell.
     assert np.array_equal(inputs[given], labels[given])
 
@@ -146,8 +159,8 @@ def test_the_build_is_deterministic(tmp_path: Path, csv_dir: Path) -> None:
         csv_directory=csv_dir,
     )
     assert np.array_equal(
-        np.load(first / "train" / "all__inputs.npy"),
-        np.load(second / "train" / "all__inputs.npy"),
+        _load_array(first / "train" / "all__inputs.npy"),
+        _load_array(second / "train" / "all__inputs.npy"),
     )
 
 
@@ -166,8 +179,8 @@ def test_a_different_seed_builds_different_data(tmp_path: Path, csv_dir: Path) -
         csv_directory=csv_dir,
     )
     assert not np.array_equal(
-        np.load(first / "train" / "all__inputs.npy"),
-        np.load(second / "train" / "all__inputs.npy"),
+        _load_array(first / "train" / "all__inputs.npy"),
+        _load_array(second / "train" / "all__inputs.npy"),
     )
 
 

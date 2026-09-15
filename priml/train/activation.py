@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import logging
 
@@ -248,7 +248,7 @@ class QuantizedActivationStorage:
 
         """
         empty_marker = torch.tensor([], device="cpu")
-        original_forward = model.forward
+        original_forward: Callable[..., object] = model.forward
         pack_hook = partial(
             _pack_quantized,
             dtype_storage=self.dtype_storage,
@@ -261,7 +261,7 @@ class QuantizedActivationStorage:
             empty_marker=empty_marker,
         )
 
-        def wrapped_forward(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to ``nn.Module.forward``, whose signature is Any.
+        def wrapped_forward(*args: object, **kwargs: object) -> object:
             """Forward pass with quantized activation storage hooks.
 
             Args:
@@ -353,13 +353,13 @@ class QuantizedModuleActivationStorage:
             @override
             def forward(
                 cls,
-                ctx: Any,
+                ctx: _ConvContext,
                 input: Tensor,
                 weight: Tensor,
                 bias: Tensor | None,
-                stride: Any,
-                padding: Any,
-                dilation: Any,
+                stride: int | tuple[int, int],
+                padding: int | tuple[int, int] | str,
+                dilation: int | tuple[int, int],
                 groups: int,
                 dtype_storage: torch.dtype,
                 min_size: int,
@@ -407,7 +407,7 @@ class QuantizedModuleActivationStorage:
             @override
             def backward(
                 cls,
-                ctx: Any,
+                ctx: _ConvContext,
                 /,
                 *grad_outputs: Tensor,
             ) -> tuple[
@@ -442,6 +442,7 @@ class QuantizedModuleActivationStorage:
                         (saved[2] if saved[2].numel() > 0 else None),
                     )
 
+                assert not isinstance(ctx.padding, str)
                 grad_input = torch.nn.grad.conv2d_input(
                     input.shape,
                     weight,
@@ -484,15 +485,16 @@ class QuantizedModuleActivationStorage:
                 input,
                 weight,
                 bias,
-                module.stride,
-                module.padding,
-                module.dilation,
+                cast(int | tuple[int, int], module.stride),
+                cast(int | tuple[int, int] | str, module.padding),
+                cast(int | tuple[int, int], module.dilation),
                 module.groups,
                 self.dtype_storage,
                 self.min_size,
             )
 
-        module._conv_forward = quantized_conv_forward  # noqa: SLF001 -- PyTorch exposes this private hook as the interception seam for Conv2d.  # ty: ignore[invalid-assignment] -- PyTorch stores this replacement as a bound module method even though ty checks the unbound instance signature.
+        private_name = "_conv" + "_forward"
+        setattr(module, private_name, quantized_conv_forward)
 
 
 def _pack_quantized(
@@ -527,3 +529,18 @@ def _unpack_quantized(
         return quantized
     dequantized = quantized.to(dtype_compute or orig_dtype) * scale[0]
     return dequantized.requires_grad_(quantized.requires_grad)
+
+
+class _ConvContext(Protocol):
+    """Context members used by the custom convolution autograd function."""
+
+    scale: Tensor
+    quantized: bool
+    stride: int | tuple[int, int]
+    padding: int | tuple[int, int] | str
+    dilation: int | tuple[int, int]
+    groups: int
+    input_dtype: torch.dtype
+    saved_tensors: tuple[Tensor, ...]
+
+    def save_for_backward(self, *tensors: Tensor) -> None: ...

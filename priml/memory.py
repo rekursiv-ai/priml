@@ -20,7 +20,7 @@ pinning. Those have their own concerns and do not belong here.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, overload
 
 from torch import Tensor
 
@@ -383,6 +383,7 @@ def _resolve_dtype(xs: tuple[Tensorable, ...]) -> torch.dtype | None:
         if dt is None:
             continue
         if not isinstance(dt, torch.dtype):
+            assert isinstance(dt, np.dtype)
             dt = _numpy_dtype_to_torch_dtype.get(dt)
             if dt is None:
                 continue
@@ -419,7 +420,7 @@ _dtype_coercion_precedence: tuple[torch.dtype, ...] = (
     torch.bool,
 )
 
-_numpy_dtype_to_torch_dtype: dict[type | np.dtype[Any], torch.dtype] = {
+_numpy_dtype_to_torch_dtype: dict[type | np.dtype[np.generic], torch.dtype] = {
     np.bool_: torch.bool,
     np.uint8: torch.uint8,
     np.uint16: torch.uint16,

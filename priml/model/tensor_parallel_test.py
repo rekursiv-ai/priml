@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import functools
 import tempfile
@@ -85,7 +85,8 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
         ffn=MoE.Config(router=MoE.Config().router),
     ).make()
     assert isinstance(block.ffn, MoE)
-    assert all(expert.shard == "colwise" for expert in block.ffn.experts)
+    experts = cast(list[SwiGLU], block.ffn.experts)
+    assert all(expert.shard == "colwise" for expert in experts)
 
 
 def test_transformer_declares_embedding_and_head_vocab() -> None:
@@ -120,8 +121,9 @@ def _ensemble_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
         x = torch.randn(2, 3, 8)
         dense = model(x)
         sharded = apply_tensor_parallel(model, mesh)
+        assert isinstance(sharded, EnsembleLinear)
         out = sharded(x)
-        full = out.full_tensor() if hasattr(out, "full_tensor") else out
+        full = out.full_tensor() if isinstance(out, DTensor) else out
         if not torch.allclose(full, dense, rtol=1e-4, atol=1e-5):
             (result_dir / f"rank_{rank}").write_text(
                 f"FAIL:mismatch max={float((full - dense).abs().max()):.2e}",
@@ -212,9 +214,10 @@ def _meta_tp_worker(result_dir_str: str, mesh: DeviceMesh) -> None:
             model = _ColwiseRowwisePair()
         assert all(p.is_meta for p in model.parameters())
         placed = TensorParallel.Config().make()(model)
+        assert isinstance(placed, _ColwiseRowwisePair)
 
         out = placed(x)
-        full = out.full_tensor() if hasattr(out, "full_tensor") else out
+        full = out.full_tensor() if isinstance(out, DTensor) else out
         deviation = float((full - dense).abs().max())
         if any(p.is_meta for p in placed.parameters()):
             (result_dir / f"rank_{rank}").write_text("FAIL:still meta")
@@ -308,11 +311,6 @@ _CASES: dict[str, Callable[[], tuple[nn.Module, Tensor]]] = {
 _REPLICATED_CASES = frozenset({"mla_replicated"})
 
 
-def _first(out: Tensor | tuple[Tensor, object]) -> Tensor:
-    """Unwrap a model output that may be a ``(tensor, cache)`` tuple."""
-    return out[0] if isinstance(out, tuple) else out
-
-
 # Each ``WorkerPool`` spawn is expensive and repeated spawns in a single process corrupt
 # the multiprocessing forkserver, so all cases share one pool. ``result_dir_str`` is
 # bound via ``functools.partial`` and pickled with the worker, so it survives a
@@ -344,7 +342,7 @@ def _record_case(
         torch.manual_seed(0)
         model, x = build()
         randomize_parameters(model, seed=7, std=0.2)
-        dense = _first(model(x))
+        dense = cast(_TensorModule, model)(x)
         assert torch.count_nonzero(dense) > 0
         sharded = apply_tensor_parallel(model, mesh)
         # Guard against silent replication: for a case meant to shard,
@@ -356,7 +354,7 @@ def _record_case(
         if sharding_expected and not has_dtensor:
             target.write_text("FAIL:no-dtensor-param (silently replicated?)")
             return
-        out = _first(sharded(x))
+        out = cast(_TensorModule, sharded)(x)
         full = out.full_tensor() if isinstance(out, DTensor) else out
         if torch.allclose(full, dense, rtol=1e-4, atol=1e-5):
             target.write_text("ok")
@@ -403,6 +401,12 @@ def test_sharded_equals_dense_and_guard_tp2(warm_pools: WarmPoolGetter) -> None:
         f"{case}_rank{rank}": "ok" for case in expected_cases for rank in (0, 1)
     }
     assert results == expected, results
+
+
+class _TensorModule(Protocol):
+    """Callable module boundary for the heterogeneous test registry."""
+
+    def __call__(self, x: Tensor) -> Tensor: ...
 
 
 if __name__ == "__main__":

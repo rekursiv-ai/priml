@@ -52,7 +52,10 @@ GRID_LEN: Final = 81
 """Cells in a sudoku grid, fixed by the puzzle."""
 
 
-class SudokuTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class SudokuTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[SudokuTrainStep.Config, SudokuData.Config],
+):
     """A training loop with the sudoku step and dataset already in place.
 
     Narrowing the two slots here rather than at each call site is what lets a

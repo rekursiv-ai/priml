@@ -351,13 +351,18 @@ def test_router_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(4, 4), device),
         seed=0,
-        run=lambda module, x: first_tensor(module(x)),
+        run=_first_tensor,
     )
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_moe_bfb(device: str) -> None:
-    """Regenerate with ``BFB_REGENERATE=1`` against this canonical sidecar."""
+    """Regenerate with ``BFB_REGENERATE=1`` against this canonical sidecar.
+
+    Args:
+      device: Device on which to run the golden comparison.
+
+    """
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="moe",
@@ -371,8 +376,15 @@ def test_moe_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(2, 2, 4), device),
         seed=0,
-        run=lambda module, x: first_tensor(module(x)),
+        run=_first_tensor,
     )
+
+
+def _first_tensor(module: torch.nn.Module, value: object) -> torch.Tensor:
+    """Call a module after narrowing the harness input to its tensor contract."""
+    assert isinstance(value, torch.Tensor)
+    assert isinstance(module, (MoE, Router))
+    return first_tensor(module(value))
 
 
 if __name__ == "__main__":

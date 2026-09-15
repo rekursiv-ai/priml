@@ -14,13 +14,16 @@ one).
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
 
 import torch
 import torch.distributed as dist
+
+from priml.lib.custom_json import FloatCodec, IntCodec
 
 
 class GridAccuracy:
@@ -103,13 +106,23 @@ class GridAccuracy:
                 counts = counts.to(torch.device("cuda", torch.cuda.current_device()))
             dist.all_reduce(counts, op=dist.ReduceOp.SUM)
             counts = counts.cpu()
-        solved, puzzles, cells_correct, cells = counts.tolist()
+        solved, puzzles, cells_correct, cells = [
+            FloatCodec.coerce(count) for count in counts.tolist()
+        ]
         return {
             "exact": solved / max(1.0, puzzles),
             "cell": cells_correct / max(1.0, cells),
         }
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """The four running counts."""
+
+        solved: int
+        puzzles: int
+        cells_correct: int
+        cells: int
+
+    def state_dict(self) -> StateDict:
         """Return the accumulated counts.
 
         Returns:
@@ -123,14 +136,17 @@ class GridAccuracy:
             "cells": self.cells,
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore counts produced by :meth:`state_dict`.
 
         Args:
           state_dict: State dict.
 
         """
-        self.solved = state_dict.get("solved", 0)
-        self.puzzles = state_dict.get("puzzles", 0)
-        self.cells_correct = state_dict.get("cells_correct", 0)
-        self.cells = state_dict.get("cells", 0)
+        state = cast(GridAccuracy.StateDict, state_dict)
+        # A checkpoint reader may hand a count back as a float or a numeric
+        # string; anything else is corruption, so the coercion raises.
+        self.solved = IntCodec.coerce(state.get("solved", 0), None)
+        self.puzzles = IntCodec.coerce(state.get("puzzles", 0), None)
+        self.cells_correct = IntCodec.coerce(state.get("cells_correct", 0), None)
+        self.cells = IntCodec.coerce(state.get("cells", 0), None)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 from io import BytesIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
@@ -14,6 +14,7 @@ import torch
 
 if TYPE_CHECKING:
     from torchvision.transforms.functional import convert_image_dtype
+    from turbojpeg import TurboJPEG
 else:
     # 433ms measured, and only the two baseline-comparison tests below touch
     # torchvision; a top-level import bills every other test in the module.
@@ -785,7 +786,7 @@ def test_decode_jpeg_turbojpeg_success():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        mock_turbo,
+        cast("TurboJPEG", mock_turbo),
         height=100,
         width=100,
     )
@@ -804,7 +805,7 @@ def test_decode_jpeg_turbojpeg_channels_last():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        mock_turbo,
+        cast("TurboJPEG", mock_turbo),
         height=100,
         width=100,
         channels_first=False,
@@ -826,7 +827,7 @@ def test_decode_jpeg_turbojpeg_with_crop():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        mock_turbo,
+        cast("TurboJPEG", mock_turbo),
         height=200,
         width=400,
         crop=(100, 100),  # Center crop to 1:1 aspect ratio.
@@ -849,7 +850,7 @@ def test_decode_jpeg_turbojpeg_bgr_to_rgb():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        mock_turbo,
+        cast("TurboJPEG", mock_turbo),
         height=10,
         width=10,
         channels_first=False,
@@ -873,7 +874,7 @@ def test_decode_jpeg_turbojpeg_error():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        mock_turbo,
+        cast("TurboJPEG", mock_turbo),
         height=100,
         width=100,
     )

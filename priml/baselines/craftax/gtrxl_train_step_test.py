@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
 from unittest.mock import patch
 
 import copy
@@ -14,40 +13,12 @@ import pytest
 import torch
 
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
+from priml.optimizers import learning_rate
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
 pytestmark = pytest.mark.compute_training
-
-
-def _config(**overrides: object) -> CraftaxGTrXLTrainStep.Config:
-    config = CraftaxGTrXLTrainStep.Config()
-    config.parallelism = NoParallel.Config(device="cpu")
-    config.env.device = "cpu"
-    config.env.num_envs = 2
-    config.rollout_steps = 4
-    config.gradient_window = 2
-    config.num_epochs = 1
-    config.num_minibatches = 1
-    config.total_train_steps = 10
-    config.model.embed_dim = 4
-    config.model.num_heads = 1
-    config.model.num_layers = 1
-    config.model.qkv_dim = 4
-    config.model.channels_in = 4
-    config.model.memory_length = 2
-    for name, value in overrides.items():
-        setattr(config, name, value)
-    # The world and the policy draw from separate streams, so a reproducible
-    # run has to pin both.
-    if "seed" in overrides:
-        config.env.seed = int(config.seed)
-    return config
-
-
-def _step() -> CraftaxGTrXLTrainStep:
-    return cast(CraftaxGTrXLTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- ty requires the cast because inherited Config.make remains @Todo to its checker.
 
 
 def test_it_satisfies_the_training_step_protocol() -> None:
@@ -57,7 +28,8 @@ def test_it_satisfies_the_training_step_protocol() -> None:
 def test_the_network_is_sized_from_the_environment() -> None:
     step = _step()
     assert step.model.encoder.in_features == step.env.observation_size
-    assert step.model.actor[-1].out_features == step.env.num_actions
+    assert isinstance(actor_head := step.model.actor[-1], torch.nn.Linear)
+    assert actor_head.out_features == step.env.num_actions
 
 
 def test_one_step_consumes_the_declared_interactions() -> None:
@@ -219,7 +191,7 @@ def test_the_learning_rate_anneals_toward_zero() -> None:
     rates: list[float] = []
     for _ in range(3):
         step.train_step()
-        rates.append(float(step.optimizer.param_groups[0]["lr"]))
+        rates.append(learning_rate(step.optimizer))
     assert rates == sorted(rates, reverse=True)
     assert rates[-1] < rates[0]
 
@@ -297,7 +269,8 @@ def test_a_checkpoint_resumes_an_identical_run() -> None:
     step.train_step()
     # Deep-copied because the live step keeps mutating these tensors.
     saved = copy.deepcopy(step.state_dict())
-    expected = float(step.train_step()["loss"])
+    loss = step.train_step()["loss"]
+    expected = float(loss)
 
     resumed = _config(seed=3).make()
     resumed.load_state_dict(saved)
@@ -358,6 +331,37 @@ def test_minibatches_that_do_not_divide_the_workers_are_refused() -> None:
 def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:
     """Read the optional diagnostics a completed update always carries."""
     return result.get("metrics", {})
+
+
+def _config(**overrides: object) -> CraftaxGTrXLTrainStep.Config:
+    config = CraftaxGTrXLTrainStep.Config()
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.env.device = "cpu"
+    config.env.num_envs = 2
+    config.rollout_steps = 4
+    config.gradient_window = 2
+    config.num_epochs = 1
+    config.num_minibatches = 1
+    config.total_train_steps = 10
+    config.model.embed_dim = 4
+    config.model.num_heads = 1
+    config.model.num_layers = 1
+    config.model.qkv_dim = 4
+    config.model.channels_in = 4
+    config.model.memory_length = 2
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    # The world and the policy draw from separate streams, so a reproducible
+    # run has to pin both.
+    if "seed" in overrides:
+        config.env.seed = int(config.seed)
+    return config
+
+
+def _step() -> CraftaxGTrXLTrainStep:
+    step = _config().make()
+    assert isinstance(step, CraftaxGTrXLTrainStep)
+    return step
 
 
 if __name__ == "__main__":

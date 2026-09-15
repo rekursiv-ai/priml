@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import hashlib
 import json
@@ -51,7 +51,9 @@ def read_mapping(path: Path) -> dict[str, object]:
       mapping: The decoded object.
 
     """
-    return dict(DictCodec.coerce(json.loads(path.read_text()), default=None))
+    return dict(
+        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None)
+    )
 
 
 def write_mapping(path: Path, *, value: object) -> None:
@@ -341,22 +343,25 @@ def frequency_model(
         ("".join(alphabet[value] for value in piece), math.log(max(1, count) / total))
         for piece, count in zip(pieces, counts, strict=True)
     ]
+    models = cast(_TokenizersNamespace, tokenizers.models)
+    pre_tokenizers = cast(_PreTokenizersNamespace, tokenizers.pre_tokenizers)
+    decoders = cast(_DecodersNamespace, tokenizers.decoders)
     model = tokenizers.Tokenizer(
-        tokenizers.models.Unigram(vocab, unk_id=None, byte_fallback=False),
+        models.Unigram(vocab, unk_id=None, byte_fallback=False),
     )
-    model.pre_tokenizer = tokenizers.pre_tokenizers.Sequence(
+    model.pre_tokenizer = pre_tokenizers.Sequence(
         [
-            tokenizers.pre_tokenizers.Split(
+            pre_tokenizers.Split(
                 tokenizers.Regex(split_pattern),
                 behavior="isolated",
             ),
-            tokenizers.pre_tokenizers.ByteLevel(
+            pre_tokenizers.ByteLevel(
                 add_prefix_space=False,
                 use_regex=False,
             ),
         ],
     )
-    model.decoder = tokenizers.decoders.ByteLevel()
+    model.decoder = decoders.ByteLevel()
     return model
 
 
@@ -433,7 +438,23 @@ class ByteLevelTokenizer:
             ids = encoded.ids
             if self.backend.decode(ids, skip_special_tokens=False) != text:
                 raise ValueError("The tokenizer failed literal document round-trip.")
-            if int(self.token_bytes_literal[ids].sum()) != len(text.encode()):
+            if int(cast(int, self.token_bytes_literal[ids].sum())) != len(
+                text.encode()
+            ):
                 raise ValueError("Token pieces do not conserve literal UTF-8 bytes.")
             output.append([self.bos_token_id, *ids])
         return output
+
+
+class _TokenizersNamespace(Protocol):
+    Unigram: Callable[..., object]
+
+
+class _PreTokenizersNamespace(Protocol):
+    Sequence: Callable[..., object]
+    Split: Callable[..., object]
+    ByteLevel: Callable[..., object]
+
+
+class _DecodersNamespace(Protocol):
+    ByteLevel: Callable[..., object]

@@ -13,8 +13,9 @@ policy must never read them.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -226,11 +227,21 @@ class CraftaxEnv:
             fresh = fresh.take(rank.clamp_min(0) % wanted)
         return state.select(done, fresh)
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed environment: generator, batch size, and the world.
+
+        ``state`` is empty before the first :meth:`reset`.
+        """
+
+        generator: Tensor
+        num_envs: int
+        state: dict[str, Tensor]
+
+    def state_dict(self) -> StateDict:
         """Return the world and its generator, for checkpointing.
 
         Returns:
-          result: The dict[str, Any].
+          result: The generator state, batch size, and flattened world.
 
         """
         return {
@@ -239,17 +250,18 @@ class CraftaxEnv:
             "state": {} if self._state is None else self._state.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore a world saved by :meth:`state_dict`.
 
         Args:
           state_dict: State from :meth:`state_dict` with generator, env state.
 
         """
-        generator_state = state_dict["generator"]
+        state = cast(CraftaxEnv.StateDict, state_dict)
+        generator_state = state["generator"]
         self._generator.set_state(generator_state)
-        self._num_envs = state_dict["num_envs"]
-        saved = state_dict["state"]
+        self._num_envs = state["num_envs"]
+        saved = state["state"]
         if not saved:
             self._state = None
             return

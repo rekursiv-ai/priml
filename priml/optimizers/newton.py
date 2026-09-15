@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, ClassVar, overload, override
+from typing import ClassVar, cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -109,7 +109,7 @@ class Newton(Optimizer):
 
     def __init__(
         self,
-        params: Iterable[Tensor] | Iterable[dict[str, Any]],
+        params: Iterable[Tensor] | Iterable[dict[str, object]],
         lr: float = 1.0,
         *,
         damping: float = 1e-5,
@@ -162,8 +162,8 @@ class Newton(Optimizer):
             )
         loss = None
         for group in self.param_groups:
-            lr = group["lr"]
-            damping = group["damping"]
+            lr = cast(float, group["lr"])
+            damping = cast(float, group["damping"])
 
             # Compute Hessian via autograd. The closure must return a
             # graph-bearing Tensor (a float loss carries no graph for
@@ -175,7 +175,9 @@ class Newton(Optimizer):
                         "Newton.step requires a closure returning a graph-bearing "
                         f"Tensor loss; got {type(loss).__name__}.",
                     )
-                param_list = [p for p in group["params"] if p.requires_grad]
+                param_list = [
+                    p for p in cast(list[Tensor], group["params"]) if p.requires_grad
+                ]
                 # A sharded DTensor would flatten to its LOCAL shard inside
                 # compute_hessian, building a global Hessian from inconsistent
                 # partial vectors. Newton is an O(n^2)-Hessian small-model

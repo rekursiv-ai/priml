@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from configgle.testing import assert_pprint_golden
+from torch import Tensor, nn
 
 import torch
 
@@ -70,6 +71,11 @@ def test_narrow_embedding_reset_draws_at_float32_then_narrows() -> None:
     assert torch.equal(module.inner.weight, expected.weight.bfloat16())
 
 
+def _run_embedding(module: nn.Module, tokens: Tensor) -> Tensor:
+    assert isinstance(module, NarrowEmbedding)
+    return module(tokens, message=object()).float()
+
+
 def test_narrow_embedding_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
@@ -81,7 +87,7 @@ def test_narrow_embedding_bfb() -> None:
         ).make(),
         build_input=lambda: torch.tensor([[0, 3, 7]]),
         seed=0,
-        run=lambda module, tokens: module(tokens, message=object()).float(),
+        run=_run_embedding,
     )
 
 

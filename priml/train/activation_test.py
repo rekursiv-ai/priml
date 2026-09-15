@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, override
+from typing import override
 
 import contextlib
 
@@ -482,6 +482,7 @@ def test_quantized_activation_storage_with_learnable():
 
     x = torch.randn(4, 10, device=learnable.device)
     output = learnable(x)
+    assert isinstance(output, Tensor)
     loss = output.sum()
     loss.backward()
     learnable.step()
@@ -525,15 +526,18 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
     captured: dict[str, object] = {}
     orig_to = Tensor.to
 
-    def spy_to(self: Tensor, *args: Any, **kwargs: Any) -> Tensor:  # noqa: ANN401 -- forwarded to an upstream Any.
+    def spy_to(self: Tensor, *args: object, **kwargs: object) -> Tensor:
         # Record any dequant on a float8 tensor (capture its target dtype).
+        del kwargs
         if self.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) and args:
             captured["dequant_target"] = args[0]
-        return orig_to(self, *args, **kwargs)
+        assert len(args) == 1
+        assert isinstance(args[0], torch.dtype)
+        return orig_to(self, args[0])
 
     x = torch.randn(1, 2, 8, 8, dtype=torch.bfloat16, requires_grad=True)
     out = conv(x)
-    Tensor.to = spy_to
+    Tensor.to = spy_to  # ty: ignore[invalid-assignment] -- test spy replaces an overloaded bound method.
     try:
         # bf16 conv backward may be unsupported.
         with contextlib.suppress(RuntimeError):

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 import torch
 
@@ -11,6 +9,7 @@ from priml.baselines.sudoku.act import ActPool
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.lib.custom_json import ListCodec
 from priml.train.parallelism import NoParallel
 
 
@@ -30,7 +29,7 @@ def _step(*, act: bool = False) -> SudokuTrainStep:
     return config.make()
 
 
-def _batch() -> dict[str, Any]:
+def _batch() -> dict[str, object]:
     return {
         "media": torch.randint(2, 11, (4, 81)),
         "label": torch.randint(2, 11, (4, 81)),
@@ -55,8 +54,10 @@ def test_optimizer_partitions_the_model() -> None:
     """
     step = _step()
     named = {id(p): n for n, p in step.model.named_parameters()}
-    groups = step.optimizer.param_groups
-    assigned = [{named[id(p)] for p in group["params"]} for group in groups]
+    assigned = [
+        {named[id(p)] for p in _parameters(group)}
+        for group in step.optimizer.param_groups
+    ]
     everything: set[str] = set()
     for names in assigned:
         everything |= names
@@ -136,7 +137,9 @@ def test_act_pool_is_not_checkpointed() -> None:
     """
     step = _step(act=True)
     step.train_step(**_batch())
-    assert set(step.state_dict()["act"]) == {"halt_rng"}
+    state = step.state_dict()
+    assert "act" in state
+    assert set(state["act"]) == {"halt_rng"}
 
 
 def test_feedback_reaches_the_channel() -> None:
@@ -155,7 +158,9 @@ def test_feedback_reaches_the_channel() -> None:
     torch.manual_seed(0)
     step = config.make()
     step.eval_loss(**_batch())
-    channel = step.model.embedding.channels[0]
+    embedding = step.net.embedding
+    channels = embedding.channels
+    channel = channels[0]
     assert isinstance(channel, PredictionFeedback)
     # Consumed by the final rollout step, never left stashed.
     assert channel._feedback_ids is None
@@ -166,6 +171,10 @@ def test_horizon_must_be_positive() -> None:
     config.total_train_steps = 0
     with pytest.raises(ValueError, match="total_train_steps must be positive"):
         config.make()
+
+
+def _parameters(group: dict[str, object]) -> list[torch.Tensor]:
+    return ListCodec.coerce(group["params"], torch.Tensor)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
 from unittest.mock import patch
 
 import copy
@@ -14,6 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
+from priml.optimizers import learning_rate
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
@@ -43,7 +43,9 @@ def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
 
 
 def _step() -> CraftaxRNNTrainStep:
-    return cast(CraftaxRNNTrainStep, _config().make())  # pyright: ignore[reportUnnecessaryCast] -- Ty resolves `Makes[...].make()` only through the class-attribute descriptor; on an INHERITED `Config` instance it is `@Todo`.
+    step = _config().make()
+    assert isinstance(step, CraftaxRNNTrainStep)
+    return step
 
 
 def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:
@@ -57,8 +59,13 @@ def test_it_satisfies_the_training_step_protocol() -> None:
 
 def test_the_network_is_sized_from_the_environment() -> None:
     step = _step()
-    assert step.model.embed[0].in_features == step.env.observation_size
-    assert step.model.actor[-1].out_features == step.env.num_actions
+    model = step.model
+    embed = model.embed[0]
+    actor = model.actor[-1]
+    assert isinstance(embed, torch.nn.Linear)
+    assert isinstance(actor, torch.nn.Linear)
+    assert embed.in_features == step.env.observation_size
+    assert actor.out_features == step.env.num_actions
 
 
 def test_one_step_consumes_the_declared_interactions() -> None:
@@ -91,9 +98,12 @@ def test_each_epoch_visits_every_minibatch() -> None:
 
 def test_a_step_changes_the_policy() -> None:
     step = _step()
-    before = step.model.embed[0].weight.detach().clone()
+    model = step.model
+    embed = model.embed[0]
+    assert isinstance(embed, torch.nn.Linear)
+    before = embed.weight.detach().clone()
     step.train_step()
-    assert not torch.equal(before, step.model.embed[0].weight.detach())
+    assert not torch.equal(before, embed.weight.detach())
 
 
 def test_a_rollout_records_the_state_it_began_from() -> None:
@@ -153,7 +163,7 @@ def test_the_learning_rate_anneals_toward_zero() -> None:
     rates: list[float] = []
     for _ in range(3):
         step.train_step()
-        rates.append(float(step.optimizer.param_groups[0]["lr"]))
+        rates.append(learning_rate(step.optimizer))
     assert rates == sorted(rates, reverse=True)
     assert rates[-1] < rates[0]
 
@@ -173,10 +183,13 @@ def test_the_same_seed_reproduces_the_same_update() -> None:
 
 def test_evaluation_does_not_change_the_policy() -> None:
     step = _step()
-    before = step.model.embed[0].weight.detach().clone()
+    model = step.model
+    embed = model.embed[0]
+    assert isinstance(embed, torch.nn.Linear)
+    before = embed.weight.detach().clone()
     result = step.eval_loss()
     assert math.isfinite(float(result["loss"]))
-    assert torch.equal(before, step.model.embed[0].weight.detach())
+    assert torch.equal(before, embed.weight.detach())
 
 
 def test_action_logits_can_be_read_for_arbitrary_observations() -> None:

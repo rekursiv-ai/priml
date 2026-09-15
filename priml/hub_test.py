@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import cast
 from unittest.mock import (
     MagicMock,
     patch,
@@ -29,7 +30,7 @@ def _mock_transformers(mock_auto_model: object) -> Generator[MagicMock]:
     fake = MagicMock()
     fake.AutoModel = mock_auto_model
     saved = sys.modules.get("transformers")
-    sys.modules["transformers"] = fake
+    sys.modules["transformers"] = cast(ModuleType, fake)
     try:
         yield fake
     finally:
@@ -86,7 +87,7 @@ def test_load_transformers_model_with_class():
 
         assert model == mock_model
         mock_auto_model.from_pretrained.assert_called_once()
-        call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+        call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
         # No cache_dir kwarg: passing one overrides HF_HOME, which is how a
         # provisioned shared cache became inert for every priml processor.
         assert "cache_dir" not in call_kwargs
@@ -109,7 +110,7 @@ def test_load_transformers_model_with_revision():
             revision="v1.0",
         )
 
-        call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+        call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
         assert call_kwargs["revision"] == "v1.0"
 
 
@@ -128,7 +129,7 @@ def test_load_transformers_model_with_trust_remote_code():
             trust_remote_code=True,
         )
 
-        call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+        call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
         assert call_kwargs["trust_remote_code"] is True
 
 
@@ -166,7 +167,7 @@ def test_load_transformers_model_extra_kwargs():
             low_cpu_mem_usage=True,
         )
 
-        call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+        call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
         assert call_kwargs["torch_dtype"] == torch.float16
         assert call_kwargs["low_cpu_mem_usage"] is True
 
@@ -185,7 +186,7 @@ def test_dtype_uses_the_current_transformers_spelling() -> None:
     ):
         load_transformers_model("test/model", "AutoModel", dtype=torch.float16)
 
-    call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+    call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
     assert call_kwargs["dtype"] == torch.float16
     assert "torch_dtype" not in call_kwargs
 
@@ -204,7 +205,7 @@ def test_load_transformers_model_no_global_env_mutation() -> None:
     # Capture process-global state *during* from_pretrained -- the old code
     # toggled it around the call and restored in finally, so the leak is only
     # observable mid-call.
-    observed: dict[str, Any] = {}
+    observed: dict[str, object] = {}
 
     def _capture(*_args: object, **_kwargs: object) -> MagicMock:
         observed["env"] = os.environ.get("HF_HUB_OFFLINE")
@@ -224,7 +225,7 @@ def test_load_transformers_model_no_global_env_mutation() -> None:
     assert observed["env"] == sentinel
     assert observed["level"] == original_logger_level
     # Cache-first path still requests offline via local_files_only.
-    call_kwargs = mock_auto_model.from_pretrained.call_args[1]
+    call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
     assert call_kwargs["local_files_only"] is True
 
 
@@ -244,8 +245,8 @@ def test_load_transformers_model_cache_miss_falls_back_online() -> None:
 
     assert model == mock_model
     assert mock_auto_model.from_pretrained.call_count == 2
-    first_kwargs = mock_auto_model.from_pretrained.call_args_list[0][1]
-    second_kwargs = mock_auto_model.from_pretrained.call_args_list[1][1]
+    first_kwargs = mock_auto_model.from_pretrained.call_args_list[0].kwargs
+    second_kwargs = mock_auto_model.from_pretrained.call_args_list[1].kwargs
     assert first_kwargs["local_files_only"] is True
     assert second_kwargs["local_files_only"] is False
 

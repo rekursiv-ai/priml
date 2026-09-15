@@ -208,12 +208,12 @@ def test_ensemble_parallel_input_is_replicated(
             return self
 
     monkeypatch.setattr(linear, "DTensor", FakeDTensor)
-    local = object()
+    local = torch.randn(1, 4)
 
     replicated, extra = linear._replicate_input(
         mesh,
         torch.nn.Identity(),
-        (local, "extra"),
+        cast(tuple[torch.Tensor, ...], (local, "extra")),
     )
     assert isinstance(replicated, FakeDTensor)
     assert replicated.local is local

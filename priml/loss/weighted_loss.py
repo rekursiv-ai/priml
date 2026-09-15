@@ -15,8 +15,6 @@ from priml.loss.custom_types import LossOutput
 
 
 if TYPE_CHECKING:
-    from typing import Any
-
     LossFn = Callable[..., LossOutput | Tensor]
 
 
@@ -44,7 +42,7 @@ class WeightedSum(nn.Module):
         self.weights = list(config.weights)
 
     @override
-    def forward(self, *args: Any, **kwargs: Any) -> LossOutput:
+    def forward(self, *args: object, **kwargs: object) -> LossOutput:
         """Compute weighted sum of losses.
 
         Returns:

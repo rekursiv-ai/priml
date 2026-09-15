@@ -22,8 +22,9 @@ Features:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import KW_ONLY, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, NotRequired, TypedDict, cast
 from typing_extensions import TypeVar
 
 import contextlib
@@ -40,6 +41,7 @@ from priml.loss.custom_types import LossOutput
 from priml.loss.simple_loss import SimpleLoss
 from priml.math.schedules import Schedule, constant
 from priml.model.special import Identity
+from priml.optimizers.lr import apply_lr_scale, remember_initial_lrs
 from priml.runtime import global_device_mesh
 from priml.timer import CheckpointableStepTimer
 from priml.train.activation import DefaultActivationStorage
@@ -50,6 +52,7 @@ from priml.train.custom_types import (
     ModelQuantizationProtocol,
     OptimizerProtocol,
     ParallelStrategyProtocol,
+    PhaseTimerProtocol,
     TrainStepOutput,
 )
 from priml.train.ema import NoEMA
@@ -58,7 +61,7 @@ from priml.train.quantization import NoModelQuantization
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
 
 _ModelConfigT = TypeVar(
@@ -207,17 +210,19 @@ class TrainStep:
         )
         """How activations are kept for backward: stored, recomputed, or quantized."""
 
-        compile: Makeable[Callable[[Callable[..., Any]], Callable[..., Any]]] | None = (
-            field(
-                default_factory=lambda: PartialConfig(
-                    torch.compile,
-                    fullgraph=True,
-                ),
-            )
+        compile: (
+            Makeable[Callable[[Callable[..., object]], Callable[..., object]]] | None
+        ) = field(
+            default_factory=lambda: PartialConfig(
+                torch.compile,
+                fullgraph=True,
+            ),
         )
         """Wraps the model before its first forward; ``None`` runs eager."""
 
-        ema: Makeable[EMAProtocol] = field(default_factory=NoEMA.Config)
+        ema: Makeable[EMAProtocol] = field(
+            default_factory=lambda: cast(Makeable[EMAProtocol], NoEMA.Config()),
+        )
         """Weight-averaging shadow, applied after each optimizer update."""
 
         gradient_clip_norm: float = math.inf
@@ -280,6 +285,12 @@ class TrainStep:
                 raise ValueError(f"{name} must be positive; got {budget}.")
 
         self.gradient_clip_norm = config.gradient_clip_norm
+        self.timer: PhaseTimerProtocol | None = None
+        """The loop's phase timer, injected after construction.
+
+        Unused here; a subclass wraps its own phases with it so they land in
+        the loop's summary."""
+
         self.timer_forward = CheckpointableStepTimer()
         """Training forward passes: how many, and how long they took."""
 
@@ -337,8 +348,7 @@ class TrainStep:
 
         # Recorded before any schedule runs, so the multiplier scales the rate
         # the recipe was tuned at rather than compounding on the last step's.
-        for group in self.optimizer.param_groups:
-            group.setdefault("initial_lr", group["lr"])
+        remember_initial_lrs([self.optimizer])
 
         self.learning_rate_scheduler: Schedule[float] = (
             self.config.learning_rate_scheduler.make()
@@ -346,10 +356,10 @@ class TrainStep:
 
         self.ema: EMAProtocol = self.config.ema.make()
 
-        self._compile_fn: Callable[[Callable[..., Any]], Callable[..., Any]] | None = (
-            self.config.compile.make() if self.config.compile else None
-        )
-        self._compiled_model: Any = None
+        self._compile_fn: (
+            Callable[[Callable[..., object]], Callable[..., object]] | None
+        ) = self.config.compile.make() if self.config.compile else None
+        self._compiled_model: Callable[..., object] | None = None
 
         self.last_grad_norm: Tensor | None = None
 
@@ -421,9 +431,9 @@ class TrainStep:
         """
         build = self.config.optimizer.make()
         try:
-            return build(model)
+            return cast(OptimizerProtocol, build(model))
         except TypeError:
-            return build([{"params": model.parameters()}])
+            return cast(OptimizerProtocol, build([{"params": model.parameters()}]))
 
     def bind_epoch_timer(self, timer: CheckpointableStepTimer) -> None:
         """Anneal against the loader's pass count rather than a private one.
@@ -473,7 +483,7 @@ class TrainStep:
         """
         return self.progress_complete
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to the model's forward, itself Any; a subclass narrows to its batch (``**batch: Tensor``), which ``object`` would reject.
+    def __call__(self, *args: object, **kwargs: object) -> object:
         """Training forward pass (sets train mode, applies autocast, optionally compiles)."""
         self.model.train()
         if self._compile_fn is not None and self._compiled_model is None:
@@ -493,7 +503,7 @@ class TrainStep:
         with self.timer_forward, autocast_ctx:
             return forward_model(*args, **kwargs)
 
-    def call_eval(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- forwarded to the model's forward, itself Any; a subclass narrows to its batch (``**batch: Tensor``), which ``object`` would reject.
+    def call_eval(self, *args: object, **kwargs: object) -> object:
         """Run the evaluation forward pass under inference_mode and autocast.
 
         Runs the live model with EMA-averaged weights swapped in via
@@ -529,7 +539,7 @@ class TrainStep:
             self.ema.apply_to(self.model),
             autocast_ctx,
         ):
-            output = self.model(*args, **kwargs)
+            output = cast(object, self.model(*args, **kwargs))
 
         self.model.train(was_training)
         return output
@@ -580,10 +590,10 @@ class TrainStep:
         application cannot compound.
         """
         multiplier = self.learning_rate_scheduler(self.progress_learning_schedule)
-        for group in self.optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * multiplier
+        assert isinstance(multiplier, (int, float))
+        apply_lr_scale([self.optimizer], multiplier)
 
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Move every tensor in the batch to this step's device.
 
         Args:
@@ -624,7 +634,7 @@ class TrainStep:
         # Forward (autocast applied in __call__). The output may be a single
         # Tensor or a multi-output container; the loss consumes it via the
         # ModelOutput contract rather than a blind ``cast(Tensor, ...)``.
-        forward_output: Any = self(**preprocessed_batch)
+        forward_output: object = self(**preprocessed_batch)
         if not isinstance(forward_output, ModelOutput):
             raise TypeError(
                 "Model forward output does not satisfy ModelOutput "
@@ -696,7 +706,9 @@ class TrainStep:
 
         """
         # Forward (train mode + autocast via __call__)
-        output: ModelOutput = self(**preprocessed_batch)
+        forward_output: object = self(**preprocessed_batch)
+        assert isinstance(forward_output, ModelOutput)
+        output: ModelOutput = forward_output
 
         # Loss computation (inherits autocast)
         result = {**self.loss(output, **preprocessed_batch)}
@@ -719,7 +731,9 @@ class TrainStep:
 
         """
         # Forward (eval mode + autocast via call_eval)
-        output: ModelOutput = self.call_eval(**preprocessed_batch)
+        forward_output = self.call_eval(**preprocessed_batch)
+        assert isinstance(forward_output, ModelOutput)
+        output: ModelOutput = forward_output
 
         # Loss computation (inherits autocast)
         result = {**self.loss(output, **preprocessed_batch)}
@@ -745,7 +759,19 @@ class TrainStep:
         self.accumulation_steps = 0
         self.accumulated_samples = 0
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Checkpointed step state; see :meth:`TrainStep.state_dict`."""
+
+        model: dict[str, Tensor]
+        optimizer: Mapping[str, Any]  # pyright: ignore[reportExplicitAny] -- torch's own opaque optimizer payload.
+        timer_forward: NotRequired[CheckpointableStepTimer.StateDict]
+        timer_eval: NotRequired[CheckpointableStepTimer.StateDict]
+        timer_step: NotRequired[CheckpointableStepTimer.StateDict]
+        ema: NotRequired[Mapping[str, Any]]  # pyright: ignore[reportExplicitAny] -- EMAProtocol implementations each own their schema.
+        accumulation_steps: int
+        accumulated_samples: int
+
+    def state_dict(self) -> StateDict:
         """Return checkpoint state dict.
 
         Only what this class OWNS. ``timer_epoch`` is absent because the
@@ -784,11 +810,11 @@ class TrainStep:
 
     def load_state_dict(
         self,
-        state_dict: dict[str, Any],
+        state_dict: Mapping[str, object],
         *,
         strict: bool = True,
         load_optimizer: bool = True,
-        remap: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
     ) -> None:
         """Load checkpoint state dict.
 
@@ -811,7 +837,8 @@ class TrainStep:
             (e.g., remove a prefix).
 
         """
-        model_state = state_dict["model"]
+        state = cast(TrainStep.StateDict, state_dict)
+        model_state: Mapping[str, Tensor] = state["model"]
         if remap is not None:
             model_state = remap(model_state)
         self.model.load_state_dict(model_state, strict=strict)
@@ -823,13 +850,12 @@ class TrainStep:
         #
         # A timer the checkpoint does not name keeps its fresh zero, so a
         # checkpoint written before a timer existed still loads.
-        for name, timer in (
-            ("timer_forward", self.timer_forward),
-            ("timer_eval", self.timer_eval),
-            ("timer_step", self.timer_step),
-        ):
-            if name in state_dict:
-                timer.load_state_dict(state_dict[name])
+        if "timer_forward" in state:
+            self.timer_forward.load_state_dict(state["timer_forward"])
+        if "timer_eval" in state:
+            self.timer_eval.load_state_dict(state["timer_eval"])
+        if "timer_step" in state:
+            self.timer_step.load_state_dict(state["timer_step"])
 
         self.accumulation_steps = 0
         self.accumulated_samples = 0
@@ -837,17 +863,19 @@ class TrainStep:
         if not load_optimizer:
             return  # Finetuning: keep the fresh optimizer/EMA.
 
-        self.optimizer.load_state_dict(state_dict["optimizer"])
-        if "ema" in state_dict:
-            self.ema.load_state_dict(state_dict["ema"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        if "ema" in state:
+            self.ema.load_state_dict(state["ema"])
 
     # The optimizer closure for closure-based optimizers (e.g. exact-Hessian Newton,
     # which differentiates this via ``autograd.grad``). First-order optimizers never
     # call it. Returns a graph-bearing scalar so the caller can take further
     # derivatives.
-    def _recompute_loss(self, preprocessed_batch: dict[str, Any]) -> Tensor:
+    def _recompute_loss(self, preprocessed_batch: dict[str, object]) -> Tensor:
         """Recompute the scalar training loss on ``preprocessed_batch``."""
-        output: ModelOutput = self(**preprocessed_batch)
+        forward_output: object = self(**preprocessed_batch)
+        assert isinstance(forward_output, ModelOutput)
+        output: ModelOutput = forward_output
         loss = {**self.loss(output, **preprocessed_batch)}
         return loss["loss"].sum()
 

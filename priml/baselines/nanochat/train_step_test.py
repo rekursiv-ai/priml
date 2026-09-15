@@ -25,6 +25,7 @@ from priml.baselines.nanochat.train_step import (
     matrix_parameters,
     nanochat_optimizer,
 )
+from priml.lib.custom_json import FloatCodec
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
     sdpa_attention,
@@ -317,7 +318,8 @@ def test_the_optimizer_partitions_the_model() -> None:
     step = _step()
     named = {id(p): n for n, p in step.model.named_parameters()}
     assigned = [
-        {named[id(p)] for p in group["params"]} for group in step.optimizer.param_groups
+        {named[id(parameter)] for parameter in cast("list[Tensor]", group["params"])}
+        for group in step.optimizer.param_groups
     ]
     everything: set[str] = set()
     for names in assigned:
@@ -495,14 +497,21 @@ def test_progress_drives_the_learning_rate() -> None:
     against a horizon that does not exist.
     """
     step = _step(train_budget_sec=100.0)
-    initial = step.optimizer.param_groups[0]["initial_lr"]
+    initial = FloatCodec.coerce(
+        cast(object, step.optimizer.param_groups[0]["initial_lr"]), None
+    )
     step.train_step(**_batch())
-    assert step.optimizer.param_groups[0]["lr"] == pytest.approx(initial)
+    assert FloatCodec.coerce(
+        cast(object, step.optimizer.param_groups[0]["lr"]), None
+    ) == pytest.approx(initial)
 
     # Most of the budget spent: the trapezoid is into its decay.
     step.elapsed_sec = 75.0
     step.train_step(**_batch())
-    assert step.optimizer.param_groups[0]["lr"] < initial
+    assert (
+        FloatCodec.coerce(cast(object, step.optimizer.param_groups[0]["lr"]), None)
+        < initial
+    )
 
 
 @pytest.mark.compute_training
@@ -639,8 +648,7 @@ def test_a_compiled_run_checkpoints_in_the_form_it_reloads() -> None:
     step = _step(compile=compiling)
     step.train_step(**_batch())
     state = step.state_dict()
-    model_state = cast("dict[str, Tensor]", state["model"])
-    assert not any(name.startswith("_orig_mod") for name in model_state)
+    assert not any(name.startswith("_orig_mod") for name in state["model"])
 
     restored = _step(compile=compiling)
     restored.load_state_dict(state)
@@ -659,7 +667,7 @@ def test_a_checkpoint_without_the_warmup_gate_is_refused() -> None:
     the incompatibility is named rather than surfacing as a bare KeyError.
     """
     step = _step()
-    state = step.state_dict()
+    state = dict(step.state_dict())
     del state["local_step"]
     with pytest.raises(ValueError, match="local_step"):
         step.load_state_dict(state)

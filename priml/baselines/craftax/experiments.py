@@ -45,7 +45,10 @@ from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop
 
 
-class CraftaxTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class CraftaxTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[CraftaxTrainStep.Config, CraftaxRollouts.Config],
+):
     """A training loop with the Craftax step and rollout cadence in place.
 
     Narrowing the two slots here rather than at each call site is what lets a
@@ -60,7 +63,10 @@ class CraftaxTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
     """The loop's cadence; the data lives in the step's environment."""
 
 
-class CraftaxRNNTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class CraftaxRNNTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[CraftaxRNNTrainStep.Config, CraftaxRollouts.Config],
+):
     """The same loop with the recurrent step, whose config is its own type."""
 
     step: CraftaxRNNTrainStep.Config = field(
@@ -72,7 +78,10 @@ class CraftaxRNNTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
     """The loop's cadence; the data lives in the step's environment."""
 
 
-class CraftaxPQNTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class CraftaxPQNTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[CraftaxPQNTrainStep.Config, CraftaxRollouts.Config],
+):
     """The same loop with the Q-learning step, whose config is its own type."""
 
     step: CraftaxPQNTrainStep.Config = field(
@@ -84,7 +93,10 @@ class CraftaxPQNTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
     """The loop's cadence; the data lives in the step's environment."""
 
 
-class CraftaxGTrXLTrainLoop(Makes["TrainLoop"], TrainLoop.Config):
+class CraftaxGTrXLTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[CraftaxGTrXLTrainStep.Config, CraftaxRollouts.Config],
+):
     """The same loop with the recurrent step, whose config is a different type.
 
     A separate class rather than a union: the recurrent step has fields the

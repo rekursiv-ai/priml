@@ -112,9 +112,8 @@ class NgramEmbedding(NarrowEmbedding):
         if self.scale != 1.0:
             output = self.scale * output
         for context in self.contexts.values():
-            contribution = context(tokens, **kwargs)
-            assert isinstance(contribution, Tensor)
-            output = output + contribution
+            assert isinstance(context, NarrowEmbedding)
+            output = output + context(tokens, **kwargs)
         return output
 
 

@@ -130,7 +130,10 @@ class NanoChatLoop(TrainLoop):
     stopping on another, and the two disagree by the warmup.
     """
 
-    class Config(Makes["NanoChatLoop"], TrainLoop.Config):
+    class Config(
+        Makes["NanoChatLoop"],
+        TrainLoop.Config[NanoChatTrainStep.Config, NanoChatData.Config],
+    ):
         """A loop with the nanochat step and dataset already in place.
 
         Narrowing the two slots here rather than at each call site lets a
@@ -612,8 +615,9 @@ def exp008() -> NgramTrainLoop.Config:
     head.lr = 0.0045
     for member in optimizer.optimizers:
         if isinstance(member, PartialConfig):
-            member.lr *= 1.2
-            member.lr *= 1.1
+            rate = cast(float, member.lr)
+            member.lr = rate * 1.2
+            member.lr = member.lr * 1.1
     assert isinstance(cfg.step.schedule, PartialConfig)
     schedule = cast(PartialConfig[Callable[[float], float]], cfg.step.schedule)
     schedule.flat = 0.4
@@ -743,7 +747,7 @@ def exp011() -> NgramTrainLoop.Config:
     skip = optimizer.optimizers[4]
     assert isinstance(skip, PartialConfig)
     pooling = cast(PartialConfig[torch.optim.Optimizer], skip.copy_tree())
-    pooling.lr *= 0.15
+    pooling.lr = cast(float, pooling.lr) * 0.15
     optimizer.optimizers.append(pooling)
     optimizer.select.append(matching("pool_weights"))
     # Uncomment for B200's 300-second budget; leave commented for H-series.
@@ -1048,16 +1052,17 @@ def exp018() -> NgramTrainLoop.Config:
     for index in (0, 1, 2):
         member = optimizer.optimizers[index]
         assert isinstance(member, PartialConfig)
-        member.lr *= batch_scale
+        member.lr = cast(float, member.lr) * batch_scale
     for index in (5, 6):
         member = optimizer.optimizers[index]
         assert isinstance(member, BiasCorrectedRMSProp.Config)
-        member.lr *= (previous_width / model.channels_in) ** 0.5 * batch_scale
-    # Preserve multiplication order: folding these factors changes float LR bits.
+        member.lr = (
+            member.lr * (previous_width / model.channels_in) ** 0.5 * batch_scale
+        )  # Preserve multiplication order: folding these factors changes float LR bits.
     for index in (0, 1, 2, 5, 6):
         member = optimizer.optimizers[index]
         assert isinstance(member, (PartialConfig, BiasCorrectedRMSProp.Config))
-        member.lr *= batch_correction
+        member.lr = cast(float, member.lr) * batch_correction
     matrices = optimizer.optimizers[8]
     assert isinstance(matrices, FFNScaledNorMuon.Config)
     matrices.channels_in = model.channels_in

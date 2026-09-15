@@ -30,14 +30,14 @@ Examples:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Protocol, cast
 
 import argparse
 import importlib
 import subprocess
 import sys
-import types
 
 from torch import Tensor
 
@@ -49,6 +49,22 @@ from priml.baselines.nanochat.data import (
     PackedTokenStream,
 )
 from priml.baselines.nanochat.scripts.prepare_data import prepare
+
+
+class _Tokenizer(Protocol):
+    def get_vocab_size(self) -> int: ...
+    def get_bos_token_id(self) -> int: ...
+
+
+class _TokenizerFactory(Protocol):
+    def from_directory(self, path: str) -> _Tokenizer: ...
+
+
+class _PrepareModule(Protocol):
+    __file__: str
+    EVAL_TOKENS: int
+    Tokenizer: _TokenizerFactory
+    make_dataloader: Callable[..., Iterator[tuple[Tensor, Tensor, int]]]
 
 
 def clone_upstream(
@@ -92,7 +108,7 @@ def clone_upstream(
     return root
 
 
-def load_upstream(root: Path, *, corpus: Path) -> types.ModuleType:
+def load_upstream(root: Path, *, corpus: Path) -> _PrepareModule:
     """Import their ``prepare.py`` as itself, pointed at the shared corpus.
 
     Their module locates the corpus through two module-level constants computed
@@ -117,7 +133,7 @@ def load_upstream(root: Path, *, corpus: Path) -> types.ModuleType:
     module = importlib.import_module("prepare")
     module.DATA_DIR = str(corpus)  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and exposes these integration attributes at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and exposes these integration attributes at runtime.
     module.TOKENIZER_DIR = str(corpus / "tokenizer")  # ty: ignore[unresolved-attribute] -- The module is dynamically imported and exposes these integration attributes at runtime.  # pyright: ignore[reportAttributeAccessIssue] -- The module is dynamically imported and exposes these integration attributes at runtime.
-    return module
+    return cast(_PrepareModule, module)
 
 
 def build_ours(
@@ -229,7 +245,7 @@ def main() -> int:
       exit_code: 0 if identical, nonzero if differences found.
 
     """
-    args = _parse_args()
+    args = cast(_Flags, _parse_args())
     root = clone_upstream(args.clone)
     upstream = load_upstream(root, corpus=args.corpus)
     print(f"upstream: {upstream.__file__}")
@@ -343,6 +359,15 @@ def _parse_args() -> argparse.Namespace:
     # unconditionally (``prepare.py:283``) and so cannot run anywhere else.
     parser.add_argument("--device", default="cuda", help="Device batches land on.")
     return parser.parse_args()
+
+
+class _Flags(Protocol):
+    clone: Path
+    corpus: Path
+    batches: int
+    rows: int
+    num_train_shards: int
+    device: str
 
 
 if __name__ == "__main__":

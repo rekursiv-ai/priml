@@ -38,7 +38,8 @@ def _constructor_state(config: MMDiTBlock.Config) -> Tensor:
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         module = config.make()
-        values = [value.reshape(-1).float() for value in module.state_dict().values()]
+        state = module.state_dict()
+        values = [value.reshape(-1).float() for value in state.values()]
         values.append(torch.get_rng_state().float())
         return torch.cat(values)
 

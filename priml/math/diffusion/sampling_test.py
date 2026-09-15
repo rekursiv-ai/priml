@@ -113,7 +113,7 @@ def test_sample_model_fn_protocol():
         2,
         log_snr[1],
     )
-    assert isinstance(result, Tensor)
+    assert result is x
 
 
 @pytest.mark.parametrize("eta", [0, 0.33, 0.71, 1.0])
@@ -249,7 +249,6 @@ def test_sample_without_stateful() -> None:
     x = torch.tensor([[1.2, -0.7, 0.3], [-0.9, 2.4, 0.1]])
     with torch.no_grad():
         r = sample(log_snr, model_fn, x)
-    assert isinstance(r, SampleResult)
     assert x.shape == r.x_clean.shape, r.x_clean.shape
 
 

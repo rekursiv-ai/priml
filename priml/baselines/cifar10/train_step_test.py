@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Final, Literal, cast, override
+from typing import Final, Literal, cast, override
 
 import math
 
@@ -23,9 +23,11 @@ from priml.optimizers import (
     Muon,
     complement,
     excluding,
+    learning_rate,
 )
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.timer import CheckpointableStepTimer
+from priml.train.custom_types import OptimizerProtocol
 from priml.train.parallelism import NoParallel
 
 
@@ -103,9 +105,9 @@ def test_train_step_advances_the_step_counters() -> None:
 
 def test_train_step_updates_the_weights() -> None:
     step = tiny_step().make()
-    before = step.model.head.weight.detach().clone()
+    before: Tensor = _head(step).weight.detach().clone()
     _ = step.train_step(**tiny_batch())
-    assert not torch.equal(before, step.model.head.weight)
+    assert not torch.equal(before, _head(step).weight)
 
 
 def test_loss_decreases_on_a_memorizable_batch() -> None:
@@ -130,9 +132,9 @@ def test_muon_stack_splits_convolutions_from_the_rest() -> None:
     assert isinstance(muon, Muon)
     # Muon orthogonalizes a matrix-shaped update, which is meaningless for the
     # 1-D norm parameters; those and the head stay on SGD.
-    assert {p.ndim for p in muon.param_groups[0]["params"]} == {4}
-    named = dict(step.model.named_parameters())
-    on_sgd = {id(p) for p in sgd.param_groups[0]["params"]}
+    assert {p.ndim for p in _group_parameters(muon.param_groups[0])} == {4}
+    named = dict(_model(step).named_parameters())
+    on_sgd = {id(p) for p in _group_parameters(sgd.param_groups[0])}
     assert id(named["head.weight"]) in on_sgd
     assert id(named["head.bias"]) in on_sgd
 
@@ -141,8 +143,10 @@ def test_every_parameter_lands_in_exactly_one_optimizer_group() -> None:
     config = tiny_step()
     config.optimizer = muon_optimizer()
     step = config.make()
-    owned = [id(p) for group in step.optimizer.param_groups for p in group["params"]]
-    assert sorted(owned) == sorted(id(p) for p in step.model.parameters())
+    owned = [
+        id(p) for group in step.optimizer.param_groups for p in _group_parameters(group)
+    ]
+    assert sorted(owned) == sorted(id(p) for p in _model(step).parameters())
 
 
 def test_a_split_recipe_still_presents_one_optimizer() -> None:
@@ -171,7 +175,7 @@ def test_schedule_warms_up_then_decays() -> None:
     step.schedule = cosine
     step.timer_step = CheckpointableStepTimer()
     step.optimizer = cast(
-        torch.optim.Optimizer,
+        OptimizerProtocol,
         SimpleNamespace(param_groups=[{"initial_lr": 1.0, "lr": 1.0}]),
     )
     peak = 1.0
@@ -180,7 +184,7 @@ def test_schedule_warms_up_then_decays() -> None:
     for global_step in (0, 9, 50, 99):
         step.timer_step.global_count = global_step
         step._apply_schedule()
-        rates.append(step.optimizer.param_groups[0]["lr"])
+        rates.append(learning_rate(step.optimizer))
 
     assert rates[0] < peak  # Warming up.
     assert rates[1] == pytest.approx(peak, rel=0.05)
@@ -198,7 +202,7 @@ def test_the_injected_schedule_drives_the_learning_rate() -> None:
         out: list[float] = []
         for _ in range(20):
             _ = step.train_step(**tiny_batch())
-            out.append(step.optimizer.param_groups[0]["lr"])
+            out.append(learning_rate(step.optimizer))
         return out
 
     assert trace(PartialConfig(cosine)) != trace(PartialConfig(polynomial, power=1.2))
@@ -220,9 +224,9 @@ def test_whitening_is_fitted_from_the_first_batch_only() -> None:
     assert not step._whitened
     _ = step.train_step(**tiny_batch(image=32))
     assert step._whitened
-    fitted = step.model.whiten.weight.detach().clone()
+    fitted: Tensor = _whitening_weight(step).detach().clone()
     _ = step.train_step(**tiny_batch(image=32, seed=1))
-    assert torch.equal(fitted, step.model.whiten.weight)
+    assert torch.equal(fitted, _whitening_weight(step))
 
 
 def test_whitening_weights_survive_a_cache_round_trip(tmp_path: Path) -> None:
@@ -233,7 +237,7 @@ def test_whitening_weights_survive_a_cache_round_trip(tmp_path: Path) -> None:
 
     second = config.make()
     _ = second.train_step(**tiny_batch(image=32, seed=7))
-    assert torch.equal(first.model.whiten.weight, second.model.whiten.weight)
+    assert torch.equal(_whitening_weight(first), _whitening_weight(second))
 
 
 def test_augmentation_preserves_the_image_shape() -> None:
@@ -286,9 +290,13 @@ def test_tta_matches_the_plain_forward_for_a_shift_invariant_model() -> None:
     config = tiny_step()
     config.use_tta = True
     step = config.make()
-    step._model = _ConstantModel()  # Read-only property; see the note above.
+    constant = _ConstantModel()
+    step._model = constant  # Read-only property; see the note above.
     media = tiny_batch()["media"]
-    assert torch.allclose(step.call_eval(media=media), step.model(media))
+    actual = step.call_eval(media=media)
+    expected = constant(media)
+    assert isinstance(actual, Tensor)
+    assert torch.allclose(actual, expected)
 
 
 def test_gradient_clipping_shrinks_the_gradients() -> None:
@@ -308,15 +316,15 @@ def test_gradient_clipping_shrinks_the_gradients() -> None:
         # Reproduce the step's forward and clip, stopping before the optimizer
         # consumes (and zeroes) the gradients.
         media = step._augment(batch["media"])
-        loss = step._loss(step.model(media), batch["label"])
+        loss = step._loss(_model(step)(media), batch["label"])
         loss.sum().backward()
         if math.isfinite(clip):
-            _ = nn.utils.clip_grad_norm_(step.model.parameters(), clip)
+            _ = nn.utils.clip_grad_norm_(_model(step).parameters(), clip)
         return float(
             torch.cat(
                 [
                     p.grad.flatten()
-                    for p in step.model.parameters()
+                    for p in _model(step).parameters()
                     if p.grad is not None
                 ],
             ).norm(),
@@ -328,10 +336,10 @@ def test_gradient_clipping_shrinks_the_gradients() -> None:
 
 def test_train_loss_scores_without_backward() -> None:
     step = tiny_step().make()
-    before = step.model.head.weight.detach().clone()
+    before: Tensor = _head(step).weight.detach().clone()
     out = step.train_loss(**tiny_batch())
     assert out["loss"].shape == (4,)
-    assert torch.equal(before, step.model.head.weight)
+    assert torch.equal(before, _head(step).weight)
     assert step.global_step == 0
 
 
@@ -341,12 +349,16 @@ def test_autocast_runs_the_forward_in_the_configured_dtype() -> None:
     step = config.make()
     # Evaluated, not trained: this CPU's oneDNN has no bf16 backward, and the
     # autocast context is what is under test, not the backward kernel.
-    assert step.call_eval(**tiny_batch()).dtype == torch.bfloat16
+    output = step.call_eval(**tiny_batch())
+    assert isinstance(output, Tensor)
+    assert output.dtype == torch.bfloat16
 
 
 def test_full_precision_is_the_default() -> None:
     step = tiny_step().make()
-    assert step.call_eval(**tiny_batch()).dtype == torch.float32
+    output = step.call_eval(**tiny_batch())
+    assert isinstance(output, Tensor)
+    assert output.dtype == torch.float32
 
 
 def test_gradient_clipping_is_skipped_when_disabled() -> None:
@@ -357,9 +369,9 @@ def test_gradient_clipping_is_skipped_when_disabled() -> None:
 
 def test_eval_loss_does_not_train() -> None:
     step = tiny_step().make()
-    before = step.model.head.weight.detach().clone()
+    before: Tensor = _head(step).weight.detach().clone()
     _ = step.eval_loss(**tiny_batch())
-    assert torch.equal(before, step.model.head.weight)
+    assert torch.equal(before, _head(step).weight)
     assert step.global_step == 0
 
 
@@ -373,8 +385,8 @@ def test_state_dict_round_trip_restores_weights_and_progress() -> None:
     restored.load_state_dict(saved)
     assert restored.global_step == 2
     for a, b in zip(
-        step.model.state_dict().values(),
-        restored.model.state_dict().values(),
+        _state_values(_model(step)),
+        _state_values(_model(restored)),
         strict=True,
     ):
         assert torch.equal(a, b)
@@ -407,7 +419,7 @@ def test_resume_continues_the_same_trajectory() -> None:
     for batch in batches[2:]:
         _ = resumed.train_step(**batch)
 
-    assert torch.equal(reference.model.head.weight, resumed.model.head.weight)
+    assert torch.equal(_head(reference).weight, _head(resumed).weight)
 
 
 def test_rejects_nonpositive_horizon() -> None:
@@ -471,7 +483,7 @@ class _TrainStepModule(nn.Module):
     def __init__(self, config: Cifar10TrainStep.Config) -> None:
         super().__init__()
         self.step = config.make()
-        self.inner = self.step.model
+        self.inner = _model(self.step)
 
     @override
     def forward(self, media: Tensor, label: Tensor) -> Tensor:
@@ -479,6 +491,25 @@ class _TrainStepModule(nn.Module):
             self.step.train_step(media=media, label=label)["loss"] for _ in range(3)
         ]
         return torch.stack(losses)
+
+
+def _model(step: Cifar10TrainStep) -> ResNet | SpeedNet:
+    """Return the concrete model hidden behind the train-step protocol."""
+    model = step.model
+    assert isinstance(model, (ResNet, SpeedNet))
+    return model
+
+
+def _resnet(step: Cifar10TrainStep) -> ResNet:
+    model = _model(step)
+    assert isinstance(model, ResNet)
+    return model
+
+
+def _speednet(step: Cifar10TrainStep) -> SpeedNet:
+    model = _model(step)
+    assert isinstance(model, SpeedNet)
+    return model
 
 
 class _CountingModel(nn.Module):
@@ -494,7 +525,7 @@ class _CountingModel(nn.Module):
         return torch.zeros(len(media), 10)
 
     @override
-    def eval(self) -> Any:
+    def eval(self) -> _CountingModel:
         return self
 
 
@@ -506,8 +537,36 @@ class _ConstantModel(nn.Module):
         return torch.ones(len(media), 10)
 
     @override
-    def eval(self) -> Any:
+    def eval(self) -> _ConstantModel:
         return self
+
+
+def _head(step: Cifar10TrainStep) -> nn.Linear:
+    model = _resnet(step)
+    head = model.head
+    assert isinstance(head, nn.Linear)
+    return head
+
+
+def _whitening_weight(step: Cifar10TrainStep) -> Tensor:
+    whiten = _speednet(step).whiten
+    return whiten.weight
+
+
+def _group_parameters(group: dict[str, object]) -> list[nn.Parameter]:
+    raw = group["params"]
+    assert isinstance(raw, list)
+    values: list[object] = cast(list[object], raw)
+    parameters: list[nn.Parameter] = []
+    for parameter in values:
+        assert isinstance(parameter, nn.Parameter)
+        parameters.append(parameter)
+    return parameters
+
+
+def _state_values(model: nn.Module) -> list[Tensor]:
+    state = model.state_dict()
+    return list(state.values())
 
 
 if __name__ == "__main__":

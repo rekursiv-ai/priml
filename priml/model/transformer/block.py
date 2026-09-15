@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import Protocol, Self, cast, override, runtime_checkable
+from typing import Protocol, Self, override, runtime_checkable
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -60,7 +60,7 @@ class TransformerBlock(nn.Module):
 
         _: KW_ONLY
 
-        attn: Makeable[nn.Module] = field(default_factory=SelfAttention.Config)
+        attn: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
         """Attention module config."""
 
         ffn: Makeable[TensorModule] = field(default_factory=SwiGLU.Config)
@@ -219,11 +219,11 @@ class TransformerBlock(nn.Module):
         **kwargs: object,
     ) -> Tensor:
         if self.prenorm:
-            attn_out = cast(Tensor, self.attn(self.norm1(x, **kwargs), **kwargs))
+            attn_out = self.attn(self.norm1(x, **kwargs), **kwargs)
             x = x + attn_out
             x = x + self.ffn(self.norm2(x, **kwargs), **kwargs)
         else:
-            attn_out = cast(Tensor, self.attn(x, **kwargs))
+            attn_out = self.attn(x, **kwargs)
             x = self.norm1(x + attn_out, **kwargs)
             x = self.norm2(x + self.ffn(x, **kwargs), **kwargs)
         return x

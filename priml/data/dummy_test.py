@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+
+from torch.utils.data import DataLoader
+
 import torch
 
 from priml.data.dummy import DummyDataset
@@ -51,9 +55,13 @@ def test_num_workers_propagates_to_loader():
 def test_collate_produces_media_and_label():
     """Collate yields a dict with media and label batched tensors."""
     dataset = _make()
-    batch = next(iter(dataset.eval_dataloader()))
-    assert batch["media"].shape == (4, 2, 4, 4)
-    assert batch["label"].shape == (4,)
+    loader = cast(DataLoader[object], dataset.eval_dataloader())
+    batch_obj = next(iter(loader))
+    assert isinstance(batch_obj, dict)
+    media = cast(torch.Tensor, batch_obj["media"])
+    label = cast(torch.Tensor, batch_obj["label"])
+    assert media.shape == (4, 2, 4, 4)
+    assert label.shape == (4,)
 
 
 if __name__ == "__main__":

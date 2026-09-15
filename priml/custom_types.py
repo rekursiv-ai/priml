@@ -8,10 +8,10 @@ aliases and ``convert_to_tensor`` live in
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 
 __all__ = [
@@ -110,22 +110,31 @@ class MetricObjective:
 
 @runtime_checkable
 class CheckpointableProtocol(Protocol):
-    """Protocol for a checkpointable object."""
+    """Protocol for a checkpointable object.
 
-    def state_dict(self) -> dict[str, Any]:
+    The checkpointer serializes the payload and never reads it, so the
+    protocol is deliberately schema-free: ``Mapping[str, object]`` lets an
+    implementation return its nested ``StateDict`` TypedDict (a TypedDict is a
+    ``Mapping``, never a ``dict``). An implementation narrows the parameter with
+    one ``cast(Cls.StateDict, state_dict)`` at the top of ``load_state_dict``.
+    Torch's own ``dict[str, Any]`` payloads are converted at the checkpointer,
+    the one place that talks to torch, so no ``Any`` reaches this contract.
+    """
+
+    def state_dict(self) -> Mapping[str, object]:
         """Get state for checkpointing.
 
         Returns:
-          result: The dict[str, Any].
+          state: The state mapping; the schema belongs to the implementation.
 
         """
         ...
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Load state from checkpoint.
 
         Args:
-          state_dict: State dict.
+          state_dict: State mapping as returned by :meth:`state_dict`.
 
         """
         ...

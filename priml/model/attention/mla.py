@@ -168,7 +168,6 @@ class LatentAttention(nn.Module):
             v,
             **kwargs,
         )
-        assert isinstance(out, Tensor)
         # Absorbed output is still in latent space; project it to the value
         # width. The re-expand path applied ``W_UV`` to ``v`` already.
         return torch.einsum("...shl,hvl->...shv", out, w_uv) if self.absorb else out
@@ -236,29 +235,29 @@ class MultiHeadLatentAttention(nn.Module):
         Typed by the contract rather than by :class:`LatentAttention`, so a
         kernel this module never saw fills the slot by implementing it."""
 
-        norm_q_lora: Makeable[nn.Module] = field(
+        norm_q_lora: Makeable[TensorModule] = field(
             default_factory=partial(RMSNorm.Config, elementwise_affine=True),
         )
         """Normalization between the Q LoRA's two projections.
 
         Built only when ``q_lora_rank`` is set; its width is the rank."""
 
-        proj_q: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        proj_q: Makeable[TensorModule] = field(default_factory=Linear.Config)
         """Q projection: model width in, ``num_heads * channels_qk_head`` out.
 
         Built only when ``q_lora_rank`` is None; the LoRA path uses
         ``proj_q_a``/``proj_q_b`` instead. Sharded head-parallel under tensor
         parallelism (see :meth:`tensor_parallel_plan`)."""
 
-        proj_q_a: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        proj_q_a: Makeable[TensorModule] = field(default_factory=Linear.Config)
         """Q LoRA down-projection to ``q_lora_rank``. Replicated: the rank is
         head-shared, so sharding it over the head dim is a correctness bug."""
 
-        proj_q_b: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        proj_q_b: Makeable[TensorModule] = field(default_factory=Linear.Config)
         """Q LoRA up-projection to ``num_heads * channels_qk_head``, head-major.
         Sharded head-parallel, like ``proj_q``."""
 
-        proj_kv_a: Makeable[nn.Module] = field(default_factory=Linear.Config)
+        proj_kv_a: Makeable[TensorModule] = field(default_factory=Linear.Config)
         """KV down-projection to ``kv_lora_rank + channels_qk_rope_head``.
         Replicated -- this is the latent the cache holds."""
 
@@ -274,7 +273,7 @@ class MultiHeadLatentAttention(nn.Module):
         whose result is returned directly, so a bare ``nn.Module`` (whose
         ``__call__`` is untyped) would make the forward's return ``Any``."""
 
-        norm_kv_lora: Makeable[nn.Module] = field(
+        norm_kv_lora: Makeable[TensorModule] = field(
             default_factory=partial(RMSNorm.Config, elementwise_affine=True),
         )
         """Normalization on the compressed KV latent; its width is
@@ -422,9 +421,9 @@ class MultiHeadLatentAttention(nn.Module):
         # from are the caller's choice.
         if config.q_lora_rank is None:
             self.q_proj = config.proj_q.make()
-            self.q_a_proj: nn.Module | None = None
-            self.q_a_layernorm: nn.Module | None = None
-            self.q_b_proj: nn.Module | None = None
+            self.q_a_proj: TensorModule | None = None
+            self.q_a_layernorm: TensorModule | None = None
+            self.q_b_proj: TensorModule | None = None
         else:
             self.q_proj = None
             self.q_a_proj = config.proj_q_a.make()
@@ -646,7 +645,6 @@ class MultiHeadLatentAttention(nn.Module):
             assert self.q_a_layernorm is not None
             assert self.q_b_proj is not None
             q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
-        assert isinstance(q, Tensor)
         return q.view(*q.shape[:-1], self._heads_local, self.channels_qk_head)
 
     # The slicing lives here rather than in any kernel because it is where the tensor-
@@ -695,7 +693,6 @@ class MultiHeadLatentAttention(nn.Module):
             dropout_p=dropout_p,
             **kwargs,
         )
-        assert isinstance(out_per_head, Tensor)
         return self.o_proj(self._to_o_proj_input(out_per_head.flatten(-2)))
 
     # Replicated: a plain ``[..., num_heads * v]`` tensor. Under tensor parallelism

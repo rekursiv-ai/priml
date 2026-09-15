@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from importlib.metadata import version
 from types import ModuleType
+from typing import cast
 
 import sys
 
@@ -33,11 +34,9 @@ import priml.baselines.nanochat.attention
 
 def test_flash_backends_belong_to_attention() -> None:
     for name in ("Flash3Attention", "Flash4Attention"):
-        assert name in vars(priml.baselines.nanochat.attention)
-        assert (
-            vars(priml.baselines.nanochat.attention)[name].__module__
-            == priml.baselines.nanochat.attention.__name__
-        )
+        backend = cast(object, vars(priml.baselines.nanochat.attention)[name])
+        assert isinstance(backend, type)
+        assert backend.__module__ == priml.baselines.nanochat.attention.__name__
 
 
 def test_head_gate_inherits_full_input_width() -> None:
@@ -291,7 +290,9 @@ def test_cuda_matches_official_autograd() -> None:
     if torch.cuda.get_device_capability() not in ((9, 0), (10, 0)):
         pytest.skip("Requires an SM90 or SM100 CUDA device.")
     assert version("flash-attn-4") == "4.0.0b29"
-    interface = __import__("flash_attn.cute.interface", fromlist=["interface"])
+    interface = cast(
+        object, __import__("flash_attn.cute.interface", fromlist=["interface"])
+    )
     assert isinstance(interface, priml.baselines.nanochat.attention._Flash4Interface)
     attention = Flash4Attention.Config().make()
     torch.manual_seed(42)

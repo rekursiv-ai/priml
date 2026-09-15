@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from priml.baselines.sudoku.data import SudokuData, augment_sudoku
+from priml.lib.custom_json import ListCodec
 
 
 @pytest.fixture
@@ -152,7 +153,7 @@ def test_augmentation_preserves_empties_and_padding() -> None:
     grid = torch.full((2, 81), 1, dtype=torch.long)  # Every cell empty.
     grid[:, :5] = 0  # Padding.
     inputs, _ = augment_sudoku(grid, grid.clone())
-    assert set(inputs.unique().tolist()) <= {0, 1}
+    assert set(ListCodec.coerce(inputs.flatten().tolist(), int)) <= {0, 1}
 
 
 def test_augmentation_is_seedable() -> None:

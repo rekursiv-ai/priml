@@ -12,7 +12,7 @@ Both drive a batch of one. Watching sixty-four worlds at once shows nothing.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import imageio_ffmpeg
 import numpy as np
@@ -67,7 +67,7 @@ KEYS: dict[int, Action] = {
 
 
 class Policy(Protocol):
-    """Anything that scores actions from an observation."""
+    """objectthing that scores actions from an observation."""
 
     def __call__(self, observation: Tensor) -> tuple[Tensor, Tensor]:
         """Return action logits and a value estimate."""
@@ -116,10 +116,11 @@ def play(
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
+            key = cast(int, event.key)
+            if key == pygame.K_ESCAPE:
                 running = False
                 continue
-            action = KEYS.get(event.key)
+            action = KEYS.get(key)
             if action is None:
                 continue
             state, _ = step.step(

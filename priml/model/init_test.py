@@ -17,7 +17,7 @@ from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import RoPE, RoPEMixed
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.custom_types import DepthIndex
+from priml.model.custom_types import DepthIndex, Resettable
 from priml.model.init import (
     call_init,
     dirac,
@@ -341,6 +341,7 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
         for _, tensor in state:
             if tensor.is_floating_point():
                 tensor.fill_(float("nan"))
+    assert isinstance(model, Resettable)
     model.reset_parameters()
     for key, tensor in state:
         if not tensor.is_floating_point():

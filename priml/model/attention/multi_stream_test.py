@@ -62,7 +62,6 @@ def test_multi_stream_norm_qk_channels_inferred_from_channels_head():
     assert config.norm_qk.channels_in == 16
     streams = config.make()([torch.randn(2, 8, 64), torch.randn(2, 8, 64)])
     for stream in streams:
-        assert isinstance(stream, Tensor)
         assert stream.shape == (2, 8, 64)
 
 
@@ -89,8 +88,6 @@ def test_multi_stream_2_streams():
     x0 = torch.randn(1, 2, 8)
     x1 = torch.randn(1, 3, 8)
     y0, y1 = m([x0, x1])
-    assert isinstance(y0, Tensor)
-    assert isinstance(y1, Tensor)
     assert y0.shape == (1, 2, 8)
     assert y1.shape == (1, 3, 8)
 
@@ -106,7 +103,6 @@ def test_multi_stream_1_stream():
     result = m([x])
     assert len(result) == 1
     y = result[0]
-    assert isinstance(y, Tensor)
     assert y.shape == (2, 16, 64)
 
 
@@ -121,8 +117,6 @@ def test_multi_stream_gqa():
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
     y0, y1 = m([x0, x1])
-    assert isinstance(y0, Tensor)
-    assert isinstance(y1, Tensor)
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
 
@@ -139,8 +133,6 @@ def test_multi_stream_with_rope():
     x1 = torch.randn(2, 12, 64)
     cs0 = rope(torch.arange(8))
     y0, y1 = m([x0, x1], cos_sin=[cs0, None])
-    assert isinstance(y0, Tensor)
-    assert isinstance(y1, Tensor)
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
 
@@ -156,8 +148,6 @@ def test_multi_stream_with_norm_qk():
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
     y0, y1 = m([x0, x1])
-    assert isinstance(y0, Tensor)
-    assert isinstance(y1, Tensor)
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
 
@@ -192,8 +182,6 @@ def test_multi_stream_cache():
     result = m.forward_cached([x0, x1], cache=caches)
     assert len(result) == 2
     outputs, caches = result
-    assert isinstance(outputs, tuple)
-    assert isinstance(caches, list)
     y0, y1 = outputs
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
@@ -224,8 +212,8 @@ def test_multi_stream_no_cache_returns_tuple():
         num_streams=2,
     ).make()
     y0, y1 = m([torch.randn(2, 8, 64), torch.randn(2, 12, 64)])
-    assert isinstance(y0, Tensor)
-    assert isinstance(y1, Tensor)
+    assert y0.shape == (2, 8, 64)
+    assert y1.shape == (2, 12, 64)
 
 
 def test_multi_stream_causal_requires_single_stream():
@@ -261,8 +249,6 @@ def test_multi_stream_internal_rope():
     x0 = torch.randn(2, 8, 64)
     x1 = torch.randn(2, 12, 64)
     y0, y1 = m([x0, x1])
-    assert isinstance(y0, Tensor)
-    assert isinstance(y1, Tensor)
     assert y0.shape == (2, 8, 64)
     assert y1.shape == (2, 12, 64)
 
@@ -351,9 +337,10 @@ def test_explicit_streams_own_norms_and_native_weights() -> None:
         actual = model([x, other], attn_mask=masks)
         assert torch.equal(actual[0], native(x))
         assert torch.equal(actual[1], native(other))
+    native_state = native.state_dict()
+    stream_state = model.streams[0].state_dict()
     assert all(
-        torch.equal(value, native.state_dict()[key])
-        for key, value in model.streams[0].state_dict().items()
+        torch.equal(value, native_state[key]) for key, value in stream_state.items()
     )
 
 
@@ -439,12 +426,11 @@ def test_native_loading_rejects_source_kernel_state_without_partial_copy() -> No
     cfg.num_heads = 2
     cfg.streams = [AttentionProjections.Config().update(source_cfg, skip_missing=True)]
     model = cfg.make()
-    before = {name: value.clone() for name, value in model.state_dict().items()}
+    state = model.state_dict()
+    before = {name: value.clone() for name, value in state.items()}
     with pytest.raises(ValueError, match="state keys"):
         model.load_stream(0, source=source)
-    assert all(
-        torch.equal(before[name], value) for name, value in model.state_dict().items()
-    )
+    assert all(torch.equal(before[name], value) for name, value in state.items())
 
 
 if __name__ == "__main__":

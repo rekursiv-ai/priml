@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
+
+from torch import Tensor
 
 import numpy as np
 import pytest
@@ -10,6 +13,7 @@ import torch
 import torchvision.datasets
 
 from priml.baselines.cifar10.data import Cifar10Data, prepare
+from priml.lib.custom_json import ListCodec
 
 
 def tiny_dataset(directory: Path, *, count: int = 8) -> Cifar10Data.Config:
@@ -158,12 +162,20 @@ def test_prepare_normalizes_and_writes_both_splits(
     prepare(tmp_path, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 
     for split, expected in (("train", 1.0), ("test", -1.0)):
-        payload = torch.load(tmp_path / f"{split}.pt", weights_only=True)
+        payload = cast(
+            dict[str, Tensor],
+            torch.load(
+                tmp_path / f"{split}.pt",
+                weights_only=True,
+            ),
+        )
         # (N, H, W, C) uint8 becomes (N, C, H, W) float: the stub's 255 scales
         # to 1.0 then normalizes to (1 - 0.5) / 0.5 = 1.0, and its 0 to -1.0.
         assert payload["media"].shape == (2, 3, 4, 4)
-        assert payload["media"].unique().tolist() == pytest.approx([expected])
-        assert payload["label"].tolist() == [0, 1]
+        values = ListCodec.coerce(payload["media"].unique().tolist(), float)
+        labels = ListCodec.coerce(payload["label"].tolist(), int)
+        assert values == pytest.approx([expected])
+        assert labels == [0, 1]
     # The staging file is renamed, never left behind for the existence check
     # above to later mistake for a complete split.
     assert not list(tmp_path.glob("*.partial"))

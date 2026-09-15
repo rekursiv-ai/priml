@@ -15,7 +15,8 @@ thousands of 900-cell grids, and only equality between them matters.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 import hashlib
 
@@ -24,6 +25,8 @@ from torch import Tensor
 
 import torch
 import torch.distributed as dist
+
+from priml.lib.custom_json import FloatCodec
 
 
 class PassK:
@@ -136,30 +139,37 @@ class PassK:
                 counts = counts.to(torch.device("cuda", torch.cuda.current_device()))
             dist.all_reduce(counts, op=dist.ReduceOp.SUM)
             counts = counts.cpu()
-        total, *hits = counts.tolist()
+        total, *hits = [FloatCodec.coerce(count) for count in counts.tolist()]
         return {
             f"pass@{k}": hit / max(1.0, total)
             for k, hit in zip(self.config.pass_ks, hits, strict=True)
         }
 
-    def state_dict(self) -> dict[str, Any]:
+    class StateDict(TypedDict):
+        """Per-puzzle vote tallies and the digest of each puzzle's answer."""
+
+        votes: dict[int, dict[str, list[float]]]
+        truth: dict[int, str]
+
+    def state_dict(self) -> StateDict:
         """Return the accumulated votes.
 
         Returns:
-          result: The dict[str, Any].
+          state: The vote tallies and answer digests, keyed by puzzle.
 
         """
         return {"votes": self._votes, "truth": self._truth}
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore votes produced by :meth:`state_dict`.
 
         Args:
           state_dict: State dict.
 
         """
-        self._votes = state_dict.get("votes", {})
-        self._truth = state_dict.get("truth", {})
+        state = cast(PassK.StateDict, state_dict)
+        self._votes = state.get("votes", {})
+        self._truth = state.get("truth", {})
 
 
 # Only equality between grids matters, and an evaluation holds hundreds of thousands of

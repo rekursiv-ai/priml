@@ -14,8 +14,6 @@ from priml.loss.custom_types import LossOutput, SimpleLossFn
 
 
 if TYPE_CHECKING:
-    from typing import Any
-
     from torch import Tensor
 
 
@@ -52,7 +50,7 @@ class SimpleLoss:
         target_key: str = "label"
         """Batch key containing the target tensor."""
 
-        kwargs: dict[str, Any] = field(
+        kwargs: dict[str, object] = field(
             default_factory=lambda: {"reduction": "none"},
         )
         """Extra keyword arguments passed to loss_fn."""

@@ -25,7 +25,9 @@ from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
+    Resettable,
     RotaryFactors,
+    TensorModule,
 )
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.linear import EnsembleLinear, Linear
@@ -84,7 +86,7 @@ class MultiStreamAttention(nn.Module):
         )
         """Per-stream rotary embeddings (empty = no internal RoPE)."""
 
-        norm_qk: Makeable[nn.Module] | None = None
+        norm_qk: Makeable[TensorModule] | None = None
         """Optional norm applied to Q and K before attention."""
 
         share_qk_norm: bool = True
@@ -94,7 +96,7 @@ class MultiStreamAttention(nn.Module):
         config (shared across streams, but Q/K-independent).
         """
 
-        norm_out: Makeable[nn.Module] | None = None
+        norm_out: Makeable[TensorModule] | None = None
         """Optional norm applied to attention output before proj_out."""
 
         attn_kernel: Makeable[AttentionKernel] = field(
@@ -219,8 +221,8 @@ class MultiStreamAttention(nn.Module):
         # independent instances built from the same config. Shared
         # across streams in both modes (matches single-stream parity).
         if config.norm_qk is None:
-            self.norm_q: nn.Module | None = None
-            self.norm_k: nn.Module | None = None
+            self.norm_q: TensorModule | None = None
+            self.norm_k: TensorModule | None = None
         elif config.share_qk_norm:
             shared = config.norm_qk.make()
             self.norm_q = shared
@@ -228,7 +230,7 @@ class MultiStreamAttention(nn.Module):
         else:
             self.norm_q = config.norm_qk.make()
             self.norm_k = config.norm_qk.make()
-        self.norm_out: nn.Module | None = (
+        self.norm_out: TensorModule | None = (
             config.norm_out.make() if config.norm_out else None
         )
         self.attn_kernel = config.attn_kernel.make()
@@ -261,15 +263,14 @@ class MultiStreamAttention(nn.Module):
             for m in modules:
                 m.reset_parameters()
         for r in self.ropes.values():
-            if hasattr(r, "reset_parameters"):
+            if isinstance(r, Resettable):
                 r.reset_parameters()
-        seen: nn.Module | None = None
+        seen: TensorModule | None = None
         for norm in (self.norm_q, self.norm_k):
             if norm is not None and norm is not seen:
-                if hasattr(norm, "reset_parameters"):
-                    norm.reset_parameters()
+                norm.reset_parameters()
                 seen = norm
-        if self.norm_out is not None and hasattr(self.norm_out, "reset_parameters"):
+        if isinstance(self.norm_out, Resettable):
             self.norm_out.reset_parameters()
 
     def load_stream(self, index: int, *, source: AttentionProjections) -> None:
@@ -453,7 +454,7 @@ class MultiStreamAttention(nn.Module):
                     c_i = cache_list[i]
                     offset = c_i.seen if c_i is not None else 0
                     p = torch.arange(offset, offset + S, device=x.device)
-                assert isinstance(rope, nn.Module)
+                assert isinstance(p, Tensor)
                 cos, sin = rope(p)
                 q, k = RoPE.rotate(q, k, cos, sin)
 
@@ -536,11 +537,13 @@ class MultiStreamAttention(nn.Module):
 
 def _validate_native_state(target: nn.Module, *, source: nn.Module) -> None:
     """Validate the entire native transfer before any destination tensor changes."""
-    expected, actual = target.state_dict(), source.state_dict()
+    expected = target.state_dict()
+    actual = source.state_dict()
     if expected.keys() != actual.keys():
         raise ValueError(
             "Native stream state keys do not match the configured destination.",
         )
     for name, tensor in expected.items():
-        if tensor.shape != actual[name].shape:
+        other = actual[name]
+        if tensor.shape != other.shape:
             raise ValueError(f"Native stream state shape mismatch for {name}.")

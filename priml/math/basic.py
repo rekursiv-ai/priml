@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol, cast, overload
+from typing import TYPE_CHECKING, Protocol, Self, cast, overload
 
 import math
 
@@ -132,7 +132,7 @@ def ceil_div(x: int, y: int) -> int:
 class SupportsLT(Protocol):
     """Anything ``argsort`` can order with ``<``."""
 
-    def __lt__(self, other: Any, /) -> bool:  # noqa: ANN401 -- mirrors typeshed's SupportsDunderLT; object rejects int.
+    def __lt__(self, other: Self, /) -> bool:
         """Compare using less-than operator."""
         ...
 
@@ -216,13 +216,16 @@ def _to_multiple(
             return snapped.to(torch.int64)
         return snapped.to(x.dtype) if x.dtype.is_floating_point else snapped
     if isinstance(x, np.ndarray):
-        ratio = x / multiple
+        array: np.ndarray = cast("np.ndarray", x)
+        ratio = array / multiple
         scaled = np.ceil(ratio) if up else np.floor(ratio)
         snapped = multiple * scaled
         if isinstance(multiple, int):
             return snapped.astype(np.int64)
         return (
-            snapped.astype(x.dtype) if np.issubdtype(x.dtype, np.floating) else snapped
+            snapped.astype(array.dtype)
+            if np.issubdtype(array.dtype, np.floating)
+            else snapped
         )
     if not isinstance(x, (int, float)):
         # A Sequence is in ``Tensorable`` and reaches here, so this is caller

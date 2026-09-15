@@ -89,14 +89,14 @@ def _strike_whatever_stands_there(
     struck = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
     killed_monster = struck.clone()
 
-    for field, mob_class, can_unlock in (
-        ("melee_mobs", 1, yes),
-        ("passive_mobs", 0, yes),
-        ("ranged_mobs", 2, yes),
+    for field, input_mobs, mob_class, can_unlock in (
+        ("melee_mobs", state.melee_mobs, 1, yes),
+        ("passive_mobs", state.passive_mobs, 0, yes),
+        ("ranged_mobs", state.ranged_mobs, 2, yes),
     ):
         mobs, killed, hit, achievements = mechanics.attack_mob_class(
             state,
-            getattr(state, field),
+            input_mobs,
             position=target,
             damage=damage,
             mob_class=mob_class,

@@ -31,7 +31,9 @@ def test_optional_projections_accept_hidden_states() -> None:
     assert config.out_proj is None
     model = config.make()
     hidden = torch.randn(2, 3, 8)
-    assert torch.equal(model(hidden), model.blocks[0](hidden))
+    block = model.blocks[0]
+    assert isinstance(block, TransformerBlock)
+    assert torch.equal(model(hidden), block(hidden))
 
 
 def test_configurable_linear_projections() -> None:
@@ -83,7 +85,9 @@ def test_tied_projection_reuses_input_weight() -> None:
     model = config.make()
     assert isinstance(model.in_proj, Embedding)
     tokens = torch.tensor([[1, 2, 3]])
-    hidden = model.blocks[0](model.in_proj(tokens))
+    block = model.blocks[0]
+    assert isinstance(block, TransformerBlock)
+    hidden = block(model.in_proj(tokens))
     assert torch.equal(model(tokens), hidden @ model.in_proj.weight.T)
     assert "in_proj.weight" in model.state_dict()
     assert not any(key.startswith("out_proj.") for key in model.state_dict())
@@ -109,7 +113,14 @@ def test_layer_count_is_inferred_from_explicit_blocks() -> None:
     assert config.num_layers == -1
     model = config.make()
     assert len(model.blocks) == 2
-    assert [block.depth_index for block in model.blocks] == [((0, 2),), ((1, 2),)]
+    for block in model.blocks:
+        assert isinstance(block, TransformerBlock)
+    depth_indices = [
+        block.depth_index
+        for block in model.blocks
+        if isinstance(block, TransformerBlock)
+    ]
+    assert depth_indices == [((0, 2),), ((1, 2),)]
 
 
 @pytest.mark.parametrize("causal", [False, True])

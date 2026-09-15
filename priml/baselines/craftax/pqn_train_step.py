@@ -18,9 +18,9 @@ chasing a value the network had already moved.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Self, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 from configgle import Makes, PartialConfig
 from torch import Tensor
@@ -36,8 +36,10 @@ from priml.baselines.craftax.evaluation import (
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.observation import observation_size
 from priml.baselines.craftax.pqn import RecurrentQNetwork, epsilon_at
+from priml.lib.custom_json import ListCodec
 from priml.math.advantage import explained_variance, q_lambda_targets
 from priml.math.schedules import linear
+from priml.optimizers.lr import learning_rate
 from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
 
@@ -52,7 +54,7 @@ type _StepFn = Callable[
 ]
 """The model's one-step entry point, compiled or not.
 
-Typed precisely rather than as ``Callable[..., Any]``: an ``Any`` here would
+Typed precisely rather than as ``Callable[...]``: an ``object`` here would
 erase the recurrent state's shape at every call site, and the state being a
 PAIR is the thing most easily got wrong."""
 
@@ -341,7 +343,7 @@ class CraftaxPQNTrainStep(TrainStep):
         )
 
     @override
-    def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def preprocess_batch(self, batch: dict[str, object]) -> dict[str, object]:
         """Pass the loop's batch through: the rollout is collected here."""
         return batch
 
@@ -365,7 +367,7 @@ class CraftaxPQNTrainStep(TrainStep):
         # clock advance exactly as they do for every other recipe -- one
         # tick per PPO update, however many optimizer calls it makes.
         with self.timer_step:
-            metrics = self._optimize(rollout)
+            loss, values, metrics = self._optimize(rollout)
 
         metrics["epsilon"] = epsilon
         metrics.update(self._episode_metrics())
@@ -373,11 +375,7 @@ class CraftaxPQNTrainStep(TrainStep):
         metrics["explained_variance"] = float(
             explained_variance(chosen.flatten(), rollout.target.flatten()),
         )
-        return {
-            "loss": metrics.pop("_loss_tensor"),
-            "model": metrics.pop("_values"),
-            "metrics": metrics,
-        }
+        return {"loss": loss, "model": values, "metrics": metrics}
 
     @torch.no_grad()
     def collect(self) -> QRollout:
@@ -491,17 +489,23 @@ class CraftaxPQNTrainStep(TrainStep):
             return self.train_loss(**batch)
 
     @override
-    def call_eval(self, *, observation: Tensor, **_batch: object) -> Tensor:
+    def call_eval(self, *args: object, **kwargs: object) -> Tensor:
         """Return action values for a batch of observations.
 
         Args:
-          observation: Batched observations, ``[batch, observation_size]``.
-          **_batch: Ignored; only ``observation`` is scored.
+          *args: Positional evaluation inputs.
+          **kwargs: Evaluation inputs, including ``observation``.
 
         Returns:
           q_values: Value of each action, computed with a fresh state.
 
         """
+        if args:
+            assert len(args) == 1
+            observation = args[0]
+        else:
+            observation = kwargs["observation"]
+        assert isinstance(observation, Tensor)
         with evaluation_mode(self.model), torch.no_grad():
             return self.model.forward(observation)
 
@@ -522,11 +526,27 @@ class CraftaxPQNTrainStep(TrainStep):
     def on_epoch_end(self) -> None:
         """Nothing to flush: every update completes within one step."""
 
+    class StateDict(TrainStep.StateDict):
+        """The base state plus the environment, the LSTM state, and the cursor."""
+
+        env: CraftaxEnv.StateDict
+        generator: Tensor
+        observation: Tensor
+        hidden: Tensor
+        cell: Tensor
+        previous_action: Tensor
+        previous_done: Tensor
+        episode_return: Tensor
+        episode_length: Tensor
+        finished_returns: list[float]
+        finished_lengths: list[int]
+
     @override
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> StateDict:
         """Return model, optimizer, environment, state, and counters."""
         hidden, cell = self._state
-        return super().state_dict() | {
+        return {
+            **super().state_dict(),
             "env": self.env.state_dict(),
             "generator": self._generator.get_state(),
             "observation": self._observation,
@@ -541,19 +561,32 @@ class CraftaxPQNTrainStep(TrainStep):
         }
 
     @override
-    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+        load_optimizer: bool = True,
+        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
+    ) -> None:
         """Restore everything :meth:`state_dict` saved."""
-        super().load_state_dict(state_dict, **kwargs)
-        self.env.load_state_dict(state_dict["env"])
-        self._generator.set_state(state_dict["generator"])
-        self._observation = _tensor(state_dict["observation"])
-        self._state = (_tensor(state_dict["hidden"]), _tensor(state_dict["cell"]))
-        self._previous_action = _tensor(state_dict["previous_action"])
-        self._previous_done = _tensor(state_dict["previous_done"])
-        self._episode_return = _tensor(state_dict["episode_return"])
-        self._episode_length = _tensor(state_dict["episode_length"])
-        self._finished_returns = cast(list[float], state_dict["finished_returns"])
-        self._finished_lengths = cast(list[int], state_dict["finished_lengths"])
+        super().load_state_dict(
+            state_dict,
+            strict=strict,
+            load_optimizer=load_optimizer,
+            remap=remap,
+        )
+        state = cast(CraftaxPQNTrainStep.StateDict, state_dict)
+        self.env.load_state_dict(state["env"])
+        self._generator.set_state(state["generator"])
+        self._observation = state["observation"]
+        self._state = (state["hidden"], state["cell"])
+        self._previous_action = state["previous_action"]
+        self._previous_done = state["previous_done"]
+        self._episode_return = state["episode_return"]
+        self._episode_length = state["episode_length"]
+        self._finished_returns = list(state["finished_returns"])
+        self._finished_lengths = list(state["finished_lengths"])
 
     def _explore(self, q_values: Tensor, *, epsilon: float) -> Tensor:
         """Take the greedy action, except at rate ``epsilon``."""
@@ -571,9 +604,14 @@ class CraftaxPQNTrainStep(TrainStep):
         )
         return torch.where(explore, random, greedy)
 
-    def _optimize(self, rollout: QRollout) -> dict[str, Any]:
+    def _optimize(
+        self,
+        rollout: QRollout,
+    ) -> tuple[Tensor, Tensor, dict[str, float | Tensor]]:
         """Take every configured pass over the rollout."""
-        metrics: dict[str, Any] = {}
+        metrics: dict[str, float | Tensor] = {}
+        final_loss: Tensor | None = None
+        final_values: Tensor | None = None
         for _ in range(self.config.num_epochs):
             for minibatch in rollout.minibatches(
                 count=self.config.num_minibatches,
@@ -591,11 +629,13 @@ class CraftaxPQNTrainStep(TrainStep):
                     "q_loss": float(loss.detach()),
                     "q_mean": float(values.detach().mean()),
                     "grad_norm": float(grad_norm.detach()),
-                    "learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "_loss_tensor": loss.detach(),
-                    "_values": values.detach(),
+                    "learning_rate": learning_rate(self.optimizer),
                 }
-        return metrics
+                final_loss = loss.detach()
+                final_values = values.detach()
+        assert final_loss is not None
+        assert final_values is not None
+        return final_loss, final_values, metrics
 
     def _loss(self, minibatch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         """Regress the taken actions' values toward their targets."""
@@ -624,8 +664,12 @@ class CraftaxPQNTrainStep(TrainStep):
         self._episode_return = self._episode_return + reward
         self._episode_length = self._episode_length + 1
         if bool(done.any()):
-            self._finished_returns.extend(self._episode_return[done].tolist())
-            self._finished_lengths.extend(self._episode_length[done].tolist())
+            self._finished_returns.extend(
+                ListCodec.coerce(self._episode_return[done].tolist(), float),
+            )
+            self._finished_lengths.extend(
+                ListCodec.coerce(self._episode_length[done].tolist(), int),
+            )
             self._episode_return = self._episode_return * ~done
             self._episode_length = self._episode_length * ~done
 
@@ -695,13 +739,3 @@ class _EvaluationActor:
 def _compiled(function: _StepFn, *, enabled: bool) -> _StepFn:
     """Compile one bound method, or return it untouched."""
     return torch.compile(function) if enabled else function
-
-
-# A state dict is untyped by construction, and assigning straight from it would widen
-# every restored attribute to ``Any`` -- erasing the shapes the rest of this file
-# depends on.
-def _tensor(value: object) -> Tensor:
-    """Narrow one checkpoint entry to a tensor."""
-    if not isinstance(value, Tensor):
-        raise TypeError(f"checkpoint entry must be a tensor, got {type(value)}")
-    return value

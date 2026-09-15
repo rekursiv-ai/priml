@@ -14,11 +14,11 @@ the library. Instead the config carries a callable; the builders live in
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
 from pathlib import Path
-from typing import Any, Self, cast, override
+from typing import Protocol, Self, cast, override
 
 import math
 
@@ -28,7 +28,7 @@ from torch.nn import functional
 
 import torch
 
-from priml.baselines.cifar10.model import ResNet
+from priml.baselines.cifar10.model import ResNet, SpeedNet
 from priml.data.augmentation_gpu import pad_crop_flip
 from priml.math.schedules import Schedule, cosine
 from priml.math.stats import PcaDecompose, pca_eigh
@@ -135,7 +135,7 @@ class Cifar10TrainStep(TrainStep):
         self.schedule: Schedule[float] = config.schedule.make()
         # A whitening layer is fitted from data, so it cannot be initialized in
         # the constructor -- the first training batch supplies the images.
-        self._whitened = not hasattr(self.model, "init_whiten")
+        self._whitened = not isinstance(self.model, SpeedNet)
 
     @override
     def train_step(self, **batch: object) -> TrainStepOutput:
@@ -157,7 +157,7 @@ class Cifar10TrainStep(TrainStep):
 
         self.model.train()
         with self._autocast():
-            logits = self.model(media)
+            logits = self._classifier(media)
             loss = self._loss(logits, label)
         loss.sum().backward()
 
@@ -186,7 +186,7 @@ class Cifar10TrainStep(TrainStep):
         assert isinstance(label, Tensor)
         self.model.train()
         with torch.no_grad(), self._autocast():
-            logits = self.model(media)
+            logits = self._classifier(media)
             loss = self._loss(logits, label)
         return {"loss": loss, "model": logits}
 
@@ -198,41 +198,57 @@ class Cifar10TrainStep(TrainStep):
         label = batch["label"]
         assert isinstance(label, Tensor)
         logits = self.call_eval(media=media)
+        assert isinstance(logits, Tensor)
         return {"loss": self._loss(logits, label), "model": logits}
 
     @override
-    def call_eval(self, **batch: object) -> Tensor:
+    def call_eval(self, *args: object, **batch: object) -> object:
         """Return evaluation logits, optionally averaged over augmentations."""
+        assert not args
         media = batch["media"]
         assert isinstance(media, Tensor)
         self.model.eval()
         with torch.inference_mode(), self._autocast():
             if self.config.use_tta:
-                return _tta_logits(self.model, media)
-            logits = self.model(media)
-            assert isinstance(logits, Tensor)
-            return logits
+                return _tta_logits(self._classifier, media)
+            return self._classifier(media)
 
     @override
     def on_epoch_end(self) -> None:
         """Do nothing: this step accumulates nothing across a boundary."""
 
+    class StateDict(TrainStep.StateDict):
+        """Base state plus whether the whitening layer was fitted."""
+
+        whitened: bool
+
     @override
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> StateDict:
         """Extend the base state with whether the whitening layer was fitted.
 
         Fitting happens once, from the first batch seen, so a resume that
         forgot it would re-fit against a model whose weights had already moved.
         """
-        state = super().state_dict()
-        state["whitened"] = self._whitened
-        return state
+        return {**super().state_dict(), "whitened": self._whitened}
 
     @override
-    def load_state_dict(self, state_dict: dict[str, Any], **kwargs: Any) -> None:
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        *,
+        strict: bool = True,
+        load_optimizer: bool = True,
+        remap: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]] | None = None,
+    ) -> None:
         """Restore state produced by :meth:`state_dict`."""
-        super().load_state_dict(state_dict, **kwargs)
-        self._whitened = state_dict["whitened"]
+        state = cast(Cifar10TrainStep.StateDict, state_dict)
+        super().load_state_dict(
+            state,
+            strict=strict,
+            load_optimizer=load_optimizer,
+            remap=remap,
+        )
+        self._whitened = state["whitened"]
 
     @property
     @override
@@ -275,17 +291,29 @@ class Cifar10TrainStep(TrainStep):
             reduction="none",
         )
 
+    # A contract, not a class check: tests substitute counting and constant
+    # fakes, and ``nn.Module.__call__`` carries no signature of its own, so the
+    # cast is the only place the images-to-logits shape can be stated.
+    @property
+    def _classifier(self) -> _Classifier:
+        """The model, typed as a batch of images to logits."""
+        return cast(_Classifier, self.model)
+
     def _maybe_init_whiten(self, media: Tensor) -> None:
         """Fit the model's whitening layer once, from the first batch seen."""
         if self._whitened:
             return
-        model = cast(Any, self.model)
+        model = self.model
+        assert isinstance(model, SpeedNet)
         configured = self.config.whiten_cache_path
         cache = Path(configured) if configured else None
         if cache is not None and cache.is_file():
-            model.whiten.weight.data.copy_(
+            weight = cast(
+                object,
                 torch.load(cache, map_location=self.device, weights_only=True),
             )
+            assert isinstance(weight, Tensor)
+            model.whiten.weight.data.copy_(weight)
         else:
             model.init_whiten(
                 media[: self.config.whiten_num_images],
@@ -314,7 +342,7 @@ class Cifar10TrainStep(TrainStep):
 # Six forward passes: the image and two one-pixel-shifted crops, each paired with its
 # horizontal mirror. Shifts come from a reflect-padded copy, so no crop introduces a
 # border the network never saw in training.
-def _tta_logits(model: nn.Module, media: Tensor) -> Tensor:
+def _tta_logits(model: _Classifier, media: Tensor) -> Tensor:
     """Average logits over the mirror pair of three overlapping crops."""
     size = media.shape[-1]
     padded = functional.pad(media, (1,) * 4, "reflect")
@@ -325,8 +353,12 @@ def _tta_logits(model: nn.Module, media: Tensor) -> Tensor:
     ) / 3
 
 
-def _mirrored(model: nn.Module, view: Tensor) -> Tensor:
+def _mirrored(model: _Classifier, view: Tensor) -> Tensor:
     """Average the model over ``view`` and its horizontal mirror."""
-    averaged = 0.5 * (model(view) + model(view.flip(-1)))
-    assert isinstance(averaged, Tensor)
-    return averaged
+    return 0.5 * (model(view) + model(view.flip(-1)))
+
+
+class _Classifier(Protocol):
+    """What this recipe calls the model through: a batch of images to logits."""
+
+    def __call__(self, media: Tensor, /) -> Tensor: ...

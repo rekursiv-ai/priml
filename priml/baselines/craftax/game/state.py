@@ -12,9 +12,9 @@ the whole world to change one tile would dominate the step cost.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
-from typing import Any, Self
+from typing import Protocol, Self, cast
 
 from torch import Tensor
 
@@ -370,31 +370,38 @@ class EnvState:
 
         return _map_state(gather, self, self)
 
-    def state_dict(self) -> dict[str, Any]:
+    def state_dict(self) -> dict[str, Tensor]:
         """Return every tensor by dotted name, for checkpointing.
+
+        Keyed by field path rather than a fixed schema, like a module's own
+        ``state_dict``: the names are the dataclass fields.
 
         Returns:
           flat: Flattened state dict with dotted-path keys for nested fields.
 
         """
-        flat: dict[str, Any] = {}
+        flat: dict[str, Tensor] = {}
         for field in fields(self):
-            value = getattr(self, field.name)
+            value: object = getattr(self, field.name)  # pyright: ignore[reportAny] -- dataclass fields are dynamically accessed.
+            assert isinstance(value, (Tensor, Inventory, Mobs))
             if isinstance(value, Tensor):
                 flat[field.name] = value
                 continue
             for sub in fields(value):
-                flat[f"{field.name}.{sub.name}"] = getattr(value, sub.name)
+                subvalue: object = getattr(value, sub.name)  # pyright: ignore[reportAny] -- dataclass fields are dynamically accessed.
+                assert isinstance(subvalue, Tensor)
+                flat[f"{field.name}.{sub.name}"] = subvalue
         return flat
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore tensors saved by :meth:`state_dict`, in place.
 
         Args:
           state_dict: State dict.
 
         """
-        for name, value in state_dict.items():
+        state = cast(Mapping[str, Tensor], state_dict)
+        for name, value in state.items():
             head, _, tail = name.partition(".")
             target = getattr(self, head) if tail else self
             setattr(target, tail or head, value)
@@ -406,20 +413,46 @@ def _map_state[StateT: EnvState](
     right: StateT,
 ) -> StateT:
     """Apply ``combine`` to every matching tensor pair of two states."""
-    merged: dict[str, Any] = {}
+    merged: dict[str, Tensor | Inventory | Mobs] = {}
     for field in fields(left):
-        mine = getattr(left, field.name)
-        theirs = getattr(right, field.name)
+        mine: object = getattr(left, field.name)  # pyright: ignore[reportAny] -- dataclass fields are dynamically accessed.
+        theirs: object = getattr(right, field.name)  # pyright: ignore[reportAny] -- dataclass fields are dynamically accessed.
+        assert isinstance(mine, (Tensor, Inventory, Mobs))
+        assert isinstance(theirs, (Tensor, Inventory, Mobs))
         if isinstance(mine, Tensor):
+            assert isinstance(theirs, Tensor)
             merged[field.name] = combine(mine, theirs)
             continue
-        merged[field.name] = type(mine)(
+        if isinstance(mine, Inventory):
+            assert isinstance(theirs, Inventory)
+            merged[field.name] = Inventory(
+                **{
+                    sub.name: combine(
+                        _field_tensor(mine, sub.name),
+                        _field_tensor(theirs, sub.name),
+                    )
+                    for sub in fields(mine)
+                },
+            )
+            continue
+        assert isinstance(theirs, Mobs)
+        merged[field.name] = Mobs(
             **{
-                sub.name: combine(getattr(mine, sub.name), getattr(theirs, sub.name))
+                sub.name: combine(
+                    _field_tensor(mine, sub.name),
+                    _field_tensor(theirs, sub.name),
+                )
                 for sub in fields(mine)
             },
         )
-    return type(left)(**merged)
+    factory = cast(_StateFactory[StateT], type(left))
+    return factory(**merged)
+
+
+def _field_tensor(instance: Inventory | Mobs, name: str) -> Tensor:
+    value: object = getattr(instance, name)  # pyright: ignore[reportAny] -- dataclass fields are dynamically accessed.
+    assert isinstance(value, Tensor)
+    return value
 
 
 def empty_state(*, num_envs: int, device: torch.device) -> EnvState:
@@ -544,3 +577,7 @@ def empty_state(*, num_envs: int, device: torch.device) -> EnvState:
         ),
         timestep=scalar_int.clone(),
     )
+
+
+class _StateFactory[StateT: EnvState](Protocol):
+    def __call__(self, **fields: Tensor | Inventory | Mobs) -> StateT: ...

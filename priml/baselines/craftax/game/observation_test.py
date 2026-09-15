@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Protocol, cast
+
 from torch import Tensor
 
 import pytest
@@ -14,7 +17,7 @@ from priml.baselines.craftax.conftest import (
 )
 from priml.baselines.craftax.game import constants, observation
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
-from priml.baselines.craftax.game.state import EnvState, empty_state
+from priml.baselines.craftax.game.state import EnvState, Mobs, empty_state
 
 
 pytestmark = pytest.mark.usefixtures("warm_reference")
@@ -129,7 +132,7 @@ def test_a_distant_creature_is_not_visible() -> None:
 def test_creature_classes_are_distinguishable() -> None:
     def creature(field: str) -> Tensor:
         state = _state()
-        mobs = getattr(state, field)
+        mobs = cast(Mobs, getattr(state, field))
         mobs.mask[:, 0, 0] = True
         mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
         return observation.render(state)
@@ -185,7 +188,10 @@ def test_the_width_matches_the_reference_environment() -> None:
     ``compute_jax_jit`` marker: the JIT is the cost, so it runs in the slow
     tier.
     """
-    upstream = reference("craftax.envs.craftax_symbolic_env")
+    upstream = cast(
+        _ReferenceModule,
+        reference("craftax.envs.craftax_symbolic_env"),
+    )
     smallest = upstream.StaticEnvParams(
         map_size=(9, 9),
         num_levels=1,
@@ -199,6 +205,21 @@ def test_the_width_matches_the_reference_environment() -> None:
     environment = upstream.CraftaxSymbolicEnvNoAutoReset(smallest)
     space = environment.observation_space(environment.default_params)
     assert space.shape == (observation.observation_size(),)
+
+
+class _Space(Protocol):
+    shape: tuple[int, ...]
+
+
+class _Environment(Protocol):
+    default_params: object
+
+    def observation_space(self, params: object) -> _Space: ...
+
+
+class _ReferenceModule(Protocol):
+    StaticEnvParams: Callable[..., object]
+    CraftaxSymbolicEnvNoAutoReset: Callable[[object], _Environment]
 
 
 if __name__ == "__main__":

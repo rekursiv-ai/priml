@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import functools
 import tempfile
@@ -466,7 +466,7 @@ def test_mla_bfb(device: str) -> None:
         ),
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
         seed=0,
-        run=lambda m, x: first_tensor(m(x)),
+        run=lambda m, x: cast(MultiHeadLatentAttention, m)(x),
     )
 
 
@@ -612,7 +612,7 @@ def _reference_mla_forward(
 def _tensor_parallel_mla(
     *,
     q_lora_rank: int | None = None,
-) -> tuple[nn.Module, Tensor]:
+) -> tuple[MultiHeadLatentAttention, Tensor]:
     """Build a small MLA exercising head-parallel and latent-absorb paths."""
     module = MultiHeadLatentAttention.Config(
         channels_in=16,
@@ -642,8 +642,10 @@ def _record_case(
         model, x = _tensor_parallel_mla(q_lora_rank=q_lora_rank)
         dense = first_tensor(model(x))
         sharded = apply_tensor_parallel(model, mesh)
+        assert isinstance(sharded, MultiHeadLatentAttention)
         # A sharded q-path guards against a replicated no-op passing trivially.
         q = sharded.q_proj if sharded.q_proj is not None else sharded.q_b_proj
+        assert isinstance(q, Linear)
         if not isinstance(q.weight, DTensor):
             target.write_text("FAIL:q-path-not-sharded")
             return

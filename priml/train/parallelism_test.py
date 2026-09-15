@@ -115,20 +115,27 @@ class _BufferOnly(nn.Module):
         self.register_buffer("stat", torch.zeros(4))
 
     def reset_parameters(self) -> None:
-        self.stat.fill_(1.0)
+        stat = self._buffers["stat"]
+        assert isinstance(stat, Tensor)
+        stat.fill_(1.0)
 
 
 def test_no_parallel_materializes_meta_buffer_only_model() -> None:
     """NoParallel materializes meta buffers even when no parameters exist."""
     with torch.device("meta"):
         model = _BufferOnly()
-    assert model.stat.is_meta
+    model_stat: object = model._buffers["stat"]
+    assert isinstance(model_stat, Tensor)
+    assert model_stat.is_meta
 
     result = NoParallel.Config(device="cpu").make()(model)
 
-    assert not result.stat.is_meta
-    assert result.stat.device.type == "cpu"
-    torch.testing.assert_close(result.stat, torch.ones(4))
+    result_stat: object = result._buffers["stat"]
+    assert isinstance(result_stat, Tensor)
+    assert isinstance(result_stat, Tensor)
+    assert not result_stat.is_meta
+    assert result_stat.device.type == "cpu"
+    torch.testing.assert_close(result_stat, torch.ones(4))
 
 
 def test_no_parallel_materializes_meta_model():
@@ -284,7 +291,7 @@ def _fsdp_materialize_worker(result_dir: str, mesh: DeviceMesh) -> None:
             (result_path / f"rank_{rank}").write_text("FAIL:non-finite")
         else:
             (result_path / f"rank_{rank}").write_text("ok")
-    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test process.
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
         (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None
@@ -376,9 +383,9 @@ def _bn_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
         bn = next(m for m in out.modules() if isinstance(m, nn.BatchNorm1d))
         weight = bn.weight
         local = weight.to_local() if isinstance(weight, DTensor) else weight
-        ok = local is not None and torch.isfinite(local).all()
+        ok = torch.isfinite(local).all()
         (result_path / f"rank_{rank}").write_text("ok" if ok else "FAIL:non-finite")
-    except Exception as e:  # noqa: BLE001 -- Distributed worker failures are serialized for the parent test process.
+    except (RuntimeError, OSError, ValueError, TypeError, KeyError) as e:
         (result_path / f"rank_{rank}").write_text(f"FAIL:{e!r}")
     finally:
         runtime._device_mesh = None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import importlib
 import os
 import subprocess
 import sys
@@ -44,7 +45,7 @@ def test_composing_a_path_does_not_load_torch() -> None:
     package sits at a different depth and a hardcoded walk points outside it.
     """
     module = resolve_working_dir.__module__
-    package = __import__(module.split(".", 1)[0])
+    package = importlib.import_module(module.split(".", 1)[0])
     assert package.__file__ is not None
     source = (
         "import sys; "
