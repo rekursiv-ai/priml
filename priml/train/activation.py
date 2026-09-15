@@ -403,77 +403,7 @@ class QuantizedModuleActivationStorage:
                     groups,
                 )
 
-            @classmethod
-            @override
-            def backward(
-                cls,
-                ctx: _ConvContext,
-                /,
-                *grad_outputs: Tensor,
-            ) -> tuple[
-                Tensor,
-                Tensor,
-                Tensor | None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ]:
-                (grad_output,) = grad_outputs
-                saved = ctx.saved_tensors
-
-                if ctx.quantized:
-                    input_q, weight, bias = (
-                        saved[0],
-                        saved[1],
-                        (saved[2] if saved[2].numel() > 0 else None),
-                    )
-                    # Dequantize to the original input dtype (not hardcoded
-                    # fp32) so the backward matmuls stay dtype-consistent.
-                    input = input_q.to(ctx.input_dtype) * ctx.scale[0].to(
-                        ctx.input_dtype,
-                    )
-                else:
-                    input, weight, bias = (
-                        saved[0],
-                        saved[1],
-                        (saved[2] if saved[2].numel() > 0 else None),
-                    )
-
-                assert not isinstance(ctx.padding, str)
-                grad_input = torch.nn.grad.conv2d_input(
-                    input.shape,
-                    weight,
-                    grad_output,
-                    ctx.stride,
-                    ctx.padding,
-                    ctx.dilation,
-                    ctx.groups,
-                )
-                grad_weight = torch.nn.grad.conv2d_weight(
-                    input,
-                    weight.shape,
-                    grad_output,
-                    ctx.stride,
-                    ctx.padding,
-                    ctx.dilation,
-                    ctx.groups,
-                )
-                grad_bias = grad_output.sum([0, 2, 3]) if bias is not None else None
-
-                return (
-                    grad_input,
-                    grad_weight,
-                    grad_bias,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+            backward = staticmethod(_quantized_conv2d_backward)
 
         # Replace _conv_forward to intercept before F.conv2d call.
         def quantized_conv_forward(
@@ -495,6 +425,77 @@ class QuantizedModuleActivationStorage:
 
         private_name = "_conv" + "_forward"
         setattr(module, private_name, quantized_conv_forward)
+
+
+def _quantized_conv2d_backward(
+    ctx: _ConvContext,
+    /,
+    *grad_outputs: Tensor,
+) -> tuple[
+    Tensor,
+    Tensor,
+    Tensor | None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+]:
+    """Compute convolution gradients from the saved activation."""
+    (grad_output,) = grad_outputs
+    saved = ctx.saved_tensors
+
+    if ctx.quantized:
+        input_q, weight, bias = (
+            saved[0],
+            saved[1],
+            (saved[2] if saved[2].numel() > 0 else None),
+        )
+        # Dequantize to the original input dtype (not hardcoded
+        # fp32) so the backward matmuls stay dtype-consistent.
+        input = input_q.to(ctx.input_dtype) * ctx.scale[0].to(
+            ctx.input_dtype,
+        )
+    else:
+        input, weight, bias = (
+            saved[0],
+            saved[1],
+            (saved[2] if saved[2].numel() > 0 else None),
+        )
+
+    assert not isinstance(ctx.padding, str)
+    grad_input = torch.nn.grad.conv2d_input(
+        input.shape,
+        weight,
+        grad_output,
+        ctx.stride,
+        ctx.padding,
+        ctx.dilation,
+        ctx.groups,
+    )
+    grad_weight = torch.nn.grad.conv2d_weight(
+        input,
+        weight.shape,
+        grad_output,
+        ctx.stride,
+        ctx.padding,
+        ctx.dilation,
+        ctx.groups,
+    )
+    grad_bias = grad_output.sum([0, 2, 3]) if bias is not None else None
+
+    return (
+        grad_input,
+        grad_weight,
+        grad_bias,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 
 
 def _pack_quantized(
