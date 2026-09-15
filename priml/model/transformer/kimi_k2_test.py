@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
+import sys
 import warnings
 
 from configgle.testing import assert_pprint_golden
@@ -87,6 +89,7 @@ def _canonical_config() -> KimiK2.Config:
     )
 
 
+@pytest.mark.compute_large_fixture
 def test_kimi_k2_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
@@ -245,6 +248,7 @@ class TestConfig:
         cfg = KimiK2.Config.from_hf(config)
         assert cfg.channels_hidden_expert == cfg.channels_hidden_dense == 128
 
+    @pytest.mark.compute_large_fixture
     def test_nonpositive_channels_still_print(self) -> None:
         """The degenerate config is the one worth rendering; torch rejects it."""
         config = KimiK2.Config.from_hf(_hf_config(hidden_size=0))
@@ -500,25 +504,58 @@ def test_kimi_k2_matches_hf_deepseek_v3(q_lora_rank: int | None):
     )
 
 
-def test_transformers_compat_shims_restore_module_state() -> None:
+@pytest.mark.parametrize("fx_present", [False, True])
+@pytest.mark.parametrize("legacy_present", [False, True])
+@pytest.mark.parametrize("raise_inside", [False, True])
+def test_transformers_compat_shims_restore_module_state(
+    monkeypatch: pytest.MonkeyPatch,
+    fx_present: bool,
+    legacy_present: bool,
+    raise_inside: bool,
+) -> None:
     """Shims apply inside the block and leave the modules exactly as found."""
-    pytest.importorskip("transformers")
-    from transformers import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
-        DynamicCache,
-    )
-    from transformers.utils import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
-        import_utils,
-    )
+    # The real HF parity test above exercises Transformers itself. Here the
+    # version-dependent owners cover both existing and removed symbols.
+    transformers = ModuleType("transformers")
+    utils = ModuleType("transformers.utils")
+    import_utils = ModuleType("transformers.utils.import_utils")
 
-    # ``vars``, not ``getattr``: ``DynamicCache`` inherits from ``Cache``, so a
-    # deleted shim would still resolve through the base class and hide a leak.
+    class DynamicCache:
+        @classmethod
+        def from_legacy_cache(cls, pkv: object) -> object:
+            del cls
+            return pkv
+
+    if fx_present:
+        monkeypatch.setattr(
+            import_utils,
+            "is_torch_fx_available",
+            Mock(return_value=True),
+            raising=False,
+        )
+    if not legacy_present:
+        monkeypatch.delattr(DynamicCache, "from_legacy_cache")
+    vars(transformers)["DynamicCache"] = DynamicCache
+    vars(transformers)["utils"] = utils
+    vars(utils)["import_utils"] = import_utils
+    for module in (transformers, utils, import_utils):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    # Inspect owner namespaces directly so inherited attributes cannot hide leaks.
     absent = object()
     fx_before: object = vars(import_utils).get("is_torch_fx_available", absent)  # pyright: ignore[reportAny] -- vars() exposes dynamic module state as Any.
     legacy_before: object = vars(DynamicCache).get("from_legacy_cache", absent)  # pyright: ignore[reportAny] -- vars() exposes dynamic class state as Any.
 
-    with _install_transformers_compat_shims():
-        assert callable(import_utils.is_torch_fx_available)
+    error = (
+        pytest.raises(RuntimeError, match="inside shims")
+        if raise_inside
+        else nullcontext()
+    )
+    with error, _install_transformers_compat_shims():
+        assert callable(cast(object, vars(import_utils)["is_torch_fx_available"]))
         assert callable(DynamicCache.from_legacy_cache)
+        if raise_inside:
+            raise RuntimeError("inside shims")
 
     assert vars(import_utils).get("is_torch_fx_available", absent) is fx_before
     assert vars(DynamicCache).get("from_legacy_cache", absent) is legacy_before

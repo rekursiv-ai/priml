@@ -560,6 +560,7 @@ def test_load_guard_finite_with_inf_max_steps(temp_checkpoint_dir: Path) -> None
 # -- distributed / sharded capability --------------------------------------
 
 
+@pytest.mark.compute_distributed
 def test_dtensor_state_saves_complete_directory(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -587,6 +588,7 @@ def test_dtensor_state_saves_complete_directory(
     assert ckpt.available_steps() == [0]
 
 
+@pytest.mark.compute_distributed
 def test_distributed_save_barriers(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -617,12 +619,8 @@ def test_distributed_save_barriers(
     assert calls, "distributed save must call dist.barrier()"
 
 
-def test_partial_shard_not_loadable(
-    temp_checkpoint_dir: Path,
-    single_rank_group: None,
-) -> None:
+def test_partial_shard_not_loadable(temp_checkpoint_dir: Path) -> None:
     """A directory missing its completeness marker must not be returned."""
-    del single_rank_group
     ckpt = Checkpointer(
         Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=1),
     )
@@ -637,6 +635,7 @@ def test_partial_shard_not_loadable(
 # -- async storage ---------------------------------------------------------
 
 
+@pytest.mark.compute_distributed
 def test_async_storage_roundtrip(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -662,6 +661,7 @@ def test_async_storage_roundtrip(
     assert torch.equal(value, torch.tensor([1, 2, 3]))
 
 
+@pytest.mark.compute_distributed
 def test_async_reads_a_sync_written_plain_file(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -763,6 +763,7 @@ def test_plain_read_preserves_cpu_rng_state(
     torch.set_rng_state(restored)
 
 
+@pytest.mark.compute_distributed
 def test_async_storage_runs_after_write_callback_post_durability(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -786,6 +787,7 @@ def test_async_storage_runs_after_write_callback_post_durability(
     assert saw_complete == [True], "after_write ran before the write was durable"
 
 
+@pytest.mark.compute_distributed
 def test_async_storage_state_safe_to_mutate_after_write(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -813,6 +815,7 @@ def test_async_storage_state_safe_to_mutate_after_write(
     storage.flush()
 
 
+@pytest.mark.compute_distributed
 def test_async_checkpointer_end_to_end(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -837,6 +840,7 @@ def test_async_checkpointer_end_to_end(
     assert ckpt.available_steps() == [10]  # Now flushed -> visible.
 
 
+@pytest.mark.compute_distributed
 def test_async_retention_enforced_after_flush_no_close(
     temp_checkpoint_dir: Path,
     single_rank_group: None,
@@ -867,6 +871,7 @@ def test_storer_defaults_to_sync() -> None:
     assert isinstance(storer, SyncLocalStateDictStorer)
 
 
+@pytest.mark.compute_distributed
 def test_async_is_complete_is_pure_no_join(
     temp_checkpoint_dir: Path,
     single_rank_group: None,

@@ -248,6 +248,7 @@ def test_compile_resolves_dtype_when_unspecified():
     assert b.dtype == torch.float64
 
 
+@pytest.mark.compute_torch_compile
 def test_a_scalar_argument_survives_a_fullgraph_compile() -> None:
     """A Python number must convert, not abort the graph.
 
@@ -453,6 +454,7 @@ def test_shares_storage_on_cuda_tensors() -> None:
         assert not shares_storage(parent, other)
 
 
+@pytest.mark.compute_torch_compile
 def test_shares_storage_for_compile_matches_eager_under_fullgraph() -> None:
     """The custom op must agree with the eager predicate and keep one graph.
 
@@ -480,6 +482,7 @@ def test_shares_storage_for_compile_matches_eager_under_fullgraph() -> None:
         assert bool(compiled(x, y)) is shares_storage(x, y), name
 
 
+@pytest.mark.compute_torch_compile
 def test_shares_storage_for_compile_branches_without_a_graph_break() -> None:
     """``torch.cond`` on the op keeps the whole thing in one graph.
 
@@ -598,6 +601,7 @@ def test_is_private_conversion_is_wrong_for_a_view_by_construction() -> None:
     assert not torch.equal(parent, before), "the write really reaches the parent"
 
 
+@pytest.mark.compute_torch_compile
 def test_is_private_conversion_traces_under_fullgraph_compile() -> None:
     """Traceability is the reason ``float2rgb`` uses this, not ``shares_storage``.
 

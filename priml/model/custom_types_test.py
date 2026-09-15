@@ -143,6 +143,7 @@ def test_propagate_missing_attr_raises():
         propagate_attr(NoChannels(), "channels_out", 64, protocol=ChannelsIn)
 
 
+@pytest.mark.compute_large_fixture
 def test_channel_config_fields_are_uniform() -> None:
     root = _CWD.parent
     violations: list[str] = []

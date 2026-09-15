@@ -17,7 +17,6 @@ import torch
 from priml import runtime
 from priml.loss.custom_types import LossOutput
 from priml.metrics.binary_accuracy import BinaryAccuracy
-from priml.testing.fixtures import get_device
 from priml.train.parallelism import NoParallel
 from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
 
@@ -98,7 +97,13 @@ def test_trainable_logistic_regression():
     assert accuracy > 0.9
 
 
-def test_meta_construction_draws_on_the_placement_devices_generator() -> None:
+@pytest.mark.parametrize(
+    "placement",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.gpu_torch_cuda)],
+)
+def test_meta_construction_draws_on_the_placement_devices_generator(
+    placement: str,
+) -> None:
     """Under ``"meta"`` init runs where the model will live, not on the host.
 
     Eager construction allocates on the CPU and draws from the CPU generator,
@@ -106,7 +111,7 @@ def test_meta_construction_draws_on_the_placement_devices_generator() -> None:
     consumes a different random stream than the same recipe materialized on
     the device, and every parameter makes the trip over the bus.
     """
-    device = get_device()
+    device = torch.device(placement)
     config = TrainStep.Config()
     config.model = _LinearModel.Config(in_features=4, out_features=4)
     config.parallelism = NoParallel.Config(device=str(device))

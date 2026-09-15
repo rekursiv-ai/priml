@@ -63,6 +63,7 @@ def _config(
     return config
 
 
+@pytest.mark.compute_large_fixture
 def test_graft_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
