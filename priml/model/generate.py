@@ -19,16 +19,18 @@ Example::
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
+
+import math
 
 from torch import Tensor, nn
 
 import torch
 
-from priml.model.attention.kvcache import KVCache
 from priml.model.custom_types import TensorModule, has_weight
 
 
+@runtime_checkable
 class AttentionLike(Protocol):
     """The attention member ``generate`` reaches for on each block."""
 
@@ -39,7 +41,7 @@ class AttentionLike(Protocol):
         max_seq: int,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
-    ) -> KVCache:
+    ) -> object:
         """Alloc kv cache."""
         ...
 
@@ -49,13 +51,13 @@ class BlockLike(Protocol):
 
     attn: AttentionLike
 
-    def forward_cached(
+    def forward_cached[CacheT](
         self,
         x: Tensor,
         /,
         *,
-        cache: KVCache,
-    ) -> tuple[Tensor, KVCache]:
+        cache: CacheT,
+    ) -> tuple[Tensor, CacheT]:
         """Forward cached."""
         ...
 
@@ -111,12 +113,30 @@ def generate(
       tokens: (B, S + generated) full sequence including prompt.
 
     """
+    if prompt_ids.ndim != 2 or 0 in prompt_ids.shape:
+        raise ValueError("prompt_ids must have shape (B, S) with B and S > 0.")
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be non-negative.")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be finite and non-negative.")
+    if top_k < 0:
+        raise ValueError("top_k must be non-negative.")
+    if not math.isfinite(top_p) or top_p <= 0 or top_p > 1:
+        raise ValueError("top_p must be finite and in (0, 1].")
+    if max_seq_len <= 0:
+        raise ValueError("max_seq_len must be positive.")
+
     device = prompt_ids.device
     B = prompt_ids.shape[0]
     prompt_len = prompt_ids.shape[-1]
     if prompt_len > max_seq_len:
         raise ValueError(
             f"prompt length {prompt_len} exceeds max_seq_len={max_seq_len}.",
+        )
+    if prompt_len + max_new_tokens > max_seq_len:
+        raise ValueError(
+            f"prompt length {prompt_len} plus max_new_tokens={max_new_tokens} "
+            f"exceeds max_seq_len={max_seq_len}.",
         )
 
     in_proj = model.in_proj
@@ -146,7 +166,18 @@ def generate(
     finished = torch.zeros(B, dtype=torch.bool, device=device)
 
     for _ in range(max_new_tokens):
-        next_token = _sample(logits[:, -1, :], temperature, top_k, top_p)
+        next_token = _sample(
+            logits[:, -1, :],
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+        )
+        if eos_token_id is not None:
+            next_token = torch.where(
+                finished[:, None],
+                torch.full_like(next_token, eos_token_id),
+                next_token,
+            )
         generated.append(next_token)
 
         if eos_token_id is not None:
@@ -179,25 +210,28 @@ def _sample(
     if top_k > 0:
         top_k = min(top_k, logits.size(-1))
         kth_val = logits.topk(top_k, dim=-1).values[..., -1:]
-        logits = logits.where(logits >= kth_val, torch.full_like(logits, -1e10))
+        logits = logits.where(
+            logits >= kth_val,
+            torch.full_like(logits, float("-inf")),
+        )
 
     if top_p < 1.0:
-        logits = _topp_filter(logits, top_p)
+        logits = _topp_filter(logits, top_p=top_p)
 
     probs = logits.softmax(dim=-1)
     return torch.multinomial(probs, num_samples=1)
 
 
-# Keeps the smallest token set whose cumulative mass reaches ``top_p`` and sets the rest
-# to ``-1e10`` (which softmaxes to 0). Removes tokens whose EXCLUSIVE cumulative
-# probability already exceeds ``top_p`` (HF convention; strict ``>`` keeps the boundary
-# token that brings the running mass exactly to ``top_p``).
+# Sets tokens whose exclusive cumulative probability exceeds ``top_p`` to ``-inf``
+# (which softmaxes to 0). Strict ``>`` keeps a boundary token when the preceding
+# cumulative mass equals ``top_p`` (the Hugging Face convention).
 def _topp_filter(logits: Tensor, top_p: float) -> Tensor:
     """Mask logits outside the top-p nucleus, in original vocab order."""
     sorted_logits, sorted_idx = logits.sort(dim=-1, descending=True)
     probs = sorted_logits.softmax(dim=-1)
     mask = probs.cumsum(dim=-1) - probs > top_p
-    sorted_logits[mask] = -1e10
+    mask_value = float("-inf")
+    sorted_logits[mask] = mask_value
     # Scatter back to original vocab order over a fully-masked base so filtered
     # positions stay filtered regardless of scatter coverage.
-    return torch.full_like(logits, -1e10).scatter(-1, sorted_idx, sorted_logits)
+    return torch.full_like(logits, mask_value).scatter(-1, sorted_idx, sorted_logits)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import Protocol, Self, override, runtime_checkable
+from typing import Protocol, Self, cast, override, runtime_checkable
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -12,7 +12,6 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 import torch
 
-from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsHead,
@@ -30,16 +29,16 @@ from priml.model.swiglu import SwiGLU
 
 
 @runtime_checkable
-class CachedAttention(Protocol):
+class CachedAttention[CacheT](Protocol):
     """An attention sublayer with an explicit cached path."""
 
     def forward_cached(
         self,
         x: Tensor,
         *,
-        cache: KVCache,
+        cache: CacheT,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
+    ) -> tuple[Tensor, CacheT]:
         """Forward cached."""
         ...
 
@@ -141,6 +140,14 @@ class TransformerBlock(nn.Module):
                 f"ffn.channels_out={config.ffn.channels_out} must equal "
                 f"channels_in={config.channels_in} for TransformerBlock.",
             )
+        if (
+            isinstance(config.attn, ChannelsOut)
+            and config.attn.channels_out != config.channels_in
+        ):
+            raise ValueError(
+                f"attn.channels_out={config.attn.channels_out} must equal "
+                f"channels_in={config.channels_in} for TransformerBlock.",
+            )
         super().__init__()
         self.prenorm = config.prenorm
         self.checkpoint = config.checkpoint
@@ -177,18 +184,18 @@ class TransformerBlock(nn.Module):
             )
         return self._forward(x, **kwargs)
 
-    def forward_cached(
+    def forward_cached[CacheT](
         self,
         x: Tensor,
         *,
-        cache: KVCache,
+        cache: CacheT,
         **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
+    ) -> tuple[Tensor, CacheT]:
         """Run the block while updating its attention cache.
 
         Args:
           x: Input tensor.
-          cache: Key-value cache to update in-place.
+          cache: Attention cache passed to the attention module.
           **kwargs: Additional arguments forwarded to attention and FFN.
 
         Returns:
@@ -198,7 +205,7 @@ class TransformerBlock(nn.Module):
         """
         if not isinstance(self.attn, CachedAttention):
             raise TypeError("The attention module must implement cached attention.")
-        attention = self.attn
+        attention = cast(CachedAttention[CacheT], self.attn)
         if self.prenorm:
             attn_out, cache = attention.forward_cached(
                 self.norm1(x, **kwargs),

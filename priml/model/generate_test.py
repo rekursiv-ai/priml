@@ -22,7 +22,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 def test_generate_public_contract(request: pytest.FixtureRequest) -> None:
     prompt = torch.tensor([[0, 1]])
-    generated = _canonical_generate(_Transformer(), prompt)
+    generated = _canonical_generate(model=_Transformer(), prompt=prompt)
     tokens = [ListCodec.coerce(row, int) for row in generated.tolist()]
     assert_text_golden(
         request,
@@ -81,14 +81,120 @@ def test_sample_top_p_restores_vocab_order():
 def test_sample_greedy_is_argmax():
     """Temperature 0 returns the argmax token id."""
     logits = torch.tensor([[1.0, 9.0, 0.5]])
-    token = _sample(logits, 0.0, 0, 1.0)
+    token = _sample(logits, temperature=0.0, top_k=0, top_p=1.0)
     assert token.item() == 1
 
 
 def test_sample_applies_temperature_top_k_and_top_p() -> None:
     logits = torch.tensor([[1.0, 2.0, 9.0]])
-    token = _sample(logits, 2.0, 1, 0.5)
+    token = _sample(logits, temperature=2.0, top_k=1, top_p=0.5)
     assert token.item() == 2
+
+
+def test_sample_float16_filters_excluded_tokens() -> None:
+    """Filtering preserves eligible logits and gives excluded tokens zero mass."""
+    logits = torch.tensor([[0.0, -1.0, -2.0]], dtype=torch.float16)
+
+    filtered = _topp_filter(logits, top_p=0.8)
+    token = _sample(logits, temperature=1.0, top_k=2, top_p=1.0)
+    probs = filtered.softmax(dim=-1)
+
+    assert torch.equal(filtered[0, :2], logits[0, :2])
+    assert probs[0, 2] == 0
+    assert token.item() in (0, 1)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_topp_filter_masks_finite_floor_and_preserves_infinite_tails(
+    dtype: torch.dtype,
+) -> None:
+    """Top-p must mask finite floors while preserving pre-masked tails."""
+    floor_logits = torch.full((1, 2), torch.finfo(dtype).min, dtype=dtype)
+    floor_probs = _topp_probs(floor_logits, top_p=0.4)
+    assert torch.equal(floor_probs, torch.tensor([[1.0, 0.0]], dtype=dtype))
+
+    tail_logits = torch.tensor([[0.0, float("-inf"), float("-inf")]], dtype=dtype)
+    tail_probs = _topp_probs(tail_logits, top_p=0.4)
+    assert torch.equal(tail_probs, torch.tensor([[1.0, 0.0, 0.0]], dtype=dtype))
+
+
+def test_generate_pads_finished_rows_with_eos() -> None:
+    """Finished batch rows emit EOS while active rows continue sampling."""
+    model = _BatchTransformer()
+    prompt = torch.tensor([[0, 1], [0, 1]])
+
+    result = generate(
+        model=model,
+        prompt_ids=prompt,
+        max_new_tokens=3,
+        temperature=0.0,
+        eos_token_id=3,
+        max_seq_len=5,
+    )
+
+    assert torch.equal(result, torch.tensor([[0, 1, 3, 3, 3], [0, 1, 2, 2, 2]]))
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "match"),
+    [
+        ("max_new_tokens", -1, "max_new_tokens"),
+        ("temperature", -0.1, "temperature"),
+        ("top_k", -1, "top_k"),
+        ("top_p", 0.0, "top_p"),
+        ("top_p", 1.1, "top_p"),
+        ("max_seq_len", 0, "max_seq_len"),
+    ],
+)
+def test_generate_rejects_invalid_boundaries(
+    name: str, value: float, match: str
+) -> None:
+    """Generation rejects invalid public parameter boundaries."""
+    with pytest.raises(ValueError, match=match):
+        _generate_with_invalid_parameter(_Transformer(), name=name, value=value)
+
+
+def _generate_with_invalid_parameter(
+    model: _Transformer, *, name: str, value: float
+) -> Tensor:
+    """Call generation with one typed invalid parameter."""
+    prompt = torch.tensor([[0, 1]])
+    if name == "max_new_tokens":
+        return generate(model=model, prompt_ids=prompt, max_new_tokens=int(value))
+    if name == "temperature":
+        return generate(model=model, prompt_ids=prompt, temperature=float(value))
+    if name == "top_k":
+        return generate(model=model, prompt_ids=prompt, top_k=int(value))
+    if name == "top_p":
+        return generate(model=model, prompt_ids=prompt, top_p=float(value))
+    if name == "max_seq_len":
+        return generate(model=model, prompt_ids=prompt, max_seq_len=int(value))
+    raise AssertionError(f"Unknown parameter: {name}")
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        torch.empty((1, 0), dtype=torch.long),
+        torch.empty((0, 2), dtype=torch.long),
+        torch.tensor([0, 1]),
+    ],
+)
+def test_generate_rejects_empty_or_malformed_prompt(prompt: Tensor) -> None:
+    """Generation requires a non-empty two-dimensional prompt."""
+    with pytest.raises(ValueError, match="prompt_ids"):
+        generate(model=_Transformer(), prompt_ids=prompt)
+
+
+def test_generate_rejects_prompt_and_generation_over_cache_capacity() -> None:
+    """Generation rejects a requested sequence longer than the KV cache."""
+    with pytest.raises(ValueError, match="prompt length 2 plus max_new_tokens=3"):
+        generate(
+            model=_Transformer(),
+            prompt_ids=torch.tensor([[0, 1]]),
+            max_new_tokens=3,
+            max_seq_len=4,
+        )
 
 
 def test_generate_rejects_prompt_longer_than_cache() -> None:
@@ -98,7 +204,7 @@ def test_generate_rejects_prompt_longer_than_cache() -> None:
         ValueError,
         match=r"prompt length 3 exceeds max_seq_len=2\.",
     ):
-        generate(model, torch.tensor([[0, 1, 2]]), max_seq_len=2)
+        generate(model=model, prompt_ids=torch.tensor([[0, 1, 2]]), max_seq_len=2)
 
     assert model.block.attn.cache is None
 
@@ -107,7 +213,7 @@ def test_generate_returns_prompt_when_no_tokens_requested() -> None:
     model = _Transformer()
     prompt = torch.tensor([[0, 1]])
 
-    result = generate(model, prompt, max_new_tokens=0, max_seq_len=4)
+    result = generate(model=model, prompt_ids=prompt, max_new_tokens=0, max_seq_len=4)
 
     assert result is prompt
     assert model.project_calls == 1
@@ -119,8 +225,8 @@ def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
     prompt = torch.tensor([[0, 1]])
 
     result = generate(
-        model,
-        prompt,
+        model=model,
+        prompt_ids=prompt,
         max_new_tokens=4,
         temperature=0.0,
         eos_token_id=3,
@@ -138,13 +244,13 @@ def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
     assert torch.equal(model.in_proj.inputs[1], torch.tensor([[2]]))
 
 
-# The nucleus filter sets out-of-nucleus logits to ``-1e10``, which softmaxes to exactly
+# The nucleus filter sets out-of-nucleus logits to ``-inf``, which softmaxes to exactly
 # 0, so the filtered softmax IS the kept distribution -- the same distribution
 # ``_sample`` draws from, but without the 20k-iteration Monte-Carlo loop (or its
 # sampling flakiness).
 def _topp_probs(logits: Tensor, *, top_p: float) -> Tensor:
     """Recover the kept-token distribution under top-p, deterministically."""
-    return _topp_filter(logits, top_p).softmax(dim=-1)
+    return _topp_filter(logits, top_p=top_p).softmax(dim=-1)
 
 
 class _Lookup:
@@ -228,6 +334,20 @@ class _Transformer:
         return logits
 
 
+class _BatchTransformer(_Transformer):
+    @override
+    def project_to_logits(self, hidden: Tensor, /) -> Tensor:
+        logits = torch.full((*hidden.shape[:-1], 4), float("-inf"))
+        if self.project_calls == 0:
+            logits[0, ..., 3] = 1
+            logits[1, ..., 2] = 1
+        else:
+            logits[0, ..., 1] = 1
+            logits[1, ..., 2] = 1
+        self.project_calls += 1
+        return logits
+
+
 class _GenerateHarness(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -235,13 +355,13 @@ class _GenerateHarness(nn.Module):
 
     @override
     def forward(self, prompt: Tensor) -> Tensor:
-        return _canonical_generate(self.model, prompt)
+        return _canonical_generate(model=self.model, prompt=prompt)
 
 
 def _canonical_generate(model: _Transformer, prompt: Tensor) -> Tensor:
     return generate(
-        model,
-        prompt,
+        model=model,
+        prompt_ids=prompt,
         max_new_tokens=4,
         temperature=0.0,
         eos_token_id=3,

@@ -178,6 +178,20 @@ def test_transformer_block_rejects_ffn_output_width(channels_out: int) -> None:
         config.make()
 
 
+def test_transformer_block_rejects_attention_output_width() -> None:
+    config = TransformerBlock.Config(
+        channels_in=8,
+        attn=SelfAttention.Config(
+            num_heads=1,
+            channels_in=4,
+            channels_head=8,
+            channels_out=4,
+        ),
+    )
+    with pytest.raises(ValueError, match=r"attn\.channels_out"):
+        config.make()
+
+
 def test_transformer_block_depth_propagation():
     cfg = TransformerBlock.Config(
         channels_in=64,

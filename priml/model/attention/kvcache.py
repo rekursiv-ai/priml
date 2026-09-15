@@ -13,7 +13,8 @@ class KVCache:
     """Static pre-allocated key-value cache for autoregressive generation.
 
     Pre-allocates tensors of shape [..., H, max_seq, D] and writes new
-    KV pairs at an offset. No copies per token -- O(1) update.
+    KV pairs at an offset. Appends cost the number of incoming tokens; FIFO
+    eviction copies the retained prefix when capacity is exceeded.
 
     FIFO uses sliced copy (not torch.roll) for torch.compile compat.
     For maximum throughput, HuggingFace and vLLM use custom CUDA
@@ -75,14 +76,17 @@ class KVCache:
 
     @property
     def max_seq(self) -> int:
-        """Max seq."""
+        """Return the maximum number of cached positions."""
         return self.k.shape[-2]
 
     def freeze(self) -> KVCache:
-        """Return a frozen snapshot (update becomes a no-op).
+        """Return a frozen shared-storage view (update becomes a no-op).
+
+        The view shares the cache tensors and captures ``length`` and ``seen``
+        at freeze time. Its tensors remain writable through either cache.
 
         Returns:
-          frozen: The KVCache.
+          frozen: Shared-storage KVCache view with captured progress metadata.
 
         """
         frozen = _FrozenKVCache(self.k, self.v, self.length)
@@ -102,7 +106,8 @@ class KVCache:
           v: New value tensor of shape [..., seq_len, channels_v_head].
 
         Returns:
-          result: Tuple of (valid_k_slice, valid_v_slice) after update.
+          k: Valid key-cache slice after the update.
+          v: Valid value-cache slice after the update.
 
         """
         s = k.shape[-2]

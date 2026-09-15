@@ -42,6 +42,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.kimi_k2 import KimiK2
 from priml.model.transformer.mmdit import AdaLNZero, MMDiTBlock
 from priml.model.transformer.qwen3 import Qwen3
+from priml.model.transformer.qwen3_5 import Qwen35
 from priml.model.transformer.transformer import Transformer
 
 
@@ -70,6 +71,7 @@ __all__ = [
     "NormProtocol",
     "Patchify",
     "Qwen3",
+    "Qwen35",
     "RMSNorm",
     "RoPE",
     "RoPEMixed",
