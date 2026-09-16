@@ -40,24 +40,33 @@ def cleanup_cuda() -> Generator[None]:
     has no CUDA cache to reclaim, and importing it here would make torch a
     dependency of every test the autouse scope reaches.
 
-    Teardown runs BEFORE ``monkeypatch`` undoes the test's patches, so it must
-    not re-read ``torch.cuda.is_available``: a test that fakes it as ``True``
-    would send ``synchronize`` into a device the host does not have. The setup
-    snapshot predates the test body, so it is the host's own answer.
+    Teardown runs BEFORE ``monkeypatch`` undoes the test's patches, so a test
+    that fakes CUDA state is still faked here. Reading a seam the test controls
+    is therefore a live hazard, and so is trusting a stale setup-time snapshot
+    over it -- the gate below reads both.
 
     Yields:
       item: Each yielded value.
 
     """
-    # Torch first imported by the test body leaves no snapshot to reuse.
-    # ``is_initialized`` reads module globals: it cannot lazily init CUDA,
-    # cannot raise without it, and is not the seam a test fakes.
     torch_loaded_at_setup = "torch" in sys.modules
     on_cuda_host = torch_loaded_at_setup and torch.cuda.is_available()
-    if on_cuda_host:
+    if on_cuda_host and _cuda_is_initialized():
+        # Same gate as teardown: with no context there is nothing to reclaim,
+        # and reaching `synchronize` would force the lazy init anyway.
         _reclaim_cuda()
     yield
-    if on_cuda_host or (not torch_loaded_at_setup and _cuda_is_initialized()):
+    if torch_loaded_at_setup:
+        # All three are load-bearing: the setup snapshot, because a test faking
+        # `is_available()` True on a CPU-only host must not reach `synchronize`;
+        # `_cuda_is_initialized()`, because forcing CUDA's lazy init on a host
+        # the test never touched can raise; and a live `is_available()`, because
+        # a test that faked CUDA away is still faked when this runs.
+        if on_cuda_host and _cuda_is_initialized() and torch.cuda.is_available():
+            _reclaim_cuda()
+    elif _cuda_is_initialized():
+        # Torch first imported by the test body: no setup snapshot either way,
+        # so reclaim only if that import path actually created a context.
         _reclaim_cuda()
 
 

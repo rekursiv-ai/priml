@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from collections.abc import Generator
+from typing import cast
+from unittest.mock import MagicMock, patch
 
 import sys
 import warnings
@@ -226,6 +228,58 @@ def test_the_late_import_recheck_does_not_move_when_a_test_claims_a_device(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     assert not fixtures._cuda_is_initialized()
+
+
+@pytest.mark.parametrize(
+    ("initialized", "available_at_teardown", "calls_at_setup", "reason"),
+    [
+        (False, True, 0, "teardown synchronized without ever creating a CUDA context"),
+        (True, False, 1, "teardown synchronized against a device faked as unavailable"),
+    ],
+    ids=["no-context-was-created", "test-faked-cuda-away"],
+)
+def test_cleanup_cuda_teardown_skips_synchronize(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    initialized: bool,
+    available_at_teardown: bool,
+    calls_at_setup: int,
+    reason: str,
+) -> None:
+    """Teardown reclaims only when every seam agrees CUDA is really usable.
+
+    Two ways that fails, one per case. Without a context, a teardown
+    ``synchronize()`` forces CUDA's lazy init on a host the test never touched,
+    which can raise. With a context but ``is_available()`` faked False, it
+    resolves a device index against the fake -- and ``monkeypatch`` undoes the
+    test's patches only AFTER teardown, so the fake is still live here.
+
+    Asserting on ``call_count`` rather than on a raised exception is deliberate:
+    it still fails if the call is made and its error swallowed.
+    """
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    monkeypatch.setattr(torch.cuda, "empty_cache", MagicMock())
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: initialized)
+
+    # pytest's own accessor for a fixture's underlying function; no public
+    # equivalent, and its return type is Callable[..., Any] (pytest's stub,
+    # not ours) -- cast to what cleanup_cuda actually returns, then verify it.
+    gen = cast(
+        Generator[None, None, None], fixtures.cleanup_cuda._get_wrapped_function()()
+    )
+    assert isinstance(gen, Generator)
+    next(gen)
+    assert synchronize.call_count == calls_at_setup, (
+        "setup synchronized without a CUDA context to reclaim"
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: available_at_teardown)
+    with pytest.raises(StopIteration):
+        next(gen)
+
+    assert synchronize.call_count == calls_at_setup, reason
 
 
 if __name__ == "__main__":
