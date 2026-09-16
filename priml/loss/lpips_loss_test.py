@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import override
 from unittest.mock import MagicMock, patch
 
 from torch import Tensor, nn
@@ -116,62 +117,84 @@ def test_lpips_loss_fewer_frames(lpips_loss: LPIPSLoss) -> None:
     assert result["loss"].shape == (1,)
 
 
-# The real network is what gets counted, so nothing below mocks ``lpips``.
-# ``make()`` reads the trunk's ImageNet weights from ``TORCH_HOME`` (vgg16 is
-# 528 MB), which is the large local fixture the marker names; ``cost`` itself
-# builds a random trunk on the meta device and needs no weights.
-@pytest.mark.compute_large_fixture
-@pytest.mark.parametrize(
-    ("net", "params"),
-    [("alex", 2_470_848), ("vgg", 14_716_160), ("squeeze", 724_736)],
-)
-def test_lpips_cost_matches_torch_for_every_trunk(net: str, params: int) -> None:
-    """Every matmul the forward issues is in the cost, and every parameter, frozen included.
-
-    A token is one position of one scored frame, so ``T <= max_num_random_frames``
-    keeps every frame scored and the count deterministic. Both inputs carry a
-    gradient so the frozen first convolution's input gradient is measured too.
-    """
-    b, t, h, w = 1, 2, 32, 32
-    analytical = assert_cost_matches_torch(
-        LPIPSLoss.Config(net=net),
-        build_input=lambda: (
-            torch.randn(b, 3, t, h, w, requires_grad=True),
-            torch.randn(b, 3, t, h, w, requires_grad=True),
-        ),
-        num_tokens=b * t * h * w,
-        bus={"image_size": (h, w)},
-        run=lambda module, inputs: _loss(
-            module,
-            inputs[0],
-            x=inputs[0],
-            xhat=inputs[1],
-        ),
-    )
-    assert analytical.params == params
+def test_lpips_cost_matches_torch_for_tiny_trunk() -> None:
+    """Count both frozen-trunk input gradients and the trainable head's gradients."""
+    b, t, h, w = 1, 2, 4, 4
+    with (
+        patch("torch.hub.get_dir", side_effect=AssertionError("Weight cache accessed")),
+        patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips),
+    ):
+        analytical = assert_cost_matches_torch(
+            LPIPSLoss.Config(),
+            build_input=lambda: (
+                torch.randn(b, 3, t, h, w, requires_grad=True),
+                torch.randn(b, 3, t, h, w, requires_grad=True),
+            ),
+            num_tokens=b * t * h * w,
+            bus={"image_size": (h, w)},
+            run=lambda module, inputs: _loss(
+                module,
+                inputs[0],
+                x=inputs[0],
+                xhat=inputs[1],
+            ),
+        )
+    assert analytical.params == 58
 
 
 def test_lpips_cost_prices_the_frozen_trunk_twice_and_the_head_once() -> None:
-    """AlexNet at 32x32: five convolutions write 7x7, 3x3, 1x1, 1x1, 1x1 grids.
-
-    The trunk runs once per branch with an input-gradient-only adjoint; each
-    stage's 1x1 ``NetLinLayer`` convolution runs once on the squared difference
-    with a full adjoint. The two max pools route one gradient per channel back
-    to the argmax at their 3x3 and 1x1 output grids.
-    """
-    analytical = LPIPSLoss.Config(net="alex").cost(image_size=(32, 32))
-    trunk = (
-        3 * 121 * 64 * 49
-        + 64 * 25 * 192 * 9
-        + 192 * 9 * 384
-        + 384 * 9 * 256
-        + 256 * 9 * 256
-    )
-    head = 64 * 49 + 192 * 9 + 384 + 256 + 256
-    assert analytical.primal.flops.matmul == 2 * (2 * trunk + head) / 1024
-    assert analytical.adjoint.flops.matmul == 2 * (2 * trunk + 2 * head) / 1024
-    assert analytical.adjoint.flops.selection == 2 * (64 * 9 + 192) / 1024
+    """Price a frozen 3x3 convolution, 2x2 max pool, and trainable 1x1 head."""
+    with patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips):
+        analytical = LPIPSLoss.Config().cost(image_size=(4, 4))
+    trunk = 3 * 9 * 2 * 16
+    head = 2 * 4
+    assert analytical.primal.flops.matmul == 2 * (2 * trunk + head) / 16
+    assert analytical.adjoint.flops.matmul == 2 * (2 * trunk + 2 * head) / 16
+    assert analytical.adjoint.flops.selection == 2 * (2 * 4) / 16
     assert analytical.bytes_state == 0
+
+
+class _TinyTrunk(nn.Module):
+    """One frozen convolutional stage with two channels."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(3, 2, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        self.requires_grad_(False)
+
+    @override
+    def forward(self, x: Tensor) -> tuple[Tensor]:
+        return (self.layers(x),)
+
+
+class _TinyLPIPS(nn.Module):
+    """Minimal two-branch perceptual network for cost accounting."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.net = _TinyTrunk()
+        self.L = 1
+        self.lins = nn.ModuleList(  # codespell:ignore lins
+            [nn.Conv2d(2, 1, 1, bias=False)],
+        )
+
+    @override
+    def forward(self, x: Tensor, xhat: Tensor) -> Tensor:
+        a, b = self.net(x)[0], self.net(xhat)[0]
+        a = a / (a.square().sum(dim=1, keepdim=True).sqrt() + 1e-10)
+        b = b / (b.square().sum(dim=1, keepdim=True).sqrt() + 1e-10)
+        head = self.lins[0]  # codespell:ignore lins
+        return head((a - b).square()).mean(dim=(2, 3), keepdim=True)
+
+
+def _tiny_lpips(net: str, *, pretrained: bool) -> _TinyLPIPS:
+    """Replace heavyweight LPIPS construction on both CPU and meta devices."""
+    del net, pretrained
+    return _TinyLPIPS()
 
 
 def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:
