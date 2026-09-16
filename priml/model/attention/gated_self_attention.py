@@ -14,6 +14,7 @@ import torch
 
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
+from priml.model.attention.window import causal_chunk_mask, window_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -227,6 +228,7 @@ class GatedSelfAttention(nn.Module):
             )
             if cache.seen + x.shape[-2] > cache.max_seq:
                 raise ValueError("The full-attention cache capacity would be exceeded.")
+        kwargs.pop("is_causal", None)
         shape = (*x.shape[:-1], -1, self.channels_head)
         q, gate = (
             self.q_proj(x)
@@ -257,20 +259,53 @@ class GatedSelfAttention(nn.Module):
             k, v = k.movedim(-3, -2), v.movedim(-3, -2)
         groups = self.num_heads // self.num_heads_kv
         k, v = k.repeat_interleave(groups, dim=-2), v.repeat_interleave(groups, dim=-2)
-        causal = torch.arange(k.shape[-3], device=x.device).unsqueeze(0) <= (
-            torch.arange(q.shape[-3], device=x.device).unsqueeze(1)
-            + k.shape[-3]
-            - q.shape[-3]
-        )
-        mask = torch.zeros(causal.shape, dtype=x.dtype, device=x.device)
-        mask = mask.masked_fill(~causal, torch.finfo(x.dtype).min)
-        if attn_mask is not None:
-            mask = mask + attn_mask
+        if attn_mask is None:
+            is_causal = k.shape[-3] == q.shape[-3]
+            # A window reaching the whole context returns None. In a rectangular
+            # cached chunk, preserve the chunk's causal mask in that case; the
+            # square fast path still keeps both masks absent.
+            window = kwargs.get("window", -1)
+            assert isinstance(window, int)
+            mask = window_mask(q, k, window=window)
+            if mask is None:
+                mask = causal_chunk_mask(q, k)
+        else:
+            # A caller's mask (e.g. Qwen 3.5's padding mask) fills only WITHIN
+            # the causal cone and leaves the rest at 0, trusting causality to
+            # be enforced separately -- so it must still be combined with a
+            # full causal mask here, not just passed through. It cannot lean
+            # on `is_causal` for that: the kernels' fast path fills with a
+            # literal -inf (this module's own convention -- see window_mask,
+            # causal_chunk_mask, and SdpaNaive's own is_causal branch), but
+            # Qwen 3.5's caller-supplied mask is `finfo.min`-filled to match
+            # its HF reference bit-exactly. Mixing the two changes which value
+            # wins a fully-masked row's softmax -- measured against the Qwen
+            # 3.5 HF reference, a query whose only causally valid key is
+            # itself masked-out collapses to 100% weight on that (masked) key
+            # instead of HF's uniform fallback. That guarantee holds for a
+            # 2-D padding mask (`_full_attention_mask` fills only within the
+            # causal cone, so nothing double-fills); a caller-supplied 4-D
+            # prepared mask already carries its own causal fill, so this
+            # double-fills its non-causal cells -- confirmed confined to
+            # padding-query rows, with zero leakage into live-row logits, but
+            # the uniform-fallback guarantee above does not extend to it. So
+            # this branch deliberately diverges from the module's usual -inf
+            # and matches the caller's finfo.min instead.
+            #
+            # `window` must be read out of kwargs and applied here too: the
+            # kernels only ever build their own window_mask when attn_mask is
+            # None, so once a caller supplies one, window would otherwise be
+            # silently ignored a second way.
+            is_causal = False
+            window = kwargs.get("window", -1)
+            assert isinstance(window, int)
+            mask = _causal_bias(q, k, dtype=x.dtype, window=window) + attn_mask
         output = (
             self.attn_kernel(
                 q,
                 k,
                 v,
+                is_causal=is_causal,
                 attn_mask=mask,
                 dropout_p=self.dropout if self.training else 0.0,
                 **kwargs,
@@ -330,3 +365,27 @@ def _rotate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
     first, second = rotated.chunk(2, dim=-1)
     rotated = rotated * cos + torch.cat((-second, first), dim=-1) * sin
     return torch.cat((rotated, passthrough), dim=-1).movedim(-3, -2)
+
+
+# Unlike causal_chunk_mask/window_mask, this always materializes and never
+# uses a literal -inf: it exists only to add onto a caller-supplied mask,
+# and that mask is finite-filled (see the `forward` comment on why the two
+# fills cannot mix). Takes `window` too, since a caller-supplied mask stops
+# the kernel from ever reaching its own window_mask.
+def _causal_bias(
+    q: Tensor,
+    k: Tensor,
+    *,
+    dtype: torch.dtype,
+    window: int = -1,
+) -> Tensor:
+    """Full additive causal mask, optionally windowed, finite-filled."""
+    s, t = q.shape[-3], k.shape[-3]
+    offset = torch.arange(t, device=q.device)
+    offset = offset[t - s :, None] - offset[None, :]
+    allowed = offset >= 0
+    if window >= 0:
+        allowed = allowed & (offset <= window)
+    return torch.zeros(s, t, dtype=dtype, device=q.device).masked_fill(
+        ~allowed, torch.finfo(dtype).min
+    )

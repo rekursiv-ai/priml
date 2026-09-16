@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from functools import partial
 from types import FunctionType
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
@@ -158,7 +158,7 @@ def torch_reference(reference: nn.Module) -> nn.Module:
     assert importlib.metadata.version("transformers") == "5.17.0"
     forward: object = reference.forward
     assert callable(forward)
-    original = cast(FunctionType, inspect.unwrap(cast(Callable[..., object], forward)))
+    original = cast(FunctionType, inspect.unwrap(forward))
     assert isinstance(original, FunctionType)
     globals_ref = original.__globals__.copy()
     for name in (

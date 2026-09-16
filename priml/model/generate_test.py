@@ -209,6 +209,26 @@ def test_generate_rejects_prompt_longer_than_cache() -> None:
     assert model.block.attn.cache is None
 
 
+def test_generate_rejects_a_block_without_an_attn_attribute() -> None:
+    with pytest.raises(TypeError, match="attn attribute"):
+        generate(
+            model=_TransformerWithBlock(_NoAttn()),
+            prompt_ids=torch.tensor([[0, 1]]),
+            max_new_tokens=1,
+            max_seq_len=4,
+        )
+
+
+def test_generate_rejects_a_block_without_forward_cached() -> None:
+    with pytest.raises(TypeError, match="forward_cached method"):
+        generate(
+            model=_TransformerWithBlock(_NoForwardCached()),
+            prompt_ids=torch.tensor([[0, 1]]),
+            max_new_tokens=1,
+            max_seq_len=4,
+        )
+
+
 def test_generate_returns_prompt_when_no_tokens_requested() -> None:
     model = _Transformer()
     prompt = torch.tensor([[0, 1]])
@@ -319,6 +339,21 @@ class _Block(nn.Module):
         return x, cache
 
 
+class _NoAttn(nn.Module):
+    """A block missing the ``attn`` attribute ``generate`` requires."""
+
+    def forward_cached(self, x: Tensor, /, *, cache: object) -> tuple[Tensor, object]:
+        return x, cache
+
+
+class _NoForwardCached(nn.Module):
+    """A block missing the ``forward_cached`` method ``generate`` requires."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attn = _Attention()
+
+
 class _Transformer:
     def __init__(self) -> None:
         self.in_proj = _Lookup()
@@ -332,6 +367,17 @@ class _Transformer:
         logits = torch.zeros(*hidden.shape[:-1], 4)
         logits[..., next_token] = 1
         return logits
+
+
+class _TransformerWithBlock:
+    """A minimal model wrapping one caller-supplied block."""
+
+    def __init__(self, block: nn.Module) -> None:
+        self.in_proj = _Lookup()
+        self.blocks: list[nn.Module] = [block]
+
+    def project_to_logits(self, hidden: Tensor, /) -> Tensor:
+        return torch.zeros(*hidden.shape[:-1], 4)
 
 
 class _BatchTransformer(_Transformer):

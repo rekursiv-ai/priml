@@ -146,7 +146,18 @@ def generate(
 
     # Delegate cache alloc to block; keeps generate arch-agnostic
     # (MLA caches compressed latent).
-    blocks = [cast(BlockLike, block) for block in model.blocks]
+    blocks: list[BlockLike] = []
+    for block in model.blocks:
+        if not isinstance(getattr(block, "attn", None), AttentionLike):
+            raise TypeError(
+                "Token generation requires blocks with an attn attribute "
+                "implementing alloc_kv_cache."
+            )
+        if not isinstance(block, _HasForwardCached):
+            raise TypeError(
+                "Token generation requires blocks with a forward_cached method."
+            )
+        blocks.append(cast(BlockLike, block))
     caches = [
         block.attn.alloc_kv_cache(
             batch=B,
@@ -193,6 +204,28 @@ def generate(
     if not generated:
         return prompt_ids
     return torch.cat([prompt_ids, *generated], dim=-1)
+
+
+# `isinstance` against a runtime-checkable Protocol resolves a data member
+# (BlockLike.attn) via inspect.getattr_static, which never sees an nn.Module
+# submodule -- submodules surface only through nn.Module's own __getattr__,
+# which getattr_static deliberately bypasses. So isinstance(block, BlockLike)
+# is never True for a real block; this method-only half of it is what CAN be
+# checked, and `attn` is checked separately above with a plain getattr
+# (which, unlike getattr_static, does trigger __getattr__).
+@runtime_checkable
+class _HasForwardCached(Protocol):
+    """The half of ``BlockLike`` an isinstance check can prove."""
+
+    def forward_cached[CacheT](
+        self,
+        x: Tensor,
+        /,
+        *,
+        cache: CacheT,
+    ) -> tuple[Tensor, CacheT]:
+        """Forward cached."""
+        ...
 
 
 def _sample(

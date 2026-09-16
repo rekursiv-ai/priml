@@ -53,6 +53,47 @@ def test_hybrid_config_preserves_injected_blocks() -> None:
     assert model.hidden_states(torch.tensor([[1, 2, 3]])).shape == (1, 3, 16)
 
 
+def test_hidden_states_rejects_token_ids_without_input_embedding() -> None:
+    config = Qwen35.Config.from_hf(hf_config())
+    config.in_proj = None
+    model = config.make()
+
+    with pytest.raises(ValueError, match="Token IDs require an input embedding"):
+        model.hidden_states(torch.tensor([[1, 2, 3]]))
+
+
+def test_hidden_states_rejects_a_cache_with_the_wrong_number_of_entries() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+
+    with pytest.raises(ValueError, match="one entry per transformer block"):
+        model.hidden_states(torch.tensor([[1, 2, 3]]), cache=[])
+
+
+def test_hidden_states_rejects_positions_and_position_ids_together() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+
+    with pytest.raises(ValueError, match="Pass either positions or position_ids"):
+        model(
+            torch.tensor([[1, 2, 3]]),
+            positions=torch.arange(3),
+            position_ids=torch.arange(3).reshape(1, 3),
+        )
+
+
+def test_forward_rejects_a_non_list_cache() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+
+    with pytest.raises(TypeError, match="cache must be a list or None"):
+        model(torch.tensor([[1, 2, 3]]), cache="not-a-list")
+
+
+def test_hidden_states_rejects_an_attention_mask_that_is_neither_2d_nor_4d() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+
+    with pytest.raises(ValueError, match="2-D padding mask or 4-D mask"):
+        model(torch.tensor([[1, 2, 3]]), attention_mask=torch.zeros(1, 3, 3))
+
+
 def test_final_norm_width_inference_respects_explicit_configuration() -> None:
     """Final norms infer the model width without rewriting explicit configurations."""
     inferred = Qwen35.Config.from_hf(hf_config()).copy_tree().finalize()
@@ -250,6 +291,37 @@ def test_hybrid_cached_dispatch_accepts_injected_cached_block() -> None:
     assert cache[0] == {}
 
 
+def test_forward_cached_rejects_a_block_without_forward_cached() -> None:
+    config = Qwen35.Config.from_hf(hf_config())
+    assert isinstance(config.block, list)
+    config.block[0] = _AttnOnlyBlock.Config()
+    model = config.make().eval()
+    cache = model.alloc_cache(batch=1, max_seq=2)
+
+    with pytest.raises(TypeError, match="forward_cached method"):
+        model.forward_cached(torch.tensor([[1, 2]]), cache=cache)
+
+
+def test_alloc_cache_rejects_a_block_without_an_attn_submodule() -> None:
+    config = Qwen35.Config.from_hf(hf_config())
+    assert isinstance(config.block, list)
+    config.block[0] = _UncachedIdentityBlock.Config()
+    model = config.make()
+
+    with pytest.raises(TypeError, match="attn submodule"):
+        model.alloc_cache(batch=1, max_seq=2)
+
+
+def test_alloc_cache_rejects_attn_without_alloc_kv_cache() -> None:
+    config = Qwen35.Config.from_hf(hf_config())
+    assert isinstance(config.block, list)
+    config.block[0] = _NonCacheableAttentionBlock.Config()
+    model = config.make()
+
+    with pytest.raises(TypeError, match="alloc_kv_cache method"):
+        model.alloc_cache(batch=1, max_seq=2)
+
+
 class _CachedIdentityAttention(torch.nn.Module):
     """Allocate a cache for an injected identity block."""
 
@@ -297,6 +369,89 @@ class _CachedIdentityBlock(torch.nn.Module):
     ) -> tuple[torch.Tensor, object]:
         del kwargs
         return x, cache
+
+
+class _UncachedIdentityBlock(torch.nn.Module):
+    """A Configgle-injectable block missing both attn and forward_cached."""
+
+    class Config(Fig["_UncachedIdentityBlock"]):
+        channels_in: int = -1
+        """Input feature width."""
+
+        channels_out: int = -1
+        """Output feature width."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+
+    def reset_parameters(self) -> None:
+        """Leave the parameter-free test block unchanged."""
+
+    @override
+    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return x
+
+
+class _AttnOnlyBlock(torch.nn.Module):
+    """A Configgle-injectable block with attn but no forward_cached."""
+
+    class Config(Fig["_AttnOnlyBlock"]):
+        channels_in: int = -1
+        """Input feature width."""
+
+        channels_out: int = -1
+        """Output feature width."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+        self.attn = _CachedIdentityAttention()
+
+    def reset_parameters(self) -> None:
+        """Leave the parameter-free test block unchanged."""
+
+    @override
+    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return x
+
+
+class _NonCacheableAttention(torch.nn.Module):
+    """An attn submodule missing alloc_kv_cache."""
+
+    def reset_parameters(self) -> None:
+        """Leave the parameter-free test attention unchanged."""
+
+    @override
+    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return x
+
+
+class _NonCacheableAttentionBlock(torch.nn.Module):
+    """A Configgle-injectable block whose attn lacks alloc_kv_cache."""
+
+    class Config(Fig["_NonCacheableAttentionBlock"]):
+        channels_in: int = -1
+        """Input feature width."""
+
+        channels_out: int = -1
+        """Output feature width."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+        self.attn = _NonCacheableAttention()
+
+    def reset_parameters(self) -> None:
+        """Leave the parameter-free test block unchanged."""
+
+    @override
+    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return x
 
 
 class _MessageRecorder(torch.nn.Module):

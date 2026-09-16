@@ -162,6 +162,97 @@ def test_chunk_rejects_nonpositive_chunk_size(chunk_size: int) -> None:
         )
 
 
+@pytest.mark.parametrize("initial_state", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 3, 64])
+@pytest.mark.parametrize("length", [1, 7, 63, 65, 129])
+def test_chunk_matches_recurrent(
+    length: int,
+    chunk_size: int,
+    initial_state: bool,
+) -> None:
+    """Chunk and recurrent scans compute the identical operation.
+
+    Unlike the HF-parity tests above, this imports no optional dependency --
+    the export build's only coverage of the chunked scan, a chunk boundary
+    (``length`` need not divide ``chunk_size``), state carry, and non-trivial
+    decay (trax Issue#20644).
+    """
+    torch.manual_seed(length * 1_000 + chunk_size)
+    heads, key_width, value_width = 2, 4, 3
+    query = torch.randn(1, length, heads, key_width)
+    key = torch.randn(1, length, heads, key_width)
+    value = torch.randn(1, length, heads, value_width)
+    g = -torch.rand(1, length, heads)
+    beta = torch.rand(1, length, heads)
+    state = torch.randn(1, heads, key_width, value_width) if initial_state else None
+
+    chunk_out, chunk_state = chunk_gated_delta_rule(
+        query=query,
+        key=key,
+        value=value,
+        g=g,
+        beta=beta,
+        chunk_size=chunk_size,
+        initial_state=state,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    recurrent_out, recurrent_state = recurrent_gated_delta_rule(
+        query=query,
+        key=key,
+        value=value,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    # Measured worst case over this parametrization: 4.8e-7 (output),
+    # 7.2e-7 (state) -- roughly 3x that margin, still tight enough to bite.
+    torch.testing.assert_close(chunk_out, recurrent_out, atol=2e-6, rtol=2e-6)
+    assert chunk_state is not None
+    assert recurrent_state is not None
+    torch.testing.assert_close(chunk_state, recurrent_state, atol=2e-6, rtol=2e-6)
+
+
+def test_delta_rule_matches_closed_form_with_orthonormal_keys() -> None:
+    """No decay, full update, orthonormal keys collapse the scan to a sum.
+
+    With ``beta=1`` and ``g=0``, each new key direction is orthogonal to
+    every earlier one, so the delta correction recovers ``v_j`` exactly and
+    the running state after ``t`` steps is ``sum_{j<=t} k_j (x) v_j`` --
+    giving ``out_t = d**-0.5 * sum_{j<=t} (q_t . k_j) v_j``, a closed form
+    independent of both kernels under test (trax Issue#20644).
+    """
+    torch.manual_seed(0)
+    sequence, heads, value_width = 6, 2, 3
+    key = (
+        torch.eye(sequence)
+        .reshape(1, sequence, 1, sequence)
+        .expand(1, sequence, heads, sequence)
+    )
+    query = torch.randn(1, sequence, heads, sequence)
+    value = torch.randn(1, sequence, heads, value_width)
+    g = torch.zeros(1, sequence, heads)
+    beta = torch.ones(1, sequence, heads)
+
+    causal = torch.tril(torch.ones(sequence, sequence))[:, None, :]
+    weights = torch.einsum("btha,bsha->bths", query, key) * causal
+    expected = torch.einsum("bths,bshv->bthv", weights, value) * sequence**-0.5
+
+    chunk_actual, _ = chunk_gated_delta_rule(
+        query=query, key=key, value=value, g=g, beta=beta, chunk_size=3
+    )
+    recurrent_actual, _ = recurrent_gated_delta_rule(
+        query=query, key=key, value=value, g=g, beta=beta
+    )
+
+    # Measured: 6.0e-8 (chunk), 1.2e-7 (recurrent).
+    torch.testing.assert_close(chunk_actual, expected, atol=5e-7, rtol=5e-7)
+    torch.testing.assert_close(recurrent_actual, expected, atol=5e-7, rtol=5e-7)
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

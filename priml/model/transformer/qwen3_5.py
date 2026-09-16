@@ -8,7 +8,6 @@ from functools import partial
 from pathlib import Path
 from typing import Literal, Self, TypeGuard, cast, override
 
-import json
 import math
 
 from configgle import Makeable, Makes
@@ -24,6 +23,7 @@ from priml.lib.custom_json import (
     IntCodec,
     ListCodec,
     StrCodec,
+    loads,
 )
 from priml.model.attention.gated_self_attention import GatedSelfAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
@@ -178,12 +178,8 @@ class Qwen35(Transformer):
 
         """
         directory = Path(path)
-        raw_metadata = cast(
-            object,
-            json.loads((directory / "config.json").read_text()),
-        )
         metadata = DictCodec.coerce(
-            raw_metadata,
+            loads((directory / "config.json").read_text()),
             default=None,
         )
         config = cls.Config.from_hf(metadata)
@@ -249,16 +245,22 @@ class Qwen35(Transformer):
             if attention_mask is not None and attention_mask.ndim == 2
             else None
         )
+        # Built once: nothing below depends on `index` or `block`, and `**block_kwargs`
+        # hands each callee a fresh set of keyword arguments without mutating this dict.
+        block_kwargs = dict(kwargs)
+        if padding_mask is not None:
+            block_kwargs["attention_mask"] = padding_mask
+        if full_mask is not None:
+            block_kwargs.setdefault("attn_mask", full_mask)
+        if positions is not None:
+            block_kwargs["positions"] = positions
+        if position_ids is not None:
+            # Forwarded raw, unlike `positions` above (never unsqueezed to
+            # 3-D): no priml block declares a `position_ids` parameter today,
+            # so it is absorbed by **kwargs, but the first one that does would
+            # see a different shape than `positions`.
+            block_kwargs["position_ids"] = position_ids
         for index, block in enumerate(self.blocks):
-            block_kwargs = dict(kwargs)
-            if padding_mask is not None:
-                block_kwargs["attention_mask"] = padding_mask
-            if full_mask is not None:
-                block_kwargs.setdefault("attn_mask", full_mask)
-            if positions is not None:
-                block_kwargs["positions"] = positions
-            if position_ids is not None:
-                block_kwargs["position_ids"] = position_ids
             if cache is None:
                 x = cast(Tensor, block(x, **block_kwargs))
             else:
