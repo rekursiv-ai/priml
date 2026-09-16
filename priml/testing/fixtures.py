@@ -40,13 +40,25 @@ def cleanup_cuda() -> Generator[None]:
     has no CUDA cache to reclaim, and importing it here would make torch a
     dependency of every test the autouse scope reaches.
 
+    Teardown runs BEFORE ``monkeypatch`` undoes the test's patches, so it must
+    not re-read ``torch.cuda.is_available``: a test that fakes it as ``True``
+    would send ``synchronize`` into a device the host does not have. The setup
+    snapshot predates the test body, so it is the host's own answer.
+
     Yields:
       item: Each yielded value.
 
     """
-    _reclaim_cuda()
+    # Torch first imported by the test body leaves no snapshot to reuse.
+    # ``is_initialized`` reads module globals: it cannot lazily init CUDA,
+    # cannot raise without it, and is not the seam a test fakes.
+    torch_loaded_at_setup = "torch" in sys.modules
+    on_cuda_host = torch_loaded_at_setup and torch.cuda.is_available()
+    if on_cuda_host:
+        _reclaim_cuda()
     yield
-    _reclaim_cuda()
+    if on_cuda_host or (not torch_loaded_at_setup and _cuda_is_initialized()):
+        _reclaim_cuda()
 
 
 @contextmanager
@@ -108,8 +120,12 @@ def poison_free_pool(*shapes: tuple[int, ...], blocks: int = 32) -> None:
             del block
 
 
+def _cuda_is_initialized() -> bool:
+    """Report whether a real CUDA context exists in this process."""
+    return "torch" in sys.modules and torch.cuda.is_initialized()
+
+
 def _reclaim_cuda() -> None:
-    """Synchronize and empty the CUDA cache when a CUDA device is present."""
-    if "torch" in sys.modules and torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+    """Synchronize and empty the CUDA cache. Callers gate on CUDA being present."""
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()

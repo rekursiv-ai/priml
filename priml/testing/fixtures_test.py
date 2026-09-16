@@ -10,6 +10,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.testing import fixtures
 from priml.testing.fixtures import (
     get_device,
     poison_free_pool,
@@ -209,6 +210,22 @@ def test_test_main_exits_with_pytest_return_code():
     with patch("pytest.main", return_value=42), patch("sys.exit") as mock_exit:
         test_main("/path/to/test_file.py")
         mock_exit.assert_called_once_with(42)
+
+
+def test_the_late_import_recheck_does_not_move_when_a_test_claims_a_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_cuda_is_initialized`` is the seam a faking test does NOT control.
+
+    ``cleanup_cuda`` re-checks through it when torch arrives after setup. Were
+    that an ``is_available`` re-check, a test claiming a device would send
+    teardown into ``torch.cuda.synchronize`` on a host without one.
+    """
+    if torch.cuda.is_initialized():
+        pytest.skip("a real CUDA context makes the fake indistinguishable")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    assert not fixtures._cuda_is_initialized()
 
 
 if __name__ == "__main__":
