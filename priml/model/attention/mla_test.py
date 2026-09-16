@@ -34,6 +34,7 @@ from priml import runtime
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
 from priml.model.attention.mla import LatentAttention, MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
+from priml.model.cost import Cost, cost
 from priml.model.custom_types import AttentionKernel
 from priml.model.linear import Linear
 from priml.testing.bfb import (
@@ -43,6 +44,7 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
     move_to_device,
 )
+from priml.testing.cost import assert_cost_matches_torch
 from priml.train.tensor_parallel import apply_tensor_parallel
 
 
@@ -342,6 +344,111 @@ def test_mla_config_reports_derived_boundary_geometry() -> None:
     assert config.channels_head == (
         config.channels_qk_nope_head + config.channels_qk_rope_head
     )
+
+
+def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
+    """Absorbed: K is latent + rope key, V is the latent; both count once.
+
+    The inner kernel is priced at the summed width and halved, so the total is
+    the inner kernel's own cost at ``(6 + 4) + 6`` channels, halved.
+    """
+    latent = LatentAttention.Config().copy_tree().finalize()
+    model_cost = latent.cost(
+        seq_len=32,
+        num_heads=4,
+        channels_head=12,
+        channels_v_head=16,
+        kv_lora_rank=6,
+        channels_qk_rope_head=4,
+    )
+    inner = cost(latent.attn_kernel, seq_len=32, num_heads=4, channels_head=(6 + 4) + 6)
+    assert model_cost.primal.flops.matmul == inner.primal.flops.matmul / 2
+    assert model_cost.adjoint.flops.matmul == inner.adjoint.flops.matmul / 2
+    assert model_cost.primal.flops.matmul == 2 * 4 * 32 * ((6 + 4) + 6)
+    assert model_cost.primal.flops.elementwise == inner.primal.flops.elementwise
+    assert model_cost.params == 0
+    assert model_cost.primal.bytes.elementwise == 4 * 6
+
+
+def test_latent_attention_cost_attends_over_expanded_heads_when_not() -> None:
+    latent = LatentAttention.Config(absorb=False).copy_tree().finalize()
+    model_cost = latent.cost(
+        seq_len=32,
+        num_heads=4,
+        channels_head=12,
+        channels_v_head=16,
+        kv_lora_rank=6,
+        channels_qk_rope_head=4,
+    )
+    inner = cost(latent.attn_kernel, seq_len=32, num_heads=4, channels_head=12 + 16)
+    assert model_cost.primal.flops.matmul == inner.primal.flops.matmul / 2
+    assert model_cost.primal.bytes.elementwise == 4 * 16
+
+
+def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
+    config, _ = _mla_config()
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=32)
+    projections = (
+        finalized.proj_q,
+        finalized.proj_kv_a,
+        finalized.norm_kv_lora,
+        finalized.proj_kv_b,
+        finalized.proj_out,
+    )
+    owned = sum((cost(child) for child in projections), Cost())
+    kernel = cost(
+        finalized.attn_kernel,
+        seq_len=32,
+        num_heads=4,
+        channels_head=8 + 4,
+        channels_v_head=16,
+        kv_lora_rank=12,
+        channels_qk_rope_head=4,
+    )
+    assert (
+        owned.params
+        == 32 * 4 * (8 + 4) + 32 * (12 + 4) + 12 * 4 * (8 + 16) + 4 * 16 * 32 + 12
+    )
+    assert model_cost.params == owned.params
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    assert model_cost.primal.flops.matmul == (
+        owned.primal.flops.matmul + kernel.primal.flops.matmul
+    )
+    assert model_cost.adjoint.flops.matmul == (
+        owned.adjoint.flops.matmul + kernel.adjoint.flops.matmul
+    )
+    assert model_cost.bytes_state == 12 + 4
+
+
+def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
+    """Every product torch counts is priced.
+
+    Projections, the ``W_KR``/``W_UV`` einsums, and the naive kernel's two
+    bmms: the einsums are ``proj_kv_b``'s matmul applied one factor at a time,
+    and the kernel's bmms run at the latent width.
+    """
+    config, _ = _mla_config()
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(1, 8, 32, requires_grad=True),
+        num_tokens=8,
+        bus={"seq_len": 8},
+    )
+
+
+def test_mla_cost_counts_the_q_lora_path_and_rotary() -> None:
+    config, _ = _mla_config()
+    config.q_lora_rank = 6
+    config.rope = RoPE.Config(channels_head=4)
+    cost = config.copy_tree().finalize().cost(seq_len=8)
+    assert cost.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_mla_cost_requires_seq_len() -> None:
+    config, _ = _mla_config()
+    with pytest.raises(TypeError, match="seq_len"):
+        cost(config.copy_tree().finalize())
 
 
 @pytest.mark.parametrize("inner", [SdpaFused.Config, SdpaNaive.Config])

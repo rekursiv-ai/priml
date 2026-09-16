@@ -27,14 +27,15 @@ from priml.model.attention.multi_stream import (
     _validate_native_state,
 )
 from priml.model.attention.self_attention import AttentionProjections
+from priml.model.cost import Cost, cost, elementwise_cost
 from priml.model.custom_types import (
     ChannelsHead,
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
+    HasResetParameters,
     NumHeads,
-    Resettable,
     TensorModule,
     propagate_attr,
 )
@@ -91,6 +92,25 @@ class AdaLNZero(nn.Module):
             if isinstance(self.proj, ChannelsOut) and self.proj.channels_out == -1:
                 self.proj.channels_out = 6 * self.channels_in
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the projection; the SiLU is elementwise.
+
+            Counted per token like every leaf, though ``c`` is often one vector
+            per sequence: a per-sequence conditioning amortizes this over the
+            sequence, so the per-token figure is an upper bound.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            return cost(self.proj, **kwargs) + elementwise_cost(
+                primal=5 * self.cond_dim,
+                adjoint=5 * self.cond_dim,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -159,6 +179,28 @@ class MMDiTStream(nn.Module):
                 if isinstance(child, HasDepthIndex) and not child.depth_index:
                     child.depth_index = self.depth_index
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum the residual branches; ``attn`` is priced by the joint attention.
+
+            The joint attention registers ``attn`` as one of its own streams and
+            builds it, so it prices it too; counting it here would charge every
+            stream's projections twice.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            children = (self.norm1, self.norm2, self.ffn)
+            total = sum((cost(child, **kwargs) for child in children), Cost())
+            if self.adaln is not None:
+                total += cost(self.adaln, **kwargs)
+            # Two residual adds; adaLN adds a scale, shift, and gate per branch.
+            adds = (10 if self.adaln is not None else 2) * self.channels_in
+            return total + elementwise_cost(primal=adds, adjoint=adds)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -285,6 +327,37 @@ class MMDiTBlock(nn.Module):
                 )
             return super().finalize()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum the joint attention and every stream's residual branches.
+
+            ``seq_len`` on the bus is the JOINT key length -- every stream's
+            tokens concatenated -- as :class:`MultiStreamAttention` defines it,
+            so a caller holding per-stream lengths passes their sum. Every
+            stream's branches are summed, matching the joint attention's
+            convention that each stream's token pays its own projections.
+            Implicit streams are priced from the same templates ``__init__``
+            builds.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            total = cost(self.attn, **kwargs)
+            if self.streams:
+                return total + sum((cost(s, **kwargs) for s in self.streams), Cost())
+            D = self.channels_in
+            stream = 2 * cost(LayerNorm.Config(channels_in=D), **kwargs)
+            stream += cost(self.ffn, **kwargs)
+            if self.cond_dim > 0:
+                adaln = AdaLNZero.Config(channels_in=D, cond_dim=self.cond_dim)
+                stream += cost(adaln.finalize(), **kwargs)
+            adds = (10 if self.cond_dim > 0 else 2) * D
+            stream += elementwise_cost(primal=adds, adjoint=adds)
+            return total + self.num_streams * stream
+
     def __init__(self, config: Config) -> None:
         if (
             -1 not in (config.channels_in, config.channels_out)
@@ -350,11 +423,11 @@ class MMDiTBlock(nn.Module):
         self.attn.reset_parameters()
         for modules in (self.norms1, self.norms2, self.ffns):
             for m in modules:
-                if isinstance(m, Resettable):
+                if isinstance(m, HasResetParameters):
                     m.reset_parameters()
         if self.adalns is not None:
             for m in self.adalns.values():
-                if isinstance(m, Resettable):
+                if isinstance(m, HasResetParameters):
                     m.reset_parameters()
 
     def load_stream(self, index: int, *, source: TransformerBlock) -> None:

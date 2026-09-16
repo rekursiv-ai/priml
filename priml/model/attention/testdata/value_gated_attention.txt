@@ -13,7 +13,7 @@ ValueGatedAttention.Config(
                         dtype=None
                 ),
                 init_weight=<function priml.model.init.unit_fan_in_uniform at 0xdefacedeface>,
-                kernel=PartialConfig(<class 'functools.partial'>, <function priml.model.attention.value_gated_attention.sdpa_attention at 0xdefacedeface>),
+                kernel=SdpaCausal.Config(),
                 window=4,
                 window_pattern='SSSL',
                 max_seq_len=-1,

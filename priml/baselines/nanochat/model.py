@@ -40,14 +40,15 @@ from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
 )
+from priml.model.cost import Cost, cost
 from priml.model.custom_types import (
     ChannelsHead,
     ChannelsIn,
     ChannelsOut,
     HasAttention,
     HasDepthIndex,
+    HasResetParameters,
     NumHeads,
-    Resettable,
     TensorModule,
     propagate_attr,
 )
@@ -271,6 +272,33 @@ class NanoChatLM(nn.Module):
             _reject_ragged_heads(finalized.block, channels_in=finalized.channels_in)
             return finalized
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum the tables, both norms, the mix, every block, and the head.
+
+            What the stack owns and no child can price: the value tables, one
+            per gated layer and sized to the attention's inner width, and the
+            residual mix at the model width. The gate that reads a value table
+            is the attention's own and is priced there.
+
+            Args:
+              **kwargs: The open message bus (``seq_len``, ``num_tokens``).
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            assert isinstance(self.block, list)
+            _, width = _head_shape(self.block[0], self.channels_in)
+            table = _value_table_config(self, width=width)
+            return sum(
+                (cost(child, **kwargs) for child in (*self.block, self.lm_head)),
+                cost(self.embedding, **kwargs)
+                + 2 * cost(self.norm, **kwargs)
+                + cost(self.mix, channels_in=self.channels_in, **kwargs)
+                + cost(self.rope, **kwargs)
+                + len(self.value_embedding_layers) * cost(table, **kwargs),
+            )
+
         def _propagate_layer_table_widths(self) -> None:
             """Propagate attention-value widths into subclass-owned layer tables."""
 
@@ -319,14 +347,8 @@ class NanoChatLM(nn.Module):
     @classmethod
     def _value_table(cls, config: Config, *, width: int) -> nn.Module:
         """One value-embedding table, narrowed like the token table."""
-        table = NarrowEmbedding.Config(
-            inner=Embedding.Config(init_weight=unit_fan_in_uniform),
-        )
-        table.channels_out = width
-        table.channels_in = config.vocab_size
-        if isinstance(config.embedding, NarrowEmbedding.Config):
-            table.dtype = config.embedding.dtype
-        built = table.make()
+        built = _value_table_config(config, width=width).make()
+        assert isinstance(built, nn.Module)
         return built
 
     def reset_parameters(self) -> None:
@@ -346,7 +368,7 @@ class NanoChatLM(nn.Module):
             *self.blocks,
             *self.value_embeds.values(),
         ):
-            if isinstance(module, Resettable):
+            if isinstance(module, HasResetParameters):
                 module.reset_parameters()
         # The rotation table is derived from the rope's frequencies, which a
         # device move rebuilds (rope.py:390-393) because the transcendental
@@ -445,6 +467,24 @@ class NanoChatLM(nn.Module):
         _, inner = _head_shape(config.block[0], config.channels_in)
         attention = sum(12 * inner * _window(block) for block in self.blocks)
         return 6 * matrix + attention
+
+
+def _value_table_config(
+    config: NanoChatLM.Config,
+    *,
+    width: int,
+) -> NarrowEmbedding.Config:
+    """Configure one value-embedding table, narrowed like the token table."""
+    table = NarrowEmbedding.Config(
+        inner=Embedding.Config(init_weight=unit_fan_in_uniform),
+    )
+    table.channels_out = width
+    table.channels_in = config.vocab_size
+    if isinstance(config.embedding, NarrowEmbedding.Config):
+        table.dtype = config.embedding.dtype
+    # Finalized here because it is not in the model's tree: nothing else pushes
+    # the width into ``inner``, and an unfinalized table prices a -1 row.
+    return table.finalize()
 
 
 class _BlockCallable(Protocol):

@@ -18,6 +18,8 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.cost import Compute, Cost, Flops, elementwise_cost
+
 
 class ResidualMix(nn.Module):
     """``running[i] * x + original[i] * x0``, per layer."""
@@ -38,6 +40,40 @@ class ResidualMix(nn.Module):
         Small but nonzero: the path has to exist from step one for its weight
         to receive a gradient, while starting near zero keeps a fresh stack
         close to a plain residual network."""
+
+        def cost(
+            self,
+            *,
+            channels_in: int,
+            num_tokens: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Count two weighted streams over every layer at the supplied width.
+
+            Each scalar weight multiplies a whole row, so its gradient reduces
+            over ``channels_in`` per row before the primitive's reduction over
+            rows; the width is workload geometry, not a parameter shape.
+
+            Args:
+              channels_in: Width of the rows being mixed.
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return elementwise_cost(
+                primal=3 * channels_in * self.num_layers,
+                adjoint=4 * channels_in * self.num_layers,
+                params=2 * self.num_layers,
+                num_tokens=num_tokens,
+            ) + Cost(
+                adjoint=Compute(
+                    flops=Flops(reduction=2 * (channels_in - 1) * self.num_layers),
+                ),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

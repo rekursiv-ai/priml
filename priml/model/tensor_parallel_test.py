@@ -36,7 +36,7 @@ from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.embedding import Embedding
 from priml.model.linear import EnsembleLinear, Linear
-from priml.model.moe import MoE, Router
+from priml.model.moe import MoE, SoftmaxRouter
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
@@ -254,7 +254,7 @@ def _self_attention() -> tuple[nn.Module, Tensor]:
 def _moe() -> tuple[nn.Module, Tensor]:
     moe = MoE.Config(
         channels_in=32,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     return moe, torch.randn(2, 5, 32)
 

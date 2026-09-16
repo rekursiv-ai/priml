@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
+from priml.testing.bfb import portable_half_precision
 from priml.testing.qwen3_5 import (
     hf_config,
     hf_logits,
@@ -59,11 +60,12 @@ def test_matching_kernel_model_outputs_and_gradients(dtype: torch.dtype) -> None
     native = config.make().to(dtype=dtype)
     native.load_state_dict(remap_hf_state_dict(reference.state_dict(), config))
     tokens = torch.tensor([[1, 3, 5, 7]])
-    expected = hf_logits(reference(tokens, use_cache=False))
-    actual = native(tokens)
-    assert torch.equal(actual, expected)
-    expected.float().square().sum().backward()
-    actual.float().square().sum().backward()
+    with portable_half_precision():
+        expected = hf_logits(reference(tokens, use_cache=False))
+        actual = native(tokens)
+        assert torch.equal(actual, expected)
+        expected.float().square().sum().backward()
+        actual.float().square().sum().backward()
     reference_gradients: dict[str, Tensor] = {}
     for name, parameter in reference.named_parameters():
         assert parameter.grad is not None, name

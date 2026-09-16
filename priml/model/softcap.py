@@ -27,6 +27,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.math.numeric import softcap
+from priml.model.cost import Cost, cost, elementwise_cost
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -84,6 +85,21 @@ class SoftCap(nn.Module):
                 protocol=ChannelsOut,
             )
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price projection and divide/tanh/multiply; the adjoint uses saved tanh.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            return cost(self.inner, **kwargs) + elementwise_cost(
+                primal=3 * self.channels_out,
+                adjoint=5 * self.channels_out,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

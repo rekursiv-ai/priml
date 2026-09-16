@@ -24,6 +24,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.math.basic import broadcast_sequences, floor_multiple
+from priml.model.cost import Compute, Cost, Flops, cost, elementwise_cost
 
 
 @runtime_checkable
@@ -94,6 +95,19 @@ class GeometricFrequencies:
         base: float = 10_000.0
         """Controls the longest wavelength: period ``2*pi*base^((c-2)/c)``."""
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Price nothing: a table of constants, no products and no parameters.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return Cost()
+
     def __init__(self, config: Config) -> None:
         self.base = _validated_base(config.base)
 
@@ -124,6 +138,19 @@ class HuggingFaceFrequencies:
     class Config(Fig["HuggingFaceFrequencies"]):
         base: float = 10_000.0
         """Controls the longest wavelength; HF spells this ``rope_theta``."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price nothing: a table of constants, no products and no parameters.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return Cost()
 
     def __init__(self, config: Config) -> None:
         self.base = _validated_base(config.base)
@@ -195,6 +222,18 @@ class YarnScaling:
             default_factory=HuggingFaceFrequencies.Config,
         )
         """Table this rescales; matches ``RoPE.Config.frequencies``' default."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the table this rescales; the rescaling itself is constants.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            return cost(self.inner, **kwargs)
 
     def __init__(self, config: Config) -> None:
         # NaN is checked separately because it fails EVERY comparison, so
@@ -335,17 +374,66 @@ class RoPE(nn.Module):
         reference held them.
         """
 
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count the factors this emits, plus whatever the tables own.
+
+            The attention owner counts applying factors to each query/key head;
+            this config only emits them. Positions and fixed frequencies receive
+            no gradients. A table is priced by its own config -- one per axis,
+            as ``__init__`` builds them -- so a learned table's parameters land
+            here rather than reporting as free.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            return self._factor_cost() + self._table_cost(
+                num_tokens=num_tokens,
+                **kwargs,
+            )
+
+        def _factor_cost(self) -> Cost:
+            """Count position products, trigonometric factors, and their scaling."""
+            axes = _axis_channels(
+                self.channels_head,
+                tables=self.frequencies,
+                reduction_mode=self.reduction_mode,
+            )
+            frequencies = sum(axis // 2 for axis in axes)
+            outputs = frequencies if self.reduction_mode == "cat" else max(axes) // 2
+            # ``sum`` mode adds the axes' angles into one row before cos/sin.
+            reductions = 0 if self.reduction_mode == "cat" else frequencies - outputs
+            return elementwise_cost(primal=frequencies + 4 * outputs, adjoint=0) + Cost(
+                primal=Compute(flops=Flops(reduction=reductions)),
+            )
+
+        def _table_cost(self, **kwargs: object) -> Cost:
+            """Sum the frequency tables: one per axis from a template, else each."""
+            tables = self.frequencies
+            if not isinstance(tables, list):
+                axes = _axis_channels(
+                    self.channels_head,
+                    tables=tables,
+                    reduction_mode=self.reduction_mode,
+                )
+                tables = [tables] * len(axes)
+            return sum((cost(table, **kwargs) for table in tables), Cost())
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         c = config.channels_head
         self.reduction_mode = config.reduction_mode
         tables = config.frequencies
-        channels: list[int] = [int(v) for v in c] if isinstance(c, Sequence) else [c]
+        channels = _axis_channels(
+            c,
+            tables=tables,
+            reduction_mode=config.reduction_mode,
+        )
         if isinstance(tables, list):
-            if config.reduction_mode == "cat" and isinstance(c, int):
-                channels = self._split_dim(c, len(tables))
-            if len(channels) == 1 and len(tables) > 1:
-                channels = channels * len(tables)
             if len(channels) != len(tables):
                 raise ValueError(
                     f"channels_head names {len(channels)} axes but frequencies "
@@ -667,6 +755,53 @@ class RoPE(nn.Module):
         return dims
 
 
+def rotation_cost(rope: object, *, channels_head: int, heads: int) -> Cost:
+    """Price applying rotary factors to ``heads`` rows of ``channels_head``.
+
+    The owner of the queries and keys pays this, not the rotary module: the
+    module emits ``(cos, sin)`` once per position, and every head row is then
+    rotated by them. Each rotated channel is two products and one add, both
+    ways. A :class:`RoPE.Config` may rotate fewer channels than the head holds
+    (``channels_head=[128, 0]``) or, in ``sum`` mode, as many as its widest
+    axis; any other rotary is assumed to rotate the whole head.
+
+    Args:
+      rope: The rotary slot's config.
+      channels_head: Width of each rotated row.
+      heads: Rows rotated per token: query heads plus key heads.
+
+    Returns:
+      cost: Scalar work only; the factors are the rotary module's.
+
+    """
+    channels = channels_head
+    if isinstance(rope, RoPE.Config):
+        axes = rope.channels_head
+        if isinstance(axes, int):
+            channels = axes
+        else:
+            channels = max(axes) if rope.reduction_mode == "sum" else sum(axes)
+    rotations = 3 * channels * heads
+    return elementwise_cost(primal=rotations, adjoint=rotations)
+
+
+def _axis_channels(
+    channels_head: int | Sequence[int],
+    *,
+    tables: Makeable[FrequencyTable] | list[Makeable[FrequencyTable]],
+    reduction_mode: Literal["cat", "sum"],
+) -> list[int]:
+    """Resolve the per-axis channel widths a config describes."""
+    c = channels_head
+    channels = [int(v) for v in c] if isinstance(c, Sequence) else [c]
+    if isinstance(tables, list):
+        if reduction_mode == "cat" and isinstance(c, int):
+            channels = RoPE._split_dim(c, len(tables))  # noqa: SLF001 -- RoPE's own split, shared with its config
+        if len(channels) == 1 and len(tables) > 1:
+            channels = channels * len(tables)
+    return channels
+
+
 def rotate_conjugate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
     """Rotate ``x``'s channel pairs by ``-theta``, at the input's own precision.
 
@@ -730,6 +865,48 @@ class RoPEMixed(RoPE):
 
         learnable: bool = False
         """Whether per-head frequencies are learnable parameters."""
+
+        @override
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count per-head factors and, when learned, their frequency gradients.
+
+            The adjoint uses saved sine/cosine: two scale products, two
+            derivative products, one merge, then a position product per
+            frequency; the reduction over rows is the primitive's. Attention
+            separately counts gradients into the factors. The tables seed the
+            per-head frequencies once, so they are priced once rather than per
+            head.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            axes = _axis_channels(
+                self.channels_head,
+                tables=self.frequencies,
+                reduction_mode=self.reduction_mode,
+            )
+            params = self.num_heads * sum(axis // 2 for axis in axes)
+            outputs = (
+                params
+                if self.reduction_mode == "cat"
+                else (self.num_heads * max(axes) // 2)
+            )
+            frequencies = elementwise_cost(
+                primal=0,
+                adjoint=5 * outputs + params if self.learnable else 0,
+                params=params,
+                num_tokens=num_tokens if self.learnable else 1,
+            )
+            return (
+                self.num_heads * self._factor_cost()
+                + self._table_cost(num_tokens=num_tokens, **kwargs)
+                + frequencies
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)

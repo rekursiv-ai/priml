@@ -10,21 +10,31 @@ forward per *active* expert, not per registered expert.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
+from functools import partial
 from typing import Literal, Protocol, Self, cast, override, runtime_checkable
 
-from configgle import Fig, Makeable
+from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 
 import torch
 
 from priml.lib.custom_json import ListCodec
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+)
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
-    Resettable,
+    HasResetParameters,
     Shardable,
     TensorModule,
     propagate_attr,
@@ -44,9 +54,9 @@ class TokenRouter(Protocol):
         softmax routing needs it, sigmoid routing is aux-loss-free and carries its
         balance in the router's own bias.
 
-                Read-only, so an implementation may hold it at a narrower type -- a
-                mutable ``str`` member is invariant and would reject the ``Literal``
-                the shipped ``Router`` stores.
+        Read-only, so an implementation may hold it at a narrower type -- a
+        mutable ``str`` member is invariant and would reject the ``Literal``
+        the shipped ``Router`` stores.
         """
         ...
 
@@ -85,15 +95,12 @@ class TokenRouterConfig(Makeable[TokenRouter], Protocol):
 
 
 class Router(nn.Module):
-    """Top-k token router.
+    """Top-k token router over a linear gate; a subclass picks the activation.
 
-    Softmax routing (Switch Transformer) returns load-balancing
-    counts via an auxiliary loss that ``MoE`` computes. Sigmoid
-    routing adds a per-expert ``e_score_correction_bias`` (aux-loss-
-    free, DSV3 convention) that shifts *selection* but not the
-    returned gate weights, plus optional group top-k where experts
-    are partitioned into ``n_group`` groups and only ``topk_group``
-    groups are eligible per token.
+    Holds what every gate shares -- the projection, the top-k pick, and the
+    optional renormalization of the picked weights. :class:`SoftmaxRouter` and
+    :class:`SigmoidRouter` each fix ``scoring_func`` in their ``__init__``, so
+    this base is not buildable on its own: ``Router.Config().make()`` raises.
     """
 
     class Config(Fig["Router"], kw_only=False):
@@ -108,98 +115,68 @@ class Router(nn.Module):
         top_k: int = 2
         """Number of experts each token is routed to."""
 
-        jitter_noise: float = 0.0
-        """Multiplicative uniform noise scale for training regularization.
-        Softmax routing only."""
-
-        scoring_func: Literal["softmax", "sigmoid"] = "softmax"
-        """Gate activation. DSV3/Kimi-K2 use ``sigmoid``."""
-
-        norm_topk_prob: bool | None = None
-        """Renormalize top-k weights to sum to 1 after selection.
-        ``None`` infers: ``True`` for sigmoid routing, ``False`` for
-        softmax (softmax already sums to 1). Set explicitly to override."""
-
-        routed_scaling_factor: float = 1.0
-        """Multiplier on top-k weights. DSV3 uses 2.5; Kimi-K2 uses 2.827."""
-
-        n_group: int = 1
-        """Number of expert groups for grouped top-k (1 = no grouping)."""
-
-        topk_group: int = 1
-        """Number of groups to keep when ``n_group > 1``."""
-
-        use_correction_bias: bool | None = None
-        """Maintain ``e_score_correction_bias`` for aux-loss-free routing.
-        ``None`` infers: ``True`` for sigmoid routing, ``False`` otherwise.
-        Set explicitly to override."""
+        norm_topk_prob: bool = False
+        """Renormalize the top-k weights to sum to 1 after selection."""
 
         @override
         def finalize(self) -> Self:
-            sigmoid = self.scoring_func == "sigmoid"
-            if self.norm_topk_prob is None:
-                self.norm_topk_prob = sigmoid
-            if self.use_correction_bias is None:
-                self.use_correction_bias = sigmoid
-            if self.num_experts % self.n_group != 0:
-                raise ValueError(
-                    f"num_experts={self.num_experts} must be divisible by "
-                    f"n_group={self.n_group}.",
-                )
-            if self.topk_group > self.n_group:
-                raise ValueError(
-                    f"topk_group={self.topk_group} > n_group={self.n_group}.",
-                )
             if self.top_k < 1 or self.top_k > self.num_experts:
                 raise ValueError(
                     f"top_k={self.top_k} must satisfy 1 <= top_k <= "
                     f"num_experts={self.num_experts}.",
                 )
-            if self.n_group > 1:
-                eligible = self.topk_group * (self.num_experts // self.n_group)
-                if self.top_k > eligible:
-                    raise ValueError(
-                        f"top_k={self.top_k} exceeds the {eligible} experts "
-                        f"eligible after grouped routing (topk_group="
-                        f"{self.topk_group} groups of "
-                        f"{self.num_experts // self.n_group}).",
-                    )
             return super().finalize()
 
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        if config.scoring_func not in ("softmax", "sigmoid"):
-            raise ValueError(
-                f"scoring_func={config.scoring_func!r} must be one of "
-                f"'softmax' or 'sigmoid'.",
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the gate matmul, the top-k pick, and the picked weights' gather.
+
+            The correction bias is a buffer, not a weight.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            total = matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.num_experts,
+                bias=False,
+            ) + Cost(
+                primal=Compute(
+                    bytes=Bytes(sort=self.num_experts, selection=self.top_k),
+                ),
+                adjoint=Compute(
+                    flops=Flops(selection=self.top_k),
+                    bytes=Bytes(selection=self.top_k),
+                ),
             )
-        # ``finalize`` resolves the ``None`` sentinels to concrete bools.
-        assert config.norm_topk_prob is not None
+            if self.norm_topk_prob:
+                # Sum the picked weights, then divide each by the sum.
+                total += elementwise_cost(
+                    primal=self.top_k,
+                    adjoint=4 * self.top_k,
+                ) + Cost(primal=Compute(flops=Flops(reduction=self.top_k - 1)))
+            return total
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        scoring_func: Literal["softmax", "sigmoid"],
+    ) -> None:
+        super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-        self.jitter_noise = config.jitter_noise
-        self.scoring_func = config.scoring_func
         self.norm_topk_prob = config.norm_topk_prob
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_group = config.n_group
-        self.topk_group = config.topk_group
+        self.scoring_func: Literal["softmax", "sigmoid"] = scoring_func
         self.gate = nn.Linear(config.channels_in, config.num_experts, bias=False)
-        if config.use_correction_bias:
-            # Gradient-free: adjusted during training by the load
-            # balancer, not by autograd. Buffer so load_state_dict
-            # handles it without requires_grad surprises.
-            self.register_buffer(
-                "e_score_correction_bias",
-                torch.zeros(config.num_experts),
-            )
-        else:
-            self.e_score_correction_bias = None
 
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
         nn.init.kaiming_uniform_(self.gate.weight, a=5**0.5)
-        if self.e_score_correction_bias is not None:
-            self.e_score_correction_bias.zero_()
 
     @override
     def forward(
@@ -214,19 +191,200 @@ class Router(nn.Module):
         balance loss for softmax routing).
         """
         del kwargs
-        if self.training and self.jitter_noise > 0:
-            x = x * torch.empty_like(x).uniform_(
-                1 - self.jitter_noise,
-                1 + self.jitter_noise,
-            )
         logits = self.gate(x)
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
         else:
             scores = logits.softmax(dim=-1)
-        # Selection ranking (bias-corrected for sigmoid; identity for
-        # softmax). Bias shifts which experts are picked, not the
-        # returned gate weight (DSV3 decouples the two).
+        _, indices = self._selection(scores).topk(self.top_k, dim=-1)
+        weights = scores.gather(-1, indices)
+        if self.norm_topk_prob:
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1e-20)
+        return weights, indices, logits
+
+    def _selection(self, scores: Tensor) -> Tensor:
+        """Rank experts for the top-k pick; the gate weights stay ``scores``."""
+        return scores
+
+
+class SoftmaxRouter(Router):
+    """Switch Transformer routing: softmax gate, balanced by an auxiliary loss.
+
+    ``MoE`` computes the load-balancing loss from the logits this returns.
+    """
+
+    class Config(Makes["SoftmaxRouter"], Router.Config, kw_only=False):
+        _: KW_ONLY
+
+        jitter_noise: float = 0.0
+        """Multiplicative uniform noise scale for training regularization."""
+
+        @override
+        def cost(self, **kwargs: object) -> Cost:
+            """Count stable softmax and optional training jitter.
+
+            Softmax over ``E`` experts: max and sum are two reductions of
+            ``E - 1``; subtract, exp, and divide are ``3E`` elementwise. The
+            adjoint's dot product is the same split.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            jitter = self.channels_in if self.jitter_noise > 0 else 0
+            width = self.num_experts
+            return (
+                super().cost(**kwargs)
+                + elementwise_cost(
+                    primal=3 * width + jitter,
+                    adjoint=3 * width + jitter,
+                )
+                + Cost(
+                    primal=Compute(flops=Flops(reduction=2 * (width - 1))),
+                    adjoint=Compute(flops=Flops(reduction=width - 1)),
+                )
+            )
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config, scoring_func="softmax")
+        self.jitter_noise = config.jitter_noise
+
+    @override
+    def forward(
+        self,
+        x: Tensor,
+        **kwargs: object,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        if self.training and self.jitter_noise > 0:
+            x = x * torch.empty_like(x).uniform_(
+                1 - self.jitter_noise,
+                1 + self.jitter_noise,
+            )
+        return super().forward(x, **kwargs)
+
+
+class SigmoidRouter(Router):
+    """DeepSeek-V3 / Kimi-K2 routing: sigmoid gate, aux-loss-free.
+
+    A per-expert ``e_score_correction_bias`` shifts *selection* but not the
+    returned gate weights, so the load balancer steers assignment without
+    an auxiliary loss. Optional grouped top-k partitions the experts into
+    ``n_group`` groups and keeps only ``topk_group`` of them per token.
+    """
+
+    class Config(Makes["SigmoidRouter"], Router.Config, kw_only=False):
+        _: KW_ONLY
+
+        norm_topk_prob: bool = True
+        """Renormalize the top-k weights to sum to 1 after selection."""
+
+        use_correction_bias: bool = True
+        """Maintain ``e_score_correction_bias`` for aux-loss-free balancing."""
+
+        routed_scaling_factor: float = 1.0
+        """Multiplier on top-k weights. DSV3 uses 2.5; Kimi-K2 uses 2.827."""
+
+        n_group: int = 1
+        """Number of expert groups for grouped top-k (1 = no grouping)."""
+
+        topk_group: int = 1
+        """Number of groups to keep when ``n_group > 1``."""
+
+        @override
+        def finalize(self) -> Self:
+            if self.num_experts % self.n_group != 0:
+                raise ValueError(
+                    f"num_experts={self.num_experts} must be divisible by "
+                    f"n_group={self.n_group}.",
+                )
+            if self.topk_group > self.n_group:
+                raise ValueError(
+                    f"topk_group={self.topk_group} > n_group={self.n_group}.",
+                )
+            if self.n_group > 1:
+                eligible = self.topk_group * (self.num_experts // self.n_group)
+                if self.top_k > eligible:
+                    raise ValueError(
+                        f"top_k={self.top_k} exceeds the {eligible} experts "
+                        f"eligible after grouped routing (topk_group="
+                        f"{self.topk_group} groups of "
+                        f"{self.num_experts // self.n_group}).",
+                    )
+            return super().finalize()
+
+        @override
+        def cost(self, **kwargs: object) -> Cost:
+            """Count sigmoid, selection-only bias/group sums, and weight scaling.
+
+            Grouped routing sorts each group for its top-2 and the groups for
+            ``topk_group``; the group sums are reductions.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            width = self.num_experts
+            bias = width if self.use_correction_bias else 0
+            groups = Cost()
+            if self.n_group > 1:
+                group_size = width // self.n_group
+                groups = Cost(
+                    primal=Compute(
+                        flops=Flops(reduction=self.n_group * (min(2, group_size) - 1)),
+                        bytes=Bytes(sort=width + self.n_group),
+                    ),
+                )
+            return (
+                super().cost(**kwargs)
+                + elementwise_cost(
+                    primal=4 * width + bias + self.top_k,
+                    adjoint=3 * width + self.top_k,
+                )
+                + groups
+            )
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config, scoring_func="sigmoid")
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.n_group = config.n_group
+        self.topk_group = config.topk_group
+        self.e_score_correction_bias: Tensor | None
+        if config.use_correction_bias:
+            # Gradient-free: adjusted during training by the load
+            # balancer, not by autograd. Buffer so load_state_dict
+            # handles it without requires_grad surprises.
+            self.register_buffer(
+                "e_score_correction_bias",
+                torch.zeros(config.num_experts),
+            )
+        else:
+            self.e_score_correction_bias = None
+
+    @override
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        if self.e_score_correction_bias is not None:
+            self.e_score_correction_bias.zero_()
+
+    @override
+    def forward(
+        self,
+        x: Tensor,
+        **kwargs: object,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        weights, indices, logits = super().forward(x, **kwargs)
+        return weights * self.routed_scaling_factor, indices, logits
+
+    @override
+    def _selection(self, scores: Tensor) -> Tensor:
+        # Bias shifts which experts are picked, not the returned gate
+        # weight (DSV3 decouples the two).
         selection = (
             scores + self.e_score_correction_bias
             if self.e_score_correction_bias is not None
@@ -234,12 +392,7 @@ class Router(nn.Module):
         )
         if self.n_group > 1:
             selection = self._mask_inactive_groups(selection)
-        _, indices = selection.topk(self.top_k, dim=-1)
-        weights = scores.gather(-1, indices)
-        if self.norm_topk_prob:
-            weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1e-20)
-        weights = weights * self.routed_scaling_factor
-        return weights, indices, logits
+        return selection
 
     def _mask_inactive_groups(self, selection: Tensor) -> Tensor:
         """Keep only ``topk_group`` groups live (DSV3 grouped routing)."""
@@ -260,7 +413,7 @@ class MoE(nn.Module):
     """Mixture-of-experts layer.
 
     Drop-in replacement for FFN. Routes each token to top-k experts
-    via :class:`Router`, plus optional always-active shared experts
+    via a :class:`Router`, plus optional always-active shared experts
     summed onto every token. Dispatch is sort-and-dispatch: tokens
     are grouped by expert so each *active* expert runs exactly one
     contiguous forward (vs. one forward per registered expert in the
@@ -268,8 +421,8 @@ class MoE(nn.Module):
 
     Softmax routing stores the Switch Transformer load-balancing
     auxiliary loss in ``_aux_loss`` during training. Sigmoid routing
-    is aux-loss-free (the bias in :class:`Router` handles balance);
-    ``aux_loss_weight`` is ignored.
+    is aux-loss-free (the bias in :class:`SigmoidRouter` handles
+    balance); ``aux_loss_weight`` is ignored.
     """
 
     class Config(Fig["MoE"], kw_only=False):
@@ -281,7 +434,9 @@ class MoE(nn.Module):
 
         _: KW_ONLY
 
-        router: TokenRouterConfig = field(default_factory=Router.Config)
+        router: TokenRouterConfig = field(
+            default_factory=partial[SoftmaxRouter.Config](SoftmaxRouter.Config),
+        )
         """Token-to-expert assignment. Its ``num_experts`` is how many experts
         ``MoE`` builds from the ``expert`` template."""
 
@@ -335,6 +490,57 @@ class MoE(nn.Module):
                     cfg.shard = "colwise"
             return super().finalize()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the router, ``top_k`` routed experts, and every shared expert.
+
+            ``params`` counts every routed expert; every other field counts what
+            one token touches -- the ``top_k`` experts it is dispatched to and
+            the shared experts, which are always active. Dispatch sorts the
+            ``top_k`` assignments, gathers the token's row into each expert,
+            and scatter-adds the gated outputs back; the adjoint's gate gradient
+            is a dot product per routed expert. Expert batch reductions use the
+            supplied geometry as an estimate: actual per-expert token occupancy
+            depends on the routing decisions. The auxiliary loss is excluded,
+            like the external training loss.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            top_k = self.router.top_k
+            # Every expert exists, but one token runs ``top_k`` of them, so only
+            # ``params`` follows the module count; ``tile`` would scale
+            # ``params_active`` and the weight bytes by it too.
+            expert = cost(self.expert, **kwargs)
+            routed = replace(
+                top_k * expert,
+                params=self.router.num_experts * expert.params,
+            )
+            shared = self.num_shared_experts * cost(self.shared_expert, **kwargs)
+            width = self.channels_out
+            width_in = self.channels_in
+            dispatch = Cost(
+                primal=Compute(
+                    flops=Flops(
+                        elementwise=top_k * width,
+                        selection=(top_k + self.num_shared_experts) * width,
+                    ),
+                    bytes=Bytes(sort=top_k, selection=top_k * (width_in + width)),
+                ),
+                adjoint=Compute(
+                    flops=Flops(
+                        elementwise=2 * top_k * width,
+                        reduction=top_k * (width - 1),
+                        selection=(top_k + self.num_shared_experts) * width_in,
+                    ),
+                    bytes=Bytes(selection=top_k * (width_in + width)),
+                ),
+            )
+            return cost(self.router, **kwargs) + routed + shared + dispatch
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.num_experts = config.router.num_experts
@@ -372,7 +578,7 @@ class MoE(nn.Module):
         self.router.reset_parameters()
         for group in (self.experts, self.shared_experts):
             for expert in group:
-                if isinstance(expert, Resettable):
+                if isinstance(expert, HasResetParameters):
                     expert.reset_parameters()
 
     @override
@@ -436,9 +642,9 @@ class MoE(nn.Module):
 
         y = x_flat.new_zeros(x_flat.shape[0], self.channels_out)
         for expert_id, start, count in zip(
-            _as_int_list(active),
-            _as_int_list(starts),
-            _as_int_list(counts),
+            ListCodec.coerce(active.tolist(), int),
+            ListCodec.coerce(starts.tolist(), int),
+            ListCodec.coerce(counts.tolist(), int),
             strict=True,
         ):
             end = start + count
@@ -467,8 +673,3 @@ class MoE(nn.Module):
         freq = counts / (t * self.top_k)
         mean_probs = probs.mean(dim=0)
         return self.num_experts * (freq * mean_probs).sum() * self.aux_loss_weight
-
-
-def _as_int_list(t: Tensor) -> list[int]:
-    """Materialize a 1-D tensor as ``list[int]``."""
-    return ListCodec.coerce(t.tolist(), int)

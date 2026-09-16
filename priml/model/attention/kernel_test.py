@@ -12,7 +12,9 @@ import pytest
 import torch
 
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -108,6 +110,63 @@ def test_the_kernels_agree_on_a_windowed_forward() -> None:
     fused = SdpaFused()(q, k, v, is_causal=True, window=3)
     naive = SdpaNaive()(q, k, v, is_causal=True, window=3)
     torch.testing.assert_close(fused, naive, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("config", [SdpaFused.Config(), SdpaNaive.Config()])
+def test_kernel_cost_is_two_products_over_the_reachable_keys(
+    config: SdpaFused.Config | SdpaNaive.Config,
+) -> None:
+    """QK^T and PV, two FLOPs per MAC, per head; softmax is elementwise plus sums.
+
+    Per head over ``keys``: the max and the normalizer are two ``keys - 1``
+    sums, and the adjoint's ``sum(g * p)`` one more.
+    """
+    full = cost(config, seq_len=32, num_heads=2, channels_head=8)
+    assert full == Cost(
+        primal=Compute(
+            flops=Flops(
+                matmul=4 * 2 * 8 * 32,
+                elementwise=2 * 4 * 32,
+                reduction=2 * 62,
+            ),
+            bytes=Bytes(elementwise=2 * 8),
+        ),
+        adjoint=Compute(
+            flops=Flops(
+                matmul=2 * 4 * 2 * 8 * 32,
+                elementwise=2 * 4 * 32,
+                reduction=2 * 31,
+            ),
+            bytes=Bytes(elementwise=2 * 8),
+        ),
+    )
+    windowed = cost(config, seq_len=32, num_heads=2, channels_head=8, window=4)
+    assert windowed.primal.flops.matmul == 4 * 2 * 8 * 4
+    assert windowed.primal.flops.elementwise == 2 * 4 * 4
+    # A window past the sequence reaches every key and nothing more.
+    assert cost(config, seq_len=32, num_heads=2, channels_head=8, window=64) == full
+    dropped = cost(config, seq_len=32, num_heads=2, channels_head=8, dropout_p=0.1)
+    assert (
+        dropped.primal.flops.elementwise == full.primal.flops.elementwise + 2 * 2 * 32
+    )
+
+
+def test_naive_kernel_cost_matches_torch() -> None:
+    """The manual kernel is two bmms each way; torch counts exactly that.
+
+    Only the naive kernel is measurable here: the CPU SDPA op that
+    ``SdpaFused`` dispatches to has no ``FlopCounterMode`` registration and
+    measures zero, which is the silent-zero bug ``cost`` exists to prevent.
+    """
+    analytical = assert_cost_matches_torch(
+        SdpaNaive.Config(),
+        build_input=lambda: tuple(
+            torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3)
+        ),
+        num_tokens=8,
+        bus={"seq_len": 8, "num_heads": 2, "channels_head": 4},
+    )
+    assert analytical.primal.flops.matmul == 4 * 2 * 4 * 8
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

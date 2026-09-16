@@ -40,7 +40,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, loads
+from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
@@ -56,36 +56,7 @@ from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.transformer import Transformer
-
-
-def _load_hf_checkpoint(
-    path_or_repo: Path | str,
-    *,
-    dtype: torch.dtype | None,
-) -> tuple[dict[str, object], dict[str, Tensor]]:
-    """Read Qwen checkpoint metadata and tensors once, locally or through the hub."""
-    path = Path(path_or_repo)
-    if path.is_dir() and (path / "config.json").exists():
-        hf_config = DictCodec.coerce(loads((path / "config.json").read_text()))
-        return hf_config, hub.load_local_state_dict(path)
-    hf_model = hub.load_transformers_model(
-        str(path_or_repo),
-        "AutoModelForCausalLM",
-        dtype=dtype,
-    )
-    return DictCodec.coerce(hf_model.config.to_dict()), {
-        key: value.detach().cpu() for key, value in hf_model.state_dict().items()
-    }
-
-
-def _tied(config: Transformer.Config) -> bool:
-    """Whether the head borrows the embedding, so HF ships no ``lm_head``."""
-    head = config.proj_out
-    if isinstance(head, Sequential.Config):
-        elements = head.elements
-        head = elements[-1] if isinstance(elements, list) else elements
-    return isinstance(head, TiedLinear.Config)
+from priml.model.transformer.transformer import Transformer, head_is_tied
 
 
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the
@@ -331,7 +302,7 @@ class Qwen3(Transformer):
           model: Qwen3 instance with loaded weights on target device.
 
         """
-        hf_config, hf_sd = _load_hf_checkpoint(path_or_repo, dtype=dtype)
+        hf_config, hf_sd = hub.load_hf_checkpoint(path_or_repo, dtype=dtype)
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
         model.load_state_dict(remap_hf_state_dict(hf_sd, config), strict=True)
@@ -369,7 +340,7 @@ def remap_hf_state_dict(
         "proj_in.weight": hf_sd["model.embed_tokens.weight"],
         "proj_out.0.weight": hf_sd["model.norm.weight"],
     }
-    if not _tied(config):
+    if not head_is_tied(config):
         out["proj_out.1.weight"] = hf_sd["lm_head.weight"]
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
@@ -391,6 +362,3 @@ def remap_hf_state_dict(
         out[f"{b}.ffn.up_proj.weight"] = torch.cat([gate, up], dim=0)
         out[f"{b}.ffn.down_proj.weight"] = hf_sd[f"{p}.mlp.down_proj.weight"]
     return out
-
-
-# -- HF weight remap ---------------------------------------------------

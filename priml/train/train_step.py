@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, NotRequired, TypedDict,
 from typing_extensions import TypeVar
 
 import contextlib
+import logging
 import math
 
 from configgle import Fig, Makeable, PartialConfig
@@ -63,6 +64,8 @@ from priml.train.quantization import NoModelQuantization
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+
+logger = logging.getLogger(__name__)
 
 _ModelConfigT = TypeVar(
     "_ModelConfigT",
@@ -181,7 +184,7 @@ class TrainStep:
         have. Counted by the dataset, which owns the only boundary that can
         say a pass ended."""
 
-        learning_rate_scheduler: Makeable[Schedule[float]] = field(
+        lr_schedule: Makeable[Schedule[float]] = field(
             default_factory=lambda: PartialConfig(constant),
         )
         """Maps the learning schedule's progress to a rate multiplier.
@@ -227,6 +230,17 @@ class TrainStep:
 
         gradient_clip_norm: float = math.inf
         """Global gradient-norm ceiling; infinite disables clipping."""
+
+        skip_step_on_nonfinite_grad: bool = False
+        """Skip the optimizer update when the gradient norm is NaN or inf.
+
+        Off by default because the check reads the norm on the host: one
+        device sync per update, on a path otherwise free of them. When on, a
+        non-finite norm skips the whole update -- schedule, ``optimizer.step``,
+        EMA -- but the gradients are still zeroed and ``global_step`` still
+        advances, so the schedule and the stop conditions are unaffected. Each
+        skip increments ``skipped_steps``, which the step's train metrics then
+        carry under that name."""
 
         device_init: Literal["meta", "eager"] = "eager"
         """HOW the model's storage is allocated -- never WHERE, which is
@@ -291,6 +305,10 @@ class TrainStep:
         Unused here; a subclass wraps its own phases with it so they land in
         the loop's summary."""
 
+        self.skip_step_on_nonfinite_grad = config.skip_step_on_nonfinite_grad
+        self.skipped_steps = 0
+        """Updates skipped for a non-finite gradient norm; checkpointed."""
+
         self.timer_forward = CheckpointableStepTimer()
         """Training forward passes: how many, and how long they took."""
 
@@ -350,9 +368,7 @@ class TrainStep:
         # the recipe was tuned at rather than compounding on the last step's.
         remember_initial_lrs([self.optimizer])
 
-        self.learning_rate_scheduler: Schedule[float] = (
-            self.config.learning_rate_scheduler.make()
-        )
+        self.lr_schedule: Schedule[float] = self.config.lr_schedule.make()
 
         self.ema: EMAProtocol = self.config.ema.make()
 
@@ -565,6 +581,21 @@ class TrainStep:
                 self.gradient_clip_norm,
                 foreach=True,
             )
+            # Still inside the tally: the skipped update counts toward
+            # ``global_step`` so the schedule and stop conditions see it.
+            if self.skip_step_on_nonfinite_grad:
+                grad_norm = self.last_grad_norm.item()
+                if not math.isfinite(grad_norm):
+                    self.skipped_steps += 1
+                    logger.warning(
+                        "Skipping optimizer update at step %d: gradient norm is "
+                        "%s (%d skipped so far).",
+                        self.global_step + 1,
+                        grad_norm,
+                        self.skipped_steps,
+                    )
+                    self.optimizer.zero_grad(set_to_none=True)
+                    return
             # Scaled BEFORE the optimizer, so the rate this update uses is the
             # one the schedule names for this progress; scaled afterwards it
             # would take effect a step late and the first update would land at
@@ -589,7 +620,7 @@ class TrainStep:
         0.6 beside an unembedding at 0.004) keeps their ratios, and repeated
         application cannot compound.
         """
-        multiplier = self.learning_rate_scheduler(self.progress_learning_schedule)
+        multiplier = self.lr_schedule(self.progress_learning_schedule)
         assert isinstance(multiplier, (int, float))
         apply_lr_scale([self.optimizer], multiplier)
 
@@ -626,9 +657,6 @@ class TrainStep:
         Returns:
           output: Dict with "loss" (per-element unreduced tensor), "model"
             (forward output), and any extra loss dict entries.
-
-        Returns:
-          result: The TrainStepOutput.
 
         """
         # Forward (autocast applied in __call__). The output may be a single
@@ -688,7 +716,10 @@ class TrainStep:
             self.accumulated_samples = 0
 
         loss_result["model"] = cast(Tensor, output)
-        return cast(TrainStepOutput, loss_result)
+        result = cast(TrainStepOutput, loss_result)
+        if self.skip_step_on_nonfinite_grad:
+            result.setdefault("metrics", {})["skipped_steps"] = self.skipped_steps
+        return result
 
     def train_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Compute loss in train mode (no backprop).
@@ -700,9 +731,6 @@ class TrainStep:
         Returns:
           output: Dict with "loss" (per-element unreduced tensor), "model"
             (forward output), and any extra loss dict entries.
-
-        Returns:
-          result: The TrainStepOutput.
 
         """
         # Forward (train mode + autocast via __call__)
@@ -725,9 +753,6 @@ class TrainStep:
         Returns:
           output: Dict with "loss" (per-element unreduced tensor), "model"
             (forward output), and any extra loss dict entries.
-
-        Returns:
-          result: The TrainStepOutput.
 
         """
         # Forward (eval mode + autocast via call_eval)
@@ -770,6 +795,7 @@ class TrainStep:
         ema: NotRequired[Mapping[str, Any]]  # pyright: ignore[reportExplicitAny] -- EMAProtocol implementations each own their schema.
         accumulation_steps: int
         accumulated_samples: int
+        skipped_steps: NotRequired[int]
 
     def state_dict(self) -> StateDict:
         """Return checkpoint state dict.
@@ -789,7 +815,7 @@ class TrainStep:
         Returns:
           state: Dict with "model", "optimizer", "timer_forward",
             "timer_eval", "timer_step", "ema", "accumulation_steps",
-            "accumulated_samples".
+            "accumulated_samples", "skipped_steps".
 
         """
         if self.accumulation_steps:
@@ -806,6 +832,7 @@ class TrainStep:
             "ema": self.ema.state_dict(),
             "accumulation_steps": self.accumulation_steps,
             "accumulated_samples": self.accumulated_samples,
+            "skipped_steps": self.skipped_steps,
         }
 
     def load_state_dict(
@@ -856,6 +883,8 @@ class TrainStep:
             self.timer_eval.load_state_dict(state["timer_eval"])
         if "timer_step" in state:
             self.timer_step.load_state_dict(state["timer_step"])
+        # Absent from a checkpoint written before the counter existed.
+        self.skipped_steps = state.get("skipped_steps", 0)
 
         self.accumulation_steps = 0
         self.accumulated_samples = 0

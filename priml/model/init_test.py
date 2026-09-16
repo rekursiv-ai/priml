@@ -17,7 +17,7 @@ from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import RoPE, RoPEMixed
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.custom_types import DepthIndex, Resettable
+from priml.model.custom_types import DepthIndex, HasResetParameters
 from priml.model.init import (
     call_init,
     dirac,
@@ -31,7 +31,7 @@ from priml.model.init import (
     xavier_uniform,
 )
 from priml.model.linear import EnsembleLinear, Linear
-from priml.model.moe import MoE, Router
+from priml.model.moe import MoE, SoftmaxRouter
 from priml.model.norm import CenteredRMSNorm
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
@@ -288,7 +288,7 @@ _BUILDERS: dict[str, Callable[[], nn.Module]] = {
     ).make(),
     "moe": lambda: MoE.Config(
         channels_in=16,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make(),
     "mla": lambda: MultiHeadLatentAttention.Config(
         channels_in=16,
@@ -338,7 +338,7 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
         for _, tensor in state:
             if tensor.is_floating_point():
                 tensor.fill_(float("nan"))
-    assert isinstance(model, Resettable)
+    assert isinstance(model, HasResetParameters)
     model.reset_parameters()
     for key, tensor in state:
         if not tensor.is_floating_point():

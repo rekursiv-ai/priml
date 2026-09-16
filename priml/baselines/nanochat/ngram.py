@@ -19,6 +19,7 @@ from torch.nn import functional
 
 import torch
 
+from priml.model.cost import Cost, cost, elementwise_cost
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 
@@ -149,6 +150,28 @@ class HashedNgramTables(nn.Module):
             bound = (3 / self.channels_out) ** 0.5
             self.table.init_weight = partial(nn.init.uniform_, a=-bound, b=bound)
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price one gather per table plus the integer hash that indexes it.
+
+            Each hash is ``order - 1`` multiply-XOR pairs and one multiply, then
+            a modulo: ``2 * order`` integer ops per token per table, in the
+            elementwise silo since they are one output per input. The tables
+            themselves are the template's gather, once per hash.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            order = len(self.hash_multipliers[0])
+            hashes = len(self.hash_multipliers)
+            return hashes * cost(self.table, **kwargs) + elementwise_cost(
+                primal=2 * order * hashes,
+                adjoint=0,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

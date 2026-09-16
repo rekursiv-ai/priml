@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast, override
 
 import functools
+import math
 import tempfile
 
 from configgle import Fig, MutableNamespace, PartialConfig
@@ -555,6 +556,90 @@ def test_first_order_optimizer_runs_one_forward_per_step() -> None:
         f"expected 1 forward, got {model.forward_count} "
         "(a closure leaked to a first-order optimizer?)"
     )
+
+
+def _nan_loss(output: Tensor, **kwargs: object) -> LossOutput:
+    """Per-element loss whose gradient is NaN everywhere."""
+    del kwargs
+    return {"loss": output * math.nan}
+
+
+def _nan_grad_step(*, skip_step_on_nonfinite_grad: bool) -> TrainStep:
+    config = TrainStep.Config()
+    config.model = _LinearModel.Config(in_features=2, out_features=1)
+    config.loss = PartialConfig(_nan_loss)
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
+    config.skip_step_on_nonfinite_grad = skip_step_on_nonfinite_grad
+    return config.make()
+
+
+def test_nonfinite_grad_skips_update_when_enabled() -> None:
+    torch.manual_seed(0)
+    trainable = _nan_grad_step(skip_step_on_nonfinite_grad=True)
+    before = [p.detach().clone() for p in trainable.model.parameters()]
+
+    result = trainable.train_step(x=torch.randn(4, 2))
+
+    for param, original in zip(trainable.model.parameters(), before, strict=True):
+        assert torch.equal(param, original)
+        assert param.grad is None
+    assert trainable.skipped_steps == 1
+    assert trainable.global_step == 1
+    assert result.get("metrics") == {"skipped_steps": 1}
+
+
+def test_nonfinite_grad_reads_the_norm_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The skip check is one device sync, not one per log field."""
+    torch.manual_seed(0)
+    trainable = _nan_grad_step(skip_step_on_nonfinite_grad=True)
+    reads = 0
+    original = Tensor.item
+
+    def counted(self: Tensor) -> float:
+        nonlocal reads
+        reads += 1
+        return original(self)
+
+    monkeypatch.setattr(Tensor, "item", counted)
+    trainable.train_step(x=torch.randn(4, 2))
+    assert reads == 1
+
+
+def test_skipped_steps_survive_a_checkpoint_round_trip() -> None:
+    """A resumed run keeps reporting the skips the checkpointed one made."""
+    torch.manual_seed(0)
+    trainable = _nan_grad_step(skip_step_on_nonfinite_grad=True)
+    trainable.train_step(x=torch.randn(4, 2))
+    state = trainable.state_dict()
+    assert state.get("skipped_steps") == 1
+
+    resumed = _nan_grad_step(skip_step_on_nonfinite_grad=True)
+    resumed.load_state_dict(state)
+    assert resumed.skipped_steps == 1
+    resumed.train_step(x=torch.randn(4, 2))
+    assert resumed.skipped_steps == 2
+
+
+def test_a_checkpoint_without_skipped_steps_loads_at_zero() -> None:
+    """A checkpoint written before the counter existed still resumes."""
+    trainable = _nan_grad_step(skip_step_on_nonfinite_grad=True)
+    state = trainable.state_dict()
+    del state["skipped_steps"]
+    trainable.skipped_steps = 3
+    trainable.load_state_dict(state)
+    assert trainable.skipped_steps == 0
+
+
+def test_nonfinite_grad_corrupts_parameters_when_disabled() -> None:
+    torch.manual_seed(0)
+    trainable = _nan_grad_step(skip_step_on_nonfinite_grad=False)
+
+    result = trainable.train_step(x=torch.randn(4, 2))
+
+    assert all(p.isnan().all() for p in trainable.model.parameters())
+    assert trainable.skipped_steps == 0
+    assert "skipped_steps" not in result.get("metrics", {})
 
 
 def test_assert_uniform_microbatch_count_single_process_noop() -> None:

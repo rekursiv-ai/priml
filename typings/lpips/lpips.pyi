@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 from torch import Tensor, nn
 
@@ -6,6 +6,9 @@ def spatial_average(in_tens, keepdim=...): ...
 def upsample(in_tens, out_HW=...): ...
 
 class LPIPS(nn.Module):
+    L: int
+    net: nn.Module
+    lins: nn.ModuleList
     def __init__(
         self,
         pretrained=...,
@@ -20,18 +23,38 @@ class LPIPS(nn.Module):
         eval_mode=...,
         verbose=...,
     ) -> None: ...
+    @overload
     def forward(
         self,
-        in0,
-        in1,
-        retPerLayer=...,
-        normalize=...,
-    ) -> tuple[Any | Literal[0], list[Any]] | Literal[0]: ...
+        in0: Tensor,
+        in1: Tensor,
+        retPerLayer: Literal[False] = ...,
+        normalize: bool = ...,
+    ) -> Tensor: ...
+    @overload
+    def forward(
+        self,
+        in0: Tensor,
+        in1: Tensor,
+        retPerLayer: Literal[True],
+        normalize: bool = ...,
+    ) -> tuple[Tensor, list[Tensor]]: ...
+    @overload
     def __call__(
         self,
-        *args: Any,
-        **kwargs: Any,
-    ) -> tuple[Any | Literal[0], list[Any]] | Literal[0]: ...
+        in0: Tensor,
+        in1: Tensor,
+        retPerLayer: Literal[False] = ...,
+        normalize: bool = ...,
+    ) -> Tensor: ...
+    @overload
+    def __call__(
+        self,
+        in0: Tensor,
+        in1: Tensor,
+        retPerLayer: Literal[True],
+        normalize: bool = ...,
+    ) -> tuple[Tensor, list[Tensor]]: ...
 
 class ScalingLayer(nn.Module):
     def __init__(self) -> None: ...

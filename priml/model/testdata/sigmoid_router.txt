@@ -1,0 +1,10 @@
+SigmoidRouter.Config(
+                channels_in=4,
+                num_experts=2,
+                top_k=1,
+                norm_topk_prob=True,
+                use_correction_bias=True,
+                routed_scaling_factor=1.0,
+                n_group=1,
+                topk_group=1
+        )

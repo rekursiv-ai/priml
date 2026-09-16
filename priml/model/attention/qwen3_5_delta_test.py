@@ -13,6 +13,8 @@ from priml.model.attention.qwen3_5_delta import (
     Qwen35RMSNormGated,
 )
 from priml.model.norm import CenteredRMSNorm
+from priml.testing.bfb import portable_half_precision
+from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.qwen3_5 import hf_tensor, torch_reference
 
 
@@ -83,12 +85,13 @@ def test_delta_reference_forward_and_gradients(dtype: torch.dtype) -> None:
     native.load_state_dict(reference.state_dict(), strict=True)
     input_ref = torch.randn(1, 5, 8, dtype=dtype, requires_grad=True)
     input_native = input_ref.detach().clone().requires_grad_()
-    expected_output = cast(object, reference(input_ref))
-    expected = hf_tensor(expected_output)
-    actual = native(input_native)
-    assert torch.equal(actual, expected)
-    expected.float().square().sum().backward()
-    actual.float().square().sum().backward()
+    with portable_half_precision():
+        expected_output = cast(object, reference(input_ref))
+        expected = hf_tensor(expected_output)
+        actual = native(input_native)
+        assert torch.equal(actual, expected)
+        expected.float().square().sum().backward()
+        actual.float().square().sum().backward()
     assert input_native.grad is not None
     assert input_ref.grad is not None
     assert torch.equal(input_native.grad, input_ref.grad)
@@ -285,6 +288,34 @@ def test_delta_norm_slot_defaults_to_gated_transform_and_accepts_ordinary_norm()
     ordinary = ordinary_config.make()
     assert isinstance(ordinary.norm, CenteredRMSNorm)
     assert torch.equal(ordinary.norm(x), ordinary.norm(x, gate=gate))
+
+
+def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
+    """Torch counts no matmul; the per-channel scale is the only parameter.
+
+    Per row of width ``w``: square, mean, epsilon and rsqrt, scale, the
+    learned scale, SiLU on the gate, and the gating product are ``9w + 3``
+    scalar operations around one ``w - 1`` sum. The adjoint pulls back
+    through the affine norm (``6w + 4``), the product (``2w``), and SiLU's
+    saved-sigmoid derivative (``5w``); the scale's gradient sums over rows.
+    """
+    config = Qwen35RMSNormGated.Config()
+    config.channels_in = 8
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: (torch.randn(3, 8, requires_grad=True), torch.randn(3, 8)),
+        num_tokens=3,
+        run=lambda module, inputs: cast(Qwen35RMSNormGated, module)(
+            inputs[0],
+            gate=inputs[1],
+        ),
+    )
+    assert model_cost.params == 8
+    assert model_cost.training.flops.matmul == 0
+    assert model_cost.primal.flops.elementwise == 9 * 8 + 3
+    assert model_cost.adjoint.flops.elementwise == 13 * 8 + 4
+    assert model_cost.primal.flops.reduction == 8 - 1
+    assert model_cost.adjoint.flops.reduction == (8 - 1) + 8 * (3 - 1) / 3
 
 
 def _is_tensor_cache(value: object) -> TypeGuard[dict[str, torch.Tensor]]:

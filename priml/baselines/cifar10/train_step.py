@@ -78,7 +78,7 @@ class Cifar10TrainStep(TrainStep):
         )
         """Maps progress in ``[0, 1]`` to a learning-rate multiplier.
 
-        Read instead of the base's ``learning_rate_scheduler``, since
+        Read instead of the base's ``lr_schedule``, since
         ``_apply_schedule`` drives the rate itself."""
 
         warmup_fraction: float = 0.02

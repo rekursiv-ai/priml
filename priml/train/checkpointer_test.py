@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast, override
+from typing import TYPE_CHECKING, Literal, TypedDict, cast, override
 
 import functools
 import shutil
@@ -21,8 +21,8 @@ import torch
 import torch.distributed as dist
 
 from priml.lib.custom_json import DictCodec
-from priml.train import checkpointing
-from priml.train.checkpointing import (
+from priml.train import checkpointer
+from priml.train.checkpointer import (
     AsyncLocalStateDictStorer,
     Checkpointer,
     StateDictStorer,
@@ -166,16 +166,16 @@ def test_owner_resolves_checkpoint_working_dir() -> None:
     config = Checkpointer.Config()
     config.base_dir = "/scratch/runs/study/exp001"
 
-    checkpointing = config.make()
+    checkpointer = config.make()
 
     expected = Path("/scratch/runs/study/exp001/checkpoints")
-    assert checkpointing.checkpoint_dir == expected
+    assert checkpointer.checkpoint_dir == expected
 
 
 def test_explicit_working_dir_is_preserved(tmp_path: Path) -> None:
-    checkpointing = Checkpointer.Config(working_dir=tmp_path / "checkpoints").make()
+    checkpointer = Checkpointer.Config(working_dir=tmp_path / "checkpoints").make()
 
-    assert checkpointing.checkpoint_dir == tmp_path / "checkpoints"
+    assert checkpointer.checkpoint_dir == tmp_path / "checkpoints"
 
 
 def test_maybe_save_follows_cadence(temp_checkpoint_dir: Path) -> None:
@@ -244,7 +244,7 @@ def test_overwrite_rejects_file_to_distributed_format_transition(
         del state
         return True
 
-    monkeypatch.setattr(checkpointing, "_has_dtensor", is_distributed)
+    monkeypatch.setattr(checkpointer, "_has_dtensor", is_distributed)
 
     with pytest.raises(FileExistsError):
         ckpt.save(_DictTarget({"value": "distributed"}), 1)
@@ -440,6 +440,215 @@ def test_rejects_invalid_keep_last_n(temp_checkpoint_dir: Path) -> None:
                     keep_last_n=keep_last_n,
                 ),
             )
+
+
+# -- best-metric saves -----------------------------------------------------
+
+
+def _best_checkpointer(
+    checkpoint_dir: Path,
+    *,
+    best_mode: Literal["max", "min"] = "max",
+    keep_last_n: int = -1,
+) -> Checkpointer:
+    cfg = Checkpointer.Config(
+        working_dir=checkpoint_dir,
+        save_every=100,
+        best_mode=best_mode,
+        keep_last_n=keep_last_n,
+    )
+    cfg.best_metric = "accuracy"
+    return cfg.make()
+
+
+def test_on_eval_saves_on_improvement_only(temp_checkpoint_dir: Path) -> None:
+    ckpt = _best_checkpointer(temp_checkpoint_dir)
+    t = _DictTarget({"step": 0})
+    assert ckpt.on_eval(t, 7, {"accuracy": 0.5})
+    assert not ckpt.on_eval(t, 14, {"accuracy": 0.5})
+    assert not ckpt.on_eval(t, 21, {"accuracy": 0.4})
+    assert ckpt.on_eval(t, 28, {"accuracy": 0.6})
+    assert ckpt.available_steps() == [7, 28]
+
+
+def test_on_eval_min_mode_saves_on_decrease(temp_checkpoint_dir: Path) -> None:
+    ckpt = _best_checkpointer(temp_checkpoint_dir, best_mode="min")
+    t = _DictTarget({"step": 0})
+    assert ckpt.on_eval(t, 7, {"accuracy": 0.5})
+    assert not ckpt.on_eval(t, 14, {"accuracy": 0.6})
+    assert ckpt.on_eval(t, 21, {"accuracy": 0.4})
+    assert ckpt.available_steps() == [7, 21]
+
+
+def test_on_eval_missing_metric_names_available_keys(
+    temp_checkpoint_dir: Path,
+) -> None:
+    ckpt = _best_checkpointer(temp_checkpoint_dir)
+    with pytest.raises(KeyError, match=r"accuracy.*total_loss"):
+        ckpt.on_eval(_DictTarget({}), 7, {"total_loss": 1.0})
+
+
+def test_on_eval_without_best_metric_never_saves(temp_checkpoint_dir: Path) -> None:
+    ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
+    assert not ckpt.on_eval(_DictTarget({}), 7, {"accuracy": 1.0})
+    assert ckpt.available_steps() == []
+
+
+def test_best_checkpoint_survives_keep_last_n_pruning(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """The best step is exempt from ``keep_last_n``; a pruned best is useless."""
+    ckpt = _best_checkpointer(temp_checkpoint_dir, keep_last_n=1)
+    t = _DictTarget({"step": 0})
+    assert ckpt.on_eval(t, 50, {"accuracy": 0.9})
+    for step in (100, 200, 300):
+        assert ckpt.maybe_save(t, step)
+    assert ckpt.available_steps() == [50, 300]
+    # A new best supersedes the old one, which becomes prunable.
+    assert ckpt.on_eval(t, 350, {"accuracy": 0.95})
+    assert ckpt.maybe_save(t, 400)
+    assert ckpt.available_steps() == [350, 400]
+
+
+def test_on_eval_records_a_best_the_step_already_holds_without_rewriting(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """The end-of-run save precedes the final eval at the same step.
+
+    Rewriting that step would clobber a checkpoint just written -- and, for an
+    async storer, race its own in-flight write -- so the best is recorded and
+    the existing file kept.
+    """
+    ckpt = _best_checkpointer(temp_checkpoint_dir, keep_last_n=1)
+    t = _DictTarget({"step": 0})
+    _save(ckpt, 7, {"step": 7})
+    written_before = (temp_checkpoint_dir / "step_00000007.pt").stat().st_mtime_ns
+
+    assert not ckpt.on_eval(t, 7, {"accuracy": 0.5})
+
+    assert ckpt.best_step == 7
+    assert ckpt.best_value == 0.5
+    written_after = (temp_checkpoint_dir / "step_00000007.pt").stat().st_mtime_ns
+    assert written_after == written_before
+    # Recorded as the best, so retention protects it like any other best.
+    for step in (100, 200):
+        assert ckpt.maybe_save(t, step)
+    assert ckpt.available_steps() == [7, 200]
+
+
+def test_a_step_the_eval_just_saved_is_not_rewritten_by_the_cadence(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """The loop evaluates before it saves, so a best save can precede the cadence.
+
+    The state is the same either way -- both run after the eval -- so the
+    second write would only clobber the first and, for an async storer, race
+    its in-flight write. A checkpoint from another process at that step is
+    still foreign: ``save`` keeps refusing to overwrite it.
+    """
+    ckpt = _best_checkpointer(temp_checkpoint_dir, keep_last_n=1)
+    t = _DictTarget({"step": 0})
+    assert ckpt.on_eval(t, 100, {"accuracy": 0.5})
+    written_before = (temp_checkpoint_dir / "step_00000100.pt").stat().st_mtime_ns
+
+    assert ckpt.maybe_save(t, 100)
+    ckpt.save(t, 100)
+
+    written_after = (temp_checkpoint_dir / "step_00000100.pt").stat().st_mtime_ns
+    assert written_after == written_before
+    assert ckpt.available_steps() == [100]
+    foreign = _best_checkpointer(temp_checkpoint_dir)
+    with pytest.raises(RuntimeError, match="would overwrite"):
+        foreign.save(t, 100)
+
+
+def test_best_survives_a_resume(temp_checkpoint_dir: Path) -> None:
+    """A fresh checkpointer over the same directory keeps protecting the best.
+
+    Without this the resumed run's first eval becomes "best" whatever its
+    value, and ``keep_last_n`` then prunes the checkpoint that actually was.
+    """
+    first = _best_checkpointer(temp_checkpoint_dir, keep_last_n=1)
+    t = _DictTarget({"step": 0})
+    assert first.on_eval(t, 50, {"accuracy": 0.9})
+    assert first.maybe_save(t, 100)
+
+    resumed = _best_checkpointer(temp_checkpoint_dir, keep_last_n=1)
+    assert resumed.load(_DictTarget({}), max_steps=1e9, guard=False)
+    assert resumed.best_step == 50
+    assert resumed.best_value == 0.9
+    # A worse eval neither saves nor displaces the restored best...
+    assert not resumed.on_eval(t, 150, {"accuracy": 0.8})
+    assert resumed.maybe_save(t, 200)
+    assert resumed.available_steps() == [50, 200]
+    # ...and a better one supersedes it as before.
+    assert resumed.on_eval(t, 250, {"accuracy": 0.95})
+    assert resumed.maybe_save(t, 300)
+    assert resumed.available_steps() == [250, 300]
+
+
+def test_a_recorded_best_whose_checkpoint_is_gone_is_forgotten(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """The record names a checkpoint; if none is on disk it protects nothing."""
+    first = _best_checkpointer(temp_checkpoint_dir)
+    t = _DictTarget({"step": 0})
+    assert first.on_eval(t, 50, {"accuracy": 0.9})
+    (temp_checkpoint_dir / "step_00000050.pt").unlink()
+
+    resumed = _best_checkpointer(temp_checkpoint_dir)
+    assert not resumed.load(_DictTarget({}), max_steps=1e9, guard=False)
+    assert resumed.best_step is None
+    assert resumed.on_eval(t, 60, {"accuracy": 0.1})
+
+
+def test_a_recorded_best_for_another_metric_is_ignored(
+    temp_checkpoint_dir: Path,
+) -> None:
+    """Switching ``best_metric`` between runs starts the comparison afresh."""
+    first = _best_checkpointer(temp_checkpoint_dir)
+    t = _DictTarget({"step": 0})
+    assert first.on_eval(t, 50, {"accuracy": 0.9})
+
+    cfg = Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=100)
+    cfg.best_metric = "loss"
+    cfg.best_mode = "min"
+    resumed = cfg.make()
+    assert resumed.load(_DictTarget({}), max_steps=1e9, guard=False)
+    assert resumed.best_step is None
+    assert resumed.on_eval(t, 60, {"loss": 5.0})
+
+
+def test_on_eval_follows_the_rank_agreed_verdict(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every rank saves when rank 0 says the metric improved.
+
+    The loop's eval scalars are per-rank (``total_loss`` is a local mean), so
+    a local comparison lets one rank enter the collective write while another
+    returns -- the barrier then hangs. Rank 0's verdict is broadcast instead.
+    """
+    ckpt = _best_checkpointer(temp_checkpoint_dir)
+    t = _DictTarget({"step": 0})
+    assert ckpt.on_eval(t, 7, {"accuracy": 0.5})
+
+    # Rank 0's answers to the two collectives: "improved", then "exists".
+    rank_zero_verdicts = [True, False]
+
+    def broadcast_rank_zero(shared: list[bool], src: int) -> None:
+        del src
+        shared[0] = rank_zero_verdicts.pop(0)
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "barrier", lambda: None)
+    monkeypatch.setattr(dist, "broadcast_object_list", broadcast_rank_zero)
+
+    # Locally 0.4 is worse than 0.5, but rank 0 disagrees and its view wins.
+    assert ckpt.on_eval(t, 14, {"accuracy": 0.4})
+    assert not rank_zero_verdicts
+    assert ckpt.available_steps() == [7, 14]
 
 
 # -- completeness: resume + collisions skip crashed partials ---------------

@@ -6,11 +6,15 @@ from typing import override
 
 from configgle import Fig
 from torch import Tensor, nn
+from torch.nn import functional
 
+import pytest
 import torch
 
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
+from priml.model.cost import cost, elementwise_cost
+from priml.testing.cost import assert_cost_matches_torch
 
 
 class DummyLoss(nn.Module):
@@ -121,6 +125,39 @@ def test_weighted_sum_accepts_plain_callable_loss() -> None:
 
     assert "loss" in result
     assert "loss_0" in result
+
+
+def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
+    """Children are priced through ``cost``; each adds a multiply and a stacked add."""
+    bce = SimpleLoss.Config()
+    mse = SimpleLoss.Config(loss_fn=functional.mse_loss)
+    config = WeightedSum.Config(fns=[bce, mse], weights=[0.5, 0.5])
+    label = torch.rand(4, 3)
+    measured = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(4, 3, requires_grad=True),
+        num_tokens=12,
+        run=lambda module, prediction: _loss(module, prediction, label=label),
+    )
+    assert measured == cost(bce, num_tokens=12) + cost(
+        mse,
+        num_tokens=12,
+    ) + elementwise_cost(primal=2 * 2, adjoint=2 * 2)
+    assert measured.params == 0
+    assert measured.training.flops.matmul == 0
+
+
+def test_weighted_sum_cost_rejects_unpriced_child() -> None:
+    """A child without ``cost`` raises instead of pricing zero."""
+    config = WeightedSum.Config(fns=[DummyLoss.Config()], weights=[1.0])
+    with pytest.raises(TypeError, match=r"DummyLoss\.Config has no cost"):
+        cost(config, num_tokens=1)
+
+
+def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:
+    """Run the weighted-sum wrapper and return its ``loss`` tensor."""
+    assert isinstance(module, WeightedSum)
+    return module(prediction, **batch)["loss"]
 
 
 if __name__ == "__main__":

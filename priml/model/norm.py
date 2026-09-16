@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import KW_ONLY
 from typing import Protocol, Self, override, runtime_checkable
 
-from configgle import Fig
+from configgle import Fig, Makes
 from torch import Tensor, nn
 from torch.nn import functional as f
 
 import torch
+
+from priml.model.cost import Compute, Cost, Flops, elementwise_cost
 
 
 @runtime_checkable
@@ -36,16 +38,38 @@ class NormConfigProtocol(Protocol):
     dtype: torch.dtype | None
 
 
+class SameWidthConfig(Fig[nn.Module], kw_only=False):
+    """Config of a width-preserving layer: each width infers the other.
+
+    A norm neither widens nor narrows, so a parent may push either width down
+    and ``finalize`` fills the other. Both set and unequal is a wiring error,
+    raised here so the ``pprint`` of the offending tree names both values.
+    """
+
+    channels_in: int = -1
+    """Number of input channels (-1 to infer from channels_out)."""
+
+    channels_out: int = -1
+    """Number of output channels (-1 to infer from channels_in)."""
+
+    @override
+    def finalize(self) -> Self:
+        if self.channels_in == -1:
+            self.channels_in = self.channels_out
+        if self.channels_out == -1:
+            self.channels_out = self.channels_in
+        if self.channels_in != self.channels_out:
+            raise ValueError(
+                f"channels_in={self.channels_in} must equal "
+                f"channels_out={self.channels_out}.",
+            )
+        return super().finalize()
+
+
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization."""
 
-    class Config(Fig["RMSNorm"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels (normalized shape)."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["RMSNorm"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         eps: float | None = 1e-6
@@ -65,28 +89,33 @@ class RMSNorm(nn.Module):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count square/mean/rsqrt/scale and its saved-rsqrt derivative.
+
+            The adjoint forms sum(g*x), scales by r**3 / width, then subtracts
+            the radial component; the affine adds one product each way. The
+            two sums over the row are the reductions.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            width = self.channels_in
+            params = width if self.elementwise_affine else 0
+            return elementwise_cost(
+                primal=2 * width + 3 + params,
+                adjoint=4 * width + 4 + 2 * params,
+                channels=width,
+                params=params,
+                num_tokens=num_tokens,
+            ) + _reduction_cost(primal=width - 1, adjoint=width - 1)
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         self.normalized_shape = (config.channels_in,)
         self.eps = config.eps
@@ -125,40 +154,34 @@ class CenteredRMSNorm(nn.Module):
     Computation is done in float32 for numerical precision.
     """
 
-    class Config(Fig["CenteredRMSNorm"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels (normalized shape)."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["CenteredRMSNorm"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         eps: float = 1e-6
         """Epsilon for numerical stability."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count affine RMSNorm plus one ``1 + weight`` fold shared by every row.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            width = self.channels_in
+            return elementwise_cost(
+                primal=3 * width + 3 + width / num_tokens,
+                adjoint=6 * width + 4,
+                channels=width,
+                params=width,
+                num_tokens=num_tokens,
+            ) + _reduction_cost(primal=width - 1, adjoint=width - 1)
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         self.eps = config.eps
         self.weight = nn.Parameter(torch.zeros(config.channels_in))
@@ -179,13 +202,7 @@ class CenteredRMSNorm(nn.Module):
 class LayerNorm(nn.LayerNorm):
     """Layer Normalization."""
 
-    class Config(Fig["LayerNorm"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels (normalized shape)."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["LayerNorm"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         eps: float = 1e-5
@@ -200,28 +217,26 @@ class LayerNorm(nn.LayerNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count centered statistics, normalization, and affine gradients.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return _normalization_cost(
+                channels=self.channels_in,
+                groups_per_token=1,
+                params=2 * self.channels_in if self.elementwise_affine else 0,
+                num_tokens=num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__(
             normalized_shape=config.channels_in,
             eps=config.eps,
@@ -239,13 +254,7 @@ class LayerNorm(nn.LayerNorm):
 class BatchNorm(nn.BatchNorm1d):
     """BatchNorm1d for (B, L, C) input."""
 
-    class Config(Fig["BatchNorm"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["BatchNorm"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         momentum: float = 0.1
@@ -263,28 +272,32 @@ class BatchNorm(nn.BatchNorm1d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Estimate training statistics and running updates per position.
+
+            ``num_tokens`` is batch times spatial/sequence positions. The
+            analytical population-variance algorithm includes six operations
+            per channel for the two running averages and two for the unbiased
+            variance correction. One-row defaults are shape estimates only;
+            a training batch norm requires more than one sample per channel.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return _normalization_cost(
+                channels=self.channels_in,
+                groups_per_token=self.channels_in / num_tokens,
+                params=2 * self.channels_in if self.elementwise_affine else 0,
+                num_tokens=num_tokens,
+            ) + elementwise_cost(primal=8 * self.channels_in / num_tokens, adjoint=0)
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__(
             config.channels_in,
             momentum=config.momentum,
@@ -327,14 +340,8 @@ class BatchRenorm(nn.Module):
 
     """
 
-    class Config(Fig["BatchRenorm"]):
+    class Config(Makes["BatchRenorm"], SameWidthConfig):
         """Configure the normalization."""
-
-        channels_in: int = -1
-        """Width of the axis being normalized (-1 to infer from channels_out)."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
 
         _: KW_ONLY
 
@@ -360,18 +367,33 @@ class BatchRenorm(nn.Module):
         max_drift: float = 5.0
         """Bound on the mean correction, in running standard deviations."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Estimate warm training, including detached corrections and updates.
+
+            Warmup skips five scalar operations per channel; this prices the
+            post-warmup path. Detached correction coefficients do not receive
+            gradients. The backward estimate includes differentiating the
+            corrected mean and variance in addition to ordinary normalization.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            width = self.channels_in
+            return _normalization_cost(
+                channels=width,
+                groups_per_token=width / num_tokens,
+                params=2 * width,
+                num_tokens=num_tokens,
+            ) + elementwise_cost(
+                primal=18 * width / num_tokens,
+                adjoint=5 * width / num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
         """Build the learned affine and the running statistics.
@@ -383,14 +405,6 @@ class BatchRenorm(nn.Module):
           ValueError: A dimension or bound is invalid.
 
         """
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for BatchRenorm.",
-            )
         super().__init__()
         if config.channels_in <= 0:
             raise ValueError("channels_in must be positive")
@@ -501,13 +515,7 @@ class BatchRenorm(nn.Module):
 class BatchNorm2d(nn.BatchNorm2d):
     """BatchNorm2d for (B, C, H, W) input."""
 
-    class Config(Fig["BatchNorm2d"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["BatchNorm2d"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         momentum: float = 0.1
@@ -525,28 +533,32 @@ class BatchNorm2d(nn.BatchNorm2d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Estimate training statistics and running updates per position.
+
+            ``num_tokens`` is batch times spatial/sequence positions. The
+            analytical population-variance algorithm includes six operations
+            per channel for the two running averages and two for the unbiased
+            variance correction. One-row defaults are shape estimates only;
+            a training batch norm requires more than one sample per channel.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return _normalization_cost(
+                channels=self.channels_in,
+                groups_per_token=self.channels_in / num_tokens,
+                params=2 * self.channels_in if self.elementwise_affine else 0,
+                num_tokens=num_tokens,
+            ) + elementwise_cost(primal=8 * self.channels_in / num_tokens, adjoint=0)
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__(
             config.channels_in,
             momentum=config.momentum,
@@ -571,13 +583,7 @@ class GroupNorm2d(nn.GroupNorm):
     per-iteration activation distributions.
     """
 
-    class Config(Fig["GroupNorm2d"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["GroupNorm2d"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         num_groups: int = 8
@@ -595,28 +601,36 @@ class GroupNorm2d(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(
+            self,
+            *,
+            num_tokens: int = 1,
+            seq_len: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Count groups spanning ``seq_len`` positions within each sample.
+
+            For images, ``seq_len`` is the product of spatial extents;
+            ``num_tokens`` is batch times that extent for affine gradients.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              seq_len: Positions each normalization group spans within one sample.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return _normalization_cost(
+                channels=self.channels_in,
+                groups_per_token=self.num_groups / seq_len,
+                params=2 * self.channels_in if self.elementwise_affine else 0,
+                num_tokens=num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__(
             config.num_groups,
             config.channels_in,
@@ -635,13 +649,7 @@ class GroupNorm2d(nn.GroupNorm):
 class GroupNorm(nn.GroupNorm):
     """GroupNorm for (B, L, C) input."""
 
-    class Config(Fig["GroupNorm"], kw_only=False):
-        channels_in: int = -1
-        """Number of input channels."""
-
-        channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
-
+    class Config(Makes["GroupNorm"], SameWidthConfig, kw_only=False):
         _: KW_ONLY
 
         num_groups: int = 8
@@ -659,28 +667,36 @@ class GroupNorm(nn.GroupNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out}.",
-                )
-            return super().finalize()
+        def cost(
+            self,
+            *,
+            num_tokens: int = 1,
+            seq_len: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Count groups spanning ``seq_len`` positions within each sample.
+
+            For images, ``seq_len`` is the product of spatial extents;
+            ``num_tokens`` is batch times that extent for affine gradients.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              seq_len: Positions each normalization group spans within one sample.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return _normalization_cost(
+                channels=self.channels_in,
+                groups_per_token=self.num_groups / seq_len,
+                params=2 * self.channels_in if self.elementwise_affine else 0,
+                num_tokens=num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__(
             config.num_groups,
             config.channels_in,
@@ -696,3 +712,33 @@ class GroupNorm(nn.GroupNorm):
         shape = input.shape
         x = input.reshape(-1, *shape[-2:]).movedim(-2, -1)
         return super().forward(x).movedim(-2, -1).reshape(shape)
+
+
+# A group of R elements uses 5R+2 primal operations: mean, centering, square/mean
+# variance, epsilon/rsqrt, and scaling. The adjoint uses 7R: sum(g), sum(g*y), two
+# means, y scaling, two subtractions and rsqrt scaling. Each pass holds two sums over
+# the group, R-1 apiece, in the reduction silo. Affine adds a scale/shift and one
+# gradient product per parameter; the reduction over rows is the primitive's.
+def _normalization_cost(
+    *,
+    channels: int,
+    groups_per_token: float,
+    params: int,
+    num_tokens: int,
+) -> Cost:
+    """Count two-pass centered variance and the saved-normalized-input derivative."""
+    sums = 2 * (channels - groups_per_token)
+    return elementwise_cost(
+        primal=5 * channels + 2 * groups_per_token + params - sums,
+        adjoint=7 * channels + params - sums,
+        channels=channels,
+        params=params,
+        num_tokens=num_tokens,
+    ) + _reduction_cost(primal=sums, adjoint=sums)
+
+
+def _reduction_cost(*, primal: float, adjoint: float) -> Cost:
+    return Cost(
+        primal=Compute(flops=Flops(reduction=primal)),
+        adjoint=Compute(flops=Flops(reduction=adjoint)),
+    )

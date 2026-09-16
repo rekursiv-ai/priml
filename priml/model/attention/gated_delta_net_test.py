@@ -22,12 +22,14 @@ from priml.model.attention.gated_delta_net import (
     GatedDeltaNet,
     _torch_chunk_gated_delta_rule,
 )
+from priml.model.cost import cost
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
     first_tensor,
     move_to_device,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -230,6 +232,70 @@ def test_gated_delta_net_bfb(device: str) -> None:
         seed=0,
         run=lambda m, x: first_tensor(m(x)),  # pyright: ignore[reportAny] -- the test helper accepts the model's untyped tuple output.
     )
+
+
+def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
+    """The scan prices as a per-token state read and write, not a growing cache."""
+    config = GatedDeltaNet.Config(
+        channels_in=16,
+        num_heads_k=2,
+        num_heads_v=4,
+        channels_k_head=8,
+        channels_v_head=4,
+        conv_kernel_size=3,
+    )
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost()
+    k_dim, v_dim = 2 * 8, 4 * 4
+    conv_dim = 2 * k_dim + v_dim
+    projections = 16 * conv_dim + 16 * v_dim + 2 * 16 * 4 + v_dim * 16
+    conv = conv_dim * 3
+    gates = 2 * 4  # dt_bias and A_log, one per value head.
+    norm = cost(finalized.norm).params
+    assert norm == 4
+    assert model_cost.params == projections + conv + gates + norm
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    state = 4 * 8 * 4  # num_heads_v x channels_k_head x channels_v_head.
+    assert model_cost.primal.flops.matmul == 2 * (projections + conv) + 4 * state
+    assert model_cost.adjoint.flops.matmul == 4 * (projections + conv) + 8 * state
+    assert model_cost.bytes_state == 0
+    # The q/k L2 norms sum each key row once each way, per value head.
+    assert model_cost.primal.flops.reduction == 4 * (8 - 1) + norm_reduction(finalized)
+
+
+def norm_reduction(finalized: GatedDeltaNet.Config) -> float:
+    """Reduction FLOPs the injected norm contributes, tiled over the value heads."""
+    return cost(finalized.norm).tile(finalized.num_heads_v).primal.flops.reduction
+
+
+def test_gated_delta_net_projections_match_torch() -> None:
+    """The projections and the depthwise conv are torch's whole matmul count.
+
+    The CPU scan is chunked: it pads the sequence to 64-token chunks and runs
+    in-chunk triangular solves, so at four tokens it executes ~50x the products
+    the recurrent-model proxy prices. The proxy is the analytical policy; the
+    ratio pins torch's measured count at this geometry (541,664 FLOPs/token to
+    the analytical 10,464) so a change to either side is visible.
+    """
+    assert_cost_matches_torch(
+        GatedDeltaNet.Config(
+            channels_in=16,
+            num_heads_k=2,
+            num_heads_v=2,
+            channels_k_head=8,
+            channels_v_head=8,
+            conv_kernel_size=3,
+        ),
+        build_input=lambda: torch.randn(1, 4, 16, requires_grad=True),
+        num_tokens=4,
+        expected_ratio=10_464 / 541_664,
+    )
+
+
+def test_gated_delta_net_cost_ignores_seq_len() -> None:
+    config = GatedDeltaNet.Config(channels_in=8, num_heads_k=1, num_heads_v=1)
+    finalized = config.copy_tree().finalize()
+    assert finalized.cost(seq_len=8) == finalized.cost(seq_len=1024)
 
 
 if __name__ == "__main__":

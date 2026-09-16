@@ -23,6 +23,7 @@ from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU, SwiGLUReluSquared, relu_squared
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -524,6 +525,43 @@ def test_the_gradient_is_a_rectifier() -> None:
     relu_squared(x).sum().backward()
     assert x.grad is not None
     torch.testing.assert_close(x.grad, 2 * torch.relu(x.detach()), rtol=0, atol=0)
+
+
+def test_swiglu_cost_is_both_projections() -> None:
+    """Gated: up_proj is twice the hidden width; the gate itself is elementwise."""
+    cost = assert_cost_matches_torch(
+        SwiGLU.Config(16, channels_hidden=32, round_to=1),
+        build_input=lambda: torch.randn(3, 16, requires_grad=True),
+        num_tokens=3,
+    )
+    up, down = 16 * 64, 32 * 16
+    assert cost.primal.flops.matmul == 2 * (up + down)
+    assert cost.adjoint.flops.matmul == 4 * (up + down)
+    assert cost.params == up + down
+    # SiLU (5), one gating product (1) per hidden channel; twice the products
+    # and the sigmoid's derivative (5) in the adjoint.
+    assert cost.primal.flops.elementwise == 6 * 32
+    assert cost.adjoint.flops.elementwise == 7 * 32
+
+
+def test_ungated_cost_has_a_single_width_up_proj() -> None:
+    cost = assert_cost_matches_torch(
+        SwiGLUReluSquared.Config(16, channels_hidden=32, round_to=1),
+        build_input=lambda: torch.randn(3, 16, requires_grad=True),
+        num_tokens=3,
+    )
+    assert cost.params == 16 * 32 + 32 * 16
+
+
+def test_swiglu_cost_includes_a_gate_norm() -> None:
+    config = SwiGLU.Config(16, channels_hidden=32, round_to=1)
+    config.norm = RMSNorm.Config(elementwise_affine=True)
+    cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, 16, requires_grad=True),
+        num_tokens=3,
+    )
+    assert cost.params == 16 * 64 + 32 * 16 + 32
 
 
 class _EmptyResettableNorm(nn.Sequential):

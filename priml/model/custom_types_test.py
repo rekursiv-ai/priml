@@ -21,7 +21,7 @@ from priml.model.custom_types import (
     has_weight,
     propagate_attr,
 )
-from priml.model.moe import Router
+from priml.model.moe import SoftmaxRouter
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import assert_bfb_against_golden
@@ -117,7 +117,7 @@ def test_propagate_non_participant_skipped():
     parent to push into. A norm was used here once and stopped being a
     non-participant the moment norms gained the derived property.
     """
-    cfg = Router.Config(channels_in=32)
+    cfg = SoftmaxRouter.Config(channels_in=32)
     assert not isinstance(cfg, ChannelsOut)
     propagate_attr(cfg, "channels_out", 999, protocol=ChannelsOut)
     propagate_attr(cfg, "depth_index", ((0, 1),))

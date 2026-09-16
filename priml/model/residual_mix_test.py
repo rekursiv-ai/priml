@@ -18,6 +18,7 @@ import torch
 
 from priml.model.residual_mix import ResidualMix
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -70,6 +71,33 @@ def _run_residual(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
         layer=1,
         message=object(),
     )
+
+
+def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
+    """Two learned scalar weights per layer contribute only elementwise work."""
+    config = ResidualMix.Config(num_layers=3)
+    cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randn(2, 4, requires_grad=True),
+            torch.randn(2, 4, requires_grad=True),
+        ),
+        num_tokens=2,
+        bus={"channels_in": 4},
+        run=_mix_layer_one,
+    )
+    assert cost.training.flops.matmul == 0
+    assert cost.primal.flops.elementwise == 3 * 4 * 3
+    assert cost.adjoint.flops.elementwise == 4 * 4 * 3
+    # Each scalar's gradient sums over the row, then over the two rows.
+    assert cost.adjoint.flops.reduction == 2 * (4 - 1) * 3 + 2 * 3 * (2 - 1) / 2
+    assert cost.params == 2 * 3
+
+
+def _mix_layer_one(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Mix layer one of the running and original streams."""
+    assert isinstance(module, ResidualMix)
+    return module(inputs[0], original=inputs[1], layer=1)
 
 
 if __name__ == "__main__":

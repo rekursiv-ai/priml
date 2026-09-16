@@ -42,7 +42,7 @@ class GANTrainStep:
                 # A schedule of PROGRESS needs a horizon: left unset, progress
                 # is pinned at zero and the rate below never moves.
                 train_budget_steps=400,
-                learning_rate_scheduler=PartialConfig(staircase, gamma=0.5),
+                lr_schedule=PartialConfig(staircase, gamma=0.5),
                 loss=AdversarialLoss.Config(),
             ),
         )
@@ -59,7 +59,7 @@ class GANTrainStep:
                 # Matches the generator's: annealing the two on different
                 # horizons is a different recipe, not a different setting.
                 train_budget_steps=400,
-                learning_rate_scheduler=PartialConfig(staircase, gamma=0.5),
+                lr_schedule=PartialConfig(staircase, gamma=0.5),
             ),
         )
         """Discriminator TrainStep configuration."""

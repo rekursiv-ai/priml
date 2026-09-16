@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.loss.lpips_loss import LPIPSLoss
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def _make_loss_with_mocked_lpips(
@@ -113,6 +114,70 @@ def test_lpips_loss_fewer_frames(lpips_loss: LPIPSLoss) -> None:
     result = lpips_loss(dummy_model_output, x=x, xhat=xhat)
 
     assert result["loss"].shape == (1,)
+
+
+# The real network is what gets counted, so nothing below mocks ``lpips``.
+# ``make()`` reads the trunk's ImageNet weights from ``TORCH_HOME`` (vgg16 is
+# 528 MB), which is the large local fixture the marker names; ``cost`` itself
+# builds a random trunk on the meta device and needs no weights.
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize(
+    ("net", "params"),
+    [("alex", 2_470_848), ("vgg", 14_716_160), ("squeeze", 724_736)],
+)
+def test_lpips_cost_matches_torch_for_every_trunk(net: str, params: int) -> None:
+    """Every matmul the forward issues is in the cost, and every parameter, frozen included.
+
+    A token is one position of one scored frame, so ``T <= max_num_random_frames``
+    keeps every frame scored and the count deterministic. Both inputs carry a
+    gradient so the frozen first convolution's input gradient is measured too.
+    """
+    b, t, h, w = 1, 2, 32, 32
+    analytical = assert_cost_matches_torch(
+        LPIPSLoss.Config(net=net),
+        build_input=lambda: (
+            torch.randn(b, 3, t, h, w, requires_grad=True),
+            torch.randn(b, 3, t, h, w, requires_grad=True),
+        ),
+        num_tokens=b * t * h * w,
+        bus={"image_size": (h, w)},
+        run=lambda module, inputs: _loss(
+            module,
+            inputs[0],
+            x=inputs[0],
+            xhat=inputs[1],
+        ),
+    )
+    assert analytical.params == params
+
+
+def test_lpips_cost_prices_the_frozen_trunk_twice_and_the_head_once() -> None:
+    """AlexNet at 32x32: five convolutions write 7x7, 3x3, 1x1, 1x1, 1x1 grids.
+
+    The trunk runs once per branch with an input-gradient-only adjoint; each
+    stage's 1x1 ``NetLinLayer`` convolution runs once on the squared difference
+    with a full adjoint. The two max pools route one gradient per channel back
+    to the argmax at their 3x3 and 1x1 output grids.
+    """
+    analytical = LPIPSLoss.Config(net="alex").cost(image_size=(32, 32))
+    trunk = (
+        3 * 121 * 64 * 49
+        + 64 * 25 * 192 * 9
+        + 192 * 9 * 384
+        + 384 * 9 * 256
+        + 256 * 9 * 256
+    )
+    head = 64 * 49 + 192 * 9 + 384 + 256 + 256
+    assert analytical.primal.flops.matmul == 2 * (2 * trunk + head) / 1024
+    assert analytical.adjoint.flops.matmul == 2 * (2 * trunk + 2 * head) / 1024
+    assert analytical.adjoint.flops.selection == 2 * (64 * 9 + 192) / 1024
+    assert analytical.bytes_state == 0
+
+
+def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:
+    """Run the perceptual loss and return its ``loss`` tensor."""
+    assert isinstance(module, LPIPSLoss)
+    return module(model_output, **batch)["loss"]
 
 
 if __name__ == "__main__":

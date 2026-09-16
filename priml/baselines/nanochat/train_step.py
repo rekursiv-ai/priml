@@ -251,7 +251,7 @@ class NanoChatTrainStep(TrainStep):
 
         The reference's flat-then-decay shape, verified equal to
         ``trapezoidal`` at every one of 100,001 sampled progresses. Read
-        instead of the base's ``learning_rate_scheduler``, since this recipe
+        instead of the base's ``lr_schedule``, since this recipe
         drives the update itself rather than through ``TrainStep.step``."""
 
         budget_warmup_steps: int = 11

@@ -23,13 +23,15 @@ from priml.lib.custom_json import DictCodec
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.embedding import Embedding
-from priml.model.moe import MoE, Router
+from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
-from priml.model.transformer import kimi_k2, qwen3, qwen3_test
+from priml.model.transformer import kimi_k2, qwen3_test
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.kimi_k2 import KimiK2, remap_hf_state_dict
+from priml.model.transformer.transformer import head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden, host_agnostic_numerics
+from priml.testing.cost import assert_cost_matches_torch
 
 
 if TYPE_CHECKING:
@@ -108,6 +110,40 @@ def test_kimi_k2_bfb() -> None:
     )
 
 
+@pytest.mark.parametrize("q_lora_rank", [None, 6])
+def test_kimi_k2_cost_matches_torch(q_lora_rank: int | None) -> None:
+    """The dense prefix, every MLA product, the routed experts, and the head.
+
+    MLA's kernel defaults to the naive latent kernel, whose bmms torch counts,
+    so no swap is needed. The routed count holds however the router assigns
+    tokens: each runs exactly ``top_k`` experts (``moe_test``).
+    """
+    config = KimiK2.Config.from_hf(
+        _hf_config(
+            vocab_size=32,
+            hidden_size=16,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            qk_nope_head_dim=4,
+            qk_rope_head_dim=4,
+            v_head_dim=4,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=8,
+            intermediate_size=32,
+            moe_intermediate_size=16,
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+        ),
+    )
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 32, (2, 5)),
+        num_tokens=10,
+        bus={"seq_len": 5},
+    )
+    assert analytical.params_active < analytical.params
+
+
 def _router(cfg: KimiK2.Config, layer: int = -1) -> Router.Config:
     """Return the routing config -- where the expert COUNT lives now."""
     blocks = cfg.block if isinstance(cfg.block, list) else [cfg.block]
@@ -132,7 +168,7 @@ def _synth_hf(cfg: KimiK2.Config) -> dict[str, Tensor]:
         "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
     }
-    if not qwen3._tied(cfg):
+    if not head_is_tied(cfg):
         sd["lm_head.weight"] = torch.randn(cfg.channels_out, h)
     for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
@@ -202,6 +238,29 @@ def _attn(cfg: KimiK2.Config, layer: int = 0) -> MultiHeadLatentAttention.Config
 
 
 class TestConfig:
+    def test_default_router_is_buildable_sigmoid(self) -> None:
+        router = _router(KimiK2.Config())
+        assert isinstance(router, SigmoidRouter.Config)
+        router.channels_in = 4
+        assert isinstance(router.make(), SigmoidRouter)
+
+    @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+    def test_parse_router_variant(self, scoring_func: str) -> None:
+        cfg = KimiK2.Config.from_hf(
+            _hf_config(scoring_func=scoring_func, norm_topk_prob=False),
+        ).finalize()
+        router = _router(cfg)
+        assert router.norm_topk_prob is False
+        assert router.channels_in == cfg.channels_in
+        assert router.num_experts == 4
+        assert router.top_k == 2
+        if scoring_func == "sigmoid":
+            assert isinstance(router, SigmoidRouter.Config)
+            assert router.routed_scaling_factor == 2.0
+        else:
+            assert isinstance(router, SoftmaxRouter.Config)
+        assert router.make().scoring_func == scoring_func
+
     def test_parse_kimi_k2(self):
         cfg = KimiK2.Config.from_hf(_hf_config())
         attn = _attn(cfg)
@@ -291,14 +350,14 @@ class TestSlots:
         template = cfg.block
         assert isinstance(template, TransformerBlock.Config)
         assert isinstance(template.ffn, MoE.Config)
-        assert isinstance(template.ffn.router, Router.Config)
+        assert isinstance(template.ffn.router, SigmoidRouter.Config)
         template.ffn.router.routed_scaling_factor = 2.5
         cfg = cfg.copy_tree().finalize()
         assert isinstance(cfg.block, list)
         last = cfg.block[-1]
         assert isinstance(last, TransformerBlock.Config)
         assert isinstance(last.ffn, MoE.Config)
-        assert isinstance(last.ffn.router, Router.Config)
+        assert isinstance(last.ffn.router, SigmoidRouter.Config)
         assert last.ffn.router.routed_scaling_factor == 2.5
 
     def test_a_norm_edit_reaches_every_norm(self):
@@ -384,6 +443,27 @@ class TestLoad:
 
 
 class TestRemap:
+    @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("correction_bias", [False, True])
+    def test_remap_router_buffers_match_variant(
+        self,
+        scoring_func: str,
+        correction_bias: bool,
+    ) -> None:
+        cfg = KimiK2.Config.from_hf(
+            _hf_config(scoring_func=scoring_func),
+        )
+        router = _router(cfg)
+        if isinstance(router, SigmoidRouter.Config):
+            router.use_correction_bias = correction_bias
+        cfg.finalize()
+        remapped = remap_hf_state_dict(_synth_hf(cfg), cfg)
+        bias_key = "blocks.1.ffn.router.e_score_correction_bias"
+        assert (bias_key in remapped) == (scoring_func == "sigmoid" and correction_bias)
+        model = cfg.make()
+        model.load_state_dict(remapped, strict=True)
+        assert model(torch.tensor([[0, 1]])).shape == (1, 2, cfg.channels_out)
+
     def test_end_to_end_no_q_lora(self):
         cfg = KimiK2.Config.from_hf(_hf_config()).finalize()
         model = cfg.make()

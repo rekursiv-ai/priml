@@ -12,8 +12,10 @@ import pytest
 import torch
 
 from priml.model import linear
+from priml.model.cost import Bytes, Flops, matmul_cost
 from priml.model.linear import EnsembleLinear, Linear
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 if TYPE_CHECKING:
@@ -223,6 +225,43 @@ def test_ensemble_parallel_input_is_replicated(
     )
     assert redistributed is replicated
     assert replicated.redistributions == [(mesh, [Replicate()])]
+
+
+def test_linear_cost_is_the_matmul() -> None:
+    analytical = assert_cost_matches_torch(
+        Linear.Config(4, 3),
+        build_input=lambda: torch.randn(2, 4, requires_grad=True),
+        num_tokens=2,
+    )
+    assert analytical == matmul_cost(channels_in=4, channels_out=3, num_tokens=2)
+    assert analytical.primal.flops == Flops(matmul=2 * 4 * 3)
+    assert analytical.adjoint.flops == Flops(matmul=4 * 4 * 3)
+    assert analytical.primal.bytes == Bytes(matmul=12, elementwise=3)
+
+
+def test_linear_cost_counts_bias_separately_from_matmuls() -> None:
+    biased = assert_cost_matches_torch(
+        Linear.Config(4, 3, bias=True),
+        build_input=lambda: torch.randn(2, 4, requires_grad=True),
+        num_tokens=2,
+    )
+    plain = Linear.Config(4, 3).copy_tree().finalize().cost(num_tokens=2)
+    assert biased.params == plain.params + 3
+    assert biased.primal.bytes.matmul == plain.primal.bytes.matmul + 3
+    assert biased.training.flops.matmul == plain.training.flops.matmul
+    assert biased.primal.flops.elementwise == 3
+    assert biased.adjoint.flops.reduction == 3 * (2 - 1) / 2
+
+
+def test_ensemble_linear_cost_is_every_member() -> None:
+    analytical = assert_cost_matches_torch(
+        EnsembleLinear.Config(4, 3, num_ensemble=5, bias=True),
+        build_input=lambda: torch.randn(2, 4, requires_grad=True),
+        num_tokens=2,
+    )
+    assert analytical.primal.flops.matmul == 2 * 4 * 3 * 5
+    assert analytical.adjoint.flops.matmul == 2 * analytical.primal.flops.matmul
+    assert analytical.primal.bytes.elementwise == 3 * 5
 
 
 if __name__ == "__main__":

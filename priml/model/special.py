@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY
+from dataclasses import KW_ONLY, replace
 from operator import attrgetter
 from typing import Self, override
 
@@ -10,6 +10,7 @@ from configgle import Fig, LateBound, Makeable
 from torch import Tensor, nn
 from torch.nn import functional
 
+from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.model.custom_types import (
     TensorModule,
     WeightedTensorModule,
@@ -41,6 +42,19 @@ class Identity(nn.Identity):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price nothing: no parameters, no arithmetic, no copy.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return Cost()
 
     def __init__(self, config: Config) -> None:
         if (
@@ -76,6 +90,23 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         channels_in = PassthroughAttribute[int]()
         channels_out = PassthroughAttribute[int]()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the branch, residual add, and input-gradient accumulation.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            if self.inner is None:
+                raise ValueError("Must specify `inner`.")
+            return cost(self.inner, **kwargs) + elementwise_cost(
+                primal=self.channels_out,
+                adjoint=self.channels_in,
+            )
+
     def __init__(self, config: Config) -> None:
         if config.inner is None:
             raise ValueError("Must specify `inner`.")
@@ -87,8 +118,7 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
 
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
-        if hasattr(self.inner, "reset_parameters"):
-            self.inner.reset_parameters()
+        self.inner.reset_parameters()
 
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
@@ -126,6 +156,26 @@ class TiedLinear(nn.Module, LateBound):
 
         transpose: bool = True
         """Read the weight as ``weight.T``; the usual head-over-embedding tie."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the matmul; the weight is counted where it is owned.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return replace(
+                matmul_cost(
+                    channels_in=self.channels_in,
+                    channels_out=self.channels_out,
+                    bias=False,
+                ),
+                params=0,
+            )
 
     def __init__(self, config: Config) -> None:
         if not config.tied:

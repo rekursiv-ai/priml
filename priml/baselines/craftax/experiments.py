@@ -172,7 +172,7 @@ def exp000() -> CraftaxTrainLoop:
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
 
-    score = cfg.metrics["craftax"] = CraftaxScore.Config()
+    score = cfg.metrics_eval["craftax"] = CraftaxScore.Config()
     score.num_envs = 64
     score.steps = 10_000
     score.seed = 42
@@ -280,7 +280,7 @@ def exp002() -> CraftaxRNNTrainLoop:
     )
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
-    cfg.metrics = dict(parent.metrics)
+    cfg.metrics_eval = dict(parent.metrics_eval)
     cfg.runtime = parent.runtime
     return cfg
 
@@ -346,7 +346,7 @@ def exp003() -> CraftaxPQNTrainLoop:
     )
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
-    cfg.metrics = dict(parent.metrics)
+    cfg.metrics_eval = dict(parent.metrics_eval)
     cfg.runtime = parent.runtime
     return cfg
 
@@ -468,7 +468,7 @@ def exp013() -> CraftaxGTrXLTrainLoop:
     )
     cfg.dataset.updates_per_epoch = int(cfg.max_steps)
     cfg.num_steps_eval = cfg.max_steps
-    cfg.metrics = dict(parent.metrics)
+    cfg.metrics_eval = dict(parent.metrics_eval)
     cfg.runtime = parent.runtime
     return cfg
 
@@ -494,7 +494,7 @@ def exp_smoke() -> CraftaxTrainLoop:
     cfg.max_steps = cfg.step.total_train_steps = 4
     cfg.dataset.updates_per_epoch = 4
     cfg.num_steps_eval = 4
-    score = cfg.metrics["craftax"]
+    score = cfg.metrics_eval["craftax"]
     assert isinstance(score, CraftaxScore.Config)
     score.num_envs = 4
     score.steps = 64

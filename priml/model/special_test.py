@@ -19,6 +19,7 @@ from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.cost import Compute, Cost, Flops
 from priml.model.custom_types import (
     ChannelsInOut,
     ChannelsOut,
@@ -43,6 +44,7 @@ from priml.model.special import Identity, Skip, TiedLinear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -309,6 +311,41 @@ def test_tied_linear_built_alone_is_unbound() -> None:
     """A bare make binds against the leaf itself, which owns no weight."""
     with pytest.raises(AttributeError):
         TiedLinear.Config(tied="embed").make()
+
+
+def test_identity_cost_is_free() -> None:
+    free = assert_cost_matches_torch(
+        Identity.Config(8),
+        build_input=lambda: torch.randn(2, 8, requires_grad=True),
+        num_tokens=2,
+    )
+    assert free == Cost()
+
+
+def test_skip_cost_is_the_inner_cost_plus_residual_additions() -> None:
+    inner = Linear.Config(4, 4)
+    skip = assert_cost_matches_torch(
+        Skip.Config(inner=inner),
+        build_input=lambda: torch.randn(2, 4, requires_grad=True),
+        num_tokens=2,
+    )
+    assert skip == inner.copy_tree().finalize().cost(num_tokens=2) + Cost(
+        primal=Compute(flops=Flops(elementwise=4)),
+        adjoint=Compute(flops=Flops(elementwise=4)),
+    )
+
+
+def test_skip_cost_without_inner_raises() -> None:
+    with pytest.raises(ValueError, match="inner"):
+        Skip.Config().cost()
+
+
+def test_tied_linear_cost_pays_flops_and_owns_nothing() -> None:
+    tied = TiedLinear.Config(4, 8, tied="embed").copy_tree().finalize().cost()
+    owned = Linear.Config(4, 8).copy_tree().finalize().cost()
+    assert tied.training.flops.matmul == owned.training.flops.matmul
+    assert tied.params == 0
+    assert tied.training.bytes.matmul == owned.training.bytes.matmul
 
 
 class _ChannelsConfig(Makeable[object], ChannelsInOut, Protocol):

@@ -66,16 +66,16 @@ from priml.runtime import (
     runtime_initialized,
 )
 from priml.timer import CheckpointableStepTimer
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.custom_types import (
-    CheckpointingProtocol,
+    CheckpointerProtocol,
     CudaEventProtocol,
     PhaseTimerProtocol,
-    ProfileProtocol,
+    ProfilerProtocol,
     TrackerProtocol,
     TrainStepProtocol,
 )
-from priml.train.profiling import PhaseTimer
+from priml.train.profiler import PhaseTimer
 from priml.train.tracker import scalar_metrics
 from priml.train.train_step import TrainStep
 
@@ -127,7 +127,7 @@ class TrainLoop:
       cfg = TrainLoop.Config(
           step=TrainStep.Config(...),
           dataset=ImageNetDataset.Config(...),
-          metrics={"accuracy": TopK.Config(k_values=[1, 5])},
+          metrics_eval={"accuracy": TopK.Config(k_values=[1, 5])},
       )
       loop = cfg.make()
       loop.train()
@@ -180,17 +180,29 @@ class TrainLoop:
         )
         """Supplies the train and eval loaders, and owns the epoch count."""
 
-        metrics: dict[str, Makeable[MetricProtocol]] = field(
+        metrics_train: dict[str, Makeable[MetricProtocol]] = field(
             default_factory=dict[str, Makeable[MetricProtocol]],
         )
-        """Eval metrics by name; each name prefixes the keys it publishes."""
+        """Metrics updated on every train step and published on the log cadence.
 
-        checkpointing: Makeable[CheckpointingProtocol] | None = field(
+        Each name prefixes the keys it publishes under ``train/``. The bus each
+        ``update`` receives is the step's batch plus ``step_sec``, the wall time
+        the step took, so a throughput metric needs nothing from the loop. The
+        same config may appear here and in ``metrics_eval``."""
+
+        metrics_eval: dict[str, Makeable[MetricProtocol]] = field(
+            default_factory=dict[str, Makeable[MetricProtocol]],
+        )
+        """Metrics updated on every eval batch and published per eval.
+
+        Each name prefixes the keys it publishes under ``eval/``."""
+
+        checkpointer: Makeable[CheckpointerProtocol] | None = field(
             default_factory=Checkpointer.Config,
         )
         """Save cadence, resume, and retention. ``None`` writes nothing."""
 
-        profiling: Makeable[ProfileProtocol] | None = None
+        profiler: Makeable[ProfilerProtocol] | None = None
         """Per-step profiler hooks; ``None`` (the default) adds no overhead."""
 
         phase_timer: Makeable[PhaseTimerProtocol] = field(
@@ -290,7 +302,7 @@ class TrainLoop:
         """Run a single full-dataset eval on a loaded checkpoint, then exit.
 
         Skips training; the checkpoint is loaded by the checkpointer's own resume
-        policy (``checkpointing.resume`` defaults on, selecting ``resume_step``)
+        policy (``checkpointer.resume`` defaults on, selecting ``resume_step``)
         -- eval_only does not dictate checkpoint reads. The loop evaluates over
         the full eval set, logs ``eval/*`` at the checkpoint's ``global_step``,
         and returns. With ``resume`` off, eval scores fresh weights (warned)."""
@@ -353,8 +365,8 @@ class TrainLoop:
             # Run-output children inherit this run's resolved directory.
             for part in (
                 self.step,
-                self.checkpointing,
-                self.profiling,
+                self.checkpointer,
+                self.profiler,
                 self.phase_timer,
                 self.tracker,
             ):
@@ -376,7 +388,7 @@ class TrainLoop:
                 placement.device = self.runtime.device
             # A metric reading a shared ``/datasets/...`` corpus inherits the
             # bare root; every other (artifact/dump) metric inherits the run dir.
-            for metric in self.metrics.values():
+            for metric in (*self.metrics_train.values(), *self.metrics_eval.values()):
                 if (
                     not isinstance(metric, HasNormalizedWorkingDirPattern)
                     or metric.base_dir is not None
@@ -450,7 +462,12 @@ class TrainLoop:
                 self.step = config.step.make()
             if isinstance(self.step, _HasTimer):
                 self.step.timer = self.phase_timer
-            self.metrics = {name: cfg.make() for name, cfg in config.metrics.items()}
+            self.metrics_train = {
+                name: cfg.make() for name, cfg in config.metrics_train.items()
+            }
+            self.metrics_eval = {
+                name: cfg.make() for name, cfg in config.metrics_eval.items()
+            }
 
             if mesh:
                 # Derive the data seed locally -- no collective.
@@ -482,8 +499,8 @@ class TrainLoop:
             # Setup checkpointing. The checkpointer is driven against this
             # TrainLoop (passed as the target to each call).
             logger.info("TrainLoop startup: creating checkpointer.")
-            self.checkpointing: CheckpointingProtocol | None = (
-                config.checkpointing.make() if config.checkpointing else None
+            self.checkpointer: CheckpointerProtocol | None = (
+                config.checkpointer.make() if config.checkpointer else None
             )
             logger.info("TrainLoop startup: checkpointer ready.")
 
@@ -543,8 +560,8 @@ class TrainLoop:
 
             # Setup profiling.
             logger.info("TrainLoop startup: creating profiler.")
-            self.profiling: ProfileProtocol | None = (
-                config.profiling.make() if config.profiling else None
+            self.profiler: ProfilerProtocol | None = (
+                config.profiler.make() if config.profiler else None
             )
             logger.info("TrainLoop startup: profiler ready.")
 
@@ -557,13 +574,13 @@ class TrainLoop:
             # future save would clobber an existing checkpoint -- caught at
             # startup, not thousands of steps in. eval_only writes nothing, so
             # its guard is skipped.
-            if self.checkpointing is not None:
+            if self.checkpointer is not None:
                 logger.info(
                     "TrainLoop startup: loading checkpoint (max_steps=%s, guard=%s).",
                     self.max_steps,
                     not self.eval_only,
                 )
-                self.checkpointing.load(
+                self.checkpointer.load(
                     self,
                     max_steps=self.max_steps,
                     guard=not self.eval_only,
@@ -632,8 +649,8 @@ class TrainLoop:
                     except BaseException:
                         self._save_after_evaluation_error(is_final=False)
                         raise
-                    if self.checkpointing is not None:
-                        self.checkpointing.maybe_save(self, self.step.global_step)
+                    if self.checkpointer is not None:
+                        self.checkpointer.maybe_save(self, self.step.global_step)
                 batch = self._get_next_batch()
                 if self.current_epoch == n + 1:
                     # Flush/discard any partial gradient accumulation from the
@@ -688,8 +705,8 @@ class TrainLoop:
                 raise
             # A terminal checkpoint may be resumed with a larger budget, so it
             # must include the final evaluation's RNG progression too.
-            if self.checkpointing is not None:
-                self.checkpointing.save(self, self.step.global_step)
+            if self.checkpointer is not None:
+                self.checkpointer.save(self, self.step.global_step)
         finally:
             self.phase_timer.publish_summary(
                 self.tracker,
@@ -705,13 +722,13 @@ class TrainLoop:
             and torch.distributed.get_world_size() > 1
         ):
             return
-        if self.checkpointing is None:
+        if self.checkpointer is None:
             return
         try:
             if is_final:
-                self.checkpointing.save(self, step=self.step.global_step)
+                self.checkpointer.save(self, step=self.step.global_step)
             else:
-                self.checkpointing.maybe_save(self, step=self.step.global_step)
+                self.checkpointer.maybe_save(self, step=self.step.global_step)
         except BaseException:
             logger.exception("Failed to save checkpoint after evaluation error.")
 
@@ -1006,8 +1023,8 @@ class TrainLoop:
 
     def _do_train_step(self, batch: dict[str, object]) -> None:
         """Execute one training step with profiling and logging."""
-        if self.profiling:
-            self.profiling.on_step_start(self.step.global_step)
+        if self.profiler:
+            self.profiler.on_step_start(self.step.global_step)
 
         next_step = self.step.global_step + 1
         if is_rank_zero():
@@ -1040,8 +1057,13 @@ class TrainLoop:
             # (which carries the one-time compile) is excluded from "train" time.
             self._train_clock_base = time.perf_counter()
 
-        if self.profiling:
-            self.profiling.on_step_end(self.step.global_step)
+        if self.profiler:
+            self.profiler.on_step_end(self.step.global_step)
+
+        # Every microbatch, not only logged ones: a metric averaging over the
+        # window between logs has to see each step it averages.
+        for metric in self.metrics_train.values():
+            metric.update(step_results["model"], **batch, step_sec=step_time)
 
         # Log every startup step, then on the ``num_steps_log`` cadence. This
         # gates BOTH the console line and the tracker upload: after startup,
@@ -1083,6 +1105,9 @@ class TrainLoop:
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(reduced_values)
             reduced_values = reduced_values / torch.distributed.get_world_size()
+        # Before the rank gate: a metric's ``compute`` may all-reduce, and its
+        # ``reset`` bounds the window on every rank, not only the one that logs.
+        train_metrics = self._compute_train_metrics()
         if not is_rank_zero():
             return
 
@@ -1108,6 +1133,9 @@ class TrainLoop:
             f"loss={loss_value:.4f} step_time={step_time:.3f}s "
             f"elapsed={elapsed:.0f}s"
         )
+        extra = " ".join(
+            [extra, *(f"{k}={v:.4f}" for k, v in train_metrics.items())],
+        ).strip()
         logger.info(f"{line} {extra}" if extra else line)
 
         if self.tracker:
@@ -1119,6 +1147,7 @@ class TrainLoop:
                 # a ``max_time_kind="train"`` budget charges against.
                 "elapsed": self._train_elapsed(),
                 **step_metrics,
+                **train_metrics,
             }
             if torch.cuda.is_available():
                 # Cumulative peaks since the last torch CUDA memory-stat reset.
@@ -1127,6 +1156,18 @@ class TrainLoop:
                 )
                 metrics["gpu_mem_reserved_gb"] = torch.cuda.max_memory_reserved() / 1e9
             self.tracker.log_metrics(metrics, self.step.global_step, prefix="train/")
+
+    # Bracketed per log, not per step, so a metric sees the whole window between
+    # logs and its ``compute`` runs at the log cadence rather than the microbatch
+    # cadence. Non-scalar values are dropped as they are for eval.
+    def _compute_train_metrics(self) -> dict[str, float]:
+        """Compute, reset, and flatten every train metric under its name."""
+        results: dict[str, object] = {}
+        for name, metric in self.metrics_train.items():
+            for key, value in metric.compute().items():
+                results[f"{name}_{key}" if name else key] = value
+            metric.reset()
+        return scalar_metrics(results)
 
     def _maybe_garbage_collect(self) -> None:
         """Run manual garbage collection if configured."""
@@ -1186,6 +1227,10 @@ class TrainLoop:
             step=self.step.global_step,
             is_final=is_final,
         )
+        # An eval-only run writes nothing, however good its score; ``force`` is
+        # that path's signature.
+        if self.checkpointer is not None and not force:
+            self.checkpointer.on_eval(self, self.step.global_step, scalar_metrics)
         if is_rank_zero():
             if is_final:
                 elapsed = time.perf_counter() - self._start_time
@@ -1206,12 +1251,12 @@ class TrainLoop:
 
     def _cleanup(self) -> None:
         """Cleanup resources after training."""
-        if self.checkpointing is not None:
-            self.checkpointing.close()
+        if self.checkpointer is not None:
+            self.checkpointer.close()
         if self.tracker:
             self.tracker.close()
-        if self.profiling:
-            self.profiling.cleanup()
+        if self.profiler:
+            self.profiler.cleanup()
         if math.isfinite(self.num_steps_garbage_collect):
             gc.enable()
         self._destroy_runtime_once()
@@ -1298,7 +1343,7 @@ class TrainLoop:
           metrics: Computed validation metrics keyed by name.
 
         """
-        for metric in self.metrics.values():
+        for metric in self.metrics_eval.values():
             metric.reset()
 
         eval_loader = self.dataset.eval_dataloader()
@@ -1374,7 +1419,7 @@ class TrainLoop:
             total_batch_time += batch_dt
             num_batches += 1
 
-            for name, metric in self.metrics.items():
+            for name, metric in self.metrics_eval.items():
                 cuda_events = self._cuda_event_pair()
                 # A metric ``update`` that all-gathers across ranks is a classic
                 # deadlock point: if one rank entered it while another is still in
@@ -1384,14 +1429,18 @@ class TrainLoop:
                     f"eval batch {num_batches} metric[{name}].update",
                     interval_s=self.phase_heartbeat_sec,
                 ):
-                    metric.update(model_output, **batch)
+                    metric.update(model_output, **batch, step_sec=batch_dt)
                     # Extra candidates (e.g. WTA's K heads) are fed as additional
                     # update() calls so accumulating metrics (pass@K voting) gain
                     # extra votes; scalar metrics already came from the primary
                     # path.
                     if extra_votes:
                         for extra_output, extra_batch in extra_votes:
-                            metric.update(extra_output, **extra_batch)
+                            metric.update(
+                                extra_output,
+                                **extra_batch,
+                                step_sec=batch_dt,
+                            )
                 self._record_cuda_timing(f"eval_metric_{name}_update", cuda_events)
 
             if narrate and num_batches % log_every == 0:
@@ -1421,7 +1470,7 @@ class TrainLoop:
             for key, value in total_step_metrics.items():
                 results[key] = value / total_weight
 
-        for name, metric in self.metrics.items():
+        for name, metric in self.metrics_eval.items():
             cuda_events = self._cuda_event_pair()
             metric_results = metric.compute()
             assert isinstance(metric_results, dict)
@@ -1446,7 +1495,9 @@ class TrainLoop:
 
         step: Mapping[str, Any]  # pyright: ignore[reportExplicitAny] -- The step's own schema (TrainStep.StateDict or a subclass's).
         dataset: Mapping[str, Any]  # pyright: ignore[reportExplicitAny] -- DatasetProtocol implementations each own their schema.
-        metrics: dict[str, Mapping[str, Any]]  # pyright: ignore[reportExplicitAny] -- MetricProtocol implementations each own their schema.
+        metrics_train: dict[str, Mapping[str, Any]]  # pyright: ignore[reportExplicitAny] -- MetricProtocol implementations each own their schema.
+        metrics_eval: dict[str, Mapping[str, Any]]  # pyright: ignore[reportExplicitAny] -- MetricProtocol implementations each own their schema.
+        metrics: NotRequired[dict[str, Mapping[str, Any]]]  # pyright: ignore[reportExplicitAny] -- The pre-split eval dict, read from older checkpoints.
         rng: NotRequired[RngState]
 
     def state_dict(self) -> StateDict:
@@ -1459,8 +1510,11 @@ class TrainLoop:
         return {
             "step": self.step.state_dict(),
             "dataset": self.dataset.state_dict(),
-            "metrics": {
-                name: metric.state_dict() for name, metric in self.metrics.items()
+            "metrics_train": {
+                name: metric.state_dict() for name, metric in self.metrics_train.items()
+            },
+            "metrics_eval": {
+                name: metric.state_dict() for name, metric in self.metrics_eval.items()
             },
             "rng": get_rng_state(),
         }
@@ -1475,9 +1529,15 @@ class TrainLoop:
         state = cast(TrainLoop.StateDict, state_dict)
         self.step.load_state_dict(state["step"])
         self.dataset.load_state_dict(state["dataset"])
-        for name, metric_state in state["metrics"].items():
-            if name in self.metrics:
-                self.metrics[name].load_state_dict(metric_state)
+        # ``metrics`` is the pre-split name for the eval dict, so an older
+        # checkpoint still restores.
+        eval_state = state.get("metrics_eval", state.get("metrics", {}))
+        for name, metric_state in eval_state.items():
+            if name in self.metrics_eval:
+                self.metrics_eval[name].load_state_dict(metric_state)
+        for name, metric_state in state.get("metrics_train", {}).items():
+            if name in self.metrics_train:
+                self.metrics_train[name].load_state_dict(metric_state)
         # No epoch to restore here: it rode the dataset's own state above.
         self.local_step = 0
 

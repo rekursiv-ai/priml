@@ -95,8 +95,8 @@ from priml.metrics.bits_per_byte import BitsPerByte
 from priml.model import softcap
 from priml.model.attention.rope import HuggingFaceFrequencies
 from priml.model.attention.value_gated_attention import (
+    SdpaCausal,
     ValueGatedAttention,
-    sdpa_attention,
 )
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
@@ -106,7 +106,7 @@ from priml.model.swiglu import SwiGLUReluSquared
 from priml.optimizers.composite import CompositeOptimizer, matching
 from priml.optimizers.fused_adamw import FusedAdamW
 from priml.runtime import SingleProcess
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import (
     AsyncTracker,
@@ -268,7 +268,7 @@ def exp000() -> NanoChatLoop.Config:
     cfg.max_time = cfg.step.train_budget_sec
     cfg.max_time_kind = "train"
 
-    cfg.metrics["val"] = BitsPerByte.Config()
+    cfg.metrics_eval["val"] = BitsPerByte.Config()
     # One eval, at the end, as the reference does (train.py:611, after its
     # loop). A mid-run eval is not charged to the budget, so it would not cost
     # steps -- but it holds the GPU for ~23 (5090) seconds each.
@@ -289,9 +289,9 @@ def exp000() -> NanoChatLoop.Config:
     # order is the corpus's own, packed deterministically and never shuffled.
     cfg.seed = 42
     # Avoid checkpoint resuming because the job is single-shot.
-    checkpointing = cfg.checkpointing
-    assert isinstance(checkpointing, Checkpointer.Config)
-    checkpointing.resume = False
+    checkpointer = cfg.checkpointer
+    assert isinstance(checkpointer, Checkpointer.Config)
+    checkpointer.resume = False
 
     cfg.step.parallelism = NoParallel.Config()
     cfg.step.parallelism.device = "cuda"
@@ -351,7 +351,7 @@ def exp001() -> NanoChatLoop.Config:
     # The following are tuned for rtx5090.
     block = cfg.step.model.template
     assert isinstance(block.attn, ValueGatedAttention.Config)
-    block.attn.kernel = PartialConfig(sdpa_attention)
+    block.attn.kernel = SdpaCausal.Config()
 
     # Karpathy uses 32 but we can get 15.7% more speed @ 64.
     # Theoretically up to 76.
@@ -432,7 +432,7 @@ class NgramTrainLoop(NanoChatLoop):
         @override
         def finalize(self) -> Self:
             if self.dataset.reference_evaluation is not None:
-                self.metrics["val"] = ReferenceBitsPerByte.Config()
+                self.metrics_eval["val"] = ReferenceBitsPerByte.Config()
             return super().finalize()
 
 
@@ -646,7 +646,7 @@ def exp009() -> NgramTrainLoop.Config:
     """
     cfg = exp008()
     cfg.experiment_name = "exp009"
-    cfg.checkpointing = None
+    cfg.checkpointer = None
     model = cfg.step.model
     assert isinstance(model, MemoryNanoChatLM.Config)
     model.num_layers = 8

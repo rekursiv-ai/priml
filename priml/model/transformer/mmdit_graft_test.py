@@ -14,6 +14,7 @@ import torch
 from priml.lib.custom_json import DictCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Cost, cost
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
@@ -29,6 +30,7 @@ from priml.testing.bfb import (
     host_agnostic_numerics,
     randomize_parameters,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -279,6 +281,56 @@ def test_factory_rejects_unsupported_backbones(invalid: str) -> None:
         match=r"Grafting requires|at least one additional stream",
     ):
         graft.make()
+
+
+@pytest.mark.parametrize("tie", [False, True])
+def test_graft_cost_prices_host_projections_and_joint_blocks_once(
+    tie: bool,
+) -> None:
+    """The host's layers live inside the joint blocks, so they are not re-added."""
+    config = _config(depth=2, tie=tie, conditioned=True)
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=8)
+    backbone = finalized.backbone
+    projections = [p for p in (backbone.proj_in, backbone.proj_out) if p is not None]
+    expected = sum(
+        (cost(c, seq_len=8) for c in (*projections, *finalized.block)),
+        Cost(),
+    )
+    assert model_cost == expected
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    host = cost(backbone, seq_len=8)
+    assert model_cost.params > host.params
+    assert model_cost.training.flops.matmul > host.training.flops.matmul
+
+
+@pytest.mark.parametrize("tie", [False, True])
+def test_graft_cost_matches_torch(tie: bool) -> None:
+    """Embedding, joint blocks over both streams, and the head are torch's count.
+
+    A "token" is one POSITION holding one token per stream, as
+    ``MultiStreamAttention`` defines it, so both streams run three positions
+    and the joint key length is six. Unconditioned, since adaLN runs once per
+    sequence while ``cost`` prices it per token (``mmdit_test``).
+    """
+    assert_cost_matches_torch(
+        _config(depth=2, tie=tie),
+        build_input=lambda: (
+            torch.randint(0, 32, (1, 3)),
+            torch.randn(1, 3, 16, requires_grad=True),
+        ),
+        num_tokens=3,
+        bus={"seq_len": 6},
+        run=run_graft,
+    )
+
+
+def run_graft(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Run a graft on ``(tokens, stream)`` and reduce both outputs to a scalar."""
+    assert isinstance(module, MMDiTGraft)
+    tokens, other = inputs
+    logits, streams = module(tokens, [other], attn_mask=[None, None])
+    return logits.sum() + streams[0].sum()
 
 
 if __name__ == "__main__":

@@ -15,8 +15,10 @@ an explicit list whose length IS the block count.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Self, cast, override
+
+import math
 
 from configgle import Fig, Makeable
 from configgle.walk import copy_tree
@@ -26,6 +28,16 @@ import torch
 
 from priml.math.custom_types import TensorFn
 from priml.math.stats import PcaDecompose, pca_eigh
+from priml.model.conv import conv_cost
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+)
 from priml.model.custom_types import (
     ActivationFn,
     ChannelsIn,
@@ -34,6 +46,7 @@ from priml.model.custom_types import (
     propagate_attr,
 )
 from priml.model.init import InitFn, call_init
+from priml.model.norm import BatchNorm2d
 from priml.model.whitening import PCAWhiteningConv2d
 
 
@@ -67,6 +80,79 @@ class ResidualBlock(nn.Module):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             return super().finalize()
+
+        def cost(
+            self,
+            *,
+            image_size: tuple[int, int],
+            grid: tuple[int, int] | None = None,
+            num_tokens: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Price norm-act-conv twice and the shortcut, per image position.
+
+            A token is one position of the network's input image,
+            ``image_size``; ``grid`` is this block's own input grid, which is
+            the image when the block stands alone. ``norm1`` and its activation
+            run on ``grid``; ``conv1`` and the shortcut read it and write the
+            strided grid, where everything else runs. Work at either grid is
+            spread over the image's positions in one division, so a stack of
+            blocks sums exactly. The adjoint accumulates the shortcut's and the
+            branch's gradients into the activated input, one add per element.
+
+            Args:
+              image_size: ``(height, width)`` of the input image; the token grid.
+              grid: ``(height, width)`` this block reads; ``None`` is the image.
+              num_tokens: Image positions sharing each parameter, batch included.
+              **kwargs: The open message bus, forwarded to the activation.
+
+            Returns:
+              cost: Per-image-position cost of this module.
+
+            """
+            c_in, c_out = self.channels_in, self.channels_out
+            grid = grid or image_size
+            strided = _grid(grid, kernel_size=3, stride=self.stride, padding=1)
+            rows_in = _rows(num_tokens, image_size=image_size, grid=grid)
+            rows_out = _rows(num_tokens, image_size=image_size, grid=strided)
+            at_input = (
+                BatchNorm2d.Config(c_in, elementwise_affine=True).cost(
+                    num_tokens=rows_in,
+                )
+                + _activation_cost(
+                    self.activation,
+                    channels=c_in,
+                    num_tokens=rows_in,
+                    **kwargs,
+                )
+                + elementwise_cost(primal=0, adjoint=c_in)
+            )
+            at_output = (
+                _conv2d_cost(c_in, c_out, kernel_size=3, num_tokens=rows_out)
+                + BatchNorm2d.Config(c_out, elementwise_affine=True).cost(
+                    num_tokens=rows_out,
+                )
+                + _activation_cost(
+                    self.activation,
+                    channels=c_out,
+                    num_tokens=rows_out,
+                    **kwargs,
+                )
+                + _conv2d_cost(c_out, c_out, kernel_size=3, num_tokens=rows_out)
+                + elementwise_cost(primal=c_out, adjoint=0)
+            )
+            if self.stride != 1 or c_in != c_out:
+                at_output += _conv2d_cost(
+                    c_in,
+                    c_out,
+                    kernel_size=1,
+                    num_tokens=rows_out,
+                )
+            return _per_image_position(
+                at_input,
+                grid=grid,
+                image_size=image_size,
+            ) + _per_image_position(at_output, grid=strided, image_size=image_size)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -114,6 +200,121 @@ class ResidualBlock(nn.Module):
         return self.shortcut(h) + self.conv2(self.act(self.norm2(self.conv1(h))))
 
 
+def _conv2d_cost(
+    channels_in: int,
+    channels_out: int,
+    *,
+    kernel_size: int,
+    num_tokens: int,
+) -> Cost:
+    """Price one output position of a bias-free, ungrouped 2-d convolution."""
+    return conv_cost(
+        channels_in=channels_in,
+        channels_out=channels_out,
+        kernel_size=kernel_size,
+        ndim=2,
+        groups=1,
+        bias=False,
+        num_tokens=num_tokens,
+    )
+
+
+# ReLU is one compare forward and one mask multiply back; SiLU saves its sigmoid
+# for a five-operation derivative, the constants ``SwiGLU.Config.cost`` uses.
+def _activation_cost(
+    activation: ActivationFn,
+    *,
+    channels: int,
+    num_tokens: int,
+    **kwargs: object,
+) -> Cost:
+    """Price an activation per element; a config prices itself, a stranger raises."""
+    if activation in (torch.relu, nn.functional.relu):
+        primal = adjoint = 1
+    elif activation is nn.functional.silu:
+        primal = adjoint = 5
+    else:
+        return cost(activation, channels=channels, num_tokens=num_tokens, **kwargs)
+    return elementwise_cost(primal=primal * channels, adjoint=adjoint * channels)
+
+
+def _max_pool_cost(channels: int, *, kernel_size: int) -> Cost:
+    """Price one pooled position: compares forward, one gradient routed to the argmax."""
+    return Cost(
+        primal=Compute(
+            flops=Flops(reduction=channels * (kernel_size * kernel_size - 1)),
+            bytes=Bytes(reduction=channels),
+        ),
+        adjoint=Compute(
+            flops=Flops(selection=channels),
+            bytes=Bytes(selection=channels),
+        ),
+    )
+
+
+def _avg_pool_cost(channels: int, *, positions: int) -> Cost:
+    """Price a global average pool per image: a sum per channel, a scale per element back."""
+    return Cost(
+        primal=Compute(
+            flops=Flops(reduction=channels * (positions - 1), elementwise=channels),
+            bytes=Bytes(reduction=channels),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=channels * positions),
+            bytes=Bytes(elementwise=channels * positions),
+        ),
+    )
+
+
+def _grid(
+    size: tuple[int, int],
+    *,
+    kernel_size: int,
+    stride: int,
+    padding: int,
+) -> tuple[int, int]:
+    """Return the grid a window sweep writes, as torch's conv and pool shape it."""
+    height, width = ((s + 2 * padding - kernel_size) // stride + 1 for s in size)
+    return height, width
+
+
+# Rounded up, so the one-row shape estimate stays one row through a downsampling layer
+# instead of dividing by zero.
+def _rows(
+    num_tokens: int,
+    *,
+    image_size: tuple[int, int],
+    grid: tuple[int, int],
+) -> int:
+    """Return the rows a layer on ``grid`` sees when the image holds ``num_tokens``."""
+    total = math.prod(image_size)
+    return (num_tokens * math.prod(grid) + total - 1) // total
+
+
+# One division by the image's positions, never a chain of per-stage ratios: a
+# ``225 / 961`` followed by ``961 / 1024`` lands an ulp off ``225 / 1024``, and the
+# torch comparison is exact.
+def _per_image_position(
+    priced: Cost,
+    *,
+    grid: tuple[int, int],
+    image_size: tuple[int, int],
+) -> Cost:
+    """Spread work done once per ``grid`` position over the image's positions."""
+    ratio = math.prod(grid) / math.prod(image_size)
+    return replace(
+        priced,
+        primal=Compute(
+            flops=priced.primal.flops * ratio,
+            bytes=priced.primal.bytes * ratio,
+        ),
+        adjoint=Compute(
+            flops=priced.adjoint.flops * ratio,
+            bytes=priced.adjoint.bytes * ratio,
+        ),
+    )
+
+
 class ConvBlock(nn.Module):
     """Convolution block for :class:`SpeedNet`: conv, pool, norm, activate."""
 
@@ -146,6 +347,60 @@ class ConvBlock(nn.Module):
             if self.num_convs not in (1, 2, 3):
                 raise ValueError(f"num_convs must be 1, 2, or 3; got {self.num_convs}.")
             return super().finalize()
+
+        def cost(
+            self,
+            *,
+            image_size: tuple[int, int],
+            grid: tuple[int, int] | None = None,
+            num_tokens: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the first convolution on the block's grid, the rest on the pooled one.
+
+            A token is one position of the network's input image,
+            ``image_size``; ``grid`` is this block's own input grid, which is
+            the image when the block stands alone. The first convolution keeps
+            that grid (``padding="same"``); the pool halves it, and every norm,
+            activation, and later convolution runs there. Work at either grid
+            is spread over the image's positions in one division. Three
+            convolutions add a residual: one add forward and one gradient
+            accumulation into the skip.
+
+            Args:
+              image_size: ``(height, width)`` of the input image; the token grid.
+              grid: ``(height, width)`` this block reads; ``None`` is the image.
+              num_tokens: Image positions sharing each parameter, batch included.
+              **kwargs: The open message bus, forwarded to the activation.
+
+            Returns:
+              cost: Per-image-position cost of this module.
+
+            """
+            c_in, c_out = self.channels_in, self.channels_out
+            grid = grid or image_size
+            pooled_grid = _grid(grid, kernel_size=2, stride=2, padding=0)
+            rows_in = _rows(num_tokens, image_size=image_size, grid=grid)
+            rows_out = _rows(num_tokens, image_size=image_size, grid=pooled_grid)
+            norm_act = BatchNorm2d.Config(c_out).cost(num_tokens=rows_out) + (
+                _activation_cost(
+                    self.activation,
+                    channels=c_out,
+                    num_tokens=rows_out,
+                    **kwargs,
+                )
+            )
+            pooled = _max_pool_cost(c_out, kernel_size=2) + norm_act
+            for _ in range(self.num_convs - 1):
+                pooled += _conv2d_cost(c_out, c_out, kernel_size=3, num_tokens=rows_out)
+                pooled += norm_act
+            if self.num_convs == 3:
+                pooled += elementwise_cost(primal=c_out, adjoint=c_out)
+            return _per_image_position(
+                _conv2d_cost(c_in, c_out, kernel_size=3, num_tokens=rows_in),
+                grid=grid,
+                image_size=image_size,
+            ) + _per_image_position(pooled, grid=pooled_grid, image_size=image_size)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -224,6 +479,28 @@ class ScaledLinear(nn.Linear):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             return super().finalize()
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price the projection plus one scale multiply per output each way.
+
+            The scale is a Python float, not a parameter, so it adds no
+            gradient of its own.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, unread by this leaf.
+
+            Returns:
+              cost: Per-row cost of this module.
+
+            """
+            del kwargs
+            return matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_out,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            ) + elementwise_cost(primal=self.channels_out, adjoint=self.channels_out)
 
     def __init__(self, config: Config) -> None:
         super().__init__(config.channels_in, config.channels_out, bias=config.bias)
@@ -321,6 +598,79 @@ class ResNet(nn.Module):
                 )
             return super().finalize()
 
+        def cost(
+            self,
+            *,
+            image_size: tuple[int, int],
+            num_tokens: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the stem, every block at its grid, then norm, pool, and head.
+
+            A token is one position of the input image, ``image_size``, so
+            ``num_tokens`` is ``batch * height * width`` and the cost times
+            that count is one step's work. Each block is handed the grid it
+            reads and prices itself per image position; a stride-2 block
+            leaves ``ceil(size / 2)`` for the next. The pool and head run once
+            per image.
+
+            Args:
+              image_size: ``(height, width)`` of the input image; the token grid.
+              num_tokens: Image positions sharing each parameter, batch included.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-image-position cost of this module.
+
+            """
+            priced = _conv2d_cost(
+                self.channels_in,
+                self.channels_hidden[0],
+                kernel_size=3,
+                num_tokens=num_tokens,
+            )
+            grid = image_size
+            for stage_blocks in _resnet_blocks(self):
+                for block, stride in stage_blocks:
+                    priced += cost(
+                        block,
+                        image_size=image_size,
+                        grid=grid,
+                        num_tokens=num_tokens,
+                        **kwargs,
+                    )
+                    grid = _grid(grid, kernel_size=3, stride=stride, padding=1)
+            c_last = self.channels_hidden[-1]
+            rows = _rows(num_tokens, image_size=image_size, grid=grid)
+            images = _rows(num_tokens, image_size=image_size, grid=(1, 1))
+            at_output = BatchNorm2d.Config(c_last, elementwise_affine=True).cost(
+                num_tokens=rows,
+            ) + _activation_cost(
+                self.activation,
+                channels=c_last,
+                num_tokens=rows,
+                **kwargs,
+            )
+            head = (
+                matmul_cost(
+                    channels_in=c_last,
+                    channels_out=self.channels_out,
+                    bias=True,
+                    num_tokens=images,
+                )
+                if self.proj_out is None
+                else cost(self.proj_out, num_tokens=images, **kwargs)
+            )
+            return (
+                priced
+                + _per_image_position(at_output, grid=grid, image_size=image_size)
+                + _per_image_position(
+                    _avg_pool_cost(c_last, positions=math.prod(grid)) + head,
+                    grid=(1, 1),
+                    image_size=image_size,
+                )
+            )
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.stem = nn.Conv2d(
@@ -331,30 +681,11 @@ class ResNet(nn.Module):
             bias=False,
         )
         stages: list[nn.Module] = []
-        channels = config.channels_hidden[0]
-        blocks = _block_grid(
-            config.block,
-            len(config.channels_hidden),
-            config.blocks_per_stage,
-        )
-        for stage_index, stage_blocks in enumerate(blocks):
-            for block_index, block in enumerate(stage_blocks):
-                propagate_attr(block, "channels_in", channels, protocol=ChannelsIn)
-                channels = config.channels_hidden[stage_index]
-                propagate_attr(block, "channels_out", channels, protocol=ChannelsOut)
-                # Downsample once per stage, on its first block. The first stage
-                # keeps full resolution: 32x32 is already small, and halving it
-                # here costs accuracy outright.
-                propagate_attr(
-                    block,
-                    "stride",
-                    2 if stage_index and not block_index else 1,
-                )
-                propagate_attr(block, "activation", config.activation)
-                propagate_attr(block, "norm_momentum", config.norm_momentum)
-                stages.append(block.make())
+        for stage_blocks in _resnet_blocks(config):
+            stages.extend(block.make() for block, _ in stage_blocks)
             stages.append(nn.Identity())
         self.stages = nn.Sequential(*stages)
+        channels = config.channels_hidden[-1]
         self.norm = nn.BatchNorm2d(channels, momentum=config.norm_momentum)
         self.act = _activation(config.activation)
         self.pool = nn.AdaptiveAvgPool2d(1)
@@ -436,6 +767,16 @@ class SpeedNet(nn.Module):
         ``dirac`` makes each block start as an identity map.
         """
 
+        @property
+        def whiten_width(self) -> int:
+            """Return the whitening layer's width: each eigenvector and its negation.
+
+            PCA yields ``channels_in * kernel**2`` eigenvectors; the layer emits
+            both a vector and its negation so a following ReLU-like activation
+            can respond to projections of either sign.
+            """
+            return 2 * self.channels_in * self.whiten_kernel * self.whiten_kernel
+
         @override
         def finalize(self) -> Self:
             if not self.channels_hidden:
@@ -454,36 +795,87 @@ class SpeedNet(nn.Module):
             )
             return super().finalize()
 
+        def cost(
+            self,
+            *,
+            image_size: tuple[int, int],
+            num_tokens: int = 1,
+            **kwargs: object,
+        ) -> Cost:
+            """Price whitening, every block at its grid, the final pool, and the head.
+
+            A token is one position of the input image, ``image_size``, so
+            ``num_tokens`` is ``batch * height * width``. The unpadded whitening
+            convolution shrinks the grid by ``whiten_kernel - 1``; each block
+            pools it by two; the final pool by three. Every layer is priced at
+            its own grid and spread back over the image's positions.
+
+            The whitening weight is frozen but owned: it is in ``params``, and
+            its adjoint is the input gradient alone -- one convolution of the
+            primal's size, not the two a trainable layer pays.
+
+            Args:
+              image_size: ``(height, width)`` of the input image; the token grid.
+              num_tokens: Image positions sharing each parameter, batch included.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-image-position cost of this module.
+
+            """
+            grid = _grid(
+                image_size,
+                kernel_size=self.whiten_kernel,
+                stride=1,
+                padding=0,
+            )
+            rows = _rows(num_tokens, image_size=image_size, grid=grid)
+            trainable = _conv2d_cost(
+                self.channels_in,
+                self.whiten_width,
+                kernel_size=self.whiten_kernel,
+                num_tokens=rows,
+            )
+            whitened = replace(
+                trainable,
+                adjoint=replace(trainable.adjoint, flops=trainable.primal.flops),
+            ) + _activation_cost(
+                self.activation,
+                channels=self.whiten_width,
+                num_tokens=rows,
+                **kwargs,
+            )
+            priced = _per_image_position(whitened, grid=grid, image_size=image_size)
+            for block in _speednet_blocks(self):
+                priced += cost(
+                    block,
+                    image_size=image_size,
+                    grid=grid,
+                    num_tokens=num_tokens,
+                    **kwargs,
+                )
+                grid = _grid(grid, kernel_size=2, stride=2, padding=0)
+            grid = _grid(grid, kernel_size=3, stride=3, padding=0)
+            tail = _max_pool_cost(self.channels_hidden[-1], kernel_size=3) + cost(
+                self.proj_out,
+                num_tokens=_rows(num_tokens, image_size=image_size, grid=grid),
+                **kwargs,
+            )
+            return priced + _per_image_position(tail, grid=grid, image_size=image_size)
+
     def __init__(self, config: Config) -> None:
         super().__init__()
-        # Rank doubling: PCA yields C*k*k eigenvectors, and the layer emits both
-        # a vector and its negation so a following ReLU-like activation can
-        # respond to projections of either sign.
-        whiten_width = 2 * config.channels_in * config.whiten_kernel**2
         self.whiten = PCAWhiteningConv2d(
             config.channels_in,
-            whiten_width,
+            config.whiten_width,
             config.whiten_kernel,
             padding=0,
             bias=False,
         )
         self.act = _activation(config.activation)
-        blocks: list[nn.Module] = []
-        channels = whiten_width
-        grid = _block_grid(config.block, len(config.channels_hidden), 1)
-        for stage_channels, stage_blocks in zip(
-            config.channels_hidden,
-            grid,
-            strict=True,
-        ):
-            for block in stage_blocks:
-                propagate_attr(block, "channels_in", channels, protocol=ChannelsIn)
-                channels = stage_channels
-                propagate_attr(block, "channels_out", channels, protocol=ChannelsOut)
-                propagate_attr(block, "activation", config.activation)
-                propagate_attr(block, "norm_momentum", config.norm_momentum)
-                blocks.append(block.make())
-        self.blocks = nn.Sequential(*blocks)
+        self.blocks = nn.Sequential(
+            *(block.make() for block in _speednet_blocks(config)),
+        )
         self.pool = nn.MaxPool2d(3)
         self.head = config.proj_out.make()
         if config.init_conv is not None:
@@ -531,14 +923,30 @@ class SpeedNet(nn.Module):
         return self.head(pooled.flatten(1))
 
 
+def _speednet_blocks(config: SpeedNet.Config) -> list[Makeable[nn.Module]]:
+    """Wire one block per hidden width, the first reading the whitened channels."""
+    blocks: list[Makeable[nn.Module]] = []
+    channels = config.whiten_width
+    grid = _block_grid(config.block, len(config.channels_hidden), 1)
+    for stage_channels, (block,) in zip(config.channels_hidden, grid, strict=True):
+        propagate_attr(block, "channels_in", channels, protocol=ChannelsIn)
+        channels = stage_channels
+        propagate_attr(block, "channels_out", channels, protocol=ChannelsOut)
+        propagate_attr(block, "activation", config.activation)
+        propagate_attr(block, "norm_momentum", config.norm_momentum)
+        blocks.append(block)
+    return blocks
+
+
 # A shared config would be mutated once per stage and every block would end up carrying
-# the last stage's width.
+# the last stage's width. A caller's list is copied too, so wiring it -- from ``cost``
+# as much as from ``__init__`` -- leaves the caller's configs untouched.
 def _block_grid(
     block: Makeable[nn.Module] | list[Makeable[nn.Module]],
     num_stages: int,
     blocks_per_stage: int,
 ) -> list[list[Makeable[nn.Module]]]:
-    """Group block configs by stage, copying a template so each is distinct."""
+    """Group block configs by stage, copying each so wiring mutates no caller's config."""
     flat: list[Makeable[nn.Module]]
     if isinstance(block, list):
         expected = num_stages * blocks_per_stage
@@ -547,7 +955,7 @@ def _block_grid(
                 f"block list must hold {expected} configs "
                 f"({num_stages} stages x {blocks_per_stage}); got {len(block)}.",
             )
-        flat = list(block)
+        flat = [copy_tree(member) for member in block]
     else:
         flat = [
             copy_tree(block) for _ in range(num_stages) for _ in range(blocks_per_stage)
@@ -556,3 +964,32 @@ def _block_grid(
         flat[index * blocks_per_stage : (index + 1) * blocks_per_stage]
         for index in range(num_stages)
     ]
+
+
+def _resnet_blocks(
+    config: ResNet.Config,
+) -> list[list[tuple[Makeable[nn.Module], int]]]:
+    """Wire each stage's blocks and pair each with the stride it was given."""
+    stages: list[list[tuple[Makeable[nn.Module], int]]] = []
+    channels = config.channels_hidden[0]
+    grid = _block_grid(
+        config.block,
+        len(config.channels_hidden),
+        config.blocks_per_stage,
+    )
+    for stage_index, stage_blocks in enumerate(grid):
+        stage: list[tuple[Makeable[nn.Module], int]] = []
+        for block_index, block in enumerate(stage_blocks):
+            propagate_attr(block, "channels_in", channels, protocol=ChannelsIn)
+            channels = config.channels_hidden[stage_index]
+            propagate_attr(block, "channels_out", channels, protocol=ChannelsOut)
+            # Downsample once per stage, on its first block. The first stage
+            # keeps full resolution: 32x32 is already small, and halving it
+            # here costs accuracy outright.
+            stride = 2 if stage_index and not block_index else 1
+            propagate_attr(block, "stride", stride)
+            propagate_attr(block, "activation", config.activation)
+            propagate_attr(block, "norm_momentum", config.norm_momentum)
+            stage.append((block, stride))
+        stages.append(stage)
+    return stages

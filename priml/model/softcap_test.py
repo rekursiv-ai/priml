@@ -10,8 +10,10 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.model.cost import Compute, Cost, Flops, cost
 from priml.model.softcap import SoftCap
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -81,6 +83,22 @@ def test_softcap_keeps_gradient_at_default_dtype() -> None:
     assert out.requires_grad
     out.sum().backward()
     assert all(p.grad is not None for p in m.parameters())
+
+
+def test_softcap_cost_separates_projection_and_squash() -> None:
+    """The squash contributes scalar work independently of its projection."""
+    config = SoftCap.Config(cap=5.0, channels_in=4, channels_out=6)
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, 4, requires_grad=True),
+        num_tokens=3,
+    )
+    inner = cost(config.copy_tree().finalize().inner, num_tokens=3)
+    assert inner.params == 4 * 6
+    assert model_cost == inner + Cost(
+        primal=Compute(flops=Flops(elementwise=3 * 6)),
+        adjoint=Compute(flops=Flops(elementwise=5 * 6)),
+    )
 
 
 if __name__ == "__main__":

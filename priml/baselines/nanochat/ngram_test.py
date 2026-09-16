@@ -14,6 +14,7 @@ from priml.baselines.nanochat.ngram import (
     ngram_mix,
 )
 from priml.model.embedding import Embedding
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> None:
@@ -60,6 +61,24 @@ def test_hash_indices_preserve_prefix_and_coefficient_order() -> None:
         torch.equal(full[:, :3], prefix)
         for full, prefix in zip(indices, table.indices(tokens[:, :3]), strict=True)
     )
+
+
+def test_hashed_tables_cost_is_one_gather_per_hash_and_matches_torch() -> None:
+    """Two hashes gather two half-width rows; the integer hash is elementwise."""
+    config = HashedNgramTables.Config()
+    config.channels_out = 4
+    config.num_embeddings = 17
+    config.hash_multipliers = ((3, 5, 7), (11, 13, 17))
+    priced = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 17, (2, 5)),
+        num_tokens=10,
+    )
+    assert priced.params == 2 * 17 * 2
+    assert priced.primal.bytes.selection == 4
+    assert priced.adjoint.flops.selection == 4
+    # Three multiplies, two XORs, one modulo per hash.
+    assert priced.primal.flops.elementwise == 2 * 2 * 3
 
 
 def test_table_initialization_transform_preserves_rng_draws() -> None:

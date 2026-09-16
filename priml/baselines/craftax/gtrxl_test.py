@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from torch import Tensor
+from typing import cast
+
+from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.baselines.craftax.gtrxl import ActorCriticGTrXL
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def _model(**overrides: float) -> ActorCriticGTrXL:
@@ -313,6 +316,99 @@ def test_a_degenerate_dimension_is_refused(field: str) -> None:
 def test_heads_that_do_not_divide_the_projection_are_refused() -> None:
     with pytest.raises(ValueError, match="divide"):
         _model(num_heads=3, qkv_dim=16)
+
+
+def _config() -> ActorCriticGTrXL.Config:
+    config = ActorCriticGTrXL.Config()
+    config.observation_size = 12
+    config.num_actions = 5
+    config.embed_dim = 16
+    config.num_heads = 2
+    config.num_layers = 2
+    config.qkv_dim = 16
+    config.channels_in = 8
+    config.memory_length = 8
+    return config
+
+
+def _stepped(model: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Take one recurrent step over a full memory; reduce both heads."""
+    observation, memory = inputs
+    envs = observation.shape[0]
+    _, _, logits, value = cast(ActorCriticGTrXL, model).step(
+        memory,
+        torch.full((envs,), memory.shape[1]),
+        observation,
+        torch.zeros(envs, dtype=torch.bool),
+    )
+    return logits.sum() + value.sum()
+
+
+def _sequenced(model: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Score a whole window over a full memory; reduce both heads."""
+    observation, memory = inputs
+    steps, envs = observation.shape[:2]
+    logits, value = cast(ActorCriticGTrXL, model).sequence(
+        memory,
+        torch.full((envs,), memory.shape[1]),
+        observation,
+        torch.zeros(steps, envs, dtype=torch.bool),
+    )
+    return logits.sum() + value.sum()
+
+
+def test_the_cost_matches_torch_on_a_step() -> None:
+    """One token is one step of one worker attending over its whole memory.
+
+    Every key row -- eight remembered plus the step's own -- is normalized
+    and projected per token, while the relative-position projection reads
+    one constant table shared by the three workers, so its forward and its
+    weight gradient are amortized over ``num_tokens`` and it has no input
+    gradient to count.
+    """
+    config = _config()
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randn(3, 12, requires_grad=True),
+            torch.randn(3, 8, 2, 16, requires_grad=True),
+        ),
+        num_tokens=3,
+        run=_stepped,
+    )
+    keys = 8 + 1
+    # Per layer: the table projection's forward, spread over the workers.
+    table = 2 * 16 * 16 * keys / 3
+    assert analytical.adjoint.flops.matmul == (
+        2 * analytical.primal.flops.matmul - 2 * table
+    )
+    # The relative scores are gathered into place: elements moved forward,
+    # one scatter-add per element back.
+    assert analytical.primal.flops.selection == 0
+    assert analytical.primal.bytes.selection == 2 * 2 * keys
+    assert analytical.adjoint.flops.selection == 2 * 2 * keys
+    # One remembered layer input per layer per step.
+    assert analytical.bytes_state == 2 * 16
+
+
+def test_the_cost_matches_torch_on_a_gradient_window() -> None:
+    """A window's queries share its keys, so a token costs less than a step.
+
+    Four steps over an eight-row memory: each query sees twelve keys, each
+    token normalizes and projects three key rows, and the twelve-row table
+    is shared by eight tokens.
+    """
+    config = _config()
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randn(4, 2, 12, requires_grad=True),
+            torch.randn(2, 8, 2, 16, requires_grad=True),
+        ),
+        num_tokens=4 * 2,
+        bus={"seq_len": 4},
+        run=_sequenced,
+    )
 
 
 if __name__ == "__main__":

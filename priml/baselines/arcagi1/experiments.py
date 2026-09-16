@@ -46,7 +46,7 @@ from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.runtime import SingleProcess
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.train_loop import TrainLoop
 
 
@@ -151,17 +151,17 @@ def exp000() -> ArcTrainLoop:
     cfg.dataset.batch_size = batch_size
     cfg.dataset.eval_batch_size = batch_size
 
-    cfg.metrics["pass"] = PassK.Config()
+    cfg.metrics_eval["pass"] = PassK.Config()
     cfg.max_steps = cfg.step.total_train_steps
     cfg.num_steps_eval = 10_000
     cfg.num_steps_log = 100
     cfg.eval_warmup_batches = 1
     cfg.eval_every_epoch = False
 
-    cfg.checkpointing = Checkpointer.Config()
-    cfg.checkpointing.save_every = 4_000
-    cfg.checkpointing.keep_last_n = 8
-    cfg.checkpointing.keep_every = 40_000
+    cfg.checkpointer = Checkpointer.Config()
+    cfg.checkpointer.save_every = 4_000
+    cfg.checkpointer.keep_last_n = 8
+    cfg.checkpointer.keep_every = 40_000
 
     cfg.runtime = SingleProcess.Config()
     return cfg
@@ -282,7 +282,7 @@ def exp_smoke() -> ArcTrainLoop:
     cfg.dataset.num_tasks = 4
     cfg.max_steps = cfg.step.total_train_steps = 4
     cfg.num_steps_eval = 2
-    cfg.checkpointing = None
+    cfg.checkpointer = None
 
     prefix = cfg.step.model.prefix
     assert isinstance(prefix, PrefixStack.Config)

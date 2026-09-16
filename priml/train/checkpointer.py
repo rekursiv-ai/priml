@@ -23,9 +23,11 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Formatter
-from typing import TYPE_CHECKING, Any, Protocol, Self, cast, override
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast, override
 
+import json
 import logging
+import math
 import re
 import shutil
 import time
@@ -62,6 +64,7 @@ else:
 from configgle import Fig, Makeable
 
 from priml.custom_types import CheckpointableProtocol
+from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, StrCodec, loads
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
 
@@ -530,6 +533,23 @@ class Checkpointer:
         name, or a rewind-resume clobbering newer checkpoints). Set True to
         deliberately re-mint, e.g. re-running a training section."""
 
+        best_metric: str = ""
+        """Eval metric name whose improvement forces a save; empty keeps
+        cadence-only saving.
+
+        The best step is recorded in a ``best.json`` sidecar beside the
+        checkpoints (not in the filename: the ``filename`` template is the
+        only naming scheme, so ``_list`` and resume see one inventory) and is
+        exempt from ``keep_last_n`` pruning -- a best checkpoint that gets
+        pruned is useless. It becomes prunable again once a later eval beats
+        it. ``load`` restores the record, so a resumed run keeps protecting
+        the checkpoint that actually was best rather than crowning its own
+        first eval."""
+
+        best_mode: Literal["max", "min"] = "max"
+        """Whether a larger (``"max"``) or smaller (``"min"``) ``best_metric``
+        value is the improvement."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
@@ -597,6 +617,18 @@ class Checkpointer:
         self.resume = config.resume
         self.resume_step = config.resume_step
         self.allow_checkpoint_overwrite = config.allow_checkpoint_overwrite
+        if config.best_mode not in ("max", "min"):
+            raise ValueError(
+                f"best_mode must be 'max' or 'min'; got {config.best_mode!r}.",
+            )
+        self.best_metric = config.best_metric
+        self.best_mode = config.best_mode
+        self.best_value = -math.inf if config.best_mode == "max" else math.inf
+        """Best ``best_metric`` value offered so far; the sentinel until one is."""
+        self.best_step: int | None = None
+        """Step of the checkpoint holding ``best_value``; exempt from pruning."""
+        self._eval_saved_step: int | None = None
+        """Step ``on_eval`` wrote; the cadence at that step then has nothing to add."""
         self.storage: StateDictStorer = config.storer.make()
 
     def maybe_save(self, target: CheckpointableProtocol, step: int) -> bool:
@@ -618,6 +650,8 @@ class Checkpointer:
             raise ValueError(f"checkpoint step must be non-negative, got {step}")
         if step == 0 or step % self.save_every != 0:
             return False
+        if step == self._eval_saved_step:
+            return True
         self._write(target, step)
         return True
 
@@ -627,6 +661,11 @@ class Checkpointer:
         For the end-of-training save at an off-cadence step. The exists-check is
         collective (rank 0's verdict broadcast) so ranks never disagree and
         strand each other at the save barrier.
+
+        A checkpoint ``on_eval`` wrote at this step is this run's own and is
+        kept: the loop evaluates before it saves, so both would serialize the
+        same state. The overwrite guard is for a checkpoint another process
+        left behind.
 
         Drains any pending async write first: its background barrier must
         complete before this method's collective broadcast, or the two
@@ -639,6 +678,8 @@ class Checkpointer:
         """
         if step < 0:
             raise ValueError(f"checkpoint step must be non-negative, got {step}")
+        if step == self._eval_saved_step:
+            return
         self.storage.flush()
         exists = step in self.available_steps()
         if _agreed_across_ranks(exists) and not self.allow_checkpoint_overwrite:
@@ -648,6 +689,62 @@ class Checkpointer:
                 "allow_checkpoint_overwrite=True to deliberately re-mint it.",
             )
         self._write(target, step)
+
+    def on_eval(
+        self,
+        target: CheckpointableProtocol,
+        step: int,
+        metrics: Mapping[str, float],
+    ) -> bool:
+        """Save ``target`` at ``step`` iff ``best_metric`` improved; return whether.
+
+        Rank 0's verdict is broadcast: the loop's eval scalars are per-rank
+        (``total_loss`` is a local mean), so a local comparison could send one
+        rank into the collective write while another returns. The best step is
+        exempt from ``keep_last_n`` pruning until a later eval supersedes it.
+
+        A step already on disk is recorded as the best without being rewritten,
+        so a checkpoint just written is never clobbered nor, for an async
+        storer, raced by its own in-flight write. The converse holds too: the
+        loop evaluates before it saves, so a step this method wrote is one the
+        cadence and end-of-run saves then skip.
+
+        Args:
+          target: The object whose state is saved.
+          step: The global step the metrics were measured at.
+          metrics: The eval's metrics by name.
+
+        Returns:
+          saved: Whether ``best_metric`` improved and a checkpoint was written.
+
+        Raises:
+          KeyError: ``best_metric`` is set but absent from ``metrics``.
+
+        """
+        if not self.best_metric:
+            return False
+        if self.best_metric not in metrics:
+            raise KeyError(
+                f"best_metric {self.best_metric!r} is not an eval metric; "
+                f"available: {sorted(metrics)}",
+            )
+        value = metrics[self.best_metric]
+        improved = (
+            value > self.best_value
+            if self.best_mode == "max"
+            else value < self.best_value
+        )
+        if not _agreed_across_ranks(improved):
+            return False
+        self.best_value = value
+        self.best_step = step
+        self._write_best_record()
+        self.storage.flush()
+        if _agreed_across_ranks(step in self.available_steps()):
+            return False
+        self._write(target, step)
+        self._eval_saved_step = step
+        return True
 
     def load(
         self,
@@ -687,6 +784,8 @@ class Checkpointer:
         self.storage.flush()  # A just-issued async write must be visible to resume.
         inventory = [c for c in self._list() if c.complete]
         resumed_step = self._resume(target, inventory) if self.resume else None
+        if self.resume:
+            self._restore_best_record(inventory)
         if guard and not self.allow_checkpoint_overwrite:
             self._guard_overwrite(inventory, resumed_step or 0, max_steps)
         return resumed_step is not None
@@ -756,6 +855,55 @@ class Checkpointer:
             "to deliberately re-mint over them.",
         )
 
+    # The record is a sidecar rather than part of the checkpoint blob because the
+    # checkpointer never parses the blob (the target owns its structure), and
+    # because the best step must outlive the checkpoint that was current when it
+    # was set. Rank 0 writes; the metric name and mode are recorded so a run
+    # that switches what "best" means does not inherit the old comparison.
+    def _write_best_record(self) -> None:
+        """Persist ``best_step``/``best_value`` beside the checkpoints."""
+        if not is_rank_zero():
+            return
+        path = validated_output_path(self.checkpoint_dir / "best.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "metric": self.best_metric,
+            "mode": self.best_mode,
+            "step": self.best_step,
+            "value": self.best_value,
+        }
+        temp_path = path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(payload))
+        temp_path.replace(path)
+
+    # A record naming a checkpoint no longer in the inventory protects nothing
+    # and is dropped, as is one written for another metric or mode.
+    def _restore_best_record(self, inventory: list[_Checkpoint]) -> None:
+        """Adopt the persisted best if it names a complete checkpoint on disk."""
+        if not self.best_metric:
+            return
+        path = self.checkpoint_dir / "best.json"
+        if not path.is_file():
+            return
+        record = DictCodec.coerce(loads(path.read_text()), default=None)
+        if (
+            StrCodec.coerce(record.get("metric")) != self.best_metric
+            or StrCodec.coerce(record.get("mode")) != self.best_mode
+        ):
+            return
+        step = IntCodec.coerce(record.get("step"), default=None)
+        if all(c.step != step for c in inventory):
+            return
+        self.best_step = step
+        self.best_value = FloatCodec.coerce(record.get("value"), default=None)
+        logger.info(
+            "Restored best %s=%s at step %d from %s.",
+            self.best_metric,
+            self.best_value,
+            step,
+            path,
+        )
+
     def _write(self, target: CheckpointableProtocol, step: int) -> None:
         """Serialize ``target`` and write it at ``step``; retention rides the write."""
         path = validated_output_path(self._path(step))
@@ -809,7 +957,8 @@ class Checkpointer:
     # rank 0 (deletion is rank-0 file I/O; no other rank reads an aged-out checkpoint
     # mid-run, so no barrier is needed). Counts and deletes only *complete* checkpoints:
     # a partial is either crashed or an in-flight write, never a retention candidate.
-    # Checkpoints on the ``keep_every`` archival interval are exempt.
+    # Checkpoints on the ``keep_every`` archival interval and the current
+    # ``best_step`` are exempt.
     def _prune(self) -> None:
         """Delete complete checkpoints beyond ``keep_last_n``, oldest first."""
         if not is_rank_zero() or self.keep_last_n < 0:
@@ -818,6 +967,8 @@ class Checkpointer:
         for doomed in complete[: max(0, len(complete) - self.keep_last_n)]:
             if self.keep_every > 0 and doomed.step % self.keep_every == 0:
                 continue  # Archival snapshot: retained forever.
+            if doomed.step == self.best_step:
+                continue  # Best eval so far: retained until superseded.
             try:
                 if doomed.path.is_dir():  # A shard checkpoint.
                     shutil.rmtree(doomed.path)

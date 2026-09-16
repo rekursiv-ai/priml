@@ -50,7 +50,7 @@ attention in priml uses.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field, fields
+from dataclasses import KW_ONLY, field, fields, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal, Self, override
 
@@ -68,16 +68,17 @@ import torch
 
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import RoPE
+from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
+from priml.model.cost import Compute, Cost, cost
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     ChannelsInOutConfig,
     ChannelsOut,
     DepthIndex,
+    HasResetParameters,
     LatentAttentionKernel,
-    Resettable,
     RotaryFactors,
     TensorModule,
     WeightedTensorModule,
@@ -132,6 +133,62 @@ class LatentAttention(nn.Module):
         fused kernel materializes it -- which spends exactly the memory the
         absorbed form was avoiding."""
 
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int,
+            kv_lora_rank: int,
+            channels_qk_rope_head: int,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the kernel's two products at the widths this form hands it.
+
+            Absorbed, K is the latent plus the rope key and V the latent alone;
+            re-expanded, they are the per-head Q/K width and ``channels_v_head``.
+            The latent projections are not priced here: folded into the query or
+            applied to the key, ``W_KR``/``W_UV`` are one matmul per token either
+            way, and the owner prices that matmul as ``proj_kv_b``.
+
+            The kernel prices both products at ONE width, ``4 * heads * keys *
+            width``, so it is handed the two widths' sum and the result halved:
+            ``2 * heads * keys * (channels_k + channels_v)``, which is ``QK^T`` at
+            the key width plus ``PV`` at the value width, exactly.
+
+            Args:
+              seq_len: Keys a query reaches before any window.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Width of each value head.
+              kv_lora_rank: Width of the shared KV latent.
+              channels_qk_rope_head: Width of the rotated key slice.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            if self.absorb:
+                channels_k = kv_lora_rank + channels_qk_rope_head
+                channels_v = kv_lora_rank
+            else:
+                channels_k, channels_v = channels_head, channels_v_head
+            doubled = cost(
+                self.attn_kernel,
+                seq_len=seq_len,
+                num_heads=num_heads,
+                channels_head=channels_k + channels_v,
+                **kwargs,
+            )
+            written = num_heads * channels_v
+            return replace(
+                doubled,
+                primal=_halve_matmul(doubled.primal, written=written),
+                adjoint=_halve_matmul(doubled.adjoint, written=written),
+            )
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.absorb = config.absorb
@@ -173,6 +230,14 @@ class LatentAttention(nn.Module):
         # Absorbed output is still in latent space; project it to the value
         # width. The re-expand path applied ``W_UV`` to ``v`` already.
         return torch.einsum("...shl,hvl->...shv", out, w_uv) if self.absorb else out
+
+
+def _halve_matmul(compute: Compute, *, written: int) -> Compute:
+    """Undo the doubled width's products; the row written is the value width."""
+    return Compute(
+        flops=replace(compute.flops, matmul=compute.flops.matmul / 2),
+        bytes=replace(compute.bytes, elementwise=written),
+    )
 
 
 def _broadcast_heads(x: Tensor, num_heads: int) -> Tensor:
@@ -333,6 +398,57 @@ class MultiHeadLatentAttention(nn.Module):
             self._size_projections()
             return super().finalize()
 
+        def cost(self, *, seq_len: int, **kwargs: object) -> Cost:
+            """Price the projections, norms, rotary, kernel, and the latent cache.
+
+            ``bytes_state`` is what :meth:`alloc_kv_cache` stores per token: the
+            ``kv_lora_rank`` latent and the head-shared rope key, not the K/V the
+            kernel would expand them into.
+
+            Args:
+              seq_len: Keys a query reaches before any window.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            q_path = (
+                (self.proj_q,)
+                if self.q_lora_rank is None
+                else (self.proj_q_a, self.norm_q_lora, self.proj_q_b)
+            )
+            children = (
+                *q_path,
+                self.proj_kv_a,
+                self.norm_kv_lora,
+                self.proj_kv_b,
+                self.proj_out,
+            )
+            total = sum((cost(child, **kwargs) for child in children), Cost())
+            if self.rope is not None:
+                total += cost(self.rope, **kwargs)
+                # Every query head and the one shared key row are rotated.
+                total += rotation_cost(
+                    self.rope,
+                    channels_head=self.channels_qk_rope_head,
+                    heads=self.num_heads + 1,
+                )
+            total += cost(
+                self.attn_kernel,
+                seq_len=seq_len,
+                num_heads=self.num_heads,
+                channels_head=self.channels_qk_head,
+                channels_v_head=self.channels_v_head,
+                kv_lora_rank=self.kv_lora_rank,
+                channels_qk_rope_head=self.channels_qk_rope_head,
+                **kwargs,
+            )
+            return replace(
+                total,
+                bytes_state=self.kv_lora_rank + self.channels_qk_rope_head,
+            )
+
         # Every width here is DERIVED -- a head count times a per-head width, or a LoRA
         # rank -- so a caller states the shape once and swaps the projection class
         # without restating any of it. Only the sentinel fields are filled: a slot
@@ -469,7 +585,7 @@ class MultiHeadLatentAttention(nn.Module):
             self.rope,
             self.attn_kernel,
         ):
-            if isinstance(m, Resettable):
+            if isinstance(m, HasResetParameters):
                 m.reset_parameters()
 
     def alloc_kv_cache(

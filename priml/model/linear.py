@@ -13,6 +13,7 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 import torch
 
+from priml.model.cost import Cost, matmul_cost
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
@@ -61,6 +62,25 @@ class Linear(nn.Linear):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             return super().finalize()
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price one row, amortizing bias reduction over ``num_tokens`` rows.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_out,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
         self.depth_index = config.depth_index
@@ -125,6 +145,25 @@ class EnsembleLinear(nn.Module):
             if self.channels_out == -1:
                 self.channels_out = self.channels_in
             return super().finalize()
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price every member, each sharing its bias over ``num_tokens`` rows.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return self.num_ensemble * matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_out,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

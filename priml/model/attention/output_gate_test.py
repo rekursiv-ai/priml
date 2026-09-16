@@ -10,11 +10,14 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -141,6 +144,30 @@ def test_output_gate_bfb(device: str) -> None:
         build_input=lambda: torch.randn(2, 4, 16),
         seed=0,
     )
+
+
+def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
+    config = OutputGate.Config(
+        channels_in=16,
+        inner=SelfAttention.Config(num_heads=2, channels_head=8),
+    )
+    config.inner = SelfAttention.Config(
+        num_heads=2,
+        channels_head=8,
+        attn_kernel=SdpaNaive.Config(),
+    )
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        num_tokens=8,
+        bus={"seq_len": 8},
+    )
+    inner = cost(config.copy_tree().finalize().inner, seq_len=8, num_tokens=8)
+    gate = 16 * 16
+    assert model_cost.primal.flops.matmul == inner.primal.flops.matmul + 2 * gate
+    assert model_cost.adjoint.flops.matmul == inner.adjoint.flops.matmul + 4 * gate
+    assert model_cost.params == inner.params + gate
+    assert model_cost.bytes_state == inner.bytes_state
 
 
 if __name__ == "__main__":

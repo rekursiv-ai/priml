@@ -11,6 +11,7 @@ from torch import nn
 
 import torch
 
+from priml.model.cost import Bytes, Compute, Cost, Flops
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, truncated_normal
 
@@ -55,6 +56,29 @@ class Embedding(nn.Embedding):
         of what READS the table: one feeding an RMS norm has its scale divided
         out and wants unit variance, while one summed into a residual stream
         does not."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price a gather and its scatter-add adjoint.
+
+            Every gradient element is added to a zero-initialized table, so
+            repeated indices do not change the count. Padding rows skip it, so
+            this is an upper bound when padding is present.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            row = self.channels_out
+            return Cost(
+                primal=Compute(bytes=Bytes(selection=row)),
+                adjoint=Compute(flops=Flops(selection=row), bytes=Bytes(selection=row)),
+                params=self.channels_in * row,
+                params_active=row,
+            )
 
     def __init__(self, config: Config) -> None:
         self.shard = config.shard

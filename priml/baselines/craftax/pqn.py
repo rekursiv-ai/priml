@@ -29,6 +29,7 @@ References:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import override
 
 from configgle import Fig
@@ -36,7 +37,15 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.norm import BatchRenorm
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+)
+from priml.model.norm import BatchRenorm, LayerNorm
 
 
 class RecurrentQNetwork(nn.Module):
@@ -60,6 +69,87 @@ class RecurrentQNetwork(nn.Module):
         channels_in: int = 512
         """Width of the encoder and of the recurrent state."""
 
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price one recurrent step of one worker.
+
+            A token is one environment step: the observation and the previous
+            action in, both carried tensors updated, a Q-value per action
+            out. The step runs the whole cell once whatever the history, so
+            ``bytes_state`` is the hidden and cell vectors carried to the
+            next step, and both are differentiable (every step but a
+            window's first), so the state gates' adjoint is counted in full.
+
+            The renormalization and the layer norm price themselves. The
+            one-hot previous action is written, not computed: one element
+            moved per action, no gradient. The cell is a biased
+            ``[width + actions] -> [4 width]`` matmul and a biased
+            ``[width] -> [4 width]`` matmul, then per unit: four gates (an add
+            and a sigmoid or tanh each), the cell update (two products, an
+            add), and the output (a tanh, a product): thirteen operations.
+            The adjoint reuses the saved gates: twenty-two. The episode reset
+            is one product per carried unit each way.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            width, actions = self.channels_in, self.num_actions
+            normalize = cost(
+                _renorm_config(self.observation_size),
+                num_tokens=num_tokens,
+                **kwargs,
+            )
+            encoder = matmul_cost(
+                channels_in=self.observation_size,
+                channels_out=width,
+                bias=True,
+                num_tokens=num_tokens,
+            )
+            encoder_norm = cost(
+                LayerNorm.Config(width, elementwise_affine=True),
+                num_tokens=num_tokens,
+                **kwargs,
+            ) + elementwise_cost(primal=width, adjoint=width)
+            one_hot = Cost(primal=Compute(bytes=Bytes(selection=actions)))
+            reset = elementwise_cost(primal=2 * width, adjoint=2 * width)
+            gates = matmul_cost(
+                channels_in=width + actions,
+                channels_out=4 * width,
+                bias=True,
+                num_tokens=num_tokens,
+            ) + matmul_cost(
+                channels_in=width,
+                channels_out=4 * width,
+                bias=True,
+                num_tokens=num_tokens,
+            )
+            cell = elementwise_cost(
+                primal=13 * width,
+                adjoint=22 * width,
+                channels=2 * width,
+            )
+            head = matmul_cost(
+                channels_in=width,
+                channels_out=actions,
+                bias=True,
+                num_tokens=num_tokens,
+            )
+            return replace(
+                normalize
+                + encoder
+                + encoder_norm
+                + one_hot
+                + reset
+                + gates
+                + cell
+                + head,
+                bytes_state=2 * width,
+            )
+
     def __init__(self, config: Config) -> None:
         """Build the encoder, the recurrent cell, and the value head.
 
@@ -77,9 +167,7 @@ class RecurrentQNetwork(nn.Module):
         self.channels_in = config.channels_in
         self.num_actions = config.num_actions
 
-        normalize = BatchRenorm.Config()
-        normalize.channels_in = config.observation_size
-        self.normalize = normalize.make()
+        self.normalize = _renorm_config(config.observation_size).make()
 
         self.encoder = nn.Linear(config.observation_size, config.channels_in)
         self.encoder_norm = nn.LayerNorm(config.channels_in)
@@ -245,3 +333,10 @@ def epsilon_at(
     horizon = max(1.0, decay_fraction * total_updates)
     progress = min(1.0, update / horizon)
     return start + (finish - start) * progress
+
+
+def _renorm_config(observation_size: int) -> BatchRenorm.Config:
+    """Configure the observation renormalization; one source for build and cost."""
+    normalize = BatchRenorm.Config()
+    normalize.channels_in = observation_size
+    return normalize

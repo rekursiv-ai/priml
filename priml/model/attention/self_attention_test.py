@@ -22,8 +22,10 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
+from priml.model.cost import cost, matmul_cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -514,6 +516,103 @@ def test_projection_stage_width_error_names_the_owner() -> None:
     cfg.num_heads = 2
     with pytest.raises(ValueError, match="for AttentionProjections"):
         cfg.make()
+
+
+def test_self_attention_cost_is_projections_plus_scores() -> None:
+    """Projections follow the matrix rule; scores scale with seq_len, not params."""
+    config = SelfAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        attn_kernel=SdpaNaive.Config(),
+    )
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(1, 32, 16, requires_grad=True),
+        num_tokens=32,
+        bus={"seq_len": 32},
+    )
+    finalized = config.copy_tree().finalize()
+    kernel = cost(finalized.attn_kernel, seq_len=32, num_heads=2, channels_head=8)
+    qkv = 16 * 8 * (2 + 2 + 2)
+    out = 16 * 16
+    assert kernel.primal.flops.matmul == 4 * 2 * 8 * 32  # QK^T and PV, per head-row.
+    assert model_cost.params == qkv + out
+    assert (
+        model_cost.primal.flops.matmul == 2 * (qkv + out) + kernel.primal.flops.matmul
+    )
+    assert model_cost.adjoint.flops.matmul == (
+        4 * (qkv + out) + kernel.adjoint.flops.matmul
+    )
+    assert model_cost.bytes_state == 2 * 2 * 8
+
+
+def test_attention_projections_cost_is_its_projections_and_slots() -> None:
+    """No kernel here: fused QKV plus the output map, then the injected norms."""
+    config = AttentionProjections.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+        share_qk_norm=False,
+        norm_out=RMSNorm.Config(elementwise_affine=True),
+    )
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=32)
+    qkv = matmul_cost(channels_in=16, channels_out=8, bias=False)
+    out = matmul_cost(channels_in=16, channels_out=16, bias=False)
+    norm_qk = cost(finalized.norm_qk, num_tokens=4)
+    norm_out = cost(finalized.norm_out)
+    assert model_cost.primal.flops.matmul == (
+        6 * qkv.primal.flops.matmul + out.primal.flops.matmul
+    )
+    assert (
+        model_cost.params
+        == 6 * qkv.params + out.params + 2 * norm_qk.params + norm_out.params
+    )
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    # Four head rows (2 q + 2 k) through the norm, plus one output row.
+    assert model_cost.primal.flops.elementwise == (
+        4 * norm_qk.primal.flops.elementwise + norm_out.primal.flops.elementwise
+    )
+    assert model_cost.bytes_state == 0
+
+
+def test_gqa_cost_caches_only_kv_heads() -> None:
+    config = SelfAttention.Config(
+        channels_in=16,
+        num_heads=4,
+        channels_head=4,
+        num_heads_kv=2,
+    )
+    cost = config.copy_tree().finalize().cost(seq_len=8)
+    assert cost.bytes_state == 2 * 2 * 4
+    assert cost.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_attention_cost_counts_its_norms_and_rotary() -> None:
+    config = SelfAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+        share_qk_norm=False,
+        rope=RoPE.Config(channels_head=8),
+        attn_kernel=SdpaNaive.Config(),
+    )
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        num_tokens=8,
+        bus={"seq_len": 8},
+    )
+
+
+def test_attention_cost_requires_seq_len() -> None:
+    """A container forwarding a bus without ``seq_len`` fails at the leaf."""
+    config = SelfAttention.Config(channels_in=16, num_heads=2, channels_head=8)
+    with pytest.raises(TypeError, match="seq_len"):
+        cost(config.copy_tree().finalize())
 
 
 if __name__ == "__main__":

@@ -125,9 +125,9 @@ def shrink(config: _CraftaxLoop) -> _CraftaxLoop:
     config.max_steps = 2
     config.max_epochs = 1
     config.num_steps_eval = 2
-    config.checkpointing = None
+    config.checkpointer = None
     config.tracker = None
-    score = config.metrics["craftax"]
+    score = config.metrics_eval["craftax"]
     assert isinstance(score, CraftaxScore.Config)
     score.num_envs = 2
     score.steps = 2
@@ -235,7 +235,7 @@ def test_every_published_experiment_scores_identically(
 ) -> None:
     # Two runs are comparable only when their evaluation geometry matches, so
     # a fork that changed it would be reporting on a different benchmark.
-    score = factory().metrics["craftax"]
+    score = factory().metrics_eval["craftax"]
     assert isinstance(score, CraftaxScore.Config)
     assert (score.num_envs, score.steps, score.seed) == (64, 10_000, 42)
 

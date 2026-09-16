@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Self, override
 
 import math
@@ -14,12 +14,14 @@ import torch
 
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
+from priml.model.attention.rope import rotation_cost
 from priml.model.attention.window import causal_chunk_mask, window_mask
+from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
-    Resettable,
+    HasResetParameters,
     RotaryFactors,
     TensorModule,
 )
@@ -78,6 +80,71 @@ class GatedSelfAttention(nn.Module):
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
                 self.norm_qk.channels_in = self.channels_head
             return super().finalize()
+
+        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price four projections, two norms, rotary, the kernel, and the gate.
+
+            The query projection emits the gate beside the queries, so it is
+            twice the query width. Each norm runs over its own head rows and
+            owns one scale. The gate is a sigmoid and a product per inner
+            channel; its adjoint pulls a gradient back through both factors.
+
+            Args:
+              seq_len: Keys a query reaches.
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            inner = self.num_heads * self.channels_head
+            kv = self.num_heads_kv * self.channels_head
+            total = (
+                matmul_cost(
+                    channels_in=self.channels_in,
+                    channels_out=2 * inner,
+                    bias=self.bias,
+                    num_tokens=num_tokens,
+                )
+                + 2
+                * matmul_cost(
+                    channels_in=self.channels_in,
+                    channels_out=kv,
+                    bias=self.bias,
+                    num_tokens=num_tokens,
+                )
+                + matmul_cost(
+                    channels_in=inner,
+                    channels_out=self.channels_out,
+                    bias=self.bias,
+                    num_tokens=num_tokens,
+                )
+            )
+            for heads in (self.num_heads, self.num_heads_kv):
+                total += cost(
+                    self.norm_qk,
+                    num_tokens=num_tokens * heads,
+                    **kwargs,
+                ).tile(heads)
+            if self.rope is not None:
+                total += cost(self.rope, num_tokens=num_tokens, **kwargs)
+                total += rotation_cost(
+                    self.rope,
+                    channels_head=self.channels_head,
+                    heads=self.num_heads + self.num_heads_kv,
+                )
+            total += cost(
+                self.attn_kernel,
+                seq_len=seq_len,
+                num_heads=self.num_heads,
+                channels_head=self.channels_head,
+                dropout_p=self.dropout,
+                num_tokens=num_tokens,
+                **kwargs,
+            )
+            total += elementwise_cost(primal=5 * inner, adjoint=6 * inner)
+            return replace(total, bytes_state=2 * kv)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -145,7 +212,7 @@ class GatedSelfAttention(nn.Module):
             self.norm_k,
         ):
             module.reset_parameters()
-        if isinstance(self.rope, Resettable):
+        if isinstance(self.rope, HasResetParameters):
             self.rope.reset_parameters()
 
     def alloc_kv_cache(

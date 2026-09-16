@@ -12,6 +12,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
 )
@@ -21,12 +22,14 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
+from priml.model.cost import Cost, cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
     host_agnostic_numerics,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -428,6 +431,103 @@ def test_native_loading_rejects_source_kernel_state_without_partial_copy() -> No
     with pytest.raises(ValueError, match="state keys"):
         model.load_stream(0, source=source)
     assert all(torch.equal(before[name], value) for name, value in state.items())
+
+
+def test_multi_stream_cost_sums_projections_and_scores_per_stream() -> None:
+    """Every stream's projections, and each stream's query row over the joint keys."""
+    config = MultiStreamAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        num_streams=2,
+        rope=[RoPE.Config(channels_head=8), None],
+    )
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=8)
+    kernel = cost(finalized.attn_kernel, seq_len=8, num_heads=2, channels_head=8)
+    stream = (2 + 2 + 2) * 16 * 8 + 16 * 16
+    assert kernel.primal.flops.matmul == 4 * 2 * 8 * 8  # One query row, joint keys.
+    assert model_cost.params == 2 * stream
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    assert model_cost.primal.flops.matmul == 2 * (
+        2 * stream + kernel.primal.flops.matmul
+    )
+    assert model_cost.adjoint.flops.matmul == 2 * (
+        2 * 2 * stream + kernel.adjoint.flops.matmul
+    )
+    # A position holds one token per stream, each caching its own K and V.
+    assert model_cost.bytes_state == 2 * 2 * 2 * 8
+
+
+def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
+    """Every stream token pays its projections once and attends over joint keys.
+
+    Two streams of four tokens each; the naive kernel makes the attention
+    countable. This test caught the kernel being priced once per position
+    rather than once per stream token (measured 15,360 to a claimed 13,824).
+    """
+    config = MultiStreamAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        num_streams=2,
+        attn_kernel=SdpaNaive.Config(),
+    )
+    # ``cost`` prices one stream token's projections times ``num_streams``, so
+    # the token count is one stream's; ``seq_len`` is the joint key count.
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: tuple(
+            torch.randn(1, 4, 16, requires_grad=True) for _ in range(2)
+        ),
+        num_tokens=4,
+        bus={"seq_len": 8},
+        run=_joint_sum,
+    )
+
+
+def test_multi_stream_cost_counts_shared_norms_once() -> None:
+    config = MultiStreamAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        num_streams=2,
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+        norm_out=RMSNorm.Config(elementwise_affine=True),
+        share_qk_norm=False,
+    )
+    cost = config.copy_tree().finalize().cost(seq_len=8)
+    assert cost.params == 2 * ((2 + 2 + 2) * 16 * 8 + 16 * 16) + 2 * 8 + 16
+    assert cost.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_multi_stream_cost_prices_explicit_streams_by_their_own_config() -> None:
+    stream = AttentionProjections.Config(
+        norm_qk=RMSNorm.Config(elementwise_affine=True),
+        share_qk_norm=False,
+        bias=True,
+    )
+    config = MultiStreamAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        streams=[stream.copy_tree(), stream.copy_tree()],
+    )
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=8)
+    owned = sum((cost(s, seq_len=8) for s in finalized.streams), Cost())
+    kernel = cost(finalized.attn_kernel, seq_len=8, num_heads=2, channels_head=8)
+    assert model_cost.params == owned.params
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    assert model_cost.primal.flops.matmul == (
+        owned.primal.flops.matmul + 2 * kernel.primal.flops.matmul
+    )
+
+
+def _joint_sum(module: nn.Module, xs: tuple[Tensor, ...]) -> Tensor:
+    """Attend jointly over every stream and reduce the outputs to a scalar."""
+    assert isinstance(module, MultiStreamAttention)
+    return torch.stack(module(list(xs))).sum()
 
 
 if __name__ == "__main__":

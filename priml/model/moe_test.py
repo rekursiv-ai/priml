@@ -19,13 +19,16 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
-from priml.model.moe import MoE, Router
+from priml.model.cost import cost
+from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
+from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
     first_tensor,
     move_to_device,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -37,13 +40,13 @@ def test_router_rejects_top_k_above_num_experts():
     Regression for MODEL-009.
     """
     with pytest.raises(ValueError, match="top_k"):
-        Router.Config(channels_in=64, num_experts=4, top_k=5).make()
+        SoftmaxRouter.Config(channels_in=64, num_experts=4, top_k=5).make()
 
 
 def test_router_rejects_non_positive_top_k():
     """``top_k`` must be at least 1. Regression for MODEL-009."""
     with pytest.raises(ValueError, match="top_k"):
-        Router.Config(channels_in=64, num_experts=4, top_k=0).make()
+        SoftmaxRouter.Config(channels_in=64, num_experts=4, top_k=0).make()
 
 
 def test_router_rejects_top_k_above_grouped_eligible():
@@ -54,7 +57,7 @@ def test_router_rejects_top_k_above_grouped_eligible():
     eligible; selecting more would draw from masked (-inf) experts.
     """
     with pytest.raises(ValueError, match="eligible"):
-        Router.Config(
+        SigmoidRouter.Config(
             channels_in=64,
             num_experts=8,
             top_k=5,
@@ -64,7 +67,7 @@ def test_router_rejects_top_k_above_grouped_eligible():
 
 
 def test_router():
-    m = Router.Config(channels_in=64, num_experts=4, top_k=2).make()
+    m = SoftmaxRouter.Config(channels_in=64, num_experts=4, top_k=2).make()
     x = torch.randn(2, 8, 64)
     weights, indices, logits = m(x)
     assert weights.shape == (2, 8, 2)
@@ -73,7 +76,12 @@ def test_router():
 
 
 def test_router_jitter():
-    m = Router.Config(channels_in=64, num_experts=4, top_k=2, jitter_noise=0.1).make()
+    m = SoftmaxRouter.Config(
+        channels_in=64,
+        num_experts=4,
+        top_k=2,
+        jitter_noise=0.1,
+    ).make()
     m.train()
     x = torch.randn(2, 8, 64)
     weights, _, _ = m(x)
@@ -81,22 +89,28 @@ def test_router_jitter():
 
 
 def test_router_reset():
-    m = Router.Config(channels_in=64, num_experts=4).make()
+    m = SoftmaxRouter.Config(channels_in=64, num_experts=4).make()
     m.reset_parameters()
 
 
 def test_router_forward_accepts_messages_and_rejects_positional_extras():
-    m = Router.Config(channels_in=64, num_experts=4).make()
+    m = SoftmaxRouter.Config(channels_in=64, num_experts=4).make()
     x = torch.randn(2, 8, 64)
     m(x, key="val")
     with pytest.raises(TypeError):
         cast(Callable[..., object], m)(x, "extra")
 
 
+def test_base_router_is_not_buildable():
+    """The activation is a subclass's decision; the base has none to make."""
+    with pytest.raises(TypeError, match="scoring_func"):
+        Router.Config(channels_in=8, num_experts=4, top_k=2).make()
+
+
 def test_moe():
     m = MoE.Config(
         channels_in=64,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     x = torch.randn(2, 8, 64)
     assert m(x).shape == (2, 8, 64)
@@ -105,7 +119,7 @@ def test_moe():
 def test_moe_aux_loss():
     m = MoE.Config(
         channels_in=64,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     m.train()
     x = torch.randn(2, 8, 64)
@@ -116,7 +130,7 @@ def test_moe_aux_loss():
 def test_moe_reset():
     m = MoE.Config(
         channels_in=64,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     m.reset_parameters()
 
@@ -124,7 +138,7 @@ def test_moe_reset():
 def test_moe_forward_accepts_messages_and_rejects_positional_extras():
     m = MoE.Config(
         channels_in=64,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     x = torch.randn(2, 8, 64)
     assert m(x, key="val").shape == (2, 8, 64)
@@ -142,7 +156,7 @@ def test_sort_dispatch_matches_mask_reference():
     torch.manual_seed(0)
     m = MoE.Config(
         channels_in=32,
-        router=Router.Config(num_experts=6, top_k=3),
+        router=SoftmaxRouter.Config(num_experts=6, top_k=3),
     ).make()
     m.eval()
     x = torch.randn(5, 3, 32)
@@ -170,10 +184,9 @@ def test_sigmoid_routing_shared_experts_and_bias():
     """Sigmoid + shared experts + correction bias (DSV3/Kimi-K2 config)."""
     m = MoE.Config(
         channels_in=32,
-        router=Router.Config(
+        router=SigmoidRouter.Config(
             num_experts=8,
             top_k=2,
-            scoring_func="sigmoid",
             routed_scaling_factor=2.5,
         ),
         num_shared_experts=1,
@@ -181,7 +194,7 @@ def test_sigmoid_routing_shared_experts_and_bias():
     # The slot is typed by what MoE needs of a router; this test built the
     # concrete one, so narrow back to inspect its own fields.
     router = m.router
-    assert isinstance(router, Router)
+    assert isinstance(router, SigmoidRouter)
     assert router.scoring_func == "sigmoid"
     assert router.norm_topk_prob is True  # auto-enabled for sigmoid.
     assert router.e_score_correction_bias is not None
@@ -200,7 +213,7 @@ def test_moe_channels_out_differs_from_in():
     m = MoE.Config(
         channels_in=8,
         channels_out=16,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     assert m(torch.randn(2, 3, 8)).shape == (2, 3, 16)
 
@@ -210,7 +223,7 @@ def test_moe_channels_out_with_shared_experts():
     m = MoE.Config(
         channels_in=8,
         channels_out=16,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
         num_shared_experts=1,
     ).make()
     assert m(torch.randn(2, 3, 8)).shape == (2, 3, 16)
@@ -223,11 +236,10 @@ def test_router_sigmoid_respects_explicit_norm_topk_prob():
     set ``norm_topk_prob=True`` and ``use_correction_bias=True`` for
     sigmoid routing, silently overriding values the user supplied.
     """
-    r = Router.Config(
+    r = SigmoidRouter.Config(
         channels_in=8,
         num_experts=4,
         top_k=2,
-        scoring_func="sigmoid",
         norm_topk_prob=False,
         use_correction_bias=False,
     ).make()
@@ -236,15 +248,17 @@ def test_router_sigmoid_respects_explicit_norm_topk_prob():
 
 
 def test_router_sigmoid_defaults_enable_norm_and_bias():
-    """Sigmoid routing still defaults ``norm_topk_prob``/bias on when unset."""
-    r = Router.Config(
-        channels_in=8,
-        num_experts=4,
-        top_k=2,
-        scoring_func="sigmoid",
-    ).make()
+    """Sigmoid routing defaults ``norm_topk_prob`` and the bias on."""
+    r = SigmoidRouter.Config(channels_in=8, num_experts=4, top_k=2).make()
     assert r.norm_topk_prob is True
     assert r.e_score_correction_bias is not None
+
+
+def test_router_softmax_defaults_leave_weights_unnormalized():
+    """Softmax already sums to 1, so its default skips the renormalization."""
+    r = SoftmaxRouter.Config(channels_in=8, num_experts=4, top_k=2).make()
+    assert r.norm_topk_prob is False
+    assert "e_score_correction_bias" not in dict(r.named_buffers())
 
 
 def test_moe_aux_loss_is_registered_buffer():
@@ -256,7 +270,7 @@ def test_moe_aux_loss_is_registered_buffer():
     """
     m = MoE.Config(
         channels_in=8,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     assert "_aux_loss" in dict(m.named_buffers())
 
@@ -271,7 +285,7 @@ def test_moe_reset_parameters_reinitializes_aux_loss():
     """
     m = MoE.Config(
         channels_in=8,
-        router=Router.Config(num_experts=4, top_k=2),
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
     ).make()
     with torch.no_grad():
         m._aux_loss.fill_(float("nan"))
@@ -279,34 +293,18 @@ def test_moe_reset_parameters_reinitializes_aux_loss():
     assert torch.isfinite(m._aux_loss).all()
 
 
-def test_router_rejects_unknown_scoring_func():
-    """An invalid ``scoring_func`` must raise, not silently fall back.
-
-    Regression for ROUTER-SCORING (Issue#336): a typo'd ``scoring_func``
-    previously hit the ``softmax`` else-branch with no error.
-    """
-    cfg = Router.Config(channels_in=8, num_experts=4, top_k=2)
-    # The literal is what the guard defends against, so the checker rejecting
-    # it is correct: a caller reaching this branch got here from JSON, a CLI
-    # override, or an untyped dict, none of which the annotation constrains.
-    cfg.scoring_func = "softmaxx"  # ty: ignore[invalid-assignment] -- The test injects a purpose-built model double.  # pyright: ignore[reportAttributeAccessIssue] -- Negative test: the invalid literal is the input under test.
-    with pytest.raises(ValueError, match="scoring_func"):
-        cfg.make()
-
-
 def test_group_topk_masks_inactive_groups():
     """8 experts / 2 groups / topk_group=1 keeps only one group alive."""
     m = MoE.Config(
         channels_in=32,
-        router=Router.Config(
+        router=SigmoidRouter.Config(
             num_experts=8,
             top_k=1,
-            scoring_func="sigmoid",
             n_group=2,
             topk_group=1,
         ),
     ).make()
-    assert isinstance(m.router, Router)
+    assert isinstance(m.router, SigmoidRouter)
     bias = m.router.e_score_correction_bias
     assert bias is not None
     with torch.no_grad():
@@ -318,7 +316,7 @@ def test_group_topk_masks_inactive_groups():
 
 
 def test_router_config_pprint() -> None:
-    config = Router.Config(channels_in=4, num_experts=2, top_k=1)
+    config = SoftmaxRouter.Config(channels_in=4, num_experts=2, top_k=1)
     assert_pprint_golden(
         test_file=__file__,
         name="router",
@@ -326,10 +324,19 @@ def test_router_config_pprint() -> None:
     )
 
 
+def test_sigmoid_router_config_pprint() -> None:
+    config = SigmoidRouter.Config(channels_in=4, num_experts=2, top_k=1)
+    assert_pprint_golden(
+        test_file=__file__,
+        name="sigmoid_router",
+        config=config,
+    )
+
+
 def test_moe_config_pprint() -> None:
     config = MoE.Config(
         channels_in=4,
-        router=Router.Config(num_experts=2, top_k=1),
+        router=SoftmaxRouter.Config(num_experts=2, top_k=1),
     )
     assert_pprint_golden(
         test_file=__file__,
@@ -344,7 +351,9 @@ def test_router_bfb(device: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name="router",
         build_module=lambda: (
-            Router.Config(channels_in=4, num_experts=2, top_k=1).make().to(device)
+            SoftmaxRouter.Config(channels_in=4, num_experts=2, top_k=1)
+            .make()
+            .to(device)
         ),
         build_input=lambda: move_to_device(torch.randn(4, 4), device),
         seed=0,
@@ -366,7 +375,7 @@ def test_moe_bfb(device: str) -> None:
         build_module=lambda: (
             MoE.Config(
                 channels_in=4,
-                router=Router.Config(num_experts=2, top_k=1),
+                router=SoftmaxRouter.Config(num_experts=2, top_k=1),
             )
             .make()
             .to(device)
@@ -374,6 +383,85 @@ def test_moe_bfb(device: str) -> None:
         build_input=lambda: move_to_device(torch.randn(2, 2, 4), device),
         seed=0,
         run=_first_tensor,
+    )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        SoftmaxRouter.Config(channels_in=8, num_experts=4, top_k=2),
+        SigmoidRouter.Config(channels_in=8, num_experts=4, top_k=2),
+    ],
+    ids=["softmax", "sigmoid"],
+)
+def test_router_cost_is_the_gate_matmul(config: Router.Config) -> None:
+    """The sigmoid correction bias is a buffer, so neither path counts it.
+
+    The top-k pick sorts the expert row and gathers ``top_k`` weights, which
+    the adjoint scatter-adds back.
+    """
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, 8, requires_grad=True),
+        num_tokens=3,
+        run=_first_tensor,
+    )
+    assert model_cost.primal.flops.matmul == 2 * 8 * 4
+    assert model_cost.adjoint.flops.matmul == 4 * 8 * 4
+    assert model_cost.params == 8 * 4
+    assert model_cost.primal.bytes.sort == 4
+    assert model_cost.primal.bytes.selection == 2
+    assert model_cost.adjoint.flops.selection == 2
+
+
+def test_softmax_router_counts_the_softmax_reductions() -> None:
+    config = SoftmaxRouter.Config(channels_in=8, num_experts=4, top_k=2)
+    model_cost = cost(config.copy_tree().finalize())
+    # Max and sum over four experts in the primal; ``sum(g * p)`` in the adjoint.
+    assert model_cost.primal.flops.reduction == 2 * 3
+    assert model_cost.adjoint.flops.reduction == 3
+    assert model_cost.primal.flops.elementwise == 3 * 4
+
+
+def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
+    """Torch's count agrees: every token runs exactly ``top_k`` experts.
+
+    Sort-and-dispatch issues one matmul per active expert with as many rows
+    as it received, so the total is ``top_k * num_tokens`` expert rows however
+    the router assigns them.
+    """
+    expert = SwiGLU.Config(channels_hidden=16, round_to=1)
+    config = MoE.Config(
+        channels_in=8,
+        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
+        expert=expert,
+        num_shared_experts=1,
+        shared_expert=expert.copy_tree(),
+    )
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 3, 8, requires_grad=True),
+        num_tokens=6,
+    )
+    finalized = config.copy_tree().finalize()
+    router = cost(finalized.router, num_tokens=6)
+    one_expert = cost(finalized.expert, num_tokens=6)
+    assert router.params == 8 * 4
+    assert one_expert.params == 8 * 32 + 16 * 8
+    assert model_cost.params == router.params + (4 + 1) * one_expert.params
+    assert model_cost.params_active == router.params + (2 + 1) * one_expert.params
+    assert model_cost.primal.flops.matmul == (
+        router.primal.flops.matmul + (2 + 1) * one_expert.primal.flops.matmul
+    )
+    assert model_cost.adjoint.flops.matmul == (
+        router.adjoint.flops.matmul + (2 + 1) * one_expert.adjoint.flops.matmul
+    )
+    # Dispatch: gather each routed token's row in and scatter its output back.
+    assert model_cost.primal.bytes.sort == router.primal.bytes.sort + 2
+    assert model_cost.primal.flops.selection == (2 + 1) * 8
+    assert (
+        model_cost.adjoint.flops.selection
+        == (2 + 1) * 8 + router.adjoint.flops.selection
     )
 
 

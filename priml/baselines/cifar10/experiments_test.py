@@ -93,7 +93,7 @@ def shrink(config: Cifar10TrainLoop, *, directory: Path) -> Cifar10TrainLoop:
     config.max_steps = 2
     config.max_epochs = 1
     config.num_steps_eval = 2
-    config.checkpointing = None
+    config.checkpointer = None
     config.tracker = None
     return config
 
@@ -218,7 +218,7 @@ def test_exp000_horizon_matches_the_step_budget() -> None:
 
 def test_exp000_reports_top1_accuracy() -> None:
     cfg = exp000()
-    accuracy = cfg.metrics["accuracy"]
+    accuracy = cfg.metrics_eval["accuracy"]
     assert isinstance(accuracy, TopK.Config)
     assert accuracy.k_values == [1]
 

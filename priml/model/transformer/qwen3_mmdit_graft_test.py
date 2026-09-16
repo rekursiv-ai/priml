@@ -9,16 +9,22 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.mmdit import MMDiTStream
-from priml.model.transformer.mmdit_graft_test import _assert_transferred
+from priml.model.transformer.mmdit_graft_test import (
+    _assert_transferred,
+    run_graft,
+)
 from priml.model.transformer.qwen3 import Qwen3
 from priml.model.transformer.qwen3_mmdit_graft import Qwen3MMDiTGraft
 from priml.model.transformer.qwen3_test import (
+    _attn,
     _canonical_config,
     _hf_config,
     _synth_hf_state_dict,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def test_config_defaults_and_make() -> None:
@@ -68,6 +74,29 @@ def test_load_rejects_other_qwen_families(tmp_path: Path) -> None:
     torch.save({}, tmp_path / "pytorch_model.bin")
     with pytest.raises(ValueError, match="model_type"):
         Qwen3MMDiTGraft.load(tmp_path)
+
+
+def test_cost_is_inherited_and_matches_torch() -> None:
+    """The inherited graft cost prices this backbone's products exactly.
+
+    One position per stream over three positions, so the joint key length is
+    six; the CPU SDPA op is not counted by torch, so the naive kernel stands
+    in (``mmdit_graft_test``).
+    """
+    config = Qwen3MMDiTGraft.Config()
+    config.backbone = _canonical_config()
+    _attn(config.backbone).attn_kernel = SdpaNaive.Config()
+    config.streams[0].ffn = SwiGLU.Config(channels_hidden=24)
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randint(0, 32, (1, 3)),
+            torch.randn(1, 3, 16, requires_grad=True),
+        ),
+        num_tokens=3,
+        bus={"seq_len": 6},
+        run=run_graft,
+    )
 
 
 if __name__ == "__main__":

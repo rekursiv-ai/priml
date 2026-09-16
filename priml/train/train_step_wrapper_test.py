@@ -218,7 +218,7 @@ class _ScheduledKwargs(TypedDict, total=False):
     train_budget_steps: float
     train_budget_sec: float
     train_budget_epochs: float
-    learning_rate_scheduler: object
+    lr_schedule: object
 
 
 def _scheduled(**config_kwargs: Unpack[_ScheduledKwargs]) -> TrainStep:
@@ -232,9 +232,9 @@ def _scheduled(**config_kwargs: Unpack[_ScheduledKwargs]) -> TrainStep:
         train_budget_steps=config_kwargs.get("train_budget_steps", float("inf")),
         train_budget_sec=config_kwargs.get("train_budget_sec", float("inf")),
         train_budget_epochs=config_kwargs.get("train_budget_epochs", float("inf")),
-        learning_rate_scheduler=cast(
+        lr_schedule=cast(
             "Makeable[Schedule[float]]",
-            config_kwargs.get("learning_rate_scheduler", PartialConfig(constant)),
+            config_kwargs.get("lr_schedule", PartialConfig(constant)),
         ),
     ).make()
 
@@ -343,7 +343,7 @@ def test_the_schedule_scales_the_rate_the_recipe_was_tuned_at() -> None:
     """
     learnable = _scheduled(
         train_budget_steps=10,
-        learning_rate_scheduler=PartialConfig(linear),
+        lr_schedule=PartialConfig(linear),
     )
     learnable.timer_step.global_count = 5
     learnable.apply_learning_rate()
@@ -360,7 +360,7 @@ def test_the_rate_is_scheduled_before_the_update_it_applies_to() -> None:
     """
     learnable = _scheduled(
         train_budget_steps=10,
-        learning_rate_scheduler=PartialConfig(warmup, fraction=0.5),
+        lr_schedule=PartialConfig(warmup, fraction=0.5),
     )
     model = _tiny_model(learnable)
     before = model.fc.weight.detach().clone()

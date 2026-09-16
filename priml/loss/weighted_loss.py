@@ -12,6 +12,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.loss.custom_types import LossOutput
+from priml.model.cost import Cost, cost, elementwise_cost
 
 
 if TYPE_CHECKING:
@@ -29,6 +30,29 @@ class WeightedSum(nn.Module):
 
         weights: Sequence[float] = field(default_factory=list[float])
         """Weight for each loss function."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum every child's price plus one weight multiply and one add each.
+
+            A token is whatever the children call one: the bus is forwarded
+            unchanged, so ``num_tokens`` means the same thing at every level. A
+            child may be an ``nn.Module`` config or a plain callable's; either
+            must price itself or :func:`cost` raises. The stack-and-sum costs
+            one add per child per token, the weight one multiply; the adjoint
+            is the same two ops.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this combiner.
+
+            """
+            children = sum((cost(fn, **kwargs) for fn in self.fns), Cost())
+            return children + elementwise_cost(
+                primal=2 * len(self.fns),
+                adjoint=2 * len(self.fns),
+            )
 
     def __init__(self, config: Config):
         super().__init__()

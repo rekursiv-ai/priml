@@ -148,7 +148,7 @@ from priml.baselines.nanochat.scripts.prepare_tokenizer import (
 )
 from priml.lib.custom_json import DictCodec, IntCodec
 from priml.paths import validated_output_path
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.tracker import FileTracker, TrackerList
 from priml.train.train_loop import TrainLoop
 
@@ -2006,9 +2006,9 @@ def launch_training(
     """
     config = config.copy_tree()
     if save_checkpoint:
-        config.checkpointing = Checkpointer.Config()
-        config.checkpointing.save_every = sys.maxsize
-        config.checkpointing.resume = False
+        config.checkpointer = Checkpointer.Config()
+        config.checkpointer.save_every = sys.maxsize
+        config.checkpointer.resume = False
     directory = validated_output_path(config.working_dir)
     directory.mkdir(parents=True, exist_ok=False)
     recipe = directory / "prepared_experiment.py"

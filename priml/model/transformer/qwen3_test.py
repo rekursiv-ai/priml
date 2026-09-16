@@ -34,8 +34,9 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer import qwen3
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
-from priml.model.transformer.transformer import Transformer
+from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 if TYPE_CHECKING:
@@ -97,6 +98,39 @@ def test_qwen3_bfb() -> None:
     )
 
 
+@pytest.mark.parametrize("tie_embeddings", [False, True])
+def test_qwen3_cost_matches_torch(tie_embeddings: bool) -> None:
+    """Every projection, the GQA products, and the head are torch's whole count.
+
+    The fused CPU SDPA op is not in ``FlopCounterMode``'s registry, so the
+    naive kernel makes the same two products countable. A tied head borrows
+    the table, so it adds a matmul and no parameters.
+    """
+    config = _canonical_config()
+    config.channels_out = 32
+    if tie_embeddings:
+        config = Qwen3.Config.from_hf(
+            _hf_config(
+                vocab_size=32,
+                hidden_size=16,
+                intermediate_size=32,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                num_key_value_heads=1,
+                head_dim=8,
+                tie_word_embeddings=True,
+            ),
+        )
+    _attn(config).attn_kernel = SdpaNaive.Config()
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 32, (2, 5)),
+        num_tokens=10,
+        bus={"seq_len": 5},
+    )
+    assert analytical.bytes_state == 2 * 1 * 8  # One KV head cached per layer.
+
+
 def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     """Build a random-weight state_dict in HF Qwen3 layout."""
     h = cfg.channels_in
@@ -109,7 +143,7 @@ def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
         "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
     }
-    if not qwen3._tied(cfg):
+    if not head_is_tied(cfg):
         sd["lm_head.weight"] = torch.randn(cfg.channels_out, h)
     for i in range(cfg.num_layers):
         p = f"model.layers.{i}"
@@ -347,6 +381,7 @@ class TestLoad:
             "Qwen/tiny-qwen",
             "AutoModelForCausalLM",
             dtype=torch.float32,
+            trust_remote_code=False,
         )
 
 

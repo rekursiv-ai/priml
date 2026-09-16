@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import override
 
-from torch import Tensor
+from torch import Tensor, nn
 
+import pytest
 import torch
 
 from priml.loss.diffusion import DiffusionLoss
 from priml.math.diffusion.schedule import (
     log_sigma_from_log_snr_per_variance_preserving,
     log_snr_from_log_time_per_logtan,
+    log_time_from_log_snr_per_logit,
 )
-from priml.math.diffusion.target import target_eps, target_v, target_x
+from priml.math.diffusion.target import (
+    TargetFn,
+    TargetResult,
+    target_eps,
+    target_rectified_flow,
+    target_v,
+    target_v_eps,
+    target_v_x,
+    target_x,
+)
+from priml.model.cost import Compute, Cost, Flops, cost, elementwise_cost
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def test_diffusion_loss_default_config() -> None:
@@ -344,6 +358,106 @@ def test_diffusion_loss_min_snr_gamma_gradient_flow() -> None:
     result = loss_fn(denoiser=model.forward, x0=torch.randn(4, 3, 8, 8))
     result["loss"].mean().backward()
     assert model.w.grad is not None
+
+
+def test_diffusion_loss_cost_default_prices_rectified_flow_per_element() -> None:
+    """Per element: noise mix 3, target 7, squared error 2, one mean; scalars spread 1/n."""
+    scale = torch.ones((), requires_grad=True)
+
+    def denoiser(x: Tensor, sigma: Tensor) -> Tensor:
+        del sigma
+        return x * scale
+
+    config = DiffusionLoss.Config()
+    measured = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 3, 4, 4),
+        num_tokens=48,
+        run=lambda module, x0: _loss(module, denoiser=denoiser, x0=x0),
+    )
+    per_sample = 1 + 8 + 8 + 4 + 8
+    expected = elementwise_cost(
+        primal=3 + 7 + 2 + per_sample / 48,
+        adjoint=2 + 1,
+    ) + Cost(primal=Compute(flops=Flops(reduction=(48 - 1) / 48)))
+    assert measured == expected
+    assert measured.params == 0
+    assert measured.training.flops.matmul == 0
+
+
+@pytest.mark.parametrize(
+    ("target_fn", "primal", "adjoint"),
+    [
+        (target_x, 3, 0),
+        (target_eps, 3, 0),
+        (target_rectified_flow, 7, 0),
+        (target_v, 9, 0),
+        (target_v_x, 6, 1),
+        (target_v_eps, 6, 1),
+    ],
+)
+def test_diffusion_loss_cost_prices_target_fn_by_identity(
+    target_fn: TargetFn,
+    primal: int,
+    adjoint: int,
+) -> None:
+    """Passthrough targets add no adjoint; ``v_x``/``v_eps`` scale the gradient once."""
+    config = DiffusionLoss.Config(target_fn=target_fn)
+    baseline = cost(DiffusionLoss.Config(target_fn=target_x), num_tokens=48)
+    priced = cost(config, num_tokens=48)
+    assert priced.primal.flops.elementwise == pytest.approx(
+        baseline.primal.flops.elementwise + primal - 3,
+    )
+    assert priced.adjoint.flops.elementwise == pytest.approx(
+        baseline.adjoint.flops.elementwise + adjoint,
+    )
+
+
+def test_diffusion_loss_cost_spreads_snr_weight_and_time_transform() -> None:
+    """Min-SNR weighting and a time transform are per-sample scalars, spread 1/n."""
+    plain = cost(DiffusionLoss.Config(), num_tokens=48)
+    weighted = cost(DiffusionLoss.Config(snr_gamma=5.0), num_tokens=48)
+    assert weighted.primal.flops.elementwise == pytest.approx(
+        plain.primal.flops.elementwise + 5 / 48,
+    )
+    assert weighted.adjoint.flops.elementwise == pytest.approx(
+        plain.adjoint.flops.elementwise + 1 / 48,
+    )
+    transformed = cost(
+        DiffusionLoss.Config(time_transform=log_time_from_log_snr_per_logit),
+        num_tokens=48,
+    )
+    assert transformed.primal.flops.elementwise == pytest.approx(
+        plain.primal.flops.elementwise + 8 / 48,
+    )
+
+
+def test_diffusion_loss_cost_rejects_unpriced_target_fn() -> None:
+    def target_custom(
+        model: Tensor,
+        x_noisy: Tensor,
+        log_snr: Tensor,
+        log_sigma: Tensor,
+        *,
+        x_original: Tensor | None = None,
+        eps_original: Tensor | None = None,
+    ) -> TargetResult:
+        del x_noisy, log_snr, log_sigma, eps_original
+        return TargetResult(x_original, model, model, model)
+
+    with pytest.raises(TypeError, match="target_custom"):
+        cost(DiffusionLoss.Config(target_fn=target_custom), num_tokens=48)
+
+
+def _loss(
+    module: nn.Module,
+    *,
+    denoiser: Callable[[Tensor, Tensor], Tensor],
+    x0: Tensor,
+) -> Tensor:
+    """Run the diffusion loss and return its ``loss`` tensor."""
+    assert isinstance(module, DiffusionLoss)
+    return module(denoiser=denoiser, x0=x0)["loss"]
 
 
 if __name__ == "__main__":

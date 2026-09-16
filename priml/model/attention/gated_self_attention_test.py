@@ -12,8 +12,10 @@ import torch
 from priml.model.attention.gated_self_attention import GatedSelfAttention
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import RoPE, RoPEMixed
+from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
+from priml.model.cost import cost
 from priml.model.custom_types import AttentionKernel
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def test_gated_attention_cache_continuation() -> None:
@@ -420,6 +422,80 @@ def test_gated_attention_reaches_causal_fast_path() -> None:
 
     assert spy.received["attn_mask"] is None
     assert spy.received["is_causal"] is True
+
+
+def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> None:
+    """Four projections and the naive kernel are torch's whole matmul count.
+
+    The query projection is twice the query width because it emits the gate
+    beside the queries; the gate itself is scalar work, so the elementwise
+    silo decomposes into the two norms (each over its own head rows), the
+    rotary factors and rotation, the kernel's softmax, and a sigmoid plus a
+    product per inner channel.
+    """
+    config = GatedSelfAttention.Config()
+    config.channels_in = 16
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.channels_head = 8
+    config.rope = RoPE.Config(4)
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        num_tokens=8,
+        bus={"seq_len": 8},
+    )
+    finalized = config.copy_tree().finalize()
+    kernel = cost(finalized.attn_kernel, seq_len=8, num_heads=2, channels_head=8)
+    inner = 2 * 8
+    projections = 16 * 2 * inner + 2 * 16 * 8 + inner * 16
+    norms = 2 * 8  # norm_q and norm_k each own one head-width scale.
+    assert model_cost.params == projections + norms
+    assert (
+        model_cost.primal.flops.matmul == 2 * projections + kernel.primal.flops.matmul
+    )
+    assert model_cost.adjoint.flops.matmul == (
+        4 * projections + kernel.adjoint.flops.matmul
+    )
+    assert model_cost.bytes_state == 2 * 1 * 8
+    assert finalized.rope is not None
+    scalar = (
+        kernel
+        + cost(finalized.norm_qk, num_tokens=8 * 2).tile(2)
+        + cost(finalized.norm_qk, num_tokens=8 * 1).tile(1)
+        + cost(finalized.rope, num_tokens=8)
+        + rotation_cost(finalized.rope, channels_head=8, heads=3)
+    )
+    assert model_cost.primal.flops.elementwise == (
+        scalar.primal.flops.elementwise + 5 * inner
+    )
+    assert model_cost.adjoint.flops.elementwise == (
+        scalar.adjoint.flops.elementwise + 6 * inner
+    )
+
+
+def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
+    """Attention dropout is a mask and a rescale over each head's key row, both ways."""
+    config = GatedSelfAttention.Config()
+    config.channels_in = 16
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.channels_head = 8
+    dry = config.copy_tree().finalize().cost(seq_len=32)
+    config.dropout = 0.1
+    wet = config.copy_tree().finalize().cost(seq_len=32)
+    assert wet.training.flops.elementwise - dry.training.flops.elementwise == 2 * 4 * 32
+    assert wet.training.flops.matmul == dry.training.flops.matmul
+
+
+def test_gated_attention_cost_requires_seq_len() -> None:
+    config = GatedSelfAttention.Config()
+    config.channels_in = 16
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.channels_head = 8
+    with pytest.raises(TypeError, match="seq_len"):
+        cost(config.copy_tree().finalize())
 
 
 if __name__ == "__main__":

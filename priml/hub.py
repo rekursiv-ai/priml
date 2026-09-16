@@ -16,6 +16,7 @@ from torch import Tensor
 
 import torch
 
+from priml.lib.custom_json import DictCodec, loads
 from priml.lib.userdirs import cache_dir
 
 
@@ -230,3 +231,50 @@ def load_local_state_dict(path: Path) -> dict[str, Tensor]:
     raise FileNotFoundError(
         f"No safetensors or pytorch_model weights found in {path}.",
     )
+
+
+def load_hf_checkpoint(
+    path_or_repo: Path | str,
+    *,
+    dtype: torch.dtype | None,
+    trust_remote_code: bool = False,
+) -> tuple[dict[str, object], dict[str, Tensor]]:
+    """Read an HF causal-LM checkpoint's config and tensors, locally or remotely.
+
+    A local directory holding ``config.json`` is read straight from disk
+    (``config.json`` plus the weight shards beside it); anything else is
+    treated as a Hub repo id and materialized through
+    :func:`load_transformers_model`.
+
+    Args:
+      path_or_repo: Local checkpoint directory, or a HuggingFace repo id.
+      dtype: Dtype to materialize a Hub download in; ``None`` keeps the
+          checkpoint's own. Ignored for a local directory, whose tensors
+          arrive as stored.
+      trust_remote_code: Forwarded to ``from_pretrained`` for a Hub repo
+          whose architecture ships as custom modeling code.
+
+    Returns:
+      hf_config: The checkpoint's ``config.json`` as a dict.
+      hf_sd: Every tensor of the checkpoint, on CPU, keyed by HF name.
+
+    Raises:
+      TypeError: A local ``config.json`` is not a JSON object.
+
+    """
+    path = Path(path_or_repo)
+    if path.is_dir() and (path / "config.json").exists():
+        hf_config = DictCodec.coerce(
+            loads((path / "config.json").read_text()),
+            default=None,
+        )
+        return hf_config, load_local_state_dict(path)
+    hf_model = load_transformers_model(
+        str(path_or_repo),
+        "AutoModelForCausalLM",
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+    )
+    return DictCodec.coerce(hf_model.config.to_dict(), default=None), {
+        key: value.detach().cpu() for key, value in hf_model.state_dict().items()
+    }

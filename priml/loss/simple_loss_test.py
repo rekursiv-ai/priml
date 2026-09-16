@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from torch import Tensor, nn
 from torch.nn import functional
 
 import pytest
 import torch
 
+from priml.loss.custom_types import SimpleLossFn
 from priml.loss.simple_loss import SimpleLoss
+from priml.loss.weighted_loss import WeightedSum
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost, elementwise_cost
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def test_simple_loss_basic():
@@ -101,6 +106,90 @@ def test_simple_loss_reduction_mean():
 
     assert "loss" in result
     assert result["loss"].ndim == 0  # Scalar.
+
+
+def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
+    """Default BCE: eight primal and five adjoint ops per logit, no reduction.
+
+    The harness needs an ``nn.Module``, so the loss rides inside a one-term
+    ``WeightedSum``; its two weighting ops are subtracted back out.
+    """
+    config = SimpleLoss.Config()
+    label = torch.rand(4, 3)
+    measured = assert_cost_matches_torch(
+        WeightedSum.Config(fns=[config], weights=[1.0]),
+        build_input=lambda: torch.randn(4, 3, requires_grad=True),
+        num_tokens=12,
+        run=lambda module, prediction: _loss(module, prediction, label=label),
+    )
+    expected = elementwise_cost(primal=8, adjoint=5)
+    assert cost(config, num_tokens=12) == expected
+    assert measured == expected + elementwise_cost(primal=2, adjoint=2)
+    assert measured.params == 0
+    assert measured.training.flops.matmul == 0
+
+
+def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
+    """Cross-entropy prices a log-softmax over ``channels_out`` and one gather per row."""
+    config = SimpleLoss.Config(
+        loss_fn=functional.cross_entropy,
+        kwargs={"reduction": "mean"},
+    )
+    label = torch.randint(0, 5, (4,))
+    measured = assert_cost_matches_torch(
+        WeightedSum.Config(fns=[config], weights=[1.0]),
+        build_input=lambda: torch.randn(4, 5, requires_grad=True),
+        num_tokens=4,
+        bus={"channels_out": 5},
+        run=lambda module, logits: _loss(module, logits, label=label),
+    )
+    expected = Cost(
+        primal=Compute(
+            flops=Flops(
+                elementwise=3 * 5 + 2,
+                reduction=2 * (5 - 1) + (4 - 1) / 4,
+            ),
+            bytes=Bytes(selection=1),
+        ),
+        adjoint=Compute(flops=Flops(elementwise=2 * 5 + 1, selection=1)),
+    )
+    assert cost(config, num_tokens=4, channels_out=5) == expected
+    assert measured == expected + elementwise_cost(primal=2, adjoint=2)
+    assert measured.training.flops.matmul == 0
+
+
+def test_simple_loss_cost_cross_entropy_needs_channels_out() -> None:
+    config = SimpleLoss.Config(loss_fn=functional.cross_entropy)
+    with pytest.raises(ValueError, match="channels_out"):
+        cost(config, num_tokens=4)
+
+
+@pytest.mark.parametrize("loss_fn", [functional.mse_loss, functional.l1_loss])
+def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -> None:
+    """MSE and L1: subtract then square/abs; the adjoint scales the saved difference."""
+    none = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "none"})
+    assert cost(none, num_tokens=6) == elementwise_cost(primal=2, adjoint=2)
+    # ``mean`` adds one reduction over the tokens and a ``1 / n`` scale backward.
+    mean = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "mean"})
+    assert cost(mean, num_tokens=6) == elementwise_cost(primal=2, adjoint=3) + Cost(
+        primal=Compute(flops=Flops(reduction=(6 - 1) / 6)),
+    )
+    total = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "sum"})
+    assert cost(total, num_tokens=6) == elementwise_cost(primal=2, adjoint=2) + Cost(
+        primal=Compute(flops=Flops(reduction=(6 - 1) / 6)),
+    )
+
+
+def test_simple_loss_cost_rejects_unpriced_loss_fn() -> None:
+    config = SimpleLoss.Config(loss_fn=functional.smooth_l1_loss)
+    with pytest.raises(TypeError, match="smooth_l1_loss"):
+        cost(config, num_tokens=4)
+
+
+def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:
+    """Run the weighted-sum wrapper and return its ``loss`` tensor."""
+    assert isinstance(module, WeightedSum)
+    return module(prediction, **batch)["loss"]
 
 
 if __name__ == "__main__":

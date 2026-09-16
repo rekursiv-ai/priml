@@ -26,7 +26,7 @@ is simply unused without one.
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import field, replace
 from typing import NamedTuple, Protocol, Self, cast, override, runtime_checkable
 
 import copy
@@ -39,6 +39,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.model.cost import Compute, Cost, cost, elementwise_cost
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
@@ -194,6 +195,21 @@ class DeepRecurrence(nn.Module):
         fast_cycles: int = 9
         """Inner iterations refining the fast latent per slow cycle."""
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Price nothing: the schedule owns no weights and does no arithmetic.
+
+            The core it repeats is the model's, which prices every cycle.
+
+            Args:
+              **kwargs: The open message bus; nothing here reads it.
+
+            Returns:
+              cost: Zero.
+
+            """
+            del kwargs
+            return Cost()
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         if config.slow_cycles < 1 or config.fast_cycles < 1:
@@ -348,6 +364,58 @@ class SudokuNet(nn.Module):
                 self.num_prefix_tokens = _count_prefix_tokens(self.prefix)
             return super().finalize()
 
+        def cost(self, *, seq_len: int = -1, **kwargs: object) -> Cost:
+            """Price one forward per grid cell: embed, every core pass, both heads.
+
+            The latent sequence is ``total_seq_len`` rows per puzzle -- prefix
+            plus grid -- while a token is one grid CELL, so work over the
+            sequence (the block stack, the adds, the token head) is spread by
+            ``total_seq_len / grid_len`` and work done once per puzzle (the
+            prefix, the halt head) by ``1 / grid_len``.
+
+            One core pass runs the stack ``fast_cycles + 1`` times over
+            parameters owned once. Every slow cycle runs the core forward and
+            only the last runs backward, so the primal is repeated
+            ``slow_cycles`` times and the adjoint once.
+
+            Args:
+              seq_len: Read and discarded. The bus carries the grid width of
+                the batch, but the reach of every block is this config's own
+                ``total_seq_len``, which a batch cannot change.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-cell cost of this module.
+
+            """
+            del seq_len
+            grid_len = self.grid_len
+            rows = self.total_seq_len
+            slow_cycles, fast_cycles = _cycles(self.recurrence)
+            width = self.channels_in
+            stack = self.num_layers * cost(self.block, seq_len=rows, **kwargs)
+            # ``z_slow + input_emb``, one add per fast cycle, and the slow
+            # update: each an add forward and an accumulation back.
+            adds = elementwise_cost(
+                primal=(fast_cycles + 2) * width,
+                adjoint=(fast_cycles + 2) * width,
+            )
+            per_row = stack.tile(fast_cycles + 1) + adds + cost(_head(self), **kwargs)
+            core = _spread(per_row, rows / grid_len) + _spread(
+                cost(_halt_head(self), **kwargs),
+                1 / grid_len,
+            )
+            total = (
+                cost(self.embedding, **kwargs)
+                + core
+                + (slow_cycles - 1) * Cost(primal=core.primal)
+            )
+            if self.prefix is not None:
+                total += _spread(cost(self.prefix, **kwargs), 1 / grid_len)
+            if self.recurrence is not None:
+                total += cost(self.recurrence, **kwargs)
+            return total
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
@@ -358,23 +426,8 @@ class SudokuNet(nn.Module):
         embedding = config.embedding.make()
         self.embedding = embedding
 
-        self.head = Linear.Config(
-            channels_in=c,
-            channels_out=config.vocab_size,
-            bias=False,
-            init_weight=corrected_fan_in_normal,
-        ).make()
-
-        self.halt_head = Linear.Config(
-            channels_in=c,
-            channels_out=config.halt_outputs,
-            bias=True,
-            init_weight=nn.init.zeros_,
-            init_bias=functools.partial(
-                nn.init.constant_,
-                val=config.halt_init_bias,
-            ),
-        ).make()
+        self.head = _head(config).make()
+        self.halt_head = _halt_head(config).make()
 
         # ``repeat`` builds independent copies, each finalized separately, so
         # every block draws its own weights in stack order.
@@ -436,7 +489,7 @@ class SudokuNet(nn.Module):
           out: Logits, halt logit, and both updated latents.
 
         """
-        fast_cycles = _fast_cycles(self.recurrence)
+        _, fast_cycles = _cycles(self.config.recurrence)
         combined = z_slow + input_emb
         for _ in range(fast_cycles):
             z_fast = self._mix(z_fast + combined, cos_sin)
@@ -529,15 +582,51 @@ class SudokuNet(nn.Module):
         return out
 
 
-# Without a recurrence the core runs its inner loop exactly once, which makes the plain
-# model a single pass over the block stack. A recurrence that declares ``fast_cycles``
-# overrides it -- read from the config so the core stays a plain method the recurrence
-# can call.
-def _fast_cycles(recurrence: Recurrence | None) -> int:
-    """Inner-loop count for one core application."""
-    if isinstance(recurrence, DeepRecurrence):
-        return recurrence.config.fast_cycles
-    return 1
+def _head(config: SudokuNet.Config) -> Linear.Config:
+    """Configure the token head: one logit row per latent position, no bias."""
+    return Linear.Config(
+        channels_in=config.channels_in,
+        channels_out=config.vocab_size,
+        bias=False,
+        init_weight=corrected_fan_in_normal,
+    )
+
+
+def _halt_head(config: SudokuNet.Config) -> Linear.Config:
+    """Configure the halt head: zero weights and a constant, strongly negative bias."""
+    return Linear.Config(
+        channels_in=config.channels_in,
+        channels_out=config.halt_outputs,
+        bias=True,
+        init_weight=nn.init.zeros_,
+        init_bias=functools.partial(nn.init.constant_, val=config.halt_init_bias),
+    )
+
+
+# Without a recurrence the core runs once, its inner loop once: the plain model is a
+# single pass over the block stack. A recurrence that declares its cycles overrides
+# both -- read from the config so the core stays a plain method the recurrence can
+# call, and so the same numbers price a forward before anything is built.
+def _cycles(recurrence: Makeable[Recurrence] | None) -> tuple[int, int]:
+    """Return ``(slow_cycles, fast_cycles)`` one forward runs."""
+    if isinstance(recurrence, DeepRecurrence.Config):
+        return recurrence.slow_cycles, recurrence.fast_cycles
+    return 1, 1
+
+
+def _spread(total: Cost, rows_per_cell: float) -> Cost:
+    """Spread work done on ``rows_per_cell`` rows over one cell; ownership unchanged."""
+    return replace(
+        total,
+        primal=Compute(
+            flops=total.primal.flops * rows_per_cell,
+            bytes=total.primal.bytes * rows_per_cell,
+        ),
+        adjoint=Compute(
+            flops=total.adjoint.flops * rows_per_cell,
+            bytes=total.adjoint.bytes * rows_per_cell,
+        ),
+    )
 
 
 # Read from the config rather than by constructing the module: ``finalize`` runs during

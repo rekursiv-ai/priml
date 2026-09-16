@@ -16,6 +16,7 @@ from priml.math.gated_delta_rule import (
     recurrent_gated_delta_rule,
 )
 from priml.model.attention.gated_delta_net import GatedDeltaNet
+from priml.model.cost import Compute, Cost, Flops, elementwise_cost
 from priml.model.custom_types import TensorModule
 from priml.model.init import InitFn
 
@@ -29,6 +30,36 @@ class Qwen35RMSNormGated(nn.Module):
 
         eps: float = 1e-6
         """Epsilon added to the fp32 mean square."""
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count an affine RMSNorm, a SiLU on the gate, and their product.
+
+            Per row: square, mean, epsilon and rsqrt, normalize, scale, SiLU
+            (a sigmoid and a product), and the gating product, around one sum
+            over the row. The adjoint pulls back through the product, SiLU's
+            saved-sigmoid derivative, and the affine norm; the scale's gradient
+            reduces over rows.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            width = self.channels_in
+            return elementwise_cost(
+                primal=9 * width + 3,
+                adjoint=13 * width + 4,
+                channels=width,
+                params=width,
+                num_tokens=num_tokens,
+            ) + Cost(
+                primal=Compute(flops=Flops(reduction=width - 1)),
+                adjoint=Compute(flops=Flops(reduction=width - 1)),
+            )
 
     def __init__(self, config: Config) -> None:
         if not math.isfinite(config.eps) or config.eps <= 0:

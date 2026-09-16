@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import cast
+
+from torch import Tensor, nn
+
 import pytest
 import torch
 
 from priml.baselines.craftax.model import ActorCritic
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def _model(**overrides: int) -> ActorCritic:
@@ -105,6 +110,42 @@ def test_it_defaults_to_the_environment_geometry() -> None:
     config = ActorCritic.Config()
     assert config.observation_size == 8_268
     assert config.num_actions == 43
+
+
+def _scored(model: nn.Module, observation: Tensor) -> Tensor:
+    """Reduce both towers' outputs to one scalar for the backward pass."""
+    logits, value = cast(ActorCritic, model)(observation)
+    return logits.sum() + value.sum()
+
+
+def test_the_cost_matches_torch_and_prices_the_tanh_towers() -> None:
+    """One token is one observation scored by both towers.
+
+    The observation carries a gradient so torch runs the full adjoint of
+    the first layer, which is how the matmul primitive prices every input.
+    """
+    config = ActorCritic.Config()
+    config.observation_size = 12
+    config.num_actions = 5
+    config.channels_in = 16
+    config.num_layers = 2
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, 12, requires_grad=True),
+        num_tokens=3,
+        run=_scored,
+    )
+    weights = 2 * (12 * 16 + 16 * 16) + 16 * 5 + 16 * 1
+    biases = 2 * (16 + 16) + 5 + 1
+    assert analytical.params == weights + biases
+    assert analytical.primal.flops.matmul == 2 * weights
+    # Every bias add, then one tanh per hidden unit of both towers; the
+    # adjoint is ``g * (1 - t**2)`` on the saved output.
+    hidden_units = 2 * 2 * 16
+    assert analytical.primal.flops.elementwise == biases + hidden_units
+    assert analytical.adjoint.flops.elementwise == 3 * hidden_units
+    assert analytical.adjoint.flops.reduction == biases * 2 / 3
+    assert analytical.bytes_state == 0
 
 
 if __name__ == "__main__":

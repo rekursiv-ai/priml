@@ -40,11 +40,12 @@ from priml.baselines.nanochat.train_step import (
 )
 from priml.metrics.bits_per_byte import BitsPerByte
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.cost import cost
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 from priml.runtime import SingleProcess
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
 from priml.train.tracker import (
     AsyncTracker,
@@ -247,6 +248,22 @@ def test_exp000_pins_the_reference_kernel() -> None:
     assert isinstance(attn.kernel, Flash3Attention.Config)
 
 
+def test_the_reference_kernel_prices_like_the_portable_one() -> None:
+    """FA3 fuses the same two products SDPA issues, so the MFU numerator is shared.
+
+    The pinned build needs SM90 to construct, so it cannot be run against
+    torch's counter here; the portable rung's kernel is, and the two configs
+    must price identically for exp000 and exp001 to report comparable MFU.
+    """
+    base, fork = experiments.exp000(), experiments.exp001()
+    base_attn, fork_attn = base.step.model.template.attn, fork.step.model.template.attn
+    assert isinstance(base_attn, ValueGatedAttention.Config)
+    assert isinstance(fork_attn, ValueGatedAttention.Config)
+    bus = {"seq_len": 16, "num_heads": 2, "channels_head": 8, "window": 8}
+    assert cost(base_attn.kernel, **bus) == cost(fork_attn.kernel, **bus)
+    assert cost(base_attn.kernel, **bus).primal.flops.matmul == 2 * 2 * 2 * 8 * 8
+
+
 def test_exp001_changes_only_the_kernel() -> None:
     """The portable rung is the reference recipe, kernel aside."""
     base, fork = experiments.exp000(), experiments.exp001()
@@ -380,9 +397,9 @@ def test_no_rung_resumes_a_checkpoint(
     property of one command line, and the rung it protects is launched from
     several.
     """
-    checkpointing = factory().checkpointing
-    assert isinstance(checkpointing, Checkpointer.Config), name
-    assert checkpointing.resume is False, name
+    checkpointer = factory().checkpointer
+    assert isinstance(checkpointer, Checkpointer.Config), name
+    assert checkpointer.resume is False, name
 
 
 def test_the_budget_and_the_schedule_horizon_agree() -> None:
@@ -558,7 +575,7 @@ def test_the_dataset_inherits_the_models_geometry() -> None:
 
 def test_the_score_is_bits_per_byte() -> None:
     """A per-token score would rank a coarser tokenizer better for free."""
-    assert isinstance(experiments.exp000().metrics["val"], BitsPerByte.Config)
+    assert isinstance(experiments.exp000().metrics_eval["val"], BitsPerByte.Config)
 
 
 def test_smoke_is_small_on_every_costly_axis() -> None:

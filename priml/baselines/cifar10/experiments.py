@@ -128,7 +128,7 @@ def exp000() -> Cifar10TrainLoop:
     # Equal, or the schedule anneals past the end of training or short of it.
     cfg.max_steps = cfg.step.total_train_steps = 30 * steps_per_epoch
 
-    topk = cfg.metrics["accuracy"] = TopK.Config()
+    topk = cfg.metrics_eval["accuracy"] = TopK.Config()
     topk.k_values = [1]
 
     cfg.runtime = SingleProcess.Config()

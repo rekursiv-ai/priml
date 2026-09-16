@@ -11,8 +11,10 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.model.cost import Cost
 from priml.model.patchify import Patchify, Unpatchify
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -134,6 +136,27 @@ def test_patchify_rejects_degenerate_patch_size():
             _ = Patchify.Config(channels_in=3, patch_size=bad).make()
         with pytest.raises(ValueError, match="patch_size"):
             _ = Unpatchify.Config(channels_out=3, patch_size=bad).make()
+
+
+@pytest.mark.parametrize(
+    ("config", "shape"),
+    [
+        (Patchify.Config(channels_in=3, patch_size=[4, 4]), (2, 3, 8, 8)),
+        (Unpatchify.Config(channels_out=3, patch_size=[4, 4]), (2, 48, 2, 2)),
+    ],
+    ids=["patchify", "unpatchify"],
+)
+def test_patchify_cost_is_free(
+    config: Patchify.Config | Unpatchify.Config,
+    shape: tuple[int, ...],
+) -> None:
+    """A reshape owns nothing and multiplies nothing, and torch agrees."""
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(*shape, requires_grad=True),
+        num_tokens=2 * 2 * 2,
+    )
+    assert analytical == Cost()
 
 
 if __name__ == "__main__":

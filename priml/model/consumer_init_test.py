@@ -19,7 +19,7 @@ from priml.model.embedding import Embedding
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.linear import EnsembleLinear, Linear
 from priml.model.mlpmixer import MLPMixerBlock
-from priml.model.moe import MoE, Router
+from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
 from priml.model.norm import RMSNorm
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
@@ -111,7 +111,10 @@ def test_reference_initialization(kind: str, std: float) -> None:
             expected = torch.empty_like(module.gate.weight)
             nn.init.kaiming_uniform_(expected, a=5**0.5)
             assert torch.equal(module.gate.weight, expected)
-            if module.e_score_correction_bias is not None:
+            if (
+                isinstance(module, SigmoidRouter)
+                and module.e_score_correction_bias is not None
+            ):
                 assert torch.count_nonzero(module.e_score_correction_bias) == 0
 
 
@@ -210,7 +213,7 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             expert=legacy_ffn,
             shared_expert=legacy_ffn.copy_tree(),
         )
-        cfg_moe.router = Router.Config(num_experts=2, top_k=1)
+        cfg_moe.router = SoftmaxRouter.Config(num_experts=2, top_k=1)
         model = cfg_moe.make()
     elif kind == "mixer":
         model = MLPMixerBlock.Config(

@@ -25,10 +25,10 @@ __all__ = [
     "DepthIndex",
     "HasAttention",
     "HasDepthIndex",
+    "HasResetParameters",
     "LatentAttentionKernel",
     "LookupTable",
     "NumHeads",
-    "Resettable",
     "RotaryFactors",
     "ShardStyle",
     "Shardable",
@@ -77,7 +77,7 @@ every ``self.act(x)`` infer ``Any``. Pass a Module through a ``Makeable``.
 
 
 @runtime_checkable
-class Resettable(Protocol):
+class HasResetParameters(Protocol):
     """Owns resettable parameters or buffers."""
 
     def reset_parameters(self) -> None:
@@ -85,7 +85,7 @@ class Resettable(Protocol):
         ...
 
 
-class TensorModule(Resettable, Protocol[_Kwargs]):
+class TensorModule(HasResetParameters, Protocol[_Kwargs]):
     """A module that maps a Tensor to a Tensor.
 
     ``nn.Module.__call__`` is untyped, so a plain ``nn.Module`` annotation makes
@@ -232,7 +232,7 @@ class HasAttention(Makeable[nn.Module], Protocol):
     replacement qualifies by exposing an attention instead of by inheriting.
     Builds a bare ``nn.Module``, not a :class:`TensorModule`: the stack holds
     its blocks in a ``ModuleList`` and resets only those that are
-    :class:`Resettable`, so a block without ``reset_parameters`` is a valid
+    :class:`HasResetParameters`, so a block without ``reset_parameters`` is a valid
     layer here.
     """
 

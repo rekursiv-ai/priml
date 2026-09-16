@@ -22,10 +22,12 @@ from priml.baselines.nanochat.model import (
     SourceReuseTransformerBlock,
 )
 from priml.baselines.nanochat.ngram import HashedNgramTables
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.cost import HasCost, cost
 from priml.model.custom_types import HasAttention, TensorModule
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
@@ -35,6 +37,7 @@ from priml.model.softcap import SoftCap
 from priml.model.special import Identity
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
+from priml.testing.cost import assert_cost_matches_torch
 from priml.train.parallelism import materialize_meta
 
 
@@ -345,6 +348,48 @@ def test_flops_exclude_lookup_tables() -> None:
     # The head is a matmul and does grow; the embedding tables must not.
     assert large > small
     assert large - small == 6 * (VOCAB * 4 - VOCAB) * 16
+
+
+def test_the_config_prices_itself() -> None:
+    """``Utilization`` binds only to a model config implementing ``HasCost``."""
+    assert isinstance(_config(), HasCost)
+
+
+def test_cost_matches_torch_through_a_naive_kernel() -> None:
+    """Every matmul the forward issues is in the cost, and every parameter.
+
+    ``SdpaCausal`` dispatches to the CPU SDPA op, which ``FlopCounterMode``
+    does not register; the naive kernel makes the same products countable.
+    """
+    config = _config(value_embedding_stride=1)
+    attention = config.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.kernel = SdpaNaive.Config()
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, VOCAB, (2, SEQ)),
+        num_tokens=2 * SEQ,
+        bus={"seq_len": SEQ},
+    )
+
+
+def test_cost_matmul_flops_agree_with_the_palm_estimate() -> None:
+    """Both count six FLOPs per matrix parameter plus the attention products."""
+    finalized = _config(value_embedding_stride=1).copy_tree().finalize()
+    priced = cost(finalized, seq_len=SEQ)
+    torch.manual_seed(0)
+    assert priced.training.flops.matmul == finalized.make().flops_per_token()
+
+
+def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
+    """The token and value tables are parameters that cost one gather each."""
+    plain = cost(_config().copy_tree().finalize(), seq_len=SEQ)
+    gated = cost(_config(value_embedding_stride=1).copy_tree().finalize(), seq_len=SEQ)
+    # Two value tables of ``VOCAB x (num_heads * channels_head)`` and one gate
+    # of ``gate_channels x num_heads`` per layer.
+    assert gated.params - plain.params == 2 * (VOCAB * 16 + 4 * 2)
+    assert gated.primal.flops.selection == plain.primal.flops.selection == 0
+    assert gated.primal.bytes.selection - plain.primal.bytes.selection == 2 * 16
 
 
 def test_the_token_table_is_drawn_at_unit_variance() -> None:

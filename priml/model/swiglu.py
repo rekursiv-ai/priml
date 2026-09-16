@@ -17,9 +17,11 @@ from torch.distributed.tensor.parallel import (
 
 from priml.math.basic import ceil_multiple
 from priml.math.custom_types import TensorFn
+from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
+    HasResetParameters,
     ShardStyle,
     TensorModule,
 )
@@ -141,6 +143,60 @@ class SwiGLU(nn.Module):
                 self.norm.channels_in = self.channels_hidden
             return super().finalize()
 
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price projections, activation, products, and optional normalization.
+
+            SiLU saves sigmoid for its five-operation derivative; squared ReLU
+            uses two backward multiplies. Unknown injected activations must
+            implement ``cost`` rather than silently receiving a zero estimate.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            up = matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_hidden * 2
+                if self.gate
+                else self.channels_hidden,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            )
+            down = matmul_cost(
+                channels_in=self.channels_hidden,
+                channels_out=self.channels_out,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            )
+            if self.act is nn.functional.silu:
+                fwd, bwd = (5, 5) if self.norm is None else (4, 3)
+            elif self.act is relu_squared:
+                fwd, bwd = (1, 2) if self.norm is None else (0, 1)
+            else:
+                return (
+                    up
+                    + down
+                    + cost(
+                        self.act,
+                        channels=self.channels_hidden,
+                        num_tokens=num_tokens,
+                        **kwargs,
+                    )
+                )
+            # Each product is one multiply forward and two backward.
+            products = int(self.gate) + int(self.norm is not None)
+            scalar = elementwise_cost(
+                primal=(fwd + products) * self.channels_hidden,
+                adjoint=(bwd + 2 * products) * self.channels_hidden,
+            )
+            if self.norm is None:
+                return up + down + scalar
+            return up + down + scalar + cost(self.norm, num_tokens=num_tokens, **kwargs)
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         c_in = config.channels_in
@@ -183,7 +239,7 @@ class SwiGLU(nn.Module):
         """Initialize every parameter in place."""
         self.up_proj.reset_parameters()
         self.down_proj.reset_parameters()
-        if self.norm is not None and hasattr(self.norm, "reset_parameters"):
+        if isinstance(self.norm, HasResetParameters):
             self.norm.reset_parameters()
 
     @override

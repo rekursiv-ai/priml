@@ -12,6 +12,7 @@ import torch
 
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.model.custom_types import (
     ChannelsHead,
     ChannelsIn,
@@ -112,6 +113,31 @@ class OutputGate(nn.Module):
                 protocol=HasDepthIndex,
             )
             return super().finalize()
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Count projection, sigmoid, product and the two-path input gradient.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            return (
+                cost(self.inner, num_tokens=num_tokens, **kwargs)
+                + matmul_cost(
+                    channels_in=self.channels_in,
+                    channels_out=self.channels_in,
+                    bias=self.bias,
+                    num_tokens=num_tokens,
+                )
+                + elementwise_cost(
+                    primal=5 * self.channels_in,
+                    adjoint=6 * self.channels_in,
+                )
+            )
 
     def __init__(self, config: Config) -> None:
         if (

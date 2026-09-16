@@ -27,6 +27,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.cost import Cost, cost
 from priml.model.custom_types import (
     ChannelsOut,
     LookupTable,
@@ -63,6 +64,18 @@ class NarrowEmbedding(nn.Module):
             )
             propagate_attr(self.inner, "channels_in", self.channels_in)
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the table it narrows; a cast is a move, not arithmetic.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            return cost(self.inner, **kwargs)
 
     def __init__(self, config: Config) -> None:
         super().__init__()

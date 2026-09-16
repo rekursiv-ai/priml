@@ -21,6 +21,8 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.cost import Cost, elementwise_cost, matmul_cost
+
 
 class ActorCritic(nn.Module):
     """Separate policy and value towers over a flat observation."""
@@ -39,6 +41,38 @@ class ActorCritic(nn.Module):
 
         num_layers: int = 3
         """Hidden layers per tower."""
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price one observation through both towers.
+
+            A token is one environment step of one worker: the observation
+            vector in, action logits and a value out. Nothing is carried
+            between steps, so ``bytes_state`` is zero. Each hidden layer is a
+            biased matmul and a tanh; the tanh's adjoint is ``g * (1 - t**2)``
+            on the saved output, three operations per unit.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus; nothing here reads it.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return sum(
+                (
+                    _tower_cost(
+                        observation_size=self.observation_size,
+                        channels_in=self.channels_in,
+                        num_layers=self.num_layers,
+                        output_size=output_size,
+                        num_tokens=num_tokens,
+                    )
+                    for output_size in (self.num_actions, 1)
+                ),
+                Cost(),
+            )
 
     def __init__(self, config: Config) -> None:
         """Build both towers.
@@ -108,6 +142,38 @@ def _tower(
         width = channels_in
     layers.append(_linear(width, output_size, gain=output_gain))
     return nn.Sequential(*layers)
+
+
+def _tower_cost(
+    *,
+    observation_size: int,
+    channels_in: int,
+    num_layers: int,
+    output_size: int,
+    num_tokens: int,
+) -> Cost:
+    """Price one tower: ``num_layers`` biased tanh layers, then a biased readout."""
+    total = Cost()
+    width = observation_size
+    for _ in range(num_layers):
+        total += matmul_cost(
+            channels_in=width,
+            channels_out=channels_in,
+            bias=True,
+            num_tokens=num_tokens,
+        )
+        total += elementwise_cost(
+            primal=channels_in,
+            adjoint=3 * channels_in,
+            channels=channels_in,
+        )
+        width = channels_in
+    return total + matmul_cost(
+        channels_in=width,
+        channels_out=output_size,
+        bias=True,
+        num_tokens=num_tokens,
+    )
 
 
 def _linear(in_features: int, out_features: int, *, gain: float) -> nn.Linear:

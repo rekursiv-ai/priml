@@ -12,17 +12,22 @@ import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import (
+    CoreOutput,
     DeepRecurrence,
     ForwardOutput,
     SudokuNet,
 )
 from priml.baselines.sudoku.prefix import RegisterTokens
+from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Cost, cost
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -201,6 +206,96 @@ def test_recurrent_forward_bfb() -> None:
         seed=0,
         run=_logits,
     )
+
+
+def test_deep_recurrence_cost_is_zero() -> None:
+    """The recurrence schedules the core and owns nothing; the model prices its cycles."""
+    analytical = assert_cost_matches_torch(
+        DeepRecurrence.Config(slow_cycles=2, fast_cycles=2),
+        build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
+        num_tokens=2,
+        run=_run_identity_core,
+    )
+    assert analytical == Cost()
+
+
+@pytest.mark.parametrize("prefix", [False, True])
+def test_plain_cost_matches_torch(prefix: bool) -> None:
+    """One core application per forward; a prefix widens the latent sequence.
+
+    A two-cell grid with a two-token prefix keeps every per-cell fraction
+    dyadic, so the analytical count matches torch's exactly.
+    """
+    config = _cost_config(prefix=prefix)
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 11, (1, 2)),
+        num_tokens=2,
+        run=_logits_and_halt,
+    )
+    # The sequence length is the config's own: a bus value cannot reprice it.
+    finalized = config.copy_tree().finalize()
+    assert cost(finalized, num_tokens=2, seq_len=1_000) == analytical
+
+
+def test_recurrent_cost_matches_torch() -> None:
+    """Every slow cycle runs forward; only the last runs backward."""
+    config = _cost_config(prefix=True)
+    config.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=2)
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 11, (1, 2)),
+        num_tokens=2,
+        run=_logits_and_halt,
+    )
+    one_cycle = _cost_config(prefix=True)
+    one_cycle.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=2)
+    single = cost(one_cycle.copy_tree().finalize(), num_tokens=2)
+    assert analytical.adjoint == single.adjoint
+    assert analytical.params == single.params
+    assert analytical.primal.flops.matmul > single.primal.flops.matmul
+
+
+def _cost_config(*, prefix: bool) -> SudokuNet.Config:
+    """Build a two-cell solver whose attention torch can count."""
+    config = SudokuNet.Config(channels_in=16, num_layers=1)
+    config.embedding = GridEmbedding.Config(grid_shape=(2,))
+    config.block = TransformerBlock.Config(
+        prenorm=False,
+        attn=SelfAttention.Config(
+            num_heads=2,
+            channels_head=8,
+            attn_kernel=SdpaNaive.Config(),
+        ),
+        ffn=SwiGLU.Config(channels_hidden=32, round_to=1),
+    )
+    if prefix:
+        config.prefix = RegisterTokens.Config(num_tokens=2)
+    return config
+
+
+def _logits_and_halt(module: nn.Module, tokens: Tensor) -> Tensor:
+    """Reduce both heads, so the halt head's backward is counted too."""
+    out = cast(object, module(tokens))
+    assert isinstance(out, ForwardOutput)
+    return out.logits.sum() + out.halt.sum()
+
+
+def _run_identity_core(module: nn.Module, x: Tensor) -> Tensor:
+    """Drive the recurrence with a core that does no arithmetic."""
+    out = cast(object, module(_identity_core, x, x, x, None))
+    assert isinstance(out, ForwardOutput)
+    return out.logits
+
+
+def _identity_core(
+    input_emb: Tensor,
+    z_slow: Tensor,
+    z_fast: Tensor,
+    cos_sin: tuple[Tensor, Tensor] | None = None,
+) -> CoreOutput:
+    del cos_sin
+    return CoreOutput(input_emb, input_emb[:, 0, 0], z_slow, z_fast)
 
 
 def _logits(module: nn.Module, tokens: object) -> Tensor:

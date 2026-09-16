@@ -10,9 +10,11 @@ from configgle.testing import assert_pprint_golden
 
 import torch
 
+from priml.model.cost import Bytes, Compute, Cost, Flops
 from priml.model.embedding import Embedding
 from priml.model.init import normal
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -92,6 +94,22 @@ def test_a_depth_scales_the_table_down():
         init_weight=partial(normal, std=0.5),
     ).make()
     assert torch.allclose(scaled.weight.detach(), flat.weight.detach() / 2.0)
+
+
+def test_embedding_cost_is_a_gather() -> None:
+    """A lookup gathers one row; the adjoint scatter-adds its four gradients."""
+    config = Embedding.Config(8, 4)
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 8, (3,)),
+        num_tokens=3,
+    )
+    assert analytical == Cost(
+        primal=Compute(bytes=Bytes(selection=4)),
+        adjoint=Compute(flops=Flops(selection=4), bytes=Bytes(selection=4)),
+        params=32,
+        params_active=4,
+    )
 
 
 if __name__ == "__main__":

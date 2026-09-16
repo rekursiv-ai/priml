@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -15,6 +15,7 @@ from priml.baselines.sudoku.embedding import (
     GridEmbedding,
     PredictionFeedback,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 if TYPE_CHECKING:
@@ -111,6 +112,82 @@ def test_channels_must_be_inherited_or_set() -> None:
         GridEmbedding.Config().make()
     with pytest.raises(ValueError, match="channels_out must be positive"):
         GridEmbedding.Config(channels_in=11).make()
+
+
+def test_factored_positions_cost_is_three_gathers_two_adds_and_a_scale() -> None:
+    """Per cell: one row read from each table, summed, then scaled; no products."""
+    analytical = assert_cost_matches_torch(
+        FactoredPositions.Config(grid_shape=(4, 4), box_shape=(2, 2), channels_out=8),
+        build_input=lambda: (
+            torch.zeros(1, 16, dtype=torch.long),
+            torch.zeros(1, 16, 8),
+        ),
+        num_tokens=16,
+    )
+    assert analytical.params == (4 + 4 + 4) * 8
+    assert analytical.params_active == 3 * 8
+    assert analytical.primal.bytes.selection == 3 * 8
+    assert analytical.adjoint.flops.selection == 3 * 8
+    assert analytical.primal.flops.elementwise == 3 * 8
+    assert analytical.adjoint.flops.elementwise == 8
+
+
+def test_prediction_feedback_cost_is_a_gather_and_a_scale() -> None:
+    """Per cell with a grid stashed: one table row read, scaled; the whole table owned."""
+    analytical = assert_cost_matches_torch(
+        PredictionFeedback.Config(channels_in=11, channels_out=8),
+        build_input=lambda: (torch.randint(0, 11, (1, 16)), torch.zeros(1, 16, 8)),
+        num_tokens=16,
+        run=_run_feedback,
+    )
+    assert analytical.params == 11 * 8
+    assert analytical.params_active == 8
+    assert analytical.primal.bytes.selection == 8
+    assert analytical.adjoint.flops.selection == 8
+    assert analytical.primal.flops.elementwise == 8
+    assert analytical.adjoint.flops.elementwise == 8
+
+
+def test_grid_embedding_cost_sums_the_token_table_and_every_channel() -> None:
+    """The token gather and its scale, plus each channel and one add per channel."""
+    config = GridEmbedding.Config(channels_in=11, channels_out=8)
+    config.channels = [FactoredPositions.Config(), PredictionFeedback.Config()]
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 11, (1, 81)),
+        num_tokens=81,
+        run=_run_with_feedback,
+    )
+    assert analytical.params == 11 * 8 + (9 + 9 + 9) * 8 + 11 * 8
+    assert analytical.params_active == 8 + 3 * 8 + 8
+    # Token row, three position rows, one feedback row.
+    assert analytical.primal.bytes.selection == 8 + 3 * 8 + 8
+    assert analytical.adjoint.flops.selection == 8 + 3 * 8 + 8
+    # Token scale; positions' two adds and scale; feedback scale; two channel adds.
+    assert analytical.primal.flops.elementwise == 8 + 3 * 8 + 8 + 2 * 8
+    # The channel adds accumulate no gradient, so only the three scales pull back.
+    assert analytical.adjoint.flops.elementwise == 8 + 8 + 8
+
+
+def _run_feedback(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Stash ``tokens`` as the fed-back grid, then run the channel."""
+    assert isinstance(module, PredictionFeedback)
+    tokens, embeddings = inputs
+    module.set_feedback(tokens)
+    out = module(tokens, embeddings)
+    assert isinstance(out, Tensor)
+    return out
+
+
+def _run_with_feedback(module: nn.Module, tokens: Tensor) -> Tensor:
+    """Stash ``tokens`` on every feedback channel, then embed them."""
+    assert isinstance(module, GridEmbedding)
+    for channel in module.channels:
+        if isinstance(channel, PredictionFeedback):
+            channel.set_feedback(tokens)
+    out = module(tokens)
+    assert isinstance(out, Tensor)
+    return out
 
 
 def _ordered(tokens: Tensor, *, swap: bool) -> Tensor:

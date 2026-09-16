@@ -8,7 +8,7 @@ CPU fallback. Plugs into ``TransformerBlock.Config(attn=...)`` as a
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig, Makeable
@@ -18,6 +18,14 @@ from torch.nn import functional as f
 import torch
 
 from priml.math.basic import ceil_multiple
+from priml.model.cost import (
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+)
 from priml.model.custom_types import ChannelsIn, DepthIndex, TensorModule
 from priml.model.init import InitFn, call_init, kaiming_uniform
 from priml.model.legacy_keys import absorb_legacy_keys
@@ -94,6 +102,99 @@ class GatedDeltaNet(nn.Module):
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
                 self.norm.channels_in = self.channels_v_head
             return super().finalize()
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price the projections, the depthwise conv, and the recurrent scan.
+
+            Matrix scan counts retain the recurrent-model proxy of two MACs
+            per state element, not the chunked implementation's actual products.
+            Scalar scan counts estimate a decay, delta and weighted state update
+            with its analytical derivative. Chunking, triangular solves and
+            padding change executed work and are not represented by this model.
+            Nonlinearities and q/k normalization are included separately.
+            ``bytes_state`` is zero: no cache grows with token count.
+
+            Args:
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            h = self.channels_in
+            k_dim = self.num_heads_k * self.channels_k_head
+            v_dim = self.num_heads_v * self.channels_v_head
+            conv_dim = 2 * k_dim + v_dim
+            projections = (
+                matmul_cost(channels_in=h, channels_out=conv_dim, bias=False)
+                + matmul_cost(channels_in=h, channels_out=v_dim, bias=False)
+                + 2
+                * matmul_cost(channels_in=h, channels_out=self.num_heads_v, bias=False)
+                + matmul_cost(channels_in=v_dim, channels_out=h, bias=False)
+            )
+            # Depthwise: each channel is its own ``[taps] -> [1]`` map, followed
+            # by a SiLU.
+            conv = conv_dim * matmul_cost(
+                channels_in=self.conv_kernel_size,
+                channels_out=1,
+                bias=False,
+            ) + elementwise_cost(primal=5 * conv_dim, adjoint=5 * conv_dim)
+            # The recurrence: per value head, ``k^T v`` writes the state and
+            # ``S q`` reads it -- two activation products of ``k_head x v_head``
+            # per token. That is the recurrent-model proxy; the chunked kernel
+            # executes a different (larger) product count. The state written is
+            # scratch, not an output row; the read produces the head row.
+            state_write = matmul_cost(
+                channels_in=self.channels_k_head,
+                channels_out=self.channels_v_head,
+                weight=False,
+            )
+            state_write = replace(
+                state_write,
+                primal=Compute(flops=state_write.primal.flops),
+                adjoint=Compute(flops=state_write.adjoint.flops),
+            )
+            state_read = matmul_cost(
+                channels_in=self.channels_k_head,
+                channels_out=self.channels_v_head,
+                weight=False,
+            )
+            # Decay, delta, and weighted update over the state; the q/k L2 norms
+            # reduce each key row once each way.
+            state = self.num_heads_v * self.channels_k_head * self.channels_v_head
+            norms = self.num_heads_v * (self.channels_k_head - 1)
+            scan = (
+                self.num_heads_v * (state_write + state_read)
+                + elementwise_cost(
+                    primal=2 * state
+                    + 2 * v_dim
+                    + self.num_heads_v * (6 * self.channels_k_head + 4),
+                    adjoint=4 * state
+                    + 4 * v_dim
+                    + self.num_heads_v * (10 * self.channels_k_head + 7),
+                )
+                + Cost(
+                    primal=Compute(flops=Flops(reduction=norms)),
+                    adjoint=Compute(flops=Flops(reduction=norms)),
+                )
+            )
+            # ``dt_bias`` and ``A_log``: one gate parameter per value head each.
+            # ``A_log`` is exponentiated once per batch, so that is shared.
+            gates = elementwise_cost(
+                primal=(9 + 2 / num_tokens) * self.num_heads_v + 6 * v_dim,
+                adjoint=9 * self.num_heads_v + 7 * v_dim,
+                channels=self.num_heads_v,
+                params=2 * self.num_heads_v,
+                num_tokens=num_tokens,
+            )
+            # The norm runs once per value head; its parameters exist once.
+            norm = cost(
+                self.norm,
+                num_tokens=num_tokens * self.num_heads_v,
+                **kwargs,
+            ).tile(self.num_heads_v)
+            return projections + conv + scan + gates + norm
 
     def __init__(self, config: Config) -> None:
         if (

@@ -12,10 +12,13 @@ from priml.baselines.cifar10.model import (
     ConvBlock,
     ResidualBlock,
     ResNet,
+    ScaledLinear,
     SpeedNet,
 )
 from priml.model.init import dirac
+from priml.model.norm import BatchNorm2d
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -184,6 +187,158 @@ def test_speednet_bfb() -> None:
         build_module=lambda: tiny_speednet().make(),
         build_input=lambda: torch.randn(1, 3, 32, 32),
         seed=0,
+    )
+
+
+# Cost tests feed an input that REQUIRES grad, as ``conv_test.py`` does: priml
+# prices every layer's full adjoint, whereas a real image carries no gradient
+# and torch then skips the gradient into the first trainable layer's input.
+# Grids are powers of two so every ``channels / num_tokens`` term inside a
+# BatchNorm estimate is dyadic and the equalities below stay exact.
+
+
+def test_scaled_linear_cost_is_a_matmul_plus_one_scale_per_logit() -> None:
+    analytical = assert_cost_matches_torch(
+        ScaledLinear.Config(channels_in=6, channels_out=4),
+        build_input=lambda: torch.randn(3, 6, requires_grad=True),
+        num_tokens=3,
+    )
+    assert analytical.params == 6 * 4
+    # ``1 / fan_in`` is a Python float, so the scale is one multiply per logit
+    # each way and no parameter.
+    assert analytical.primal.flops.elementwise == 4
+    assert analytical.adjoint.flops.elementwise == 4
+
+
+def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> None:
+    """A stride-2 block runs its convolutions on a quarter of the input positions."""
+    analytical = assert_cost_matches_torch(
+        ResidualBlock.Config(channels_in=4, channels_out=6, stride=2),
+        build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
+        num_tokens=2 * 8 * 8,
+        bus={"image_size": (8, 8)},
+    )
+    conv1, conv2, shortcut = 6 * 4 * 9, 6 * 6 * 9, 6 * 4
+    assert analytical.primal.flops.matmul == 2 * (conv1 + conv2 + shortcut) / 4
+    assert analytical.params == conv1 + conv2 + shortcut + 2 * 4 + 2 * 6
+    # Elementwise: norm1 and one ReLU compare per input channel at the input
+    # grid; norm2, a ReLU, and the residual add per output channel at the
+    # output grid. The adjoint adds one accumulation per input channel where the
+    # shortcut's and the branch's gradients meet.
+    norm1 = BatchNorm2d.Config(4, elementwise_affine=True).cost(num_tokens=128)
+    norm2 = BatchNorm2d.Config(6, elementwise_affine=True).cost(num_tokens=32)
+    assert analytical.primal.flops.elementwise == (
+        norm1.primal.flops.elementwise
+        + 4
+        + (norm2.primal.flops.elementwise + 6 + 6) / 4
+    )
+    assert analytical.adjoint.flops.elementwise == (
+        norm1.adjoint.flops.elementwise
+        + 4
+        + 4
+        + (norm2.adjoint.flops.elementwise + 6) / 4
+    )
+
+
+def test_residual_block_cost_omits_the_shortcut_when_shape_is_preserved() -> None:
+    analytical = assert_cost_matches_torch(
+        ResidualBlock.Config(channels_in=4, channels_out=4),
+        build_input=lambda: torch.randn(2, 4, 4, 4, requires_grad=True),
+        num_tokens=2 * 4 * 4,
+        bus={"image_size": (4, 4)},
+    )
+    assert analytical.params == 2 * (4 * 4 * 9) + 2 * (2 * 4)
+
+
+def test_conv_block_cost_pools_after_the_first_convolution() -> None:
+    """The first convolution runs at the input grid, the other two at a quarter of it."""
+    block = ConvBlock.Config(channels_in=4, channels_out=6)
+    block.num_convs = 3
+    analytical = assert_cost_matches_torch(
+        block,
+        build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
+        num_tokens=2 * 8 * 8,
+        bus={"image_size": (8, 8)},
+    )
+    first, later = 6 * 4 * 9, 6 * 6 * 9
+    assert analytical.primal.flops.matmul == 2 * first + 2 * 2 * later / 4
+    # ``affine=False`` norms own nothing.
+    assert analytical.params == first + 2 * later
+    # The 2x2 max pool is three compares per pooled channel forward and one
+    # gradient element routed back to the argmax; the norms add their own sums.
+    norm = BatchNorm2d.Config(6).cost(num_tokens=32)
+    assert analytical.primal.flops.reduction == (
+        (6 * 3 + 3 * norm.primal.flops.reduction) / 4
+    )
+    assert analytical.adjoint.flops.selection == 6 / 4
+
+
+def test_resnet_cost_amortizes_each_stage_over_the_input_positions() -> None:
+    """Every matmul the forward issues is in the cost, and every parameter."""
+    analytical = assert_cost_matches_torch(
+        tiny_resnet(),
+        build_input=lambda: torch.randn(2, 3, 8, 8, requires_grad=True),
+        num_tokens=2 * 8 * 8,
+        bus={"image_size": (8, 8)},
+    )
+    stem, stage0 = 8 * 3 * 9, 2 * (8 * 8 * 9)
+    stage1 = 16 * 8 * 9 + 16 * 16 * 9 + 16 * 8
+    head = 16 * 10
+    assert analytical.primal.flops.matmul == 2 * (
+        stem + stage0 + stage1 / 4 + head / 64
+    )
+    # Five affine norms: three of width 8, two of width 16; the head owns a bias.
+    assert analytical.params == (
+        stem + stage0 + stage1 + head + 3 * (2 * 8) + 2 * (2 * 16) + 10
+    )
+    # Global average pooling sums 4x4 positions per channel once per image; the
+    # four norms sum at their own grids.
+    norm8 = BatchNorm2d.Config(8, elementwise_affine=True).cost(num_tokens=128)
+    norm16 = BatchNorm2d.Config(16, elementwise_affine=True).cost(num_tokens=32)
+    assert analytical.primal.flops.reduction == (
+        3 * norm8.primal.flops.reduction
+        + 2 * norm16.primal.flops.reduction / 4
+        + 16 * (16 - 1) / 64
+    )
+
+
+def test_speednet_cost_prices_the_frozen_whitening_and_every_pool() -> None:
+    """Every matmul the forward issues is in the cost, and every parameter.
+
+    The whitening weight is frozen but owned: ``parameters()`` lists it, so
+    it counts, while its adjoint forms only the input gradient.
+    """
+    analytical = assert_cost_matches_torch(
+        tiny_speednet(),
+        build_input=lambda: torch.randn(1, 3, 32, 32, requires_grad=True),
+        num_tokens=32 * 32,
+        bus={"image_size": (32, 32)},
+    )
+    whiten = 24 * 3 * 4
+    blocks = (8 * 24 * 9, 16 * 8 * 9, 24 * 16 * 9)
+    head = 10 * 24
+    assert analytical.params == whiten + sum(blocks) + head
+    # 32 -> 31 (whiten) -> 15 -> 7 -> 3 (block pools) -> 1 (final pool).
+    assert (
+        analytical.primal.flops.matmul
+        == 2
+        * (whiten * 961 + blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head)
+        / 1024
+    )
+    assert (
+        analytical.adjoint.flops.matmul
+        == 2
+        * (
+            whiten * 961
+            + 2 * (blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head)
+        )
+        / 1024
+    )
+    # One gradient element routed back per pooled channel: three block pools
+    # and the final 3x3 pool.
+    assert (
+        analytical.adjoint.flops.selection
+        == (8 * 225 + 16 * 49 + 24 * 9 + 24 * 1) / 1024
     )
 
 

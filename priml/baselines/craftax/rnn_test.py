@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from torch import Tensor
+from typing import cast
+
+from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.baselines.craftax.rnn import ActorCriticRNN
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def _model(**overrides: int) -> ActorCriticRNN:
@@ -177,6 +180,53 @@ def test_the_policy_head_starts_near_uniform() -> None:
 def test_a_degenerate_dimension_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match="positive"):
         _model(**{field: 0})
+
+
+def _stepped(model: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Take one recurrent step from a carried state; reduce both heads."""
+    observation, state = inputs
+    _, logits, value = cast(ActorCriticRNN, model).step(
+        state,
+        observation,
+        torch.zeros(observation.shape[0], dtype=torch.bool),
+    )
+    return logits.sum() + value.sum()
+
+
+def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
+    """One token is one recurrent step of one worker.
+
+    The carried state has a gradient, as it does at every step after the
+    first of :meth:`sequence`, so torch counts the state-side gate matmul's
+    full adjoint: measured, ``nn.GRUCell(4, 6)`` on three rows is 3240 FLOPs
+    with a differentiable state and 2592 without.
+    """
+    config = ActorCriticRNN.Config()
+    config.observation_size = 12
+    config.num_actions = 5
+    config.channels_in = 16
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randn(3, 12, requires_grad=True),
+            torch.randn(3, 16, requires_grad=True),
+        ),
+        num_tokens=3,
+        run=_stepped,
+    )
+    gates = 2 * 3 * 16 * 16
+    heads = 2 * (16 * 16 + 16 * 16) + 16 * 5 + 16 * 1
+    weights = 12 * 16 + gates + heads
+    biases = 16 + 2 * 3 * 16 + 2 * (16 + 16) + 5 + 1
+    assert analytical.params == weights + biases
+    assert analytical.primal.flops.matmul == 2 * weights
+    # Biases, the embedding's ReLU, the episode reset, eleven operations per
+    # GRU unit, and a ReLU after each hidden head layer.
+    assert analytical.primal.flops.elementwise == (
+        biases + 16 + 16 + 11 * 16 + 2 * 2 * 16
+    )
+    assert analytical.adjoint.flops.elementwise == 16 + 16 + 17 * 16 + 2 * 2 * 16
+    assert analytical.bytes_state == 16
 
 
 if __name__ == "__main__":

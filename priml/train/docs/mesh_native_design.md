@@ -202,7 +202,7 @@ subsystem the campaign found:
 - **EMA** (`train/ema.py`, #299): param-dict name-keyed shadow over local
   shards (the sudoku pattern, already proven across sudoku/arcagi1/maze),
   replacing the deepcopy-clone shadow that breaks under `fully_shard`.
-- **checkpointing** (`train/checkpointing.py`): DCP
+- **checkpointing** (`train/checkpointer.py`): DCP
   (`torch.distributed.checkpoint`) saves/loads DTensor state by mesh, instead
   of the hand-rolled per-rank shard files. (Today: hand-rolled, not
   mesh-native.)

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
+from priml.model.cost import Compute, Cost, cost, elementwise_cost
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -106,6 +107,50 @@ class MLPMixerBlock(nn.Module):
                 )
             return super().finalize()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum the four children per token and two residual additions.
+
+            The token mixer and its norm map rows of ``seq_len``, and there are
+            ``channels_in`` such rows per ``seq_len`` tokens, so their work is
+            amortized by ``channels_in / seq_len``; their parameters exist once.
+            Transposes are views.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            rows_per_token = self.channels_in / self.seq_len
+            over_tokens = sum(
+                (
+                    cost(child, **kwargs)
+                    for child in (self.token_mixer, self.norm_token)
+                ),
+                Cost(),
+            )
+            over_channels = sum(
+                (
+                    cost(child, **kwargs)
+                    for child in (self.channel_mixer, self.norm_channel)
+                ),
+                Cost(),
+            )
+            residual_adds = elementwise_cost(
+                primal=2 * self.channels_in,
+                adjoint=2 * self.channels_in,
+            )
+            return (
+                replace(
+                    over_tokens,
+                    primal=_amortize(over_tokens.primal, rows_per_token),
+                    adjoint=_amortize(over_tokens.adjoint, rows_per_token),
+                )
+                + over_channels
+                + residual_adds
+            )
+
     def __init__(self, config: Config) -> None:
         if (
             -1 not in (config.channels_in, config.channels_out)
@@ -131,8 +176,7 @@ class MLPMixerBlock(nn.Module):
             self.norm_token,
             self.norm_channel,
         ):
-            if hasattr(m, "reset_parameters"):
-                m.reset_parameters()
+            m.reset_parameters()
 
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
@@ -150,3 +194,11 @@ class MLPMixerBlock(nn.Module):
                 **kwargs,
             )
         return x
+
+
+def _amortize(compute: Compute, rows_per_token: float) -> Compute:
+    """Spread work done on rows over the tokens those rows span."""
+    return Compute(
+        flops=compute.flops * rows_per_token,
+        bytes=compute.bytes * rows_per_token,
+    )

@@ -39,13 +39,14 @@ Cifar10TrainLoop(
                 │       train_budget_steps=inf,
                 │       train_budget_sec=inf,
                 │       train_budget_epochs=inf,
-                │       learning_rate_scheduler=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
+                │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
                 │       parallelism=NoParallel.Config(device='auto'),
                 │       model_quantization=NoModelQuantization.Config(),
                 │       activation_memoization=DefaultActivationStorage.Config(),
                 │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
                 │       ema=NoEMA.Config(),
                 │       gradient_clip_norm=inf,
+                │       skip_step_on_nonfinite_grad=False,
                 │       device_init='eager',
                 │       dtype_autocast=None,
                 │       autocast_cache_enabled=False,
@@ -70,8 +71,9 @@ Cifar10TrainLoop(
                         device='auto',
                         dtype=torch.float32
                 ),
-                metrics={'accuracy': TopK.Config(k_values=[1])},
-                checkpointing=Checkpointer.Config(
+                metrics_train={},
+                metrics_eval={'accuracy': TopK.Config(k_values=[1])},
+                checkpointer=Checkpointer.Config(
                         base_dir=PosixPath('/opt/scratch/runs/cifar10/exp000'),
                         working_dir=PosixPath('/opt/scratch/runs/cifar10/exp000/checkpoints'),
                         filename='step_{step:08d}.pt',
@@ -81,9 +83,11 @@ Cifar10TrainLoop(
                         storer=SyncLocalStateDictStorer.Config(),
                         resume=True,
                         resume_step=-1,
-                        allow_checkpoint_overwrite=False
+                        allow_checkpoint_overwrite=False,
+                        best_metric='',
+                        best_mode='max'
                 ),
-                profiling=None,
+                profiler=None,
                 phase_timer=PhaseTimer.Config(
                         enabled=False,
                         torch_profile=False,

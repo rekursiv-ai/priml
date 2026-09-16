@@ -27,7 +27,7 @@ from priml.optimizers.composite import CompositeOptimizer
 from priml.runtime import SingleProcess
 from priml.testing.qwen3_5 import hf_config
 from priml.timer import CheckpointableStepTimer
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.custom_types import OptimizerProtocol, TrainStepOutput
 from priml.train.train_loop import TrainLoop
 from priml.train.train_step import TrainStep
@@ -45,20 +45,20 @@ def test_lora_training_checkpoint_resumes_exactly(
     initial = copy.deepcopy(reference.step.model.state_dict())
     _assert_trainable_membership(reference.step)
     reference.train()
-    assert reference.checkpointing is not None
-    assert reference.checkpointing.available_steps() == [1, 2]
+    assert reference.checkpointer is not None
+    assert reference.checkpointer.available_steps() == [1, 2]
     reference_rng = get_rng_state()
 
     source_dir = tmp_path / "reference" / "checkpoints"
     if source == "final":
         prefix_config = _loop_config(tmp_path / "prefix")
         prefix_config.max_steps = 1
-        assert isinstance(prefix_config.checkpointing, Checkpointer.Config)
-        prefix_config.checkpointing.save_every = 2
+        assert isinstance(prefix_config.checkpointer, Checkpointer.Config)
+        prefix_config.checkpointer.save_every = 2
         prefix = prefix_config.make()
         prefix.train()
-        assert prefix.checkpointing is not None
-        assert prefix.checkpointing.available_steps() == [1]
+        assert prefix.checkpointer is not None
+        assert prefix.checkpointer.available_steps() == [1]
         source_dir = tmp_path / "prefix" / "checkpoints"
 
     resumed_dir = tmp_path / "resumed" / "checkpoints"
@@ -113,7 +113,7 @@ def test_lora_adapter_only_roundtrip(tmp_path: Path) -> None:
     """Adapter weights alone reproduce logits on the same frozen native base."""
     config = _loop_config(tmp_path)
     config.max_steps = 1
-    config.checkpointing = None
+    config.checkpointer = None
     loop = config.make()
     assert isinstance(loop.step, _RecordingStep)
     assert isinstance(loop.step.model, Qwen35)
@@ -172,8 +172,8 @@ def _loop_config(
     optimizer = CompositeOptimizer.Config()
     optimizer.optimizers = [PartialConfig(torch.optim.AdamW)]
     config.step.optimizer = optimizer
-    assert isinstance(config.checkpointing, Checkpointer.Config)
-    config.checkpointing.save_every = 1
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    config.checkpointer.save_every = 1
     return config
 
 

@@ -21,7 +21,13 @@ from priml.model.attention.rope import (
     RoPEMixed,
     YarnScaling,
 )
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.cost import assert_cost_matches_torch
+
+
+def _config_id(value: object) -> str | None:
+    return type(value).__qualname__ if isinstance(value, Fig) else None
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -717,6 +723,137 @@ def test_frequency_table_bfb(device: str, name: str, frequencies: object) -> Non
         seed=0,
         run=lambda module, positions: torch.cat(cast(RoPE, module)(positions), dim=-1),
     )
+
+
+@pytest.mark.parametrize(
+    "frequencies",
+    [
+        GeometricFrequencies.Config(),
+        HuggingFaceFrequencies.Config(),
+        YarnScaling.Config(),
+    ],
+    ids=_config_id,
+)
+def test_frequency_table_cost_is_free(
+    frequencies: GeometricFrequencies.Config
+    | HuggingFaceFrequencies.Config
+    | YarnScaling.Config,
+) -> None:
+    """A table is constants: no products, no parameters, nothing per token."""
+    assert cost(frequencies.copy_tree().finalize(), seq_len=8) == Cost()
+    model = RoPE.Config(8, frequencies=frequencies).make()
+    assert sum(p.numel() for p in model.parameters()) == 0
+
+
+class _LearnedTable:
+    """A frequency table that owns parameters, so pricing it is not free."""
+
+    class Config(Fig["_LearnedTable"]):
+        def cost(self, **kwargs: object) -> Cost:
+            del kwargs
+            return Cost(
+                primal=Compute(bytes=Bytes(matmul=7)),
+                params=7,
+                params_active=7,
+            )
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(self, *, channels: int, device: torch.device) -> tuple[Tensor, float]:
+        return HuggingFaceFrequencies(HuggingFaceFrequencies.Config())(
+            channels=channels,
+            device=device,
+        )
+
+
+def test_yarn_cost_is_its_inner_table() -> None:
+    """The wrapper rescales constants; whatever the inner table owns is priced."""
+    yarn = YarnScaling.Config(inner=_LearnedTable.Config())
+    assert cost(yarn) == cost(_LearnedTable.Config())
+
+
+def test_rope_cost_is_factors_plus_one_table_per_axis() -> None:
+    """A template is copied per axis in ``__init__``, so it is priced per axis."""
+    plain = RoPE.Config([8, 8]).copy_tree().finalize().cost()
+    learned = RoPE.Config([8, 8], frequencies=_LearnedTable.Config())
+    assert learned.copy_tree().finalize().cost() == plain + 2 * cost(
+        _LearnedTable.Config(),
+    )
+    # ``cat`` over [8, 8]: 8 frequencies, 8 outputs, no reductions.
+    assert plain == Cost(primal=Compute(flops=Flops(elementwise=8 + 4 * 8)))
+    # ``sum`` over [8, 8]: two axes' angles added into 4 outputs.
+    summed = RoPE.Config([8, 8], reduction_mode="sum").copy_tree().finalize().cost()
+    assert summed.primal.flops == Flops(elementwise=8 + 4 * 4, reduction=4)
+
+
+def test_rope_cost_prices_an_explicit_table_list_once_each() -> None:
+    config = RoPE.Config([8, 8])
+    config.frequencies = [_LearnedTable.Config(), HuggingFaceFrequencies.Config()]
+    plain = RoPE.Config([8, 8]).copy_tree().finalize().cost()
+    assert config.copy_tree().finalize().cost() == plain + cost(_LearnedTable.Config())
+
+
+def test_rope_mixed_cost_scales_factors_per_head_and_tables_once() -> None:
+    """Heads multiply the emitted factors; the seed tables are built once."""
+    heads = 3
+    plain = RoPE.Config(8).copy_tree().finalize().cost()
+    mixed = RoPEMixed.Config(8, num_heads=heads, frequencies=_LearnedTable.Config())
+    fixed = mixed.copy_tree().finalize().cost()
+    assert fixed.primal.flops.elementwise == heads * plain.primal.flops.elementwise
+    assert fixed.adjoint.flops.elementwise == 0
+    # Per-head frequencies are owned once each, plus the seed table once.
+    assert fixed.params == heads * 4 + 7
+    mixed.learnable = True
+    learned = mixed.copy_tree().finalize().cost(num_tokens=4)
+    assert learned.adjoint.flops.elementwise == 5 * (heads * 4) + heads * 4
+    assert learned.adjoint.flops.reduction == heads * 4 * 3 / 4
+    assert (
+        learned.params
+        == sum(
+            p.numel() for p in RoPEMixed.Config(8, num_heads=heads).make().parameters()
+        )
+        + 7
+    )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        RoPE.Config(8),
+        RoPE.Config(8, frequencies=GeometricFrequencies.Config()),
+        RoPE.Config(8, frequencies=YarnScaling.Config()),
+        RoPE.Config([8, 8], reduction_mode="sum"),
+        RoPEMixed.Config(8, num_heads=2),
+        RoPEMixed.Config(8, num_heads=2, learnable=True),
+    ],
+    ids=[
+        "rope",
+        "geometric",
+        "yarn",
+        "summed_axes",
+        "mixed",
+        "mixed_learnable",
+    ],
+)
+def test_rope_cost_matches_torch(config: RoPE.Config) -> None:
+    """Every rotary is elementwise: torch counts no matmul, and the params agree.
+
+    The frequency tables ride along: none owns a matmul, and only a learnable
+    RoPE-Mixed owns parameters, which the harness checks against the module.
+    """
+    positions = (
+        torch.arange(4)
+        if isinstance(config.channels_head, int)
+        else (torch.arange(8).reshape(4, 2))
+    )
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: positions,
+        num_tokens=4,
+        run=lambda module, pos: torch.cat(cast(RoPE, module)(pos), dim=-1),
+    )
+    assert analytical.training.flops.matmul == 0
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

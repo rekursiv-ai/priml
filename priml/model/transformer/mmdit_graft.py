@@ -17,7 +17,8 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
-from priml.model.custom_types import DeepModelConfig, Resettable
+from priml.model.cost import Cost, cost
+from priml.model.custom_types import DeepModelConfig, HasResetParameters
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock, MMDiTStream
 from priml.model.transformer.transformer import Transformer
@@ -84,6 +85,25 @@ class MMDiTGraft(nn.Module):
                     stream.channels_in = self.block[0].channels_in
             return super().finalize()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the host's projections and every joint block.
+
+            A joint block's stream zero IS the host layer, so the host's blocks
+            are priced through ``block`` and never again from ``backbone``.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            source = self.backbone
+            projections = [
+                p for p in (source.proj_in, source.proj_out) if p is not None
+            ]
+            return sum((cost(c, **kwargs) for c in (*projections, *self.block)), Cost())
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         source = config.backbone
@@ -145,7 +165,7 @@ class MMDiTGraft(nn.Module):
     def reset_parameters(self) -> None:
         """Reset all owned modules using their configured initializers."""
         for module in (self.proj_in, *self.blocks, self.proj_out):
-            if isinstance(module, Resettable):
+            if isinstance(module, HasResetParameters):
                 module.reset_parameters()
 
     @override

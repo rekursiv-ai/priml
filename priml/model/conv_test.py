@@ -12,6 +12,7 @@ import torch
 
 from priml.model.conv import Conv1d, Conv2d, Conv3d
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -119,6 +120,52 @@ def test_conv_reset():
     for cls in (Conv1d, Conv2d, Conv3d):
         m = cls.Config(3, 16).make()
         m.reset_parameters()
+
+
+def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
+    """Per output position: ``channels_in * prod(kernel_size)`` -> ``channels_out``.
+
+    ``padding="same"`` keeps every input position as an output position, so
+    a ``4 x 6`` image is 24 tokens.
+    """
+    analytical = assert_cost_matches_torch(
+        Conv2d.Config(2, 3, kernel_size=(3, 5), bias=True),
+        build_input=lambda: torch.randn(1, 2, 4, 6, requires_grad=True),
+        num_tokens=4 * 6,
+    )
+    weights = 3 * 2 * 15
+    assert analytical.primal.flops.matmul == 2 * weights
+    assert analytical.adjoint.flops.matmul == 4 * weights
+    assert analytical.params == weights + 3
+    assert analytical.primal.bytes.elementwise == 3
+
+
+def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
+    """Grouped: each output sees ``channels_in / groups`` inputs, forward and back.
+
+    torch's ``convolution_backward`` formula ignores ``groups`` (it reads the
+    full ``c_in`` off the weight shape), so it over-counts the backward by the
+    group factor: measured 504 forward, 1512 backward for a 2-group conv whose
+    true backward is 1008. Forward agrees; the total is held to 3/4 of torch's.
+    """
+    analytical = assert_cost_matches_torch(
+        Conv1d.Config(4, 6, kernel_size=3, groups=2),
+        build_input=lambda: torch.randn(1, 4, 7, requires_grad=True),
+        num_tokens=7,
+        expected_ratio=0.75,
+    )
+    weights = 6 * (4 // 2) * 3
+    assert analytical.primal.flops.matmul == 2 * weights
+    assert analytical.params == weights
+
+
+def test_conv3d_cost_cubes_a_scalar_kernel() -> None:
+    analytical = assert_cost_matches_torch(
+        Conv3d.Config(2, 3, kernel_size=3),
+        build_input=lambda: torch.randn(1, 2, 3, 4, 5, requires_grad=True),
+        num_tokens=3 * 4 * 5,
+    )
+    assert analytical.primal.flops.matmul == 2 * 3 * 2 * 27
 
 
 if __name__ == "__main__":

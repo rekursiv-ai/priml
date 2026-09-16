@@ -23,8 +23,10 @@ from torch.utils.checkpoint import checkpoint as real_checkpoint
 import pytest
 import torch
 
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Compute, Cost, Flops, cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -34,6 +36,7 @@ from priml.testing.bfb import (
     bfb_devices,
     move_to_device,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -274,6 +277,44 @@ def test_transformer_block_bfb(device: str) -> None:
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
         seed=0,
     )
+
+
+def test_block_cost_sums_its_four_children() -> None:
+    config = TransformerBlock.Config(
+        channels_in=16,
+        attn=SelfAttention.Config(
+            num_heads=2,
+            channels_head=8,
+            attn_kernel=SdpaNaive.Config(),
+        ),
+        ffn=SwiGLU.Config(channels_hidden=32, round_to=1),
+        norm1=RMSNorm.Config(elementwise_affine=True),
+    )
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        num_tokens=8,
+        bus={"seq_len": 8},
+    )
+    finalized = config.copy_tree().finalize()
+    children = (finalized.attn, finalized.ffn, finalized.norm1, finalized.norm2)
+    expected = sum(
+        (cost(child, seq_len=8, num_tokens=8) for child in children),
+        Cost(),
+    ) + Cost(
+        primal=Compute(flops=Flops(elementwise=2 * 16)),
+        adjoint=Compute(flops=Flops(elementwise=2 * 16)),
+    )
+    assert model_cost == expected
+
+
+def test_block_cost_ignores_checkpointing() -> None:
+    """Recompute is hardware work, not model work: MFU counts the model."""
+    plain = TransformerBlock.Config(channels_in=16)
+    checkpointed = TransformerBlock.Config(channels_in=16, checkpoint=True)
+    assert plain.copy_tree().finalize().cost(
+        seq_len=8,
+    ) == checkpointed.copy_tree().finalize().cost(seq_len=8)
 
 
 if __name__ == "__main__":

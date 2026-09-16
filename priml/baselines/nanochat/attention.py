@@ -38,6 +38,7 @@ from priml.baselines.nanochat.ngram import (
     NgramSource,
     ngram_mix,
 )
+from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.custom_types import TensorModule, propagate_attr
@@ -386,6 +387,8 @@ class Flash3Attention:
         that reads its value from the library it is pinning would follow that
         library forward and silently stop pinning anything."""
 
+        cost = attention_kernel_cost
+
     def __init__(self, config: Config) -> None:
         if config.revision != hf_reference_revision():
             raise ValueError(
@@ -684,6 +687,8 @@ class Flash4Attention:
 
     class Config(Fig["Flash4Attention"]):
         """Select the native CuTe FA4 dispatcher."""
+
+        cost = attention_kernel_cost
 
     def __init__(self, config: Config) -> None:
         del config

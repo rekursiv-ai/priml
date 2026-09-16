@@ -121,7 +121,7 @@ def exp000() -> SudokuTrainLoop:
     # populations are not comparable.
     cfg.dataset.num_eval_puzzles = 2_000
 
-    cfg.metrics["accuracy"] = GridAccuracy.Config()
+    cfg.metrics_eval["accuracy"] = GridAccuracy.Config()
     cfg.max_steps = cfg.step.total_train_steps = 19_500
     cfg.num_steps_eval = 1_000
     cfg.runtime = SingleProcess.Config()

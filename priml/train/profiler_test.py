@@ -14,7 +14,7 @@ import time
 import pytest
 
 from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
-from priml.train.profiling import PhaseTimer, TorchProfiling
+from priml.train.profiler import PhaseTimer, TorchProfiler
 
 
 if TYPE_CHECKING:
@@ -255,7 +255,7 @@ class TestPhaseTimerHeartbeat:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: False)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
         timer = _phase_timer_config(heartbeat_interval_sec=0.02).make()
         with caplog.at_level(logging.INFO), timer.phase("slow"):
             time.sleep(0.07)
@@ -266,7 +266,7 @@ class TestPhaseTimerHeartbeat:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: True)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: True)
         timer = _phase_timer_config(heartbeat_interval_sec=0.02).make()
         with caplog.at_level(logging.INFO), timer.phase("slow"):
             time.sleep(0.07)
@@ -281,7 +281,7 @@ class TestPhaseTimerRankGating:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: False)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
         timer = _phase_timer_config(enabled=True).make()
         with caplog.at_level(logging.INFO), timer.phase("fwd"):
             pass
@@ -296,7 +296,7 @@ class TestPhaseTimerRankGating:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: True)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: True)
         timer = _phase_timer_config(enabled=True).make()
         with caplog.at_level(logging.INFO), timer.phase("fwd"):
             pass
@@ -311,10 +311,10 @@ class TestPhaseTimerRankGating:
     ):
         # ERROR-level logging is never gated: each rank's own failure must
         # reach its per-rank file even when the phase narrative is suppressed.
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: False)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
         timer = _phase_timer_config(enabled=True).make()
         with caplog.at_level(logging.INFO), timer.phase("fwd"):
-            logging.getLogger("priml.train.profiling").error("rank crash")
+            logging.getLogger("priml.train.profiler").error("rank crash")
         msgs = [r.message for r in caplog.records]
         assert any("rank crash" in m for m in msgs)
         assert not any("[phase] fwd started" in m for m in msgs)
@@ -334,7 +334,7 @@ class TestPhaseTimerTorchProfile:
             fake_torch.profiler.profile.return_value = profiler
             fake_torch.profiler.ProfilerActivity.CPU = "cpu"
             fake_torch.profiler.ProfilerActivity.CUDA = "cuda"
-            monkeypatch.setattr("priml.train.profiling.torch", fake_torch)
+            monkeypatch.setattr("priml.train.profiler.torch", fake_torch)
             timer = _phase_timer_config(
                 enabled=True,
                 torch_profile=True,
@@ -365,7 +365,7 @@ class TestPhaseTimerTorchProfile:
             fake_torch.profiler.profile.return_value = profiler
             fake_torch.profiler.ProfilerActivity.CPU = "cpu"
             fake_torch.profiler.ProfilerActivity.CUDA = "cuda"
-            monkeypatch.setattr("priml.train.profiling.torch", fake_torch)
+            monkeypatch.setattr("priml.train.profiler.torch", fake_torch)
             timer = _phase_timer_config(
                 enabled=True,
                 torch_profile=True,
@@ -412,7 +412,7 @@ class TestPhaseTimerLogSummaryRankGating:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: True)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: True)
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("work"):
             pass
@@ -420,7 +420,7 @@ class TestPhaseTimerLogSummaryRankGating:
         # clear them so the assertion sees only what ``log_summary`` itself
         # emits on a non-zero rank (must be nothing). Without this the captured
         # phase-enter lines (which contain "work") spuriously fail the check.
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: False)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
         with caplog.at_level(logging.INFO):
             caplog.clear()
             timer.log_summary()
@@ -432,7 +432,7 @@ class TestPhaseTimerLogSummaryRankGating:
         caplog: pytest.LogCaptureFixture,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.setattr("priml.train.profiling.is_rank_zero", lambda: True)
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: True)
         timer = _phase_timer_config(enabled=True).make()
         with timer.phase("work"):
             pass
@@ -454,7 +454,7 @@ class TestPhaseTimerCudaEvents:
         fake_torch = MagicMock()
         fake_torch.cuda.is_available.return_value = True
         fake_torch.cuda.Event.side_effect = [start, end]
-        monkeypatch.setattr("priml.train.profiling.torch", fake_torch)
+        monkeypatch.setattr("priml.train.profiler.torch", fake_torch)
         timer = _phase_timer_config(enabled=True, cuda_events=True).make()
 
         with timer.measure("forward_loss"), timer.measure_cuda("gpu"):
@@ -550,19 +550,19 @@ class TestPhaseTimerTotalCollision:
 
 class TestTorchProfilingWorkingDir:
     def test_owner_resolves_working_dir(self) -> None:
-        config = TorchProfiling.Config(torch_profile=False)
+        config = TorchProfiler.Config(torch_profile=False)
         config.base_dir = "/scratch/runs/study/run-1"
 
         assert config.make().working_dir == Path("/scratch/runs/study/run-1/profiling")
 
     def test_disabled_profiler_uses_opinionated_default(self) -> None:
-        profiling = TorchProfiling.Config(torch_profile=False).make()
+        profiler = TorchProfiler.Config(torch_profile=False).make()
 
-        assert profiling.working_dir == Path("/profiling")
+        assert profiler.working_dir == Path("/profiling")
 
     def test_explicit_path_working_dir_is_literal(self, tmp_path: Path) -> None:
         working_dir = tmp_path / "profiling"
-        config = TorchProfiling.Config(
+        config = TorchProfiler.Config(
             torch_profile=False,
             working_dir=working_dir,
         )
@@ -587,13 +587,13 @@ def test_phase_timer_working_dir_is_scoped_by_owner() -> None:
     )
 
 
-class TestTorchProfilingCleanup:
+class TestTorchProfilerCleanup:
     def test_completed_window_cleanup_does_not_stop_again(
         self,
         tmp_path: Path,
     ) -> None:
         """Cleanup must not stop an already-stopped profiler again."""
-        config = TorchProfiling.Config(
+        config = TorchProfiler.Config(
             torch_profile=False,
             torch_profile_start=5,
             torch_profile_end=6,
@@ -615,7 +615,7 @@ class TestTorchProfilingCleanup:
 
     def test_cleanup_stops_running_profiler(self) -> None:
         """T-032: cleanup must stop a profiler still running at training end."""
-        config = TorchProfiling.Config(
+        config = TorchProfiler.Config(
             torch_profile=True,
             torch_profile_start=5,
             torch_profile_end=10,

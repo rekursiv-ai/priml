@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ActivationMemoizationProtocol",
-    "CheckpointingProtocol",
+    "CheckpointerProtocol",
     "CudaEventProtocol",
     "EMAProtocol",
     "LossFn",
@@ -36,7 +36,7 @@ __all__ = [
     "OptimizerProtocol",
     "ParallelStrategyProtocol",
     "PhaseTimerProtocol",
-    "ProfileProtocol",
+    "ProfilerProtocol",
     "TrackerProtocol",
     "TrainStepOutput",
     "TrainStepProtocol",
@@ -249,7 +249,7 @@ class EMAProtocol(CheckpointableProtocol, Protocol):
         ...
 
 
-class CheckpointingProtocol(Protocol):
+class CheckpointerProtocol(Protocol):
     """The stepped checkpoint engine: save cadence, resume, overwrite-guard, retention.
 
     The training loop drives this per step against a *target* (the ``TrainLoop``,
@@ -277,6 +277,25 @@ class CheckpointingProtocol(Protocol):
         Args:
           target: Target.
           step: Step.
+
+        """
+        ...
+
+    def on_eval(
+        self,
+        target: CheckpointableProtocol,
+        step: int,
+        metrics: Mapping[str, float],
+    ) -> bool:
+        """Offer an eval result; return whether it triggered a save.
+
+        Args:
+          target: Target.
+          step: Step.
+          metrics: The eval's metrics by name.
+
+        Returns:
+          saved: Whether a checkpoint was written.
 
         """
         ...
@@ -379,7 +398,7 @@ class TrackerProtocol(Protocol):
         ...
 
 
-class ProfileProtocol(Protocol):
+class ProfilerProtocol(Protocol):
     """Protocol for profiling training performance.
 
     Handles torch profiler (CPU/CUDA) and memory profiling.
@@ -427,7 +446,7 @@ class CudaEventProtocol(Protocol):
 class PhaseTimerProtocol(Protocol):
     """The phase-timer surface the train loop and steps consume.
 
-    Satisfied by :class:`~priml.train.profiling.PhaseTimer`. Lets
+    Satisfied by :class:`~priml.train.profiler.PhaseTimer`. Lets
     ``TrainLoop.Config.phase_timer`` be a ``Makeable[PhaseTimerProtocol]`` --
     uniform with the other component fields (step/dataset/tracker/...) -- instead
     of pinning the concrete config type, so an alternative timer (or a test fake)

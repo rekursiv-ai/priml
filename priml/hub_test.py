@@ -4,12 +4,14 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import (
     MagicMock,
+    Mock,
     patch,
 )
 
+import json
 import logging
 import os
 import sys
@@ -17,11 +19,21 @@ import sys
 import pytest
 import torch
 
+from priml import hub
 from priml.hub import (
     get_cache_dir,
+    load_hf_checkpoint,
     load_transformers_model,
 )
 from priml.lib.userdirs import cache_dir
+
+
+if TYPE_CHECKING:
+    from safetensors.torch import save_file
+else:
+    from wrapt import lazy_import
+
+    save_file = lazy_import("safetensors.torch", "save_file")
 
 
 @contextmanager
@@ -249,6 +261,86 @@ def test_load_transformers_model_cache_miss_falls_back_online() -> None:
     second_kwargs = mock_auto_model.from_pretrained.call_args_list[1].kwargs
     assert first_kwargs["local_files_only"] is True
     assert second_kwargs["local_files_only"] is False
+
+
+def test_load_hf_checkpoint_reads_a_local_safetensors_directory(
+    tmp_path: Path,
+) -> None:
+    """A directory with ``config.json`` never touches transformers."""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "tiny", "hidden_size": 4}),
+    )
+    weights = {"a.weight": torch.arange(4.0), "b.bias": torch.zeros(2)}
+    save_file(weights, str(tmp_path / "model.safetensors"))
+
+    with patch("priml.hub.load_transformers_model") as mock_load:
+        hf_config, hf_sd = load_hf_checkpoint(tmp_path, dtype=None)
+
+    mock_load.assert_not_called()
+    assert hf_config == {"model_type": "tiny", "hidden_size": 4}
+    assert hf_sd.keys() == weights.keys()
+    for key, value in weights.items():
+        torch.testing.assert_close(hf_sd[key], value)
+
+
+def test_load_hf_checkpoint_reads_a_local_pytorch_bin(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "tiny"}))
+    torch.save({"w": torch.ones(3)}, tmp_path / "pytorch_model.bin")
+
+    hf_config, hf_sd = load_hf_checkpoint(str(tmp_path), dtype=torch.float16)
+
+    assert hf_config == {"model_type": "tiny"}
+    torch.testing.assert_close(hf_sd["w"], torch.ones(3))
+
+
+def test_load_hf_checkpoint_rejects_a_non_object_config(tmp_path: Path) -> None:
+    """A ``config.json`` that is not a JSON object is caller input, not a KeyError."""
+    (tmp_path / "config.json").write_text(json.dumps([1, 2]))
+    torch.save({}, tmp_path / "pytorch_model.bin")
+
+    with pytest.raises(TypeError, match="dict"):
+        load_hf_checkpoint(tmp_path, dtype=None)
+
+
+def test_load_hf_checkpoint_downloads_a_repo_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-directory goes through transformers and lands on CPU, detached."""
+    hf_model = MagicMock()
+    hf_model.config.to_dict.return_value = {"model_type": "tiny"}
+    hf_model.state_dict.return_value = {"w": torch.ones(2, requires_grad=True)}
+    load = Mock(return_value=hf_model)
+    monkeypatch.setattr(hub, "load_transformers_model", load)
+
+    hf_config, hf_sd = load_hf_checkpoint(
+        "org/tiny",
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+
+    load.assert_called_once_with(
+        "org/tiny",
+        "AutoModelForCausalLM",
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+    assert hf_config == {"model_type": "tiny"}
+    assert hf_sd["w"].requires_grad is False
+    assert hf_sd["w"].device.type == "cpu"
+
+
+def test_load_hf_checkpoint_defaults_to_no_remote_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hf_model = MagicMock()
+    hf_model.config.to_dict.return_value = {}
+    hf_model.state_dict.return_value = {}
+    load = Mock(return_value=hf_model)
+    monkeypatch.setattr(hub, "load_transformers_model", load)
+
+    load_hf_checkpoint("org/tiny", dtype=None)
+
+    assert load.call_args.kwargs["trust_remote_code"] is False
 
 
 if __name__ == "__main__":

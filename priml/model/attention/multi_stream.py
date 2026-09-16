@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Self, cast, override
 
 from configgle import Fig, Makeable
@@ -14,18 +14,19 @@ import torch
 
 from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import RoPE
+from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.self_attention import (
     AttentionProjections,
     _infer_head_dims,
     _validate_head_dims,
 )
 from priml.model.attention.window import causal_chunk_mask
+from priml.model.cost import Cost, cost
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
-    Resettable,
+    HasResetParameters,
     RotaryFactors,
     TensorModule,
 )
@@ -140,6 +141,83 @@ class MultiStreamAttention(nn.Module):
                     stream.channels_head = self.channels_head
                     stream.depth_index = self.depth_index
             return super().finalize()
+
+        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price one position: every stream's token, each attending jointly.
+
+            A position holds ``num_streams`` tokens. Each pays its own
+            projections, runs the kernel as one query row against the
+            concatenated keys -- so ``seq_len`` is the joint key length and the
+            kernel is counted once per stream -- and caches its own keys and
+            values. A shared norm runs on every stream's rows but is owned once.
+
+            Args:
+              seq_len: Keys a query reaches before any window.
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            if self.streams:
+                total = sum(
+                    (
+                        cost(s, seq_len=seq_len, num_tokens=num_tokens, **kwargs)
+                        for s in self.streams
+                    ),
+                    Cost(),
+                )
+            else:
+                template = AttentionProjections.Config(
+                    channels_in=self.channels_in,
+                    channels_out=self.channels_out,
+                    num_heads=self.num_heads,
+                    channels_head=self.channels_head,
+                    num_heads_kv=self.num_heads_kv,
+                    bias=self.bias,
+                )
+                total = self.num_streams * template.cost(
+                    seq_len=seq_len,
+                    num_tokens=num_tokens,
+                    **kwargs,
+                )
+                for rope in self.rope:
+                    if rope is None:
+                        continue
+                    total += cost(rope, num_tokens=num_tokens, **kwargs)
+                    total += rotation_cost(
+                        rope,
+                        channels_head=self.channels_head,
+                        heads=self.num_heads + self.num_heads_kv,
+                    )
+                if self.norm_qk is not None:
+                    # One norm config prices one head row; it runs on every q
+                    # and k head of every stream, while its parameters exist
+                    # once (shared) or twice.
+                    total += cost(self.norm_qk, num_tokens=num_tokens, **kwargs).tile(
+                        self.num_streams * (self.num_heads + self.num_heads_kv),
+                        copies=1 if self.share_qk_norm else 2,
+                    )
+                if self.norm_out is not None:
+                    total += cost(self.norm_out, num_tokens=num_tokens, **kwargs).tile(
+                        self.num_streams,
+                    )
+            kernel = cost(
+                self.attn_kernel,
+                seq_len=seq_len,
+                num_heads=self.num_heads,
+                channels_head=self.channels_head,
+                num_tokens=num_tokens,
+                **kwargs,
+            )
+            return replace(
+                total + self.num_streams * kernel,
+                bytes_state=self.num_streams
+                * 2
+                * self.num_heads_kv
+                * self.channels_head,
+            )
 
     def __init__(self, config: Config) -> None:
         _validate_head_dims(
@@ -263,14 +341,14 @@ class MultiStreamAttention(nn.Module):
             for m in modules:
                 m.reset_parameters()
         for r in self.ropes.values():
-            if isinstance(r, Resettable):
+            if isinstance(r, HasResetParameters):
                 r.reset_parameters()
         seen: TensorModule | None = None
         for norm in (self.norm_q, self.norm_k):
             if norm is not None and norm is not seen:
                 norm.reset_parameters()
                 seen = norm
-        if isinstance(self.norm_out, Resettable):
+        if isinstance(self.norm_out, HasResetParameters):
             self.norm_out.reset_parameters()
 
     def load_stream(self, index: int, *, source: AttentionProjections) -> None:

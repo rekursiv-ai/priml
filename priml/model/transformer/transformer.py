@@ -18,16 +18,19 @@ from typing import Self, cast, override
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
+from priml.model.cost import Cost, cost
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsInOutConfig,
     ChannelsOut,
     HasDepthIndex,
-    Resettable,
+    HasResetParameters,
     TensorModule,
     propagate_attr,
 )
 from priml.model.legacy_keys import absorb_legacy_keys
+from priml.model.sequential import Sequential
+from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
 
 
@@ -138,6 +141,20 @@ class Transformer(nn.Module):
                 )
             return finalized
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum the projections and every block of the finalized list.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            assert isinstance(self.block, list)
+            projections = [p for p in (self.proj_in, self.proj_out) if p is not None]
+            return sum((cost(c, **kwargs) for c in (*projections, *self.block)), Cost())
+
     def __init__(self, config: Config) -> None:
         if not isinstance(config.block, list):
             raise TypeError("A finalized Transformer config must contain a block list.")
@@ -164,7 +181,7 @@ class Transformer(nn.Module):
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
         for module in (self.proj_in, *self.blocks, self.proj_out):
-            if isinstance(module, Resettable):
+            if isinstance(module, HasResetParameters):
                 module.reset_parameters()
 
     def project_to_logits(self, hidden: Tensor, **kwargs: object) -> Tensor:
@@ -188,3 +205,20 @@ class Transformer(nn.Module):
         for block in self.blocks:
             x = cast(Tensor, block(x, **kwargs))
         return self.project_to_logits(x, **kwargs)
+
+
+def head_is_tied(config: Transformer.Config) -> bool:
+    """Return whether the head borrows the embedding, so HF ships no ``lm_head``.
+
+    Args:
+      config: A transformer config, finalized or not.
+
+    Returns:
+      tied: True when ``proj_out`` is, or ends in, a ``TiedLinear``.
+
+    """
+    head = config.proj_out
+    if isinstance(head, Sequential.Config):
+        elements = head.elements
+        head = elements[-1] if isinstance(elements, list) else elements
+    return isinstance(head, TiedLinear.Config)

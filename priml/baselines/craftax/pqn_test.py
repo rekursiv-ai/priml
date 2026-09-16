@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from torch import Tensor
+from typing import cast
+
+from torch import Tensor, nn
 
 import pytest
 import torch
 
 from priml.baselines.craftax.pqn import RecurrentQNetwork, epsilon_at
+from priml.model.cost import cost
+from priml.model.norm import BatchRenorm, LayerNorm
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def _model(**overrides: int) -> RecurrentQNetwork:
@@ -153,6 +158,65 @@ def test_gradients_reach_every_parameter() -> None:
 def test_a_degenerate_dimension_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match="positive"):
         _model(**{field: 0})
+
+
+def _stepped(model: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+    """Take one recurrent step from a carried state; reduce the Q-values."""
+    observation, hidden, cell = inputs
+    envs = observation.shape[0]
+    _, q_values = cast(RecurrentQNetwork, model).step(
+        (hidden, cell),
+        observation,
+        torch.zeros(envs, dtype=torch.int64),
+        torch.zeros(envs, dtype=torch.bool),
+    )
+    return q_values.sum()
+
+
+def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
+    """One token is one recurrent step of one worker.
+
+    Both carried tensors have gradients, as at every step after the first of
+    :meth:`sequence`, so torch counts the state-side gate matmul's full
+    adjoint: measured, ``nn.LSTMCell(4, 6)`` on three rows is 4320 FLOPs
+    with a differentiable state and 3456 without.
+    """
+    config = RecurrentQNetwork.Config()
+    config.observation_size = 12
+    config.num_actions = 5
+    config.channels_in = 16
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: (
+            torch.randn(3, 12, requires_grad=True),
+            torch.randn(3, 16, requires_grad=True),
+            torch.randn(3, 16, requires_grad=True),
+        ),
+        num_tokens=3,
+        run=_stepped,
+    )
+    gates = 4 * 16 * (16 + 5) + 4 * 16 * 16
+    weights = 12 * 16 + gates + 16 * 5
+    biases = 16 + 2 * 4 * 16 + 5
+    renorm = BatchRenorm.Config()
+    renorm.channels_in = 12
+    norms = cost(renorm, num_tokens=3) + cost(
+        LayerNorm.Config(16, elementwise_affine=True),
+        num_tokens=3,
+    )
+    assert analytical.params == weights + biases + norms.params
+    assert analytical.primal.flops.matmul == 2 * weights
+    # Beyond the norms: biases, the encoder's ReLU, the reset of both carried
+    # tensors, and thirteen operations per LSTM unit.
+    assert analytical.primal.flops.elementwise - norms.primal.flops.elementwise == (
+        biases + 16 + 2 * 16 + 13 * 16
+    )
+    assert analytical.adjoint.flops.elementwise - norms.adjoint.flops.elementwise == (
+        16 + 2 * 16 + 22 * 16
+    )
+    # The one-hot previous action is written, not computed.
+    assert analytical.primal.bytes.selection == 5
+    assert analytical.bytes_state == 2 * 16
 
 
 def test_exploration_starts_certain_and_ends_rare() -> None:

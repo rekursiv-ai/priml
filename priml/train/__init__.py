@@ -10,7 +10,7 @@ from priml.train.activation import (
     QuantizedModuleActivationStorage,
     SelectiveActivationCheckpointing,
 )
-from priml.train.checkpointing import Checkpointer
+from priml.train.checkpointer import Checkpointer
 from priml.train.custom_types import (
     ModelQuantizationProtocol,
     ParallelStrategyProtocol,
@@ -23,7 +23,7 @@ from priml.train.parallelism import (
     NoParallel,
     RecursiveSharded,
 )
-from priml.train.profiling import TorchProfiling
+from priml.train.profiler import TorchProfiler
 from priml.train.quantization import (
     Float8ModelQuantization,
     NoModelQuantization,
@@ -60,7 +60,7 @@ __all__ = [
     "SelectiveActivationCheckpointing",
     "TensorBoardTracker",
     "TensorParallel",
-    "TorchProfiling",
+    "TorchProfiler",
     "TrainLoop",
     "TrainStep",
     "WandbTracker",

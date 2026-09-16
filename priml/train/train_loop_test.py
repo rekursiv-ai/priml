@@ -35,13 +35,16 @@ from priml.lib.custom_json import ListCodec
 from priml.loss.custom_types import LossOutput
 from priml.math.seed import RngState, get_rng_state
 from priml.metrics.binary_accuracy import BinaryAccuracy
+from priml.metrics.topk import TopK
+from priml.metrics.utilization import Utilization
+from priml.model.cost import Cost, matmul_cost
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.timer import CheckpointableStepTimer
 from priml.train import train_loop
-from priml.train.checkpointing import Checkpointer, _agreed_across_ranks
+from priml.train.checkpointer import Checkpointer, _agreed_across_ranks
 from priml.train.custom_types import TrainStepOutput
 from priml.train.parallelism import NoParallel
-from priml.train.profiling import PhaseTimer, TorchProfiling
+from priml.train.profiler import PhaseTimer, TorchProfiler
 from priml.train.tracker import FileTracker
 from priml.train.train_loop import (
     EvalTimeLimitError,
@@ -444,16 +447,16 @@ def test_train_loop_basic():
             device="cpu",
         ),
     )
-    config.metrics = {}
+    config.metrics_eval = {}
     config.max_steps = 10
     config.num_steps_eval = 5
     config.seed = 42
 
     with tempfile.TemporaryDirectory() as tmp:
-        assert isinstance(config.checkpointing, Checkpointer.Config)
-        config.checkpointing.base_dir = "/"
-        config.checkpointing.working_dir = Path(tmp)
-        config.checkpointing.save_every = 5
+        assert isinstance(config.checkpointer, Checkpointer.Config)
+        config.checkpointer.base_dir = "/"
+        config.checkpointer.working_dir = Path(tmp)
+        config.checkpointer.save_every = 5
         loop = config.make()
         loop.train()
         assert loop.step.global_step == 10
@@ -488,9 +491,9 @@ def test_train_loop_with_max_epochs():
     config.seed = 42
 
     with tempfile.TemporaryDirectory() as tmp:
-        assert isinstance(config.checkpointing, Checkpointer.Config)
-        config.checkpointing.base_dir = "/"
-        config.checkpointing.working_dir = Path(tmp)
+        assert isinstance(config.checkpointer, Checkpointer.Config)
+        config.checkpointer.base_dir = "/"
+        config.checkpointer.working_dir = Path(tmp)
         loop = config.make()
         loop.train()
         assert loop.current_epoch == 2
@@ -608,10 +611,10 @@ def test_train_loop_comprehensive():
         step_config.parallelism = NoParallel.Config(device="cpu")
         step_config.compile = None
         config = TrainLoop.Config(step=step_config, dataset=_BinaryDataset.Config())
-        config.metrics = {"accuracy": BinaryAccuracy.Config()}
+        config.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         config.max_steps = 20
         config.num_steps_eval = 10
-        config.checkpointing = Checkpointer.Config(
+        config.checkpointer = Checkpointer.Config(
             base_dir="/",
             working_dir=checkpoint_dir,
             save_every=10,
@@ -644,18 +647,18 @@ def test_train_loop_comprehensive():
         step_config2.parallelism = NoParallel.Config(device="cpu")
         step_config2.compile = None
         config2 = TrainLoop.Config(step=step_config2, dataset=_BinaryDataset.Config())
-        config2.metrics = {"accuracy": BinaryAccuracy.Config()}
+        config2.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         config2.max_steps = 30
         config2.num_steps_eval = 10
-        config2.checkpointing = Checkpointer.Config(
+        config2.checkpointer = Checkpointer.Config(
             base_dir="/",
             working_dir=checkpoint_dir,
             save_every=10,
             keep_last_n=2,
         )
         config2.seed = 42
-        assert isinstance(config2.checkpointing, Checkpointer.Config)
-        config2.checkpointing.resume = True
+        assert isinstance(config2.checkpointer, Checkpointer.Config)
+        config2.checkpointer.resume = True
 
         loop2 = config2.make()
 
@@ -714,10 +717,10 @@ def test_eval_only_loads_checkpoint_and_skips_training(seeded_checkpoints: Path)
             step=_eval_only_step_config(),
             dataset=_BinaryDataset.Config(),
         )
-        eval_cfg.metrics = {"accuracy": BinaryAccuracy.Config()}
+        eval_cfg.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
         eval_cfg.max_steps = 20
         eval_cfg.num_steps_eval = float("inf")
-        eval_cfg.checkpointing = Checkpointer.Config(
+        eval_cfg.checkpointer = Checkpointer.Config(
             base_dir="/",
             working_dir=checkpoint_dir,
             save_every=10,
@@ -743,8 +746,8 @@ def test_train_raises_when_no_finite_stop_condition() -> None:
         step=_eval_only_step_config(),
         dataset=_BinaryDataset.Config(),
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = math.inf
     config.max_epochs = math.inf
     config.max_time = math.inf
@@ -760,11 +763,11 @@ def _resume_table_config(checkpoint_dir: Path):
         step=_eval_only_step_config(),
         dataset=_BinaryDataset.Config(),
     )
-    cfg.metrics = {}
+    cfg.metrics_eval = {}
     cfg.max_steps = 20
     cfg.num_steps_eval = float("inf")
     cfg.eval_every_epoch = False
-    cfg.checkpointing = Checkpointer.Config(
+    cfg.checkpointer = Checkpointer.Config(
         base_dir="/",
         working_dir=checkpoint_dir,
         save_every=10,
@@ -779,8 +782,8 @@ def seeded_checkpoints(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Train ONE 20-step run per session; every resume test copies its output."""
     source = tmp_path_factory.mktemp("seeded-checkpoints") / "ck"
     cfg = _resume_table_config(source)
-    assert isinstance(cfg.checkpointing, Checkpointer.Config)
-    cfg.checkpointing.resume = False
+    assert isinstance(cfg.checkpointer, Checkpointer.Config)
+    cfg.checkpointer.resume = False
     loop = cfg.make()
     loop.train()
     assert (source / "step_00000020.pt").exists()
@@ -797,9 +800,9 @@ def seeded_checkpoints(tmp_path_factory: pytest.TempPathFactory) -> Path:
     warm = source.parent / "warm"
     shutil.copytree(source, warm)
     warm_config = _resume_table_config(warm)
-    assert isinstance(warm_config.checkpointing, Checkpointer.Config)
-    warm_config.checkpointing.resume = True
-    warm_config.metrics = {"accuracy": BinaryAccuracy.Config()}
+    assert isinstance(warm_config.checkpointer, Checkpointer.Config)
+    warm_config.checkpointer.resume = True
+    warm_config.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
     warm_config.eval_only = True
     warm_config.make().train()
     return source
@@ -817,9 +820,9 @@ def test_resume_latest_uses_largest_when_checkpoints_exist(seeded_checkpoints: P
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = -1
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = -1
         loop = cfg.make()
         assert loop.step.global_step == 20  # Largest on disk.
 
@@ -833,9 +836,9 @@ def test_resume_latest_starts_fresh_when_no_checkpoints():
     with tempfile.TemporaryDirectory() as temp_dir:
         empty_dir = Path(temp_dir) / "nope"  # `never` written to.
         cfg = _resume_table_config(empty_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = -1
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = -1
         loop = cfg.make()
         assert loop.step.global_step == 0
 
@@ -847,12 +850,12 @@ def test_resume_explicit_step_loads_that_step(seeded_checkpoints: Path):
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = 10
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = 10
         # step_20 exists and a later save would re-mint it; that overwrite
         # guard is exercised elsewhere -- here we isolate the explicit load.
-        cfg.checkpointing.allow_checkpoint_overwrite = True
+        cfg.checkpointer.allow_checkpoint_overwrite = True
         loop = cfg.make()
         assert loop.step.global_step == 10
 
@@ -864,9 +867,9 @@ def test_resume_explicit_step_missing_raises(seeded_checkpoints: Path):
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Has 10, 20 -- not 999.
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = 999
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = 999
         with pytest.raises(RuntimeError, match="requested but not found"):
             cfg.make()
 
@@ -876,9 +879,9 @@ def test_resume_explicit_step_no_checkpoints_raises():
     with tempfile.TemporaryDirectory() as temp_dir:
         empty_dir = Path(temp_dir) / "nope"
         cfg = _resume_table_config(empty_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = 5
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = 5
         with pytest.raises(RuntimeError, match="requested but not found"):
             cfg.make()
 
@@ -888,9 +891,9 @@ def test_resume_false_starts_at_zero_into_empty_dir():
     with tempfile.TemporaryDirectory() as temp_dir:
         empty_dir = Path(temp_dir) / "fresh"
         cfg = _resume_table_config(empty_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = False
-        cfg.checkpointing.resume_step = 10  # Must be ignored.
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = False
+        cfg.checkpointer.resume_step = 10  # Must be ignored.
         loop = cfg.make()
         assert loop.step.global_step == 0
 
@@ -898,8 +901,8 @@ def test_resume_false_starts_at_zero_into_empty_dir():
 def test_resume_defaults_to_true():
     """The resume default is True (preemption-restart is the common case)."""
     finalized = TrainLoop.Config().finalize()
-    assert isinstance(finalized.checkpointing, Checkpointer.Config)
-    assert finalized.checkpointing.resume is True
+    assert isinstance(finalized.checkpointer, Checkpointer.Config)
+    assert finalized.checkpointer.resume is True
 
 
 def test_a_resume_with_nothing_left_to_do_says_so(
@@ -924,9 +927,9 @@ def test_a_resume_with_nothing_left_to_do_says_so(
         )  # Trains to max_steps and saves step_20.
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = -1
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = -1
         loop = cfg.make()
         assert loop.step.global_step == cfg.max_steps  # Nothing left to run.
         with caplog.at_level(logging.WARNING, logger=train_loop.__name__):
@@ -953,9 +956,9 @@ def test_fresh_run_refuses_to_overwrite_existing_checkpoints(seeded_checkpoints:
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = False
-        cfg.checkpointing.allow_checkpoint_overwrite = False
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = False
+        cfg.checkpointer.allow_checkpoint_overwrite = False
         with pytest.raises(RuntimeError, match="would overwrite existing"):
             cfg.make()
 
@@ -974,10 +977,10 @@ def test_rewind_resume_refuses_to_overwrite_newer_checkpoints(
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = 10  # Rewind: start_step=10, step_20 is newer.
-        cfg.checkpointing.allow_checkpoint_overwrite = False
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = 10  # Rewind: start_step=10, step_20 is newer.
+        cfg.checkpointer.allow_checkpoint_overwrite = False
         with pytest.raises(RuntimeError, match="would overwrite existing"):
             cfg.make()
 
@@ -989,10 +992,10 @@ def test_resume_latest_does_not_trip_overwrite_guard(seeded_checkpoints: Path):
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)  # Steps 10, 20.
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = True
-        cfg.checkpointing.resume_step = -1  # start_step=20; no save step in (20, 20].
-        cfg.checkpointing.allow_checkpoint_overwrite = False
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = True
+        cfg.checkpointer.resume_step = -1  # start_step=20; no save step in (20, 20].
+        cfg.checkpointer.allow_checkpoint_overwrite = False
         loop = cfg.make()
         assert loop.step.global_step == 20
 
@@ -1005,9 +1008,9 @@ def test_fresh_run_into_off_cadence_dir_is_allowed():
         (checkpoint_dir / "step_5.pt").write_bytes(b"x")  # Off the save cadence.
 
         cfg = _resume_table_config(checkpoint_dir)  # save_every=10 -> 10, 20.
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = False
-        cfg.checkpointing.allow_checkpoint_overwrite = False
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = False
+        cfg.checkpointer.allow_checkpoint_overwrite = False
         loop = cfg.make()  # 5 is never a save step -> no collision.
         assert loop.step.global_step == 0
 
@@ -1019,9 +1022,9 @@ def test_allow_checkpoint_overwrite_permits_clobber(seeded_checkpoints: Path):
         _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
 
         cfg = _resume_table_config(checkpoint_dir)
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume = False
-        cfg.checkpointing.allow_checkpoint_overwrite = True
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume = False
+        cfg.checkpointer.allow_checkpoint_overwrite = True
         loop = cfg.make()
         assert loop.step.global_step == 0
 
@@ -1029,8 +1032,8 @@ def test_allow_checkpoint_overwrite_permits_clobber(seeded_checkpoints: Path):
 def test_allow_checkpoint_overwrite_defaults_to_false():
     """allow_checkpoint_overwrite must default False -- clobbering is opt-in."""
     finalized = TrainLoop.Config().finalize()
-    assert isinstance(finalized.checkpointing, Checkpointer.Config)
-    assert finalized.checkpointing.allow_checkpoint_overwrite is False
+    assert isinstance(finalized.checkpointer, Checkpointer.Config)
+    assert finalized.checkpointer.allow_checkpoint_overwrite is False
 
 
 def test_eval_only_never_trips_overwrite_guard(seeded_checkpoints: Path):
@@ -1046,11 +1049,11 @@ def test_eval_only_never_trips_overwrite_guard(seeded_checkpoints: Path):
 
         cfg = _resume_table_config(checkpoint_dir)
         cfg.eval_only = True
-        assert isinstance(cfg.checkpointing, Checkpointer.Config)
-        cfg.checkpointing.resume_step = (
+        assert isinstance(cfg.checkpointer, Checkpointer.Config)
+        cfg.checkpointer.resume_step = (
             10  # Older than latest; would-collide for training.
         )
-        cfg.checkpointing.allow_checkpoint_overwrite = False
+        cfg.checkpointer.allow_checkpoint_overwrite = False
         loop = cfg.make()  # Must not raise.
         assert loop.step.global_step == 10
 
@@ -1095,8 +1098,8 @@ def _make_recording_train_loop_config(
         step_config.parallelism = NoParallel.Config(device="cpu")
         step_config.compile = None
         config.step = step_config
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 1
     config.num_steps_eval = math.inf
     config.base_dir = base_dir
@@ -1110,8 +1113,8 @@ def test_eval_weights_scalar_metrics_by_valid_count() -> None:
         step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 0
     config.num_steps_eval = math.inf
     config.eval_every_epoch = False
@@ -1127,8 +1130,8 @@ def test_eval_fails_when_exceeding_max_eval_time() -> None:
         step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 0
     config.num_steps_eval = math.inf
     config.eval_every_epoch = False
@@ -1146,8 +1149,8 @@ def test_eval_stop_on_time_limit_publishes_partial_results() -> None:
         step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 0
     config.num_steps_eval = math.inf
     config.eval_every_epoch = False
@@ -1165,8 +1168,8 @@ def test_eval_respects_generous_max_eval_time() -> None:
         step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 0
     config.num_steps_eval = math.inf
     config.eval_every_epoch = False
@@ -1183,8 +1186,8 @@ def test_eval_warmup_runs_configured_eval_batches() -> None:
         step=_WarmupStep.Config(),
         dataset=_WarmupDataset.Config(),
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.eval_warmup_batches = 1
     config.max_steps = 0
     config.num_steps_eval = math.inf
@@ -1297,7 +1300,7 @@ class TestFinalize:
         cfg = TrainLoop.Config()
         cfg.study_name = "my_project/"
         cfg.experiment_name = "exp000"
-        cfg.checkpointing = Checkpointer.Config()
+        cfg.checkpointer = Checkpointer.Config()
         cfg.phase_timer = PhaseTimer.Config(
             base_dir="/",
             working_dir="/explicit/child",
@@ -1306,8 +1309,8 @@ class TestFinalize:
         finalized = cfg.finalize()
 
         assert finalized.working_dir == Path("/opt/scratch/runs/my_project/exp000")
-        assert isinstance(finalized.checkpointing, Checkpointer.Config)
-        assert finalized.checkpointing.working_dir == Path(
+        assert isinstance(finalized.checkpointer, Checkpointer.Config)
+        assert finalized.checkpointer.working_dir == Path(
             "/opt/scratch/runs/my_project/exp000/checkpoints",
         )
         assert isinstance(finalized.phase_timer, PhaseTimer.Config)
@@ -1317,19 +1320,19 @@ class TestFinalize:
         cfg = TrainLoop.Config()
         cfg.study_name = "my_project/"
         cfg.experiment_name = "exp000"
-        cfg.profiling = TorchProfiling.Config(torch_profile=False)
+        cfg.profiler = TorchProfiler.Config(torch_profile=False)
 
         finalized = cfg.finalize()
 
-        assert isinstance(finalized.profiling, TorchProfiling.Config)
-        assert finalized.profiling.working_dir == Path(
+        assert isinstance(finalized.profiler, TorchProfiler.Config)
+        assert finalized.profiler.working_dir == Path(
             "/opt/scratch/runs/my_project/exp000/profiling",
         )
 
     def test_explicit_profiling_base_dir_wins(self, tmp_path: Path) -> None:
         working_dir = tmp_path / "profiling"
         cfg = TrainLoop.Config()
-        cfg.profiling = TorchProfiling.Config(
+        cfg.profiler = TorchProfiler.Config(
             torch_profile=False,
             base_dir=tmp_path,
             working_dir="/profiling",
@@ -1337,19 +1340,19 @@ class TestFinalize:
 
         finalized = cfg.finalize()
 
-        assert isinstance(finalized.profiling, TorchProfiling.Config)
-        assert finalized.profiling.working_dir == working_dir
+        assert isinstance(finalized.profiler, TorchProfiler.Config)
+        assert finalized.profiler.working_dir == working_dir
 
     def test_checkpoint_working_dir_is_scoped_below_run(self):
         cfg = TrainLoop.Config()
         cfg.study_name = "my_project/"
         cfg.experiment_name = "exp000"
-        cfg.checkpointing = Checkpointer.Config()
+        cfg.checkpointer = Checkpointer.Config()
 
         finalized = cfg.finalize()
 
-        assert isinstance(finalized.checkpointing, Checkpointer.Config)
-        assert finalized.checkpointing.working_dir == Path(
+        assert isinstance(finalized.checkpointer, Checkpointer.Config)
+        assert finalized.checkpointer.working_dir == Path(
             "/opt/scratch/runs/my_project/exp000/checkpoints",
         )
 
@@ -1362,12 +1365,12 @@ class TestFinalize:
         cfg.base_dir = scratch
         cfg.study_name = "my_project/"
         cfg.experiment_name = "exp000"
-        cfg.checkpointing = Checkpointer.Config()
+        cfg.checkpointer = Checkpointer.Config()
 
         finalized = cfg.finalize()
 
-        assert isinstance(finalized.checkpointing, Checkpointer.Config)
-        assert finalized.checkpointing.working_dir == (
+        assert isinstance(finalized.checkpointer, Checkpointer.Config)
+        assert finalized.checkpointer.working_dir == (
             scratch / "runs/my_project/exp000/checkpoints"
         )
 
@@ -1375,22 +1378,22 @@ class TestFinalize:
         cfg = TrainLoop.Config()
         cfg.study_name = "my_project/"
         cfg.experiment_name = "exp000"
-        cfg.checkpointing = Checkpointer.Config(
+        cfg.checkpointer = Checkpointer.Config(
             base_dir="/",
             working_dir="/custom/dir",
         )
         finalized = cfg.finalize()
-        assert isinstance(finalized.checkpointing, Checkpointer.Config)
-        assert finalized.checkpointing.working_dir == Path("/custom/dir")
+        assert isinstance(finalized.checkpointer, Checkpointer.Config)
+        assert finalized.checkpointer.working_dir == Path("/custom/dir")
 
     def test_checkpoint_working_dir_without_run_name(self):
         cfg = TrainLoop.Config()
-        cfg.checkpointing = Checkpointer.Config()
+        cfg.checkpointer = Checkpointer.Config()
 
         finalized = cfg.finalize()
 
-        assert isinstance(finalized.checkpointing, Checkpointer.Config)
-        assert finalized.checkpointing.working_dir == Path(
+        assert isinstance(finalized.checkpointer, Checkpointer.Config)
+        assert finalized.checkpointer.working_dir == Path(
             "/opt/scratch/runs/checkpoints",
         )
 
@@ -1402,7 +1405,7 @@ class TestFinalize:
         """
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _make_simple_loop_config(tmp)
-            cfg.checkpointing = None
+            cfg.checkpointer = None
             cfg.tracker = _RecordingTracker.Config()
             cfg.doc = "Hypothesis: X. Change: Y. Result: TODO."
             loop = cfg.make()
@@ -1414,7 +1417,7 @@ class TestFinalize:
         """No description means no notes call -- the tracker keeps its own."""
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _make_simple_loop_config(tmp)
-            cfg.checkpointing = None
+            cfg.checkpointer = None
             cfg.tracker = _RecordingTracker.Config()
             cfg.doc = ""
             loop = cfg.make()
@@ -1425,7 +1428,7 @@ class TestFinalize:
     def test_doc_without_tracker_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _make_simple_loop_config(tmp)
-            cfg.checkpointing = None
+            cfg.checkpointer = None
             cfg.tracker = None
             cfg.doc = "docstring note"
             loop = cfg.make()  # Must not raise.
@@ -1450,8 +1453,8 @@ def test_phase_timer_instruments_data_load_and_model_init():
         batch_size=4,
         device="cpu",
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 5
     config.num_steps_eval = math.inf
     config.seed = 42
@@ -1484,8 +1487,8 @@ def _make_step_logging_loop_config() -> TrainLoop.Config:
         batch_size=4,
         device="cpu",
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 2
     config.num_steps_eval = math.inf
     config.num_steps_log = 1  # Log every step.
@@ -1951,8 +1954,8 @@ def test_phase_timer_disabled_no_overhead():
         batch_size=4,
         device="cpu",
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_steps = 5
     config.num_steps_eval = math.inf
     config.seed = 42
@@ -1983,7 +1986,7 @@ def test_phase_timer_passed_to_step():
         batch_size=4,
         device="cpu",
     )
-    config.metrics = {}
+    config.metrics_eval = {}
     config.max_steps = 1
     config.num_steps_eval = math.inf
     config.seed = 42
@@ -2027,8 +2030,8 @@ def _make_simple_loop_config(
         step=step_config,
         dataset=dataset if dataset is not None else _simple_dummy_dataset(),
     )
-    config.metrics = {}
-    config.checkpointing = Checkpointer.Config(
+    config.metrics_eval = {}
+    config.checkpointer = Checkpointer.Config(
         base_dir="/",
         working_dir=Path(tmp),
         save_every=5,
@@ -2079,15 +2082,15 @@ def test_resume_does_not_eval_or_checkpoint_before_first_new_step(
         assert loop.step.global_step == 5
 
         maybe_save_steps: list[int] = []
-        checkpointing = loop.checkpointing
-        assert checkpointing is not None
-        original_maybe_save = checkpointing.maybe_save
+        checkpointer = loop.checkpointer
+        assert checkpointer is not None
+        original_maybe_save = checkpointer.maybe_save
 
         def spy_maybe_save(target: CheckpointableProtocol, step: int) -> bool:
             maybe_save_steps.append(step)
             return original_maybe_save(target, step)
 
-        monkeypatch.setattr(checkpointing, "maybe_save", spy_maybe_save)
+        monkeypatch.setattr(checkpointer, "maybe_save", spy_maybe_save)
         eval_steps: list[int] = []
         orig_eval = loop.eval
 
@@ -2112,16 +2115,16 @@ def test_resume_does_not_rewrite_completed_checkpoint_with_partial_accumulation(
         initial.max_steps = 1
         assert isinstance(initial.step, TrainStep.Config)
         initial.step.accumulate_grad_batches = 2
-        assert isinstance(initial.checkpointing, Checkpointer.Config)
-        initial.checkpointing.save_every = 1
+        assert isinstance(initial.checkpointer, Checkpointer.Config)
+        initial.checkpointer.save_every = 1
         initial.make().train()
 
         resumed = _make_simple_loop_config(tmp)
         resumed.max_steps = 2
         assert isinstance(resumed.step, TrainStep.Config)
         resumed.step.accumulate_grad_batches = 2
-        assert isinstance(resumed.checkpointing, Checkpointer.Config)
-        resumed.checkpointing.save_every = 1
+        assert isinstance(resumed.checkpointer, Checkpointer.Config)
+        resumed.checkpointer.save_every = 1
         resumed.make().train()
 
         checkpoint = _load_loop_checkpoint(Path(tmp) / "step_00000001.pt")
@@ -2146,8 +2149,8 @@ def test_cadence_checkpoint_replays_next_batch_and_rng(
         )
         reference_config.max_steps = 3
         reference_config.num_steps_eval = num_steps_eval
-        assert isinstance(reference_config.checkpointing, Checkpointer.Config)
-        reference_config.checkpointing.save_every = 1
+        assert isinstance(reference_config.checkpointer, Checkpointer.Config)
+        reference_config.checkpointer.save_every = 1
         reference = reference_config.make()
         reference.train()
         assert isinstance(reference.dataset, _ReplayDataset)
@@ -2160,8 +2163,8 @@ def test_cadence_checkpoint_replays_next_batch_and_rng(
         )
         resumed_config.max_steps = 3
         resumed_config.num_steps_eval = num_steps_eval
-        assert isinstance(resumed_config.checkpointing, Checkpointer.Config)
-        resumed_config.checkpointing.save_every = 1
+        assert isinstance(resumed_config.checkpointer, Checkpointer.Config)
+        resumed_config.checkpointer.save_every = 1
         checkpoint_dir = Path(tmp) / "resumed"
         checkpoint_dir.mkdir()
         shutil.copy2(
@@ -2236,8 +2239,8 @@ def test_eval_timeout_saves_and_restores_interrupted_prefix(
     config.max_steps = 2
     config.num_steps_eval = -1 if is_final else 1
     config.max_eval_time = 0.0
-    assert isinstance(config.checkpointing, Checkpointer.Config)
-    config.checkpointing.save_every = 1
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    config.checkpointer.save_every = 1
     loop = config.make()
 
     with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
@@ -2253,8 +2256,8 @@ def test_eval_timeout_saves_and_restores_interrupted_prefix(
     )
     resumed_config.max_steps = expected_step + 1
     resumed_config.num_steps_eval = math.inf
-    assert isinstance(resumed_config.checkpointing, Checkpointer.Config)
-    resumed_config.checkpointing.save_every = 1
+    assert isinstance(resumed_config.checkpointer, Checkpointer.Config)
+    resumed_config.checkpointer.save_every = 1
     resumed = resumed_config.make()
 
     assert resumed.step.global_step == expected_step
@@ -2272,8 +2275,8 @@ def test_cadence_eval_error_after_work_saves_interrupted_rng(
     )
     config.max_steps = 2
     config.num_steps_eval = 1
-    assert isinstance(config.checkpointing, Checkpointer.Config)
-    config.checkpointing.save_every = 1
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    config.checkpointer.save_every = 1
     loop = config.make()
     monkeypatch.setattr(loop, "eval", functools.partial(_raise_after_eval, loop.eval))
 
@@ -2298,15 +2301,15 @@ def test_eval_error_logs_immediate_checkpoint_failure(
     config.max_steps = 2
     config.num_steps_eval = -1 if is_final else 1
     config.max_eval_time = 0.0
-    assert isinstance(config.checkpointing, Checkpointer.Config)
-    config.checkpointing.save_every = 1
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    config.checkpointer.save_every = 1
     loop = config.make()
-    checkpointing = loop.checkpointing
-    assert checkpointing is not None
+    checkpointer = loop.checkpointer
+    assert checkpointer is not None
     if is_final:
-        monkeypatch.setattr(checkpointing, "save", _raise_checkpoint_write)
+        monkeypatch.setattr(checkpointer, "save", _raise_checkpoint_write)
     else:
-        monkeypatch.setattr(checkpointing, "maybe_save", _raise_checkpoint_write)
+        monkeypatch.setattr(checkpointer, "maybe_save", _raise_checkpoint_write)
 
     with (
         caplog.at_level(logging.ERROR, logger="priml.train.train_loop"),
@@ -2339,16 +2342,16 @@ def test_eval_error_recovery_skips_checkpoint_io_only_for_multirank(
     """Recovery remains local-only when a distributed group has multiple ranks."""
     config = _make_simple_loop_config(str(tmp_path))
     loop = config.make()
-    checkpointing = loop.checkpointing
-    assert checkpointing is not None
+    checkpointer = loop.checkpointer
+    assert checkpointer is not None
     calls: list[str] = []
     monkeypatch.setattr(
-        checkpointing,
+        checkpointer,
         "maybe_save",
         functools.partial(_record_maybe_save, calls),
     )
     monkeypatch.setattr(
-        checkpointing,
+        checkpointer,
         "save",
         functools.partial(_record_save, calls),
     )
@@ -2417,17 +2420,17 @@ def test_terminal_partial_accumulation_preserves_prior_checkpoint(
         initial.max_steps = 1
         assert isinstance(initial.step, TrainStep.Config)
         initial.step.accumulate_grad_batches = 2
-        assert isinstance(initial.checkpointing, Checkpointer.Config)
-        initial.checkpointing.save_every = 1
+        assert isinstance(initial.checkpointer, Checkpointer.Config)
+        initial.checkpointer.save_every = 1
         initial.make().train()
 
         resumed = _make_simple_loop_config(tmp)
         resumed.max_steps = 2
         assert isinstance(resumed.step, TrainStep.Config)
         resumed.step.accumulate_grad_batches = 2
-        assert isinstance(resumed.checkpointing, Checkpointer.Config)
-        resumed.checkpointing.save_every = 1
-        resumed.checkpointing.allow_checkpoint_overwrite = True
+        assert isinstance(resumed.checkpointer, Checkpointer.Config)
+        resumed.checkpointer.save_every = 1
+        resumed.checkpointer.allow_checkpoint_overwrite = True
         loop = resumed.make()
         monkeypatch.setattr(loop, "_time_limit_reached", lambda: loop.local_step >= 1)
 
@@ -2463,8 +2466,178 @@ def test_terminal_no_update_with_complete_accumulation_saves_prefix(
         assert isinstance(step, TrainStep)
         assert step.global_step == 1
         assert step.accumulation_steps == 0
-        assert loop.checkpointing is not None
-        assert loop.checkpointing.available_steps() == [1]
+        assert loop.checkpointer is not None
+        assert loop.checkpointer.available_steps() == [1]
+
+
+class _PricedLinearModel(nn.Module):
+    """A linear model whose config can price itself, so an MFU meter binds."""
+
+    class Config(Fig["_PricedLinearModel"], make_with_kwargs=True):
+        in_features: int = -1
+        out_features: int = -1
+
+        def cost(self, **kwargs: object) -> Cost:
+            del kwargs
+            return matmul_cost(
+                channels_in=self.in_features,
+                channels_out=self.out_features,
+                bias=True,
+            )
+
+    def __init__(self, in_features: int, out_features: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    @override
+    def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
+        """Forward pass."""
+        return self.linear(media)
+
+
+def test_a_train_metric_publishes_on_the_train_payload() -> None:
+    """A metric in ``metrics_train`` sees every step's batch and its wall time."""
+    # ``_make_simple_loop_config`` pins its model slot to ``_LinearModel``, so
+    # the priced model gets its own step; no checkpointer, so no directory.
+    step: TrainStep.Config[_PricedLinearModel.Config] = TrainStep.Config()
+    step.model = _PricedLinearModel.Config(in_features=2, out_features=2)
+    step.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
+    step.loss = PartialConfig(_cross_entropy)
+    step.parallelism = NoParallel.Config(device="cpu")
+    step.compile = None
+    config = TrainLoop.Config(step=step, dataset=_simple_dummy_dataset())
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.seed = 42
+    config.tracker = _RecordingTracker.Config()
+    mfu = Utilization.Config()
+    mfu.tokens_key = "media"
+    mfu.peak_flops_per_sec = 1e6
+    config.metrics_train = {"": mfu}
+    config.max_steps = 1
+    config.num_steps_eval = math.inf
+    loop = config.make()
+    tracker = cast(_RecordingTracker, loop.tracker)
+
+    loop.train()
+
+    train_log = next(
+        metrics
+        for metrics, _step in tracker.metrics_by_step
+        if "train/total_loss" in metrics
+    )
+    step_time = train_log["train/step_time"]
+    tokens_per_sec = train_log["train/tokens_per_sec"]
+    assert isinstance(step_time, float)
+    assert isinstance(tokens_per_sec, float)
+    # One [4, 2] media batch is 8 tokens; a 2x2 matmul is 24 FLOPs per token.
+    assert tokens_per_sec == pytest.approx(8 / step_time)
+    assert train_log["train/mfu"] == pytest.approx(24 * tokens_per_sec / 1e6)
+
+
+def test_train_metrics_accumulate_over_the_log_cadence() -> None:
+    """``update`` runs every step; ``compute``/``reset`` bracket each log."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.checkpointer = None
+        config.tracker = _RecordingTracker.Config()
+        config.metrics_train = {"acc": TopK.Config(k_values=[1])}
+        config.max_steps = 6
+        config.num_steps_log = 3
+        config.early_train_log_steps = 0
+        config.num_steps_eval = math.inf
+        loop = config.make()
+        metric = loop.metrics_train["acc"]
+        assert isinstance(metric, TopK)
+        totals_at_compute: list[int] = []
+        original_compute = metric.compute
+
+        def spy_compute() -> dict[str, float]:
+            totals_at_compute.append(metric.total)
+            return original_compute()
+
+        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+        tracker = cast(_RecordingTracker, loop.tracker)
+
+        loop.train()
+
+    # Step 1 always logs; then steps 3 and 6 on the cadence. Each ``compute``
+    # saw only the steps since the previous log, four rows apiece.
+    assert totals_at_compute == [4, 8, 12]
+    logs = [
+        m["train/acc_top1"] for m, _ in tracker.metrics_by_step if "train/acc_top1" in m
+    ]
+    assert len(logs) == 3
+    for accuracy in logs:
+        assert isinstance(accuracy, float)
+        assert 0.0 <= accuracy <= 1.0
+
+
+def test_train_metrics_compute_and_reset_on_every_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-zero ranks bracket the window too, only the log is rank-0.
+
+    A metric whose ``compute`` all-reduces would otherwise wait on rank 0
+    alone, and one that does not would accumulate across the whole run.
+    """
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: False)
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.checkpointer = None
+        config.tracker = _RecordingTracker.Config()
+        config.metrics_train = {"acc": TopK.Config(k_values=[1])}
+        config.max_steps = 6
+        config.num_steps_log = 3
+        config.early_train_log_steps = 0
+        config.num_steps_eval = math.inf
+        loop = config.make()
+        metric = loop.metrics_train["acc"]
+        assert isinstance(metric, TopK)
+        totals_at_compute: list[int] = []
+        original_compute = metric.compute
+
+        def spy_compute() -> dict[str, float]:
+            totals_at_compute.append(metric.total)
+            return original_compute()
+
+        metric.compute = spy_compute  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+        tracker = cast(_RecordingTracker, loop.tracker)
+
+        loop.train()
+
+    assert totals_at_compute == [4, 8, 12]
+    assert not any("train/acc_top1" in m for m, _ in tracker.metrics_by_step)
+
+
+def test_one_config_may_serve_both_phases() -> None:
+    """The same protocol, so one config can sit in either dict."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.checkpointer = None
+        shared = TopK.Config(k_values=[1])
+        config.metrics_train = {"acc": shared}
+        config.metrics_eval = {"acc": shared}
+        config.tracker = _RecordingTracker.Config()
+        config.max_steps = 1
+        loop = config.make()
+        assert isinstance(loop.metrics_train["acc"], TopK)
+        assert isinstance(loop.metrics_eval["acc"], TopK)
+        tracker = cast(_RecordingTracker, loop.tracker)
+        loop.train()
+    keys = {key for payload, _ in tracker.metrics_by_step for key in payload}
+    assert {"train/acc_top1", "eval/acc_top1"} <= keys
+
+
+def test_a_utilization_metric_binds_to_the_model_config_late() -> None:
+    """No loop wiring: ``LateBound`` hands the built loop to the metric."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.checkpointer = None
+        config.metrics_train = {"": Utilization.Config()}
+        config.max_steps = 0
+        with pytest.raises(TypeError, match=r"_LinearModel\.Config"):
+            config.make()
 
 
 def test_complete_update_still_writes_terminal_checkpoint_and_resumes() -> None:
@@ -2477,8 +2650,8 @@ def test_complete_update_still_writes_terminal_checkpoint_and_resumes() -> None:
         loop = config.make()
         loop.train()
 
-        assert loop.checkpointing is not None
-        assert loop.checkpointing.available_steps() == [1]
+        assert loop.checkpointer is not None
+        assert loop.checkpointer.available_steps() == [1]
         resumed = _make_simple_loop_config(tmp).make()
         assert resumed.step.global_step == 1
 
@@ -2489,7 +2662,7 @@ def test_train_step_logs_gpu_memory_to_tracker(
     """Train-step tracker logs process CUDA memory peaks when CUDA is available."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 1
         config.num_steps_eval = math.inf
@@ -2534,7 +2707,7 @@ def test_train_step_omits_gpu_memory_on_cpu_tracker() -> None:
     """CPU train-step tracker logs keep running without CUDA memory keys."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 1
         config.num_steps_eval = math.inf
@@ -2562,7 +2735,7 @@ def test_train_tracker_logging_respects_num_steps_log_cadence() -> None:
     """
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 12
         config.num_steps_eval = math.inf
@@ -2603,7 +2776,7 @@ def test_accumulation_logs_once_per_update_not_once_per_microbatch() -> None:
                 device="cpu",
             ),
         )
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         step_config = config.step
         assert isinstance(step_config, TrainStep.Config)
@@ -2646,7 +2819,7 @@ def test_accumulation_evaluates_once_per_update_not_once_per_microbatch(
                 device="cpu",
             ),
         )
-        config.checkpointing = None
+        config.checkpointer = None
         step_config = config.step
         assert isinstance(step_config, TrainStep.Config)
         step_config.accumulate_grad_batches = 4
@@ -2673,7 +2846,7 @@ def test_train_tracker_logs_every_startup_step_then_cadence() -> None:
     """Startup diagnostics log every early step before falling back to cadence."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 12
         config.num_steps_eval = math.inf
@@ -2697,7 +2870,7 @@ def test_epoch_eval_logs_eval_time_to_tracker() -> None:
     """Epoch-triggered eval logs duration with epoch eval metrics."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 100
         config.max_epochs = 1
@@ -2719,7 +2892,7 @@ def test_step_eval_logs_eval_time_to_tracker() -> None:
     """Step-triggered eval logs duration with eval metrics."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 2
         config.num_steps_eval = 1
@@ -2748,7 +2921,7 @@ def test_final_eval_uses_same_bounded_loader_as_cadence() -> None:
     """
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 2
         config.num_steps_eval = 1
@@ -2771,7 +2944,7 @@ def test_phase_timer_summary_logs_after_final_eval(
     events: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
-        config.checkpointing = None
+        config.checkpointer = None
         config.max_steps = 2
         # Finite cadence so a final eval runs (num_steps_eval=inf disables eval).
         config.num_steps_eval = 2
@@ -2810,7 +2983,7 @@ def test_phase_timer_publishes_interval_and_summary_metrics() -> None:
     """Enabled timing reaches tracker sinks during and after training."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
-        config.checkpointing = None
+        config.checkpointer = None
         config.max_steps = 2
         config.num_steps_log = 1
         config.num_steps_eval = 0
@@ -2844,7 +3017,7 @@ def test_eval_disabled_when_num_steps_eval_says_never(never: float) -> None:
     """
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
-        config.checkpointing = None
+        config.checkpointer = None
         config.max_steps = 2
         config.num_steps_eval = never
         config.eval_every_epoch = False
@@ -2867,7 +3040,7 @@ def test_num_steps_eval_minus_one_runs_the_final_eval_only() -> None:
     """
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp, dataset=_ScopedEvalDataset.Config())
-        config.checkpointing = None
+        config.checkpointer = None
         config.max_steps = 6
         config.num_steps_eval = -1
         config.eval_every_epoch = False
@@ -2888,7 +3061,7 @@ def test_final_post_training_eval_logs_to_tracker() -> None:
     """
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.tracker = _RecordingTracker.Config()
         config.max_steps = 2
         # Cadence wider than the run (2 % 5 != 0): no mid-run eval fires, so the
@@ -2918,7 +3091,7 @@ def test_cadence_eval_runs_once_per_optimizer_step(
     """Gradient accumulation cannot repeat eval at one optimizer step."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
-        config.checkpointing = None
+        config.checkpointer = None
         config.num_steps_eval = 5
         loop = config.make()
         assert isinstance(loop.step, TrainStep)
@@ -2961,21 +3134,94 @@ def test_no_post_loop_eval_when_no_training(monkeypatch: pytest.MonkeyPatch) -> 
         assert eval_count[0] == 0, "post-loop eval ran despite zero training"
 
 
+def test_eval_improvement_saves_off_cadence_checkpoint() -> None:
+    """An eval that improves ``best_metric`` saves at that (off-cadence) step."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.max_steps = 6
+        config.num_steps_eval = 3
+        assert isinstance(config.checkpointer, Checkpointer.Config)
+        config.checkpointer.save_every = 100
+        config.checkpointer.best_metric = "total_loss"
+        config.checkpointer.best_mode = "min"
+        loop = config.make()
+        loop.train()
+
+        assert loop.checkpointer is not None
+        # The first eval (step 3) sets the best; the end-of-run save adds 6.
+        assert loop.checkpointer.available_steps() == [3, 6]
+
+
+def test_final_eval_improvement_keeps_the_end_of_run_save() -> None:
+    """The final eval saves the best at the last step; the end-of-run save adds nothing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _make_simple_loop_config(tmp)
+        config.max_steps = 3
+        config.num_steps_eval = -1
+        assert isinstance(config.checkpointer, Checkpointer.Config)
+        config.checkpointer.save_every = 100
+        config.checkpointer.best_metric = "total_loss"
+        config.checkpointer.best_mode = "min"
+        writes: list[int] = []
+        loop = config.make()
+        assert isinstance(loop.checkpointer, Checkpointer)
+        original_write = loop.checkpointer._write
+
+        def spy_write(target: CheckpointableProtocol, step: int) -> None:
+            writes.append(step)
+            original_write(target, step)
+
+        loop.checkpointer._write = spy_write  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+        loop.train()
+
+        assert writes == [3]
+        assert loop.checkpointer.best_step == 3
+
+
+def test_eval_only_never_saves_a_best_checkpoint(seeded_checkpoints: Path) -> None:
+    """An eval-only run writes nothing, however good its score."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        checkpoint_dir = Path(temp_dir) / "checkpoints"
+        _seed_checkpoints(checkpoint_dir, seeded_checkpoints)
+        eval_cfg = TrainLoop.Config(
+            step=_eval_only_step_config(),
+            dataset=_BinaryDataset.Config(),
+        )
+        eval_cfg.metrics_eval = {"accuracy": BinaryAccuracy.Config()}
+        eval_cfg.max_steps = 20
+        eval_cfg.num_steps_eval = math.inf
+        eval_cfg.checkpointer = Checkpointer.Config(
+            base_dir="/",
+            working_dir=checkpoint_dir,
+            save_every=10,
+        )
+        eval_cfg.checkpointer.best_metric = "accuracy_accuracy"
+        eval_cfg.eval_only = True
+        before = {p: p.stat().st_mtime_ns for p in checkpoint_dir.iterdir()}
+
+        loop = eval_cfg.make()
+        loop.train()
+
+        assert loop.checkpointer is not None
+        assert loop.checkpointer.available_steps() == [10, 20]
+        assert {p: p.stat().st_mtime_ns for p in checkpoint_dir.iterdir()} == before
+
+
 def test_retention_keeps_last_n_after_training() -> None:
     """Retention prunes to keep_last_n across cadence + forced end-of-run saves."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.max_steps = 25
         config.num_steps_eval = math.inf
-        assert isinstance(config.checkpointing, Checkpointer.Config)
-        config.checkpointing.save_every = 5
-        config.checkpointing.keep_last_n = 2
+        assert isinstance(config.checkpointer, Checkpointer.Config)
+        config.checkpointer.save_every = 5
+        config.checkpointer.keep_last_n = 2
         loop = config.make()
         loop.train()
 
-        assert loop.checkpointing is not None
+        assert loop.checkpointer is not None
         # Saves land at 5,10,15,20,25; retention keeps only the newest two.
-        assert loop.checkpointing.available_steps() == [20, 25]
+        assert loop.checkpointer.available_steps() == [20, 25]
 
 
 def _make_accum_epoch_loop_config(
@@ -3003,8 +3249,8 @@ def _make_accum_epoch_loop_config(
         batch_size=batch_size,
         device="cpu",
     )
-    config.metrics = {}
-    config.checkpointing = None
+    config.metrics_eval = {}
+    config.checkpointer = None
     config.max_epochs = 1
     config.max_steps = 1000
     config.num_steps_eval = math.inf
@@ -3112,7 +3358,7 @@ def test_dataset_receives_the_step_before_the_first_batch() -> None:
         step=_WarmupStep.Config(),
         dataset=_BindingDataset.Config(),
     )
-    config.checkpointing = None
+    config.checkpointer = None
     config.max_steps = 1
     loop = config.make()
     dataset = loop.dataset
@@ -3131,7 +3377,7 @@ def test_dataset_without_the_hook_is_left_alone() -> None:
         step=_WarmupStep.Config(),
         dataset=_WarmupDataset.Config(),
     )
-    config.checkpointing = None
+    config.checkpointer = None
     config.max_steps = 0
     assert config.make().dataset is not None
 
@@ -3182,9 +3428,9 @@ def _make_extras_publish_config() -> TrainLoop.Config:
         step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
-    config.metrics = {"": _ExtrasMetric.Config()}
+    config.metrics_eval = {"": _ExtrasMetric.Config()}
     config.tracker = _RecordingTracker.Config()
-    config.checkpointing = None
+    config.checkpointer = None
     config.max_steps = 0
     config.num_steps_eval = math.inf
     config.eval_every_epoch = False
@@ -3257,7 +3503,7 @@ def test_load_state_dict_can_skip_rng_restore(
         step=_WeightedEvalStep.Config(),
         dataset=_WeightedEvalDataset.Config(),
     )
-    config.checkpointing = None
+    config.checkpointer = None
     config.max_steps = 0
     config.restore_rng_state = False
     loop = config.make()
@@ -3552,7 +3798,8 @@ def _assert_state_dict_equal(
     """Compare the managed model, optimizer, data, and RNG checkpoint state."""
     torch.testing.assert_close(actual["step"], expected["step"], rtol=0, atol=0)
     assert actual["dataset"] == expected["dataset"]
-    assert actual["metrics"] == expected["metrics"]
+    assert actual["metrics_train"] == expected["metrics_train"]
+    assert actual["metrics_eval"] == expected["metrics_eval"]
     assert "rng" in actual
     assert "rng" in expected
     _assert_rng_state_equal(actual["rng"], expected=expected["rng"])

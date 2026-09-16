@@ -10,6 +10,7 @@ from configgle.testing import assert_pprint_golden
 import torch
 
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Cost, cost
 from priml.model.init import mup_output
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -18,6 +19,7 @@ from priml.model.special import Skip
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -177,6 +179,37 @@ def test_sequential_reset():
         ],
     ).make()
     m.reset_parameters()
+
+
+def test_sequential_cost_sums_every_expanded_element() -> None:
+    """``repeat`` is expanded by finalize, so each copy is priced once."""
+    config = Sequential.Config(
+        channels_in=4,
+        elements=[RMSNorm.Config(elementwise_affine=True), Linear.Config(4, 4)],
+        repeat=3,
+    )
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized.elements, list)
+    assert len(finalized.elements) == 6
+    expected = sum((cost(element) for element in finalized.elements), Cost())
+    assert finalized.cost() == expected
+    assert expected.params == 3 * (4 + 4 * 4)
+    assert expected.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_sequential_cost_matches_torch() -> None:
+    """Every repeated projection is one matmul torch counts; the norms are free."""
+    config = Sequential.Config(
+        channels_in=4,
+        elements=[RMSNorm.Config(elementwise_affine=True), Linear.Config(4, 4)],
+        repeat=2,
+    )
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(3, 4, requires_grad=True),
+        num_tokens=3,
+    )
+    assert analytical.primal.flops.matmul == 2 * 2 * 4 * 4
 
 
 if __name__ == "__main__":

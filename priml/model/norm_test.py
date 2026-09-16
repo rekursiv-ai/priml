@@ -6,12 +6,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final, cast
 
+from configgle import Fig, Makeable
 from configgle.testing import assert_pprint_golden
 from torch import nn
 
 import pytest
 import torch
 
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.model.norm import (
     BatchNorm,
     BatchNorm2d,
@@ -21,8 +23,14 @@ from priml.model.norm import (
     GroupNorm2d,
     LayerNorm,
     RMSNorm,
+    SameWidthConfig,
 )
 from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.cost import assert_cost_matches_torch
+
+
+def _config_id(value: object) -> str | None:
+    return type(value).__qualname__ if isinstance(value, Fig) else None
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -291,6 +299,31 @@ def test_an_invalid_setting_is_refused(field: str, value: float) -> None:
         _norm(**{field: value})
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        RMSNorm.Config(),
+        CenteredRMSNorm.Config(),
+        LayerNorm.Config(),
+        BatchNorm.Config(),
+        BatchRenorm.Config(),
+        BatchNorm2d.Config(),
+        GroupNorm2d.Config(),
+        GroupNorm.Config(),
+    ],
+    ids=_config_id,
+)
+def test_norm_infers_the_missing_width_and_rejects_unequal_widths(
+    config: SameWidthConfig,
+) -> None:
+    """One finalize serves every norm: either width fills the other, both must agree."""
+    config.channels_out = 8
+    assert config.copy_tree().finalize().channels_in == 8
+    config.channels_in = 4
+    with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
+        config.make()
+
+
 def test_rms_norm_config_pprint() -> None:
     config = RMSNorm.Config(4)
     assert_pprint_golden(
@@ -440,6 +473,143 @@ def test_group_norm_bfb() -> None:
         build_module=lambda: GroupNorm.Config(4, num_groups=2).make(),
         build_input=lambda: torch.randn(2, 3, 4),
         seed=0,
+    )
+
+
+def _rows() -> torch.Tensor:
+    return torch.randn(2, 3, 8, requires_grad=True)
+
+
+def _image() -> torch.Tensor:
+    return torch.randn(2, 8, 3, 1, requires_grad=True)
+
+
+@pytest.mark.parametrize(
+    ("config", "params", "primal", "adjoint"),
+    [
+        (RMSNorm.Config(8), 0, (2 * 8 + 3, 7), (4 * 8 + 4, 7)),
+        (RMSNorm.Config(8, elementwise_affine=True), 8, (3 * 8 + 3, 7), (6 * 8 + 4, 7)),
+        (CenteredRMSNorm.Config(8), 8, (4 * 8 + 3, 7), (6 * 8 + 4, 7)),
+        (
+            LayerNorm.Config(8, elementwise_affine=True),
+            16,
+            (3 * 8 + 4 + 16, 14),
+            (5 * 8 + 2 + 16, 14),
+        ),
+        (
+            BatchNorm.Config(8, elementwise_affine=True),
+            16,
+            (7 * 8 + 16 + 8 * 8, 0),
+            (7 * 8 + 16, 0),
+        ),
+        (
+            BatchRenorm.Config(channels_in=8),
+            16,
+            (7 * 8 + 16 + 18 * 8, 0),
+            (7 * 8 + 16 + 5 * 8, 0),
+        ),
+        (
+            GroupNorm.Config(8, elementwise_affine=True),
+            16,
+            (7 * 8 + 16, 0),
+            (7 * 8 + 16, 0),
+        ),
+        (
+            BatchNorm2d.Config(8, elementwise_affine=True),
+            16,
+            (7 * 8 + 16 + 8 * 8, 0),
+            (7 * 8 + 16, 0),
+        ),
+        (
+            GroupNorm2d.Config(8, elementwise_affine=True),
+            16,
+            (7 * 8 + 16, 0),
+            (7 * 8 + 16, 0),
+        ),
+    ],
+    ids=_config_id,
+)
+def test_norm_cost_splits_elementwise_from_row_sums(
+    config: Makeable[nn.Module],
+    params: int,
+    primal: tuple[float, float],
+    adjoint: tuple[float, float],
+) -> None:
+    """A norm is elementwise work plus sums over its group; never a matmul.
+
+    Priced at one token: a group spanning a whole row is ``groups_per_token =
+    1`` and holds two ``R - 1`` sums each way, while a group of one element
+    (the batch norms at one token, eight groups of one) sums nothing. The
+    expected pairs are ``(elementwise, reduction)``.
+    """
+    model_cost = cost(config.copy_tree().finalize())
+    assert model_cost == Cost(
+        primal=Compute(
+            flops=Flops(elementwise=primal[0], reduction=primal[1]),
+            bytes=Bytes(elementwise=8 + params),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=adjoint[0], reduction=adjoint[1]),
+            bytes=Bytes(elementwise=8 + params),
+        ),
+        params=params,
+        params_active=params,
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "build_input"),
+    [
+        (RMSNorm.Config(8, elementwise_affine=True), _rows),
+        (CenteredRMSNorm.Config(8), _rows),
+        (LayerNorm.Config(8, elementwise_affine=True), _rows),
+        (BatchNorm.Config(8, elementwise_affine=True), _rows),
+        (BatchRenorm.Config(channels_in=8), _rows),
+        (GroupNorm.Config(8, elementwise_affine=True), _rows),
+        (BatchNorm2d.Config(8, elementwise_affine=True), _image),
+        (GroupNorm2d.Config(8, elementwise_affine=True), _image),
+    ],
+    ids=_config_id,
+)
+def test_norm_cost_is_matmul_free(
+    config: Makeable[nn.Module],
+    build_input: Callable[[], torch.Tensor],
+) -> None:
+    """Torch counts no matmul FLOPs in any norm, and the parameters agree."""
+    model_cost = assert_cost_matches_torch(
+        config,
+        build_input=build_input,
+        num_tokens=6,
+    )
+    assert model_cost.training.flops.matmul == 0
+    assert model_cost.training.flops.elementwise > 0
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        RMSNorm.Config(8, elementwise_affine=True),
+        CenteredRMSNorm.Config(8),
+        LayerNorm.Config(8, elementwise_affine=True),
+        GroupNorm.Config(8, elementwise_affine=True),
+    ],
+    ids=_config_id,
+)
+def test_affine_gradients_reduce_over_the_rows(config: Makeable[nn.Module]) -> None:
+    """Every owned parameter's gradient is summed over ``num_tokens`` rows.
+
+    Forward work per row is unchanged (the ``1 + weight`` fold aside); backward
+    gains exactly ``(N - 1) / N`` additions per parameter, the primitive's rule.
+    """
+    finalized = config.copy_tree().finalize()
+    one = cost(finalized, num_tokens=1)
+    four = cost(finalized, num_tokens=4)
+    assert four.params == one.params > 0
+    fold = one.primal.flops.elementwise - four.primal.flops.elementwise
+    assert fold in (0, 8 * (1 - 1 / 4))
+    assert four.adjoint.flops.elementwise == one.adjoint.flops.elementwise
+    assert four.adjoint.flops.reduction - one.adjoint.flops.reduction == (
+        one.params * 3 / 4
     )
 
 

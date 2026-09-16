@@ -295,6 +295,31 @@ def host_agnostic_numerics() -> Generator[None]:
         yield
 
 
+@contextmanager
+def portable_half_precision() -> Generator[None]:
+    """Run bf16/f16 CPU arithmetic on torch's native kernels, not oneDNN's.
+
+    oneDNN refuses the half-precision BACKWARD of a convolution on a CPU
+    whose ISA it does not cover (``DNNL does not support bf16/f16 backward on
+    the platform with avx2_vnni_2``), so a parity test comparing gradients
+    fails on that host and passes on an AVX-512 one. Torch's fallback kernels
+    run everywhere; the two sides of a comparison both take them here, so
+    the test measures the model and not the host.
+
+    Yields:
+      item: Nothing; used as a context manager for computation.
+
+    """
+    # Only the enable bit: ``torch.backends.mkldnn.flags`` also rewrites the
+    # oneDNN TF32 setting, which warns on every CPU-only build and the suite
+    # runs with warnings as errors.
+    (enabled,) = torch.backends.mkldnn.set_flags(False)[:1]
+    try:
+        yield
+    finally:
+        torch.backends.mkldnn.set_flags(enabled)
+
+
 def bfb_devices() -> list[str]:
     """Return the sole device supported by portable BFB goldens.
 

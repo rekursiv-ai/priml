@@ -30,6 +30,14 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+)
 from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
 from priml.model.init import truncated_normal
@@ -101,6 +109,41 @@ class FactoredPositions(nn.Module):
         The embedding-rescale trick initializes tables at ``1/sqrt(C)`` and
         multiplies by ``sqrt(C)`` at runtime, so this must match whatever the
         token embedding uses or the channels enter at different magnitudes."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price three table gathers, two adds, and a scale per cell.
+
+            Each table is a gather and a scatter-add back, as
+            :class:`~priml.model.embedding.Embedding` prices one; the adds
+            pass gradient through, so only the scale pulls one back. Counted
+            per cell as though evaluated per batch row: the module evaluates
+            its ``[grid_len, C]`` sum once per forward and broadcasts it, so
+            for a batch this is an upper bound.
+
+            Args:
+              **kwargs: The open message bus; nothing here reads it.
+
+            Returns:
+              cost: Per-cell cost of this module.
+
+            """
+            del kwargs
+            rows, cols = self.grid_shape
+            box_rows, box_cols = self.box_shape
+            width = self.channels_out
+            tables = (rows, cols, (rows // box_rows) * (cols // box_cols))
+            gathers = sum(
+                (
+                    cost(Embedding.Config(channels_in=n, channels_out=width))
+                    for n in tables
+                ),
+                Cost(),
+            )
+            return gathers + elementwise_cost(
+                primal=3 * width,
+                adjoint=width,
+                channels=width,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -180,6 +223,28 @@ class PredictionFeedback(nn.Module):
         embed_scale: float = -1.0
         """Runtime multiplier; -1 inherits the model's (see
         :class:`FactoredPositions.Config.embed_scale`)."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price one table gather and a scale per cell.
+
+            Priced with a grid stashed, as every step under adaptive
+            computation time is; a forward without one contributes nothing.
+
+            Args:
+              **kwargs: The open message bus; nothing here reads it.
+
+            Returns:
+              cost: Per-cell cost of this module.
+
+            """
+            del kwargs
+            width = self.channels_out
+            table = Embedding.Config(channels_in=self.channels_in, channels_out=width)
+            return cost(table) + elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -275,6 +340,36 @@ class GridEmbedding(nn.Module):
                     channel.channels_in = self.channels_in
             return super().finalize()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Price the token table, its scale, and every channel plus one add each.
+
+            The stream before an add feeds a channel only for its dtype, so
+            the add's adjoint is a pass-through with no accumulation and only
+            its primal is counted.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every channel.
+
+            Returns:
+              cost: Per-cell cost of this module.
+
+            """
+            width = self.channels_out
+            total = cost(_token_table(self), **kwargs) + elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+            )
+            add = Cost(
+                primal=Compute(
+                    flops=Flops(elementwise=width),
+                    bytes=Bytes(elementwise=width),
+                ),
+            )
+            for channel in self.channels:
+                total += cost(channel, **kwargs) + add
+            return total
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         if config.channels_in <= 0:
@@ -289,10 +384,7 @@ class GridEmbedding(nn.Module):
             )
         self.config = config
         self.embed_scale: float = config.channels_out**0.5
-        self.embed_tokens = Embedding.Config(
-            channels_out=config.channels_out,
-            channels_in=config.channels_in,
-        ).make()
+        self.embed_tokens = _token_table(config).make()
         truncated_normal(
             self.embed_tokens.weight,
             std=1.0 / self.embed_scale,
@@ -323,6 +415,14 @@ class GridEmbedding(nn.Module):
             if contribution.numel():
                 embeddings = embeddings + contribution
         return embeddings
+
+
+def _token_table(config: GridEmbedding.Config) -> Embedding.Config:
+    """Configure the grid-token table at the model's width and vocabulary."""
+    return Embedding.Config(
+        channels_in=config.channels_in,
+        channels_out=config.channels_out,
+    )
 
 
 # The initializer's std is divided by ``sqrt(channels_out)`` because the caller

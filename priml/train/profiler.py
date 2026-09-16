@@ -49,7 +49,7 @@ class ProfilerSchedule:
     """Steps actually recorded, once per run."""
 
 
-class TorchProfiling:
+class TorchProfiler:
     """Torch profiler for CPU/CUDA profiling and memory profiling.
 
     Combines torch.profiler (CPU/CUDA timeline) and CUDA memory profiling.
@@ -60,8 +60,8 @@ class TorchProfiling:
     - File collisions (ranks overwriting same files)
     """
 
-    class Config(Fig["TorchProfiling"]):
-        """TorchProfiling configuration."""
+    class Config(Fig["TorchProfiler"]):
+        """TorchProfiler configuration."""
 
         torch_profile: bool = True
         """Run the torch profiler over the ``torch_profile_*`` step window."""
@@ -546,7 +546,7 @@ class PhaseTimer:
         # The summary narrative mirrors phase()/heartbeat: rank 0 only. On an
         # N-GPU run every rank would otherwise emit an identical timing table,
         # drowning the rank-0 narrative. The torch profiler only runs on rank 0
-        # (TorchProfiling.ranks defaults to [0]), so non-rank-0 has no profiler
+        # (TorchProfiler.ranks defaults to [0]), so non-rank-0 has no profiler
         # to stop and ``self._profiler`` is None there.
         narrate = is_rank_zero()
         if self._profiler:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+
+from torch import Tensor, nn
+
 import pytest
 import torch
 
@@ -10,6 +14,8 @@ from priml.baselines.sudoku.prefix import (
     RegisterTokens,
     SparsePuzzleEmbedding,
 )
+from priml.model.cost import cost
+from priml.testing.cost import assert_cost_matches_torch
 
 
 def _sparse(**overrides: object) -> SparsePuzzleEmbedding:
@@ -113,6 +119,67 @@ def test_stack_concatenates_in_order() -> None:
 def test_channels_must_be_inherited() -> None:
     with pytest.raises(ValueError, match="must be positive"):
         RegisterTokens.Config().make()
+
+
+def test_register_tokens_cost_is_one_scale_over_the_owned_tokens() -> None:
+    """Per puzzle: every register token scaled; the expand is a view."""
+    analytical = assert_cost_matches_torch(
+        RegisterTokens.Config(num_tokens=2, channels_out=8),
+        build_input=lambda: torch.arange(4, dtype=torch.int32),
+        num_tokens=4,
+        run=_run_prefix,
+    )
+    assert analytical.params == analytical.params_active == 2 * 8
+    assert analytical.primal.flops.elementwise == 2 * 8
+    assert analytical.adjoint.flops.elementwise == 2 * 8
+    # The gradient is summed back over the four puzzles sharing the tokens.
+    assert analytical.adjoint.flops.reduction == 2 * 8 * 3 / 4
+    frozen = cost(RegisterTokens.Config(num_tokens=2, channels_out=8, learnable=False))
+    assert frozen.params == frozen.params_active == 0
+
+
+def test_sparse_embedding_cost_owns_no_parameters() -> None:
+    """The table is a buffer: one row gathered, padded, scaled; nothing to own.
+
+    The scatter back into the master table is the sparse optimizer's, which
+    the counting policy excludes, so the adjoint holds only the scale.
+    """
+    config = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
+    config.channels_out = 8
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.arange(4, dtype=torch.int32),
+        num_tokens=4,
+        run=_run_prefix,
+    )
+    assert analytical.params == analytical.params_active == 0
+    assert analytical.primal.bytes.selection == 8
+    assert analytical.adjoint.flops.selection == 0
+    assert analytical.primal.flops.elementwise == 2 * 8
+    assert analytical.adjoint.flops.elementwise == 2 * 8
+
+
+def test_stack_cost_sums_its_parts() -> None:
+    puzzle = SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4)
+    puzzle.channels_out = 8
+    registers = RegisterTokens.Config(num_tokens=3)
+    registers.channels_out = 8
+    config = PrefixStack.Config()
+    config.parts = [puzzle, registers]
+    analytical = assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.arange(4, dtype=torch.int32),
+        num_tokens=4,
+        run=_run_prefix,
+    )
+    assert analytical == cost(puzzle, num_tokens=4) + cost(registers, num_tokens=4)
+
+
+def _run_prefix(module: nn.Module, identifiers: Tensor) -> Tensor:
+    """Call a prefix module as the model does: the row count plus the batch's ids."""
+    out = cast(object, module(identifiers.shape[0], puzzle_identifiers=identifiers))
+    assert isinstance(out, Tensor)
+    return out
 
 
 if __name__ == "__main__":

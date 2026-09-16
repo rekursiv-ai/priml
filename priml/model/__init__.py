@@ -24,7 +24,7 @@ from priml.model.init import (
 )
 from priml.model.linear import EnsembleLinear, Linear
 from priml.model.mlpmixer import MLPMixerBlock
-from priml.model.moe import MoE, Router
+from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
 from priml.model.norm import (
     BatchNorm,
     BatchNorm2d,
@@ -80,7 +80,9 @@ __all__ = [
     "SdpaNaive",
     "SelfAttention",
     "Sequential",
+    "SigmoidRouter",
     "Skip",
+    "SoftmaxRouter",
     "SwiGLU",
     "SwiGLUReluSquared",
     "Transformer",

@@ -13,6 +13,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 import torch
 
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Cost, cost, elementwise_cost
 from priml.model.custom_types import (
     ChannelsHead,
     ChannelsIn,
@@ -122,6 +123,28 @@ class TransformerBlock(nn.Module):
                 self.ffn.shard = "colwise"
             return super().finalize()
 
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum the four sublayers; ``checkpoint`` is recompute, not model work.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            residual_adds = elementwise_cost(
+                primal=2 * self.channels_in,
+                adjoint=2 * self.channels_in,
+            )
+            return sum(
+                (
+                    cost(child, **kwargs)
+                    for child in (self.attn, self.ffn, self.norm1, self.norm2)
+                ),
+                residual_adds,
+            )
+
     def __init__(self, config: Config) -> None:
         if (
             -1 not in (config.channels_in, config.channels_out)
@@ -160,8 +183,7 @@ class TransformerBlock(nn.Module):
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
         for m in (self.attn, self.ffn, self.norm1, self.norm2):
-            if hasattr(m, "reset_parameters"):
-                m.reset_parameters()
+            m.reset_parameters()
 
     @override
     def forward(

@@ -20,9 +20,11 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.cost import Compute, Cost, Flops, cost
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import mmdit
@@ -35,6 +37,7 @@ from priml.testing.bfb import (
     move_to_device,
     randomize_parameters,
 )
+from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -484,6 +487,107 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
             0,
             source=_native_stream_config().make(),
         )
+
+
+def test_adaln_zero_cost_is_one_biased_matmul() -> None:
+    config = AdaLNZero.Config(channels_in=8, cond_dim=4)
+    finalized = config.copy_tree().finalize()
+    proj = cost(finalized.proj, seq_len=8)
+    assert proj.params == 4 * 6 * 8 + 6 * 8
+    assert finalized.cost(seq_len=8) == proj + Cost(
+        primal=Compute(flops=Flops(elementwise=5 * 4)),
+        adjoint=Compute(flops=Flops(elementwise=5 * 4)),
+    )
+    assert proj.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_stream_cost_sums_its_branches_and_leaves_attention_to_the_joint() -> None:
+    """The joint attention builds ``attn``, so the stream does not price it."""
+    config = mmdit.MMDiTStream.Config(channels_in=8)
+    config.ffn = SwiGLU.Config(channels_hidden=12)
+    config.adaln = AdaLNZero.Config(cond_dim=4)
+    config.norm1 = RMSNorm.Config(elementwise_affine=True)
+    finalized = config.copy_tree().finalize()
+    children = (finalized.norm1, finalized.norm2, finalized.ffn, finalized.adaln)
+    expected = sum((cost(child, seq_len=8) for child in children), Cost()) + Cost(
+        primal=Compute(flops=Flops(elementwise=10 * 8)),
+        adjoint=Compute(flops=Flops(elementwise=10 * 8)),
+    )
+    assert finalized.cost(seq_len=8) == expected
+    assert expected.params == sum(p.numel() for p in config.make().parameters())
+    assert expected.params == 8 + (8 * 24 + 12 * 8) + (4 * 48 + 48)
+
+
+def test_block_cost_with_implicit_streams_is_the_hand_formula() -> None:
+    """Joint scores over ``seq_len`` keys; every stream pays its own branches."""
+    config = _cfg(channels_in=8, num_streams=2, num_heads=2, cond_dim=4)
+    config.ffn = SwiGLU.Config(channels_hidden=12)
+    seq_len = 16
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=seq_len)
+    attn = cost(finalized.attn, seq_len=seq_len)
+    ffn = cost(finalized.ffn, seq_len=seq_len)
+    adaln = cost(
+        AdaLNZero.Config(channels_in=8, cond_dim=4).finalize(),
+        seq_len=seq_len,
+    )
+    assert attn.params == 2 * ((2 + 2 * 2) * 8 * 4 + 2 * 4 * 8)
+    assert ffn.params == 8 * 24 + 12 * 8
+    assert adaln.params == 4 * 48 + 48
+    assert model_cost.primal.flops.matmul == (
+        attn.primal.flops.matmul
+        + 2 * (ffn.primal.flops.matmul + adaln.primal.flops.matmul)
+    )
+    assert model_cost.adjoint.flops.matmul == (
+        attn.adjoint.flops.matmul
+        + 2 * (ffn.adjoint.flops.matmul + adaln.adjoint.flops.matmul)
+    )
+    assert model_cost.params == attn.params + 2 * (ffn.params + adaln.params)
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+    # Two streams per position, each caching its own K and V.
+    assert model_cost.bytes_state == 2 * 2 * 2 * 4
+
+
+def test_block_cost_with_explicit_streams_prices_each_once() -> None:
+    config = _cfg(channels_in=8, num_heads=2)
+    config.streams = [mmdit.MMDiTStream.Config(), mmdit.MMDiTStream.Config()]
+    config.streams[0].adaln = AdaLNZero.Config(cond_dim=4)
+    config.streams[0].ffn = SwiGLU.Config(channels_hidden=12)
+    config.streams[1].ffn = SwiGLU.Config(channels_hidden=16)
+    config.streams[1].attn.norm_qk = RMSNorm.Config(elementwise_affine=True)
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(seq_len=8)
+    expected = cost(finalized.attn, seq_len=8) + sum(
+        (cost(stream, seq_len=8) for stream in finalized.streams),
+        Cost(),
+    )
+    assert model_cost == expected
+    assert model_cost.params == sum(p.numel() for p in config.make().parameters())
+
+
+def test_block_cost_matches_torch_without_conditioning() -> None:
+    """Two streams of four tokens: joint attention plus each stream's FFN.
+
+    Unconditioned, because adaLN's projection runs once per SEQUENCE while
+    ``cost`` prices it per token (its documented upper bound); measured, the
+    per-token figure overstates a four-token sequence by exactly ``3/4`` of
+    the projection.
+    """
+    config = _cfg(channels_in=8, num_streams=2, num_heads=2)
+    config.attn = MultiStreamAttention.Config(
+        num_heads=2,
+        attn_kernel=SdpaNaive.Config(),
+    )
+    config.ffn = SwiGLU.Config(channels_hidden=12)
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: tuple(
+            torch.randn(1, 4, 8, requires_grad=True) for _ in range(2)
+        ),
+        num_tokens=4,
+        bus={"seq_len": 8},
+        run=lambda module, xs: _run_mmdit(module, list(xs)).sum(),
+    )
 
 
 def _run_adaln(module: nn.Module, conditioning: Tensor) -> Tensor:

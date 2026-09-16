@@ -53,7 +53,7 @@ from torch import Tensor, nn
 import torch
 
 from priml import hub
-from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, decode
+from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
@@ -64,14 +64,13 @@ from priml.model.custom_types import (
 )
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
-from priml.model.moe import MoE, Router
+from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
 from priml.model.norm import RMSNorm
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.qwen3 import _tied
-from priml.model.transformer.transformer import Transformer
+from priml.model.transformer.transformer import Transformer, head_is_tied
 
 
 _VALID_MODEL_TYPES = frozenset({"kimi_k2", "deepseek_v3"})
@@ -200,7 +199,7 @@ class KimiK2(Transformer):
                     causal=True,
                 ),
                 ffn=MoE.Config(
-                    router=Router.Config(num_experts=384),
+                    router=SigmoidRouter.Config(num_experts=384),
                     expert=SwiGLU.Config(
                         init_weight=partial(nn.init.normal_, std=0.02),
                         init_weight_out=partial(nn.init.normal_, std=0.02),
@@ -300,16 +299,26 @@ class KimiK2(Transformer):
             attn.norm_q_lora = norm.copy_tree()
             attn.norm_kv_lora = norm.copy_tree()
 
-            router = Router.Config()
-            router.top_k = IntCodec.coerce(config.get("num_experts_per_tok"), 1)
-            router.scoring_func = scoring_func
-            router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
-            router.routed_scaling_factor = FloatCodec.coerce(
-                config.get("routed_scaling_factor"),
-                1.0,
+            router = (
+                SigmoidRouter.Config()
+                if scoring_func == "sigmoid"
+                else SoftmaxRouter.Config()
             )
-            router.n_group = IntCodec.coerce(config.get("n_group"), 1)
-            router.topk_group = IntCodec.coerce(config.get("topk_group"), 1)
+            router.top_k = IntCodec.coerce(
+                config.get("num_experts_per_tok", 1),
+                default=None,
+            )
+            router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
+            if isinstance(router, SigmoidRouter.Config):
+                router.routed_scaling_factor = FloatCodec.coerce(
+                    config.get("routed_scaling_factor", 1.0),
+                    default=None,
+                )
+                router.n_group = IntCodec.coerce(config.get("n_group", 1), default=None)
+                router.topk_group = IntCodec.coerce(
+                    config.get("topk_group", 1),
+                    default=None,
+                )
 
             moe = MoE.Config(
                 expert=SwiGLU.Config(
@@ -435,27 +444,12 @@ class KimiK2(Transformer):
         Returns:
           model: KimiK2 instance with weights loaded.
 
-        Returns:
-          model: The KimiK2.
-
         """
-        path = Path(path_or_repo)
-        if path.is_dir() and (path / "config.json").exists():
-            hf_config = DictCodec.coerce(
-                decode("object", (path / "config.json").read_text()),
-            )
-            hf_sd = hub.load_local_state_dict(path)
-        else:
-            hf_model = hub.load_transformers_model(
-                str(path_or_repo),
-                "AutoModelForCausalLM",
-                dtype=dtype,
-                trust_remote_code=True,
-            )
-            hf_config = DictCodec.coerce(hf_model.config.to_dict())
-            hf_sd = {k: v.detach().cpu() for k, v in hf_model.state_dict().items()}
-            del hf_model
-
+        hf_config, hf_sd = hub.load_hf_checkpoint(
+            path_or_repo,
+            dtype=dtype,
+            trust_remote_code=True,
+        )
         config = cls.Config.from_hf(hf_config).finalize()
         model = config.make()
         model.load_state_dict(remap_hf_state_dict(hf_sd, config), strict=True)
@@ -498,7 +492,7 @@ def remap_hf_state_dict(
         "proj_in.weight": hf_sd["model.embed_tokens.weight"],
         "proj_out.0.weight": hf_sd["model.norm.weight"],
     }
-    if not _tied(config):
+    if not head_is_tied(config):
         out["proj_out.1.weight"] = hf_sd["lm_head.weight"]
 
     for i in range(config.num_layers):
@@ -533,11 +527,11 @@ def remap_hf_state_dict(
             out[f"{bf}.router.gate.weight"] = hf_sd[f"{p}.mlp.gate.weight"]
             moe = _moe_of(config, i)
             router = moe.router
-            assert isinstance(router, Router.Config)
-            out[f"{bf}.router.e_score_correction_bias"] = hf_sd.get(
-                f"{p}.mlp.gate.e_score_correction_bias",
-                torch.zeros(router.num_experts),
-            )
+            if isinstance(router, SigmoidRouter.Config) and router.use_correction_bias:
+                out[f"{bf}.router.e_score_correction_bias"] = hf_sd.get(
+                    f"{p}.mlp.gate.e_score_correction_bias",
+                    torch.zeros(router.num_experts),
+                )
             for e in range(router.num_experts):
                 ep, be = f"{p}.mlp.experts.{e}", f"{bf}.experts.{e}"
                 gate = hf_sd[f"{ep}.gate_proj.weight"]
@@ -562,6 +556,3 @@ def remap_hf_state_dict(
                         out,
                     )
     return out
-
-
-# -- HF weight remap ---------------------------------------------------

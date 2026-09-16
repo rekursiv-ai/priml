@@ -11,6 +11,7 @@ from configgle import Fig
 from torch import Tensor, nn
 
 from priml.math.pixel import patchify, unpatchify
+from priml.model.cost import Cost
 
 
 class Patchify(nn.Module):
@@ -54,6 +55,19 @@ class Patchify(nn.Module):
                     f"channels_in={self.channels_in} * prod(patch_size)={factor}.",
                 )
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price nothing: a reshape owns no weights and multiplies nothing.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return Cost()
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -105,6 +119,19 @@ class Unpatchify(nn.Module):
                     f"channels_out={self.channels_out} * prod(patch_size)={factor}.",
                 )
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price nothing: a reshape owns no weights and multiplies nothing.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del kwargs
+            return Cost()
 
     def __init__(self, config: Config) -> None:
         super().__init__()

@@ -30,6 +30,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.cost import Bytes, Compute, Cost, cost, elementwise_cost
 from priml.model.custom_types import ChannelsOut
 from priml.model.init import truncated_normal
 
@@ -63,6 +64,32 @@ class RegisterTokens(nn.Module):
 
         Must match the grid embedding's, or the prefix enters the sequence at
         a different magnitude than the tokens it precedes."""
+
+        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price one scale over every register token, per puzzle.
+
+            The expand is a view. A frozen basis owns nothing, so its gradient
+            reduction over puzzles vanishes with its parameters.
+
+            Args:
+              num_tokens: Puzzles sharing the tokens; divides their gradient
+                reduction. The bus's row count, not this config's own
+                ``num_tokens``, which is how many tokens it prepends.
+              **kwargs: The open message bus; nothing here reads it.
+
+            Returns:
+              cost: Per-puzzle cost of this module.
+
+            """
+            del kwargs
+            width = self.num_tokens * self.channels_out
+            return elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+                params=width if self.learnable else 0,
+                num_tokens=num_tokens,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -147,6 +174,27 @@ class SparsePuzzleEmbedding(nn.Module):
 
         dtype: torch.dtype | None = None
         """Cast applied to the forward output; ``None`` keeps the table dtype."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Price one row gathered and the prefix scaled, per puzzle; nothing owned.
+
+            The table is a buffer, so there are no parameters, and the scatter
+            back into it is the sparse optimizer's work, which the counting
+            policy excludes: the adjoint holds only the scale. The pad is a
+            zero fill and the reshape a view.
+
+            Args:
+              **kwargs: The open message bus; nothing here reads it.
+
+            Returns:
+              cost: Per-puzzle cost of this module.
+
+            """
+            del kwargs
+            width = self.num_tokens * self.channels_out
+            return Cost(
+                primal=Compute(bytes=Bytes(selection=self.channels_out)),
+            ) + elementwise_cost(primal=width, adjoint=width, channels=width)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -273,6 +321,18 @@ class PrefixStack(nn.Module):
                 if isinstance(part, ChannelsOut) and part.channels_out == -1:
                     part.channels_out = self.channels_out
             return super().finalize()
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Sum every part; the concatenation is a copy, not arithmetic.
+
+            Args:
+              **kwargs: The open message bus, forwarded to every part.
+
+            Returns:
+              cost: Per-puzzle cost of this module.
+
+            """
+            return sum((cost(part, **kwargs) for part in self.parts), Cost())
 
     def __init__(self, config: Config) -> None:
         super().__init__()

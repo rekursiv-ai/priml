@@ -21,17 +21,26 @@ References:
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Self, override
 
-from configgle import Fig, Makeable, PartialConfig
+from configgle import Fig, Makeable
 from torch import Tensor, nn
 from torch.nn import functional
 
 import torch
 
+from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.window import layer_window, window_mask
+from priml.model.cost import (
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -75,6 +84,39 @@ def sdpa_attention(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
         is_causal=mask is None,
     )
     return out.movedim(-3, -2)
+
+
+class SdpaCausal:
+    """:func:`sdpa_attention` as a slot value that prices itself.
+
+    Holds no state. It exists so the default kernel is a config with a
+    ``cost`` -- the standard two products, bound the way every other priml
+    kernel binds them -- rather than a bare function the owner would have to
+    price on its behalf.
+    """
+
+    class Config(Fig["SdpaCausal"]):
+        cost = attention_kernel_cost
+
+    def __init__(self, config: Config) -> None:
+        del config
+
+    def __call__(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        window: int = -1,
+        **kwargs: object,
+    ) -> Tensor:
+        """Attend over the last ``window`` positions, causally.
+
+        Remaining keyword arguments belong to the open model message bus; this
+        kernel reads only the window it understands.
+        """
+        del kwargs
+        return sdpa_attention(q, k, v, window=window)
 
 
 class ValueGatedAttention(nn.Module):
@@ -134,9 +176,7 @@ class ValueGatedAttention(nn.Module):
         init_weight: InitFn = unit_fan_in_uniform
         """Initialization for the query, key, and value projections."""
 
-        kernel: Makeable[AttentionKernel] = field(
-            default_factory=lambda: PartialConfig(sdpa_attention),
-        )
+        kernel: Makeable[AttentionKernel] = field(default_factory=SdpaCausal.Config)
         """The attention kernel itself, injected rather than selected.
 
         A kernel is a different VALUE in this slot, not a mode flag: the
@@ -206,6 +246,67 @@ class ValueGatedAttention(nn.Module):
                 protocol=ChannelsIn,
             )
             return super().finalize()
+
+        def cost(self, *, seq_len: int, **kwargs: object) -> Cost:
+            """Price four projections, the gate, two norms, and the kernel.
+
+            The kernel is handed this layer's window on the bus, so it counts
+            its two products over ``min(window, seq_len)`` keys; the rotation
+            and the gate are counted here, since no child owns them.
+
+            Args:
+              seq_len: Keys a query reaches before any window.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            inner = self.num_heads * self.channels_head
+            total = 3 * matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=inner,
+                bias=False,
+            )
+            total += matmul_cost(
+                channels_in=inner,
+                channels_out=self.channels_in,
+                bias=False,
+            )
+            if self.gated:
+                total += matmul_cost(
+                    channels_in=self.gate_channels,
+                    channels_out=self.num_heads,
+                    bias=False,
+                )
+            # One norm config prices one head row; it runs on every q and k
+            # head, while its parameters exist twice (norm_q and norm_k).
+            total += cost(self.norm_qk, **kwargs).tile(2 * self.num_heads, copies=2)
+            total += cost(
+                self.kernel,
+                seq_len=seq_len,
+                num_heads=self.num_heads,
+                channels_head=self.channels_head,
+                window=self.window if self.window > 0 else -1,
+                **kwargs,
+            )
+            # Queries and keys are each rotated: two products and an add per channel.
+            total += elementwise_cost(primal=6 * inner, adjoint=6 * inner)
+            if self.gated:
+                # ``2 * sigmoid`` per head, then a scale-and-add over the values;
+                # the adjoint also reduces the gate's gradient over each head's
+                # channels and accumulates into the input slice.
+                total += elementwise_cost(
+                    primal=5 * self.num_heads + 2 * inner,
+                    adjoint=5 * self.num_heads + 2 * inner + self.channels_in,
+                ) + Cost(
+                    adjoint=Compute(
+                        flops=Flops(
+                            reduction=self.num_heads * (self.channels_head - 1),
+                        ),
+                    ),
+                )
+            return replace(total, bytes_state=2 * inner)
 
     def __init__(self, config: Config) -> None:
         if (

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Self, override
 
 from configgle import Fig, Makeable, Makes
@@ -13,13 +13,14 @@ import torch
 
 from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import RoPE
+from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
+from priml.model.cost import Cost, cost, matmul_cost
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
-    Resettable,
+    HasResetParameters,
     RotaryFactors,
     TensorModule,
 )
@@ -119,6 +120,57 @@ class AttentionProjections(nn.Module):
             ):
                 self.norm_out.channels_in = self.num_heads * self.channels_head
             return super().finalize()
+
+        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Price the projections, norms, and rotary; no kernel here.
+
+            ``seq_len`` is named though unread: it is the message every
+            attention on this bus requires, so a subclass adding the kernel
+            can narrow nothing and the override stays compatible.
+
+            Args:
+              seq_len: Keys a query reaches before any window.
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            del seq_len
+            inner = self.num_heads * self.channels_head
+            qkv = (self.num_heads + 2 * self.num_heads_kv) * matmul_cost(
+                channels_in=self.channels_in,
+                channels_out=self.channels_head,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            )
+            out = matmul_cost(
+                channels_in=inner,
+                channels_out=self.channels_in,
+                bias=self.bias,
+                num_tokens=num_tokens,
+            )
+            total = qkv + out
+            if self.norm_qk is not None:
+                # One norm config prices one head row; it runs on every q and k
+                # head, while its parameters exist once (shared) or twice.
+                head_rows = self.num_heads + self.num_heads_kv
+                total += cost(
+                    self.norm_qk,
+                    num_tokens=num_tokens * head_rows,
+                    **kwargs,
+                ).tile(head_rows, copies=1 if self.share_qk_norm else 2)
+            if self.norm_out is not None:
+                total += cost(self.norm_out, num_tokens=num_tokens, **kwargs)
+            if self.rope is not None:
+                total += cost(self.rope, num_tokens=num_tokens, **kwargs)
+                total += rotation_cost(
+                    self.rope,
+                    channels_head=self.channels_head,
+                    heads=self.num_heads + self.num_heads_kv,
+                )
+            return total
 
     def __init__(self, config: Config) -> None:
         _validate_head_dims(
@@ -233,7 +285,7 @@ class AttentionProjections(nn.Module):
                 seen = norm
         if self.norm_out is not None:
             self.norm_out.reset_parameters()
-        if isinstance(self.rope, Resettable):
+        if isinstance(self.rope, HasResetParameters):
             self.rope.reset_parameters()
 
 
@@ -298,6 +350,32 @@ class SelfAttention(AttentionProjections):
 
         attn_kernel: Makeable[AttentionKernel] = field(default_factory=SdpaFused.Config)
         """Attention kernel shared by all heads."""
+
+        @override
+        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+            """Add the kernel's products and the per-token KV cache.
+
+            Args:
+              seq_len: Keys a query reaches before any window.
+              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              **kwargs: The open message bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            kernel = cost(
+                self.attn_kernel,
+                seq_len=seq_len,
+                num_heads=self.num_heads,
+                channels_head=self.channels_head,
+                num_tokens=num_tokens,
+                **kwargs,
+            )
+            return replace(
+                super().cost(seq_len=seq_len, num_tokens=num_tokens, **kwargs) + kernel,
+                bytes_state=2 * self.num_heads_kv * self.channels_head,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)

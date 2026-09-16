@@ -21,11 +21,7 @@ from configgle import Makes
 from priml import hub
 from priml.model.custom_types import DeepModelConfig
 from priml.model.transformer.mmdit_graft import MMDiTGraft
-from priml.model.transformer.qwen3 import (
-    Qwen3,
-    _load_hf_checkpoint,
-    remap_hf_state_dict,
-)
+from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 
 
 if TYPE_CHECKING:
@@ -63,7 +59,7 @@ class Qwen3MMDiTGraft(MMDiTGraft):
           model: Graft with strictly loaded language weights and fresh modalities.
 
         """
-        hf_config, hf_state = _load_hf_checkpoint(path_or_repo, dtype=dtype)
+        hf_config, hf_state = hub.load_hf_checkpoint(path_or_repo, dtype=dtype)
         graft = config.copy_tree() if config is not None else cls.Config()
         graft.backbone = Qwen3.Config.from_hf(hf_config)
         graft.finalize()
