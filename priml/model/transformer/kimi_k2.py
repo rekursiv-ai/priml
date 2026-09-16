@@ -58,7 +58,7 @@ from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
 from priml.model.custom_types import (
     ChannelsIn,
-    TensorBlockConfig,
+    ChannelsInOutConfig,
     TensorModule,
     propagate_attr,
 )
@@ -163,7 +163,7 @@ class KimiK2(Transformer):
         first_k_dense_replace: int = 1
         """Leading layers whose ``ffn`` is replaced by a dense SwiGLU."""
 
-        in_proj: Makeable[TensorModule] | None = field(
+        proj_in: Makeable[TensorModule] | None = field(
             default_factory=lambda: Embedding.Config(
                 init_weight=partial(nn.init.normal_, std=0.02),
                 shard="vocab",
@@ -171,7 +171,7 @@ class KimiK2(Transformer):
         )
         """Reference token embedding initialization."""
 
-        out_proj: Makeable[TensorModule] | None = field(
+        proj_out: Makeable[TensorModule] | None = field(
             default_factory=lambda: Sequential.Config(
                 elements=[
                     RMSNorm.Config(elementwise_affine=True),
@@ -185,9 +185,9 @@ class KimiK2(Transformer):
         """Learned final RMS scale, then the reference untied head.
 
         A tied checkpoint replaces the ``Linear`` with
-        ``TiedLinear.Config(tied="in_proj")``."""
+        ``TiedLinear.Config(tied="proj_in")``."""
 
-        block: TensorBlockConfig | list[TensorBlockConfig] = field(
+        block: ChannelsInOutConfig | list[ChannelsInOutConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=MultiHeadLatentAttention.Config(
                     init_weight=partial(nn.init.normal_, std=0.02),
@@ -342,7 +342,7 @@ class KimiK2(Transformer):
                 )
 
             head: Makeable[TensorModule] = (
-                TiedLinear.Config(tied="in_proj")
+                TiedLinear.Config(tied="proj_in")
                 if bool(config.get("tie_word_embeddings", False))
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
@@ -350,8 +350,8 @@ class KimiK2(Transformer):
                 channels_in=IntCodec.coerce(config["hidden_size"]),
                 channels_out=IntCodec.coerce(config["vocab_size"]),
                 num_layers=IntCodec.coerce(config["num_hidden_layers"]),
-                in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
-                out_proj=Sequential.Config(elements=[norm.copy_tree(), head]),
+                proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
+                proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
                 channels_hidden_dense=IntCodec.coerce(config["intermediate_size"]),
                 channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=IntCodec.coerce(
@@ -370,12 +370,17 @@ class KimiK2(Transformer):
                 self._size_block(block, layer)
             # The vocabulary is stated once, as the output width; the table's
             # row count follows from it.
-            propagate_attr(self.in_proj, "num_embeddings", self.channels_out)
+            propagate_attr(
+                self.proj_in,
+                "channels_in",
+                self.channels_out,
+                protocol=ChannelsIn,
+            )
             return super().finalize()
 
         # Only the widths: everything else on the block is the caller's, so an edit to
         # the template survives ``finalize`` rather than being rebuilt over.
-        def _size_block(self, block: TensorBlockConfig, layer: int) -> None:
+        def _size_block(self, block: ChannelsInOutConfig, layer: int) -> None:
             """Push the widths the PARENT owns into one already-shaped block."""
             propagate_attr(block, "channels_in", self.channels_in, protocol=ChannelsIn)
             if not isinstance(block, TransformerBlock.Config):
@@ -486,11 +491,11 @@ def remap_hf_state_dict(
 
     """
     out: dict[str, Tensor] = {
-        "in_proj.weight": hf_sd["model.embed_tokens.weight"],
-        "out_proj.0.weight": hf_sd["model.norm.weight"],
+        "proj_in.weight": hf_sd["model.embed_tokens.weight"],
+        "proj_out.0.weight": hf_sd["model.norm.weight"],
     }
     if not _tied(config):
-        out["out_proj.1.weight"] = hf_sd["lm_head.weight"]
+        out["proj_out.1.weight"] = hf_sd["lm_head.weight"]
 
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
@@ -500,16 +505,16 @@ def remap_hf_state_dict(
         # -- MLA --------------------------------------------------------
         attn, ba = f"{p}.self_attn", f"{b}.attn"
         if _attn_of(config, i).q_lora_rank is None:
-            out[f"{ba}.q_proj.weight"] = hf_sd[f"{attn}.q_proj.weight"]
+            out[f"{ba}.proj_q.weight"] = hf_sd[f"{attn}.q_proj.weight"]
         else:
-            out[f"{ba}.q_a_proj.weight"] = hf_sd[f"{attn}.q_a_proj.weight"]
+            out[f"{ba}.proj_q_a.weight"] = hf_sd[f"{attn}.q_a_proj.weight"]
             out[f"{ba}.q_a_layernorm.weight"] = hf_sd[f"{attn}.q_a_layernorm.weight"]
-            out[f"{ba}.q_b_proj.weight"] = hf_sd[f"{attn}.q_b_proj.weight"]
+            out[f"{ba}.proj_q_b.weight"] = hf_sd[f"{attn}.q_b_proj.weight"]
         # HF's kv_a_proj_with_mqa → loop's kv_a_proj.
-        out[f"{ba}.kv_a_proj.weight"] = hf_sd[f"{attn}.kv_a_proj_with_mqa.weight"]
+        out[f"{ba}.proj_kv_a.weight"] = hf_sd[f"{attn}.kv_a_proj_with_mqa.weight"]
         out[f"{ba}.kv_a_layernorm.weight"] = hf_sd[f"{attn}.kv_a_layernorm.weight"]
-        out[f"{ba}.kv_b_proj.weight"] = hf_sd[f"{attn}.kv_b_proj.weight"]
-        out[f"{ba}.o_proj.weight"] = hf_sd[f"{attn}.o_proj.weight"]
+        out[f"{ba}.proj_kv_b.weight"] = hf_sd[f"{attn}.kv_b_proj.weight"]
+        out[f"{ba}.proj_out.weight"] = hf_sd[f"{attn}.o_proj.weight"]
 
         # -- FFN --------------------------------------------------------
         bf = f"{b}.ffn"

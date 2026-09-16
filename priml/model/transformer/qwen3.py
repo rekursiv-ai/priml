@@ -3,7 +3,7 @@
 Subclasses :class:`Transformer` per the library idiom
 (``Makes[X]`` re-parents ``.make()``). ``Qwen3.Config`` carries the
 HF-shaped arch fields; ``finalize()`` wires them into the inherited
-``block``/``channels_in``/``num_layers``/``out_proj`` slots. The head is
+``block``/``channels_in``/``num_layers``/``proj_out`` slots. The head is
 ``[RMSNorm, Linear]`` -- HF's ``model.norm`` then ``lm_head`` -- or
 ``[RMSNorm, TiedLinear]`` when the checkpoint ties word embeddings.
 
@@ -45,7 +45,7 @@ from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     ChannelsIn,
-    TensorBlockConfig,
+    ChannelsInOutConfig,
     TensorModule,
     propagate_attr,
 )
@@ -81,7 +81,7 @@ def _load_hf_checkpoint(
 
 def _tied(config: Transformer.Config) -> bool:
     """Whether the head borrows the embedding, so HF ships no ``lm_head``."""
-    head = config.out_proj
+    head = config.proj_out
     if isinstance(head, Sequential.Config):
         elements = head.elements
         head = elements[-1] if isinstance(elements, list) else elements
@@ -123,7 +123,7 @@ class Qwen3(Transformer):
         num_layers: int = 28
         """Blocks in the stack. Qwen3-0.6B's."""
 
-        in_proj: Makeable[TensorModule] | None = field(
+        proj_in: Makeable[TensorModule] | None = field(
             default_factory=lambda: Embedding.Config(
                 init_weight=partial(nn.init.normal_, std=0.02),
                 shard="vocab",
@@ -131,7 +131,7 @@ class Qwen3(Transformer):
         )
         """Reference token embedding initialization."""
 
-        out_proj: Makeable[TensorModule] | None = field(
+        proj_out: Makeable[TensorModule] | None = field(
             default_factory=lambda: Sequential.Config(
                 elements=[
                     RMSNorm.Config(elementwise_affine=True),
@@ -145,9 +145,9 @@ class Qwen3(Transformer):
         """Learned final RMS scale, then the reference untied head.
 
         A tied checkpoint replaces the ``Linear`` with
-        ``TiedLinear.Config(tied="in_proj")``."""
+        ``TiedLinear.Config(tied="proj_in")``."""
 
-        block: TensorBlockConfig | list[TensorBlockConfig] = field(
+        block: ChannelsInOutConfig | list[ChannelsInOutConfig] = field(
             default_factory=lambda: TransformerBlock.Config(
                 attn=SelfAttention.Config(
                     init_weight=partial(nn.init.normal_, std=0.02),
@@ -259,7 +259,7 @@ class Qwen3(Transformer):
             block.norm2 = norm.copy_tree()
 
             head: Makeable[TensorModule] = (
-                TiedLinear.Config(tied="in_proj")
+                TiedLinear.Config(tied="proj_in")
                 if bool(config.get("tie_word_embeddings", False))
                 else Linear.Config(init_weight=init_weight, shard="vocab")
             )
@@ -267,8 +267,8 @@ class Qwen3(Transformer):
                 channels_in=channels_in,
                 channels_out=IntCodec.coerce(config["vocab_size"]),
                 num_layers=IntCodec.coerce(config["num_hidden_layers"]),
-                in_proj=Embedding.Config(init_weight=init_weight, shard="vocab"),
-                out_proj=Sequential.Config(elements=[norm.copy_tree(), head]),
+                proj_in=Embedding.Config(init_weight=init_weight, shard="vocab"),
+                proj_out=Sequential.Config(elements=[norm.copy_tree(), head]),
                 block=block,
             )
 
@@ -284,12 +284,17 @@ class Qwen3(Transformer):
                 self._size_block(block)
             # The vocabulary is stated once, as the output width; the table's
             # row count follows from it.
-            propagate_attr(self.in_proj, "num_embeddings", self.channels_out)
+            propagate_attr(
+                self.proj_in,
+                "channels_in",
+                self.channels_out,
+                protocol=ChannelsIn,
+            )
             return super().finalize()
 
         # Only the widths: everything else on the block is the caller's, so an edit to
         # the template survives ``finalize`` rather than being rebuilt over.
-        def _size_block(self, block: TensorBlockConfig) -> None:
+        def _size_block(self, block: ChannelsInOutConfig) -> None:
             """Push the widths the PARENT owns into one already-shaped block."""
             propagate_attr(block, "channels_in", self.channels_in, protocol=ChannelsIn)
             if not isinstance(block, TransformerBlock.Config):
@@ -360,11 +365,11 @@ def remap_hf_state_dict(
     n_kv = attn.num_heads_kv
     d = attn.channels_head
     out: dict[str, Tensor] = {
-        "in_proj.weight": hf_sd["model.embed_tokens.weight"],
-        "out_proj.0.weight": hf_sd["model.norm.weight"],
+        "proj_in.weight": hf_sd["model.embed_tokens.weight"],
+        "proj_out.0.weight": hf_sd["model.norm.weight"],
     }
     if not _tied(config):
-        out["out_proj.1.weight"] = hf_sd["lm_head.weight"]
+        out["proj_out.1.weight"] = hf_sd["lm_head.weight"]
     for i in range(config.num_layers):
         p, b = f"model.layers.{i}", f"blocks.{i}"
         out[f"{b}.norm1.weight"] = hf_sd[f"{p}.input_layernorm.weight"]

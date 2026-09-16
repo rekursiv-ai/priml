@@ -9,8 +9,8 @@ ArcTrainLoop(
                 │       │       channels_in=512,
                 │       │       num_layers=2,
                 │       │       embedding=GridEmbedding.Config(
-                │       │               vocab_size=12,
-                │       │               channels_in=512,
+                │       │               channels_in=12,
+                │       │               channels_out=512,
                 │       │               grid_shape=(900,),
                 │       │               channels=[]
                 │       │       ),
@@ -75,10 +75,10 @@ ArcTrainLoop(
                 │       │       prefix=PrefixStack.Config(
                 │       │               parts=[
                 │       │                       SparsePuzzleEmbedding.Config(
+                │       │                               channels_in=-1,
+                │       │                               channels_out=512,
                 │       │                               num_puzzles=876_403,
                 │       │                               num_tokens=16,
-                │       │                               channels=512,
-                │       │                               channels_in=-1,
                 │       │                               batch_size=256,
                 │       │                               init_std=0.0,
                 │       │                               embed_scale=-1.0,
@@ -86,13 +86,13 @@ ArcTrainLoop(
                 │       │                       ),
                 │       │                       RegisterTokens.Config(
                 │       │                               num_tokens=1,
-                │       │                               channels=512,
+                │       │                               channels_out=512,
                 │       │                               init_std=1.0,
                 │       │                               learnable=True,
                 │       │                               embed_scale=-1.0
                 │       │                       )
                 │       │               ],
-                │       │               channels=512
+                │       │               channels_out=512
                 │       │       ),
                 │       │       num_prefix_tokens=17,
                 │       │       vocab_size=12,

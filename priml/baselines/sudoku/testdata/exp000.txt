@@ -9,14 +9,14 @@ SudokuTrainLoop(
                 │       │       channels_in=512,
                 │       │       num_layers=2,
                 │       │       embedding=GridEmbedding.Config(
-                │       │               vocab_size=11,
-                │       │               channels_in=512,
+                │       │               channels_in=11,
+                │       │               channels_out=512,
                 │       │               grid_shape=(81,),
                 │       │               channels=[
                 │       │                       FactoredPositions.Config(
                 │       │                               grid_shape=(9, 9),
                 │       │                               box_shape=(3, 3),
-                │       │                               channels=512,
+                │       │                               channels_out=512,
                 │       │                               init_std=1.0,
                 │       │                               embed_scale=-1.0
                 │       │                       )

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Protocol, runtime_checkable
+from collections.abc import Iterable, Iterator, Mapping
+from typing import Protocol, TypeVar, runtime_checkable
 
 from priml.custom_types import CheckpointableProtocol
 from priml.timer import CheckpointableStepTimer
@@ -11,7 +11,51 @@ from priml.timer import CheckpointableStepTimer
 
 __all__ = [
     "DatasetProtocol",
+    "Processor",
+    "Source",
 ]
+
+_InputSampleT_contra = TypeVar(
+    "_InputSampleT_contra",
+    bound=Mapping[str, object],
+    contravariant=True,
+)
+_OutputSampleT_co = TypeVar(
+    "_OutputSampleT_co",
+    bound=Mapping[str, object],
+    covariant=True,
+)
+
+
+class Source(Protocol[_OutputSampleT_co]):
+    """Dataset iterator that yields samples."""
+
+    def __iter__(self) -> Iterator[_OutputSampleT_co]:
+        """Iterate over samples."""
+        ...
+
+
+class Processor(Protocol[_InputSampleT_contra, _OutputSampleT_co]):
+    """Process a stream of samples, yielding transformed samples.
+
+    Processors can:
+    1. Filter: Yield samples that pass, skip those that don't (0 or 1 output per input)
+    2. Transform: Yield transformed samples (1 output per input)
+    3. Batch: Consume multiple samples, yield batches (N inputs -> 1 output)
+    4. Expand: Yield multiple samples per input (1 input -> N outputs)
+
+    Filter behavior convention:
+    Filters typically only add filter_reasons to mark samples for filtering.
+    Sample mutation (adding/modifying fields) is typically an optimization only.
+    This allows filters to be composable without tight coupling to downstream processors.
+    """
+
+    def __call__(
+        self,
+        samples: Iterator[_InputSampleT_contra],
+    ) -> Iterator[_OutputSampleT_co]:
+        """Apply to the input."""
+        ...
 
 
 @runtime_checkable

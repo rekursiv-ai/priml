@@ -19,7 +19,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_embedding_config_pprint() -> None:
-    config = Embedding.Config(4, num_embeddings=8)
+    config = Embedding.Config(8, 4)
     assert_pprint_golden(
         test_file=__file__,
         name="embedding",
@@ -31,25 +31,25 @@ def test_embedding_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="embedding",
-        build_module=lambda: Embedding.Config(4, num_embeddings=8).make(),
+        build_module=lambda: Embedding.Config(8, 4).make(),
         build_input=lambda: torch.tensor([[0, 3, 7]]),
         seed=0,
     )
 
 
 def test_embedding():
-    m = Embedding.Config(64, num_embeddings=1000).make()
+    m = Embedding.Config(1000, 64).make()
     ids = torch.randint(0, 1000, (2, 8))
     assert m(ids).shape == (2, 8, 64)
 
 
 def test_embedding_reset():
-    m = Embedding.Config(64, num_embeddings=1000).make()
+    m = Embedding.Config(1000, 64).make()
     m.reset_parameters()
 
 
 def test_embedding_padding_idx():
-    m = Embedding.Config(64, num_embeddings=1000, padding_idx=0).make()
+    m = Embedding.Config(1000, 64, padding_idx=0).make()
     assert m(torch.zeros(1, dtype=torch.long)).abs().sum() == 0
 
 
@@ -64,8 +64,8 @@ def test_the_table_realizes_the_spread_it_was_asked_for():
     """
     torch.manual_seed(0)
     m = Embedding.Config(
+        4096,
         256,
-        num_embeddings=4096,
         init_weight=partial(normal, std=0.5),
     ).make()
     assert abs(float(m.weight.detach().std()) / 0.5 - 1.0) < 0.02
@@ -80,14 +80,14 @@ def test_a_depth_scales_the_table_down():
     """
     torch.manual_seed(0)
     flat = Embedding.Config(
+        4096,
         256,
-        num_embeddings=4096,
         init_weight=partial(normal, std=0.5),
     ).make()
     torch.manual_seed(0)
     scaled = Embedding.Config(
+        4096,
         256,
-        num_embeddings=4096,
         depth_index=((3, 4),),
         init_weight=partial(normal, std=0.5),
     ).make()

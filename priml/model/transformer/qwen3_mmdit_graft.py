@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Self, cast
 from configgle import Makes
 
 from priml import hub
-from priml.model.custom_types import TransformerConfig
+from priml.model.custom_types import DeepModelConfig
 from priml.model.transformer.mmdit_graft import MMDiTGraft
 from priml.model.transformer.qwen3 import (
     Qwen3,
@@ -36,8 +36,8 @@ class Qwen3MMDiTGraft(MMDiTGraft):
     """Add independently trainable modality streams to dense Qwen3."""
 
     class Config(Makes["Qwen3MMDiTGraft"], MMDiTGraft.Config):
-        backbone: TransformerConfig = field(
-            default_factory=cast(Callable[[], TransformerConfig], Qwen3.Config),
+        backbone: DeepModelConfig = field(
+            default_factory=cast(Callable[[], DeepModelConfig], Qwen3.Config),
         )
         """Dense Qwen3 language architecture; the checkpoint supplies this on load."""
 

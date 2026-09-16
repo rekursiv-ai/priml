@@ -113,7 +113,7 @@ def test_a_real_batch_indexes_the_table_in_bounds(dataset_dir: Path) -> None:
     # must arrive from the experiment exactly as a real run would build it.
     table = _table(experiments.exp000().copy_tree().finalize())
     table.batch_size = 4
-    table.channels = 8
+    table.channels_out = 8
     table.channels_in = 8
     module = table.make()
     module.eval()

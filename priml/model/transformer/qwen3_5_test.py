@@ -55,7 +55,7 @@ def test_hybrid_config_preserves_injected_blocks() -> None:
 
 def test_hidden_states_rejects_token_ids_without_input_embedding() -> None:
     config = Qwen35.Config.from_hf(hf_config())
-    config.in_proj = None
+    config.proj_in = None
     model = config.make()
 
     with pytest.raises(ValueError, match="Token IDs require an input embedding"):
@@ -181,7 +181,7 @@ def test_hybrid_forwards_messages_to_injected_output_head_and_cache() -> None:
     """Preserve output-head messages across direct and cached Qwen calls."""
     model = Qwen35.Config.from_hf(hf_config()).make()
     recorder = _HeadMessageRecorder()
-    model.out_proj = recorder
+    model.proj_out = recorder
     message = torch.tensor([7])
 
     model(torch.tensor([[1, 2]]), marker=message)

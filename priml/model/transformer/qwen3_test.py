@@ -155,9 +155,9 @@ def _block(cfg: Qwen3.Config, layer: int = 0) -> TransformerBlock.Config:
 
 
 def _final_norm(cfg: Transformer.Config) -> RMSNorm.Config:
-    """Return the head's norm -- HF's ``model.norm``, first element of ``out_proj``."""
-    assert isinstance(cfg.out_proj, Sequential.Config)
-    elements = cfg.out_proj.elements
+    """Return the head's norm -- HF's ``model.norm``, first element of ``proj_out``."""
+    assert isinstance(cfg.proj_out, Sequential.Config)
+    elements = cfg.proj_out.elements
     assert isinstance(elements, list)
     norm = elements[0]
     assert isinstance(norm, RMSNorm.Config)
@@ -319,10 +319,10 @@ class TestLoad:
 
         model = Qwen3.load(tmp_path, device="cpu", dtype=torch.float32)
 
-        assert isinstance(model.in_proj, Embedding)
-        assert model.in_proj.weight.dtype == torch.float32
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.float32
         assert model.num_layers == 1
-        assert model.in_proj.weight.shape == (cfg.channels_out, cfg.channels_in)
+        assert model.proj_in.weight.shape == (cfg.channels_out, cfg.channels_in)
         load_local_state_dict.assert_called_once_with(tmp_path)
 
     def test_remote_load_uses_hf_model_config_and_weights(
@@ -400,11 +400,11 @@ class TestRemap:
         cfg = Qwen3.Config.from_hf(_hf_config(tie_word_embeddings=True)).finalize()
         hf_sd = _synth_hf_state_dict(cfg)
         remapped = remap_hf_state_dict(hf_sd, cfg)
-        assert "out_proj.1.weight" not in remapped
+        assert "proj_out.1.weight" not in remapped
         model = cfg.make()
         model.load_state_dict(remapped, strict=True)
-        assert isinstance(model.out_proj, Sequential)
-        assert isinstance(model.out_proj[1], TiedLinear)
+        assert isinstance(model.proj_out, Sequential)
+        assert isinstance(model.proj_out[1], TiedLinear)
         tokens = torch.tensor([[1, 2, 3]])
         assert model(tokens).shape == (1, 3, cfg.channels_out)
 

@@ -245,7 +245,7 @@ class NanoChatLM(nn.Module):
                         attention.window = self.max_seq_len
                     attention.gated = layer in gated
             propagate_attr(self.embedding, "channels_out", self.channels_in)
-            propagate_attr(self.embedding, "num_embeddings", self.vocab_size)
+            propagate_attr(self.embedding, "channels_in", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels_in)
             propagate_attr(self.lm_head, "channels_out", self.vocab_size)
             propagate_attr(
@@ -323,7 +323,7 @@ class NanoChatLM(nn.Module):
             inner=Embedding.Config(init_weight=unit_fan_in_uniform),
         )
         table.channels_out = width
-        table.num_embeddings = config.vocab_size
+        table.channels_in = config.vocab_size
         if isinstance(config.embedding, NarrowEmbedding.Config):
             table.dtype = config.embedding.dtype
         built = table.make()

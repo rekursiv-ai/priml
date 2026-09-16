@@ -123,17 +123,17 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
         if kind == "qwen"
         else kimi_k2_test._canonical_config()
     )
-    assert isinstance(config.in_proj, Embedding.Config)
-    config.in_proj.init_weight = nn.init.ones_
-    config.in_proj.padding_idx = 0
-    assert isinstance(config.out_proj, Sequential.Config)
-    head_elements = config.out_proj.elements
+    assert isinstance(config.proj_in, Embedding.Config)
+    config.proj_in.init_weight = nn.init.ones_
+    config.proj_in.padding_idx = 0
+    assert isinstance(config.proj_out, Sequential.Config)
+    head_elements = config.proj_out.elements
     assert isinstance(head_elements, list)
     head = head_elements[1]
     assert isinstance(head, Linear.Config)
     head.init_weight = nn.init.ones_
     if tie:
-        head_elements[1] = TiedLinear.Config(tied="in_proj")
+        head_elements[1] = TiedLinear.Config(tied="proj_in")
     assert isinstance(config.block, TransformerBlock.Config)
     ffns = (
         (config.block.ffn.expert, config.block.ffn.shared_expert)
@@ -145,34 +145,34 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
         ffn.init_weight = nn.init.ones_
         ffn.init_weight_out = nn.init.ones_
     model = config.make()
-    assert isinstance(model.in_proj, Embedding)
-    assert config.in_proj.channels_out == -1
-    assert config.in_proj.num_embeddings == -1
+    assert isinstance(model.proj_in, Embedding)
+    assert config.proj_in.channels_out == -1
+    assert config.proj_in.channels_in == -1
     for reset in (False, True):
         if reset:
             with torch.no_grad():
                 for parameter in model.parameters():
                     parameter.zero_()
             model.reset_parameters()
-        assert torch.count_nonzero(model.in_proj.weight[0]) == 0
+        assert torch.count_nonzero(model.proj_in.weight[0]) == 0
         assert torch.equal(
-            model.in_proj.weight[1:],
-            torch.ones_like(model.in_proj.weight[1:]),
+            model.proj_in.weight[1:],
+            torch.ones_like(model.proj_in.weight[1:]),
         )
         for module in model.modules():
             if isinstance(module, SwiGLU):
                 for parameter in module.parameters():
                     assert torch.equal(parameter, torch.ones_like(parameter))
-        assert isinstance(model.out_proj, Sequential)
-        built_head = model.out_proj[1]
+        assert isinstance(model.proj_out, Sequential)
+        built_head = model.proj_out[1]
         if tie:
             assert isinstance(built_head, TiedLinear)
         else:
             assert isinstance(built_head, Linear)
             assert torch.equal(built_head.weight, torch.ones_like(built_head.weight))
         assert model(torch.tensor([[1, 2]])).shape == (1, 2, config.channels_out)
-    assert "in_proj.weight" in model.state_dict()
-    assert ("out_proj.1.weight" in model.state_dict()) is not tie
+    assert "proj_in.weight" in model.state_dict()
+    assert ("proj_out.1.weight" in model.state_dict()) is not tie
 
 
 @pytest.mark.parametrize(
@@ -225,8 +225,8 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
             if kind == "qwen"
             else kimi_k2_test._canonical_config()
         )
-        config.in_proj = Embedding.Config(shard="vocab")
-        config.out_proj = Sequential.Config(
+        config.proj_in = Embedding.Config(shard="vocab")
+        config.proj_out = Sequential.Config(
             elements=[
                 RMSNorm.Config(elementwise_affine=True),
                 Linear.Config(shard="vocab"),

@@ -1,7 +1,7 @@
 """Qwen3.5 delta-layer parity, cache continuation, and serialization."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeGuard, cast
+from typing import TYPE_CHECKING, Final, TypeGuard, cast
 
 from torch import nn
 
@@ -63,6 +63,16 @@ def _native() -> Qwen35GatedDeltaNet:
     return config.make()
 
 
+# Native ``proj_*`` attributes against Hugging Face's parameter names.
+_HF_NAMES: Final = {
+    "proj_qkv.weight": "in_proj_qkv.weight",
+    "proj_z.weight": "in_proj_z.weight",
+    "proj_b.weight": "in_proj_b.weight",
+    "proj_a.weight": "in_proj_a.weight",
+    "proj_out.weight": "out_proj.weight",
+}
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_delta_reference_forward_and_gradients(dtype: torch.dtype) -> None:
     reference = _reference().to(dtype=dtype)
@@ -80,7 +90,7 @@ def test_delta_reference_forward_and_gradients(dtype: torch.dtype) -> None:
     assert input_ref.grad is not None
     assert torch.equal(input_native.grad, input_ref.grad)
     for name, parameter in native.named_parameters():
-        expected_parameter = reference.get_parameter(name)
+        expected_parameter = reference.get_parameter(_HF_NAMES.get(name, name))
         assert parameter.grad is not None
         assert expected_parameter.grad is not None
         assert torch.equal(parameter.grad, expected_parameter.grad), name

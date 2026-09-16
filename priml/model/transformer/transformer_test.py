@@ -37,14 +37,14 @@ def _head(tie: bool = False) -> Sequential.Config:
     return Sequential.Config(
         elements=[
             RMSNorm.Config(),
-            TiedLinear.Config(tied="in_proj") if tie else Linear.Config(shard="vocab"),
+            TiedLinear.Config(tied="proj_in") if tie else Linear.Config(shard="vocab"),
         ],
     )
 
 
 def _tiny_config(tie: bool = False) -> Transformer.Config:
     return Transformer.Config(
-        in_proj=Embedding.Config(num_embeddings=128, shard="vocab"),
+        proj_in=Embedding.Config(channels_in=128, shard="vocab"),
         channels_in=32,
         channels_out=128,
         num_layers=2,
@@ -56,14 +56,14 @@ def _tiny_config(tie: bool = False) -> Transformer.Config:
                 rope=RoPE.Config(channels_head=8),
             ),
         ),
-        out_proj=_head(tie),
+        proj_out=_head(tie),
     )
 
 
 def _canonical_config() -> Transformer.Config:
     return Transformer.Config(
-        in_proj=Embedding.Config(num_embeddings=32, shard="vocab"),
-        out_proj=_head(),
+        proj_in=Embedding.Config(channels_in=32, shard="vocab"),
+        proj_out=_head(),
         channels_in=16,
         channels_out=32,
         num_layers=1,
@@ -79,6 +79,23 @@ def test_transformer_config_pprint() -> None:
         name="transformer",
         config=_canonical_config(),
     )
+
+
+def test_load_state_dict_absorbs_legacy_projection_keys() -> None:
+    model = _tiny_config().make()
+    legacy = {
+        "in_proj." + k.removeprefix("proj_in.")
+        if k.startswith("proj_in.")
+        else "out_proj." + k.removeprefix("proj_out.")
+        if k.startswith("proj_out.")
+        else k: v
+        for k, v in model.state_dict().items()
+    }
+    assert any(k.startswith(("in_proj.", "out_proj.")) for k in legacy)
+    fresh = _tiny_config().make()
+    fresh.load_state_dict(legacy, strict=True)
+    for k, v in model.state_dict().items():
+        assert torch.equal(fresh.state_dict()[k], v)
 
 
 def test_transformer_bfb() -> None:
@@ -134,7 +151,7 @@ def test_model_forwards_the_open_message_bus_through_output_layers() -> None:
         def reset_parameters(self) -> None:
             self.wrapped.reset_parameters()
 
-    head = model.out_proj
+    head = model.proj_out
     assert isinstance(head, Sequential)
     norm, proj = head[0], head[1]
     assert isinstance(norm, RMSNorm)
@@ -157,48 +174,48 @@ def test_forward_shape():
 
 def test_tied_embeddings():
     m = _tiny_config(tie=True).make()
-    assert isinstance(m.out_proj, Sequential)
-    assert isinstance(m.out_proj[1], TiedLinear)
-    assert [name for name, _ in m.named_parameters() if "out_proj" in name] == []
+    assert isinstance(m.proj_out, Sequential)
+    assert isinstance(m.proj_out[1], TiedLinear)
+    assert [n for n, _ in m.named_parameters() if n.startswith("proj_out.")] == []
     toks = torch.randint(0, 128, (1, 4))
     out = m(toks)
     assert out.shape == (1, 4, 128)
 
 
-def test_separate_out_proj():
+def test_separate_proj_out():
     m = _tiny_config(tie=False).make()
-    assert isinstance(m.out_proj, Sequential)
-    head = m.out_proj[1]
+    assert isinstance(m.proj_out, Sequential)
+    head = m.proj_out[1]
     assert isinstance(head, Linear)
-    assert isinstance(m.in_proj, Embedding)
+    assert isinstance(m.proj_in, Embedding)
     # Distinct parameter, not the embed matrix.
-    assert head.weight.data_ptr() != m.in_proj.weight.data_ptr()
+    assert head.weight.data_ptr() != m.proj_in.weight.data_ptr()
 
 
-def test_explicit_out_proj_receives_model_dimensions() -> None:
+def test_explicit_proj_out_receives_model_dimensions() -> None:
     config = _tiny_config()
-    config.out_proj = Linear.Config()
+    config.proj_out = Linear.Config()
 
     model = config.make()
 
-    assert isinstance(model.out_proj, Linear)
-    assert model.out_proj.in_features == config.channels_in
-    assert model.out_proj.out_features == config.channels_out
+    assert isinstance(model.proj_out, Linear)
+    assert model.proj_out.in_features == config.channels_in
+    assert model.proj_out.out_features == config.channels_out
 
 
-def test_transformer_preserves_an_explicit_out_proj_width() -> None:
+def test_transformer_preserves_an_explicit_proj_out_width() -> None:
     """An explicit head width survives finalize; torch rejects a wrong one.
 
     A wrong input width fails the matmul, naming both operands. The output
     width is the head's to state: the stack reports whatever it says.
     """
     config = _tiny_config()
-    config.out_proj = Linear.Config(channels_in=7, channels_out=128)
+    config.proj_out = Linear.Config(channels_in=7, channels_out=128)
 
     finalized = config.copy_tree().finalize()
 
-    assert isinstance(finalized.out_proj, Linear.Config)
-    assert finalized.out_proj.channels_in == 7
+    assert isinstance(finalized.proj_out, Linear.Config)
+    assert finalized.proj_out.channels_in == 7
     with pytest.raises(RuntimeError, match="shapes cannot be multiplied"):
         config.make()(torch.zeros(2, 3, dtype=torch.long))
 
@@ -207,7 +224,7 @@ def test_transformer_reports_the_head_width_when_composed() -> None:
     """A composed head derives its width in its own finalize; the stack reads it."""
     config = _tiny_config()
     config.channels_out = -1
-    config.out_proj = Sequential.Config(
+    config.proj_out = Sequential.Config(
         elements=[RMSNorm.Config(), Linear.Config(32, 99)],
     )
 
@@ -265,8 +282,8 @@ def test_generate_rejects_prompt_longer_than_cache():
 
 def test_transformer_rejects_width_changing_blocks() -> None:
     config = Transformer.Config(
-        in_proj=Embedding.Config(num_embeddings=128, shard="vocab"),
-        out_proj=_head(),
+        proj_in=Embedding.Config(channels_in=128, shard="vocab"),
+        proj_out=_head(),
         channels_in=32,
         channels_out=128,
         num_layers=2,
@@ -295,8 +312,8 @@ def test_block_expansion_preserves_identity_sensitive_leaves() -> None:
             raise AssertionError("leaf must remain aliased")
 
     config = Transformer.Config(
-        in_proj=Embedding.Config(num_embeddings=128, shard="vocab"),
-        out_proj=_head(),
+        proj_in=Embedding.Config(channels_in=128, shard="vocab"),
+        proj_out=_head(),
         channels_in=32,
         channels_out=128,
         num_layers=2,
@@ -339,12 +356,12 @@ def test_transformer_preserves_an_explicit_head_norm_width() -> None:
     """
     config = _tiny_config()
     config.channels_out = -1
-    config.out_proj = RMSNorm.Config(channels_in=7)
+    config.proj_out = RMSNorm.Config(channels_in=7)
 
     finalized = config.copy_tree().finalize()
 
-    assert isinstance(finalized.out_proj, RMSNorm.Config)
-    assert finalized.out_proj.channels_in == 7
+    assert isinstance(finalized.proj_out, RMSNorm.Config)
+    assert finalized.proj_out.channels_in == 7
     assert finalized.channels_out == 7
     with pytest.raises(RuntimeError, match="normalized_shape"):
         config.make()(torch.zeros(2, 3, dtype=torch.long))
@@ -379,7 +396,7 @@ def test_transformer_reset_visits_every_parameterized_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _tiny_config().make()
-    modules = [model.in_proj, *model.blocks, model.out_proj]
+    modules = [model.proj_in, *model.blocks, model.proj_out]
     resetters: list[Mock] = []
     for module in modules:
         assert module is not None

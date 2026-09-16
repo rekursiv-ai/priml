@@ -257,11 +257,11 @@ def test_generate_forwards_cache_metadata_and_stops_at_eos() -> None:
     assert model.block.attn.batch == 1
     assert model.block.attn.max_seq == 6
     assert model.block.attn.device == prompt.device
-    assert model.block.attn.dtype == model.in_proj.weight.dtype
+    assert model.block.attn.dtype == model.proj_in.weight.dtype
     assert model.block.seen_caches == [model.block.attn.cache] * 2
-    assert len(model.in_proj.inputs) == 2
-    assert torch.equal(model.in_proj.inputs[0], prompt)
-    assert torch.equal(model.in_proj.inputs[1], torch.tensor([[2]]))
+    assert len(model.proj_in.inputs) == 2
+    assert torch.equal(model.proj_in.inputs[0], prompt)
+    assert torch.equal(model.proj_in.inputs[1], torch.tensor([[2]]))
 
 
 # The nucleus filter sets out-of-nucleus logits to ``-inf``, which softmaxes to exactly
@@ -356,7 +356,7 @@ class _NoForwardCached(nn.Module):
 
 class _Transformer:
     def __init__(self) -> None:
-        self.in_proj = _Lookup()
+        self.proj_in = _Lookup()
         self.block = _Block()
         self.blocks: list[nn.Module] = [self.block]
         self.project_calls = 0
@@ -373,7 +373,7 @@ class _TransformerWithBlock:
     """A minimal model wrapping one caller-supplied block."""
 
     def __init__(self, block: nn.Module) -> None:
-        self.in_proj = _Lookup()
+        self.proj_in = _Lookup()
         self.blocks: list[nn.Module] = [block]
 
     def project_to_logits(self, hidden: Tensor, /) -> Tensor:

@@ -22,7 +22,7 @@ carries the gradient, and the optimizer scatters those few rows back.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import KW_ONLY, field
 from typing import Self, override
 
 from configgle import Fig, Makeable
@@ -30,7 +30,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import HasChannels
+from priml.model.custom_types import ChannelsOut
 from priml.model.init import truncated_normal
 
 
@@ -49,7 +49,7 @@ class RegisterTokens(nn.Module):
         num_tokens: int = 1
         """Tokens prepended. 0 disables the module."""
 
-        channels: int = -1
+        channels_out: int = -1
         """Token width; -1 inherits the model's hidden size."""
 
         init_std: float = 1.0
@@ -59,23 +59,23 @@ class RegisterTokens(nn.Module):
         """Train the tokens. False freezes them as a fixed random basis."""
 
         embed_scale: float = -1.0
-        """Runtime multiplier; -1 derives it from ``channels``.
+        """Runtime multiplier; -1 derives it from ``channels_out``.
 
         Must match the grid embedding's, or the prefix enters the sequence at
         a different magnitude than the tokens it precedes."""
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.channels <= 0:
+        if config.channels_out <= 0:
             raise ValueError(
-                f"channels must be positive; got {config.channels}. It is "
+                f"channels_out must be positive; got {config.channels_out}. It is "
                 "normally inherited from the model during finalize.",
             )
         self.config = config
         self.embed_scale = (
-            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
         )
-        tokens = torch.empty(config.num_tokens, config.channels)
+        tokens = torch.empty(config.num_tokens, config.channels_out)
         truncated_normal(
             tokens,
             std=config.init_std / self.embed_scale,
@@ -110,8 +110,16 @@ class SparsePuzzleEmbedding(nn.Module):
     were absent and must learn to use it.
     """
 
-    class Config(Fig["SparsePuzzleEmbedding"]):
+    class Config(Fig["SparsePuzzleEmbedding"], kw_only=False):
         """Table size, prefix width, and the per-batch gradient buffer."""
+
+        channels_in: int = -1
+        """Model width; -1 inherits it. Sets the reshaped token width."""
+
+        channels_out: int = -1
+        """Per-puzzle vector width; -1 inherits the model's hidden size."""
+
+        _: KW_ONLY
 
         num_puzzles: int = 1
         """Rows in the table: one per distinct puzzle in the dataset.
@@ -125,12 +133,6 @@ class SparsePuzzleEmbedding(nn.Module):
         The per-puzzle vector is reshaped into this many tokens, so a wider
         prefix gives a task more room without a wider model."""
 
-        channels: int = -1
-        """Per-puzzle vector width; -1 inherits the model's hidden size."""
-
-        channels_in: int = -1
-        """Model width; -1 inherits it. Sets the reshaped token width."""
-
         batch_size: int = 384
         """Rows in the gradient buffer: the training batch size.
 
@@ -141,30 +143,23 @@ class SparsePuzzleEmbedding(nn.Module):
         """Realized standard deviation; 0 zero-initializes the table."""
 
         embed_scale: float = -1.0
-        """Runtime multiplier; -1 derives it from ``channels``."""
+        """Runtime multiplier; -1 derives it from ``channels_out``."""
 
         dtype: torch.dtype | None = None
         """Cast applied to the forward output; ``None`` keeps the table dtype."""
 
-        @override
-        def finalize(self) -> Self:
-            if self.channels == -1:
-                self.channels = self.channels
-            return super().finalize()
-
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.channels <= 0 or config.channels <= 0:
+        if config.channels_out <= 0:
             raise ValueError(
-                "channels and channels must be positive; they are normally "
-                f"inherited from the model during finalize. Got "
-                f"{config.channels} and {config.channels}.",
+                "channels_out must be positive; it is normally inherited "
+                f"from the model during finalize. Got {config.channels_out}.",
             )
         self.config = config
         self.embed_scale = (
-            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
         )
-        table = torch.zeros(config.num_puzzles, config.channels)
+        table = torch.zeros(config.num_puzzles, config.channels_out)
         if config.init_std > 0:
             truncated_normal(
                 table,
@@ -176,7 +171,7 @@ class SparsePuzzleEmbedding(nn.Module):
         # for a table this size. The sparse optimizer writes it directly.
         self.weights = nn.Buffer(table, persistent=True)
         self.local_weights = nn.Buffer(
-            torch.zeros(config.batch_size, config.channels, requires_grad=True),
+            torch.zeros(config.batch_size, config.channels_out, requires_grad=True),
             persistent=False,
         )
         self.local_ids = nn.Buffer(
@@ -207,10 +202,14 @@ class SparsePuzzleEmbedding(nn.Module):
             )
         vectors = self._lookup(identifiers)
         config = self.config
-        width = config.num_tokens * config.channels
+        width = config.num_tokens * config.channels_out
         if vectors.shape[-1] < width:
             vectors = nn.functional.pad(vectors, (0, width - vectors.shape[-1]))
-        prefix: Tensor = vectors.reshape(batch_size, config.num_tokens, config.channels)
+        prefix: Tensor = vectors.reshape(
+            batch_size,
+            config.num_tokens,
+            config.channels_out,
+        )
         return self.embed_scale * prefix
 
     def _lookup(self, identifiers: Tensor) -> Tensor:
@@ -261,7 +260,7 @@ class PrefixStack(nn.Module):
         )
         """Modules whose outputs are concatenated along the token axis."""
 
-        channels: int = -1
+        channels_out: int = -1
         """Token width; -1 inherits the model's.
 
         Declared even though this module owns no weights: the model propagates
@@ -271,8 +270,8 @@ class PrefixStack(nn.Module):
         @override
         def finalize(self) -> Self:
             for part in self.parts:
-                if isinstance(part, HasChannels) and part.channels == -1:
-                    part.channels = self.channels
+                if isinstance(part, ChannelsOut) and part.channels_out == -1:
+                    part.channels_out = self.channels_out
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

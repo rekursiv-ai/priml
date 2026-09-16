@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast, overload, override
+from typing import TYPE_CHECKING, Protocol, TypedDict, cast, overload, override
 
 from configgle import Fig, Makeable
 from torch.optim import Optimizer
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from torch import Tensor, nn
     from torch.nn import Parameter
+    from torch.optim.optimizer import StateDict as OptimizerStateDict
 
 
 class Selector(Protocol):
@@ -355,12 +356,18 @@ class CompositeOptimizer(Optimizer):
             raise ValueError("CompositeOptimizer requires at least one optimizer.")
         _reject_shared_parameters(optimizers)
         self.optimizers = list(optimizers)
-        self.defaults: dict[str, object] = {}
+        # The base installs the hook registries ``register_step_pre_hook`` and
+        # checkpointing read, then builds groups by calling ``add_param_group``
+        # once per entry -- which this class rejects. One empty placeholder
+        # group satisfies its non-empty check; ``_initialized`` lets that single
+        # call through and is what turns the rejection on afterwards.
+        self._initialized = False
+        super().__init__([{"params": []}], {})
+        self._initialized = True
         # The members' OWN group dicts and state, aliased rather than copied:
         # a scheduler writing ``composite.param_groups[i]["lr"]`` must reach the
         # optimizer that will read it, and a copy would silently discard the
-        # write. ``super().__init__`` is skipped because it would build fresh
-        # groups from a parameter list instead.
+        # write. Replaces the placeholder.
         self.param_groups = [
             group for optimizer in self.optimizers for group in optimizer.param_groups
         ]
@@ -409,12 +416,12 @@ class CompositeOptimizer(Optimizer):
     class StateDict(TypedDict):
         """Every member's state, keyed by position."""
 
-        optimizers: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch's own opaque optimizer payload.
+        optimizers: list[OptimizerStateDict]
 
     # Returns torch's ``dict[str, Any]`` rather than ``StateDict``: a TypedDict
     # is a ``Mapping``, not a ``dict``, so it cannot override ``Optimizer.state_dict``.
     @override
-    def state_dict(self) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny] -- torch's own opaque optimizer payload; shaped as StateDict.
+    def state_dict(self) -> OptimizerStateDict:
         """Return every member's state, keyed by position.
 
         Returns:
@@ -454,6 +461,9 @@ class CompositeOptimizer(Optimizer):
     @override
     def add_param_group(self, param_group: dict[str, object]) -> None:
         """Reject: a composite cannot know which member should own the group."""
+        if not self._initialized:
+            super().add_param_group(param_group)
+            return
         del param_group
         raise NotImplementedError(
             "Add the parameter group to one of the composite's members instead; "

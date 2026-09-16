@@ -102,10 +102,10 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             mask = attention_mask[..., -sequence:].reshape(*x.shape[:-1], 1)
             x = (x * mask).to(x.dtype)
         batch = x.shape[0]
-        qkv = self.in_proj_qkv(x).transpose(1, 2)
-        z = self.in_proj_z(x).reshape(batch, sequence, -1, self.channels_v_head)
-        beta = self.in_proj_b(x).sigmoid()
-        a = self.in_proj_a(x)
+        qkv = self.proj_qkv(x).transpose(1, 2)
+        z = self.proj_z(x).reshape(batch, sequence, -1, self.channels_v_head)
+        beta = self.proj_b(x).sigmoid()
+        a = self.proj_a(x)
         warm = cache is not None and "recurrent_state" in cache
         self._validate_cache_state(cache, qkv=qkv)
         qkv = self._convolve(qkv, cache=cache, warm=warm).transpose(1, 2)
@@ -146,7 +146,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             output.reshape(-1, self.channels_v_head),
             gate=z.reshape(-1, self.channels_v_head),
         )
-        return self.out_proj(output.reshape(batch, sequence, value_width)).reshape(
+        return self.proj_out(output.reshape(batch, sequence, value_width)).reshape(
             shape
         )
 

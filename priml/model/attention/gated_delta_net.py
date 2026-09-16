@@ -20,6 +20,7 @@ import torch
 from priml.math.basic import ceil_multiple
 from priml.model.custom_types import ChannelsIn, DepthIndex, TensorModule
 from priml.model.init import InitFn, call_init, kaiming_uniform
+from priml.model.legacy_keys import absorb_legacy_keys
 from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
 
@@ -134,25 +135,25 @@ class GatedDeltaNet(nn.Module):
         v_dim = config.num_heads_v * config.channels_v_head
         conv_dim = 2 * k_dim + v_dim
 
-        self.in_proj_qkv = Linear.Config(
+        self.proj_qkv = Linear.Config(
             channels_in=h,
             channels_out=conv_dim,
             bias=False,
             init_weight=config.init_weight,
         ).make()
-        self.in_proj_z = Linear.Config(
+        self.proj_z = Linear.Config(
             channels_in=h,
             channels_out=v_dim,
             bias=False,
             init_weight=config.init_weight,
         ).make()
-        self.in_proj_b = Linear.Config(
+        self.proj_b = Linear.Config(
             channels_in=h,
             channels_out=config.num_heads_v,
             bias=False,
             init_weight=config.init_weight,
         ).make()
-        self.in_proj_a = Linear.Config(
+        self.proj_a = Linear.Config(
             channels_in=h,
             channels_out=config.num_heads_v,
             bias=False,
@@ -175,13 +176,23 @@ class GatedDeltaNet(nn.Module):
         # ``depth`` scales the projection that writes back into the residual
         # stream, which is the one deep-network init schemes shrink; the input
         # projections are left unscaled, matching SwiGLU's down_proj.
-        self.out_proj = Linear.Config(
+        self.proj_out = Linear.Config(
             channels_in=v_dim,
             channels_out=h,
             bias=False,
             depth_index=config.depth_index,
             init_weight=config.init_weight,
         ).make()
+        absorb_legacy_keys(
+            self,
+            {
+                "in_proj_qkv": "proj_qkv",
+                "in_proj_z": "proj_z",
+                "in_proj_b": "proj_b",
+                "in_proj_a": "proj_a",
+                "out_proj": "proj_out",
+            },
+        )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -189,13 +200,13 @@ class GatedDeltaNet(nn.Module):
         # This module made every child below, so it owns re-initializing them
         # (and its own raw params). dt_bias and A_log carry deliberate
         # Mamba-style inits that meta materialization must reproduce.
-        self.in_proj_qkv.reset_parameters()
-        self.in_proj_z.reset_parameters()
-        self.in_proj_b.reset_parameters()
-        self.in_proj_a.reset_parameters()
+        self.proj_qkv.reset_parameters()
+        self.proj_z.reset_parameters()
+        self.proj_b.reset_parameters()
+        self.proj_a.reset_parameters()
         call_init(self._init_conv_weight, self.conv1d.weight)
         self.norm.reset_parameters()
-        self.out_proj.reset_parameters()
+        self.proj_out.reset_parameters()
         with torch.no_grad():
             nn.init.ones_(self.dt_bias)
             call_init(self._init_decay, self.A_log)
@@ -209,13 +220,13 @@ class GatedDeltaNet(nn.Module):
         k_dim = self.num_heads_k * self.channels_k_head
         v_dim = self.num_heads_v * self.channels_v_head
 
-        qkv = self.in_proj_qkv(x)
+        qkv = self.proj_qkv(x)
         qkv = f.silu(self.conv1d(qkv.transpose(1, 2))[:, :, :S]).transpose(1, 2)
         q, k, v = qkv.split([k_dim, k_dim, v_dim], dim=-1)
 
-        z = self.in_proj_z(x).reshape(-1, S, self.num_heads_v, self.channels_v_head)
-        beta = self.in_proj_b(x).sigmoid()
-        a = self.in_proj_a(x)
+        z = self.proj_z(x).reshape(-1, S, self.num_heads_v, self.channels_v_head)
+        beta = self.proj_b(x).sigmoid()
+        a = self.proj_a(x)
         g = -self.A_log.float().exp() * f.softplus(a.float() + self.dt_bias)
 
         q = q.reshape(-1, S, self.num_heads_k, self.channels_k_head)
@@ -254,7 +265,7 @@ class GatedDeltaNet(nn.Module):
         out = self.norm(out.reshape(-1, self.channels_v_head)) * f.silu(
             z.reshape(-1, self.channels_v_head).float(),
         ).type_as(out)
-        return self.out_proj(out.reshape(-1, S, v_dim)).reshape(*shape[:-1], -1)
+        return self.proj_out(out.reshape(-1, S, v_dim)).reshape(*shape[:-1], -1)
 
 
 def _l2norm(x: Tensor, dim: int = -1, eps: float = 1e-6) -> Tensor:

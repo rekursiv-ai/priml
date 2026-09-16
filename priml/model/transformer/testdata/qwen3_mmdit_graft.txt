@@ -3,9 +3,9 @@ Qwen3MMDiTGraft.Config(
                 │       channels_in=16,
                 │       channels_out=32,
                 │       num_layers=1,
-                │       in_proj=Embedding.Config(
+                │       proj_in=Embedding.Config(
+                │               channels_in=32,
                 │               channels_out=16,
-                │               num_embeddings=32,
                 │               padding_idx=None,
                 │               device=None,
                 │               dtype=None,
@@ -86,7 +86,7 @@ Qwen3MMDiTGraft.Config(
                 │       │               depth_index=((0, 1),)
                 │       │       )
                 │       ],
-                │       out_proj=Sequential.Config(
+                │       proj_out=Sequential.Config(
                 │               channels_in=16,
                 │               channels_out=32,
                 │               elements=[

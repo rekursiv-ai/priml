@@ -59,7 +59,7 @@ def test_shard_style_stored_on_runtime_module() -> None:
     up = Linear.Config(channels_in=8, channels_out=16, shard="colwise").make()
     down = Linear.Config(channels_in=16, channels_out=8, shard="rowwise").make()
     plain = Linear.Config(channels_in=8, channels_out=8).make()
-    embed = Embedding.Config(num_embeddings=10, channels_out=8, shard="vocab").make()
+    embed = Embedding.Config(channels_in=10, channels_out=8, shard="vocab").make()
     assert up.shard == "colwise"
     assert down.shard == "rowwise"
     assert plain.shard is None

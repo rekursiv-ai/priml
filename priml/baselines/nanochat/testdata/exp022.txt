@@ -742,19 +742,19 @@ NgramTrainLoop.Config(
                 │       │       ],
                 │       │       value_embedding_stride=2,
                 │       │       embedding=NarrowEmbedding.Config(
+                │       │               channels_in=16_384,
+                │       │               channels_out=768,
                 │       │               dtype=torch.bfloat16,
                 │       │               inner=Embedding.Config(
+                │       │                       channels_in=16_384,
                 │       │                       channels_out=768,
-                │       │                       num_embeddings=16_384,
                 │       │                       padding_idx=None,
                 │       │                       device=None,
                 │       │                       dtype=None,
                 │       │                       shard=None,
                 │       │                       depth_index=(),
                 │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │       │               ),
-                │       │               channels_out=768,
-                │       │               num_embeddings=16_384
+                │       │               )
                 │       │       ),
                 │       │       norm=RMSNorm.Config(
                 │       │               channels_in=768,
@@ -803,8 +803,8 @@ NgramTrainLoop.Config(
                 │       │       │               num_embeddings=2_097_152,
                 │       │       │               hash_multipliers=((922_969, 611_423), (871_659, 235_905)),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,
@@ -819,8 +819,8 @@ NgramTrainLoop.Config(
                 │       │       │               num_embeddings=2_097_152,
                 │       │       │               hash_multipliers=((878_215, 304_631), (716_167, 719_567)),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,
@@ -835,8 +835,8 @@ NgramTrainLoop.Config(
                 │       │       │               num_embeddings=2_097_152,
                 │       │       │               hash_multipliers=((608_275, 245_159), (172_587, 896_485)),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,
@@ -851,8 +851,8 @@ NgramTrainLoop.Config(
                 │       │       │               num_embeddings=2_097_152,
                 │       │       │               hash_multipliers=((749_129, 423_087), (424_077, 621_489)),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,
@@ -870,8 +870,8 @@ NgramTrainLoop.Config(
                 │       │       │                       (34_179, 850_893, 300_111)
                 │       │       │               ),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,
@@ -889,8 +889,8 @@ NgramTrainLoop.Config(
                 │       │       │                       (726_691, 511_307, 164_915)
                 │       │       │               ),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,
@@ -908,8 +908,8 @@ NgramTrainLoop.Config(
                 │       │       │                       (864_041, 659_687, 665_505)
                 │       │       │               ),
                 │       │       │               table=Embedding.Config(
+                │       │       │                       channels_in=2_097_152,
                 │       │       │                       channels_out=384,
-                │       │       │                       num_embeddings=2_097_152,
                 │       │       │                       padding_idx=None,
                 │       │       │                       device=None,
                 │       │       │                       dtype=None,

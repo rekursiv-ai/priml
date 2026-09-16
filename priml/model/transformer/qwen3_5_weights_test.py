@@ -40,8 +40,8 @@ def test_reference_weights_load_strictly() -> None:
     mapped = remap_hf_state_dict(reference.state_dict(), native)
     model = native.make()
     model.load_state_dict(mapped, strict=True)
-    assert has_weight(model.out_proj)
-    assert torch.equal(model.out_proj.weight, reference.lm_head.weight)
+    assert has_weight(model.proj_out)
+    assert torch.equal(model.proj_out.weight, reference.lm_head.weight)
 
 
 def test_missing_head_is_not_discarded() -> None:
@@ -94,7 +94,7 @@ def test_conditional_namespace_and_explicit_nontext_policy() -> None:
     with pytest.raises(ValueError, match="Unexpected"):
         remap_hf_state_dict(state, native_config)
     mapped = remap_hf_state_dict(state, native_config, non_text="discard")
-    assert torch.equal(mapped["out_proj.weight"], state["lm_head.weight"])
+    assert torch.equal(mapped["proj_out.weight"], state["lm_head.weight"])
     state["model.language_model.extra.weight"] = torch.zeros(1)
     with pytest.raises(ValueError, match="extra"):
         remap_hf_state_dict(state, native_config, non_text="discard")
@@ -125,7 +125,7 @@ def test_tied_head_alias_must_match_the_embedding() -> None:
     native_config = Qwen35.Config.from_hf(config)
     mapped = remap_hf_state_dict(state, native_config)
     native_config.make().load_state_dict(mapped, strict=True)
-    assert "out_proj.weight" not in mapped
+    assert "proj_out.weight" not in mapped
     state["lm_head.weight"] = state["lm_head.weight"] + 1
     with pytest.raises(ValueError, match="Tied"):
         remap_hf_state_dict(state, native_config)

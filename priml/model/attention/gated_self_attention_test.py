@@ -249,12 +249,12 @@ def test_gated_attention_cached_decode_window_zero_pins_to_value_projection() ->
 
         shape = (*decode.shape[:-1], -1, model.channels_head)
         gate = (
-            model.q_proj(decode)
+            model.proj_q(decode)
             .reshape(*decode.shape[:-1], model.num_heads, 2 * model.channels_head)
             .chunk(2, dim=-1)[1]
         )
-        v = model.v_proj(decode).reshape(shape)
-        expected = model.out_proj((v * gate.sigmoid()).flatten(-2))
+        v = model.proj_v(decode).reshape(shape)
+        expected = model.proj_out((v * gate.sigmoid()).flatten(-2))
 
     torch.testing.assert_close(actual, expected)
 
@@ -282,10 +282,10 @@ def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
     config.attn_kernel = kernel_config
     model = config.make().eval()
     with torch.no_grad():
-        model.q_proj.weight.zero_()
-        model.k_proj.weight.zero_()
-        model.v_proj.weight.fill_(1)
-        model.out_proj.weight.fill_(1)
+        model.proj_q.weight.zero_()
+        model.proj_k.weight.zero_()
+        model.proj_v.weight.fill_(1)
+        model.proj_out.weight.fill_(1)
         cache = model.alloc_kv_cache(batch=1, max_seq=4)
         _, cache = model.forward_cached(torch.tensor([[[2.0], [4.0]]]), cache=cache)
         actual, _ = model.forward_cached(
@@ -360,12 +360,12 @@ def test_gated_attention_window_zero_with_a_no_op_mask_pins_to_value_projection(
         actual = model(x, window=0, attn_mask=attn_mask)
         shape = (*x.shape[:-1], -1, model.channels_head)
         gate = (
-            model.q_proj(x)
+            model.proj_q(x)
             .reshape(*x.shape[:-1], model.num_heads, 2 * model.channels_head)
             .chunk(2, dim=-1)[1]
         )
-        v = model.v_proj(x).reshape(shape)
-        expected = model.out_proj((v * gate.sigmoid()).flatten(-2))
+        v = model.proj_v(x).reshape(shape)
+        expected = model.proj_out((v * gate.sigmoid()).flatten(-2))
 
     torch.testing.assert_close(actual, expected)
 
@@ -389,12 +389,12 @@ def test_gated_attention_window_zero_pins_to_value_projection() -> None:
         actual = model(x, window=0)
         shape = (*x.shape[:-1], -1, model.channels_head)
         gate = (
-            model.q_proj(x)
+            model.proj_q(x)
             .reshape(*x.shape[:-1], model.num_heads, 2 * model.channels_head)
             .chunk(2, dim=-1)[1]
         )
-        v = model.v_proj(x).reshape(shape)
-        expected = model.out_proj((v * gate.sigmoid()).flatten(-2))
+        v = model.proj_v(x).reshape(shape)
+        expected = model.proj_out((v * gate.sigmoid()).flatten(-2))
 
     torch.testing.assert_close(actual, expected)
 

@@ -1,7 +1,7 @@
 """Autoregressive text generation with KV caching.
 
 Works with any model exposing the standard interface:
-  in_proj(tokens) -> hidden
+  proj_in(tokens) -> hidden
   blocks: Iterable[TransformerBlock]
   project_to_logits(hidden) -> logits
 
@@ -71,7 +71,7 @@ class TransformerLike(Protocol):
     """
 
     @property
-    def in_proj(self) -> TensorModule | None:
+    def proj_in(self) -> TensorModule | None:
         """In proj."""
         ...
 
@@ -139,10 +139,11 @@ def generate(
             f"exceeds max_seq_len={max_seq_len}.",
         )
 
-    in_proj = model.in_proj
-    if not has_weight(in_proj):
-        raise TypeError("Token generation requires an in_proj with embedding weights.")
-    dtype = in_proj.weight.dtype
+    proj_in = model.proj_in
+    if proj_in is None or not has_weight(proj_in):
+        raise TypeError("Token generation requires an proj_in with embedding weights.")
+    forward = proj_in
+    dtype = proj_in.weight.dtype
 
     # Delegate cache alloc to block; keeps generate arch-agnostic
     # (MLA caches compressed latent).
@@ -168,7 +169,7 @@ def generate(
         for block in blocks
     ]
 
-    x: Tensor = in_proj(prompt_ids)
+    x: Tensor = forward(prompt_ids)
     for i, block in enumerate(blocks):
         x, caches[i] = block.forward_cached(x, cache=caches[i])
     logits: Tensor = model.project_to_logits(x[:, -1:, :])
@@ -196,7 +197,7 @@ def generate(
             if finished.all():
                 break
 
-        x = in_proj(next_token)
+        x = forward(next_token)
         for i, block in enumerate(blocks):
             x, caches[i] = block.forward_cached(x, cache=caches[i])
         logits = model.project_to_logits(x)

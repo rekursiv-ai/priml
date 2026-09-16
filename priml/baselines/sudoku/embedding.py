@@ -20,7 +20,7 @@ precisely so the order is visible in ``pprint`` rather than buried in a method.
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import KW_ONLY, field
 from typing import Protocol, Self, override, runtime_checkable
 
 import math
@@ -30,6 +30,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
 from priml.model.init import truncated_normal
 
@@ -59,24 +60,10 @@ class GridChannel(Protocol):
 
 
 @runtime_checkable
-class HasChannels(Protocol):
-    """A channel config sized by the model's hidden width."""
-
-    channels: int
-
-
-@runtime_checkable
 class HasGridLen(Protocol):
     """A channel config sized by the puzzle's grid-token count."""
 
     grid_len: int
-
-
-@runtime_checkable
-class HasVocabSize(Protocol):
-    """A channel config sized by the token vocabulary."""
-
-    vocab_size: int
 
 
 class FactoredPositions(nn.Module):
@@ -102,7 +89,7 @@ class FactoredPositions(nn.Module):
         box_shape: tuple[int, int] = (3, 3)
         """``(rows, cols)`` of one constraint box tiling the grid."""
 
-        channels: int = -1
+        channels_out: int = -1
         """Table width; -1 inherits the model's hidden size."""
 
         init_std: float = 1.0
@@ -124,14 +111,14 @@ class FactoredPositions(nn.Module):
                 f"box_shape {config.box_shape} does not tile grid_shape "
                 f"{config.grid_shape}.",
             )
-        if config.channels <= 0:
+        if config.channels_out <= 0:
             raise ValueError(
-                f"channels must be positive; got {config.channels}. It is "
+                f"channels_out must be positive; got {config.channels_out}. It is "
                 "normally inherited from the model during finalize.",
             )
         self.config = config
         self.embed_scale: float = (
-            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         cell = torch.arange(rows * cols)
         row = cell // cols
@@ -144,10 +131,10 @@ class FactoredPositions(nn.Module):
         # Init order is a checkpoint-parity contract: row, then column, then
         # box. Each draws from the global RNG, so reordering changes every
         # seeded run's weights.
-        width, std = config.channels, config.init_std
-        self.embed_pos_row = _table(rows, channels=width, init_std=std)
-        self.embed_pos_col = _table(cols, channels=width, init_std=std)
-        self.embed_pos_box = _table(num_boxes, channels=width, init_std=std)
+        width, std = config.channels_out, config.init_std
+        self.embed_pos_row = _table(rows, channels_out=width, init_std=std)
+        self.embed_pos_col = _table(cols, channels_out=width, init_std=std)
+        self.embed_pos_box = _table(num_boxes, channels_out=width, init_std=std)
 
     @override
     def forward(self, tokens: Tensor, embeddings: Tensor) -> Tensor:
@@ -176,14 +163,16 @@ class PredictionFeedback(nn.Module):
     therefore starts from the same weights and must LEARN to use it.
     """
 
-    class Config(Fig["PredictionFeedback"]):
+    class Config(Fig["PredictionFeedback"], kw_only=False):
         """Feedback-table size and initialization."""
 
-        vocab_size: int = -1
+        channels_in: int = -1
         """Token vocabulary; -1 inherits the model's."""
 
-        channels: int = -1
+        channels_out: int = -1
         """Table width; -1 inherits the model's hidden size."""
+
+        _: KW_ONLY
 
         init_std: float = 0.0
         """Realized standard deviation; 0 zero-initializes the table."""
@@ -194,19 +183,19 @@ class PredictionFeedback(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        if config.channels <= 0 or config.vocab_size <= 0:
+        if config.channels_out <= 0 or config.channels_in <= 0:
             raise ValueError(
-                f"vocab_size and channels must be positive; got "
-                f"{config.vocab_size} and {config.channels}. Both are "
+                f"channels_in and channels_out must be positive; got "
+                f"{config.channels_in} and {config.channels_out}. Both are "
                 "normally inherited from the model during finalize.",
             )
         self.config = config
         self.embed_scale: float = (
-            config.channels**0.5 if config.embed_scale < 0 else config.embed_scale
+            config.channels_out**0.5 if config.embed_scale < 0 else config.embed_scale
         )
         self.embed_feedback = _table(
-            config.vocab_size,
-            channels=config.channels,
+            config.channels_in,
+            channels_out=config.channels_out,
             init_std=config.init_std,
         )
         self._feedback_ids: Tensor | None = None
@@ -246,14 +235,16 @@ class GridEmbedding(nn.Module):
     a per-puzzle embedding) is prepended by the model, after this returns.
     """
 
-    class Config(Fig["GridEmbedding"]):
+    class Config(Fig["GridEmbedding"], kw_only=False):
         """Vocabulary, width, and the additive channel list."""
 
-        vocab_size: int = 11
-        """Token vocabulary size."""
-
         channels_in: int = -1
+        """Token vocabulary size: the one-hot input width the table is linear over."""
+
+        channels_out: int = -1
         """Embedding width; -1 inherits the model's own."""
+
+        _: KW_ONLY
 
         grid_shape: tuple[int, ...] = (81,)
         """Token layout per puzzle. A flat ``(81,)`` and a ``(9, 9)`` grid
@@ -276,12 +267,12 @@ class GridEmbedding(nn.Module):
         @override
         def finalize(self) -> Self:
             for channel in self.channels:
-                if isinstance(channel, HasChannels) and channel.channels == -1:
-                    channel.channels = self.channels_in
+                if isinstance(channel, ChannelsOut) and channel.channels_out == -1:
+                    channel.channels_out = self.channels_out
                 if isinstance(channel, HasGridLen) and channel.grid_len == -1:
                     channel.grid_len = self.grid_len
-                if isinstance(channel, HasVocabSize) and channel.vocab_size == -1:
-                    channel.vocab_size = self.vocab_size
+                if isinstance(channel, ChannelsIn) and channel.channels_in == -1:
+                    channel.channels_in = self.channels_in
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
@@ -291,11 +282,16 @@ class GridEmbedding(nn.Module):
                 f"channels_in must be positive; got {config.channels_in}. It "
                 "is normally inherited from the model during finalize.",
             )
+        if config.channels_out <= 0:
+            raise ValueError(
+                f"channels_out must be positive; got {config.channels_out}. It "
+                "is normally inherited from the model during finalize.",
+            )
         self.config = config
-        self.embed_scale: float = config.channels_in**0.5
+        self.embed_scale: float = config.channels_out**0.5
         self.embed_tokens = Embedding.Config(
-            channels_out=config.channels_in,
-            num_embeddings=config.vocab_size,
+            channels_out=config.channels_out,
+            channels_in=config.channels_in,
         ).make()
         truncated_normal(
             self.embed_tokens.weight,
@@ -329,21 +325,20 @@ class GridEmbedding(nn.Module):
         return embeddings
 
 
-# The std passed to the initializer is divided by ``sqrt(channels)`` because the caller
-# multiplies by that factor at runtime (the embedding rescale trick), so the two cancel
-# and the effective std is ``init_std``.
+# The initializer's std is divided by ``sqrt(channels_out)`` because the caller
+# multiplies by that factor at runtime; the two cancel to ``init_std``.
 def _table(
     num_embeddings: int,
     *,
-    channels: int,
+    channels_out: int,
     init_std: float,
 ) -> nn.Parameter:
     """Return a learned table whose REALIZED std is ``init_std`` after rescaling."""
-    w = torch.zeros(num_embeddings, channels)
+    w = torch.zeros(num_embeddings, channels_out)
     if init_std > 0:
         truncated_normal(
             w,
-            std=init_std / channels**0.5,
+            std=init_std / channels_out**0.5,
             depth_index=(),
             variance_correction=True,
         )

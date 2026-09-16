@@ -262,7 +262,7 @@ def test_tied_linear_config_pprint() -> None:
 def test_tied_linear_head_borrows_the_embedding() -> None:
     """The head reads the table transposed; only the table is a parameter."""
     config = _LanguageModel.Config()
-    config.embed = Embedding.Config(channels_out=8, num_embeddings=17)
+    config.embed = Embedding.Config(channels_out=8, channels_in=17)
     config.head = TiedLinear.Config(tied="embed")
     model = config.make()
     assert isinstance(model.embed, Embedding)

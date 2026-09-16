@@ -24,6 +24,7 @@ from priml.model.custom_types import (
     TensorModule,
 )
 from priml.model.init import InitFn, kaiming_uniform
+from priml.model.legacy_keys import absorb_legacy_keys
 from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
 
@@ -94,43 +95,52 @@ class GatedSelfAttention(nn.Module):
         self.num_heads_kv = config.num_heads_kv
         self.channels_head = config.channels_head
         self.dropout = config.dropout
-        q_proj = Linear.Config()
-        q_proj.channels_in = config.channels_in
-        q_proj.channels_out = 2 * config.num_heads * config.channels_head
-        q_proj.bias = config.bias
-        q_proj.init_weight = config.init_weight
-        self.q_proj = q_proj.make()
-        k_proj = Linear.Config()
-        k_proj.channels_in = config.channels_in
-        k_proj.channels_out = config.num_heads_kv * config.channels_head
-        k_proj.bias = config.bias
-        k_proj.init_weight = config.init_weight
-        self.k_proj = k_proj.make()
-        v_proj = Linear.Config()
-        v_proj.channels_in = config.channels_in
-        v_proj.channels_out = config.num_heads_kv * config.channels_head
-        v_proj.bias = config.bias
-        v_proj.init_weight = config.init_weight
-        self.v_proj = v_proj.make()
-        out_proj = Linear.Config()
-        out_proj.channels_in = config.num_heads * config.channels_head
-        out_proj.channels_out = config.channels_out
-        out_proj.bias = config.bias
-        out_proj.init_weight = config.init_weight
-        out_proj.depth_index = config.depth_index
-        self.out_proj = out_proj.make()
+        proj_q = Linear.Config()
+        proj_q.channels_in = config.channels_in
+        proj_q.channels_out = 2 * config.num_heads * config.channels_head
+        proj_q.bias = config.bias
+        proj_q.init_weight = config.init_weight
+        self.proj_q = proj_q.make()
+        proj_k = Linear.Config()
+        proj_k.channels_in = config.channels_in
+        proj_k.channels_out = config.num_heads_kv * config.channels_head
+        proj_k.bias = config.bias
+        proj_k.init_weight = config.init_weight
+        self.proj_k = proj_k.make()
+        proj_v = Linear.Config()
+        proj_v.channels_in = config.channels_in
+        proj_v.channels_out = config.num_heads_kv * config.channels_head
+        proj_v.bias = config.bias
+        proj_v.init_weight = config.init_weight
+        self.proj_v = proj_v.make()
+        proj_out = Linear.Config()
+        proj_out.channels_in = config.num_heads * config.channels_head
+        proj_out.channels_out = config.channels_out
+        proj_out.bias = config.bias
+        proj_out.init_weight = config.init_weight
+        proj_out.depth_index = config.depth_index
+        self.proj_out = proj_out.make()
         self.norm_q = config.norm_qk.make()
         self.norm_k = config.norm_qk.make()
         self.rope = config.rope.make() if config.rope is not None else None
+        absorb_legacy_keys(
+            self,
+            {
+                "q_proj": "proj_q",
+                "k_proj": "proj_k",
+                "v_proj": "proj_v",
+                "out_proj": "proj_out",
+            },
+        )
         self.attn_kernel = config.attn_kernel.make()
 
     def reset_parameters(self) -> None:
         """Reset projection and normalization parameters."""
         for module in (
-            self.q_proj,
-            self.k_proj,
-            self.v_proj,
-            self.out_proj,
+            self.proj_q,
+            self.proj_k,
+            self.proj_v,
+            self.proj_out,
             self.norm_q,
             self.norm_k,
         ):
@@ -163,8 +173,8 @@ class GatedSelfAttention(nn.Module):
             num_heads=self.num_heads_kv,
             max_seq=max_seq,
             channels_head=self.channels_head,
-            device=self.q_proj.weight.device if device is None else device,
-            dtype=self.q_proj.weight.dtype if dtype is None else dtype,
+            device=self.proj_q.weight.device if device is None else device,
+            dtype=self.proj_q.weight.dtype if dtype is None else dtype,
         )
 
     def forward_cached(
@@ -231,7 +241,7 @@ class GatedSelfAttention(nn.Module):
         kwargs.pop("is_causal", None)
         shape = (*x.shape[:-1], -1, self.channels_head)
         q, gate = (
-            self.q_proj(x)
+            self.proj_q(x)
             .reshape(
                 *x.shape[:-1],
                 self.num_heads,
@@ -240,8 +250,8 @@ class GatedSelfAttention(nn.Module):
             .chunk(2, dim=-1)
         )
         q = self.norm_q(q)
-        k = self.norm_k(self.k_proj(x).reshape(shape))
-        v = self.v_proj(x).reshape(shape)
+        k = self.norm_k(self.proj_k(x).reshape(shape))
+        v = self.proj_v(x).reshape(shape)
         if self.rope is not None:
             if positions is None:
                 offset = cache.seen if cache is not None else 0
@@ -313,7 +323,7 @@ class GatedSelfAttention(nn.Module):
             .flatten(-2)
             .contiguous()
         )
-        return self.out_proj(output * gate.flatten(-2).sigmoid())
+        return self.proj_out(output * gate.flatten(-2).sigmoid())
 
 
 def _validate_cache_geometry(

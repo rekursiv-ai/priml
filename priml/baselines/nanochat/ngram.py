@@ -69,7 +69,7 @@ class NgramEmbedding(NarrowEmbedding):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.multipliers = config.multipliers
-        self.num_embeddings = config.num_embeddings
+        self.num_embeddings = config.channels_in
         self.scale = config.scale
         self.contexts = nn.ModuleDict(
             {name: context.make() for name, context in config.contexts.items()}
@@ -145,7 +145,7 @@ class HashedNgramTables(nn.Module):
             if len({len(row) for row in self.hash_multipliers}) != 1:
                 raise ValueError("All hashes must have the same n-gram order.")
             self.table.channels_out = self.channels_out // len(self.hash_multipliers)
-            self.table.num_embeddings = self.num_embeddings
+            self.table.channels_in = self.num_embeddings
             bound = (3 / self.channels_out) ** 0.5
             self.table.init_weight = partial(nn.init.uniform_, a=-bound, b=bound)
             return super().finalize()

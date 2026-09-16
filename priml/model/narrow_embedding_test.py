@@ -26,9 +26,9 @@ _CWD: Final = Path(__file__).resolve().parent
 
 def test_narrow_embedding_config_pprint() -> None:
     config = NarrowEmbedding.Config(
-        torch.bfloat16,
+        channels_in=8,
         channels_out=4,
-        num_embeddings=8,
+        dtype=torch.bfloat16,
     )
     assert_pprint_golden(
         test_file=__file__,
@@ -39,9 +39,9 @@ def test_narrow_embedding_config_pprint() -> None:
 
 def test_narrow_embedding_forward_and_open_kwargs() -> None:
     config = NarrowEmbedding.Config(
-        torch.bfloat16,
+        channels_in=8,
         channels_out=4,
-        num_embeddings=8,
+        dtype=torch.bfloat16,
     )
     module = config.make()
 
@@ -51,16 +51,16 @@ def test_narrow_embedding_forward_and_open_kwargs() -> None:
     assert output.dtype == torch.bfloat16
     assert isinstance(config.inner, Embedding.Config)
     assert config.inner.channels_out == -1
-    assert config.inner.num_embeddings == -1
+    assert config.inner.channels_in == -1
 
 
 def test_narrow_embedding_reset_draws_at_float32_then_narrows() -> None:
     module = NarrowEmbedding.Config(
-        torch.bfloat16,
+        channels_in=8,
         channels_out=4,
-        num_embeddings=8,
+        dtype=torch.bfloat16,
     ).make()
-    expected = Embedding.Config(channels_out=4, num_embeddings=8).make()
+    expected = Embedding.Config(channels_out=4, channels_in=8).make()
 
     torch.manual_seed(17)
     module.reset_parameters()
@@ -81,9 +81,9 @@ def test_narrow_embedding_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="narrow_embedding",
         build_module=lambda: NarrowEmbedding.Config(
-            torch.bfloat16,
+            channels_in=8,
             channels_out=4,
-            num_embeddings=8,
+            dtype=torch.bfloat16,
         ).make(),
         build_input=lambda: torch.tensor([[0, 3, 7]]),
         seed=0,

@@ -38,9 +38,9 @@ def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
     config = _canonical_config()
     config.num_layers = depth
     if tie:
-        assert isinstance(config.out_proj, Sequential.Config)
-        assert isinstance(config.out_proj.elements, list)
-        config.out_proj.elements[1] = TiedLinear.Config(tied="in_proj")
+        assert isinstance(config.proj_out, Sequential.Config)
+        assert isinstance(config.proj_out.elements, list)
+        config.proj_out.elements[1] = TiedLinear.Config(tied="proj_in")
     assert isinstance(config.block, TransformerBlock.Config)
     assert isinstance(config.block.attn, SelfAttention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
@@ -105,8 +105,8 @@ def _assert_same_state(source: object, target: object) -> None:
 
 
 def _assert_transferred(source: Transformer, graft: MMDiTGraft) -> None:
-    _assert_same_state(source.in_proj, graft.in_proj)
-    _assert_same_state(source.out_proj, graft.out_proj)
+    _assert_same_state(source.proj_in, graft.proj_in)
+    _assert_same_state(source.proj_out, graft.proj_out)
     assert len(source.blocks) == len(graft.blocks)
     for before, after in zip(source.blocks, graft.blocks, strict=True):
         assert isinstance(before, TransformerBlock)
@@ -167,8 +167,8 @@ def test_continuous_backbone_projections(projected: bool) -> None:
         attn_kernel=SdpaNaive.Config(),
     )
     if projected:
-        backbone.in_proj = Linear.Config(channels_out=16)
-        backbone.out_proj = Linear.Config(channels_out=3)
+        backbone.proj_in = Linear.Config(channels_out=16)
+        backbone.proj_out = Linear.Config(channels_out=3)
     config = MMDiTGraft.Config()
     config.backbone = backbone
     source, graft = backbone.make(), config.make()

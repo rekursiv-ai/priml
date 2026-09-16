@@ -6,7 +6,7 @@ Used by DeepSeek-V2/V3 and Kimi-K2. Compresses KV through a low-rank
 value path.
 
 Q has an optional LoRA decomposition (``q_lora_rank``): DeepSeek-V3 uses
-it (1536), Kimi-K2 does not (None ⇒ single ``q_proj``).
+it (1536), Kimi-K2 does not (None ⇒ single ``proj_q``).
 
 Forward shape map. B batch · S new tokens · T cached+new · n ``num_heads`` ·
 D ``channels_qk_nope_head`` · R ``channels_qk_rope_head`` ·
@@ -14,22 +14,22 @@ V ``channels_v_head`` · L ``kv_lora_rank``::
 
     x [B, S, hidden]
     │
-    ├─ q_proj ⟶ q [B, S, n, D+R]          (q_a_proj ⟶ norm ⟶ q_b_proj
+    ├─ proj_q ⟶ q [B, S, n, D+R]          (proj_q_a ⟶ norm ⟶ proj_q_b
     │  │                                    when q_lora_rank is set)
     │  ├─ q_nope [B, S, n, D]
     │  └─ q_pe   [B, S, n, R] ⟵ RoPE
     │
-    └─ kv_a_proj ⟶ [B, S, L+R]
+    └─ proj_kv_a ⟶ [B, S, L+R]
        ├─ c_kv [B, S, L] ⟵ kv_a_layernorm  ╮ cached; head-shared,
        └─ k_pe [B, S, R] ⟵ RoPE            ╯ so no head axis
 
-Attention never materializes K or V. ``kv_b_proj.weight`` is viewed per head
+Attention never materializes K or V. ``proj_kv_b.weight`` is viewed per head
 as ``W_KR [n, D, L]`` and ``W_UV [n, V, L]``, then folded into the contraction
 so both terms meet in the latent space::
 
     logits = (q_nope @ W_KR) @ c_kv^T + q_pe @ k_pe^T   [B, n, S, T]
     out    = (softmax(logits) @ c_kv) @ W_UV            [B, S, n, V]
-                                            ⟶ o_proj ⟶ [B, S, hidden]
+                                            ⟶ proj_out ⟶ [B, S, hidden]
 
 **Cache layout.** Only ``(c_kv, k_pe)`` are cached -- not the expanded
 K/V. For Kimi-K2 (n=64, D+V=256, L=512, R=64) this cuts cache memory
@@ -73,15 +73,17 @@ from priml.model.attention.window import causal_chunk_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
+    ChannelsInOutConfig,
     ChannelsOut,
     DepthIndex,
     LatentAttentionKernel,
     Resettable,
     RotaryFactors,
     TensorModule,
-    WeightedTensorConfig,
+    WeightedTensorModule,
 )
 from priml.model.init import InitFn, kaiming_uniform
+from priml.model.legacy_keys import absorb_legacy_keys
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 
@@ -203,8 +205,8 @@ class MultiHeadLatentAttention(nn.Module):
         """Value head dim (independent of Q/K head dim)."""
 
         q_lora_rank: int | None = None
-        """Rank for Q LoRA. ``None`` ⇒ single ``q_proj`` (Kimi-K2). Non-None
-        uses ``q_a_proj`` + RMSNorm + ``q_b_proj`` (DeepSeek-V3)."""
+        """Rank for Q LoRA. ``None`` ⇒ single ``proj_q`` (Kimi-K2). Non-None
+        uses ``proj_q_a`` + RMSNorm + ``proj_q_b`` (DeepSeek-V3)."""
 
         kv_lora_rank: int = 512
         """Rank of the compressed KV latent."""
@@ -261,7 +263,9 @@ class MultiHeadLatentAttention(nn.Module):
         """KV down-projection to ``kv_lora_rank + channels_qk_rope_head``.
         Replicated -- this is the latent the cache holds."""
 
-        proj_kv_b: WeightedTensorConfig = field(default_factory=Linear.Config)
+        proj_kv_b: ChannelsInOutConfig[WeightedTensorModule] = field(
+            default_factory=Linear.Config,
+        )
         """KV latent expansion. Replicated even under tensor parallelism: the
         absorb math slices its weight per head in Python, so each rank holds the
         whole thing and expands only its own head range."""
@@ -290,7 +294,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         ``"colwise"`` selects the head-parallel custom style (see
         :meth:`MultiHeadLatentAttention.tensor_parallel_style`): the q-path and
-        ``o_proj`` shard over the head dim while the head-shared latent path
+        ``proj_out`` shard over the head dim while the head-shared latent path
         stays replicated. MLA exposes no ``"rowwise"`` -- it is sharded as one
         block, not per child projection.
         """
@@ -408,7 +412,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.shard = config.shard
 
         # Tensor parallelism is head-parallel: the custom ``ParallelStyle``
-        # (see ``tensor_parallel_style``) shards the q-path and ``o_proj`` over
+        # (see ``tensor_parallel_style``) shards the q-path and ``proj_out`` over
         # the head dim and makes the absorb-math rank-local. Until that style is
         # applied these record the replicated identity (every rank owns all
         # num_heads); the head-shared latent path always stays replicated.
@@ -420,37 +424,48 @@ class MultiHeadLatentAttention(nn.Module):
         # plan names (see ``tensor_parallel_plan``); the slots they are built
         # from are the caller's choice.
         if config.q_lora_rank is None:
-            self.q_proj = config.proj_q.make()
-            self.q_a_proj: TensorModule | None = None
+            self.proj_q = config.proj_q.make()
+            self.proj_q_a: TensorModule | None = None
             self.q_a_layernorm: TensorModule | None = None
-            self.q_b_proj: TensorModule | None = None
+            self.proj_q_b: TensorModule | None = None
         else:
-            self.q_proj = None
-            self.q_a_proj = config.proj_q_a.make()
+            self.proj_q = None
+            self.proj_q_a = config.proj_q_a.make()
             self.q_a_layernorm = config.norm_q_lora.make()
-            self.q_b_proj = config.proj_q_b.make()
+            self.proj_q_b = config.proj_q_b.make()
 
         # KV path: compressed_kv is split into (c_kv, k_pe).
-        self.kv_a_proj = config.proj_kv_a.make()
+        self.proj_kv_a = config.proj_kv_a.make()
         self.kv_a_layernorm = config.norm_kv_lora.make()
         # kv_b expands c_kv into (n_heads * (qk_nope + channels_v_head)).
-        self.kv_b_proj = config.proj_kv_b.make()
-        self.o_proj = config.proj_out.make()
+        self.proj_kv_b = config.proj_kv_b.make()
+        self.proj_out = config.proj_out.make()
 
         self.rope = config.rope.make() if config.rope else None
         self.attn_kernel = config.attn_kernel.make()
+        absorb_legacy_keys(
+            self,
+            {
+                "q_proj": "proj_q",
+                "q_a_proj": "proj_q_a",
+                "q_b_proj": "proj_q_b",
+                "kv_a_proj": "proj_kv_a",
+                "kv_b_proj": "proj_kv_b",
+                "o_proj": "proj_out",
+            },
+        )
 
     def reset_parameters(self) -> None:
         """Initialize every parameter in place."""
         for m in (
-            self.q_proj,
-            self.q_a_proj,
+            self.proj_q,
+            self.proj_q_a,
             self.q_a_layernorm,
-            self.q_b_proj,
-            self.kv_a_proj,
+            self.proj_q_b,
+            self.proj_kv_a,
             self.kv_a_layernorm,
-            self.kv_b_proj,
-            self.o_proj,
+            self.proj_kv_b,
+            self.proj_out,
             self.rope,
             self.attn_kernel,
         ):
@@ -581,7 +596,7 @@ class MultiHeadLatentAttention(nn.Module):
         q_nope = q[..., : self.channels_qk_nope_head]
         q_pe = q[..., self.channels_qk_nope_head :]
 
-        compressed = self.kv_a_proj(x)
+        compressed = self.proj_kv_a(x)
         c_kv_new = self.kv_a_layernorm(compressed[..., : self.kv_lora_rank])
         k_pe_new = compressed[..., self.kv_lora_rank :].unsqueeze(-2)  # [*, S, 1, R].
 
@@ -633,22 +648,22 @@ class MultiHeadLatentAttention(nn.Module):
         ), cache
 
     # Under tensor parallelism the q-path is colwise-sharded over the head dim, so
-    # ``q_proj``/``q_b_proj`` emit only this rank's ``heads_local = num_heads // tp``
+    # ``proj_q``/``proj_q_b`` emit only this rank's ``heads_local = num_heads // tp``
     # heads as a plain local tensor; the view reshapes by ``heads_local`` (``=
     # num_heads`` when replicated).
     def _project_q(self, x: Tensor) -> Tensor:
         """Return Q as ``[..., S, heads_local, channels_qk_head]``."""
-        if self.q_proj is not None:
-            q = self.q_proj(x)
+        if self.proj_q is not None:
+            q = self.proj_q(x)
         else:
-            assert self.q_a_proj is not None
+            assert self.proj_q_a is not None
             assert self.q_a_layernorm is not None
-            assert self.q_b_proj is not None
-            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
+            assert self.proj_q_b is not None
+            q = self.proj_q_b(self.q_a_layernorm(self.proj_q_a(x)))
         return q.view(*q.shape[:-1], self._heads_local, self.channels_qk_head)
 
     # The slicing lives here rather than in any kernel because it is where the tensor-
-    # parallel correctness argument is: ``kv_b_proj`` stays **replicated** (the latent
+    # parallel correctness argument is: ``proj_kv_b`` stays **replicated** (the latent
     # it expands is head-shared, so sharding it over the head dim is a bug), and this
     # rank expands only its ``heads_local`` heads -- rows ``[head_offset, head_offset +
     # heads_local)`` -- so the views align with the rank-local ``q_nope``/``q_pe`` from
@@ -676,7 +691,7 @@ class MultiHeadLatentAttention(nn.Module):
         # ranges over the local heads only.
         head_rows = qk_nope + self.channels_v_head
         lo = self._head_offset * head_rows
-        w = self.kv_b_proj.weight[lo : lo + h_local * head_rows].view(
+        w = self.proj_kv_b.weight[lo : lo + h_local * head_rows].view(
             h_local,
             head_rows,
             self.kv_lora_rank,
@@ -693,15 +708,15 @@ class MultiHeadLatentAttention(nn.Module):
             dropout_p=dropout_p,
             **kwargs,
         )
-        return self.o_proj(self._to_o_proj_input(out_per_head.flatten(-2)))
+        return self.proj_out(self._to_proj_out_input(out_per_head.flatten(-2)))
 
     # Replicated: a plain ``[..., num_heads * v]`` tensor. Under tensor parallelism
-    # ``o_proj`` is rowwise-sharded and expects its input sharded on the last (head*v)
+    # ``proj_out`` is rowwise-sharded and expects its input sharded on the last (head*v)
     # dim, so wrap this rank's local ``[..., heads_local * v]`` slice as a ``Shard(-1)``
     # DTensor; ``RowwiseParallel`` then all-reduces the partial outputs into the
     # replicated result.
-    def _to_o_proj_input(self, out: Tensor) -> Tensor:
-        """Present the per-head output to ``o_proj`` in its expected layout."""
+    def _to_proj_out_input(self, out: Tensor) -> Tensor:
+        """Present the per-head output to ``proj_out`` in its expected layout."""
         if self._tp_mesh is None:
             return out
         return DTensor.from_local(out, self._tp_mesh, [Shard(-1)], run_check=False)
@@ -710,12 +725,12 @@ class MultiHeadLatentAttention(nn.Module):
         """Return the head-parallel ``ParallelStyle`` for this MLA block.
 
         MLA is the hard tier of the two-tier tensor-parallel contract: its
-        absorb-math reshapes ``kv_b_proj.weight`` per head in Python, which the
+        absorb-math reshapes ``proj_kv_b.weight`` per head in Python, which the
         generic colwise/rowwise styles cannot express. The style shards the
-        q-path (``q_proj``/``q_b_proj``, colwise over the head dim) and
-        ``o_proj`` (rowwise), records this rank's local head range so the
+        q-path (``proj_q``/``proj_q_b``, colwise over the head dim) and
+        ``proj_out`` (rowwise), records this rank's local head range so the
         forward expands only its heads, and leaves the head-shared latent path
-        (``kv_a_proj``/``kv_b_proj``/``q_a_proj``/``kv_a_layernorm``)
+        (``proj_kv_a``/``proj_kv_b``/``proj_q_a``/``kv_a_layernorm``)
         replicated -- sharding the latent over the head axis is a correctness
         bug, not merely wasteful.
 
@@ -735,7 +750,7 @@ class MultiHeadLatentAttention(nn.Module):
         Validates that ``mesh`` (the ``tp`` sub-mesh) divides ``num_heads``, then
         stores ``heads_local`` and ``head_offset`` so :meth:`_project_q` and
         :meth:`_attend` expand only this rank's num_heads and
-        :meth:`_to_o_proj_input` wraps the per-head output over ``mesh``.
+        :meth:`_to_proj_out_input` wraps the per-head output over ``mesh``.
 
         Args:
           mesh: The ``tp`` device sub-mesh the head dim is sharded over.
@@ -802,10 +817,10 @@ class MultiHeadLatentAttention(nn.Module):
         still finds it, because the plan names the ATTRIBUTE this class binds
         rather than the class the caller chose.
 
-        Only the per-head path shards. ``q_proj`` XOR ``q_b_proj`` exists (the
+        Only the per-head path shards. ``proj_q`` XOR ``proj_q_b`` exists (the
         ``q_lora_rank`` gate); whichever emits head-major q is colwise, with a
         LOCAL output so the absorb-math einsums see plain tensors rather than
-        DTensors. ``o_proj`` is rowwise. Everything else -- the latent path and
+        DTensors. ``proj_out`` is rowwise. Everything else -- the latent path and
         its norms -- stays replicated, which is correctness rather than thrift:
         the latent is head-shared, so splitting it over the head dim is wrong.
 
@@ -813,10 +828,10 @@ class MultiHeadLatentAttention(nn.Module):
           plan: Attribute name to style, for ``parallelize_module``.
 
         """
-        q_name = "q_proj" if self.q_proj is not None else "q_b_proj"
+        q_name = "proj_q" if self.proj_q is not None else "proj_q_b"
         return {
             q_name: ColwiseParallel(use_local_output=True),
-            "o_proj": RowwiseParallel(
+            "proj_out": RowwiseParallel(
                 input_layouts=Shard(-1),
                 output_layouts=Replicate(),
             ),

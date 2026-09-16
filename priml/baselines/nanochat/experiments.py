@@ -509,7 +509,7 @@ def exp006() -> NgramTrainLoop.Config:
     context = embedding.contexts["bigram"] = NgramEmbedding.Config()
     context.multipliers = (1, 257)
     context.scale = 0.25
-    context.num_embeddings = 1_048_576
+    context.channels_in = 1_048_576
     context.inner = Embedding.Config(init_weight=torch.nn.init.zeros_)
     cfg.step.model.embedding = embedding
     # Uncomment for B200's 300-second budget; leave commented for H-series.
@@ -553,7 +553,7 @@ def exp007() -> NgramTrainLoop.Config:
     trigram = embedding.contexts["trigram"] = NgramEmbedding.Config()
     trigram.multipliers = (1, 257, 66_049)
     trigram.scale = 0.125
-    trigram.num_embeddings = 1_048_576
+    trigram.channels_in = 1_048_576
     trigram.inner = Embedding.Config(init_weight=torch.nn.init.zeros_)
     optimizer.select[6] = matching(
         "embed.contexts.bigram.inner", "embed.contexts.trigram.inner"
@@ -584,7 +584,7 @@ def exp008() -> NgramTrainLoop.Config:
     cfg.experiment_name = "exp008"
     embedding = cfg.step.model.embedding
     assert isinstance(embedding, NgramEmbedding.Config)
-    embedding.contexts["trigram"].num_embeddings = 2_097_152
+    embedding.contexts["trigram"].channels_in = 2_097_152
     optimizer = cfg.step.optimizer
     assert isinstance(optimizer, CompositeOptimizer.Config)
     context = optimizer.optimizers[6]

@@ -38,8 +38,8 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.embedding import GridEmbedding, HasChannels
-from priml.model.custom_types import ChannelsIn, TensorModule
+from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
@@ -335,14 +335,15 @@ class SudokuNet(nn.Module):
         def finalize(self) -> Self:
             embedding = self.embedding
             assert isinstance(embedding, GridEmbedding.Config)
+            if embedding.channels_out == -1:
+                embedding.channels_out = self.channels_in
             if embedding.channels_in == -1:
-                embedding.channels_in = self.channels_in
-            embedding.vocab_size = self.vocab_size
+                embedding.channels_in = self.vocab_size
             propagate = self.block
             if isinstance(propagate, ChannelsIn) and propagate.channels_in == -1:
                 propagate.channels_in = self.channels_in
-            if isinstance(self.prefix, HasChannels) and self.prefix.channels == -1:
-                self.prefix.channels = self.channels_in
+            if isinstance(self.prefix, ChannelsOut) and self.prefix.channels_out == -1:
+                self.prefix.channels_out = self.channels_in
             if self.num_prefix_tokens == -1:
                 self.num_prefix_tokens = _count_prefix_tokens(self.prefix)
             return super().finalize()

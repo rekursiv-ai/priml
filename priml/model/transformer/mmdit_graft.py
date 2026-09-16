@@ -17,7 +17,7 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
-from priml.model.custom_types import Resettable, TransformerConfig
+from priml.model.custom_types import DeepModelConfig, Resettable
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock, MMDiTStream
 from priml.model.transformer.transformer import Transformer
@@ -32,7 +32,7 @@ class MMDiTGraft(nn.Module):
     """
 
     class Config(Fig["MMDiTGraft"]):
-        backbone: TransformerConfig = field(default_factory=Transformer.Config)
+        backbone: DeepModelConfig = field(default_factory=Transformer.Config)
         """Transformer architecture exposing projections and blocks."""
 
         streams: list[MMDiTStream.Config] = field(
@@ -97,9 +97,9 @@ class MMDiTGraft(nn.Module):
             if not isinstance(layer.attn, SelfAttention.Config):
                 raise TypeError("Grafting requires native SelfAttention blocks.")
         self.num_streams = len(config.streams) + 1
-        self.in_proj = source.in_proj.make() if source.in_proj is not None else None
+        self.proj_in = source.proj_in.make() if source.proj_in is not None else None
         self.blocks = nn.ModuleList(block.make() for block in config.block)
-        self.out_proj = source.out_proj.make() if source.out_proj is not None else None
+        self.proj_out = source.proj_out.make() if source.proj_out is not None else None
 
     def load_backbone(self, source: Transformer) -> None:
         """Load native language weights, preflighting all layers before copying.
@@ -144,7 +144,7 @@ class MMDiTGraft(nn.Module):
 
     def reset_parameters(self) -> None:
         """Reset all owned modules using their configured initializers."""
-        for module in (self.in_proj, *self.blocks, self.out_proj):
+        for module in (self.proj_in, *self.blocks, self.proj_out):
             if isinstance(module, Resettable):
                 module.reset_parameters()
 
@@ -174,13 +174,13 @@ class MMDiTGraft(nn.Module):
             raise ValueError(
                 f"Expected {self.num_streams - 1} modality streams, got {len(streams)}.",
             )
-        language = self.in_proj(tokens) if self.in_proj is not None else tokens
+        language = self.proj_in(tokens) if self.proj_in is not None else tokens
         hidden: tuple[Tensor, ...] = (language, *streams)
         for block in self.blocks:
             hidden = block(hidden, c=c, cos_sin=cos_sin, attn_mask=attn_mask, **kwargs)
         language = hidden[0]
         logits = (
-            language if self.out_proj is None else self.out_proj(language, **kwargs)
+            language if self.proj_out is None else self.proj_out(language, **kwargs)
         )
         return logits, hidden[1:]
 
@@ -197,9 +197,9 @@ class MMDiTGraft(nn.Module):
             for block in self.blocks
         ]
         modules: dict[str, nn.Module] = {}
-        if self.in_proj is not None:
-            modules["in_proj"] = cast(nn.Module, self.in_proj)
+        if self.proj_in is not None:
+            modules["proj_in"] = cast(nn.Module, self.proj_in)
         modules["blocks"] = nn.ModuleList(blocks)
-        if self.out_proj is not None:
-            modules["out_proj"] = cast(nn.Module, self.out_proj)
+        if self.proj_out is not None:
+            modules["proj_out"] = cast(nn.Module, self.proj_out)
         return nn.ModuleDict(modules)

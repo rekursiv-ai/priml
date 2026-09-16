@@ -39,19 +39,19 @@ class NarrowEmbedding(nn.Module):
     """A table drawn at full precision, then held at ``dtype``."""
 
     class Config(Fig["NarrowEmbedding"], kw_only=False):
-        dtype: torch.dtype | None = None
-        """Width the table is held at; None keeps whatever ``inner`` drew."""
-
-        _: KW_ONLY
-
-        inner: Makeable[LookupTable] = field(default_factory=Embedding.Config)
-        """The table being narrowed."""
+        channels_in: int = -1
+        """Vocabulary size: the input token range the table indexes."""
 
         channels_out: int = -1
         """Embedding width; forwarded to ``inner``."""
 
-        num_embeddings: int = -1
-        """Vocabulary size; forwarded to ``inner``."""
+        _: KW_ONLY
+
+        dtype: torch.dtype | None = None
+        """Width the table is held at; None keeps whatever ``inner`` drew."""
+
+        inner: Makeable[LookupTable] = field(default_factory=Embedding.Config)
+        """The table being narrowed."""
 
         @override
         def finalize(self) -> Self:
@@ -61,7 +61,7 @@ class NarrowEmbedding(nn.Module):
                 self.channels_out,
                 protocol=ChannelsOut,
             )
-            propagate_attr(self.inner, "num_embeddings", self.num_embeddings)
+            propagate_attr(self.inner, "channels_in", self.channels_in)
             return super().finalize()
 
     def __init__(self, config: Config) -> None:

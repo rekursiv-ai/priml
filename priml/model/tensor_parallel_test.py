@@ -91,13 +91,13 @@ def test_moe_experts_inherit_swiglu_shard() -> None:
 
 def test_transformer_declares_embedding_and_head_vocab() -> None:
     config = Transformer.Config(channels_in=32, channels_out=64, num_layers=1)
-    config.in_proj = Embedding.Config(num_embeddings=64, shard="vocab")
-    config.out_proj = Linear.Config(shard="vocab")
+    config.proj_in = Embedding.Config(channels_in=64, shard="vocab")
+    config.proj_out = Linear.Config(shard="vocab")
     model = config.make()
-    assert isinstance(model.in_proj, Embedding)
-    assert model.in_proj.shard == "vocab"
-    assert isinstance(model.out_proj, Linear)
-    assert model.out_proj.shard == "vocab"
+    assert isinstance(model.proj_in, Embedding)
+    assert model.proj_in.shard == "vocab"
+    assert isinstance(model.proj_out, Linear)
+    assert model.proj_out.shard == "vocab"
 
 
 # ``result_dir_str`` is bound via ``functools.partial`` and pickled with the worker, so
@@ -273,8 +273,8 @@ def _transformer_block() -> tuple[nn.Module, Tensor]:
 
 def _transformer() -> tuple[nn.Module, Tensor]:
     model = Transformer.Config(
-        in_proj=Embedding.Config(num_embeddings=64, shard="vocab"),
-        out_proj=Linear.Config(shard="vocab"),
+        proj_in=Embedding.Config(channels_in=64, shard="vocab"),
+        proj_out=Linear.Config(shard="vocab"),
         channels_in=32,
         channels_out=64,
         num_layers=2,

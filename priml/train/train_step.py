@@ -763,7 +763,7 @@ class TrainStep:
         """Checkpointed step state; see :meth:`TrainStep.state_dict`."""
 
         model: dict[str, Tensor]
-        optimizer: Mapping[str, Any]  # pyright: ignore[reportExplicitAny] -- torch's own opaque optimizer payload.
+        optimizer: Mapping[str, object]
         timer_forward: NotRequired[CheckpointableStepTimer.StateDict]
         timer_eval: NotRequired[CheckpointableStepTimer.StateDict]
         timer_step: NotRequired[CheckpointableStepTimer.StateDict]

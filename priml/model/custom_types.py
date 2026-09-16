@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal, Protocol, Self, TypeGuard, runtime_checkable
-from typing_extensions import ParamSpec
+from typing_extensions import ParamSpec, TypeVar
 
 from configgle import Makeable
 from torch import Tensor, nn
@@ -21,6 +21,7 @@ __all__ = [
     "ChannelsInOut",
     "ChannelsInOutConfig",
     "ChannelsOut",
+    "DeepModelConfig",
     "DepthIndex",
     "HasAttention",
     "HasDepthIndex",
@@ -31,10 +32,7 @@ __all__ = [
     "RotaryFactors",
     "ShardStyle",
     "Shardable",
-    "TensorBlockConfig",
     "TensorModule",
-    "TransformerConfig",
-    "WeightedTensorConfig",
     "WeightedTensorModule",
     "flatten_depth_index",
     "has_weight",
@@ -49,6 +47,14 @@ module whose ``forward`` starts with the named tensors: ``nn.Module.__call__``
 is generic over the subclass's ``forward``, and a fixed ``**kwargs: object``
 rejects a kernel that names its own keywords (``window: int = -1``).
 """
+
+_ModuleT_co = TypeVar(
+    "_ModuleT_co",
+    bound="TensorModule",
+    default="TensorModule",
+    covariant=True,
+)
+"""The module a width-configurable config builds; a plain tensor module by default."""
 
 type DepthIndex = tuple[tuple[int, int], ...]
 """Global-to-local ``(index, count)`` pairs; empty means unspecified."""
@@ -70,7 +76,16 @@ every ``self.act(x)`` infer ``Any``. Pass a Module through a ``Makeable``.
 """
 
 
-class TensorModule(Protocol[_Kwargs]):
+@runtime_checkable
+class Resettable(Protocol):
+    """Owns resettable parameters or buffers."""
+
+    def reset_parameters(self) -> None:
+        """Initialize every parameter in place."""
+        ...
+
+
+class TensorModule(Resettable, Protocol[_Kwargs]):
     """A module that maps a Tensor to a Tensor.
 
     ``nn.Module.__call__`` is untyped, so a plain ``nn.Module`` annotation makes
@@ -87,18 +102,17 @@ class TensorModule(Protocol[_Kwargs]):
         """Apply to the input."""
         ...
 
-    def reset_parameters(self) -> None:
-        """Initialize every parameter in place."""
-        ...
 
+class WeightedTensorModule(TensorModule[_Kwargs], Protocol[_Kwargs]):
+    """A tensor module exposing its ``weight``.
 
-@runtime_checkable
-class Resettable(Protocol):
-    """Owns resettable parameters or buffers."""
+    Not ``runtime_checkable``: ``nn.Module`` stores parameters in ``_parameters``
+    and resolves them via ``__getattr__``, so a data-member protocol check
+    (``inspect.getattr_static``) misses every real weight and accepts a plain
+    class attribute; use :func:`has_weight` at runtime.
+    """
 
-    def reset_parameters(self) -> None:
-        """Initialize every parameter in place."""
-        ...
+    weight: Tensor
 
 
 @runtime_checkable
@@ -191,8 +205,7 @@ class LatentAttentionKernel(Protocol[_Kwargs]):
         ...
 
 
-@runtime_checkable
-class LookupTable(Protocol[_Kwargs]):
+class LookupTable(WeightedTensorModule[_Kwargs], Protocol[_Kwargs]):
     """A table mapping integer ids to rows, whose rows are readable.
 
     Wider than :class:`TensorModule` in the two ways a wrapper needs: the
@@ -200,22 +213,6 @@ class LookupTable(Protocol[_Kwargs]):
     ``to``, because holding a table at a narrower width is a move rather than a
     computation.
     """
-
-    weight: Tensor
-
-    def __call__(
-        self,
-        tokens: Tensor,
-        /,
-        *args: _Kwargs.args,
-        **kwargs: _Kwargs.kwargs,
-    ) -> Tensor:
-        """Apply to the input."""
-        ...
-
-    def reset_parameters(self) -> None:
-        """Initialize every parameter in place."""
-        ...
 
     def to(self, *, dtype: torch.dtype) -> Self:
         """To."""
@@ -284,39 +281,21 @@ class ChannelsInOut(ChannelsIn, ChannelsOut, Protocol):
 
 
 @runtime_checkable
-class ChannelsInOutConfig(Makeable[TensorModule], ChannelsInOut, Protocol):
-    """A config with input/output widths that builds a tensor-returning module."""
+class ChannelsInOutConfig(
+    Makeable[_ModuleT_co],
+    ChannelsInOut,
+    Protocol[_ModuleT_co],
+):
+    """A config with input/output widths that builds a tensor module."""
 
 
-@runtime_checkable
-class TensorBlockConfig(ChannelsInOutConfig, Protocol):
-    """A width-preserving config that builds a tensor-returning block."""
-
-
-@runtime_checkable
-class TransformerConfig(ChannelsInOutConfig, Protocol):
-    """A buildable transformer architecture exposing its replaceable components."""
+class DeepModelConfig(ChannelsInOutConfig, Protocol):
+    """A buildable deep model exposing its projections and block stack."""
 
     num_layers: int
-    in_proj: Makeable[TensorModule] | None
-    block: TensorBlockConfig | list[TensorBlockConfig]
-    out_proj: Makeable[TensorModule] | None
-
-
-@runtime_checkable
-class WeightedTensorModule(TensorModule, Protocol):
-    """A tensor-returning module exposing its projection weight."""
-
-    weight: Tensor
-
-
-@runtime_checkable
-class WeightedTensorConfig(
-    Makeable[WeightedTensorModule],
-    ChannelsInOut,
-    Protocol,
-):
-    """A width-configurable config that builds a weighted tensor module."""
+    proj_in: Makeable[TensorModule] | None
+    block: ChannelsInOutConfig | list[ChannelsInOutConfig]
+    proj_out: Makeable[TensorModule] | None
 
 
 @runtime_checkable

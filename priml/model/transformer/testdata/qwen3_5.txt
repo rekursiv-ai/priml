@@ -2,9 +2,9 @@ Qwen35.Config(
                 channels_in=16,
                 channels_out=32,
                 num_layers=2,
-                in_proj=Embedding.Config(
+                proj_in=Embedding.Config(
+                        channels_in=32,
                         channels_out=16,
-                        num_embeddings=32,
                         padding_idx=None,
                         device=None,
                         dtype=None,
@@ -122,7 +122,7 @@ Qwen35.Config(
                 │               depth_index=((1, 2),)
                 │       )
                 ],
-                out_proj=Linear.Config(
+                proj_out=Linear.Config(
                         channels_in=16,
                         channels_out=32,
                         bias=False,

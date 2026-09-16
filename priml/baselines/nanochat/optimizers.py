@@ -11,7 +11,6 @@ from importlib import import_module
 from types import FunctionType
 from typing import (
     TYPE_CHECKING,
-    Any,
     Final,
     Protocol,
     TypedDict,
@@ -23,7 +22,7 @@ from typing import (
 import math
 
 from configgle import Fig
-from torch import Tensor
+from torch import Tensor, nn
 from torch._dynamo import config as torch_dynamo_config
 from torch.optim import Optimizer, optimizer
 
@@ -32,6 +31,7 @@ import torch
 from priml.lib.custom_json import FloatCodec
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
+from priml.train.custom_types import OptimizerProtocol
 
 
 if TYPE_CHECKING:
@@ -39,14 +39,43 @@ if TYPE_CHECKING:
     from triton.language.extra.cuda import libdevice
 
     import triton
-
-    from priml.baselines.nanochat.train_step import NgramTrainStep
 else:
     from wrapt import lazy_import
 
     triton = lazy_import("triton")
     language = lazy_import("triton.language")
     libdevice = lazy_import("triton.language.extra.cuda.libdevice")
+
+
+class _ScheduleConfig(Protocol):
+    """The momentum-warmup knobs the update policy reads off a step's config."""
+
+    @property
+    def momentum_warmup_steps(self) -> int: ...
+    @property
+    def momentum_start(self) -> float: ...
+    @property
+    def momentum_end(self) -> float: ...
+
+
+class _ScheduledTrainStep(Protocol):
+    """What :class:`ScheduledOptimizerUpdate` needs of the step it drives.
+
+    Read-only properties so a step whose ``optimizer`` is typed by the wider
+    ``OptimizerProtocol`` still conforms; the policy narrows to
+    :class:`CompositeOptimizer` at the call site.
+    """
+
+    @property
+    def config(self) -> _ScheduleConfig: ...
+    @property
+    def progress_learning_schedule(self) -> float: ...
+    @property
+    def completed_updates(self) -> int: ...
+    @property
+    def optimizer(self) -> OptimizerProtocol: ...
+    @property
+    def model(self) -> nn.Module: ...
 
 
 class BiasCorrectedRMSProp(Optimizer):
@@ -105,11 +134,11 @@ class BiasCorrectedRMSProp(Optimizer):
     class StateDict(TypedDict):
         """Torch optimizer checkpoint payload."""
 
-        state: dict[int, dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch owns the opaque state schema.
-        param_groups: list[dict[str, Any]]  # pyright: ignore[reportExplicitAny] -- torch owns the opaque group schema.
+        state: dict[int, optimizer.StateDict]
+        param_groups: list[optimizer.StateDict]
 
     @override
-    def state_dict(self) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny] -- torch owns the checkpoint payload schema.
+    def state_dict(self) -> optimizer.StateDict:
         raw = super().state_dict()
         state: BiasCorrectedRMSProp.StateDict = {
             "state": raw["state"],
@@ -412,6 +441,7 @@ class ScheduledOptimizerUpdate:
         """Ordered weight-decay pulses; the first matching interval takes precedence."""
 
     def __init__(self, config: Config) -> None:
+        super().__init__()
         for name, value in (
             ("muon_warmdown", config.muon_warmdown),
             ("adam_warmdown", config.adam_warmdown),
@@ -421,7 +451,7 @@ class ScheduledOptimizerUpdate:
                 raise ValueError(f"{name} must be finite and positive; got {value}.")
         self.config = config
 
-    def __call__(self, step: "NgramTrainStep") -> dict[str, float | Tensor]:
+    def __call__(self, step: _ScheduledTrainStep) -> dict[str, float | Tensor]:
         """Apply schedules, update parameters, and clear gradients.
 
         Args:

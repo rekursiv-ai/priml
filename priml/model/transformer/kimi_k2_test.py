@@ -372,9 +372,9 @@ class TestLoad:
 
         model = KimiK2.load("moonshotai/tiny-kimi", device="cpu", dtype=torch.float32)
 
-        assert isinstance(model.in_proj, Embedding)
-        assert model.in_proj.weight.dtype == torch.float32
-        assert model.in_proj.weight.device.type == "cpu"
+        assert isinstance(model.proj_in, Embedding)
+        assert model.proj_in.weight.dtype == torch.float32
+        assert model.proj_in.weight.device.type == "cpu"
         load_transformers_model.assert_called_once_with(
             "moonshotai/tiny-kimi",
             "AutoModelForCausalLM",

@@ -83,17 +83,17 @@ class Qwen35(Transformer):
                 std=initializer_range,
             )
             embedding = Embedding.Config()
-            embedding.num_embeddings = result.channels_out
+            embedding.channels_in = result.channels_out
             embedding.init_weight = init
-            result.in_proj = embedding
+            result.proj_in = embedding
             if BoolCodec.coerce(config.get("tie_word_embeddings", False), default=None):
                 head = TiedLinear.Config()
-                head.tied = "in_proj"
-                result.out_proj = head
+                head.tied = "proj_in"
+                result.proj_out = head
             else:
                 projection = Linear.Config()
                 projection.init_weight = init
-                result.out_proj = projection
+                result.proj_out = projection
             layers = _layer_types(config, count=count)
             result.block = []
             for layer_type in layers:
@@ -188,7 +188,7 @@ class Qwen35(Transformer):
             config=config,
             non_text=non_text,
         )
-        target_dtype = weights["in_proj.weight"].dtype if dtype is None else dtype
+        target_dtype = weights["proj_in.weight"].dtype if dtype is None else dtype
         model = config.make().to(device=device, dtype=target_dtype)
         model.load_state_dict(weights, strict=True)
         return model
@@ -225,9 +225,9 @@ class Qwen35(Transformer):
 
         """
         if not x.is_floating_point():
-            if self.in_proj is None:
+            if self.proj_in is None:
                 raise ValueError("Token IDs require an input embedding.")
-            x = self.in_proj(x)
+            x = self.proj_in(x)
         if cache is not None and len(cache) != len(self.blocks):
             raise ValueError("The cache must have one entry per transformer block.")
         attention_mask = _pop_tensor(kwargs, name="attention_mask")
@@ -292,7 +292,7 @@ class Qwen35(Transformer):
             raise TypeError("cache must be a list or None.")
         cache = cast(list[object] | None, cache)
         hidden = self.hidden_states(x, cache=cache, **kwargs)
-        return hidden if self.out_proj is None else self.out_proj(hidden, **kwargs)
+        return hidden if self.proj_out is None else self.proj_out(hidden, **kwargs)
 
     def alloc_cache(
         self,
@@ -357,7 +357,7 @@ class Qwen35(Transformer):
         """
         hidden = self.hidden_states(x, cache=cache, **kwargs)
         return (
-            hidden if self.out_proj is None else self.out_proj(hidden, **kwargs),
+            hidden if self.proj_out is None else self.proj_out(hidden, **kwargs),
             cache,
         )
 

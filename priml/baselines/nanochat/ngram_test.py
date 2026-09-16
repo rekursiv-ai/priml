@@ -18,7 +18,7 @@ from priml.model.embedding import Embedding
 
 def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> None:
     config = NgramEmbedding.Config()
-    config.num_embeddings = 13
+    config.channels_in = 13
     config.channels_out = 2
     config.multipliers = (1, 3, 5)
     config.scale = 0.25
@@ -36,7 +36,7 @@ def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> Non
                 int(tokens[0, position - lag]) * multiplier
                 for lag, multiplier in enumerate(config.multipliers)
             )
-            % config.num_embeddings
+            % config.channels_in
         )
         expected[0, position] = torch.tensor([2 * bucket, 2 * bucket + 1]) * 0.25
     assert torch.equal(output, expected)

@@ -518,19 +518,19 @@ NanoChatLoop.Config(
                 │       │       ],
                 │       │       value_embedding_stride=2,
                 │       │       embedding=NarrowEmbedding.Config(
+                │       │               channels_in=8_192,
+                │       │               channels_out=512,
                 │       │               dtype=torch.bfloat16,
                 │       │               inner=Embedding.Config(
+                │       │                       channels_in=8_192,
                 │       │                       channels_out=512,
-                │       │                       num_embeddings=8_192,
                 │       │                       padding_idx=None,
                 │       │                       device=None,
                 │       │                       dtype=None,
                 │       │                       shard=None,
                 │       │                       depth_index=(),
                 │       │                       init_weight=functools.partial(<function priml.model.init.normal at 0xdefacedeface>, std=1.0)
-                │       │               ),
-                │       │               channels_out=512,
-                │       │               num_embeddings=8_192
+                │       │               )
                 │       │       ),
                 │       │       norm=RMSNorm.Config(
                 │       │               channels_in=512,

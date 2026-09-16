@@ -349,7 +349,7 @@ proj_out: Makeable[nn.Module] = field(default_factory=ScaledLinear.Config)
 The sentinel's rule lives in the parent's `forward` as an `if scale > 0` branch,
 so a caller cannot turn it off without knowing the sentinel. `ScaledLinear`
 carries the `1 / fan_in` rule with the weights it divides: the branch disappears
-and a plain `nn.Linear` drops in. Same shape as `Transformer.Config.out_proj`.
+and a plain `nn.Linear` drops in. Same shape as `Transformer.Config.proj_out`.
 
 Two more of the same shape: a field meaningful only when another field has a
 given value belongs on the injected piece; a count beside an EXPLICIT list is
@@ -412,7 +412,7 @@ whether the parent RENAMES one quantity or DERIVES a different one:
 |---|---|
 | `rms_norm_eps` -> `RMSNorm.eps` | Violation: same number, second name. |
 | `num_key_value_heads` -> `SelfAttention.num_heads_kv` | Violation: priml disagreeing with itself. |
-| `vocab_size` -> `Embedding.num_embeddings`, `Linear.channels_out` | Fine: one value, two ROLES. |
+| `vocab_size` -> `Embedding.channels_in`, `Linear.channels_out` | Fine: one value, two ROLES. |
 | `q_lora_rank` -> `Linear.channels_in`, `RMSNorm.channels_in` | Fine: a rank sizes several tensors. |
 
 A derivation earns the parent field: the value means something the children's

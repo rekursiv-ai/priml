@@ -19,13 +19,13 @@ class Embedding(nn.Embedding):
     """Embedding with truncated normal init."""
 
     class Config(Fig["Embedding"], kw_only=False):
+        channels_in: int = -1
+        """Vocabulary size: the input token range the table indexes."""
+
         channels_out: int = -1
         """Dimensionality of each embedding vector."""
 
         _: KW_ONLY
-
-        num_embeddings: int = -1
-        """Size of the embedding vocabulary."""
 
         padding_idx: int | None = None
         """Index whose embedding is zeroed out (e.g. for padding tokens)."""
@@ -61,7 +61,7 @@ class Embedding(nn.Embedding):
         self.depth_index = config.depth_index
         self._init_weight = config.init_weight
         super().__init__(
-            num_embeddings=config.num_embeddings,
+            num_embeddings=config.channels_in,
             embedding_dim=config.channels_out,
             padding_idx=config.padding_idx,
             device=config.device,

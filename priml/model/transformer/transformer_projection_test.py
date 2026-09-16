@@ -27,8 +27,8 @@ def _config() -> Transformer.Config:
 
 def test_optional_projections_accept_hidden_states() -> None:
     config = _config()
-    assert config.in_proj is None
-    assert config.out_proj is None
+    assert config.proj_in is None
+    assert config.proj_out is None
     model = config.make()
     hidden = torch.randn(2, 3, 8)
     block = model.blocks[0]
@@ -40,26 +40,26 @@ def test_configurable_linear_projections() -> None:
     config = _config()
     config.channels_in = 4
     config.channels_out = 3
-    config.in_proj = Linear.Config(channels_out=8)
-    config.out_proj = Linear.Config()
+    config.proj_in = Linear.Config(channels_out=8)
+    config.proj_out = Linear.Config()
     resolved = config.copy_tree().finalize()
-    assert isinstance(resolved.in_proj, Linear.Config)
-    assert isinstance(resolved.out_proj, Linear.Config)
-    assert resolved.in_proj.channels_in == 4
-    assert resolved.in_proj.channels_out == 8
-    assert resolved.out_proj.channels_in == 8
-    assert resolved.out_proj.channels_out == 3
+    assert isinstance(resolved.proj_in, Linear.Config)
+    assert isinstance(resolved.proj_out, Linear.Config)
+    assert resolved.proj_in.channels_in == 4
+    assert resolved.proj_in.channels_out == 8
+    assert resolved.proj_out.channels_in == 8
+    assert resolved.proj_out.channels_out == 3
     model = config.make()
     assert model(torch.randn(2, 3, 4)).shape == (2, 3, 3)
-    assert isinstance(model.out_proj, Linear)
-    assert model.out_proj.in_features == 8
-    assert config.in_proj.channels_in == -1
-    assert config.out_proj.channels_in == -1
+    assert isinstance(model.proj_out, Linear)
+    assert model.proj_out.in_features == 8
+    assert config.proj_in.channels_in == -1
+    assert config.proj_out.channels_in == -1
 
 
 def test_output_width_is_inferred_from_projection() -> None:
     config = _config()
-    config.out_proj = Linear.Config(channels_out=3)
+    config.proj_out = Linear.Config(channels_out=3)
     resolved = config.copy_tree().finalize()
     assert resolved.channels_out == 3
     assert config.channels_out == -1
@@ -68,38 +68,38 @@ def test_output_width_is_inferred_from_projection() -> None:
 
 def test_generation_requires_token_input_projection() -> None:
     model = _config().make()
-    with pytest.raises(TypeError, match=r"in_proj.*embedding"):
+    with pytest.raises(TypeError, match=r"proj_in.*embedding"):
         generate(model, torch.tensor([[1, 2]]))
 
 
 def test_tied_projection_reuses_input_weight() -> None:
     config = _config()
-    config.in_proj = Embedding.Config(num_embeddings=17)
-    config.out_proj = TiedLinear.Config(tied="in_proj")
+    config.proj_in = Embedding.Config(channels_in=17)
+    config.proj_out = TiedLinear.Config(tied="proj_in")
     config.channels_out = 17
     resolved = config.copy_tree().finalize()
     assert resolved.channels_in == 8
-    assert isinstance(resolved.out_proj, TiedLinear.Config)
-    assert resolved.out_proj.channels_in == 8
-    assert resolved.out_proj.channels_out == 17
+    assert isinstance(resolved.proj_out, TiedLinear.Config)
+    assert resolved.proj_out.channels_in == 8
+    assert resolved.proj_out.channels_out == 17
     model = config.make()
-    assert isinstance(model.in_proj, Embedding)
+    assert isinstance(model.proj_in, Embedding)
     tokens = torch.tensor([[1, 2, 3]])
     block = model.blocks[0]
     assert isinstance(block, TransformerBlock)
-    hidden = block(model.in_proj(tokens))
-    assert torch.equal(model(tokens), hidden @ model.in_proj.weight.T)
-    assert "in_proj.weight" in model.state_dict()
-    assert not any(key.startswith("out_proj.") for key in model.state_dict())
+    hidden = block(model.proj_in(tokens))
+    assert torch.equal(model(tokens), hidden @ model.proj_in.weight.T)
+    assert "proj_in.weight" in model.state_dict()
+    assert not any(key.startswith("proj_out.") for key in model.state_dict())
     model(tokens).square().sum().backward()
-    assert model.in_proj.weight.grad is not None
-    assert torch.count_nonzero(model.in_proj.weight.grad) > 0
+    assert model.proj_in.weight.grad is not None
+    assert torch.count_nonzero(model.proj_in.weight.grad) > 0
 
 
 def test_tied_projection_requires_input_weight() -> None:
     config = _config()
-    config.out_proj = TiedLinear.Config(tied="in_proj")
-    with pytest.raises(ValueError, match=r"tied='in_proj'"):
+    config.proj_out = TiedLinear.Config(tied="proj_in")
+    with pytest.raises(ValueError, match=r"tied='proj_in'"):
         config.make()
 
 

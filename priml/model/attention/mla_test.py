@@ -170,11 +170,11 @@ def test_forward_with_q_lora():
     x = torch.randn(1, 5, 128)
     out = m(x)
     assert out.shape == (1, 5, 128)
-    # Sanity: q_proj is disabled, LoRA path is active.
-    assert m.q_proj is None
-    assert m.q_a_proj is not None
+    # Sanity: proj_q is disabled, LoRA path is active.
+    assert m.proj_q is None
+    assert m.proj_q_a is not None
     assert m.q_a_layernorm is not None
-    assert m.q_b_proj is not None
+    assert m.proj_q_b is not None
 
 
 def test_explicit_zero_softmax_scale_is_honored() -> None:
@@ -564,21 +564,21 @@ def _reference_mla_forward(
     channels_v = module.channels_v_head
     channels_qk = module.channels_qk_head
 
-    if module.q_proj is not None:
-        q = module.q_proj(x)
+    if module.proj_q is not None:
+        q = module.proj_q(x)
     else:
-        assert module.q_a_proj is not None
+        assert module.proj_q_a is not None
         assert module.q_a_layernorm is not None
-        assert module.q_b_proj is not None
-        q = module.q_b_proj(module.q_a_layernorm(module.q_a_proj(x)))
+        assert module.proj_q_b is not None
+        q = module.proj_q_b(module.q_a_layernorm(module.proj_q_a(x)))
     q = q.view(*q.shape[:-1], num_heads, channels_qk)
     q_nope, q_pe = q[..., :channels_qk_nope], q[..., channels_qk_nope:]
 
-    compressed = module.kv_a_proj(x)
+    compressed = module.proj_kv_a(x)
     c_kv_raw = compressed[..., : module.kv_lora_rank]
     k_pe_raw = compressed[..., module.kv_lora_rank :]
     c_kv = module.kv_a_layernorm(c_kv_raw)
-    kv = module.kv_b_proj(c_kv).view(
+    kv = module.proj_kv_b(c_kv).view(
         *x.shape[:-1],
         num_heads,
         channels_qk_nope + channels_v,
@@ -603,7 +603,7 @@ def _reference_mla_forward(
         is_causal=True,
         scale=module.softmax_scale,
     )
-    return module.o_proj(out.movedim(-3, -2).flatten(-2))
+    return module.proj_out(out.movedim(-3, -2).flatten(-2))
 
 
 def _tensor_parallel_mla(
@@ -641,7 +641,7 @@ def _record_case(
         sharded = apply_tensor_parallel(model, mesh)
         assert isinstance(sharded, MultiHeadLatentAttention)
         # A sharded q-path guards against a replicated no-op passing trivially.
-        q = sharded.q_proj if sharded.q_proj is not None else sharded.q_b_proj
+        q = sharded.proj_q if sharded.proj_q is not None else sharded.proj_q_b
         assert isinstance(q, Linear)
         if not isinstance(q.weight, DTensor):
             target.write_text("FAIL:q-path-not-sharded")

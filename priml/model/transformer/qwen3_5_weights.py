@@ -3,25 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import torch
 
 from priml.model.attention.gated_self_attention import GatedSelfAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
+from priml.model.custom_types import ChannelsInOutConfig, DeepModelConfig
 from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
 
 
-if TYPE_CHECKING:
-    from priml.model.transformer.qwen3_5 import Qwen35
-
-
 def remap_hf_state_dict(
     state: dict[str, Tensor],
-    config: Qwen35.Config,
+    config: DeepModelConfig,
     *,
     non_text: str = "reject",
 ) -> dict[str, Tensor]:
@@ -54,12 +50,16 @@ def remap_hf_state_dict(
     prefix = prefixes[0]
     remaining = set(state)
     with torch.device("meta"):
-        expected = config.make().state_dict()
+        expected_module = config.make()
+    if not isinstance(expected_module, nn.Module):
+        raise TypeError("A deep model config must build an nn.Module.")
+    expected = expected_module.state_dict()
     finalized = config.copy_tree().finalize()
     assert isinstance(finalized.block, list)
+    blocks = finalized.block
     mapped: dict[str, Tensor] = {}
     for target, template in expected.items():
-        sources = _sources(target, prefix=prefix, blocks=finalized.block)
+        sources = _sources(target, prefix=prefix, blocks=blocks)
         shape = tuple(template.shape)
         if len(sources) == 2:
             part_shape = (shape[0] // 2, *shape[1:])
@@ -75,16 +75,16 @@ def remap_hf_state_dict(
                 state, remaining=remaining, name=sources[0], shape=shape
             )
     if (
-        isinstance(finalized.out_proj, TiedLinear.Config)
+        isinstance(finalized.proj_out, TiedLinear.Config)
         and "lm_head.weight" in remaining
     ):
         head = _take(
             state,
             remaining=remaining,
             name="lm_head.weight",
-            shape=tuple(mapped["in_proj.weight"].shape),
+            shape=tuple(mapped["proj_in.weight"].shape),
         )
-        embedding = mapped["in_proj.weight"]
+        embedding = mapped["proj_in.weight"]
         if head.dtype != embedding.dtype:
             raise ValueError("Tied lm_head.weight must match the embedding dtype.")
         if head.device != embedding.device:
@@ -126,13 +126,13 @@ def _sources(
     target: str,
     *,
     prefix: str,
-    blocks: Sequence[object],
+    blocks: Sequence[ChannelsInOutConfig],
 ) -> list[str]:
-    if target == "in_proj.weight":
+    if target == "proj_in.weight":
         return [f"{prefix}embed_tokens.weight"]
     if target == "norm.weight":
         return [f"{prefix}norm.weight"]
-    if target == "out_proj.weight":
+    if target == "proj_out.weight":
         return ["lm_head.weight"]
     parts = target.split(".")
     if len(parts) < 4 or parts[0] != "blocks":
@@ -156,12 +156,28 @@ def _sources(
     if tail.startswith("attn."):
         name = tail.removeprefix("attn.")
         if isinstance(block.attn, Qwen35GatedDeltaNet.Config):
+            projections = {
+                "proj_qkv.": "in_proj_qkv.",
+                "proj_z.": "in_proj_z.",
+                "proj_b.": "in_proj_b.",
+                "proj_a.": "in_proj_a.",
+                "proj_out.": "out_proj.",
+            }
+            for native, hf in projections.items():
+                if name.startswith(native):
+                    return [base + "linear_attn." + hf + name.removeprefix(native)]
             return [base + "linear_attn." + name]
         if isinstance(block.attn, GatedSelfAttention.Config):
-            name = (
-                name.replace("out_proj.", "o_proj.")
-                .replace("norm_q.", "q_norm.")
-                .replace("norm_k.", "k_norm.")
-            )
+            projections = {
+                "proj_q.": "q_proj.",
+                "proj_k.": "k_proj.",
+                "proj_v.": "v_proj.",
+                "proj_out.": "o_proj.",
+                "norm_q.": "q_norm.",
+                "norm_k.": "k_norm.",
+            }
+            for native, hf in projections.items():
+                if name.startswith(native):
+                    return [base + "self_attn." + hf + name.removeprefix(native)]
             return [base + "self_attn." + name]
     raise ValueError(f"Unsupported native checkpoint parameter: {target}.")
