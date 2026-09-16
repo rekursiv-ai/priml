@@ -796,7 +796,7 @@ def _axis_channels(
     channels = [int(v) for v in c] if isinstance(c, Sequence) else [c]
     if isinstance(tables, list):
         if reduction_mode == "cat" and isinstance(c, int):
-            channels = RoPE._split_dim(c, len(tables))  # noqa: SLF001 -- RoPE's own split, shared with its config
+            channels = RoPE._split_dim(c, len(tables))  # noqa: SLF001 -- This module helper shares RoPE's private axis allocator with its config.
         if len(channels) == 1 and len(tables) > 1:
             channels = channels * len(tables)
     return channels

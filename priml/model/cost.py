@@ -163,7 +163,7 @@ class Compute:
         return Compute(flops=self.flops + other.flops, bytes=self.bytes + other.bytes)
 
     def __mul__(self, other: int) -> Compute:
-        if isinstance(other, bool) or not isinstance(other, int):  # pyright: ignore[reportUnnecessaryIsInstance] -- the runtime check is the contract
+        if isinstance(other, bool) or not isinstance(other, int):  # pyright: ignore[reportUnnecessaryIsInstance] -- Python operator dispatch must reject non-integers from untyped callers.
             return NotImplemented
         return Compute(flops=self.flops * other, bytes=self.bytes * other)
 
@@ -202,7 +202,7 @@ class Cost:
 
     def __mul__(self, other: int) -> Cost:
         # A Cost is repeated over modules, never scaled by a fraction.
-        if isinstance(other, bool) or not isinstance(other, int):  # pyright: ignore[reportUnnecessaryIsInstance] -- the runtime check is the contract
+        if isinstance(other, bool) or not isinstance(other, int):  # pyright: ignore[reportUnnecessaryIsInstance] -- Python operator dispatch must reject non-integers from untyped callers.
             return NotImplemented
         return Cost(
             primal=self.primal * other,
