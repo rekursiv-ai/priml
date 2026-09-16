@@ -55,7 +55,7 @@ class NgramEmbedding(NarrowEmbedding):
         """Multiplier applied to this lookup before adding its contexts."""
 
         contexts: dict[str, NarrowEmbedding.Config] = field(
-            default_factory=dict[str, NarrowEmbedding.Config]
+            default_factory=dict[str, NarrowEmbedding.Config],
         )
         """Named context embeddings added in insertion order; empty adds none."""
 
@@ -72,7 +72,7 @@ class NgramEmbedding(NarrowEmbedding):
         self.num_embeddings = config.channels_in
         self.scale = config.scale
         self.contexts = nn.ModuleDict(
-            {name: context.make() for name, context in config.contexts.items()}
+            {name: context.make() for name, context in config.contexts.items()},
         )
 
     @override
@@ -139,7 +139,7 @@ class HashedNgramTables(nn.Module):
         @override
         def finalize(self) -> Self:
             if not self.hash_multipliers or self.channels_out % len(
-                self.hash_multipliers
+                self.hash_multipliers,
             ):
                 raise ValueError("Hash count must divide the value width.")
             if len({len(row) for row in self.hash_multipliers}) != 1:
@@ -155,7 +155,7 @@ class HashedNgramTables(nn.Module):
         self.hash_multipliers = config.hash_multipliers
         self.num_embeddings = config.num_embeddings
         self.tables = nn.ModuleList(
-            [config.table.make() for _ in config.hash_multipliers]
+            [config.table.make() for _ in config.hash_multipliers],
         )
         self.init_after = config.init_after
         if self.init_after is not None:
@@ -194,7 +194,9 @@ class HashedNgramTables(nn.Module):
         self.gradient_bitmaps = (
             [
                 torch.zeros(
-                    table.weight.shape[0], dtype=torch.uint8, device=table.weight.device
+                    table.weight.shape[0],
+                    dtype=torch.uint8,
+                    device=table.weight.device,
                 )
                 for table in self.tables
             ]
@@ -336,7 +338,8 @@ def _check_mix(
 
 
 @torch.library.custom_op(
-    "priml_nanochat::ngram_backward", mutates_args=("sinks", "bitmaps")
+    "priml_nanochat::ngram_backward",
+    mutates_args=("sinks", "bitmaps"),
 )
 def _mix_backward(  # noqa: PLR0917 -- The operator schema fixes the positional arity.
     dv: Tensor,
@@ -350,7 +353,12 @@ def _mix_backward(  # noqa: PLR0917 -- The operator schema fixes the positional 
     _check_mix(dv, gates, weights, indices, sinks)
     if dv.is_cuda:
         grads = _mix_backward_cuda(
-            dv, gates, weights, indices, sinks, bitmaps=bitmaps or None
+            dv,
+            gates,
+            weights,
+            indices,
+            sinks,
+            bitmaps=bitmaps or None,
         )
     else:
         grads = _mix_backward_reference(dv, gates, weights, indices, sinks)
@@ -387,13 +395,15 @@ def _mix_backward_reference(
         grads.append(
             ((dv.float() * rows).sum(-1) * (2 * sig * (1 - sig)))
             .to(gate.dtype)
-            .reshape(gate.shape)
+            .reshape(gate.shape),
         )
         contribution = (dv.float() * (2 * sig).unsqueeze(-1)).reshape(-1, h * d)
         for j in (0, 1):
             index = indices[2 * source + j].reshape(-1)
             sinks[2 * source + j].index_add_(
-                0, index, contribution[:, j * half : (j + 1) * half]
+                0,
+                index,
+                contribution[:, j * half : (j + 1) * half],
             )
     return grads
 
@@ -401,7 +411,12 @@ def _mix_backward_reference(
 def _mix_setup(
     ctx: _FusedContext,
     inputs: tuple[
-        Tensor, list[Tensor], list[Tensor], list[Tensor], list[Tensor], list[Tensor]
+        Tensor,
+        list[Tensor],
+        list[Tensor],
+        list[Tensor],
+        list[Tensor],
+        list[Tensor],
     ],
     output: object,
 ) -> None:
@@ -439,7 +454,10 @@ def clear_marked_sinks(sinks: list[Tensor], bitmaps: list[Tensor]) -> None:
 
 
 def _mix_forward_cuda(
-    v: Tensor, gates: list[Tensor], weights: list[Tensor], indices: list[Tensor]
+    v: Tensor,
+    gates: list[Tensor],
+    weights: list[Tensor],
+    indices: list[Tensor],
 ) -> Tensor:
     """Gather and mix up to two factored n-gram sources in one launch."""
     (b, t, h, d) = v.shape
@@ -574,24 +592,30 @@ def _ngram_mix_fwd_kernel(
         voff = rows[:, None] * (nt * tile) + (t * tile + j[None, :])
         acc = language.load(v_ptr + voff, mask=rm2, other=0.0).to(language.float32)
         g0 = language.load(gl0_ptr + rows * n_head + head, mask=rmask, other=0.0).to(
-            language.float32
+            language.float32,
         )
         gate0 = 2.0 * language.sigmoid(g0)
         idx0 = i0 if tab == 0 else i1
         wp0 = w0_ptr if tab == 0 else w1_ptr
         w0v = language.load(
-            wp0 + (idx0[:, None] * half + (loc + j[None, :])), mask=rm2, other=0.0
+            wp0 + (idx0[:, None] * half + (loc + j[None, :])),
+            mask=rm2,
+            other=0.0,
         )
         acc += gate0[:, None] * w0v.to(language.float32)
         if ns > 1:
             g1 = language.load(
-                gl1_ptr + rows * n_head + head, mask=rmask, other=0.0
+                gl1_ptr + rows * n_head + head,
+                mask=rmask,
+                other=0.0,
             ).to(language.float32)
             gate1 = 2.0 * language.sigmoid(g1)
             idx1 = i2 if tab == 0 else i3
             wp1 = w2_ptr if tab == 0 else w3_ptr
             w1v = language.load(
-                wp1 + (idx1[:, None] * half + (loc + j[None, :])), mask=rm2, other=0.0
+                wp1 + (idx1[:, None] * half + (loc + j[None, :])),
+                mask=rm2,
+                other=0.0,
             )
             acc += gate1[:, None] * w1v.to(language.float32)
         language.store(out_ptr + voff, acc, mask=rm2)
@@ -672,7 +696,7 @@ def _ngram_mix_bwd_kernel(  # noqa: PLR0917 -- Triton JIT binds the kernel opera
             language.store(b3_ptr + i3, one_u8, mask=mark1b)
     for h in language.static_range(nt // subs):
         g0 = language.load(gl0_ptr + rows * n_head + h, mask=rmask, other=0.0).to(
-            language.float32
+            language.float32,
         )
         s0 = language.sigmoid(g0)
         gate0 = 2.0 * s0
@@ -680,7 +704,7 @@ def _ngram_mix_bwd_kernel(  # noqa: PLR0917 -- Triton JIT binds the kernel opera
         (s1, gate1, acc1) = (s0, gate0, acc0)
         if ns > 1:
             g1 = language.load(gl1_ptr + rows * n_head + h, mask=rmask, other=0.0).to(
-                language.float32
+                language.float32,
             )
             s1 = language.sigmoid(g1)
             gate1 = 2.0 * s1
@@ -699,7 +723,10 @@ def _ngram_mix_bwd_kernel(  # noqa: PLR0917 -- Triton JIT binds the kernel opera
             w0v = language.load(wp0 + woff0, mask=rm2, other=0.0).to(language.float32)
             acc0 += language.sum(dv * w0v, 1)
             language.atomic_add(
-                sp0 + woff0, dv * gate0[:, None], mask=k0, sem="relaxed"
+                sp0 + woff0,
+                dv * gate0[:, None],
+                mask=k0,
+                sem="relaxed",
             )
             if ns > 1:
                 idx1 = i2 if tab == 0 else i3
@@ -708,18 +735,25 @@ def _ngram_mix_bwd_kernel(  # noqa: PLR0917 -- Triton JIT binds the kernel opera
                 k1 = keep1a if tab == 0 else keep1b
                 woff1 = idx1[:, None] * half + (loc + j[None, :])
                 w1v = language.load(wp1 + woff1, mask=rm2, other=0.0).to(
-                    language.float32
+                    language.float32,
                 )
                 acc1 += language.sum(dv * w1v, 1)
                 language.atomic_add(
-                    sp1 + woff1, dv * gate1[:, None], mask=k1, sem="relaxed"
+                    sp1 + woff1,
+                    dv * gate1[:, None],
+                    mask=k1,
+                    sem="relaxed",
                 )
         language.store(
-            dg0_ptr + rows * n_head + h, acc0 * (2.0 * s0 * (1.0 - s0)), mask=rmask
+            dg0_ptr + rows * n_head + h,
+            acc0 * (2.0 * s0 * (1.0 - s0)),
+            mask=rmask,
         )
         if ns > 1:
             language.store(
-                dg1_ptr + rows * n_head + h, acc1 * (2.0 * s1 * (1.0 - s1)), mask=rmask
+                dg1_ptr + rows * n_head + h,
+                acc1 * (2.0 * s1 * (1.0 - s1)),
+                mask=rmask,
             )
 
 
@@ -747,7 +781,9 @@ def _clear_marked_sink_kernel(
 
 
 def _clear_marked_sinks_cuda(
-    sinks: list[Tensor], bitmaps: list[Tensor], rows_per_program: int = 8
+    sinks: list[Tensor],
+    bitmaps: list[Tensor],
+    rows_per_program: int = 8,
 ) -> None:
     """Clear marked rows in every fused table, replacing dense ``sink.zero_()``."""
     for sink, bitmap in zip(sinks, bitmaps, strict=True):
@@ -755,7 +791,7 @@ def _clear_marked_sinks_cuda(
         if rows % rows_per_program:
             raise ValueError(
                 f"{rows} rows is not divisible by {rows_per_program}; the clear omits a "
-                "bounds mask and would read past the table"
+                "bounds mask and would read past the table",
             )
         _compiled_sink_clear()[rows // rows_per_program,](
             buffers=(sink, bitmap),
@@ -790,13 +826,14 @@ def _mix_backward_fake(  # noqa: PLR0917 -- The operator schema fixes the positi
 ) -> "tuple[Tensor, Tensor]":
     del dv, weights, indices, sinks, bitmaps
     return torch.empty_like(gates[0]), torch.empty_like(gates[1]) if len(
-        gates
+        gates,
     ) == 2 else gates[0].new_empty(0)
 
 
 @_register_mix_autograd
 def _mix_autograd(
-    ctx: _FusedContext, gradient: Tensor
+    ctx: _FusedContext,
+    gradient: Tensor,
 ) -> "tuple[Tensor, list[Tensor], list[None], list[None], list[None], list[None]]":
     saved = list(ctx.saved_tensors)
     n = ctx.sources

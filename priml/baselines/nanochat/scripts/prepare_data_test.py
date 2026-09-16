@@ -68,7 +68,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 def _json_object(path: Path) -> dict[str, object]:
     return dict(
-        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None)
+        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None),
     )
 
 
@@ -122,7 +122,8 @@ def test_the_recorded_fingerprint_matches_the_table_written(corpus: Path) -> Non
     _prepare(corpus)
     directory = corpus / "tokenizer"
     table: NDArray[np.int32] = cast(
-        NDArray[np.int32], np.load(directory / "token_bytes.npy")
+        NDArray[np.int32],
+        np.load(directory / "token_bytes.npy"),
     )
     recipe = _json_object(directory / "tokenizer_recipe.json")
     assert recipe["token_bytes_sha256"] == token_bytes_fingerprint(table)
@@ -216,7 +217,8 @@ def test_an_intact_vocabulary_at_the_same_flags_is_reused(corpus: Path) -> None:
     """
     _prepare(corpus)
     before: NDArray[np.int32] = cast(
-        NDArray[np.int32], np.load(corpus / "tokenizer" / "token_bytes.npy")
+        NDArray[np.int32],
+        np.load(corpus / "tokenizer" / "token_bytes.npy"),
     ).copy()
     assert _prepare(corpus) == corpus
     assert np.array_equal(
@@ -255,7 +257,8 @@ def test_an_invalid_flag_is_rejected_by_name(
 @pytest.mark.parametrize("save_checkpoint", [False, True])
 @pytest.mark.compute_large_fixture
 def test_training_handoff_preserves_config_and_uses_priml(
-    tmp_path: Path, save_checkpoint: bool
+    tmp_path: Path,
+    save_checkpoint: bool,
 ) -> None:
     config = exp022()
     config.working_dir = tmp_path / "training"
@@ -306,16 +309,21 @@ def test_recipe_configuration_does_not_read_files() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "corpus"), [("exp018", "raw"), ("exp019", "donor-original")]
+    ("name", "corpus"),
+    [("exp018", "raw"), ("exp019", "donor-original")],
 )
 def test_online_milestones_use_their_prepared_corpus(
-    tmp_path: Path, name: str, corpus: str
+    tmp_path: Path,
+    name: str,
+    corpus: str,
 ) -> None:
     """Keep the donor-corpus transition when milestone names change."""
     config = donor_unigram16k()
     config.working_dir = tmp_path / "inputs"
     training = config.make().training_config(
-        name, run_directory=tmp_path / "run", seed=42
+        name,
+        run_directory=tmp_path / "run",
+        seed=42,
     )
     assert training.dataset.working_dir == config.working_dir / corpus
     assert training.dataset.prepared_train_manifest == ""
@@ -335,7 +343,7 @@ def test_preparation_builds_and_relocates(
         path = raw / f"shard_{index:05d}.parquet"
         parquet.write_table(
             Table.from_pydict(
-                {"text": [f"{index}-{row} café 🦙" for row in range(32)]}
+                {"text": [f"{index}-{row} café 🦙" for row in range(32)]},
             ),
             path,
             row_group_size=8,
@@ -380,7 +388,9 @@ def test_preparation_builds_and_relocates(
     assert (moved / "reference-eval/unigram.npz").exists()
     preparation = config.make()
     training = preparation.training_config(
-        "exp022", run_directory=tmp_path / "training", seed=1102
+        "exp022",
+        run_directory=tmp_path / "training",
+        seed=1102,
     )
     original_recipe = exp022()
     assert training.step.copy_tree().finalize().serialize() == (
@@ -476,7 +486,8 @@ def test_fetch_receipt_failure_leaves_download_retryable(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("same_source", [True, False])
 def test_concurrent_fetch_preserves_source_identity(
-    tmp_path: Path, same_source: bool
+    tmp_path: Path,
+    same_source: bool,
 ) -> None:
     """Serialize one destination before checking or publishing its source identity."""
     destination = tmp_path / "shard.parquet"
@@ -589,7 +600,8 @@ def test_crop_discards_shortest_document_tail() -> None:
 @pytest.mark.parametrize("relative", [False, True])
 @pytest.mark.cli_python_subprocess
 def test_cli_prints_factory_without_preparing_inputs(
-    tmp_path: Path, relative: bool
+    tmp_path: Path,
+    relative: bool,
 ) -> None:
     """Resolve the importable Config class when launched with python -m."""
     destination = tmp_path / "inputs"
@@ -632,7 +644,7 @@ def _unigram() -> tokenizers.Tokenizer:
     pre_tokenizers = cast(_TokenizersPreTokenizers, tokenizers.pre_tokenizers)
     decoders = cast(_TokenizersDecoders, tokenizers.decoders)
     backend = tokenizers.Tokenizer(
-        models.Unigram([(piece, -6.0) for piece in byte_alphabet().values()])
+        models.Unigram([(piece, -6.0) for piece in byte_alphabet().values()]),
     )
     backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     backend.decoder = decoders.ByteLevel()
@@ -731,7 +743,7 @@ def test_reference_replay() -> None:
                 ]
                 < 256
             ).all(),
-        )
+        ),
     )
 
 

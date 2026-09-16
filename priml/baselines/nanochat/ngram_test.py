@@ -141,7 +141,13 @@ def test_cuda_fused_mix_matches_autograd_and_marks_rows(sources: int) -> None:
         pytest.skip("Requires a CUDA device.")
     torch.manual_seed(31)
     values = torch.randn(
-        1, 17, 2, 2, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        1,
+        17,
+        2,
+        2,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
     )
     gates = [
         torch.randn(1, 17, 2, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -179,7 +185,8 @@ def test_cuda_fused_mix_matches_autograd_and_marks_rows(sources: int) -> None:
         sigmoid = gate.float().sigmoid()
         reference = reference + 2 * sigmoid.unsqueeze(-1) * rows
         contribution = (upstream.float() * (2 * sigmoid.detach()).unsqueeze(-1)).view(
-            -1, values.shape[-2] * values.shape[-1]
+            -1,
+            values.shape[-2] * values.shape[-1],
         )
         for part in (0, 1):
             table = 2 * source + part

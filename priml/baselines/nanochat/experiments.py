@@ -556,7 +556,8 @@ def exp007() -> NgramTrainLoop.Config:
     trigram.channels_in = 1_048_576
     trigram.inner = Embedding.Config(init_weight=torch.nn.init.zeros_)
     optimizer.select[6] = matching(
-        "embed.contexts.bigram.inner", "embed.contexts.trigram.inner"
+        "embed.contexts.bigram.inner",
+        "embed.contexts.trigram.inner",
     )
     # Uncomment for B200's 300-second budget; leave commented for H-series.
     # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
@@ -655,7 +656,10 @@ def exp009() -> NgramTrainLoop.Config:
     blocks: list[priml.model.transformer.block.TransformerBlock.Config] = []
     for layer in range(model.num_layers):
         block = template.copy_tree()
-        assert isinstance(block, priml.model.transformer.block.TransformerBlock.Config)
+        assert isinstance(
+            block,
+            priml.model.transformer.block.TransformerBlock.Config,
+        )
         assert isinstance(block.attn, ValueGatedAttention.Config)
         block.attn.window = model.max_seq_len if layer in (3, 7) else 512
         blocks.append(block)
@@ -666,7 +670,10 @@ def exp009() -> NgramTrainLoop.Config:
     cfg.step.rows_per_pass = 72
     cfg.step.tokens_per_optimizer_step = cfg.step.rows_per_pass * model.max_seq_len
     cfg.step.compile = PartialConfig(
-        torch.compile, dynamic=False, fullgraph=True, mode="max-autotune-no-cudagraphs"
+        torch.compile,
+        dynamic=False,
+        fullgraph=True,
+        mode="max-autotune-no-cudagraphs",
     )
     # Uncomment for B200's 300-second budget; leave commented for H-series.
     # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
@@ -696,7 +703,10 @@ def exp010() -> NgramTrainLoop.Config:
     model.lm_head.output_cap = 15
     assert isinstance(model.block, list)
     for block in model.block:
-        assert isinstance(block, priml.model.transformer.block.TransformerBlock.Config)
+        assert isinstance(
+            block,
+            priml.model.transformer.block.TransformerBlock.Config,
+        )
         attention = CausalAttention.Config().update(block.attn)
         attention.norm_qk = RMSNorm.Config(eps=None)
         attention.norm_out = RMSNorm.Config(eps=None)
@@ -798,7 +808,8 @@ def exp013() -> NgramTrainLoop.Config:
     model = cfg.step.model
     assert isinstance(model, MemoryNanoChatLM.Config)
     model.embedding = NarrowEmbedding.Config().update(
-        model.embedding, skip_missing=True
+        model.embedding,
+        skip_missing=True,
     )
     # Pin both generator and draws to CPU: device contexts must not change hashes.
     rng = torch.Generator(device="cpu").manual_seed(0)
@@ -819,7 +830,7 @@ def exp013() -> NgramTrainLoop.Config:
                             generator=rng,
                             device="cpu",
                             dtype=torch.int64,
-                        )
+                        ),
                     )
                     + 1
                     for _ in range(order)
@@ -884,19 +895,25 @@ def exp013() -> NgramTrainLoop.Config:
                 eps=1e-10,
                 weight_decay=decay,
                 width_scaled=scaled,
-            )
+            ),
         )
     ngram_rate = 0.6 / (model.channels_in / 768) ** 0.5
     optimizer.optimizers.extend(
         [
             BiasCorrectedRMSProp.Config(
-                lr=ngram_rate, beta2=0.999, eps=1e-10, compile=True
+                lr=ngram_rate,
+                beta2=0.999,
+                eps=1e-10,
+                compile=True,
             ),
             BiasCorrectedRMSProp.Config(
-                lr=ngram_rate, beta2=0.999, eps=1e-10, compile=True
+                lr=ngram_rate,
+                beta2=0.999,
+                eps=1e-10,
+                compile=True,
             ),
             FusedAdamW.Config(lr=0.06, betas=(0.96, 0.95), eps=1e-10),
-        ]
+        ],
     )
     matrices = FFNScaledNorMuon.Config(channels_in=model.channels_in)
     matrices.optimizer.weight_decay = 0.1
@@ -923,7 +940,10 @@ def exp014() -> NgramTrainLoop.Config:
     model = cfg.step.model
     assert isinstance(model.block, list)
     for block, expansion in zip(model.block, (2, 2, 3, 3, 5, 5, 6, 6), strict=True):
-        assert isinstance(block, priml.model.transformer.block.TransformerBlock.Config)
+        assert isinstance(
+            block,
+            priml.model.transformer.block.TransformerBlock.Config,
+        )
         assert isinstance(block.ffn, OutputNormFeedForward.Config)
         block.ffn.expansion = expansion
     # Inherited FFNScaledNorMuon now applies sqrt(4 / expansion) to FFN inputs.
@@ -1208,7 +1228,7 @@ def exp022() -> NgramTrainLoop.Config:
                         generator=rng,
                         device="cpu",
                         dtype=torch.int64,
-                    )
+                    ),
                 )
                 + 1
                 for _ in row

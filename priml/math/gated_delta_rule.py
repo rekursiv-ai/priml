@@ -72,7 +72,10 @@ def chunk_gated_delta_rule(
     ]
     decay = decay.reshape(batch, heads, -1, chunk_size)
     upper = torch.ones(
-        chunk_size, chunk_size, dtype=torch.bool, device=query.device
+        chunk_size,
+        chunk_size,
+        dtype=torch.bool,
+        device=query.device,
     ).triu(1)
     cumulative = decay.cumsum(dim=3)
     pairwise = cumulative.unsqueeze(4) - cumulative.unsqueeze(3)
@@ -81,7 +84,10 @@ def chunk_gated_delta_rule(
     attention = (query @ key.transpose(-1, -2)) * pairwise
     decayed_k_beta = k_beta * cumulative.exp().unsqueeze(-1)
     new_values = torch.linalg.solve_triangular(
-        system, v_beta, upper=False, unitriangular=True
+        system,
+        v_beta,
+        upper=False,
+        unitriangular=True,
     )
     k_cumulative = torch.linalg.solve_triangular(
         system,
@@ -158,7 +164,12 @@ def recurrent_gated_delta_rule(
     query = query / float(query.shape[-1] ** 0.5)
     state = (
         torch.zeros(
-            batch, heads, key_width, value_width, dtype=value.dtype, device=value.device
+            batch,
+            heads,
+            key_width,
+            value_width,
+            dtype=value.dtype,
+            device=value.device,
         )
         if initial_state is None
         else initial_state.to(value)

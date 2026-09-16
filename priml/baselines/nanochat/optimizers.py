@@ -166,13 +166,16 @@ class BiasCorrectedRMSProp(Optimizer):
         with (
             self.register_load_state_dict_pre_hook(capture),
             self.register_load_state_dict_post_hook(
-                partial(self._restore_state_precision, incoming), prepend=True
+                partial(self._restore_state_precision, incoming),
+                prepend=True,
             ),
         ):
             super().load_state_dict(cast(optimizer.StateDict, state_dict))
 
     def _restore_state_precision(
-        self, incoming: dict[str, object], optimizer: Optimizer
+        self,
+        incoming: dict[str, object],
+        optimizer: Optimizer,
     ) -> None:
         del optimizer
         groups = cast("list[dict[str, object]]", incoming["param_groups"])
@@ -229,11 +232,11 @@ class BiasCorrectedRMSProp(Optimizer):
                 self.scalars["step"].fill_(step_count)
                 self.scalars["lr"].fill_(FloatCodec.coerce(group_values["lr"], None))
                 self.scalars["beta2"].fill_(
-                    FloatCodec.coerce(group_values["beta2"], None)
+                    FloatCodec.coerce(group_values["beta2"], None),
                 )
                 self.scalars["eps"].fill_(FloatCodec.coerce(group_values["eps"], None))
                 self.scalars["weight_decay"].fill_(
-                    FloatCodec.coerce(group_values["weight_decay"], None)
+                    FloatCodec.coerce(group_values["weight_decay"], None),
                 )
                 self.update(
                     parameter,
@@ -316,7 +319,7 @@ class BiasCorrectedRMSProp(Optimizer):
             }
         # Round before the bias correction; using the Python float changes updates.
         beta2 = float(
-            torch.tensor(FloatCodec.coerce(group["beta2"], None), dtype=torch.float32)
+            torch.tensor(FloatCodec.coerce(group["beta2"], None), dtype=torch.float32),
         )
         cum_before = cast(float, state["cum_log"])
         state["cum_log"] = cum_before + (math.log(beta2) if beta2 != 0.0 else -math.inf)
@@ -372,7 +375,7 @@ class FFNScaledNorMuon:
         """Rate multiplier for rectangular FFN input and output matrices."""
 
         optimizer: NorMuonFactory = field(
-            default_factory=lambda: NorMuon.Config(lr=0.04)
+            default_factory=lambda: NorMuon.Config(lr=0.04),
         )
         """Deferred NorMuon constructor with configurable rates and compilation."""
 
@@ -505,7 +508,8 @@ class ScheduledOptimizerUpdate:
                     )
                     if index in cfg.adam_beta1_members:
                         beta1, beta2 = cast(
-                            "tuple[float, float]", group["initial_betas"]
+                            "tuple[float, float]",
+                            group["initial_betas"],
                         )
                         group["betas"] = (
                             beta1 + adam_fraction * (cfg.adam_beta1_final - beta1),
@@ -540,7 +544,10 @@ class ScheduledOptimizerUpdate:
 
 
 def compact_bitmap(
-    bitmap: Tensor, out_index: Tensor, out_count: Tensor, scratch: Tensor
+    bitmap: Tensor,
+    out_index: Tensor,
+    out_count: Tensor,
+    scratch: Tensor,
 ) -> None:
     """Compact row flags into fixed-size index and count buffers.
 
@@ -625,7 +632,9 @@ def sparse_rmsprop_rows(  # noqa: PLR0917 -- Each sparse kernel operand requires
 
 
 def _inactive_moment_reference(
-    second_moment: Tensor, bitmap: Tensor, beta2: Tensor
+    second_moment: Tensor,
+    bitmap: Tensor,
+    beta2: Tensor,
 ) -> None:
     """Decay idle CPU moments with lerp; multiplication alone rounds differently."""
     idle = bitmap.to(torch.bool).logical_not()
@@ -786,7 +795,7 @@ def _sparse_rmsprop_rows_kernel(
         base = row * n_cols
 
         grad = language.load(grad_ptr + base + offs, mask=mask, other=0.0).to(
-            language.float32
+            language.float32,
         )
         v_old = language.load(v_ptr + row).to(language.float32)
 
@@ -802,7 +811,7 @@ def _sparse_rmsprop_rows_kernel(
         denom = language.sqrt_rn(v_new / bias2) + eps
         term = grad / denom
         pv = language.load(p_ptr + base + offs, mask=mask, other=0.0).to(
-            language.float32
+            language.float32,
         )
         pv = language.fma(term, -lr, pv * one_minus_lr_wd)
 
@@ -838,12 +847,12 @@ def _sparse_rmsprop_rows_cuda(  # noqa: PLR0917 -- Each sparse kernel operand re
     if bitmap.dtype not in BITMAP_DTYPES:
         raise ValueError(
             f"the inactive sweep LOADS the bitmap from a kernel, so its dtype must be "
-            f"one of {BITMAP_DTYPES}, got {bitmap.dtype}"
+            f"one of {BITMAP_DTYPES}, got {bitmap.dtype}",
         )
     if cols > block_w:
         raise ValueError(
             f"row width {cols} exceeds the {block_w}-lane block; one row must fit in "
-            "one block because the kernel reduces a row per iteration"
+            "one block because the kernel reduces a row per iteration",
         )
     # Use a shape-derived grid to avoid device synchronization and preserve graph
     # capture.
@@ -878,7 +887,9 @@ def _sparse_rmsprop_rows_cuda(  # noqa: PLR0917 -- Each sparse kernel operand re
 
 
 def _ffn_scaled_normuon(
-    params: Iterable[Tensor], *, config: FFNScaledNorMuon.Config
+    params: Iterable[Tensor],
+    *,
+    config: FFNScaledNorMuon.Config,
 ) -> NorMuon:
     parameters = list(params)
     groups: list[dict[str, object]] = []

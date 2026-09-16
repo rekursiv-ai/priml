@@ -53,7 +53,9 @@ class _ScipySpecial(Protocol):
     def gammaln(self, x: NDArray[np.float64]) -> NDArray[np.float64]: ...
 
     def betaln(
-        self, x: NDArray[np.float64], y: NDArray[np.float64]
+        self,
+        x: NDArray[np.float64],
+        y: NDArray[np.float64],
     ) -> NDArray[np.float64]: ...
 
 

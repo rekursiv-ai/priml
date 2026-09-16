@@ -242,10 +242,19 @@ def test_delta_rule_matches_closed_form_with_orthonormal_keys() -> None:
     expected = torch.einsum("bths,bshv->bthv", weights, value) * sequence**-0.5
 
     chunk_actual, _ = chunk_gated_delta_rule(
-        query=query, key=key, value=value, g=g, beta=beta, chunk_size=3
+        query=query,
+        key=key,
+        value=value,
+        g=g,
+        beta=beta,
+        chunk_size=3,
     )
     recurrent_actual, _ = recurrent_gated_delta_rule(
-        query=query, key=key, value=value, g=g, beta=beta
+        query=query,
+        key=key,
+        value=value,
+        g=g,
+        beta=beta,
     )
 
     # Measured: 6.0e-8 (chunk), 1.2e-7 (recurrent).

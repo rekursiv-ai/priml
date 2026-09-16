@@ -52,7 +52,7 @@ def read_mapping(path: Path) -> dict[str, object]:
 
     """
     return dict(
-        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None)
+        DictCodec.coerce(cast(object, json.loads(path.read_text())), default=None),
     )
 
 
@@ -67,10 +67,13 @@ def write_mapping(path: Path, *, value: object) -> None:
     destination = validated_output_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        mode="w", dir=destination.parent, delete=False, prefix="nanochat-json-"
+        mode="w",
+        dir=destination.parent,
+        delete=False,
+        prefix="nanochat-json-",
     ) as output:
         output.write(
-            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+            json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
         )
         staged = Path(output.name)
     staged.replace(destination)
@@ -89,7 +92,8 @@ def document_rows(path: Path, *, shard: int) -> Iterator[tuple[str, str]]:
     """
     offset = 0
     for batch in parquet.ParquetFile(path).iter_batches(
-        batch_size=1_024, columns=["text"]
+        batch_size=1_024,
+        columns=["text"],
     ):
         for text in cast(list[str], batch.column(0).to_pylist()):
             yield f"{shard}:{offset}", text
@@ -401,7 +405,7 @@ class ByteLevelTokenizer:
             or document.get("added_tokens")
         ):
             raise ValueError(
-                "Expected ordinary byte pieces without normalization or added tokens."
+                "Expected ordinary byte pieces without normalization or added tokens.",
             )
         self.bos_token_id = self.backend.get_vocab_size(with_added_tokens=False)
         self.vocab_size = self.bos_token_id + config.reserved_count
@@ -412,11 +416,14 @@ class ByteLevelTokenizer:
             assert piece is not None
             self.token_bytes_literal[index] = len(piece)
             self.token_bytes[index] = len(
-                self.backend.decode([index], skip_special_tokens=False).encode()
+                self.backend.decode([index], skip_special_tokens=False).encode(),
             )
 
     def encode_batch(
-        self, texts: list[str], *, num_threads: int = 8
+        self,
+        texts: list[str],
+        *,
+        num_threads: int = 8,
     ) -> list[list[int]]:
         """Encode unmodified documents and prepend exactly one BOS.
 
@@ -439,7 +446,7 @@ class ByteLevelTokenizer:
             if self.backend.decode(ids, skip_special_tokens=False) != text:
                 raise ValueError("The tokenizer failed literal document round-trip.")
             if int(cast(int, self.token_bytes_literal[ids].sum())) != len(
-                text.encode()
+                text.encode(),
             ):
                 raise ValueError("Token pieces do not conserve literal UTF-8 bytes.")
             output.append([self.bos_token_id, *ids])

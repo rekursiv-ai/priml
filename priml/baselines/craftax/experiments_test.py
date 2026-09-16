@@ -162,14 +162,18 @@ def test_experiment_makes_a_train_loop() -> None:
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_every_experiment_finalizes(factory: ExperimentFactory[_CraftaxLoop]) -> None:
     assert factory().copy_tree().finalize() is not None
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_experiment_name_matches_the_factory(
     factory: ExperimentFactory[_CraftaxLoop],
@@ -180,7 +184,9 @@ def test_experiment_name_matches_the_factory(
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_the_network_is_sized_from_the_environment(
     factory: ExperimentFactory[_CraftaxLoop],
@@ -193,7 +199,9 @@ def test_the_network_is_sized_from_the_environment(
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_the_schedule_horizon_matches_the_step_budget(
     factory: ExperimentFactory[_CraftaxLoop],
@@ -205,7 +213,9 @@ def test_the_schedule_horizon_matches_the_step_budget(
 
 
 @pytest.mark.parametrize(
-    "factory", PUBLISHED_EXPERIMENTS, ids=[f.__name__ for f in PUBLISHED_EXPERIMENTS]
+    "factory",
+    PUBLISHED_EXPERIMENTS,
+    ids=[f.__name__ for f in PUBLISHED_EXPERIMENTS],
 )
 def test_every_published_experiment_resets_optimistically(
     factory: ExperimentFactory[_CraftaxLoop],
@@ -216,7 +226,9 @@ def test_every_published_experiment_resets_optimistically(
 
 
 @pytest.mark.parametrize(
-    "factory", PUBLISHED_EXPERIMENTS, ids=[f.__name__ for f in PUBLISHED_EXPERIMENTS]
+    "factory",
+    PUBLISHED_EXPERIMENTS,
+    ids=[f.__name__ for f in PUBLISHED_EXPERIMENTS],
 )
 def test_every_published_experiment_scores_identically(
     factory: ExperimentFactory[_CraftaxLoop],
@@ -229,7 +241,9 @@ def test_every_published_experiment_scores_identically(
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 @pytest.mark.compute_training
 def test_experiment_trains_at_minimum_size(

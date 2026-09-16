@@ -26,13 +26,16 @@ else:
     # Avoids the measured 3.3--3.5s fresh-process Qwen reference import.
     DynamicCache = lazy_import("transformers.cache_utils", "DynamicCache")
     LinearAttentionCacheLayerMixin = lazy_import(
-        "transformers.cache_utils", "LinearAttentionCacheLayerMixin"
+        "transformers.cache_utils",
+        "LinearAttentionCacheLayerMixin",
     )
     Qwen3_5TextConfig = lazy_import(
-        "transformers.models.qwen3_5.configuration_qwen3_5", "Qwen3_5TextConfig"
+        "transformers.models.qwen3_5.configuration_qwen3_5",
+        "Qwen3_5TextConfig",
     )
     Qwen3_5GatedDeltaNet = lazy_import(
-        "transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5GatedDeltaNet"
+        "transformers.models.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5GatedDeltaNet",
     )
 
 

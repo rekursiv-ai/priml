@@ -478,7 +478,9 @@ class TestPhaseTimerCudaEvents:
         start.elapsed_time.return_value = 12.5
 
         timer.record_cuda_events(
-            "forward", cast(CudaEventProtocol, start), cast(CudaEventProtocol, end)
+            "forward",
+            cast(CudaEventProtocol, start),
+            cast(CudaEventProtocol, end),
         )
 
         with caplog.at_level(logging.INFO):
@@ -522,7 +524,9 @@ class TestPhaseTimerCudaEvents:
         end = MagicMock()
 
         timer.record_cuda_events(
-            "forward", cast(CudaEventProtocol, start), cast(CudaEventProtocol, end)
+            "forward",
+            cast(CudaEventProtocol, start),
+            cast(CudaEventProtocol, end),
         )
         timer.log_summary()
 

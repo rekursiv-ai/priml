@@ -28,10 +28,12 @@ else:
 
     DynamicCache = lazy_import("transformers.cache_utils", "DynamicCache")
     Qwen3_5TextConfig = lazy_import(
-        "transformers.models.qwen3_5.configuration_qwen3_5", "Qwen3_5TextConfig"
+        "transformers.models.qwen3_5.configuration_qwen3_5",
+        "Qwen3_5TextConfig",
     )
     Qwen3_5ForCausalLM = lazy_import(
-        "transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5ForCausalLM"
+        "transformers.models.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5ForCausalLM",
     )
 
 
@@ -90,7 +92,7 @@ def test_padding_mask_and_positions_match_reference_prefill() -> None:
             attention_mask=padding,
             position_ids=positions,
             use_cache=False,
-        )
+        ),
     )
     actual = native(tokens, attention_mask=padding, position_ids=positions)
     assert torch.equal(actual, expected)
@@ -127,7 +129,7 @@ def test_padding_mask_and_positions_match_reference_cached_continuation() -> Non
                 position_ids=positions,
                 past_key_values=reference_cache,
                 use_cache=True,
-            )
+            ),
         )
         actual, returned_cache = native.forward_cached(
             tokens,
@@ -169,7 +171,7 @@ def test_prepared_causal_mask_matches_reference_prefill_and_cached_continuation(
                 attention_mask=mask,
                 past_key_values=reference_cache,
                 use_cache=True,
-            )
+            ),
         )
         actual, returned_cache = native.forward_cached(
             tokens,

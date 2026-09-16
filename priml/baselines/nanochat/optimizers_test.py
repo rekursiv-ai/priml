@@ -42,7 +42,10 @@ class _IndependentNorMuonConfig:
 
     def make(self) -> Callable[..., NorMuon]:
         return partial(
-            NorMuon, lr=self.lr, weight_decay=self.weight_decay, compile=self.compile
+            NorMuon,
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+            compile=self.compile,
         )
 
 
@@ -65,7 +68,7 @@ def test_weight_decay_pulses_survive_copy_and_serialization() -> None:
     )
     copied = config.copy_tree()
     restored = optimizers.ScheduledOptimizerUpdate.Config.deserialize(
-        config.serialize()
+        config.serialize(),
     )
     for candidate in (copied, restored):
         assert candidate.weight_decay_pulses == config.weight_decay_pulses
@@ -76,12 +79,17 @@ def test_weight_decay_pulses_survive_copy_and_serialization() -> None:
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("sparse", [False, True])
 def test_zero_beta_rmsprop_survives_checkpoint_and_positive_beta_update(
-    dtype: torch.dtype, sparse: bool
+    dtype: torch.dtype,
+    sparse: bool,
 ) -> None:
     """Zero decay replaces moments and must not break the cumulative log state."""
     weight = torch.nn.Parameter(torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=dtype))
     config = optimizers.BiasCorrectedRMSProp.Config(
-        lr=0.25, beta2=0.0, eps=2.0, rowwise=True, sparse_rows=sparse
+        lr=0.25,
+        beta2=0.0,
+        eps=2.0,
+        rowwise=True,
+        sparse_rows=sparse,
     )
     optimizer = config.make()([weight])
     sink = torch.tensor([[2.0, -2.0], [0.0, 0.0]])
@@ -125,11 +133,13 @@ def test_zero_beta_rmsprop_survives_checkpoint_and_positive_beta_update(
 
 
 @pytest.mark.parametrize(
-    "field", ["muon_warmdown", "adam_warmdown", "ngram_ramp_fraction"]
+    "field",
+    ["muon_warmdown", "adam_warmdown", "ngram_ramp_fraction"],
 )
 @pytest.mark.parametrize("value", [0.0, -1.0, math.nan, math.inf, -math.inf])
 def test_schedule_fractions_require_finite_positive_values(
-    field: str, value: float
+    field: str,
+    value: float,
 ) -> None:
     """Reject invalid denominators while constructing the update policy."""
     config = optimizers.ScheduledOptimizerUpdate.Config()
@@ -150,12 +160,16 @@ def test_schedule_fractions_above_one_remain_valid() -> None:
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("sparse", [False, True])
 def test_rowwise_checkpoint_preserves_state_precision_and_next_update(
-    dtype: torch.dtype, sparse: bool
+    dtype: torch.dtype,
+    sparse: bool,
 ) -> None:
     """Reloading narrow weights must retain FP32 moments and integer row indices."""
     weight = torch.nn.Parameter(torch.ones(4, 3, dtype=dtype))
     config = optimizers.BiasCorrectedRMSProp.Config(
-        lr=0.13, beta2=0.91, rowwise=True, sparse_rows=sparse
+        lr=0.13,
+        beta2=0.91,
+        rowwise=True,
+        sparse_rows=sparse,
     )
     optimizer = config.make()([weight])
     sink = torch.arange(12, dtype=torch.float32).reshape(4, 3) / 7
@@ -237,7 +251,9 @@ def test_sparse_rmsprop_keeps_idle_weights_and_advances_idle_moments() -> None:
     optimizer.param_groups[0]["beta2"] = 0.95
     optimizer.step()
     expected = torch.lerp(
-        moment, torch.zeros_like(moment), 1 - float(torch.tensor(0.95))
+        moment,
+        torch.zeros_like(moment),
+        1 - float(torch.tensor(0.95)),
     )
     assert torch.equal(weight, before)
     second_moment = _tensor(_state(optimizer, weight), "second_moment")
@@ -268,12 +284,13 @@ def test_ffn_multiplier_changes_both_rectangular_projections() -> None:
     optimizer = config.make()(parameters)
     rates = {
         tuple(cast("list[Tensor]", group["params"])[0].shape): FloatCodec.coerce(
-            cast(object, group["lr"]), None
+            cast(object, group["lr"]),
+            None,
         )
         for group in optimizer.param_groups
     }
     assert rates == pytest.approx(
-        {(4, 4): 0.04, (8, 4): 0.05 * 2**0.5, (4, 8): 0.05, (2, 3): 0.04}
+        {(4, 4): 0.04, (8, 4): 0.05 * 2**0.5, (4, 8): 0.05, (2, 3): 0.04},
     )
 
 
@@ -295,7 +312,10 @@ def test_first_weight_decay_pulse_wins_and_triangle_reaches_peak() -> None:
     config = optimizers.ScheduledOptimizerUpdate.Config()
     config.weight_decay_pulses = (
         optimizers.WeightDecayPulse(
-            center=0.5, half_width=0.25, multiplier=3, triangular=True
+            center=0.5,
+            half_width=0.25,
+            multiplier=3,
+            triangular=True,
         ),
         optimizers.WeightDecayPulse(center=0.5, half_width=0.5, multiplier=9),
     )

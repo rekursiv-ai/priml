@@ -226,12 +226,16 @@ class CausalAttention(ValueGatedAttention):
             v = ngram_mix(v.contiguous(), logits, weights, indices, sinks, bitmaps)
         out = self.norm_out(
             self.attention(
-                q, k, v, window=cfg.window if window is None else window, **kwargs
+                q,
+                k,
+                v,
+                window=cfg.window if window is None else window,
+                **kwargs,
             ),
         )
         if self.head_gate is not None:
             head_weights = 2 * torch.sigmoid(
-                self.head_gate(x[..., : cfg.gate_channels])
+                self.head_gate(x[..., : cfg.gate_channels]),
             )
             out = out * head_weights.unsqueeze(-1)
         return self.proj_out(out.contiguous().flatten(-2))
@@ -239,7 +243,10 @@ class CausalAttention(ValueGatedAttention):
 
 @torch.library.custom_op("priml_nanochat::qk_norm_rope", mutates_args=())
 def fused_qk_norm_rope(
-    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor
+    q: Tensor,
+    k: Tensor,
+    cos: Tensor,
+    sin: Tensor,
 ) -> "tuple[Tensor, Tensor]":
     """Normalize Q/K in FP32 and rotate, rounding when storing the result.
 
@@ -274,7 +281,7 @@ def _qk_reference(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     si = sin.reshape(-1, half)[: x.shape[1]].float()[None, :, None, :]
     a, b = x[..., :half].float(), x[..., half:].float()
     inv = torch.rsqrt(
-        (a * a + b * b).sum(-1, keepdim=True) / x.shape[-1] + 1.1920928955078125e-7
+        (a * a + b * b).sum(-1, keepdim=True) / x.shape[-1] + 1.1920928955078125e-7,
     )
     a, b = a * inv, b * inv
     return torch.cat((a * co + b * si, b * co - a * si), dim=-1).to(x.dtype)
@@ -282,7 +289,11 @@ def _qk_reference(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
 
 @torch.library.custom_op("priml_nanochat::qk_backward", mutates_args=())
 def _qk_backward(
-    dq: Tensor, dk: Tensor, q: Tensor, k: Tensor, rotation: list[Tensor]
+    dq: Tensor,
+    dk: Tensor,
+    q: Tensor,
+    k: Tensor,
+    rotation: list[Tensor],
 ) -> "tuple[Tensor, Tensor]":
     cos, sin = rotation
     if q.is_cuda:
@@ -302,7 +313,7 @@ def _qk_backward_reference(dy: Tensor, x: Tensor, cos: Tensor, sin: Tensor) -> T
     a, b = x[..., :half].float(), x[..., half:].float()
     da, db = dy[..., :half].float(), dy[..., half:].float()
     inv = torch.rsqrt(
-        (a * a + b * b).sum(-1, keepdim=True) / x.shape[-1] + 1.1920928955078125e-7
+        (a * a + b * b).sum(-1, keepdim=True) / x.shape[-1] + 1.1920928955078125e-7,
     )
     a, b = a * inv, b * inv
     ga, gb = da * co - db * si, da * si + db * co
@@ -311,7 +322,9 @@ def _qk_backward_reference(dy: Tensor, x: Tensor, cos: Tensor, sin: Tensor) -> T
 
 
 def _qk_setup(
-    ctx: _FusedContext, inputs: tuple[Tensor, Tensor, Tensor, Tensor], output: object
+    ctx: _FusedContext,
+    inputs: tuple[Tensor, Tensor, Tensor, Tensor],
+    output: object,
 ) -> None:
     del output
     ctx.save_for_backward(*inputs)
@@ -677,7 +690,13 @@ class Flash4Attention:
         self._flash4_forward = _make_flash4_ops()
 
     def __call__(
-        self, q: Tensor, k: Tensor, v: Tensor, *, window: int = -1, **kwargs: object
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        window: int = -1,
+        **kwargs: object,
     ) -> Tensor:
         """Apply causal FA4 attention without changing the projection layout.
 
@@ -700,7 +719,8 @@ class Flash4Attention:
 
 @lru_cache(maxsize=1)
 def _make_flash4_ops() -> Callable[
-    [Tensor, Tensor, Tensor, int], tuple[Tensor, Tensor]
+    [Tensor, Tensor, Tensor, int],
+    tuple[Tensor, Tensor],
 ]:
     module = import_module("flash_attn.cute.interface")
     if not isinstance(module, _Flash4Interface):
@@ -819,7 +839,11 @@ def _qk_fake(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> "tuple[Tensor, T
 
 @_qk_backward.register_fake
 def _qk_backward_fake(
-    dq: Tensor, dk: Tensor, q: Tensor, k: Tensor, rotation: list[Tensor]
+    dq: Tensor,
+    dk: Tensor,
+    q: Tensor,
+    k: Tensor,
+    rotation: list[Tensor],
 ) -> "tuple[Tensor, Tensor]":
     del dq, dk, rotation
     return (
@@ -830,7 +854,9 @@ def _qk_backward_fake(
 
 @_register_qk_autograd
 def _qk_autograd(
-    ctx: _FusedContext, dq: Tensor, dk: Tensor
+    ctx: _FusedContext,
+    dq: Tensor,
+    dk: Tensor,
 ) -> "tuple[Tensor, Tensor, None, None]":
     q, k, cos, sin = ctx.saved_tensors
     a, b = _qk_backward(dq, dk, q, k, [cos, sin])
@@ -838,7 +864,10 @@ def _qk_autograd(
 
 
 def _qk_forward_cuda(
-    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor
+    q: Tensor,
+    k: Tensor,
+    cos: Tensor,
+    sin: Tensor,
 ) -> "tuple[Tensor, Tensor]":
     """Launch fused query/key RMS normalization and rotary embeddings."""
     (q, k) = (q.contiguous(), k.contiguous())
@@ -859,7 +888,13 @@ def _qk_forward_cuda(
 
 
 def _qk_backward_cuda(
-    dq: Tensor, dk: Tensor, q: Tensor, k: Tensor, *, cos: Tensor, sin: Tensor
+    dq: Tensor,
+    dk: Tensor,
+    q: Tensor,
+    k: Tensor,
+    *,
+    cos: Tensor,
+    sin: Tensor,
 ) -> "tuple[Tensor, Tensor]":
     """Launch inverse rotation and recomputed RMS normalization gradients."""
     (q, k) = (q.contiguous(), k.contiguous())
@@ -1022,11 +1057,11 @@ def _qk_norm_rope_bwd_kernel(
         k2 = language.load(k_ptr + base + half, mask=m, other=0.0).to(language.float32)
         dq1 = language.load(dq_ptr + base, mask=m, other=0.0).to(language.float32)
         dq2 = language.load(dq_ptr + base + half, mask=m, other=0.0).to(
-            language.float32
+            language.float32,
         )
         dk1 = language.load(dk_ptr + base, mask=m, other=0.0).to(language.float32)
         dk2 = language.load(dk_ptr + base + half, mask=m, other=0.0).to(
-            language.float32
+            language.float32,
         )
     pos = rows // n_head % seq_len
     cs_off = pos[:, None] * half + j[None, :]

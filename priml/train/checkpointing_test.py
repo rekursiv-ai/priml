@@ -1010,7 +1010,7 @@ def _resume_worker(result_dir: str, mesh: DeviceMesh) -> None:
         merged = target.loaded
         if merged is not None:
             reload_model.load_state_dict(
-                DictCodec.coerce(merged["model"], default=None)
+                DictCodec.coerce(merged["model"], default=None),
             )
             reload_opt.load_state_dict(DictCodec.coerce(merged["opt"], default=None))
         weight = _full_tensor(next(reload_model.parameters()))

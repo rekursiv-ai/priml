@@ -116,7 +116,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         key = key.reshape(batch, sequence, -1, self.channels_k_head)
         value = value.reshape(batch, sequence, -1, self.channels_v_head)
         g = -self.A_log.float().exp() * torch.nn.functional.softplus(
-            a.float() + self.dt_bias
+            a.float() + self.dt_bias,
         )
         repeats = self.num_heads_v // self.num_heads_k
         if repeats > 1:
@@ -147,7 +147,7 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             gate=z.reshape(-1, self.channels_v_head),
         )
         return self.proj_out(output.reshape(batch, sequence, value_width)).reshape(
-            shape
+            shape,
         )
 
     def alloc_kv_cache(
@@ -264,7 +264,7 @@ def _validated_cache(value: object) -> dict[str, Tensor] | None:
     if _is_empty_cache(value) or _is_complete_cache(value):
         return value
     raise TypeError(
-        "cache must be empty or contain only Tensor conv_state and recurrent_state."
+        "cache must be empty or contain only Tensor conv_state and recurrent_state.",
     )
 
 

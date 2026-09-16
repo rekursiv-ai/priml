@@ -201,7 +201,11 @@ class GatedSelfAttention(nn.Module):
 
         """
         return self.forward(
-            x, cache=cache, positions=positions, attn_mask=attn_mask, **kwargs
+            x,
+            cache=cache,
+            positions=positions,
+            attn_mask=attn_mask,
+            **kwargs,
         ), cache
 
     @override
@@ -259,7 +263,7 @@ class GatedSelfAttention(nn.Module):
             elif not _is_text_positions(positions, x=x):
                 raise ValueError(
                     "positions must be a text layout of [sequence] or "
-                    "[batch..., sequence, 1]."
+                    "[batch..., sequence, 1].",
                 )
             cos, sin = self.rope(positions)
             q = _rotate(q, cos=cos.to(x.dtype), sin=sin.to(x.dtype))
@@ -347,7 +351,7 @@ def _validate_cache_geometry(
     ):
         raise ValueError(
             "Full-attention cache batch, head, and feature geometry must match "
-            "the input and attention configuration."
+            "the input and attention configuration.",
         )
 
 
@@ -369,7 +373,7 @@ def _rotate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
     width = cos.shape[-1]
     if width > x.shape[-1]:
         raise ValueError(
-            f"Rotary width {width} exceeds attention head width {x.shape[-1]}."
+            f"Rotary width {width} exceeds attention head width {x.shape[-1]}.",
         )
     rotated, passthrough = x[..., :width], x[..., width:]
     first, second = rotated.chunk(2, dim=-1)
@@ -397,5 +401,6 @@ def _causal_bias(
     if window >= 0:
         allowed = allowed & (offset <= window)
     return torch.zeros(s, t, dtype=dtype, device=q.device).masked_fill(
-        ~allowed, torch.finfo(dtype).min
+        ~allowed,
+        torch.finfo(dtype).min,
     )

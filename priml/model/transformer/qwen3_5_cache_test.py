@@ -34,10 +34,12 @@ else:
 
     DynamicCache = lazy_import("transformers.cache_utils", "DynamicCache")
     Qwen3_5TextConfig = lazy_import(
-        "transformers.models.qwen3_5.configuration_qwen3_5", "Qwen3_5TextConfig"
+        "transformers.models.qwen3_5.configuration_qwen3_5",
+        "Qwen3_5TextConfig",
     )
     Qwen3_5ForCausalLM = lazy_import(
-        "transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5ForCausalLM"
+        "transformers.models.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5ForCausalLM",
     )
 
 
@@ -63,7 +65,7 @@ def test_mixed_cache_weights_only_roundtrip_resumes_exactly(
         if split_gate_projection:
             assert reference_cache is not None
             expected = hf_logits(
-                reference(tokens, past_key_values=reference_cache, use_cache=True)
+                reference(tokens, past_key_values=reference_cache, use_cache=True),
             )
             assert torch.equal(actual, expected)
     state = cache_state_dict(cache)
@@ -88,7 +90,7 @@ def test_mixed_cache_weights_only_roundtrip_resumes_exactly(
                 continuation,
                 past_key_values=reference_cache,
                 use_cache=True,
-            )
+            ),
         )
         assert torch.equal(actual, expected)
     else:
@@ -110,8 +112,8 @@ def test_cache_state_rejects_invalid_native_metadata() -> None:
                     "v": torch.zeros(1, 1, 2, 4),
                     "length": 2,
                     "seen": 1,
-                }
-            ]
+                },
+            ],
         )
 
 
@@ -145,7 +147,7 @@ def test_linear_attention_restores_own_independent_snapshot_tensors() -> None:
             "kind": "linear_attention",
             "conv_state": conv_state,
             "recurrent_state": recurrent_state,
-        }
+        },
     ]
 
     first = cache_from_state_dict(state)
@@ -226,7 +228,7 @@ def test_cache_restore_rejects_bool_full_attention_metadata(name: str) -> None:
             "v": torch.zeros(1, 1, 2, 4),
             "length": 0,
             "seen": 0,
-        }
+        },
     ]
     state[0][name] = True
 
@@ -258,12 +260,13 @@ def test_cache_state_rejects_bool_full_attention_metadata(name: str) -> None:
     ],
 )
 def test_cache_restore_rejects_invalid_kv_layout_or_dtype(
-    k: torch.Tensor, v: torch.Tensor
+    k: torch.Tensor,
+    v: torch.Tensor,
 ) -> None:
     """Reject serialized full-attention tensors with invalid layout or dtype."""
     with pytest.raises(ValueError, match="incompatible shapes, dtypes, or devices"):
         cache_from_state_dict(
-            [{"kind": "full_attention", "k": k, "v": v, "length": 0, "seen": 0}]
+            [{"kind": "full_attention", "k": k, "v": v, "length": 0, "seen": 0}],
         )
 
 

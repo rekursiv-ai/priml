@@ -72,7 +72,10 @@ def remap_hf_state_dict(
             )
         else:
             mapped[target] = _take(
-                state, remaining=remaining, name=sources[0], shape=shape
+                state,
+                remaining=remaining,
+                name=sources[0],
+                shape=shape,
             )
     if (
         isinstance(finalized.proj_out, TiedLinear.Config)

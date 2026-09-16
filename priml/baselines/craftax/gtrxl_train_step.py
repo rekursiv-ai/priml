@@ -705,7 +705,8 @@ class CraftaxGTrXLTrainStep(TrainStep):
         return metrics
 
     def _loss(
-        self, minibatch: dict[str, Tensor]
+        self,
+        minibatch: dict[str, Tensor],
     ) -> tuple[Tensor, Tensor, ClippedPolicyLoss]:
         """Evaluate the clipped objective over one set of gradient windows."""
         logits, value = self._sequence(

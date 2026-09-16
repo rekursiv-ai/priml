@@ -111,7 +111,12 @@ def test_causal_attention_forwards_unconsumed_messages() -> None:
 
 
 def _message_kernel(
-    q: Tensor, k: Tensor, v: Tensor, *, window: int, message: object
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    *,
+    window: int,
+    message: object,
 ) -> Tensor:
     assert q.shape == k.shape == v.shape
     assert window == 2
@@ -155,11 +160,11 @@ def test_qk_forward_and_backward_match_fp32_math() -> None:
     references: list[torch.Tensor] = []
     for value in (q, k):
         normalized = value * torch.rsqrt(
-            value.square().mean(-1, keepdim=True) + torch.finfo(torch.float32).eps
+            value.square().mean(-1, keepdim=True) + torch.finfo(torch.float32).eps,
         )
         first, second = normalized.chunk(2, dim=-1)
         references.append(
-            torch.cat((first * cos + second * sin, second * cos - first * sin), dim=-1)
+            torch.cat((first * cos + second * sin, second * cos - first * sin), dim=-1),
         )
     gradients = [torch.randn_like(q), torch.randn_like(k)]
     for actual, expected in zip(outputs, references, strict=True):
@@ -173,7 +178,8 @@ def test_qk_forward_and_backward_match_fp32_math() -> None:
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("layout", [torch.contiguous_format, torch.channels_last])
 def test_qk_backward_preserves_reference_bits_and_declared_layout(
-    dtype: torch.dtype, layout: torch.memory_format
+    dtype: torch.dtype,
+    layout: torch.memory_format,
 ) -> None:
     """Keep channels-last cotangents from violating the compiled stride contract."""
     q = torch.randn(2, 4, 2, 8, dtype=dtype).to(memory_format=layout)
@@ -192,7 +198,8 @@ def test_qk_backward_preserves_reference_bits_and_declared_layout(
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("layout", [torch.contiguous_format, torch.channels_last])
 def test_qk_forward_preserves_reference_bits_and_declared_layout(
-    dtype: torch.dtype, layout: torch.memory_format
+    dtype: torch.dtype,
+    layout: torch.memory_format,
 ) -> None:
     """Expose the same contiguous output contract as the CUDA kernels."""
     q = torch.randn(2, 4, 2, 8, dtype=dtype).to(memory_format=layout)
@@ -224,13 +231,14 @@ def test_cuda_qk_forward_and_backward_match_fp32_math() -> None:
     for value in reference_inputs:
         fp32 = value.float()
         normalized = fp32 * torch.rsqrt(
-            fp32.square().mean(-1, keepdim=True) + torch.finfo(torch.float32).eps
+            fp32.square().mean(-1, keepdim=True) + torch.finfo(torch.float32).eps,
         )
         first, second = normalized.chunk(2, dim=-1)
         references.append(
             torch.cat(
-                (first * cos + second * sin, second * cos - first * sin), dim=-1
-            ).to(value.dtype)
+                (first * cos + second * sin, second * cos - first * sin),
+                dim=-1,
+            ).to(value.dtype),
         )
     expected_grads = torch.autograd.grad(references, reference_inputs, gradients)
 
@@ -291,9 +299,13 @@ def test_cuda_matches_official_autograd() -> None:
         pytest.skip("Requires an SM90 or SM100 CUDA device.")
     assert version("flash-attn-4") == "4.0.0b29"
     interface = cast(
-        object, __import__("flash_attn.cute.interface", fromlist=["interface"])
+        object,
+        __import__("flash_attn.cute.interface", fromlist=["interface"]),
     )
-    assert isinstance(interface, priml.baselines.nanochat.attention._Flash4Interface)
+    assert isinstance(
+        interface,
+        priml.baselines.nanochat.attention._Flash4Interface,
+    )
     attention = Flash4Attention.Config().make()
     torch.manual_seed(42)
     tensors = [

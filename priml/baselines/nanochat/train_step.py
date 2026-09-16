@@ -225,7 +225,7 @@ class NanoChatTrainStep(TrainStep):
         """Autocast dtype; ``None`` trains in full precision."""
 
         compile: Makeable[_Compile] | None = field(
-            default_factory=lambda: PartialConfig(torch.compile)
+            default_factory=lambda: PartialConfig(torch.compile),
         )
         """Compile the model AND the loss with ``torch.compile``; ``None`` runs
         them eagerly.
@@ -367,7 +367,7 @@ class NanoChatTrainStep(TrainStep):
                     raise ValueError(
                         "BoundedTokenCrossEntropy requires a symmetric readout "
                         "bound no larger than logit_upper_bound. Use "
-                        "TokenCrossEntropy for an unbounded readout."
+                        "TokenCrossEntropy for an unbounded readout.",
                     )
             # Rescaled here, not in the factory: the factory runs before the
             # caller has chosen a width, so a rate baked there is right for one
@@ -663,7 +663,10 @@ class NanoChatTrainStep(TrainStep):
             )
         state = cast(NanoChatTrainStep.StateDict, state_dict)
         super().load_state_dict(
-            state, strict=strict, load_optimizer=load_optimizer, remap=remap
+            state,
+            strict=strict,
+            load_optimizer=load_optimizer,
+            remap=remap,
         )
         self.elapsed_sec = float(state["elapsed_sec"])
         self._steps_this_process = state["local_step"]
@@ -733,8 +736,9 @@ class NanoChatTrainStep(TrainStep):
             return {}
         return {
             "grad_norm": nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.gradient_clip_norm
-            ).detach()
+                self.model.parameters(),
+                self.config.gradient_clip_norm,
+            ).detach(),
         }
 
     def _synchronize(self) -> None:
@@ -883,7 +887,8 @@ class NgramTrainStep(NanoChatTrainStep):
         ]
         total = nn.utils.get_total_norm(gradients)
         coefficient = torch.clamp(
-            self.config.gradient_clip_norm / (total + 1e-6), max=1.0
+            self.config.gradient_clip_norm / (total + 1e-6),
+            max=1.0,
         )
         for gradient in gradients:
             gradient.mul_(coefficient.to(gradient.device))
@@ -1095,12 +1100,14 @@ def _learning_rates(optimizer: HasParamGroups) -> dict[str, float]:
     if not isinstance(optimizer, CompositeOptimizer):
         return {
             "all": FloatCodec.coerce(
-                cast(object, optimizer.param_groups[0]["lr"]), None
-            )
+                cast(object, optimizer.param_groups[0]["lr"]),
+                None,
+            ),
         }
     return {
         type(member).__name__.lower(): FloatCodec.coerce(
-            cast(object, member.param_groups[0]["lr"]), None
+            cast(object, member.param_groups[0]["lr"]),
+            None,
         )
         for member in optimizer.optimizers
         if member.param_groups
@@ -1132,7 +1139,9 @@ def _bounded_forward(
 
 
 def _bounded_backward(
-    ctx: _LossContext, /, *grad_outputs: Tensor
+    ctx: _LossContext,
+    /,
+    *grad_outputs: Tensor,
 ) -> tuple[Tensor, None, None, None]:
     (grad_output,) = grad_outputs
     logits, flat_targets, lse, kept = ctx.saved_tensors

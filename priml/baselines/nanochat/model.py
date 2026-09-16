@@ -645,12 +645,12 @@ class MemoryNanoChatLM(NanoChatLM):
         """Mark touched sink rows in the backward and clear only those rows."""
 
         bigrams: dict[str, HashedNgramTables.Config] = field(
-            default_factory=dict[str, HashedNgramTables.Config]
+            default_factory=dict[str, HashedNgramTables.Config],
         )
         """Bigram table configs, keyed by the receiving layer index."""
 
         trigrams: dict[str, HashedNgramTables.Config] = field(
-            default_factory=dict[str, HashedNgramTables.Config]
+            default_factory=dict[str, HashedNgramTables.Config],
         )
         """Trigram table configs, keyed by the receiving layer index."""
 
@@ -792,7 +792,7 @@ class MemoryNanoChatLM(NanoChatLM):
         length = tokens.shape[-1]
         if length > self.config.max_seq_len:
             raise ValueError(
-                f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}."
+                f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}.",
             )
         cos_sin = self._rotation_table(length, device=tokens.device)
         x = self.norm_embed(self.embed(tokens))

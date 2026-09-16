@@ -45,13 +45,13 @@ def cache_state_dict(cache: Sequence[object]) -> Qwen35CacheState:
                     "v": layer.v.detach().clone(),
                     "length": layer.length,
                     "seen": layer.seen,
-                }
+                },
             )
         elif (delta_cache := _delta_cache(layer)) is not None:
             state.append({"kind": "linear_attention", **_tensor_dict(delta_cache)})
         else:
             raise TypeError(
-                "A Qwen3.5 cache layer must be KV or delta attention state."
+                "A Qwen3.5 cache layer must be KV or delta attention state.",
             )
     return state
 
@@ -104,7 +104,7 @@ def cache_from_state_dict(state: object) -> list[object]:
                     continue
                 if not isinstance(value, Tensor):
                     raise TypeError(
-                        "A delta-attention cache must map strings to tensors."
+                        "A delta-attention cache must map strings to tensors.",
                     )
                 tensors[name] = value
             if set(tensors) not in (set(), {"conv_state", "recurrent_state"}):
@@ -134,7 +134,7 @@ def _validate_kv_cache(
     ):
         raise ValueError(
             "Full-attention key and value caches have incompatible shapes, "
-            "dtypes, or devices."
+            "dtypes, or devices.",
         )
     if length < 0 or length > k.shape[-2] or seen < length:
         raise ValueError("Full-attention cache progress metadata is invalid.")

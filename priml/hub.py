@@ -112,7 +112,8 @@ def load_transformers_model(
     # ``transformers`` resolves attribute names lazily, so the lookup is untyped;
     # every ``Auto*`` class it names derives from ``_BaseAutoModelClass``.
     model_class_type = cast(
-        "type[_BaseAutoModelClass]", getattr(transformers, model_class)
+        "type[_BaseAutoModelClass]",
+        getattr(transformers, model_class),
     )
 
     # No ``cache_dir=``: an explicit value OVERRIDES ``HF_HOME``, so passing

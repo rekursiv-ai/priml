@@ -188,7 +188,9 @@ def _build_split(
         # ``choice`` returns an untyped array; naming the index list keeps the
         # comprehensions' element type from widening to Unknown.
         selected: NDArray[np.int64] = rng.choice(
-            len(puzzles), size=num_puzzles, replace=False
+            len(puzzles),
+            size=num_puzzles,
+            replace=False,
         )
         keep = cast(list[int], selected.tolist())
         puzzles = [puzzles[i] for i in keep]
@@ -299,7 +301,7 @@ def _transform(
     rows = np.concatenate([b * BOX + np.array(_permutation(rng, BOX)) for b in bands])
     stacks = _permutation(rng, BOX)
     columns = np.concatenate(
-        [s * BOX + np.array(_permutation(rng, BOX)) for s in stacks]
+        [s * BOX + np.array(_permutation(rng, BOX)) for s in stacks],
     )
     mapping = np.array(
         [rows[i // GRID] * GRID + columns[i % GRID] for i in range(GRID * GRID)],

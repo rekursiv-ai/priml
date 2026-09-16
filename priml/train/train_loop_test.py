@@ -2021,7 +2021,8 @@ def _make_simple_loop_config(
     step_config.parallelism = NoParallel.Config(device="cpu")
     step_config.compile = None
     config: TrainLoop.Config[
-        TrainStep.Config[_LinearModel.Config], Makeable[DatasetProtocol]
+        TrainStep.Config[_LinearModel.Config],
+        Makeable[DatasetProtocol],
     ] = TrainLoop.Config(
         step=step_config,
         dataset=dataset if dataset is not None else _simple_dummy_dataset(),
@@ -2175,7 +2176,9 @@ def test_cadence_checkpoint_replays_next_batch_and_rng(
         assert resumed.dataset.cursor == reference.dataset.cursor
         assert len(resumed.dataset.batches) == len(expected_batches)
         for actual, expected in zip(
-            resumed.dataset.batches, expected_batches, strict=True
+            resumed.dataset.batches,
+            expected_batches,
+            strict=True,
         ):
             assert torch.equal(actual, expected)
         assert torch.equal(get_rng_state()["torch"], expected_rng)
@@ -3452,7 +3455,7 @@ class _ReplayDataset:
                 [
                     {
                         "media": torch.stack(
-                            (torch.rand(()), torch.zeros(()))
+                            (torch.rand(()), torch.zeros(())),
                         ).unsqueeze(0),
                         "label": torch.tensor([0]),
                     },
@@ -3510,7 +3513,9 @@ def _raise_checkpoint_write(target: CheckpointableProtocol, step: int) -> None:
 
 
 def _record_maybe_save(
-    calls: list[str], target: CheckpointableProtocol, step: int
+    calls: list[str],
+    target: CheckpointableProtocol,
+    step: int,
 ) -> bool:
     """Record a recovery cadence-save call."""
     del target, step

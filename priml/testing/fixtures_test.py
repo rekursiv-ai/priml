@@ -267,7 +267,8 @@ def test_cleanup_cuda_teardown_skips_synchronize(
     # equivalent, and its return type is Callable[..., Any] (pytest's stub,
     # not ours) -- cast to what cleanup_cuda actually returns, then verify it.
     gen = cast(
-        Generator[None, None, None], fixtures.cleanup_cuda._get_wrapped_function()()
+        Generator[None, None, None],
+        fixtures.cleanup_cuda._get_wrapped_function()(),
     )
     assert isinstance(gen, Generator)
     next(gen)

@@ -117,16 +117,19 @@ class Qwen35(Transformer):
                     if delta.num_heads_v % delta.num_heads_k:
                         raise ValueError(
                             "linear_num_value_heads must be a multiple of "
-                            "linear_num_key_heads."
+                            "linear_num_key_heads.",
                         )
                     delta.channels_k_head = _positive(
-                        config, name="linear_key_head_dim"
+                        config,
+                        name="linear_key_head_dim",
                     )
                     delta.channels_v_head = _positive(
-                        config, name="linear_value_head_dim"
+                        config,
+                        name="linear_value_head_dim",
                     )
                     delta.conv_kernel_size = _positive(
-                        config, name="linear_conv_kernel_dim"
+                        config,
+                        name="linear_conv_kernel_dim",
                     )
                     delta.init_weight = init
                     propagate_attr(config=delta.norm, name="eps", value=norm.eps)
@@ -147,7 +150,7 @@ class Qwen35(Transformer):
                 elif self.norm.channels_in != self.channels_in:
                     raise ValueError(
                         f"norm.channels_in={self.norm.channels_in} must equal "
-                        f"channels_in={self.channels_in}."
+                        f"channels_in={self.channels_in}.",
                     )
             return super().finalize()
 
@@ -266,7 +269,7 @@ class Qwen35(Transformer):
             else:
                 if not _has_cached_forward(block):
                     raise TypeError(
-                        "Cached decoding requires blocks with a forward_cached method."
+                        "Cached decoding requires blocks with a forward_cached method.",
                     )
                 x, cache[index] = block.forward_cached(
                     x,
@@ -320,11 +323,11 @@ class Qwen35(Transformer):
                 attention = block.get_submodule("attn")
             except AttributeError as error:
                 raise TypeError(
-                    "Cached decoding requires blocks with an attn submodule."
+                    "Cached decoding requires blocks with an attn submodule.",
                 ) from error
             if not isinstance(attention, AttentionLike):
                 raise TypeError(
-                    "Cached decoding requires attention with an alloc_kv_cache method."
+                    "Cached decoding requires attention with an alloc_kv_cache method.",
                 )
             caches.append(
                 attention.alloc_kv_cache(
@@ -332,7 +335,7 @@ class Qwen35(Transformer):
                     max_seq=max_seq,
                     device=device,
                     dtype=dtype,
-                )
+                ),
             )
         return caches
 
@@ -397,7 +400,8 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
     raw = config.get("layer_types")
     if raw is None:
         interval = IntCodec.coerce(
-            config.get("full_attention_interval", 4), default=None
+            config.get("full_attention_interval", 4),
+            default=None,
         )
         if interval <= 0:
             raise ValueError("full_attention_interval must be positive.")
@@ -410,7 +414,7 @@ def _layer_types(config: Mapping[str, object], *, count: int) -> list[str]:
         layer not in ("full_attention", "linear_attention") for layer in layers
     ):
         raise ValueError(
-            "layer_types must name one supported attention type per layer."
+            "layer_types must name one supported attention type per layer.",
         )
     return [StrCodec.coerce(layer, default=None) for layer in layers]
 
@@ -421,12 +425,13 @@ def _full_attention(config: Mapping[str, object]) -> GatedSelfAttention.Config:
     attention.num_heads_kv = _positive(config, name="num_key_value_heads")
     if attention.num_heads % attention.num_heads_kv:
         raise ValueError(
-            "num_attention_heads must be divisible by num_key_value_heads."
+            "num_attention_heads must be divisible by num_key_value_heads.",
         )
     attention.channels_head = _positive(config, name="head_dim")
     attention.bias = BoolCodec.coerce(config.get("attention_bias", False), default=None)
     attention.dropout = FloatCodec.coerce(
-        config.get("attention_dropout", 0.0), default=None
+        config.get("attention_dropout", 0.0),
+        default=None,
     )
     if (
         not math.isfinite(attention.dropout)
@@ -450,7 +455,8 @@ def _full_attention(config: Mapping[str, object]) -> GatedSelfAttention.Config:
     if width < 2 or width % 2:
         raise ValueError("The rotary prefix must have a positive even width.")
     rope_theta = FloatCodec.coerce(
-        params.get("rope_theta", config.get("rope_theta", 10_000_000.0)), default=None
+        params.get("rope_theta", config.get("rope_theta", 10_000_000.0)),
+        default=None,
     )
     if not math.isfinite(rope_theta) or rope_theta <= 0:
         raise ValueError("rope_theta must be finite and positive.")

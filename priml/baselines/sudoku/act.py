@@ -272,7 +272,10 @@ class ActPool:
         for _ in range(self.config.max_steps):
             self._set_feedback(model, feedback=feedback)
             out = cast(_SudokuForward, model)(
-                media, z_slow, z_fast, **(prefix_kwargs or {})
+                media,
+                z_slow,
+                z_fast,
+                **(prefix_kwargs or {}),
             )
             z_slow, z_fast = out.z_slow, out.z_fast
             logits, halt = out.logits, out.halt

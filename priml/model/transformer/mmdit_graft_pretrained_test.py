@@ -34,7 +34,8 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
     # ``PretrainedConfig`` resolves model fields through ``__getattribute__``,
     # so the checker sees no ``layer_types``; read it through ``to_dict``.
     layer_types = ListCodec.coerce(
-        DictCodec.coerce(hf_config.to_dict())["layer_types"], str
+        DictCodec.coerce(hf_config.to_dict())["layer_types"],
+        str,
     )
     hf_config.layer_types = layer_types[:1]
     config = Qwen3.Config.from_hf(DictCodec.coerce(hf_config.to_dict()))

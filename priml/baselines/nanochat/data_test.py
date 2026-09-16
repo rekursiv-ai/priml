@@ -538,7 +538,8 @@ def test_prepared_training_preserves_order_and_refuses_to_wrap(
 
 @pytest.mark.parametrize("device", ["cpu", "meta"])
 def test_non_cuda_batches_use_the_configured_device(
-    prepared_config: NanoChatData.Config, device: str
+    prepared_config: NanoChatData.Config,
+    device: str,
 ) -> None:
     """Device placement does not depend on CUDA's pinned-memory capability."""
     prepared_config.device = device
@@ -551,7 +552,9 @@ def test_non_cuda_batches_use_the_configured_device(
 
 @pytest.mark.parametrize("prepared", [False, True])
 def test_host_packing_ignores_the_ambient_default_device(
-    corpus: Path, prepared_config: NanoChatData.Config, prepared: bool
+    corpus: Path,
+    prepared_config: NanoChatData.Config,
+    prepared: bool,
 ) -> None:
     """Configured CPU batches stay on CPU even inside a different device context."""
     dataset = prepared_config.make() if prepared else _data(corpus)
@@ -582,10 +585,12 @@ def test_prepared_evaluation_replays_packed_rows_and_primary_byte_rule(
 
 
 @pytest.mark.parametrize(
-    "name", ["train_rows.npy", "eval_y.npy", "token_bytes_primary.npy"]
+    "name",
+    ["train_rows.npy", "eval_y.npy", "token_bytes_primary.npy"],
 )
 def test_prepared_array_geometry_is_checked(
-    prepared_config: NanoChatData.Config, name: str
+    prepared_config: NanoChatData.Config,
+    name: str,
 ) -> None:
     manifest = (
         prepared_config.prepared_train_manifest
@@ -607,7 +612,7 @@ def test_prepared_metadata_ignores_obsolete_checksums(
     metadata["eval_x_sha256"] = "obsolete"
     metadata["eval_y_sha256"] = "obsolete"
     metadata["loaded_modules_and_assets"] = {
-        "tokenizer_assets": {"tokenizer.json": {"sha256": "obsolete"}}
+        "tokenizer_assets": {"tokenizer.json": {"sha256": "obsolete"}},
     }
     path.write_text(json.dumps(metadata) + " \n")
     batch = next(iter(prepared_config.make().eval_dataloader()))
@@ -627,7 +632,9 @@ def test_prepared_geometry_cannot_silently_change_the_evaluation(
     [("train_shard_indices", (2,)), ("val_shard", 2), ("buffer_size", 8)],
 )
 def test_prepared_inputs_cannot_misreport_their_corpus_or_packing(
-    prepared_config: NanoChatData.Config, field: str, value: object
+    prepared_config: NanoChatData.Config,
+    field: str,
+    value: object,
 ) -> None:
     setattr(prepared_config, field, value)
     with pytest.raises(ValueError, match="geometry"):
@@ -636,7 +643,8 @@ def test_prepared_inputs_cannot_misreport_their_corpus_or_packing(
 
 @pytest.mark.parametrize("obsolete_metadata", [False, True])
 def test_archive_replay_without_checksum_pins(
-    tmp_path: Path, obsolete_metadata: bool
+    tmp_path: Path,
+    obsolete_metadata: bool,
 ) -> None:
     """Keep BPE tensors and batch boundaries unchanged, including masked padding."""
     path = tmp_path / "rows.npz"

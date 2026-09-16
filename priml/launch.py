@@ -124,7 +124,8 @@ def main() -> int:
     # The factory's docstring is the experiment's contract; it is stamped onto
     # the config and logged below.
     function: object = getattr(  # pyright: ignore[reportAny] -- The factory name is supplied by the CLI.
-        importlib.import_module(module_name), function_name
+        importlib.import_module(module_name),
+        function_name,
     )
     docstring = inspect.getdoc(function) or ""
     _log_docstring(config_str, docstring)

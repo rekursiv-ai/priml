@@ -189,7 +189,8 @@ def test_numpy_dtype_mapping(
     expected_torch_dtype: torch.dtype,
 ) -> None:
     x: np.ndarray[tuple[int, ...], np.dtype[np.generic]] = np.array(
-        [1, 2, 3], dtype=np_dtype
+        [1, 2, 3],
+        dtype=np_dtype,
     )
     result = convert_to_tensor(x)
     assert result[0].dtype == expected_torch_dtype

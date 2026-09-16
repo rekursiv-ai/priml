@@ -242,7 +242,7 @@ class _RecordingStep(TrainStep):
                 label=label.clone(),
                 rng=rng,
                 loss=result["loss"].detach().clone(),
-            )
+            ),
         )
         return result
 
@@ -288,7 +288,7 @@ def _token_loss(prediction: Tensor, **batch: object) -> LossOutput:
             prediction.flatten(0, 1),
             label.flatten(),
             reduction="none",
-        )
+        ),
     }
 
 

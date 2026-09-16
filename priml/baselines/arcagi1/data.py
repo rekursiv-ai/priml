@@ -89,7 +89,7 @@ class _ArcBatches:
                 + 1
             ]
             rows = int(
-                puzzles[-1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
             )
         else:
             rows = len(data["inputs"])
@@ -127,7 +127,7 @@ class _ArcBatches:
         if not self.sample_by_task:
             return ceil_div(
                 int(
-                    self.puzzles[-1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                    self.puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 ),
                 self.batch_size,
             )
@@ -199,24 +199,24 @@ class _ArcBatches:
             filled = 0
             while cursor < order.size and filled < self.batch_size:
                 task = int(
-                    order[cursor]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                    order[cursor],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 )
                 cursor += 1
                 lo = int(
-                    self.groups[task]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                    self.groups[task],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 )
                 hi = int(
-                    self.groups[task + 1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                    self.groups[task + 1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 )
                 if hi <= lo:
                     continue
                 puzzle = int(rng.integers(lo, hi))
                 start = int(
-                    self.puzzles[puzzle]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                    self.puzzles[puzzle],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 )
                 size = (
                     int(
-                        self.puzzles[puzzle + 1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+                        self.puzzles[puzzle + 1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                     )
                     - start
                 )
@@ -234,7 +234,7 @@ class _ArcBatches:
     def _iter_ordered(self) -> Iterator[dict[str, object]]:
         """Walk every row once, so pass@K sees every ballot."""
         total = int(
-            self.puzzles[-1]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+            self.puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
         )
         for start in range(0, total, self.batch_size):
             end = min(total, start + self.batch_size)

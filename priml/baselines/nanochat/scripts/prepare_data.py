@@ -358,8 +358,9 @@ def _fit_vocabulary(
     recorded = (
         dict(
             DictCodec.coerce(
-                cast(object, json.loads(recipe_path.read_text())), default=None
-            )
+                cast(object, json.loads(recipe_path.read_text())),
+                default=None,
+            ),
         )
         if pickled.is_file() and recipe_path.is_file()
         else None
@@ -474,7 +475,8 @@ def _documents(
         shard = parquet.ParquetFile(path)
         for group in range(shard.num_row_groups):
             column = cast(
-                list[str], shard.read_row_group(group).column("text").to_pylist()
+                list[str],
+                shard.read_row_group(group).column("text").to_pylist(),
             )
             for document in column:
                 text = document[:doc_cap]
@@ -532,7 +534,8 @@ def fetch_file(url: str, *, destination: Path) -> None:
                 )
             return
         with tempfile.TemporaryDirectory(
-            dir=destination.parent, prefix="nanochat-download-"
+            dir=destination.parent,
+            prefix="nanochat-download-",
         ) as temporary:
             staged = Path(temporary) / destination.name
             with (
@@ -558,7 +561,8 @@ def copy_input(source: Path, *, destination: Path) -> None:
     destination = validated_output_path(destination, protected=[source])
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        dir=destination.parent, prefix="nanochat-copy-"
+        dir=destination.parent,
+        prefix="nanochat-copy-",
     ) as temporary:
         staged = Path(temporary) / destination.name
         shutil.copyfile(source, staged)
@@ -630,14 +634,16 @@ class CorpusPreparation:
         selected = set(identities)
         texts_donor = _donor_texts(self.config.raw_dir, identities=selected)
         output = validated_output_path(
-            self.config.working_dir, protected=[self.config.raw_dir]
+            self.config.working_dir,
+            protected=[self.config.raw_dir],
         )
         output.mkdir(parents=True, exist_ok=True)
         seen: dict[bytes, tuple[str, str]] = {}
         for shard in self.config.train_shard_indices:
             name = f"shard_{shard:05d}.parquet"
             canonical, _ = unique_rows(
-                document_rows(self.config.raw_dir / name, shard=shard), seen=seen
+                document_rows(self.config.raw_dir / name, shard=shard),
+                seen=seen,
             )
             retained = [
                 (identity, text)
@@ -650,13 +656,16 @@ class CorpusPreparation:
                 else ()
             )
             rows = interleave_rows(
-                retained, additions=[(key, texts_donor[key]) for key in additions]
+                retained,
+                additions=[(key, texts_donor[key]) for key in additions],
             )
             destination = validated_output_path(
-                output / name, protected=[self.config.raw_dir / name]
+                output / name,
+                protected=[self.config.raw_dir / name],
             )
             with tempfile.TemporaryDirectory(
-                dir=output, prefix="nanochat-shard-"
+                dir=output,
+                prefix="nanochat-shard-",
             ) as temporary:
                 staged = Path(temporary) / name
                 parquet.write_table(
@@ -677,7 +686,9 @@ class CorpusPreparation:
 
 
 def unique_rows(
-    rows: Iterator[tuple[str, str]], *, seen: dict[bytes, tuple[str, str]]
+    rows: Iterator[tuple[str, str]],
+    *,
+    seen: dict[bytes, tuple[str, str]],
 ) -> tuple[list[tuple[str, str]], list[dict[str, str]]]:
     """Keep the first exact text occurrence across ordered shards.
 
@@ -702,7 +713,7 @@ def unique_rows(
                 {
                     "source_id": identity,
                     "first_source_id": first_id,
-                }
+                },
             )
         else:
             seen[digest] = identity, text
@@ -711,7 +722,9 @@ def unique_rows(
 
 
 def interleave_rows(
-    original: list[tuple[str, str]], *, additions: list[tuple[str, str]]
+    original: list[tuple[str, str]],
+    *,
+    additions: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     """Insert donors at the original producer's integer-spaced positions.
 
@@ -742,10 +755,11 @@ def _donor_texts(directory: Path, *, identities: set[str]) -> dict[str, str]:
             {
                 key: text
                 for key, text in document_rows(
-                    directory / f"shard_{shard:05d}.parquet", shard=shard
+                    directory / f"shard_{shard:05d}.parquet",
+                    shard=shard,
                 )
                 if key in identities
-            }
+            },
         )
     if set(output) != identities:
         raise ValueError("A donor identity is absent from its original shard.")
@@ -759,7 +773,7 @@ class RowPreparation:
         """Declare the full training and evaluation input contract."""
 
         tokenizer: ByteLevelTokenizer.Config = field(
-            default_factory=ByteLevelTokenizer.Config
+            default_factory=ByteLevelTokenizer.Config,
         )
         """Fitted encoder and reserved IDs."""
 
@@ -850,10 +864,12 @@ class RowPreparation:
     def _manifests(self, output: Path, *, encoder: ByteLevelTokenizer) -> None:
         """Write portable loader geometry and byte-table metadata."""
         rows: NDArray[np.uint16] = cast(
-            NDArray[np.uint16], load(output / "train/train_rows.npy", mmap_mode="r")
+            NDArray[np.uint16],
+            load(output / "train/train_rows.npy", mmap_mode="r"),
         )
         targets: NDArray[np.uint16] = cast(
-            NDArray[np.uint16], load(output / "eval/eval_y.npy", mmap_mode="r")
+            NDArray[np.uint16],
+            load(output / "eval/eval_y.npy", mmap_mode="r"),
         )
         write_mapping(
             output / "train/PREPARED_MANIFEST.json",
@@ -885,13 +901,13 @@ class RowPreparation:
                 "batches": self.config.eval_batches,
                 "byte_tables": {
                     "scored_positions": int(
-                        count_nonzero(encoder.token_bytes[targets])
+                        count_nonzero(encoder.token_bytes[targets]),
                     ),
                     **{
                         name: {
                             "file": f"token_bytes_{name}.npy",
                             "total_on_eval_y": int(
-                                cast(NDArray[np.int32], table)[targets].sum()
+                                cast(NDArray[np.int32], table)[targets].sum(),
                             ),
                         }
                         for name, table in (
@@ -924,13 +940,16 @@ class RowPreparation:
                         texts = next(documents)
                     except StopIteration as error:
                         raise RuntimeError(
-                            "Training preparation exhausted the source corpus; wrapping is forbidden."
+                            "Training preparation exhausted the source corpus; wrapping is forbidden.",
                         ) from error
                     encoded = encoder.encode_batch(texts)
                     buffer.extend(encoded)
                     lengths.extend(map(len, encoded))
                 position = pack_row(
-                    row, buffer=buffer, lengths=lengths, position=position
+                    row,
+                    buffer=buffer,
+                    lengths=lengths,
+                    position=position,
                 )
             if index % 20_000 == 0:
                 logger.info("Prepared %d/%d training rows", index, len(rows))
@@ -962,7 +981,11 @@ class RowPreparation:
 
 
 def pack_row(
-    row: ndarray, *, buffer: list[list[int]], lengths: list[int], position: int
+    row: ndarray,
+    *,
+    buffer: list[list[int]],
+    lengths: list[int],
+    position: int,
 ) -> int:
     """Apply the native largest-fit, otherwise shortest-crop packing rule.
 
@@ -994,11 +1017,12 @@ def pack_row(
 def _document_batches(config: RowPreparation.Config) -> Iterator[list[str]]:
     for shard in config.train_shard_indices:
         parquet = pyarrow.parquet.ParquetFile(
-            config.raw_dir / f"shard_{shard:05d}.parquet"
+            config.raw_dir / f"shard_{shard:05d}.parquet",
         )
         for group in range(parquet.num_row_groups):
             texts = cast(
-                list[str], parquet.read_row_group(group).column("text").to_pylist()
+                list[str],
+                parquet.read_row_group(group).column("text").to_pylist(),
             )
             for start in range(0, len(texts), config.documents_per_refill):
                 yield texts[start : start + config.documents_per_refill]
@@ -1014,7 +1038,7 @@ class Preparation:
         """Root for original sources and all reproduced artifacts."""
 
         corpus: CorpusPreparation.Config = field(
-            default_factory=CorpusPreparation.Config
+            default_factory=CorpusPreparation.Config,
         )
         """Pinned source acquisition and donor-original transformation."""
 
@@ -1022,12 +1046,12 @@ class Preparation:
         """Original BPE vocabulary for the baseline and reference-byte selection."""
 
         sample: SamplePreparation.Config = field(
-            default_factory=SamplePreparation.Config
+            default_factory=SamplePreparation.Config,
         )
         """Original-corpus vocabulary fitting sample."""
 
         tokenizer: UnigramPreparation.Config = field(
-            default_factory=UnigramPreparation.Config
+            default_factory=UnigramPreparation.Config,
         )
         """Tokenizer fitting procedure."""
 
@@ -1145,14 +1169,14 @@ class Preparation:
                 "tokenizer/" + path.name: path
                 for path in self.config.tokenizer.working_dir.iterdir()
                 if path.is_file()
-            }
+            },
         )
         files.update(
             {
                 "fitting/" + path.name: path
                 for path in self.config.sample.working_dir.iterdir()
                 if path.is_file()
-            }
+            },
         )
         for directory in ("reference-eval", "reference-bpe", "raw/tokenizer"):
             files.update(
@@ -1160,14 +1184,14 @@ class Preparation:
                     directory + "/" + path.name: path
                     for path in (self.config.working_dir / directory).iterdir()
                     if path.is_file()
-                }
+                },
             )
         source = _CWD
         files.update(
             {
                 "preparation/" + str(path.relative_to(source)): path
                 for path in source.glob("prepare_*.py")
-            }
+            },
         )
         destination = validated_output_path(destination, protected=files.values())
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1179,7 +1203,8 @@ class Preparation:
         }
         payload = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
         with tempfile.TemporaryDirectory(
-            dir=destination.parent, prefix="nanochat-archive-"
+            dir=destination.parent,
+            prefix="nanochat-archive-",
         ) as temporary:
             staged = Path(temporary) / destination.name
             with tarfile.open(staged, mode="w") as archive:
@@ -1192,7 +1217,11 @@ class Preparation:
             staged.replace(destination)
 
     def training_config(
-        self, name: str, *, run_directory: Path, seed: int
+        self,
+        name: str,
+        *,
+        run_directory: Path,
+        seed: int,
     ) -> NgramTrainLoop.Config:
         """Bind an experiment to locally rebuilt inputs and local-only reporting.
 
@@ -1295,7 +1324,7 @@ def encode_fragment(raw: bytes, *, tokenizer: tokenizers.Tokenizer) -> list[int]
     except UnicodeDecodeError as error:
         if error.reason != "unexpected end of data" or error.end != len(raw):
             raise ValueError(
-                "Reference fragment has non-terminal invalid UTF-8."
+                "Reference fragment has non-terminal invalid UTF-8.",
             ) from error
         text = raw[: error.start].decode("utf-8", errors="strict")
         suffix = raw[error.start :]
@@ -1305,7 +1334,7 @@ def encode_fragment(raw: bytes, *, tokenizer: tokenizers.Tokenizer) -> list[int]
         ids.extend(
             token.id
             for token in cast(_TokenizerModel, tokenizer.model).tokenize(
-                "".join(alphabet[value] for value in suffix)
+                "".join(alphabet[value] for value in suffix),
             )
         )
     inverse = {char: value for value, char in alphabet.items()}
@@ -1399,7 +1428,7 @@ def prepare_reference_rows(
                 incomplete_suffixes += 1
             if tokenizer is not None:
                 sequence.extend(
-                    [output_bos, *encode_fragment(raw, tokenizer=tokenizer)]
+                    [output_bos, *encode_fragment(raw, tokenizer=tokenizer)],
                 )
             start = int(end) + 1
         if tokenizer is None:
@@ -1408,7 +1437,7 @@ def prepare_reference_rows(
             if len(sequence) > width + 1:
                 raise ValueError(
                     f"Reference row {row_index} exceeds the model context: "
-                    f"{len(sequence) - 1} targets > {width}."
+                    f"{len(sequence) - 1} targets > {width}.",
                 )
             output.append(_pad_row(sequence, bos=output_bos, width=width))
         reference_counts.append(int(historical[row].sum()))
@@ -1453,7 +1482,8 @@ def _pad_row(
     inputs[: len(window) - 1] = window[:-1]
     targets[: len(window) - 1] = window[1:]
     mask: NDArray[np.bool_] = cast(
-        NDArray[np.bool_], (arange(width) < len(window) - 1) & (targets != bos)
+        NDArray[np.bool_],
+        (arange(width) < len(window) - 1) & (targets != bos),
     )
     return inputs, targets, mask
 
@@ -1963,7 +1993,9 @@ def donor_unigram16k() -> Preparation.Config:
 
 
 def launch_training(
-    config: NgramTrainLoop.Config, *, save_checkpoint: bool = False
+    config: NgramTrainLoop.Config,
+    *,
+    save_checkpoint: bool = False,
 ) -> None:
     """Record the prepared config and launch it through the canonical Priml process.
 
@@ -1984,10 +2016,10 @@ def launch_training(
         "from priml.baselines.nanochat.experiments import NgramTrainLoop\n\n"
         "def experiment() -> NgramTrainLoop.Config:\n"
         '    """Run the prepared NanoChat experiment."""\n'
-        f"    return NgramTrainLoop.Config.deserialize({config.serialize()!r})\n"
+        f"    return NgramTrainLoop.Config.deserialize({config.serialize()!r})\n",
     )
     (directory / "prepared_config.txt").write_text(
-        config.pformat(hide_default_values=False) + "\n"
+        config.pformat(hide_default_values=False) + "\n",
     )
     subprocess.run(
         [sys.executable, "-m", "priml", "prepared_experiment.experiment"],
@@ -2048,7 +2080,9 @@ def main() -> int:
         preparation.dump(args.output)
     elif args.stage == "train":
         training = preparation.training_config(
-            args.experiment, run_directory=args.run_directory, seed=args.seed
+            args.experiment,
+            run_directory=args.run_directory,
+            seed=args.seed,
         )
         training.pprint(hide_default_values=False)
         launch_training(training, save_checkpoint=args.save_checkpoint)
@@ -2065,7 +2099,9 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         default="priml.baselines.nanochat.scripts.prepare_data.donor_unigram16k",
     )
     parser.add_argument(
-        "--directory", type=Path, default=Path("/opt/scratch/datasets/nanochat")
+        "--directory",
+        type=Path,
+        default=Path("/opt/scratch/datasets/nanochat"),
     )
     parser.add_argument(
         "--stage",
@@ -2126,8 +2162,8 @@ if __name__ == "__main__":
         cast(
             Callable[[], int],
             importlib.import_module(
-                "priml.baselines.nanochat.scripts.prepare_data"
+                "priml.baselines.nanochat.scripts.prepare_data",
             ).main,
-        )()
+        )(),
     )
 # vim: ft=python

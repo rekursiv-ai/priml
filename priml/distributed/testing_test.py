@@ -161,7 +161,8 @@ def test_call_retries_then_raises_on_persistent_ack_timeout(
     pool.queue = cast("tm.Queue[bytes | None]", MagicMock())
     pool.ack_queue = cast("tm.Queue[bool]", MagicMock())
     cast(
-        MagicMock, pool.ack_queue
+        MagicMock,
+        pool.ack_queue,
     ).get.side_effect = queue_mod.Empty  # Never acks -> timeout.
     pool.processes = [cast(PoolWorker, proc)]
     # Make the ack deadline elapse immediately so the test does not sleep.

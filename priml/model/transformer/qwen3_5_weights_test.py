@@ -26,10 +26,12 @@ else:
     from wrapt import lazy_import
 
     Qwen3_5TextConfig = lazy_import(
-        "transformers.models.qwen3_5.configuration_qwen3_5", "Qwen3_5TextConfig"
+        "transformers.models.qwen3_5.configuration_qwen3_5",
+        "Qwen3_5TextConfig",
     )
     Qwen3_5ForCausalLM = lazy_import(
-        "transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5ForCausalLM"
+        "transformers.models.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5ForCausalLM",
     )
 
 
@@ -110,7 +112,10 @@ def test_local_text_loading_preserves_parameters_and_logits(tmp_path: Path) -> N
     expected.load_state_dict(remap_hf_state_dict(reference.state_dict(), native_config))
     loaded = Qwen35.load(tmp_path)
     torch.testing.assert_close(
-        loaded.state_dict(), expected.state_dict(), rtol=0, atol=0
+        loaded.state_dict(),
+        expected.state_dict(),
+        rtol=0,
+        atol=0,
     )
     tokens = torch.tensor([[1, 2, 3]])
     assert torch.equal(loaded(tokens), expected(tokens))

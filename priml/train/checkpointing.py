@@ -42,17 +42,20 @@ else:
     from wrapt import lazy_import
 
     DTensor = lazy_import(
-        "torch.distributed.tensor", "DTensor"
+        "torch.distributed.tensor",
+        "DTensor",
     )  # ~1050 ms; state inspection needs it.
     state_dict_loader = lazy_import(
-        "torch.distributed.checkpoint", "state_dict_loader"
+        "torch.distributed.checkpoint",
+        "state_dict_loader",
     )  # ~1050 ms; checkpoint I/O needs it.
     state_dict_saver = lazy_import(
-        "torch.distributed.checkpoint", "state_dict_saver"
+        "torch.distributed.checkpoint",
+        "state_dict_saver",
     )  # ~1050 ms; checkpoint I/O needs it.
     torch = lazy_import("torch")  # ~1050 ms; checkpoint I/O needs it.
     dist = lazy_import(
-        "torch.distributed"
+        "torch.distributed",
     )  # ~1050 ms; distributed coordination needs it.
     dcp = lazy_import("torch.distributed.checkpoint")  # ~1050 ms; async saves need it.
 

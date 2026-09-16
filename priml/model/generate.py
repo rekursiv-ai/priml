@@ -152,11 +152,11 @@ def generate(
         if not isinstance(getattr(block, "attn", None), AttentionLike):
             raise TypeError(
                 "Token generation requires blocks with an attn attribute "
-                "implementing alloc_kv_cache."
+                "implementing alloc_kv_cache.",
             )
         if not isinstance(block, _HasForwardCached):
             raise TypeError(
-                "Token generation requires blocks with a forward_cached method."
+                "Token generation requires blocks with a forward_cached method.",
             )
         blocks.append(cast(BlockLike, block))
     caches = [

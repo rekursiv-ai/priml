@@ -180,7 +180,8 @@ class _EndpointTrajectory(nn.Module):
         assert isinstance(optimizer, CompositeOptimizer.Config)
         for member in optimizer.optimizers:
             if isinstance(
-                member, (PartialConfig, BiasCorrectedRMSProp.Config, FusedAdamW.Config)
+                member,
+                (PartialConfig, BiasCorrectedRMSProp.Config, FusedAdamW.Config),
             ):
                 member.compile = False
                 if isinstance(member, BiasCorrectedRMSProp.Config):
@@ -216,7 +217,9 @@ def test_exp022_two_updates_match_portable_golden() -> None:
 
 
 def _step(
-    *, config: NanoChatTrainStep.Config | None = None, **overrides: object
+    *,
+    config: NanoChatTrainStep.Config | None = None,
+    **overrides: object,
 ) -> NanoChatTrainStep:
     if config is None:
         config = NanoChatTrainStep.Config()
@@ -251,7 +254,8 @@ def _step(
 @pytest.mark.parametrize("injected", [False, True])
 @pytest.mark.parametrize("limit", [1.0, float("inf")])
 def test_ngram_updates_clip_both_parameter_gradients_and_persistent_sinks(
-    injected: bool, limit: float
+    injected: bool,
+    limit: float,
 ) -> None:
     """The update policy must not bypass the configured global gradient norm."""
     step = _step(config=train_step.NgramTrainStep.Config(), gradient_clip_norm=limit)
@@ -498,11 +502,13 @@ def test_progress_drives_the_learning_rate() -> None:
     """
     step = _step(train_budget_sec=100.0)
     initial = FloatCodec.coerce(
-        cast(object, step.optimizer.param_groups[0]["initial_lr"]), None
+        cast(object, step.optimizer.param_groups[0]["initial_lr"]),
+        None,
     )
     step.train_step(**_batch())
     assert FloatCodec.coerce(
-        cast(object, step.optimizer.param_groups[0]["lr"]), None
+        cast(object, step.optimizer.param_groups[0]["lr"]),
+        None,
     ) == pytest.approx(initial)
 
     # Most of the budget spent: the trapezoid is into its decay.

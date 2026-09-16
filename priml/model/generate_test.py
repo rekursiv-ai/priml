@@ -147,7 +147,9 @@ def test_generate_pads_finished_rows_with_eos() -> None:
     ],
 )
 def test_generate_rejects_invalid_boundaries(
-    name: str, value: float, match: str
+    name: str,
+    value: float,
+    match: str,
 ) -> None:
     """Generation rejects invalid public parameter boundaries."""
     with pytest.raises(ValueError, match=match):
@@ -155,7 +157,10 @@ def test_generate_rejects_invalid_boundaries(
 
 
 def _generate_with_invalid_parameter(
-    model: _Transformer, *, name: str, value: float
+    model: _Transformer,
+    *,
+    name: str,
+    value: float,
 ) -> Tensor:
     """Call generation with one typed invalid parameter."""
     prompt = torch.tensor([[0, 1]])

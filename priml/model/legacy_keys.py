@@ -36,7 +36,7 @@ def absorb_legacy_keys(module: nn.Module, renames: Mapping[str, str]) -> None:
             head = f"{prefix}{old}."
             for key in [k for k in state_dict if k.startswith(head)]:
                 state_dict[f"{prefix}{new}.{key.removeprefix(head)}"] = state_dict.pop(
-                    key
+                    key,
                 )
 
     module.register_load_state_dict_pre_hook(hook)

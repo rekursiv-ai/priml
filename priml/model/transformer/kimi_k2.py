@@ -282,10 +282,12 @@ class KimiK2(Transformer):
             )
             attn.num_heads = IntCodec.coerce(config["num_attention_heads"])
             attn.channels_qk_nope_head = IntCodec.coerce(
-                config.get("qk_nope_head_dim"), 128
+                config.get("qk_nope_head_dim"),
+                128,
             )
             attn.channels_qk_rope_head = IntCodec.coerce(
-                config.get("qk_rope_head_dim"), 64
+                config.get("qk_rope_head_dim"),
+                64,
             )
             attn.channels_v_head = IntCodec.coerce(config.get("v_head_dim"), 128)
             attn.q_lora_rank = (
@@ -303,7 +305,8 @@ class KimiK2(Transformer):
             router.scoring_func = scoring_func
             router.norm_topk_prob = bool(config.get("norm_topk_prob", True))
             router.routed_scaling_factor = FloatCodec.coerce(
-                config.get("routed_scaling_factor"), 1.0
+                config.get("routed_scaling_factor"),
+                1.0,
             )
             router.n_group = IntCodec.coerce(config.get("n_group"), 1)
             router.topk_group = IntCodec.coerce(config.get("topk_group"), 1)
@@ -355,7 +358,8 @@ class KimiK2(Transformer):
                 channels_hidden_dense=IntCodec.coerce(config["intermediate_size"]),
                 channels_hidden_expert=channels_hidden_expert,
                 first_k_dense_replace=IntCodec.coerce(
-                    config.get("first_k_dense_replace"), 0
+                    config.get("first_k_dense_replace"),
+                    0,
                 ),
                 block=block,
             )

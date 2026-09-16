@@ -217,7 +217,8 @@ class Qwen3(Transformer):
             attn = SelfAttention.Config(bias=False, causal=True, share_qk_norm=False)
             attn.num_heads = num_heads
             num_heads_kv = IntCodec.coerce(
-                config.get("num_key_value_heads", num_heads), num_heads
+                config.get("num_key_value_heads", num_heads),
+                num_heads,
             )
             if num_heads_kv < 1:
                 raise ValueError(

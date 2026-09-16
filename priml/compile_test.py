@@ -45,7 +45,8 @@ class TestLazyTorchCompile:
         calls: list[int] = []
 
         def _tracking_compile(
-            *_args: object, **_kwargs: object
+            *_args: object,
+            **_kwargs: object,
         ) -> Callable[..., object]:
             calls.append(1)
             return _identity

@@ -289,7 +289,9 @@ def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
         cache = model.alloc_kv_cache(batch=1, max_seq=4)
         _, cache = model.forward_cached(torch.tensor([[[2.0], [4.0]]]), cache=cache)
         actual, _ = model.forward_cached(
-            torch.tensor([[[6.0], [8.0]]]), cache=cache, window=window
+            torch.tensor([[[6.0], [8.0]]]),
+            cache=cache,
+            window=window,
         )
 
     assert torch.equal(actual, expected)

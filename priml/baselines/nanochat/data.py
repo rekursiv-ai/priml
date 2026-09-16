@@ -75,7 +75,10 @@ class TokenEncoder(Protocol):
     """Encode documents with a leading document-start token."""
 
     def encode_batch(
-        self, texts: list[str], *, num_threads: int = 8
+        self,
+        texts: list[str],
+        *,
+        num_threads: int = 8,
     ) -> list[list[int]]:
         """Return one BOS-prefixed token list for each input document."""
         ...
@@ -239,7 +242,7 @@ class NanoChatData:
 
         if not config.train_shard_indices and config.num_train_shards <= 0:
             raise ValueError(
-                "num_train_shards must be positive without explicit shards."
+                "num_train_shards must be positive without explicit shards.",
             )
         train_indices = list(
             config.train_shard_indices or range(config.num_train_shards),
@@ -312,7 +315,8 @@ class NanoChatData:
         """
         if self._reference is not None:
             return self._reference.batches(
-                device=self.device, vocab_size=len(self.token_bytes)
+                device=self.device,
+                vocab_size=len(self.token_bytes),
             )
         return PackedTokenStream(
             paths=self.val_paths,
@@ -569,7 +573,10 @@ class PackedTokenStream:
         pinned = self._pins_host_memory
         width = self.batch_size * self.max_seq_len
         staged = torch.empty(
-            2 * width, dtype=torch.long, device="cpu", pin_memory=pinned
+            2 * width,
+            dtype=torch.long,
+            device="cpu",
+            pin_memory=pinned,
         )
         resident = (
             torch.empty(2 * width, dtype=torch.long, device=self.device)
@@ -808,7 +815,7 @@ class PreparedTokenRows:
             != list(config.train_shard_indices or range(config.num_train_shards))
         ):
             raise ValueError(
-                "Prepared geometry or evaluation protocol differs from config."
+                "Prepared geometry or evaluation protocol differs from config.",
             )
         self.train_rows = _array(
             train_path.parent / "train_rows.npy",
@@ -846,13 +853,13 @@ class PreparedTokenRows:
         if (
             np.any(self.token_bytes[: self.bos_token_id] <= 0)
             or np.any(
-                cast(NDArray[np.bool_], self.token_bytes[self.bos_token_id :] != 0)
+                cast(NDArray[np.bool_], self.token_bytes[self.bos_token_id :] != 0),
             )
             or np.any(
                 cast(
                     NDArray[np.bool_],
                     (self.token_bytes > 0) != (literal > 0),
-                )
+                ),
             )
             or np.any(literal < 0)
         ):
@@ -864,7 +871,7 @@ class PreparedTokenRows:
             inputs = self.eval_inputs[start : start + config.eval_batch_size]
             if np.any(labels >= self.vocab_size) or np.any(inputs >= self.vocab_size):
                 raise ValueError(
-                    "Prepared evaluation contains an out-of-vocabulary token."
+                    "Prepared evaluation contains an out-of-vocabulary token.",
                 )
             lengths = self.token_bytes[labels]
             totals[0] += int(lengths.sum())
@@ -876,11 +883,14 @@ class PreparedTokenRows:
             or scored != tables["scored_positions"]
         ):
             raise ValueError(
-                "Prepared evaluation byte totals or scored positions differ."
+                "Prepared evaluation byte totals or scored positions differ.",
             )
 
     def batches(
-        self, *, batch_size: int, training: bool
+        self,
+        *,
+        batch_size: int,
+        training: bool,
     ) -> Iterator[tuple[Tensor, Tensor]]:
         """Yield host input/target pairs in the frozen order.
 
@@ -903,7 +913,7 @@ class PreparedTokenRows:
                 yield block[:, :-1], block[:, 1:]
             else:
                 targets = torch.from_numpy(
-                    self.eval_targets[start : start + batch_size].astype(np.int64)
+                    self.eval_targets[start : start + batch_size].astype(np.int64),
                 )
                 yield block, targets
         if training:
@@ -938,7 +948,10 @@ class ReferenceEvaluation:
         self._validate()
 
     def batches(
-        self, *, device: torch.device | str, vocab_size: int
+        self,
+        *,
+        device: torch.device | str,
+        vocab_size: int,
     ) -> Iterator[NanoChatBatch]:
         """Replay the archive with its original batch boundaries.
 
@@ -1011,7 +1024,10 @@ def _array(path: Path, *, shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray
 
 
 def _byte_table(
-    directory: Path, *, metadata: dict[str, object], vocab: int
+    directory: Path,
+    *,
+    metadata: dict[str, object],
+    vocab: int,
 ) -> NDArray[np.int64]:
     name = metadata["file"]
     assert isinstance(name, str)

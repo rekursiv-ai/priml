@@ -131,7 +131,9 @@ def test_experiment_makes_a_train_loop() -> None:
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_every_experiment_finalizes(
     factory: ExperimentFactory[Cifar10TrainLoop],
@@ -140,7 +142,9 @@ def test_every_experiment_finalizes(
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_experiment_name_matches_the_factory(
     factory: ExperimentFactory[Cifar10TrainLoop],
@@ -151,7 +155,9 @@ def test_experiment_name_matches_the_factory(
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_construction_reads_no_files(
     factory: ExperimentFactory[Cifar10TrainLoop],
@@ -174,7 +180,9 @@ def test_construction_reads_no_files(
 
 
 @pytest.mark.parametrize(
-    "factory", ALL_EXPERIMENTS, ids=[f.__name__ for f in ALL_EXPERIMENTS]
+    "factory",
+    ALL_EXPERIMENTS,
+    ids=[f.__name__ for f in ALL_EXPERIMENTS],
 )
 def test_experiment_trains_at_minimum_size(
     factory: ExperimentFactory[Cifar10TrainLoop],
