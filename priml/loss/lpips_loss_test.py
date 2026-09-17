@@ -130,13 +130,15 @@ def test_lpips_cost_matches_torch_for_tiny_trunk() -> None:
         patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips),
     ):
         analytical = assert_cost_matches_torch(
-            LPIPSLoss.Config(),
+            LPIPSLoss.Config(image_size=(h, w)),
             build_input=lambda: (
                 torch.randn(b, 3, t, h, w, requires_grad=True),
                 torch.randn(b, 3, t, h, w, requires_grad=True),
             ),
-            num_tokens=b * t * h * w,
-            bus={"image_size": (h, w), "batch_size": b, "frames_scored": t},
+            seq_len=t,
+            batch_size=b,
+            dtype=None,
+            rows=b * t * h * w,
             run=lambda module, inputs: _loss(
                 module,
                 inputs[0],
@@ -150,40 +152,67 @@ def test_lpips_cost_matches_torch_for_tiny_trunk() -> None:
 def test_lpips_cost_prices_the_frozen_trunk_twice_and_the_head_once() -> None:
     """Price a frozen 3x3 convolution, 2x2 max pool, and trainable 1x1 head."""
     with patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips):
-        analytical = LPIPSLoss.Config().cost(image_size=(4, 4))
+        analytical = LPIPSLoss.Config(image_size=(4, 4)).cost(
+            seq_len=1,
+            batch_size=1,
+            dtype=None,
+        )
     trunk = 3 * 9 * 2 * 16
     head = 2 * 4
-    assert analytical.primal.flops.matmul == 2 * (2 * trunk + head) / 16
-    assert analytical.adjoint.flops.matmul == 2 * (2 * trunk + 2 * head) / 16
-    assert analytical.adjoint.flops.selection == 2 * (2 * 4) / 16
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * (2 * trunk + head) / 16
+    assert (
+        analytical["flops", "adjoint", "matmul"].sum()
+        == 2 * (2 * trunk + 2 * head) / 16
+    )
+    assert analytical["flops", "adjoint", "selection"].sum() == 2 * (2 * 4) / 16
     assert analytical.bytes_state == 0
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
-def test_lpips_operand_traffic(itemsize: int) -> None:
-    pooled = _max_pool_cost(3, kernel_size=2, itemsize=itemsize)
-    assert pooled.primal.bytes.reduction == itemsize * 3 * (4 + 2)
-    assert pooled.adjoint.bytes.selection == itemsize * 3 * (4 + 2)
-    normalized = _normalize_cost(3, itemsize=itemsize)
-    assert normalized.primal.bytes.elementwise == itemsize * (4 * 3 + 5)
-    assert normalized.primal.bytes.reduction == itemsize * (3 + 1)
-    assert normalized.adjoint.bytes.elementwise == itemsize * (10 * 3 + 9)
-    assert normalized.adjoint.bytes.reduction == itemsize * (3 + 1)
-    averaged = _spatial_average_cost(6, itemsize=itemsize)
-    assert averaged.primal.bytes.reduction == itemsize * 7
-    assert averaged.primal.bytes.elementwise == itemsize * 2
-    assert averaged.adjoint.bytes.elementwise == itemsize * 7
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
+def test_lpips_operand_traffic(dtype: torch.dtype) -> None:
+    itemsize = dtype.itemsize
+    pooled = _max_pool_cost(3, kernel_size=2, dtype=dtype)
+    # Values at ``dtype``; the saved argmax is one int64 per channel each way.
+    assert pooled["bytes", "primal", "reduction", dtype] == itemsize * 3 * (4 + 1)
+    assert pooled["bytes", "primal", "reduction", torch.int64] == 8 * 3
+    assert pooled["bytes", "adjoint", "selection", dtype] == itemsize * 3 * (4 + 1)
+    assert pooled["bytes", "adjoint", "selection", torch.int64] == 8 * 3
+    normalized = _normalize_cost(3, dtype=dtype)
+    assert normalized["bytes", "primal", "elementwise"].sum() == itemsize * (4 * 3 + 5)
+    assert normalized["bytes", "primal", "reduction"].sum() == itemsize * (3 + 1)
+    assert normalized["bytes", "adjoint", "elementwise"].sum() == itemsize * (
+        10 * 3 + 9
+    )
+    assert normalized["bytes", "adjoint", "reduction"].sum() == itemsize * (3 + 1)
+    averaged = _spatial_average_cost(6, dtype=dtype)
+    assert averaged["bytes", "primal", "reduction"].sum() == itemsize * 7
+    assert averaged["bytes", "primal", "elementwise"].sum() == itemsize * 2
+    assert averaged["bytes", "adjoint", "elementwise"].sum() == itemsize * 7
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
-def test_lpips_frame_selection_traffic(itemsize: int) -> None:
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
+def test_lpips_frame_selection_traffic(dtype: torch.dtype) -> None:
     with patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips):
-        priced = LPIPSLoss.Config().cost(image_size=(4, 4), itemsize=itemsize)
+        priced = LPIPSLoss.Config(image_size=(4, 4)).cost(
+            seq_len=1,
+            batch_size=1,
+            dtype=dtype,
+        )
+    itemsize = dtype.itemsize
     positions = 16
-    assert priced.primal.bytes.selection == itemsize * (2 * 3 * 2 + 2 / positions)
-    pool_selection = 2 * 2 * (4 + 2) * 4 / positions
-    assert priced.adjoint.bytes.selection == itemsize * (
-        pool_selection + 2 * 3 * 3 + 2 / positions
+    # Two frame gathers of the RGB pixels at ``dtype``; the shared frame index
+    # is one int64 read per branch, spread over the frame's positions.
+    assert priced["bytes", "primal", "selection", dtype] == itemsize * 2 * 3 * 2
+    assert priced["bytes", "primal", "selection", torch.int64] == 8 * 2 / positions
+    # Back: the pool's dense routing (values at dtype, argmax int64) and the
+    # two branches' pixel scatters.
+    pool_values = 2 * 2 * (4 + 1) * 4 / positions
+    pool_index = 2 * 2 * 4 / positions
+    assert priced["bytes", "adjoint", "selection", dtype] == itemsize * (
+        pool_values + 2 * 3 * 3
+    )
+    assert priced["bytes", "adjoint", "selection", torch.int64] == 8 * (
+        pool_index + 2 / positions
     )
 
 

@@ -20,7 +20,7 @@ precisely so the order is visible in ``pprint`` rather than buried in a method.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field, replace
+from dataclasses import KW_ONLY, field
 from typing import Protocol, Self, override, runtime_checkable
 
 import math
@@ -31,13 +31,12 @@ from torch import Tensor, nn
 import torch
 
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     cost,
     elementwise_cost,
     reduction_cost,
+    traffic,
+    with_rows,
 )
 from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
@@ -99,7 +98,7 @@ class FactoredPositions(nn.Module):
         """``(rows, cols)`` of one constraint box tiling the grid."""
 
         channels_out: int = -1
-        """Table width; -1 inherits the model's hidden size."""
+        """Cost width; -1 inherits the model's hidden size."""
 
         init_std: float = 1.0
         """Realized standard deviation of the table entries."""
@@ -114,8 +113,9 @@ class FactoredPositions(nn.Module):
         def cost(
             self,
             *,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price three table gathers, two adds, and a scale per cell.
@@ -127,20 +127,21 @@ class FactoredPositions(nn.Module):
             adjoint first reduces the broadcast gradient across puzzles.
 
             A cell is the token and the grid is fixed by ``grid_shape``, so
-            ``seq_len`` and ``rows`` on the bus are ignored: the batch is
+            ``seq_len`` and its rows are ignored: the batch is
             ``batch_size`` whole grids.
 
             Args:
-              batch_size: Puzzles in the batch.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The rest of the open message bus, unread.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-cell cost of this module.
 
             """
-            del kwargs
             puzzles = batch_size
+            dt = dtype
             grid_rows, grid_cols = self.grid_shape
             box_rows, box_cols = self.box_shape
             width = self.channels_out
@@ -149,12 +150,16 @@ class FactoredPositions(nn.Module):
                 grid_cols,
                 (grid_rows // box_rows) * (grid_cols // box_cols),
             )
+            del seq_len
+            cells = grid_rows * grid_cols
             gathers = sum(
                 (
                     cost(
                         Embedding.Config(channels_in=n, channels_out=width),
-                        rows=grid_rows * grid_cols,
-                        itemsize=itemsize,
+                        seq_len=cells,
+                        batch_size=1,
+                        dtype=dt,
+                        **with_rows(cells, **kwargs),
                     )
                     for n in tables
                 ),
@@ -167,30 +172,20 @@ class FactoredPositions(nn.Module):
                 inputs=5,
                 outputs=3,
                 adjoint_inputs=1,
-                itemsize=itemsize,
+                dtype=dt,
             )
             broadcast = (
                 reduction_cost(
                     input_elements=puzzles * width,
                     output_groups=width,
                     rows=puzzles,
-                    itemsize=itemsize,
+                    dtype=dt,
+                    phase="adjoint",
                 )
                 if puzzles > 1
-                else Compute()
+                else Cost()
             )
-            return replace(
-                shared,
-                primal=Compute(
-                    flops=shared.primal.flops / puzzles,
-                    bytes=shared.primal.bytes / puzzles,
-                ),
-                adjoint=Compute(
-                    flops=shared.adjoint.flops / puzzles,
-                    bytes=shared.adjoint.bytes / puzzles,
-                )
-                + broadcast,
-            )
+            return shared.tile(1 / puzzles) + broadcast
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -260,7 +255,7 @@ class PredictionFeedback(nn.Module):
         """Token vocabulary; -1 inherits the model's."""
 
         channels_out: int = -1
-        """Table width; -1 inherits the model's hidden size."""
+        """Cost width; -1 inherits the model's hidden size."""
 
         _: KW_ONLY
 
@@ -271,15 +266,24 @@ class PredictionFeedback(nn.Module):
         """Runtime multiplier; -1 inherits the model's (see
         :class:`FactoredPositions.Config.embed_scale`)."""
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price one table gather and a scale per cell.
 
             Priced with a grid stashed, as every step under adaptive
             computation time is; a forward without one contributes nothing.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus; nothing here reads it.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-cell cost of this module.
@@ -287,12 +291,18 @@ class PredictionFeedback(nn.Module):
             """
             width = self.channels_out
             table = Embedding.Config(channels_in=self.channels_in, channels_out=width)
-            return cost(table, itemsize=itemsize, **kwargs) + elementwise_cost(
+            return cost(
+                table,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            ) + elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
                 adjoint_inputs=1,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -389,7 +399,14 @@ class GridEmbedding(nn.Module):
                     channel.channels_in = self.channels_in
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price the token table, its scale, and every channel plus one add each.
 
             The stream before an add feeds a channel only for its dtype, so
@@ -397,8 +414,10 @@ class GridEmbedding(nn.Module):
             its primal is counted.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every channel.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-cell cost of this module.
@@ -407,23 +426,35 @@ class GridEmbedding(nn.Module):
             width = self.channels_out
             total = cost(
                 _token_table(self),
-                itemsize=itemsize,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
                 adjoint_inputs=1,
-                itemsize=itemsize,
+                dtype=dtype,
             )
-            add = Cost(
-                primal=Compute(
-                    flops=Flops(elementwise=width),
-                    bytes=Bytes(elementwise=3 * width * itemsize),
-                ),
+            add = traffic(
+                "primal",
+                "elementwise",
+                elements=3 * width,
+                flops=width,
+                dtype=dtype,
             )
             for channel in self.channels:
-                total += cost(channel, itemsize=itemsize, **kwargs) + add
+                total += (
+                    cost(
+                        channel,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    + add
+                )
             return total
 
     def __init__(self, config: Config) -> None:

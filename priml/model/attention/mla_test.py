@@ -31,7 +31,11 @@ import pytest
 import torch
 
 from priml import runtime
-from priml.model.attention.kernel import SdpaFused, SdpaNaive
+from priml.model.attention.kernel import (
+    SdpaFused,
+    SdpaNaive,
+    attention_kernel_cost,
+)
 from priml.model.attention.mla import LatentAttention, MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
 from priml.model.cost import Cost, cost
@@ -345,45 +349,79 @@ def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
     latent = LatentAttention.Config().copy_tree().finalize()
     model_cost = latent.cost(
         seq_len=32,
+        dtype=None,
         num_heads=4,
         channels_head=12,
         channels_v_head=16,
         kv_lora_rank=6,
         channels_qk_rope_head=4,
+        dropout_p=0.0,
     )
-    inner = cost(latent.attn_kernel, seq_len=32, num_heads=4, channels_head=(6 + 4) + 6)
-    assert model_cost.primal.flops.matmul == inner.primal.flops.matmul / 2
-    assert model_cost.adjoint.flops.matmul == inner.adjoint.flops.matmul / 2
-    assert model_cost.primal.flops.matmul == 2 * 4 * 32 * ((6 + 4) + 6)
-    assert model_cost.primal.flops.elementwise == inner.primal.flops.elementwise
+    inner = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=4,
+        channels_head=(6 + 4) + 6,
+    )
+    assert (
+        model_cost["flops", "primal", "matmul"].sum()
+        == inner["flops", "primal", "matmul"].sum() / 2
+    )
+    assert (
+        model_cost["flops", "adjoint", "matmul"].sum()
+        == inner["flops", "adjoint", "matmul"].sum() / 2
+    )
+    assert model_cost["flops", "primal", "matmul"].sum() == 2 * 4 * 32 * ((6 + 4) + 6)
+    assert (
+        model_cost["flops", "primal", "elementwise"].sum()
+        == inner["flops", "primal", "elementwise"].sum()
+    )
     assert model_cost.params == 0
     assert (
-        model_cost.primal.bytes.matmul
+        model_cost["bytes", "primal", "matmul"].sum()
         == 4 * 4 * (2 * 10 + 2 * 6 + 2 * 32) + 4 * (2 * 4 - 1) * 6
     )
-    assert model_cost.primal.bytes.elementwise == inner.primal.bytes.elementwise
+    assert (
+        model_cost["bytes", "primal", "elementwise"].sum()
+        == inner["bytes", "primal", "elementwise"].sum()
+    )
 
 
 def test_latent_attention_cost_attends_over_expanded_heads_when_not() -> None:
     latent = LatentAttention.Config(absorb=False).copy_tree().finalize()
     model_cost = latent.cost(
         seq_len=32,
+        dtype=None,
         num_heads=4,
         channels_head=12,
         channels_v_head=16,
         kv_lora_rank=6,
         channels_qk_rope_head=4,
+        dropout_p=0.0,
     )
-    inner = cost(latent.attn_kernel, seq_len=32, num_heads=4, channels_head=12 + 16)
-    assert model_cost.primal.flops.matmul == inner.primal.flops.matmul / 2
-    assert model_cost.primal.bytes.matmul == 4 * 4 * (2 * 12 + 2 * 16 + 2 * 32)
-    assert model_cost.primal.bytes.elementwise == inner.primal.bytes.elementwise
+    inner = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=4,
+        channels_head=12 + 16,
+    )
+    assert (
+        model_cost["flops", "primal", "matmul"].sum()
+        == inner["flops", "primal", "matmul"].sum() / 2
+    )
+    assert model_cost["bytes", "primal", "matmul"].sum() == 4 * 4 * (
+        2 * 12 + 2 * 16 + 2 * 32
+    )
+    assert (
+        model_cost["bytes", "primal", "elementwise"].sum()
+        == inner["bytes", "primal", "elementwise"].sum()
+    )
 
 
 def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
     config, _ = _mla_config()
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=32)
+    model_cost = finalized.cost(seq_len=32, batch_size=1, dtype=None)
     projections = (
         finalized.proj_q,
         finalized.proj_kv_a,
@@ -391,15 +429,20 @@ def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
         finalized.proj_kv_b,
         finalized.proj_out,
     )
-    owned = sum((cost(child) for child in projections), Cost())
-    kernel = cost(
-        finalized.attn_kernel,
+    owned = sum(
+        (cost(child, seq_len=32, batch_size=1, dtype=None) for child in projections),
+        Cost(),
+    )
+    assert isinstance(finalized.attn_kernel, LatentAttention.Config)
+    kernel = finalized.attn_kernel.cost(
         seq_len=32,
+        dtype=None,
         num_heads=4,
         channels_head=8 + 4,
         channels_v_head=16,
         kv_lora_rank=12,
         channels_qk_rope_head=4,
+        dropout_p=0.0,
     )
     assert (
         owned.params
@@ -407,11 +450,13 @@ def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
     )
     assert model_cost.params == owned.params
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    assert model_cost.primal.flops.matmul == (
-        owned.primal.flops.matmul + kernel.primal.flops.matmul
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        owned["flops", "primal", "matmul"].sum()
+        + kernel["flops", "primal", "matmul"].sum()
     )
-    assert model_cost.adjoint.flops.matmul == (
-        owned.adjoint.flops.matmul + kernel.adjoint.flops.matmul
+    assert model_cost["flops", "adjoint", "matmul"].sum() == (
+        owned["flops", "adjoint", "matmul"].sum()
+        + kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * (12 + 4)
 
@@ -427,8 +472,9 @@ def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 8, 32, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
     )
 
 
@@ -436,7 +482,7 @@ def test_mla_cost_counts_the_q_lora_path_and_rotary() -> None:
     config, _ = _mla_config()
     config.q_lora_rank = 6
     config.rope = RoPE.Config(channels_head=4)
-    cost = config.copy_tree().finalize().cost(seq_len=8)
+    cost = config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
     assert cost.params == sum(p.numel() for p in config.make().parameters())
 
 
@@ -444,24 +490,28 @@ def test_mla_traffic_scales_all_children_and_cache() -> None:
     config, _ = _mla_config()
     config.rope = RoPE.Config(4)
     config = config.copy_tree().finalize()
-    small = config.cost(seq_len=8, rows=4, itemsize=2)
-    large = config.cost(seq_len=8, rows=4, itemsize=4)
-    assert large.training.bytes == small.training.bytes * 2
+    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    large = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
+    assert (
+        large["bytes", :, :, torch.float32].sum()
+        == small["bytes", :, :, torch.bfloat16].sum() * 2
+    )
     assert small.bytes_state == 2 * (12 + 4)
 
 
 @pytest.mark.parametrize("absorb", [False, True])
-@pytest.mark.parametrize("itemsize", [2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_mla_cost_prices_absorbed_projection_intermediates(
     absorb: bool,
-    itemsize: int,
+    dtype: torch.dtype,
 ) -> None:
     config, latent = _mla_config()
     latent.absorb = absorb
     config = config.copy_tree().finalize()
+    itemsize = dtype.itemsize
     projections = sum(
         (
-            cost(child, rows=8, itemsize=itemsize)
+            cost(child, seq_len=8, batch_size=1, dtype=dtype)
             for child in (
                 config.proj_q,
                 config.proj_kv_a,
@@ -472,45 +522,64 @@ def test_mla_cost_prices_absorbed_projection_intermediates(
         ),
         Cost(),
     )
-    kernel = cost(
-        SdpaNaive.Config(),
+    kernel = attention_kernel_cost(
         seq_len=8,
+        dtype=dtype,
         num_heads=4,
         channels_head=16 if absorb else 12,
         channels_v_head=12 if absorb else 16,
-        rows=8,
-        itemsize=itemsize,
     )
-    actual = config.cost(seq_len=8, rows=8, itemsize=itemsize)
+    actual = config.cost(seq_len=8, batch_size=1, dtype=dtype)
     extra = itemsize * (2 * 4 - 1) * 12 if absorb else 0
     assert (
-        actual.primal.bytes.matmul
-        == projections.primal.bytes.matmul + kernel.primal.bytes.matmul + extra
+        actual["bytes", "primal", "matmul"].sum()
+        == projections["bytes", "primal", "matmul"].sum()
+        + kernel["bytes", "primal", "matmul"].sum()
+        + extra
     )
     assert (
-        actual.adjoint.bytes.matmul
-        == projections.adjoint.bytes.matmul + kernel.adjoint.bytes.matmul + 2 * extra
+        actual["bytes", "adjoint", "matmul"].sum()
+        == projections["bytes", "adjoint", "matmul"].sum()
+        + kernel["bytes", "adjoint", "matmul"].sum()
+        + 2 * extra
     )
     assert (
-        actual.training.flops.matmul
-        == projections.training.flops.matmul + kernel.training.flops.matmul
+        actual["flops", :, "matmul"].sum()
+        == projections["flops", :, "matmul"].sum() + kernel["flops", :, "matmul"].sum()
     )
     assert actual.params == projections.params
 
 
-def test_mla_cost_prices_configured_dropout_and_accepts_override() -> None:
+def test_mla_cost_prices_configured_dropout() -> None:
     config, _ = _mla_config()
-    dry = config.copy_tree().finalize().cost(seq_len=8, itemsize=2)
+    dry = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    )
     config.dropout = 0.25
     config = config.copy_tree().finalize()
-    wet = config.cost(seq_len=8, itemsize=2)
-    assert wet.primal.flops.elementwise - dry.primal.flops.elementwise == 2 * 4 * 8
-    assert wet.adjoint.flops.elementwise - dry.adjoint.flops.elementwise == 2 * 4 * 8
-    assert wet.primal.bytes.elementwise - dry.primal.bytes.elementwise == 2 * 5 * 4 * 8
+    wet = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
     assert (
-        wet.adjoint.bytes.elementwise - dry.adjoint.bytes.elementwise == 2 * 3 * 4 * 8
+        wet["flops", "primal", "elementwise"].sum()
+        - dry["flops", "primal", "elementwise"].sum()
+        == 2 * 4 * 8
     )
-    assert config.cost(seq_len=8, itemsize=2, dropout_p=0.0) == dry
+    assert (
+        wet["flops", "adjoint", "elementwise"].sum()
+        - dry["flops", "adjoint", "elementwise"].sum()
+        == 2 * 4 * 8
+    )
+    assert (
+        wet["bytes", "primal", "elementwise"].sum()
+        - dry["bytes", "primal", "elementwise"].sum()
+        == 2 * 5 * 4 * 8
+    )
+    assert (
+        wet["bytes", "adjoint", "elementwise"].sum()
+        - dry["bytes", "adjoint", "elementwise"].sum()
+        == 2 * 3 * 4 * 8
+    )
 
 
 @pytest.mark.parametrize("inner", [SdpaFused.Config, SdpaNaive.Config])

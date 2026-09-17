@@ -18,7 +18,12 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
+from priml.model.cost import (
+    Cost,
+    reduction_cost,
+    resolve_dtype,
+    shared_rows,
+)
 
 
 class ResidualMix(nn.Module):
@@ -27,6 +32,12 @@ class ResidualMix(nn.Module):
     class Config(Fig["ResidualMix"]):
         num_layers: int = -1
         """Layers being mixed; -1 inherits from the stack."""
+
+        channels_in: int = -1
+        """Width of the rows being mixed; -1 inherits from the stack.
+
+        Workload geometry for pricing, not a parameter shape: each scalar
+        weight multiplies a whole row of this width."""
 
         running: float = 1.0
         """Initial weight on the running stream.
@@ -44,56 +55,65 @@ class ResidualMix(nn.Module):
         def cost(
             self,
             *,
-            channels_in: int,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Count two weighted streams over every layer at the supplied width.
+            """Count two weighted streams over every layer at ``channels_in``.
 
             Each scalar weight multiplies a whole row, so its gradient reduces
             over ``channels_in`` per row before the primitive's reduction over
-            rows; the width is workload geometry, not a parameter shape.
+            rows.
 
             Args:
-              channels_in: Width of the rows being mixed.
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
+            Raises:
+              ValueError: ``channels_in`` was never inherited.
+
             """
-            del kwargs
-            width = channels_in * self.num_layers
+            if self.channels_in <= 0:
+                raise ValueError(
+                    "ResidualMix.cost needs channels_in; the stack sets it.",
+                )
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = resolve_dtype(dtype)
+            s = dt.itemsize
+            width = self.channels_in * self.num_layers
             params = 2 * self.num_layers
-            return Cost(
-                primal=Compute(
-                    flops=Flops(elementwise=3 * width),
-                    bytes=Bytes(
-                        elementwise=itemsize * (7 * width + params / rows),
-                    ),
-                ),
-                adjoint=Compute(
-                    flops=Flops(elementwise=4 * width),
-                    bytes=Bytes(
-                        elementwise=itemsize * (10 * width + params / rows),
-                    ),
+            return (
+                Cost(
+                    cells={
+                        ("flops", "primal", "elementwise", dt): 3 * width,
+                        ("flops", "adjoint", "elementwise", dt): 4 * width,
+                        ("bytes", "primal", "elementwise", dt): s
+                        * (7 * width + params / rows),
+                        ("bytes", "adjoint", "elementwise", dt): s
+                        * (10 * width + params / rows),
+                    },
+                    params=params,
+                    params_active=params,
                 )
                 + reduction_cost(
-                    input_elements=params * channels_in,
+                    input_elements=params * self.channels_in,
                     output_groups=params,
-                    itemsize=itemsize,
+                    dtype=dt,
+                    phase="adjoint",
                 )
                 + reduction_cost(
                     input_elements=params * rows,
                     output_groups=params,
                     rows=rows,
-                    itemsize=itemsize,
-                ),
-                params=params,
-                params_active=params,
+                    dtype=dt,
+                    phase="adjoint",
+                )
             )
 
     def __init__(self, config: Config) -> None:

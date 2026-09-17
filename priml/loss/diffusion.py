@@ -26,7 +26,12 @@ from priml.math.diffusion.target import (
     target_x,
 )
 from priml.math.numeric import safe_log
-from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
+from priml.model.cost import (
+    Cost,
+    reduction_cost,
+    shared_rows,
+    traffic,
+)
 
 
 class DiffusionLoss(nn.Module):
@@ -69,14 +74,15 @@ class DiffusionLoss(nn.Module):
         def cost(
             self,
             *,
-            rows: int,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one element of ``x0``; per-sample scalar work is spread ``1 / n``.
 
-            A token is one element of ``x0``; ``rows`` is the elements one
-            sample holds. The ``denoiser`` is the model: it arrives at forward
+            A token is one element of ``x0``; the geometry's rows are the
+            elements one sample holds. The ``denoiser`` is the model: it arrives at forward
             time, no config here holds it, and ``TrainStep.Config.model`` prices
             it, so it is excluded.
 
@@ -101,9 +107,10 @@ class DiffusionLoss(nn.Module):
             The scalar ledger includes broadcast coefficients and mean scaling.
 
             Args:
-              rows: Elements per sample; the mean's width.
-              itemsize: Bytes per logical tensor element.
-              **kwargs: The rest of the bus, unread.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-element cost of this loss.
@@ -113,7 +120,8 @@ class DiffusionLoss(nn.Module):
                 :mod:`priml.math.diffusion.target`.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
             target_primal, target_adjoint = _target_fn_flops(self.target_fn)
             per_sample = 1 + 8 + 8 + 4 + 8
             per_sample_adjoint = 0
@@ -131,35 +139,25 @@ class DiffusionLoss(nn.Module):
                 scalar_elements += 2
             if self.snr_gamma > 0:
                 scalar_elements += 14
-            return Cost(
-                primal=Compute(
-                    flops=Flops(
-                        elementwise=3 + target_primal + 2 + per_sample / rows,
-                    ),
-                    bytes=Bytes(
-                        elementwise=itemsize
-                        * (13 + target_elements + scalar_elements / rows),
-                    ),
+            return (
+                traffic(
+                    "primal",
+                    "elementwise",
+                    elements=13 + target_elements + scalar_elements / rows,
+                    flops=3 + target_primal + 2 + per_sample / rows,
+                    dtype=dt,
                 )
-                + reduction_cost(
-                    input_elements=rows,
-                    rows=rows,
-                    itemsize=itemsize,
-                ),
-                adjoint=Compute(
-                    flops=Flops(
-                        elementwise=3 + target_adjoint + per_sample_adjoint / rows,
-                    ),
-                    bytes=Bytes(
-                        elementwise=itemsize
-                        * (
-                            7
-                            + int(predict_scaled) * (2 + 1 / rows)
-                            + 3 * int(self.snr_gamma > 0) / rows
-                        ),
-                        reduction=itemsize * (rows + 1) / rows,
-                    ),
-                ),
+                + reduction_cost(input_elements=rows, rows=rows, dtype=dt)
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=7
+                    + int(predict_scaled) * (2 + 1 / rows)
+                    + 3 * int(self.snr_gamma > 0) / rows,
+                    flops=3 + target_adjoint + per_sample_adjoint / rows,
+                    dtype=dt,
+                )
+                + traffic("adjoint", "reduction", elements=(rows + 1) / rows, dtype=dt)
             )
 
     class Output(TypedDict):

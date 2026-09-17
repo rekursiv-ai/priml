@@ -191,8 +191,14 @@ def test_sequential_cost_sums_every_expanded_element() -> None:
     finalized = config.copy_tree().finalize()
     assert isinstance(finalized.elements, list)
     assert len(finalized.elements) == 6
-    expected = sum((cost(element) for element in finalized.elements), Cost())
-    assert finalized.cost() == expected
+    expected = sum(
+        (
+            cost(element, seq_len=1, batch_size=1, dtype=None)
+            for element in finalized.elements
+        ),
+        Cost(),
+    )
+    assert finalized.cost(seq_len=1, batch_size=1, dtype=None) == expected
     assert expected.params == 3 * (4 + 4 * 4)
     assert expected.params == sum(p.numel() for p in config.make().parameters())
 
@@ -207,9 +213,11 @@ def test_sequential_cost_matches_torch() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(3, 4, requires_grad=True),
-        num_tokens=3,
+        seq_len=3,
+        batch_size=1,
+        dtype=None,
     )
-    assert analytical.primal.flops.matmul == 2 * 2 * 4 * 4
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * 4 * 4
 
 
 if __name__ == "__main__":

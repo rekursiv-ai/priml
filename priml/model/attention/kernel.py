@@ -12,56 +12,47 @@ import torch
 
 from priml.model.attention.window import window_mask
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
+    traffic,
 )
 
 
 def attention_kernel_cost(
-    config: object,
     *,
     seq_len: int,
+    dtype: torch.dtype | None,
     num_heads: int,
     channels_head: int,
     channels_v_head: int = -1,
     window: int = -1,
     dropout_p: float = 0.0,
-    rows: int = 1,
-    itemsize: int = 4,
-    **kwargs: object,
 ) -> Cost:
     """Price ``softmax(QK^T)V`` for one query row across every head.
 
-    Bound as ``Config.cost`` on every kernel whose products are the standard
-    two, so ``config`` is the kernel config and unread: a kernel config holds
-    no fields. The shapes arrive on the message bus the way ``q``/``k``/``v``
-    arrive in ``forward``: the OWNER of the projections says how many heads
-    and how wide. Counted over the full window with no causal discount, per
-    the module policy.
+    A kernel config holds no fields, so the OWNER of the projections calls
+    this with the shapes it knows -- how many heads and how wide -- the way it
+    hands ``q``/``k``/``v`` to ``forward``. Every kernel whose products are the
+    standard two shares this accounting. Counted over the full window with no
+    causal discount, per the module policy.
 
     Args:
-      config: The kernel config; carries nothing this needs.
-      seq_len: Keys before any window.
+      seq_len: Tokens per sequence: the keys a query reaches before any window.
+      dtype: Activation dtype; ``None`` is torch's default.
       num_heads: Query heads.
       channels_head: Width of each query/key head.
       channels_v_head: Value width; -1 uses the query/key width.
-      rows: Batch rows; activation reuse is limited to one full window.
-      itemsize: Uniform bytes per tensor element.
       window: Keys each query reaches, or ``-1`` for the whole sequence.
       dropout_p: Attention dropout rate; nonzero adds a mask and a rescale.
-      **kwargs: The rest of the bus, ignored here.
 
     Returns:
       cost: Unfused logical tensor I/O and FLOPs, not measured HBM traffic.
         Fused and naive kernels share this algorithmic accounting convention.
 
     """
-    del config, rows, kwargs
+    dt = dtype
     keys = seq_len if window < 0 else min(window, seq_len)
     value_width = channels_head if channels_v_head < 0 else channels_v_head
     # Full-window blocks share K/V across their query rows, never across batches.
@@ -70,28 +61,34 @@ def attention_kernel_cost(
         channels_out=keys,
         weight=False,
         rows=keys,
-        itemsize=itemsize,
+        dtype=dt,
     )
     values = matmul_cost(
         channels_in=keys,
         channels_out=value_width,
         weight=False,
         rows=keys,
-        itemsize=itemsize,
+        dtype=dt,
     )
     # Logical unfused I/O, including scores, even when execution uses fused SDPA.
     # Scale/subtract/exp/divide read two row scalars; VJP reads one row sum.
-    softmax = Cost(
-        primal=Compute(
-            flops=Flops(elementwise=4 * keys),
-            bytes=Bytes(elementwise=itemsize * (8 * keys + 2)),
+    softmax = (
+        traffic(
+            "primal",
+            "elementwise",
+            elements=8 * keys + 2,
+            flops=4 * keys,
+            dtype=dt,
         )
-        + 2 * reduction_cost(input_elements=keys, itemsize=itemsize),
-        adjoint=Compute(
-            flops=Flops(elementwise=4 * keys),
-            bytes=Bytes(elementwise=itemsize * (10 * keys + 1)),
+        + reduction_cost(input_elements=keys, dtype=dt).tile(2, copies=2)
+        + traffic(
+            "adjoint",
+            "elementwise",
+            elements=10 * keys + 1,
+            flops=4 * keys,
+            dtype=dt,
         )
-        + reduction_cost(input_elements=keys, itemsize=itemsize),
+        + reduction_cost(input_elements=keys, dtype=dt, phase="adjoint")
     )
     dropout = elementwise_cost(
         primal=2 * keys if dropout_p > 0 else 0,
@@ -101,9 +98,9 @@ def attention_kernel_cost(
         outputs=2,
         adjoint_inputs=2,
         rows=keys,
-        itemsize=itemsize,
+        dtype=dt,
     )
-    return num_heads * (scores + values + softmax + dropout)
+    return (scores + values + softmax + dropout).tile(num_heads, copies=num_heads)
 
 
 class SdpaFused(nn.Module):
@@ -117,7 +114,7 @@ class SdpaFused(nn.Module):
     """
 
     class Config(Fig["SdpaFused"]):
-        cost = attention_kernel_cost
+        pass
 
     def __init__(self, config: Config | None = None) -> None:
         del config
@@ -158,7 +155,7 @@ class SdpaNaive(nn.Module):
     """Manual matmul+softmax attention (matches HF eager_attention_forward)."""
 
     class Config(Fig["SdpaNaive"]):
-        cost = attention_kernel_cost
+        pass
 
     def __init__(self, config: Config | None = None) -> None:
         del config

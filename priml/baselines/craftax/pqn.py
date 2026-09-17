@@ -38,12 +38,13 @@ from torch import Tensor, nn
 import torch
 
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
+    resolve_dtype,
+    traffic,
+    with_rows,
 )
 from priml.model.norm import BatchRenorm, LayerNorm
 
@@ -72,9 +73,9 @@ class RecurrentQNetwork(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one recurrent step of one worker.
@@ -99,73 +100,76 @@ class RecurrentQNetwork(nn.Module):
             writing eight projected-gate gradients and the old-cell gradient.
             The episode reset is one product per carried unit each way.
 
-            This is the model root: it states the batch geometry itself, so
-            a ``rows`` already on the bus is discarded and every parameter is
-            shared by ``batch_size * seq_len`` tokens.
+            This is the model root: every parameter is shared by
+            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
+            replaced by the batch's tokens.
 
             Args:
-              seq_len: Steps per worker in one pass.
-              batch_size: Workers stepped together.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The rest of the open message bus, forwarded to every
-                child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            kwargs.pop("rows", None)
+            batch = with_rows(seq_len * batch_size, **kwargs)
             rows = seq_len * batch_size
+            dt = dtype
             width, actions = self.channels_in, self.num_actions
             normalize = cost(
                 _renorm_config(self.observation_size),
-                rows=rows,
-                itemsize=itemsize,
-                **kwargs,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **batch,
             )
             encoder = matmul_cost(
                 channels_in=self.observation_size,
                 channels_out=width,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
             encoder_norm = cost(
                 LayerNorm.Config(width, elementwise_affine=True),
-                rows=rows,
-                itemsize=itemsize,
-                **kwargs,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **batch,
             ) + elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
-                itemsize=itemsize,
+                dtype=dt,
             )
-            one_hot = Cost(primal=Compute(bytes=Bytes(selection=itemsize * actions)))
-            concatenate = Cost(
-                primal=Compute(
-                    bytes=Bytes(elementwise=2 * itemsize * (width + actions)),
-                ),
+            one_hot = traffic("primal", "selection", elements=actions, dtype=dt)
+            concatenate = traffic(
+                "primal",
+                "elementwise",
+                elements=2 * (width + actions),
+                dtype=dt,
             )
             reset = elementwise_cost(
                 primal=2 * width,
                 adjoint=2 * width,
                 channels=2 * width,
                 inputs=2,
-                itemsize=itemsize,
+                dtype=dt,
             )
             gates = matmul_cost(
                 channels_in=width + actions,
                 channels_out=4 * width,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             ) + matmul_cost(
                 channels_in=width,
                 channels_out=4 * width,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
             cell = elementwise_cost(
                 primal=13 * width,
@@ -175,14 +179,14 @@ class RecurrentQNetwork(nn.Module):
                 outputs=2,
                 adjoint_inputs=8,
                 adjoint_outputs=9,
-                itemsize=itemsize,
+                dtype=dt,
             )
             head = matmul_cost(
                 channels_in=width,
                 channels_out=actions,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
             return replace(
                 normalize
@@ -194,7 +198,7 @@ class RecurrentQNetwork(nn.Module):
                 + gates
                 + cell
                 + head,
-                bytes_state=itemsize * 2 * width,
+                bytes_state=resolve_dtype(dtype).itemsize * 2 * width,
             )
 
     def __init__(self, config: Config) -> None:

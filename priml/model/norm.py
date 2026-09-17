@@ -12,11 +12,12 @@ from torch.nn import functional as f
 import torch
 
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
     elementwise_cost,
     reduction_cost,
+    resolve_dtype,
+    shared_rows,
+    traffic,
 )
 from priml.model.custom_types import infer_same_width
 
@@ -58,8 +59,9 @@ class RMSNorm(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count square/mean/rsqrt/scale and its saved-rsqrt derivative.
@@ -69,37 +71,36 @@ class RMSNorm(nn.Module):
             two sums over the row are the reductions.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = _dtype(self.dtype, dtype)
             width = self.channels_in
             params = width if self.elementwise_affine else 0
-            return elementwise_cost(
-                primal=2 * width + 3 + params,
-                adjoint=4 * width + 4 + 2 * params,
-                channels=width,
-                inputs=2,
-                outputs=2,
-                adjoint_inputs=6,
-                adjoint_outputs=4,
-                params=params,
-                rows=rows,
-                itemsize=itemsize,
-            ) + Cost(
-                primal=Compute(
-                    bytes=Bytes(elementwise=itemsize * (7 + 2 * params)),
+            return (
+                elementwise_cost(
+                    primal=2 * width + 3 + params,
+                    adjoint=4 * width + 4 + 2 * params,
+                    channels=width,
+                    inputs=2,
+                    outputs=2,
+                    adjoint_inputs=6,
+                    adjoint_outputs=4,
+                    params=params,
+                    rows=rows,
+                    dtype=dt,
                 )
-                + reduction_cost(input_elements=width, itemsize=itemsize),
-                adjoint=Compute(
-                    bytes=Bytes(elementwise=itemsize * (12 + 4 * params)),
-                )
-                + reduction_cost(input_elements=width, itemsize=itemsize),
+                + traffic("primal", "elementwise", elements=7 + 2 * params, dtype=dt)
+                + traffic("adjoint", "elementwise", elements=12 + 4 * params, dtype=dt)
+                + reduction_cost(input_elements=width, dtype=dt)
+                + reduction_cost(input_elements=width, dtype=dt, phase="adjoint")
             )
 
     def __init__(self, config: Config) -> None:
@@ -161,43 +162,48 @@ class CenteredRMSNorm(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count affine RMSNorm plus one ``1 + weight`` fold shared by every row.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = resolve_dtype(dtype)
             width = self.channels_in
-            return elementwise_cost(
-                primal=3 * width + 3 + width / rows,
-                adjoint=6 * width + 4,
-                channels=width,
-                inputs=3,
-                outputs=3,
-                adjoint_inputs=8,
-                adjoint_outputs=6,
-                params=width,
-                rows=rows,
-                itemsize=itemsize,
-            ) + Cost(
-                primal=Compute(
-                    bytes=Bytes(elementwise=itemsize * (7 + 2 * width / rows)),
+            return (
+                elementwise_cost(
+                    primal=3 * width + 3 + width / rows,
+                    adjoint=6 * width + 4,
+                    channels=width,
+                    inputs=3,
+                    outputs=3,
+                    adjoint_inputs=8,
+                    adjoint_outputs=6,
+                    params=width,
+                    rows=rows,
+                    dtype=dt,
                 )
-                + reduction_cost(input_elements=width, itemsize=itemsize),
-                adjoint=Compute(
-                    bytes=Bytes(elementwise=itemsize * 12),
+                + traffic(
+                    "primal",
+                    "elementwise",
+                    elements=7 + 2 * width / rows,
+                    dtype=dt,
                 )
-                + reduction_cost(input_elements=width, itemsize=itemsize),
+                + traffic("adjoint", "elementwise", elements=12, dtype=dt)
+                + reduction_cost(input_elements=width, dtype=dt)
+                + reduction_cost(input_elements=width, dtype=dt, phase="adjoint")
             )
 
     def __init__(self, config: Config) -> None:
@@ -250,28 +256,29 @@ class LayerNorm(nn.LayerNorm):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count centered statistics, normalization, and affine gradients.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=1,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=_dtype(self.dtype, dtype),
             )
 
     def __init__(self, config: Config) -> None:
@@ -324,34 +331,37 @@ class BatchNorm(nn.BatchNorm1d):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Estimate training statistics and running updates per position.
 
-            ``rows`` is batch times spatial/sequence positions. The
+            The sharing rows are batch times spatial/sequence positions. The
             analytical population-variance algorithm includes six operations
             per channel for the two running averages and two for the unbiased
             variance correction. One-row defaults are shape estimates only;
             a training batch norm requires more than one sample per channel.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = _dtype(self.dtype, dtype)
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=self.channels_in / rows,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             ) + elementwise_cost(
                 primal=8 * self.channels_in / rows,
                 adjoint=0,
@@ -360,7 +370,7 @@ class BatchNorm(nn.BatchNorm1d):
                 outputs=8,
                 adjoint_inputs=0,
                 adjoint_outputs=0,
-                itemsize=itemsize,
+                dtype=dt,
             )
 
     def __init__(self, config: Config) -> None:
@@ -448,8 +458,9 @@ class BatchRenorm(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Estimate warm training, including detached corrections and updates.
@@ -460,22 +471,24 @@ class BatchRenorm(nn.Module):
             corrected mean and variance in addition to ordinary normalization.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = resolve_dtype(dtype)
             width = self.channels_in
             return _normalization_cost(
                 channels=width,
                 groups_per_token=width / rows,
                 params=2 * width,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             ) + elementwise_cost(
                 primal=18 * width / rows,
                 adjoint=5 * width / rows,
@@ -484,7 +497,7 @@ class BatchRenorm(nn.Module):
                 outputs=20,
                 adjoint_inputs=8,
                 adjoint_outputs=5,
-                itemsize=itemsize,
+                dtype=dt,
             )
 
     def __init__(self, config: Config) -> None:
@@ -640,34 +653,37 @@ class BatchNorm2d(nn.BatchNorm2d):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Estimate training statistics and running updates per position.
 
-            ``rows`` is batch times spatial/sequence positions. The
+            The sharing rows are batch times spatial/sequence positions. The
             analytical population-variance algorithm includes six operations
             per channel for the two running averages and two for the unbiased
             variance correction. One-row defaults are shape estimates only;
             a training batch norm requires more than one sample per channel.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = _dtype(self.dtype, dtype)
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=self.channels_in / rows,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             ) + elementwise_cost(
                 primal=8 * self.channels_in / rows,
                 adjoint=0,
@@ -676,7 +692,7 @@ class BatchNorm2d(nn.BatchNorm2d):
                 outputs=8,
                 adjoint_inputs=0,
                 adjoint_outputs=0,
-                itemsize=itemsize,
+                dtype=dt,
             )
 
     def __init__(self, config: Config) -> None:
@@ -737,33 +753,32 @@ class GroupNorm2d(nn.GroupNorm):
         def cost(
             self,
             *,
-            rows: float = 1,
-            seq_len: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count groups spanning ``seq_len`` positions within each sample.
 
-            For images, ``seq_len`` is the product of spatial extents;
-            ``rows`` is batch times that extent for affine gradients.
+            For images, ``seq_len`` is the product of spatial extents; the
+            sharing rows are batch times that extent for affine gradients.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              seq_len: Positions each normalization group spans within one sample.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=self.num_groups / seq_len,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=_dtype(self.dtype, dtype),
             )
 
     def __init__(self, config: Config) -> None:
@@ -818,33 +833,32 @@ class GroupNorm(nn.GroupNorm):
         def cost(
             self,
             *,
-            rows: float = 1,
-            seq_len: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count groups spanning ``seq_len`` positions within each sample.
 
-            For images, ``seq_len`` is the product of spatial extents;
-            ``rows`` is batch times that extent for affine gradients.
+            For images, ``seq_len`` is the product of spatial extents; the
+            sharing rows are batch times that extent for affine gradients.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              seq_len: Positions each normalization group spans within one sample.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=self.num_groups / seq_len,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=_dtype(self.dtype, dtype),
             )
 
     def __init__(self, config: Config) -> None:
@@ -876,41 +890,49 @@ def _normalization_cost(
     groups_per_token: float,
     params: int,
     rows: float,
-    itemsize: int,
+    dtype: torch.dtype,
 ) -> Cost:
     """Count unfused centered statistics, scalar broadcasts, and affine maps."""
     sums = 2 * (channels - groups_per_token)
-    return elementwise_cost(
-        primal=5 * channels + 2 * groups_per_token + params - sums,
-        adjoint=7 * channels + params - sums,
-        channels=channels,
-        inputs=3,
-        outputs=3,
-        adjoint_inputs=7,
-        adjoint_outputs=5,
-        params=params,
-        rows=rows,
-        itemsize=itemsize,
-    ) + Cost(
-        primal=Compute(
-            bytes=Bytes(elementwise=itemsize * (10 * groups_per_token + 2 * params)),
+    return (
+        elementwise_cost(
+            primal=5 * channels + 2 * groups_per_token + params - sums,
+            adjoint=7 * channels + params - sums,
+            channels=channels,
+            inputs=3,
+            outputs=3,
+            adjoint_inputs=7,
+            adjoint_outputs=5,
+            params=params,
+            rows=rows,
+            dtype=dtype,
         )
-        + 2
-        * reduction_cost(
+        + traffic(
+            "primal",
+            "elementwise",
+            elements=10 * groups_per_token + 2 * params,
+            dtype=dtype,
+        )
+        + traffic(
+            "adjoint",
+            "elementwise",
+            elements=7 * groups_per_token + 1.5 * params - params / (2 * rows),
+            dtype=dtype,
+        )
+        + reduction_cost(
             input_elements=channels,
             output_groups=groups_per_token,
-            itemsize=itemsize,
-        ),
-        adjoint=Compute(
-            bytes=Bytes(
-                elementwise=itemsize
-                * (7 * groups_per_token + 1.5 * params - params / (2 * rows)),
-            ),
-        )
-        + 2
-        * reduction_cost(
+            dtype=dtype,
+        ).tile(2, copies=2)
+        + reduction_cost(
             input_elements=channels,
             output_groups=groups_per_token,
-            itemsize=itemsize,
-        ),
+            dtype=dtype,
+            phase="adjoint",
+        ).tile(2, copies=2)
     )
+
+
+def _dtype(own: torch.dtype | None, dtype: torch.dtype | None) -> torch.dtype:
+    """Return the norm's storage dtype when set, else the batch's."""
+    return own if own is not None else resolve_dtype(dtype)

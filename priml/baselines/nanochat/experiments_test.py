@@ -259,9 +259,21 @@ def test_the_reference_kernel_prices_like_the_portable_one() -> None:
     base_attn, fork_attn = base.step.model.template.attn, fork.step.model.template.attn
     assert isinstance(base_attn, ValueGatedAttention.Config)
     assert isinstance(fork_attn, ValueGatedAttention.Config)
-    bus = {"seq_len": 16, "num_heads": 2, "channels_head": 8, "window": 8}
-    assert cost(base_attn.kernel, **bus) == cost(fork_attn.kernel, **bus)
-    assert cost(base_attn.kernel, **bus).primal.flops.matmul == 2 * 2 * 2 * 8 * 8
+    assert type(base_attn.kernel) is not type(fork_attn.kernel)
+    # A kernel config holds no shapes, so the models that own them are priced;
+    # every other field of the two recipes is identical (the next test), so an
+    # equal price means the kernels price alike.
+    assert cost(
+        base.step.model.finalize(),
+        seq_len=16,
+        batch_size=1,
+        dtype=None,
+    ) == cost(
+        fork.step.model.finalize(),
+        seq_len=16,
+        batch_size=1,
+        dtype=None,
+    )
 
 
 def test_exp001_changes_only_the_kernel() -> None:

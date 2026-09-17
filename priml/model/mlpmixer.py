@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field, replace
+from dataclasses import KW_ONLY, field
 from typing import Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
-from priml.model.cost import Compute, Cost, cost, elementwise_cost
+import torch
+
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+    shared_rows,
+    with_rows,
+)
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -103,8 +111,9 @@ class MLPMixerBlock(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Sum the four children per token and two residual additions.
@@ -115,22 +124,25 @@ class MLPMixerBlock(nn.Module):
             Transposes are views.
 
             Args:
-              rows: Original token rows; transposed rows scale by width/length.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
             rows_per_token = self.channels_in / self.seq_len
             over_tokens = sum(
                 (
                     cost(
                         child,
-                        rows=max(1, rows * rows_per_token),
-                        itemsize=itemsize,
-                        **kwargs,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **with_rows(max(1, rows * rows_per_token), **kwargs),
                     )
                     for child in (self.token_mixer, self.norm_token)
                 ),
@@ -138,7 +150,13 @@ class MLPMixerBlock(nn.Module):
             )
             over_channels = sum(
                 (
-                    cost(child, rows=rows, itemsize=itemsize, **kwargs)
+                    cost(
+                        child,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
                     for child in (self.channel_mixer, self.norm_channel)
                 ),
                 Cost(),
@@ -148,17 +166,9 @@ class MLPMixerBlock(nn.Module):
                 adjoint=2 * self.channels_in,
                 channels=2 * self.channels_in,
                 inputs=2,
-                itemsize=itemsize,
+                dtype=dtype,
             )
-            return (
-                replace(
-                    over_tokens,
-                    primal=_amortize(over_tokens.primal, rows_per_token),
-                    adjoint=_amortize(over_tokens.adjoint, rows_per_token),
-                )
-                + over_channels
-                + residual_adds
-            )
+            return over_tokens.tile(rows_per_token) + over_channels + residual_adds
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -195,11 +205,3 @@ class MLPMixerBlock(nn.Module):
                 **kwargs,
             )
         return x
-
-
-def _amortize(compute: Compute, rows_per_token: float) -> Compute:
-    """Spread work done on rows over the tokens those rows span."""
-    return Compute(
-        flops=compute.flops * rows_per_token,
-        bytes=compute.bytes * rows_per_token,
-    )

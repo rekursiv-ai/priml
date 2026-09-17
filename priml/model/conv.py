@@ -12,7 +12,11 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    matmul_cost,
+    shared_rows,
+)
 from priml.model.custom_types import DepthIndex
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
@@ -73,22 +77,23 @@ class Conv1d(nn.Conv1d):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one output position; ``rows`` counts output positions.
+            """Price one output position; the sharing rows are output positions.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return conv_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
@@ -96,8 +101,8 @@ class Conv1d(nn.Conv1d):
                 ndim=1,
                 groups=self.groups,
                 bias=self.bias,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=self.dtype if self.dtype is not None else dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -185,22 +190,23 @@ class Conv2d(nn.Conv2d):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one output position; ``rows`` counts output positions.
+            """Price one output position; the sharing rows are output positions.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return conv_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
@@ -208,8 +214,8 @@ class Conv2d(nn.Conv2d):
                 ndim=2,
                 groups=self.groups,
                 bias=self.bias,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=self.dtype if self.dtype is not None else dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -297,22 +303,23 @@ class Conv3d(nn.Conv3d):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one output position; ``rows`` counts output positions.
+            """Price one output position; the sharing rows are output positions.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return conv_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
@@ -320,8 +327,8 @@ class Conv3d(nn.Conv3d):
                 ndim=3,
                 groups=self.groups,
                 bias=self.bias,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=self.dtype if self.dtype is not None else dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -362,7 +369,7 @@ def conv_cost(
     groups: int,
     bias: bool,
     rows: float = 1,
-    itemsize: int = 4,
+    dtype: torch.dtype | None = None,
 ) -> Cost:
     """Price a convolution at one OUTPUT position.
 
@@ -384,7 +391,7 @@ def conv_cost(
       groups: Blocked connections; each output sees ``channels_in / groups``.
       bias: Whether a bias vector is owned.
       rows: Output positions sharing the weights and bias.
-      itemsize: Uniform bytes per operand element.
+      dtype: Element type of every operand; ``None`` is torch's default.
 
     Returns:
       cost: The matmul's price; parameters equal the weight plus bias numel.
@@ -393,10 +400,10 @@ def conv_cost(
     taps = math.prod(
         kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * ndim,
     )
-    return groups * matmul_cost(
+    return matmul_cost(
         channels_in=channels_in // groups * taps,
         channels_out=channels_out // groups,
         bias=bias,
         rows=rows,
-        itemsize=itemsize,
-    )
+        dtype=dtype,
+    ).tile(groups, copies=groups)

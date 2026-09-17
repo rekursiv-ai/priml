@@ -13,7 +13,11 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 import torch
 
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost, elementwise_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+)
 from priml.model.custom_types import (
     CachedAttention,
     ChannelsHead,
@@ -107,12 +111,21 @@ class TransformerBlock(nn.Module):
                 self.ffn.shard = "colwise"
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the four sublayers; ``checkpoint`` is recompute, not model work.
 
             Args:
-              itemsize: Bytes per tensor element in the analytical traffic model.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
@@ -123,11 +136,17 @@ class TransformerBlock(nn.Module):
                 adjoint=2 * self.channels_in,
                 channels=2 * self.channels_in,
                 inputs=2,
-                itemsize=itemsize,
+                dtype=dtype,
             )
             return sum(
                 (
-                    cost(child, itemsize=itemsize, **kwargs)
+                    cost(
+                        child,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
                     for child in (self.attn, self.ffn, self.norm1, self.norm2)
                 ),
                 residual_adds,

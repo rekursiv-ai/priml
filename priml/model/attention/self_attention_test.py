@@ -12,7 +12,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
 )
@@ -529,20 +529,23 @@ def test_self_attention_cost_is_projections_plus_scores() -> None:
     model_cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 32, 16, requires_grad=True),
-        num_tokens=32,
-        bus={"seq_len": 32},
+        seq_len=32,
+        batch_size=1,
+        dtype=None,
     )
-    finalized = config.copy_tree().finalize()
-    kernel = cost(finalized.attn_kernel, seq_len=32, num_heads=2, channels_head=8)
+    kernel = attention_kernel_cost(seq_len=32, dtype=None, num_heads=2, channels_head=8)
     qkv = 16 * 8 * (2 + 2 + 2)
     out = 16 * 16
-    assert kernel.primal.flops.matmul == 4 * 2 * 8 * 32  # QK^T and PV, per head-row.
+    assert (
+        kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 32
+    )  # QK^T and PV, per head-row.
     assert model_cost.params == qkv + out
     assert (
-        model_cost.primal.flops.matmul == 2 * (qkv + out) + kernel.primal.flops.matmul
+        model_cost["flops", "primal", "matmul"].sum()
+        == 2 * (qkv + out) + kernel["flops", "primal", "matmul"].sum()
     )
-    assert model_cost.adjoint.flops.matmul == (
-        4 * (qkv + out) + kernel.adjoint.flops.matmul
+    assert model_cost["flops", "adjoint", "matmul"].sum() == (
+        4 * (qkv + out) + kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * 2 * 2 * 8
 
@@ -558,13 +561,14 @@ def test_attention_projections_cost_is_its_projections_and_slots() -> None:
         norm_out=RMSNorm.Config(elementwise_affine=True),
     )
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=32)
+    model_cost = finalized.cost(seq_len=32, batch_size=1, dtype=None)
     qkv = matmul_cost(channels_in=16, channels_out=8, bias=False)
     out = matmul_cost(channels_in=16, channels_out=16, bias=False)
-    norm_qk = cost(finalized.norm_qk, rows=4)
-    norm_out = cost(finalized.norm_out)
-    assert model_cost.primal.flops.matmul == (
-        6 * qkv.primal.flops.matmul + out.primal.flops.matmul
+    norm_qk = cost(finalized.norm_qk, seq_len=4, batch_size=1, dtype=None)
+    norm_out = cost(finalized.norm_out, seq_len=1, batch_size=1, dtype=None)
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        6 * qkv["flops", "primal", "matmul"].sum()
+        + out["flops", "primal", "matmul"].sum()
     )
     assert (
         model_cost.params
@@ -572,8 +576,9 @@ def test_attention_projections_cost_is_its_projections_and_slots() -> None:
     )
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     # Four head rows (2 q + 2 k) through the norm, plus one output row.
-    assert model_cost.primal.flops.elementwise == (
-        4 * norm_qk.primal.flops.elementwise + norm_out.primal.flops.elementwise
+    assert model_cost["flops", "primal", "elementwise"].sum() == (
+        4 * norm_qk["flops", "primal", "elementwise"].sum()
+        + norm_out["flops", "primal", "elementwise"].sum()
     )
     assert model_cost.bytes_state == 0
 
@@ -585,7 +590,7 @@ def test_gqa_cost_caches_only_kv_heads() -> None:
         channels_head=4,
         num_heads_kv=2,
     )
-    cost = config.copy_tree().finalize().cost(seq_len=8)
+    cost = config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
     assert cost.bytes_state == 4 * 2 * 2 * 4
     assert cost.params == sum(p.numel() for p in config.make().parameters())
 
@@ -603,8 +608,9 @@ def test_attention_cost_counts_its_norms_and_rotary() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
     )
 
 
@@ -615,12 +621,19 @@ def test_attention_projection_traffic_amortizes_weights_and_scales_itemsize() ->
     config.channels_head = 4
     config.rope = RoPE.Config(4)
     config = config.copy_tree().finalize()
-    one = config.cost(seq_len=8, rows=1, itemsize=2)
-    batch = config.cost(seq_len=8, rows=4, itemsize=2)
-    assert one.primal.bytes.matmul - batch.primal.bytes.matmul == 2 * one.params * 3 / 4
+    one = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=1)
+    batch = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    assert (
+        one["bytes", "primal", "matmul"].sum()
+        - batch["bytes", "primal", "matmul"].sum()
+        == 2 * one.params * 3 / 4
+    )
     assert batch.bytes_state == 2 * 2 * 2 * 4
-    wide = config.cost(seq_len=8, rows=4, itemsize=4)
-    assert wide.training.bytes == batch.training.bytes * 2
+    wide = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == batch["bytes", :, :, torch.bfloat16].sum() * 2
+    )
     assert wide.bytes_state == batch.bytes_state * 2
 
 
@@ -631,11 +644,21 @@ def test_independent_qk_norms_read_each_owned_scale_once_per_batch() -> None:
     config.num_heads_kv = 1
     config.norm_qk = RMSNorm.Config()
     config.norm_qk.elementwise_affine = True
-    shared = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    shared = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    )
     config.share_qk_norm = False
-    separate = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    separate = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    )
     assert (
-        separate.primal.bytes.elementwise - shared.primal.bytes.elementwise == 2 * 4 / 4
+        separate["bytes", "primal", "elementwise"].sum()
+        - shared["bytes", "primal", "elementwise"].sum()
+        == 2 * 4 / 4
     )
 
 
@@ -646,11 +669,15 @@ def test_qkv_traffic_reads_input_per_projection_not_per_head(split: bool) -> Non
     config.num_heads = 2
     config.num_heads_kv = 1
     config.split_qkv_projection = split
-    actual = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    actual = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    )
     qkv = (3 if split else 1) * 8 + 16 + 8 * 16 / 4
     output = 8 + 8 + 8 * 8 / 4
-    assert actual.primal.bytes.matmul == 2 * (qkv + output)
-    assert actual.adjoint.bytes.matmul == 4 * (qkv + output)
+    assert actual["bytes", "primal", "matmul"].sum() == 2 * (qkv + output)
+    assert actual["bytes", "adjoint", "matmul"].sum() == 4 * (qkv + output)
 
 
 if __name__ == "__main__":

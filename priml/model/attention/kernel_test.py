@@ -7,15 +7,19 @@ from typing import Final, cast, override
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
+from torch.utils.flop_counter import FlopCounterMode
 
 import pytest
 import torch
 
-from priml.model.attention.kernel import SdpaFused, SdpaNaive
+from priml.model.attention.kernel import (
+    SdpaFused,
+    SdpaNaive,
+    attention_kernel_cost,
+)
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import Cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
-from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -113,97 +117,122 @@ def test_the_kernels_agree_on_a_windowed_forward() -> None:
     torch.testing.assert_close(fused, naive, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize("config", [SdpaFused.Config(), SdpaNaive.Config()])
-def test_kernel_cost_is_two_products_over_the_reachable_keys(
-    config: SdpaFused.Config | SdpaNaive.Config,
-) -> None:
+def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
     """QK^T and PV, two FLOPs per MAC, per head; softmax is elementwise plus sums.
 
     Per head over ``keys``: the max and the normalizer are two ``keys - 1``
     sums, and the adjoint's ``sum(g * p)`` one more.
     """
-    full = cost(config, seq_len=32, num_heads=2, channels_head=8)
+    f32 = torch.float32
+    full = attention_kernel_cost(seq_len=32, dtype=None, num_heads=2, channels_head=8)
     assert full == Cost(
-        primal=Compute(
-            flops=Flops(
-                matmul=4 * 2 * 8 * 32,
-                elementwise=2 * 4 * 32,
-                reduction=2 * 62,
-            ),
-            bytes=Bytes(
-                matmul=4 * 2 * (4 * 8 + 2 * 32),
-                elementwise=4 * 2 * (8 * 32 + 2),
-                reduction=4 * 2 * 2 * (32 + 1),
-            ),
-        ),
-        adjoint=Compute(
-            flops=Flops(
-                matmul=2 * 4 * 2 * 8 * 32,
-                elementwise=2 * 4 * 32,
-                reduction=2 * 31,
-            ),
-            bytes=Bytes(
-                matmul=4 * 2 * 2 * (4 * 8 + 2 * 32),
-                elementwise=4 * 2 * (10 * 32 + 1),
-                reduction=4 * 2 * (32 + 1),
-            ),
-        ),
+        cells={
+            ("flops", "primal", "matmul", f32): 4 * 2 * 8 * 32,
+            ("flops", "primal", "elementwise", f32): 2 * 4 * 32,
+            ("flops", "primal", "reduction", f32): 2 * 62,
+            ("flops", "adjoint", "matmul", f32): 2 * 4 * 2 * 8 * 32,
+            ("flops", "adjoint", "elementwise", f32): 2 * 4 * 32,
+            ("flops", "adjoint", "reduction", f32): 2 * 31,
+            ("bytes", "primal", "matmul", f32): 4 * 2 * (4 * 8 + 2 * 32),
+            ("bytes", "primal", "elementwise", f32): 4 * 2 * (8 * 32 + 2),
+            ("bytes", "primal", "reduction", f32): 4 * 2 * 2 * (32 + 1),
+            ("bytes", "adjoint", "matmul", f32): 4 * 2 * 2 * (4 * 8 + 2 * 32),
+            ("bytes", "adjoint", "elementwise", f32): 4 * 2 * (10 * 32 + 1),
+            ("bytes", "adjoint", "reduction", f32): 4 * 2 * (32 + 1),
+        },
     )
-    windowed = cost(config, seq_len=32, num_heads=2, channels_head=8, window=4)
-    assert windowed.primal.flops.matmul == 4 * 2 * 8 * 4
-    assert windowed.primal.flops.elementwise == 2 * 4 * 4
+    windowed = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+        window=4,
+    )
+    assert windowed["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 4
+    assert windowed["flops", "primal", "elementwise"].sum() == 2 * 4 * 4
     # A window past the sequence reaches every key and nothing more.
-    assert cost(config, seq_len=32, num_heads=2, channels_head=8, window=64) == full
-    dropped = cost(config, seq_len=32, num_heads=2, channels_head=8, dropout_p=0.1)
     assert (
-        dropped.primal.flops.elementwise == full.primal.flops.elementwise + 2 * 2 * 32
+        attention_kernel_cost(
+            seq_len=32,
+            dtype=None,
+            num_heads=2,
+            channels_head=8,
+            window=64,
+        )
+        == full
+    )
+    dropped = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+        dropout_p=0.1,
+    )
+    assert (
+        dropped["flops", "primal", "elementwise"].sum()
+        == full["flops", "primal", "elementwise"].sum() + 2 * 2 * 32
     )
 
 
-@pytest.mark.parametrize("config", [SdpaFused.Config(), SdpaNaive.Config()])
 @pytest.mark.parametrize("window", [-1, 4])
-def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(
-    config: SdpaFused.Config | SdpaNaive.Config,
-    window: int,
-) -> None:
-    small = cost(
-        config,
+def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None:
+    small = attention_kernel_cost(
         seq_len=8,
+        dtype=torch.bfloat16,
         num_heads=2,
         channels_head=4,
         window=window,
-        rows=8,
-        itemsize=2,
     )
-    large = cost(
-        config,
+    large = attention_kernel_cost(
         seq_len=8,
+        dtype=None,
         num_heads=2,
         channels_head=4,
         window=window,
-        rows=32,
-        itemsize=4,
     )
-    assert large.primal.bytes == small.primal.bytes * 2
-    assert large.adjoint.bytes == small.adjoint.bytes * 2
-    assert small.primal.bytes.matmul == 2 * 2 * (4 * 4 + 2 * (4 if window == 4 else 8))
-    assert small.primal.flops == large.primal.flops
+    assert (
+        large["bytes", "primal", :, torch.float32].sum()
+        == small["bytes", "primal", :, torch.bfloat16].sum() * 2
+    )
+    assert (
+        large["bytes", "adjoint", :, torch.float32].sum()
+        == small["bytes", "adjoint", :, torch.bfloat16].sum() * 2
+    )
+    assert small["bytes", "primal", "matmul"].sum() == 2 * 2 * (
+        4 * 4 + 2 * (4 if window == 4 else 8)
+    )
+    assert small["flops", "primal"].sum() == large["flops", "primal"].sum()
 
 
 def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
     config = RoPE.Config(8)
-    factors = config.cost(rows=4, itemsize=2)
-    assert factors.primal.bytes.elementwise == 2 * (1 + 4 / 4 + 4 + 8 * 4)
-    assert factors.adjoint.bytes.total == 0
-    rotation = rotation_cost(config, channels_head=8, heads=3, itemsize=2)
-    assert rotation.primal.bytes.elementwise == 2 * 9 * 8 * 3
-    assert rotation.adjoint.bytes.elementwise == 2 * 9 * 8 * 3
+    factors = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    # Positions are read as int64; the angle table and factors are bf16.
+    assert factors["bytes", "primal", "elementwise", torch.int64] == 8
+    assert factors["bytes", "primal", "elementwise", torch.bfloat16] == 2 * (
+        4 / 4 + 4 + 8 * 4
+    )
+    assert factors["bytes", "adjoint"].sum() == 0
+    rotation = rotation_cost(
+        config,
+        rows=4,
+        dtype=torch.bfloat16,
+        channels_head=8,
+        heads=3,
+    )
+    assert rotation["bytes", "primal", "elementwise"].sum() == 2 * 9 * 8 * 3
+    assert rotation["bytes", "adjoint", "elementwise"].sum() == 2 * 9 * 8 * 3
     mixed = RoPEMixed.Config(8)
     mixed.num_heads = 2
     mixed.learnable = True
-    small = mixed.cost(rows=4, itemsize=2)
-    large = mixed.cost(rows=4, itemsize=4)
-    assert large.training.bytes == small.training.bytes * 2
+    small = mixed.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    large = mixed.cost(seq_len=4, batch_size=1, dtype=None)
+    # Positions stay int64 at either width; every payload cell doubles.
+    assert (
+        large["bytes", :, :, torch.float32].sum()
+        == small["bytes", :, :, torch.bfloat16].sum() * 2
+    )
+    assert large["bytes", :, :, torch.int64] == small["bytes", :, :, torch.int64]
 
 
 def test_naive_kernel_cost_matches_torch() -> None:
@@ -212,16 +241,21 @@ def test_naive_kernel_cost_matches_torch() -> None:
     Only the naive kernel is measurable here: the CPU SDPA op that
     ``SdpaFused`` dispatches to has no ``FlopCounterMode`` registration and
     measures zero, which is the silent-zero bug ``cost`` exists to prevent.
+    A kernel config holds no shapes, so its owner prices it; the owner's
+    call is reproduced here against torch's count.
     """
-    analytical = assert_cost_matches_torch(
-        SdpaNaive.Config(),
-        build_input=lambda: tuple(
-            torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3)
-        ),
-        num_tokens=8,
-        bus={"seq_len": 8, "num_heads": 2, "channels_head": 4},
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3))
+    with FlopCounterMode(display=False) as counter:
+        SdpaNaive()(q, k, v).sum().backward()
+    analytical = attention_kernel_cost(
+        seq_len=8,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
     )
-    assert analytical.primal.flops.matmul == 4 * 2 * 4 * 8
+    assert analytical["flops", :, "matmul"].sum() * 8 == counter.get_total_flops()
+    assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 4 * 8
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

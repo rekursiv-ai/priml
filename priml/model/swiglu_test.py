@@ -276,7 +276,9 @@ def test_gate_norm_width_reset_and_forward_contract() -> None:
 
     x = torch.randn(2, 3, 4)
     gate, hidden = ffn.up_proj(x).chunk(2, dim=-1)
-    expected = ffn.down_proj(torch.sigmoid(gate) * ffn.norm(gate * hidden))
+    expected = ffn.down_proj(
+        torch.sigmoid(gate) * ffn.norm(gate * hidden),
+    )
     torch.testing.assert_close(ffn(x), expected, rtol=0, atol=0)
 
 
@@ -533,26 +535,35 @@ def test_swiglu_cost_is_both_projections() -> None:
     cost = assert_cost_matches_torch(
         SwiGLU.Config(16, channels_hidden=32, round_to=1),
         build_input=lambda: torch.randn(3, 16, requires_grad=True),
-        num_tokens=3,
+        seq_len=3,
+        batch_size=1,
+        dtype=None,
     )
     up, down = 16 * 64, 32 * 16
-    assert cost.primal.flops.matmul == 2 * (up + down)
-    assert cost.adjoint.flops.matmul == 4 * (up + down)
+    assert cost["flops", "primal", "matmul"].sum() == 2 * (up + down)
+    assert cost["flops", "adjoint", "matmul"].sum() == 4 * (up + down)
     assert cost.params == up + down
     # SiLU (5), one gating product (1) per hidden channel; twice the products
     # and the sigmoid's derivative (5) in the adjoint.
-    assert cost.primal.flops.elementwise == 6 * 32
-    assert cost.adjoint.flops.elementwise == 7 * 32
-    assert cost.primal.bytes.elementwise == 4 * (2 + 3) * 32
-    assert cost.adjoint.bytes.elementwise == 4 * (3 + 6) * 32
+    assert cost["flops", "primal", "elementwise"].sum() == 6 * 32
+    assert cost["flops", "adjoint", "elementwise"].sum() == 7 * 32
+    assert cost["bytes", "primal", "elementwise"].sum() == 4 * (2 + 3) * 32
+    assert cost["bytes", "adjoint", "elementwise"].sum() == 4 * (3 + 6) * 32
 
 
 class _PricedIdentityActivation:
     def __call__(self, value: Tensor) -> Tensor:
         return value
 
-    def cost(self, **kwargs: object) -> Cost:
-        del kwargs
+    def cost(
+        self,
+        *,
+        seq_len: int,
+        batch_size: int,
+        dtype: torch.dtype | None,
+        **kwargs: object,
+    ) -> Cost:
+        del seq_len, batch_size, dtype, kwargs
         return Cost()
 
 
@@ -561,35 +572,47 @@ def test_custom_activation_cost_keeps_the_gate_product() -> None:
     config.channels_in = 4
     config.channels_hidden = 3
     config.act = _PricedIdentityActivation()
-    result = config.finalize().cost(itemsize=2)
-    assert result.primal.flops.elementwise == 3
-    assert result.adjoint.flops.elementwise == 2 * 3
-    assert result.primal.bytes.elementwise == 2 * 3 * 3
-    assert result.adjoint.bytes.elementwise == 2 * 6 * 3
+    result = config.finalize().cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
+    assert result["flops", "primal", "elementwise"].sum() == 3
+    assert result["flops", "adjoint", "elementwise"].sum() == 2 * 3
+    assert result["bytes", "primal", "elementwise"].sum() == 2 * 3 * 3
+    assert result["bytes", "adjoint", "elementwise"].sum() == 2 * 6 * 3
 
 
 def test_split_gate_cost_reads_input_for_each_projection() -> None:
     config = SwiGLU.Config()
     config.channels_in = 4
     config.channels_hidden = 3
-    fused = config.copy_tree().finalize().cost(rows=2, itemsize=2)
+    fused = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=2, batch_size=1, dtype=torch.bfloat16)
+    )
     config.split_gate_projection = True
-    split = config.finalize().cost(rows=2, itemsize=2)
-    assert split.primal.flops == fused.primal.flops
-    assert split.adjoint.flops == fused.adjoint.flops
-    assert split.primal.bytes.matmul == fused.primal.bytes.matmul + 2 * 4
-    assert split.adjoint.bytes.matmul == fused.adjoint.bytes.matmul + 2 * 2 * 4
+    split = config.finalize().cost(seq_len=2, batch_size=1, dtype=torch.bfloat16)
+    assert split["flops", "primal"].sum() == fused["flops", "primal"].sum()
+    assert split["flops", "adjoint"].sum() == fused["flops", "adjoint"].sum()
+    assert (
+        split["bytes", "primal", "matmul"].sum()
+        == fused["bytes", "primal", "matmul"].sum() + 2 * 4
+    )
+    assert (
+        split["bytes", "adjoint", "matmul"].sum()
+        == fused["bytes", "adjoint", "matmul"].sum() + 2 * 2 * 4
+    )
 
 
 def test_ungated_cost_has_a_single_width_up_proj() -> None:
     cost = assert_cost_matches_torch(
         SwiGLUReluSquared.Config(16, channels_hidden=32, round_to=1),
         build_input=lambda: torch.randn(3, 16, requires_grad=True),
-        num_tokens=3,
+        seq_len=3,
+        batch_size=1,
+        dtype=None,
     )
     assert cost.params == 16 * 32 + 32 * 16
-    assert cost.primal.bytes.elementwise == 4 * 4 * 32
-    assert cost.adjoint.bytes.elementwise == 4 * 6 * 32
+    assert cost["bytes", "primal", "elementwise"].sum() == 4 * 4 * 32
+    assert cost["bytes", "adjoint", "elementwise"].sum() == 4 * 6 * 32
 
 
 def test_swiglu_cost_includes_a_gate_norm() -> None:
@@ -598,7 +621,9 @@ def test_swiglu_cost_includes_a_gate_norm() -> None:
     cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(3, 16, requires_grad=True),
-        num_tokens=3,
+        seq_len=3,
+        batch_size=1,
+        dtype=None,
     )
     assert cost.params == 16 * 64 + 32 * 16 + 32
 

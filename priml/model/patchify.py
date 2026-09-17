@@ -10,8 +10,13 @@ import math
 from configgle import Fig
 from torch import Tensor, nn
 
+import torch
+
 from priml.math.pixel import patchify, unpatchify
-from priml.model.cost import Bytes, Compute, Cost
+from priml.model.cost import (
+    Cost,
+    traffic,
+)
 
 
 class Patchify(nn.Module):
@@ -56,27 +61,39 @@ class Patchify(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price one materialized payload permutation per patch, without FLOPs.
 
             The geometry is patch positions in both directions. Nontrivial
             patches assume a copy; degenerate spatial shapes may permit views.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            del seq_len, batch_size, kwargs
             if math.prod(self.patch_size) == 1:
                 return Cost()
-            moved = itemsize * 2 * max(self.channels_in, self.channels_out)
-            return Cost(
-                primal=Compute(bytes=Bytes(selection=moved)),
-                adjoint=Compute(bytes=Bytes(selection=moved)),
+            moved = 2 * max(self.channels_in, self.channels_out)
+            dt = dtype
+            return traffic("primal", "selection", elements=moved, dtype=dt) + traffic(
+                "adjoint",
+                "selection",
+                elements=moved,
+                dtype=dt,
             )
 
     def __init__(self, config: Config) -> None:
@@ -130,27 +147,39 @@ class Unpatchify(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price one materialized payload permutation per patch, without FLOPs.
 
             The geometry is patch positions in both directions. Nontrivial
             patches assume a copy; degenerate spatial shapes may permit views.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            del seq_len, batch_size, kwargs
             if math.prod(self.patch_size) == 1:
                 return Cost()
-            moved = itemsize * 2 * max(self.channels_in, self.channels_out)
-            return Cost(
-                primal=Compute(bytes=Bytes(selection=moved)),
-                adjoint=Compute(bytes=Bytes(selection=moved)),
+            moved = 2 * max(self.channels_in, self.channels_out)
+            dt = dtype
+            return traffic("primal", "selection", elements=moved, dtype=dt) + traffic(
+                "adjoint",
+                "selection",
+                elements=moved,
+                dtype=dt,
             )
 
     def __init__(self, config: Config) -> None:

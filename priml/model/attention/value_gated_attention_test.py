@@ -5,20 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
-from configgle import Fig, PartialConfig
+from configgle import PartialConfig
 from configgle.testing import assert_pprint_golden
 from torch import Tensor
 
 import pytest
 import torch
 
-from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
-    SdpaCausal,
     ValueGatedAttention,
 )
-from priml.model.cost import Compute, Cost, Flops, cost
+from priml.model.cost import cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
@@ -197,25 +196,38 @@ def test_value_gated_attention_cost_is_projections_gate_and_the_kernel() -> None
         window=4,
     )
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=32)
-    kernel = cost(finalized.kernel, seq_len=32, num_heads=2, channels_head=8, window=4)
+    model_cost = finalized.cost(seq_len=32, batch_size=1, dtype=None)
+    kernel = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+        window=4,
+    )
     projections = 3 * 16 * 16 + 16 * 16
     gate = 4 * 2
-    assert kernel.primal.flops.matmul == 4 * 2 * 8 * 4  # Scores stop at the window.
+    assert (
+        kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 4
+    )  # Scores stop at the window.
     assert model_cost.params == projections + gate
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    assert model_cost.primal.flops.matmul == (
-        2 * (projections + gate) + kernel.primal.flops.matmul
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        2 * (projections + gate) + kernel["flops", "primal", "matmul"].sum()
     )
-    assert model_cost.adjoint.flops.matmul == (
-        4 * (projections + gate) + kernel.adjoint.flops.matmul
+    assert model_cost["flops", "adjoint", "matmul"].sum() == (
+        4 * (projections + gate) + kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * 2 * 2 * 8
     # The gate's gradient reduces over each head's channels; the norm runs on
     # every q and k head row.
-    norm = cost(finalized.norm_qk).tile(2 * 2, copies=2)
-    assert model_cost.adjoint.flops.reduction == (
-        kernel.adjoint.flops.reduction + norm.adjoint.flops.reduction + 2 * (8 - 1)
+    norm = cost(finalized.norm_qk, seq_len=32, batch_size=1, dtype=None).tile(
+        2 * 2,
+        copies=2,
+    )
+    assert model_cost["flops", "adjoint", "reduction"].sum() == (
+        kernel["flops", "adjoint", "reduction"].sum()
+        + norm["flops", "adjoint", "reduction"].sum()
+        + 2 * (8 - 1)
     )
 
 
@@ -235,8 +247,9 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
         run=lambda module, x: cast(ValueGatedAttention, module)(
             x,
             cos_sin=RoPE.Config(8).make()(torch.arange(8)),
@@ -255,54 +268,13 @@ def test_value_gated_attention_cost_without_a_gate_or_window() -> None:
         norm_qk=RMSNorm.Config(elementwise_affine=True),
     )
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=32)
-    kernel = cost(finalized.kernel, seq_len=32, num_heads=2, channels_head=8, window=-1)
-    norm = cost(finalized.norm_qk)
+    model_cost = finalized.cost(seq_len=32, batch_size=1, dtype=None)
+    kernel = attention_kernel_cost(seq_len=32, dtype=None, num_heads=2, channels_head=8)
+    norm = cost(finalized.norm_qk, seq_len=32, batch_size=1, dtype=None)
     assert model_cost.params == 4 * 16 * 16 + 2 * norm.params  # norm_q and norm_k.
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    assert model_cost.primal.flops.matmul == (
-        2 * 4 * 16 * 16 + kernel.primal.flops.matmul
-    )
-
-
-class _FlatKernel:
-    """A kernel that reports a fixed, recognizable cost."""
-
-    class Config(Fig["_FlatKernel"]):
-        def cost(self, **kwargs: object) -> Cost:
-            del kwargs
-            return Cost(primal=Compute(flops=Flops(matmul=1_000_003)))
-
-    def __init__(self, config: Config) -> None:
-        del config
-
-    def __call__(self, q: Tensor, k: Tensor, v: Tensor, **kwargs: object) -> Tensor:
-        del k, v, kwargs
-        return q
-
-
-def test_value_gated_attention_cost_prices_an_injected_kernel() -> None:
-    """The slot's own cost reaches the total; the owner does not re-derive it."""
-    config = ValueGatedAttention.Config(
-        channels_in=16,
-        num_heads=2,
-        channels_head=8,
-        window=4,
-        kernel=_FlatKernel.Config(),
-    )
-    default = config.copy_tree()
-    default.kernel = SdpaCausal.Config()
-    injected = config.copy_tree().finalize().cost(seq_len=32)
-    baseline = default.finalize().cost(seq_len=32)
-    default_kernel = cost(
-        SdpaCausal.Config(),
-        seq_len=32,
-        num_heads=2,
-        channels_head=8,
-        window=4,
-    )
-    assert injected.primal.flops.matmul - baseline.primal.flops.matmul == (
-        1_000_003 - default_kernel.primal.flops.matmul
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        2 * 4 * 16 * 16 + kernel["flops", "primal", "matmul"].sum()
     )
 
 
@@ -314,12 +286,19 @@ def test_value_attention_traffic_amortizes_weights_and_preserves_window() -> Non
     config.gate_channels = 4
     config.window = 4
     config = config.copy_tree().finalize()
-    one = config.cost(seq_len=8, rows=1, itemsize=2)
-    batch = config.cost(seq_len=8, rows=4, itemsize=2)
-    assert one.primal.bytes.matmul - batch.primal.bytes.matmul == 2 * one.params * 3 / 4
-    wide = config.cost(seq_len=8, rows=4, itemsize=4)
-    assert wide.training.bytes == batch.training.bytes * 2
-    assert config.cost(seq_len=32, rows=4, itemsize=2) == batch
+    one = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=1)
+    batch = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    assert (
+        one["bytes", "primal", "matmul"].sum()
+        - batch["bytes", "primal", "matmul"].sum()
+        == 2 * one.params * 3 / 4
+    )
+    wide = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == batch["bytes", :, :, torch.bfloat16].sum() * 2
+    )
+    assert config.cost(seq_len=32, batch_size=1, dtype=torch.bfloat16, rows=4) == batch
     assert batch.bytes_state == 2 * 2 * 8
 
 

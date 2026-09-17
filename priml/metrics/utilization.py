@@ -16,7 +16,9 @@ import math
 from configgle import Fig, LateBound
 from torch import Tensor
 
-from priml.model.cost import Cost, HasCost, KernelStats, cost
+import torch
+
+from priml.model.cost import KERNELS, Cost, HasCost, Kernel, cost
 
 
 class Utilization(LateBound):
@@ -50,15 +52,16 @@ class Utilization(LateBound):
             if not math.isfinite(peak) or peak <= 0:
                 raise ValueError(f"{name} must be positive and finite; got {peak}.")
         vector = config.peak_vector_flops_per_sec
-        self.peak = KernelStats(
-            matmul=config.peak_flops_per_sec,
-            elementwise=vector,
-            reduction=vector,
-            selection=vector,
-            sort=vector,
-        )
+        self.peak: dict[Kernel, float] = {
+            "matmul": config.peak_flops_per_sec,
+            "elementwise": vector,
+            "reduction": vector,
+            "selection": vector,
+            "sort": vector,
+        }
         self.tokens_key = config.tokens_key
         self._model_config: HasCost | None = None
+        self._dtype: torch.dtype | None = None
         self._cost_by_shape: dict[tuple[int, int], Cost] = {}
         self.reset()
 
@@ -102,12 +105,17 @@ class Utilization(LateBound):
                 "metric needs a model config implementing HasCost.",
             )
         self._model_config = model_config
+        # The step's autocast dtype is what the priced tensors are; ``None``
+        # is torch's default, which ``cost`` resolves at pricing time.
+        step_config = getattr(getattr(root, "step", None), "config", None)
+        autocast = getattr(step_config, "dtype_autocast", None)
+        self._dtype = autocast if isinstance(autocast, torch.dtype) else None
 
     def reset(self) -> None:
         """Zero the token and second sums."""
         self.tokens = 0
         self.seconds = 0.0
-        self.flops = KernelStats()
+        self.flops: dict[Kernel, float] = dict.fromkeys(KERNELS, 0.0)
 
     def update(self, logits: Tensor, **batch: object) -> None:
         """Accumulate one train step.
@@ -146,10 +154,12 @@ class Utilization(LateBound):
                 self._model_config,
                 seq_len=seq_len,
                 batch_size=num_tokens // seq_len,
+                dtype=self._dtype,
             )
         self.tokens += num_tokens
         self.seconds += step_sec
-        self.flops = self.flops + per_token.training.flops * num_tokens
+        for kernel in KERNELS:
+            self.flops[kernel] += per_token["flops", :, kernel].sum() * num_tokens
 
     def compute(self) -> dict[str, float]:
         """Report throughput and utilization over the updates since ``reset``.
@@ -164,14 +174,17 @@ class Utilization(LateBound):
             return {}
         # Summed FLOPs over summed seconds: :func:`utilization` for a window,
         # with each step weighted by its tokens rather than counted once.
-        achieved = self.flops / self.seconds / self.peak
+        achieved = {
+            kernel: self.flops[kernel] / self.seconds / self.peak[kernel]
+            for kernel in KERNELS
+        }
         return {
             "tokens_per_sec": self.tokens / self.seconds,
-            "mfu": achieved.matmul,
-            "utilization_elementwise": achieved.elementwise,
-            "utilization_reduction": achieved.reduction,
-            "utilization_selection": achieved.selection,
-            "utilization_sort": achieved.sort,
+            "mfu": achieved["matmul"],
+            "utilization_elementwise": achieved["elementwise"],
+            "utilization_reduction": achieved["reduction"],
+            "utilization_selection": achieved["selection"],
+            "utilization_sort": achieved["sort"],
         }
 
     def state_dict(self) -> Mapping[str, object]:

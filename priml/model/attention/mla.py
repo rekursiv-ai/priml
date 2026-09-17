@@ -66,11 +66,21 @@ from torch.distributed.tensor.parallel import (
 
 import torch
 
-from priml.model.attention.kernel import SdpaFused, SdpaNaive
+from priml.model.attention.kernel import (
+    SdpaFused,
+    SdpaNaive,
+    attention_kernel_cost,
+)
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import Bytes, Compute, Cost, cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    resolve_dtype,
+    shared_rows,
+    traffic,
+)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -138,13 +148,13 @@ class LatentAttention(nn.Module):
             self,
             *,
             seq_len: int,
+            dtype: torch.dtype | None,
             num_heads: int,
             channels_head: int,
             channels_v_head: int,
             kv_lora_rank: int,
             channels_qk_rope_head: int,
-            itemsize: int = 4,
-            **kwargs: object,
+            dropout_p: float,
         ) -> Cost:
             """Price the kernel's two products at the widths this form hands it.
 
@@ -157,17 +167,19 @@ class LatentAttention(nn.Module):
 
             The kernel receives separate query/key and value widths so each
             product's operands are priced directly, without scaling unrelated
-            score or softmax traffic.
+            score or softmax traffic. This is not ``HasCost``: a kernel config
+            holds no shapes, so the owner states them, the way it hands the
+            latent to ``forward``.
 
             Args:
-              seq_len: Keys a query reaches before any window.
+              seq_len: Tokens per sequence.
+              dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
               channels_head: Width of each query/key head.
               channels_v_head: Width of each value head.
               kv_lora_rank: Width of the shared KV latent.
               channels_qk_rope_head: Width of the rotated key slice.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              dropout_p: Attention dropout rate.
 
             Returns:
               cost: Per-token cost of this module.
@@ -178,19 +190,20 @@ class LatentAttention(nn.Module):
                 channels_v = kv_lora_rank
             else:
                 channels_k, channels_v = channels_head, channels_v_head
-            kernel = cost(
-                self.attn_kernel,
+            kernel = attention_kernel_cost(
                 seq_len=seq_len,
+                dtype=dtype,
                 num_heads=num_heads,
                 channels_head=channels_k,
                 channels_v_head=channels_v,
-                itemsize=itemsize,
-                **kwargs,
+                dropout_p=dropout_p,
             )
-            moved = itemsize * (2 * num_heads - 1) * kv_lora_rank if self.absorb else 0
-            return kernel + Cost(
-                primal=Compute(bytes=Bytes(matmul=moved)),
-                adjoint=Compute(bytes=Bytes(matmul=2 * moved)),
+            moved = (2 * num_heads - 1) * kv_lora_rank if self.absorb else 0
+            dt = dtype
+            return (
+                kernel
+                + traffic("primal", "matmul", elements=moved, dtype=dt)
+                + traffic("adjoint", "matmul", elements=2 * moved, dtype=dt)
             )
 
     def __init__(self, config: Config) -> None:
@@ -395,9 +408,8 @@ class MultiHeadLatentAttention(nn.Module):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
-            dropout_p: float | None = None,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price the projections, norms, rotary, kernel, and the latent cache.
@@ -407,16 +419,25 @@ class MultiHeadLatentAttention(nn.Module):
             kernel would expand them into.
 
             Args:
-              seq_len: Keys a query reaches before any window.
-              rows: Rows sharing each parameter.
-              itemsize: Uniform bytes per tensor element.
-              dropout_p: Override configured training dropout when supplied.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
+            Raises:
+              TypeError: The kernel slot holds something other than a
+                :class:`LatentAttention.Config`; a foreign kernel has no
+                analytical price, and a silent zero would understate the model.
+
             """
+            if not isinstance(self.attn_kernel, LatentAttention.Config):
+                raise TypeError(
+                    f"{type(self.attn_kernel).__qualname__} has no analytical "
+                    "price; MultiheadLatentAttention prices LatentAttention.Config.",
+                )
             q_path = (
                 (self.proj_q,)
                 if self.q_lora_rank is None
@@ -431,7 +452,13 @@ class MultiHeadLatentAttention(nn.Module):
             )
             total = sum(
                 (
-                    cost(child, rows=rows, itemsize=itemsize, **kwargs)
+                    cost(
+                        child,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
                     for child in children
                 ),
                 Cost(),
@@ -439,34 +466,33 @@ class MultiHeadLatentAttention(nn.Module):
             if self.rope is not None:
                 total += cost(
                     self.rope,
-                    rows=rows,
-                    itemsize=itemsize,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 )
                 # Every query head and the one shared key row are rotated.
                 total += rotation_cost(
                     self.rope,
+                    rows=shared_rows(seq_len, batch_size, **kwargs),
+                    dtype=dtype,
                     channels_head=self.channels_qk_rope_head,
                     heads=self.num_heads + 1,
-                    rows=rows,
-                    itemsize=itemsize,
                 )
-            total += cost(
-                self.attn_kernel,
+            total += self.attn_kernel.cost(
                 seq_len=seq_len,
+                dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_qk_head,
                 channels_v_head=self.channels_v_head,
                 kv_lora_rank=self.kv_lora_rank,
                 channels_qk_rope_head=self.channels_qk_rope_head,
-                dropout_p=self.dropout if dropout_p is None else dropout_p,
-                rows=rows,
-                itemsize=itemsize,
-                **kwargs,
+                dropout_p=self.dropout,
             )
             return replace(
                 total,
-                bytes_state=itemsize * (self.kv_lora_rank + self.channels_qk_rope_head),
+                bytes_state=resolve_dtype(dtype).itemsize
+                * (self.kv_lora_rank + self.channels_qk_rope_head),
             )
 
         # Every width here is DERIVED -- a head count times a per-head width, or a LoRA

@@ -10,7 +10,11 @@ import pytest
 import torch
 
 from priml.model.attention.gated_self_attention import GatedSelfAttention
-from priml.model.attention.kernel import SdpaFused, SdpaNaive
+from priml.model.attention.kernel import (
+    SdpaFused,
+    SdpaNaive,
+    attention_kernel_cost,
+)
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
 from priml.model.cost import cost
@@ -442,35 +446,37 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     model_cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
     )
     finalized = config.copy_tree().finalize()
-    kernel = cost(finalized.attn_kernel, seq_len=8, num_heads=2, channels_head=8)
+    kernel = attention_kernel_cost(seq_len=8, dtype=None, num_heads=2, channels_head=8)
     inner = 2 * 8
     projections = 16 * 2 * inner + 2 * 16 * 8 + inner * 16
     norms = 2 * 8  # norm_q and norm_k each own one head-width scale.
     assert model_cost.params == projections + norms
     assert (
-        model_cost.primal.flops.matmul == 2 * projections + kernel.primal.flops.matmul
+        model_cost["flops", "primal", "matmul"].sum()
+        == 2 * projections + kernel["flops", "primal", "matmul"].sum()
     )
-    assert model_cost.adjoint.flops.matmul == (
-        4 * projections + kernel.adjoint.flops.matmul
+    assert model_cost["flops", "adjoint", "matmul"].sum() == (
+        4 * projections + kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * 2 * 1 * 8
     assert finalized.rope is not None
     scalar = (
         kernel
-        + cost(finalized.norm_qk, rows=8 * 2).tile(2)
-        + cost(finalized.norm_qk, rows=8 * 1).tile(1)
-        + cost(finalized.rope, rows=8)
-        + rotation_cost(finalized.rope, channels_head=8, heads=3)
+        + cost(finalized.norm_qk, seq_len=8 * 2, batch_size=1, dtype=None).tile(2)
+        + cost(finalized.norm_qk, seq_len=8 * 1, batch_size=1, dtype=None).tile(1)
+        + cost(finalized.rope, seq_len=8, batch_size=1, dtype=None)
+        + rotation_cost(finalized.rope, rows=8, dtype=None, channels_head=8, heads=3)
     )
-    assert model_cost.primal.flops.elementwise == (
-        scalar.primal.flops.elementwise + 5 * inner
+    assert model_cost["flops", "primal", "elementwise"].sum() == (
+        scalar["flops", "primal", "elementwise"].sum() + 5 * inner
     )
-    assert model_cost.adjoint.flops.elementwise == (
-        scalar.adjoint.flops.elementwise + 6 * inner
+    assert model_cost["flops", "adjoint", "elementwise"].sum() == (
+        scalar["flops", "adjoint", "elementwise"].sum() + 6 * inner
     )
 
 
@@ -481,11 +487,14 @@ def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
     config.num_heads = 2
     config.num_heads_kv = 1
     config.channels_head = 8
-    dry = config.copy_tree().finalize().cost(seq_len=32)
+    dry = config.copy_tree().finalize().cost(seq_len=32, batch_size=1, dtype=None)
     config.dropout = 0.1
-    wet = config.copy_tree().finalize().cost(seq_len=32)
-    assert wet.training.flops.elementwise - dry.training.flops.elementwise == 2 * 4 * 32
-    assert wet.training.flops.matmul == dry.training.flops.matmul
+    wet = config.copy_tree().finalize().cost(seq_len=32, batch_size=1, dtype=None)
+    assert (
+        wet["flops", :, "elementwise"].sum() - dry["flops", :, "elementwise"].sum()
+        == 2 * 4 * 32
+    )
+    assert wet["flops", :, "matmul"].sum() == dry["flops", :, "matmul"].sum()
 
 
 def test_gated_attention_traffic_propagates_itemsize() -> None:
@@ -496,9 +505,12 @@ def test_gated_attention_traffic_propagates_itemsize() -> None:
     config.channels_head = 4
     config.rope = RoPE.Config(2)
     config = config.copy_tree().finalize()
-    small = config.cost(seq_len=8, rows=8, itemsize=2)
-    large = config.cost(seq_len=8, rows=8, itemsize=4)
-    assert large.training.bytes == small.training.bytes * 2
+    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=8)
+    large = config.cost(seq_len=8, batch_size=1, dtype=None, rows=8)
+    assert (
+        large["bytes", :, :, torch.float32].sum()
+        == small["bytes", :, :, torch.bfloat16].sum() * 2
+    )
     assert small.bytes_state == 2 * 2 * 1 * 4
 
 

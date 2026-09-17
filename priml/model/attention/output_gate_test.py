@@ -149,13 +149,35 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
     model_cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
     )
-    inner = cost(config.copy_tree().finalize().inner, seq_len=8, rows=8)
+    inner = cost(
+        config.copy_tree().finalize().inner,
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
+    )
     gate = 16 * 16
-    assert model_cost.primal.flops.matmul == inner.primal.flops.matmul + 2 * gate
-    assert model_cost.adjoint.flops.matmul == inner.adjoint.flops.matmul + 4 * gate
+    assert (
+        model_cost["flops", "primal", "matmul"].sum()
+        == inner[
+            "flops",
+            "primal",
+            "matmul",
+        ].sum()
+        + 2 * gate
+    )
+    assert (
+        model_cost["flops", "adjoint", "matmul"].sum()
+        == inner[
+            "flops",
+            "adjoint",
+            "matmul",
+        ].sum()
+        + 4 * gate
+    )
     assert model_cost.params == inner.params + gate
     assert model_cost.bytes_state == inner.bytes_state
 
@@ -165,15 +187,24 @@ def test_output_gate_traffic_prices_projection_and_scalar_operands() -> None:
     config.channels_in = 8
     config.inner = RMSNorm.Config()
     config = config.copy_tree().finalize()
-    inner = cost(config.inner, rows=4, itemsize=2)
-    actual = config.cost(rows=4, itemsize=2)
-    assert actual.primal.bytes.matmul == 2 * (8 + 8 + 64 / 4)
-    assert actual.primal.bytes.elementwise - inner.primal.bytes.elementwise == 2 * 5 * 8
+    inner = cost(config.inner, seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    actual = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    assert actual["bytes", "primal", "matmul"].sum() == 2 * (8 + 8 + 64 / 4)
     assert (
-        actual.adjoint.bytes.elementwise - inner.adjoint.bytes.elementwise == 2 * 12 * 8
+        actual["bytes", "primal", "elementwise"].sum()
+        - inner["bytes", "primal", "elementwise"].sum()
+        == 2 * 5 * 8
     )
-    wide = config.cost(rows=4, itemsize=4)
-    assert wide.training.bytes == actual.training.bytes * 2
+    assert (
+        actual["bytes", "adjoint", "elementwise"].sum()
+        - inner["bytes", "adjoint", "elementwise"].sum()
+        == 2 * 12 * 8
+    )
+    wide = config.cost(seq_len=4, batch_size=1, dtype=None)
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == actual["bytes", :, :, torch.bfloat16].sum() * 2
+    )
 
 
 if __name__ == "__main__":

@@ -23,12 +23,18 @@ from typing_extensions import ParamSpec
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
+import torch
+
 from priml.model.attention.multi_stream import (
     MultiStreamAttention,
     _validate_native_state,
 )
 from priml.model.attention.self_attention import AttentionProjections
-from priml.model.cost import Cost, cost, elementwise_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsHead,
@@ -117,7 +123,14 @@ class AdaLNZero(nn.Module):
                 self.proj.channels_out = 6 * self.channels_in
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price the projection; the SiLU is elementwise.
 
             Counted per token like every leaf, though ``c`` is often one vector
@@ -125,18 +138,26 @@ class AdaLNZero(nn.Module):
             sequence, so the per-token figure is an upper bound.
 
             Args:
-              itemsize: Bytes per tensor element in the analytical traffic model.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.proj, itemsize=itemsize, **kwargs) + elementwise_cost(
+            return cost(
+                self.proj,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            ) + elementwise_cost(
                 primal=5 * self.cond_dim,
                 adjoint=5 * self.cond_dim,
                 channels=self.cond_dim,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -207,7 +228,14 @@ class MMDiTStream(nn.Module):
                     child.depth_index = self.depth_index
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the residual branches; ``attn`` is priced by the joint attention.
 
             The joint attention registers ``attn`` as one of its own streams and
@@ -215,8 +243,10 @@ class MMDiTStream(nn.Module):
             stream's projections twice.
 
             Args:
-              itemsize: Bytes per tensor element in the analytical traffic model.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
@@ -224,11 +254,26 @@ class MMDiTStream(nn.Module):
             """
             children = (self.norm1, self.norm2, self.ffn)
             total = sum(
-                (cost(child, itemsize=itemsize, **kwargs) for child in children),
+                (
+                    cost(
+                        child,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for child in children
+                ),
                 Cost(),
             )
             if self.adaln is not None:
-                total += cost(self.adaln, itemsize=itemsize, **kwargs)
+                total += cost(
+                    self.adaln,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
             # Per branch: scale offset, scale, shift, gate, residual.
             modulated = self.adaln is not None
             adds = (10 if modulated else 2) * self.channels_in
@@ -240,7 +285,7 @@ class MMDiTStream(nn.Module):
                 outputs=5 if modulated else 1,
                 adjoint_inputs=13 if modulated else 2,
                 adjoint_outputs=7 if modulated else 1,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -360,10 +405,17 @@ class MMDiTBlock(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the joint attention and every stream's residual branches.
 
-            ``seq_len`` on the bus is the JOINT key length -- every stream's
+            ``seq_len`` is the JOINT key length -- every stream's
             tokens concatenated -- as :class:`MultiStreamAttention` defines it,
             so a caller holding per-stream lengths passes their sum. Every
             stream's branches are summed, matching the joint attention's
@@ -372,17 +424,34 @@ class MMDiTBlock(nn.Module):
             builds.
 
             Args:
-              itemsize: Bytes per tensor element in the analytical traffic model.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            total = cost(self.attn, itemsize=itemsize, **kwargs)
+            total = cost(
+                self.attn,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
             if self.streams:
                 return total + sum(
-                    (cost(s, itemsize=itemsize, **kwargs) for s in self.streams),
+                    (
+                        cost(
+                            s,
+                            seq_len=seq_len,
+                            batch_size=batch_size,
+                            dtype=dtype,
+                            **kwargs,
+                        )
+                        for s in self.streams
+                    ),
                     Cost(),
                 )
             stream = MMDiTStream.Config()
@@ -395,7 +464,13 @@ class MMDiTBlock(nn.Module):
                 adaln.channels_in = self.channels_in
                 adaln.cond_dim = self.cond_dim
                 stream.adaln = adaln.finalize()
-            return total + self.num_streams * cost(stream, itemsize=itemsize, **kwargs)
+            return total + cost(
+                stream,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            ).tile(self.num_streams, copies=self.num_streams)
 
     def __init__(self, config: Config) -> None:
         super().__init__()

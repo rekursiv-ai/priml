@@ -10,7 +10,12 @@ from torch import nn
 import torch
 
 from priml.loss.custom_types import LossOutput
-from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
+from priml.model.cost import (
+    Cost,
+    reduction_cost,
+    shared_rows,
+    traffic,
+)
 
 
 if TYPE_CHECKING:
@@ -36,14 +41,15 @@ class AdversarialLoss:
         def cost(
             self,
             *,
-            rows: int,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one media element; per-sample scalar work is spread ``1 / n``.
 
-            A token is one element of ``fake_media``; ``rows`` is the
-            elements one sample holds. Per element, the L1 term is a subtract
+            A token is one element of ``fake_media``; the geometry's rows are
+            the elements one sample holds. Per element, the L1 term is a subtract
             and a magnitude, then the mean over the sample is one reduction of
             ``(n - 1) / n``; its adjoint scales the saved sign by the upstream
             gradient and by ``1 / n``, three ops. Per SAMPLE, and so divided by
@@ -58,33 +64,39 @@ class AdversarialLoss:
             logical intermediate reads/writes, even for the width-one mean.
 
             Args:
-              rows: Elements per sample; the L1 mean's width.
-              itemsize: Bytes per logical tensor element.
-              **kwargs: The rest of the bus, unread.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-element cost of this loss.
 
             """
-            del kwargs
-            return Cost(
-                primal=Compute(
-                    flops=Flops(elementwise=2 + (8 + 3) / rows),
-                    bytes=Bytes(elementwise=(5 + 33 / rows) * itemsize),
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
+            return (
+                traffic(
+                    "primal",
+                    "elementwise",
+                    elements=5 + 33 / rows,
+                    flops=2 + (8 + 3) / rows,
+                    dtype=dt,
                 )
                 + reduction_cost(
                     input_elements=rows + 1,
                     output_groups=2,
                     rows=rows,
-                    itemsize=itemsize,
-                ),
-                adjoint=Compute(
-                    flops=Flops(elementwise=3 + (5 + 2) / rows),
-                    bytes=Bytes(
-                        elementwise=(7 + 16 / rows) * itemsize,
-                        reduction=(rows + 3) * itemsize / rows,
-                    ),
-                ),
+                    dtype=dt,
+                )
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=7 + 16 / rows,
+                    flops=3 + (5 + 2) / rows,
+                    dtype=dt,
+                )
+                + traffic("adjoint", "reduction", elements=(rows + 3) / rows, dtype=dt)
             )
 
     def __init__(self, config: Config) -> None:

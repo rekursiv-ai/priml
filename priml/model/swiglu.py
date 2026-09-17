@@ -15,9 +15,20 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
+import torch
+
 from priml.math.basic import ceil_multiple
 from priml.math.custom_types import TensorFn
-from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    HasCost,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+    resolve_dtype,
+    shared_rows,
+    with_rows,
+)
 from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
@@ -146,45 +157,53 @@ class SwiGLU(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price projections, activation, products, and optional normalization.
 
             SiLU saves sigmoid for its five-operation derivative; squared ReLU
-            uses two backward multiplies. Unknown injected activations must
-            implement ``cost`` rather than silently receiving a zero estimate.
-            Nonlinear tensor operators read/write one row; squared ReLU is
-            two operators. Their scalar FLOPs do not imply extra tensor I/O.
+            uses two backward multiplies. Nonlinear tensor operators read/write
+            one row; squared ReLU is two operators. Their scalar FLOPs do not
+            imply extra tensor I/O.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
+            Raises:
+              TypeError: ``act`` is neither SiLU nor squared ReLU; an injected
+                activation has no analytical price, and a silent zero would
+                understate the model.
+
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = resolve_dtype(dtype)
             up_copies = 2 if self.gate and self.split_gate_projection else 1
-            up = up_copies * matmul_cost(
+            up = matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_hidden
                 * (2 if self.gate else 1)
                 // up_copies,
                 bias=self.bias,
                 rows=rows,
-                itemsize=itemsize,
-            )
+                dtype=dt,
+            ).tile(up_copies, copies=up_copies)
             down = matmul_cost(
                 channels_in=self.channels_hidden,
                 channels_out=self.channels_out,
                 bias=self.bias,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
-            activation = Cost()
+            priced_act = Cost()
             if self.act is nn.functional.silu:
                 fwd, bwd = (5, 5) if self.norm is None else (4, 3)
                 reads, writes = 1, 1
@@ -193,18 +212,24 @@ class SwiGLU(nn.Module):
                 fwd, bwd = (1, 2) if self.norm is None else (0, 1)
                 reads, writes = (2, 2) if self.norm is None else (1, 1)
                 adj_reads, adj_writes = (4, 2) if self.norm is None else (2, 1)
-            else:
-                activation = cost(
-                    self.act,
-                    channels=self.channels_hidden,
-                    rows=rows,
-                    itemsize=itemsize,
-                    **kwargs,
+            elif isinstance(self.act, HasCost):
+                # An injected activation that prices itself: its own ledger,
+                # then the gate product this module still owns.
+                priced_act = self.act.cost(
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **with_rows(rows, **kwargs),
                 )
                 fwd = bwd = reads = writes = adj_reads = adj_writes = 0
+            else:
+                raise TypeError(
+                    f"SwiGLU.Config.cost has no price for act={self.act!r}; "
+                    "only silu and relu_squared are priced.",
+                )
             # Each product is one multiply forward and two backward.
             products = int(self.gate) + int(self.norm is not None)
-            scalar = activation + elementwise_cost(
+            scalar = elementwise_cost(
                 primal=(fwd + products) * self.channels_hidden,
                 adjoint=(bwd + 2 * products) * self.channels_hidden,
                 channels=self.channels_hidden,
@@ -212,18 +237,20 @@ class SwiGLU(nn.Module):
                 outputs=writes + products,
                 adjoint_inputs=adj_reads + 4 * products,
                 adjoint_outputs=adj_writes + 2 * products,
-                itemsize=itemsize,
+                dtype=dt,
             )
             if self.norm is None:
-                return up + down + scalar
+                return up + down + scalar + priced_act
             return (
                 up
                 + down
                 + scalar
+                + priced_act
                 + cost(
                     self.norm,
-                    rows=rows,
-                    itemsize=itemsize,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 )
             )

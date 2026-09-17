@@ -41,14 +41,15 @@ from torch import Tensor, nn
 import torch
 
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
+    resolve_dtype,
+    shared_rows,
+    traffic,
+    with_rows,
 )
 from priml.model.norm import LayerNorm
 
@@ -99,9 +100,9 @@ class ActorCriticGTrXL(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one environment step of one worker.
@@ -121,22 +122,20 @@ class ActorCriticGTrXL(nn.Module):
             input per layer. Maintaining that memory -- the reset, the
             append -- is cache bookkeeping, unpriced like a KV-cache update.
 
-            This is the model root: it states the batch geometry itself, so
-            a ``rows`` already on the bus is discarded and every parameter is
-            shared by ``batch_size * seq_len`` tokens.
+            This is the model root: every parameter is shared by
+            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
+            replaced by the batch's tokens.
 
             Args:
-              seq_len: Steps scored in one pass over shared keys.
-              batch_size: Workers stepped together.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The rest of the open message bus, forwarded to every
-                child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            kwargs.pop("rows", None)
             rows = seq_len * batch_size
             keys = self.memory_length + seq_len
             layer = _layer_cost(
@@ -146,16 +145,16 @@ class ActorCriticGTrXL(nn.Module):
                 keys=keys,
                 key_rows=rows * keys // seq_len,
                 seq_len=seq_len,
-                rows=rows,
-                itemsize=itemsize,
-                **kwargs,
+                batch_size=batch_size,
+                dtype=dtype,
+                **with_rows(rows, **kwargs),
             )
             encoder = matmul_cost(
                 channels_in=self.observation_size,
                 channels_out=self.embed_dim,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dtype,
             )
             heads = sum(
                 (
@@ -164,15 +163,17 @@ class ActorCriticGTrXL(nn.Module):
                         channels_in=self.channels_in,
                         output_size=output_size,
                         rows=rows,
-                        itemsize=itemsize,
+                        dtype=dtype,
                     )
                     for output_size in (self.num_actions, 1)
                 ),
                 Cost(),
             )
             return replace(
-                encoder + self.num_layers * layer + heads,
-                bytes_state=itemsize * self.num_layers * self.embed_dim,
+                encoder + layer.tile(self.num_layers, copies=self.num_layers) + heads,
+                bytes_state=resolve_dtype(dtype).itemsize
+                * self.num_layers
+                * self.embed_dim,
             )
 
     def __init__(self, config: Config) -> None:
@@ -606,15 +607,16 @@ def _head_cost(
     embed_dim: int,
     channels_in: int,
     output_size: int,
-    rows: int,
-    itemsize: int,
+    rows: float,
+    dtype: torch.dtype | None,
 ) -> Cost:
     """Price one head: two biased ReLU layers, then a biased readout."""
+    dt = dtype
     relu = elementwise_cost(
         primal=channels_in,
         adjoint=channels_in,
         channels=channels_in,
-        itemsize=itemsize,
+        dtype=dt,
     )
     return (
         matmul_cost(
@@ -622,7 +624,7 @@ def _head_cost(
             channels_out=channels_in,
             bias=True,
             rows=rows,
-            itemsize=itemsize,
+            dtype=dt,
         )
         + relu
         + matmul_cost(
@@ -630,7 +632,7 @@ def _head_cost(
             channels_out=channels_in,
             bias=True,
             rows=rows,
-            itemsize=itemsize,
+            dtype=dt,
         )
         + relu
         + matmul_cost(
@@ -638,7 +640,7 @@ def _head_cost(
             channels_out=output_size,
             bias=True,
             rows=rows,
-            itemsize=itemsize,
+            dtype=dt,
         )
     )
 
@@ -654,33 +656,39 @@ def _layer_cost(
     keys: int,
     key_rows: int,
     seq_len: int,
-    rows: int,
-    itemsize: int,
+    batch_size: int,
+    dtype: torch.dtype | None,
     **kwargs: object,
 ) -> Cost:
     """Price one layer for one token that attends over ``keys`` rows."""
+    rows = shared_rows(seq_len, batch_size, **kwargs)
+    dt = dtype
     per_token_key_rows = key_rows / rows
     norm = LayerNorm.Config(embed_dim, elementwise_affine=True).finalize()
-    norm_attention = _spread(
-        cost(norm, rows=rows + key_rows, itemsize=itemsize, **kwargs),
-        1 + per_token_key_rows,
-    )
+    norm_attention = cost(
+        norm,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        dtype=dtype,
+        **with_rows(rows + key_rows, **kwargs),
+    ).tile(1 + per_token_key_rows)
     projection = matmul_cost(
         channels_in=embed_dim,
         channels_out=qkv_dim,
         bias=True,
         rows=rows,
-        itemsize=itemsize,
+        dtype=dt,
     )
-    key_value = 2 * _spread(
+    key_value = (
         matmul_cost(
             channels_in=embed_dim,
             channels_out=qkv_dim,
             bias=True,
             rows=key_rows,
-            itemsize=itemsize,
-        ),
-        per_token_key_rows,
+            dtype=dt,
+        )
+        .tile(per_token_key_rows)
+        .tile(2, copies=2)
     )
     # The content and position biases are each added to the query; the
     # adjoint sums the two score paths' gradients back into it.
@@ -693,7 +701,7 @@ def _layer_cost(
         adjoint_inputs=2,
         params=2 * qkv_dim,
         rows=rows,
-        itemsize=itemsize,
+        dtype=dt,
     )
     attention = (
         norm_attention
@@ -705,54 +713,53 @@ def _layer_cost(
             qkv_dim=qkv_dim,
             keys=keys,
             rows=rows,
-            itemsize=itemsize,
+            dtype=dt,
         )
         + _relative_scores_cost(
             num_heads=num_heads,
             qkv_dim=qkv_dim,
             keys=keys,
             seq_len=seq_len,
-            itemsize=itemsize,
+            dtype=dt,
         )
         + matmul_cost(
             channels_in=qkv_dim,
             channels_out=embed_dim,
             bias=True,
             rows=rows,
-            itemsize=itemsize,
+            dtype=dt,
         )
         + elementwise_cost(
             primal=embed_dim,
             adjoint=embed_dim,
             channels=embed_dim,
-            itemsize=itemsize,
+            dtype=dt,
         )
     )
     # GELU: scale, erf, add, halve, multiply; the adjoint adds the density.
     mlp = (
-        cost(norm, rows=rows, itemsize=itemsize, **kwargs)
-        + 2
-        * matmul_cost(
+        cost(norm, seq_len=seq_len, batch_size=batch_size, dtype=dtype, **kwargs)
+        + matmul_cost(
             channels_in=embed_dim,
             channels_out=embed_dim,
             bias=True,
             rows=rows,
-            itemsize=itemsize,
-        )
+            dtype=dt,
+        ).tile(2, copies=2)
         + elementwise_cost(
             primal=5 * embed_dim,
             adjoint=6 * embed_dim,
             channels=embed_dim,
-            itemsize=itemsize,
+            dtype=dt,
         )
         + elementwise_cost(
             primal=embed_dim,
             adjoint=embed_dim,
             channels=embed_dim,
-            itemsize=itemsize,
+            dtype=dt,
         )
     )
-    gate = _gate_cost(embed_dim=embed_dim, rows=rows, itemsize=itemsize)
+    gate = _gate_cost(embed_dim=embed_dim, rows=rows, dtype=dt)
     return attention + gate + mlp + gate
 
 
@@ -761,36 +768,37 @@ def _layer_cost(
 # scatter-add back. The combined score is added, scaled, masked, then softmaxed: subtract
 # the max, exponentiate, divide, with the max and the sum as the reductions and the
 # adjoint's ``sum(g * p)`` as one more.
+# The position gather's index is one ``int64`` per score each way.
 def _relative_scores_cost(
     *,
     num_heads: int,
     qkv_dim: int,
     keys: int,
     seq_len: int,
-    itemsize: int,
+    dtype: torch.dtype | None,
 ) -> Cost:
     """Price unfused relative attention, sharing K/V within each query sequence."""
+    dt = dtype
     channels_head = qkv_dim // num_heads
     scores = matmul_cost(
         channels_in=channels_head,
         channels_out=keys,
         weight=False,
         rows=seq_len,
-        itemsize=itemsize,
+        dtype=dt,
     )
     values = matmul_cost(
         channels_in=keys,
         channels_out=channels_head,
         weight=False,
         rows=seq_len,
-        itemsize=itemsize,
+        dtype=dt,
     )
-    gather = Cost(
-        primal=Compute(bytes=Bytes(selection=itemsize * 2 * keys)),
-        adjoint=Compute(
-            flops=Flops(selection=keys),
-            bytes=Bytes(selection=itemsize * 3 * keys),
-        ),
+    gather = (
+        traffic("primal", "selection", elements=keys, dtype=dt)
+        + traffic("primal", "selection", elements=keys, dtype=torch.int64)
+        + traffic("adjoint", "selection", elements=2 * keys, flops=keys, dtype=dt)
+        + traffic("adjoint", "selection", elements=keys, dtype=torch.int64)
     )
     # Add, scale, mask, subtract, exp, divide; backward includes the two score paths.
     softmax = elementwise_cost(
@@ -801,12 +809,15 @@ def _relative_scores_cost(
         outputs=6,
         adjoint_inputs=10,
         adjoint_outputs=6,
-        itemsize=itemsize,
-    ) + Cost(
-        primal=2 * reduction_cost(input_elements=keys, itemsize=itemsize),
-        adjoint=reduction_cost(input_elements=keys, itemsize=itemsize),
+        dtype=dt,
+    ) + (
+        reduction_cost(input_elements=keys, dtype=dt).tile(2, copies=2)
+        + reduction_cost(input_elements=keys, dtype=dt, phase="adjoint")
     )
-    return num_heads * (2 * scores + gather + softmax + values)
+    return (scores.tile(2, copies=2) + gather + softmax + values).tile(
+        num_heads,
+        copies=num_heads,
+    )
 
 
 def _relative_table_cost(
@@ -814,18 +825,18 @@ def _relative_table_cost(
     embed_dim: int,
     qkv_dim: int,
     keys: int,
-    rows: int,
-    itemsize: int,
+    rows: float,
+    dtype: torch.dtype | None,
 ) -> Cost:
     """Price one shared constant table's projection and weight gradient."""
+    dt = dtype
     products = 2 * embed_dim * qkv_dim * (keys / rows)
     params = embed_dim * qkv_dim
-    moved = itemsize * (keys * (embed_dim + qkv_dim) + params) / rows
-    return Cost(
-        primal=Compute(flops=Flops(matmul=products), bytes=Bytes(matmul=moved)),
-        adjoint=Compute(flops=Flops(matmul=products), bytes=Bytes(matmul=moved)),
-        params=params,
-        params_active=params,
+    moved = (keys * (embed_dim + qkv_dim) + params) / rows
+    return (
+        traffic("primal", "matmul", elements=moved, flops=products, dtype=dt)
+        + traffic("adjoint", "matmul", elements=moved, flops=products, dtype=dt)
+        + Cost(params=params, params_active=params)
     )
 
 
@@ -834,14 +845,15 @@ def _relative_table_cost(
 # subtraction, two products, and an add. The adjoint reuses the saved gates: five for the
 # interpolation, three for each of the three nonlinearities, two through the reset
 # product, and three accumulating the residual's four gradient paths.
-def _gate_cost(*, embed_dim: int, rows: int, itemsize: int) -> Cost:
+def _gate_cost(*, embed_dim: int, rows: float, dtype: torch.dtype | None) -> Cost:
     """Price one gated residual's projections and scalar-region tensor boundary."""
-    return 6 * matmul_cost(
+    dt = dtype
+    return matmul_cost(
         channels_in=embed_dim,
         channels_out=embed_dim,
         rows=rows,
-        itemsize=itemsize,
-    ) + elementwise_cost(
+        dtype=dt,
+    ).tile(6, copies=6) + elementwise_cost(
         primal=12 * embed_dim,
         adjoint=19 * embed_dim,
         channels=embed_dim,
@@ -851,22 +863,7 @@ def _gate_cost(*, embed_dim: int, rows: int, itemsize: int) -> Cost:
         adjoint_outputs=8,
         params=embed_dim,
         rows=rows,
-        itemsize=itemsize,
-    )
-
-
-def _spread(total: Cost, rows: float) -> Cost:
-    """Run ``total`` on ``rows`` rows per token; parameters stay owned once."""
-    return replace(
-        total,
-        primal=Compute(
-            flops=total.primal.flops * rows,
-            bytes=total.primal.bytes * rows,
-        ),
-        adjoint=Compute(
-            flops=total.adjoint.flops * rows,
-            bytes=total.adjoint.bytes * rows,
-        ),
+        dtype=dt,
     )
 
 

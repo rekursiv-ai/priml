@@ -13,7 +13,7 @@ from torch import nn
 import pytest
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import Cost, cost
 from priml.model.custom_types import ChannelsInOut
 from priml.model.norm import (
     BatchNorm,
@@ -545,7 +545,12 @@ def test_norm_cost_splits_elementwise_from_row_sums(
     (the batch norms at one token, eight groups of one) sums nothing. The
     expected pairs are ``(elementwise, reduction)``.
     """
-    model_cost = cost(config.copy_tree().finalize())
+    model_cost = cost(
+        config.copy_tree().finalize(),
+        seq_len=1,
+        batch_size=1,
+        dtype=None,
+    )
     traffic: dict[type[Makeable[nn.Module]], tuple[float, float, float]] = {
         RMSNorm.Config: (4 * 8 + 7 + 3 * params, 10 * 8 + 12 + 6 * params, 9),
         CenteredRMSNorm.Config: (9 * 8 + 7, 16 * 8 + 12, 9),
@@ -577,18 +582,18 @@ def test_norm_cost_splits_elementwise_from_row_sums(
         ),
     }
     primal_io, adjoint_io, reduction_io = traffic[type(config)]
+    f32 = torch.float32
     assert model_cost == Cost(
-        primal=Compute(
-            flops=Flops(elementwise=primal[0], reduction=primal[1]),
-            bytes=Bytes(elementwise=4 * primal_io, reduction=4 * reduction_io),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=adjoint[0], reduction=adjoint[1]),
-            bytes=Bytes(
-                elementwise=4 * adjoint_io,
-                reduction=4 * (reduction_io + 2 * params),
-            ),
-        ),
+        cells={
+            ("flops", "primal", "elementwise", f32): primal[0],
+            ("flops", "primal", "reduction", f32): primal[1],
+            ("flops", "adjoint", "elementwise", f32): adjoint[0],
+            ("flops", "adjoint", "reduction", f32): adjoint[1],
+            ("bytes", "primal", "elementwise", f32): 4 * primal_io,
+            ("bytes", "primal", "reduction", f32): 4 * reduction_io,
+            ("bytes", "adjoint", "elementwise", f32): 4 * adjoint_io,
+            ("bytes", "adjoint", "reduction", f32): 4 * (reduction_io + 2 * params),
+        },
         params=params,
         params_active=params,
     )
@@ -616,10 +621,12 @@ def test_norm_cost_is_matmul_free(
     model_cost = assert_cost_matches_torch(
         config,
         build_input=build_input,
-        num_tokens=6,
+        seq_len=6,
+        batch_size=1,
+        dtype=None,
     )
-    assert model_cost.training.flops.matmul == 0
-    assert model_cost.training.flops.elementwise > 0
+    assert model_cost["flops", :, "matmul"].sum() == 0
+    assert model_cost["flops", :, "elementwise"].sum() > 0
 
 
 @pytest.mark.parametrize(
@@ -638,34 +645,45 @@ def test_affine_gradients_reduce_over_the_rows(config: Makeable[nn.Module]) -> N
     Forward work per row is unchanged (the ``1 + weight`` fold aside); backward
     gains exactly ``(N - 1) / N`` additions per parameter, the primitive's rule.
     """
+    # Rows come from the batch so a group norm's per-sample span stays fixed.
     finalized = config.copy_tree().finalize()
-    one = cost(finalized, rows=1)
-    four = cost(finalized, rows=4)
+    one = cost(finalized, seq_len=1, batch_size=1, dtype=None)
+    four = cost(finalized, seq_len=1, batch_size=4, dtype=None)
     assert four.params == one.params > 0
-    fold = one.primal.flops.elementwise - four.primal.flops.elementwise
-    assert fold in (0, 8 * (1 - 1 / 4))
-    assert four.adjoint.flops.elementwise == one.adjoint.flops.elementwise
-    assert four.adjoint.flops.reduction - one.adjoint.flops.reduction == (
-        one.params * 3 / 4
+    fold = (
+        one["flops", "primal", "elementwise"].sum()
+        - four["flops", "primal", "elementwise"].sum()
     )
+    assert fold in (0, 8 * (1 - 1 / 4))
+    assert (
+        four["flops", "adjoint", "elementwise"].sum()
+        == one["flops", "adjoint", "elementwise"].sum()
+    )
+    assert four["flops", "adjoint", "reduction"].sum() - one[
+        "flops",
+        "adjoint",
+        "reduction",
+    ].sum() == (one.params * 3 / 4)
 
 
 def test_affine_norm_pullback_reads_only_scale_not_shift() -> None:
     config = LayerNorm.Config(8)
-    plain = config.cost(rows=4, itemsize=2)
+    plain = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     config.elementwise_affine = True
-    affine = config.cost(rows=4, itemsize=2)
-    assert affine.adjoint.bytes.elementwise - plain.adjoint.bytes.elementwise == 2 * (
-        5 * 8 + 8 / 4
-    )
+    affine = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    assert affine["bytes", "adjoint", "elementwise"].sum() - plain[
+        "bytes",
+        "adjoint",
+        "elementwise",
+    ].sum() == 2 * (5 * 8 + 8 / 4)
 
 
 def test_rms_norm_cost_counts_unfused_tensor_operands() -> None:
-    result = RMSNorm.Config(8).cost(itemsize=2)
+    result = RMSNorm.Config(8).cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
     # Square, three scalar transforms, then vector-by-scalar scaling.
-    assert result.primal.bytes.elementwise == 2 * (2 * 8 + 6 + 2 * 8 + 1)
-    assert result.primal.bytes.reduction == 2 * (8 + 1)
-    assert result.adjoint.bytes.reduction == 2 * (8 + 1)
+    assert result["bytes", "primal", "elementwise"].sum() == 2 * (2 * 8 + 6 + 2 * 8 + 1)
+    assert result["bytes", "primal", "reduction"].sum() == 2 * (8 + 1)
+    assert result["bytes", "adjoint", "reduction"].sum() == 2 * (8 + 1)
 
 
 if __name__ == "__main__":

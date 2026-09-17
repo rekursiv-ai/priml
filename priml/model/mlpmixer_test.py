@@ -83,24 +83,35 @@ def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
     model_cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
     finalized = config.copy_tree().finalize()
-    over_tokens = cost(finalized.token_mixer, rows=2) + cost(
-        finalized.norm_token,
-        rows=2,
-    )
-    over_channels = cost(finalized.channel_mixer, rows=2) + cost(
+    over_tokens = cost(
+        finalized.token_mixer,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
+    ) + cost(finalized.norm_token, seq_len=2, batch_size=1, dtype=None)
+    over_channels = cost(
+        finalized.channel_mixer,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
+    ) + cost(
         finalized.norm_channel,
-        rows=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
     token = 2 * (2 * 3) + 3 * 2  # up_proj is twice the hidden width when gated.
     channel = 4 * (2 * 5) + 5 * 4
-    assert model_cost.primal.flops.matmul == 2 * (2 * token + channel)
-    assert model_cost.adjoint.flops.matmul == 4 * (2 * token + channel)
-    assert model_cost.primal.flops.elementwise == (
-        2 * over_tokens.primal.flops.elementwise
-        + over_channels.primal.flops.elementwise
+    assert model_cost["flops", "primal", "matmul"].sum() == 2 * (2 * token + channel)
+    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * (2 * token + channel)
+    assert model_cost["flops", "primal", "elementwise"].sum() == (
+        2 * over_tokens["flops", "primal", "elementwise"].sum()
+        + over_channels["flops", "primal", "elementwise"].sum()
         + 2 * 4
     )
     assert model_cost.params == token + channel + 2
@@ -113,22 +124,40 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
     config.norm_token = RMSNorm.Config()
     config.norm_token.elementwise_affine = True
     finalized = config.finalize()
-    result = finalized.cost(rows=6, itemsize=2)
-    token = cost(finalized.token_mixer, rows=12, itemsize=2)
-    channel = cost(finalized.channel_mixer, rows=6, itemsize=2)
-    assert (
-        result.primal.bytes.matmul
-        == 2 * token.primal.bytes.matmul + channel.primal.bytes.matmul
+    result = finalized.cost(seq_len=6, batch_size=1, dtype=torch.bfloat16)
+    token = cost(finalized.token_mixer, seq_len=12, batch_size=1, dtype=torch.bfloat16)
+    channel = cost(
+        finalized.channel_mixer,
+        seq_len=6,
+        batch_size=1,
+        dtype=torch.bfloat16,
     )
     assert (
-        result.adjoint.bytes.matmul
-        == 2 * token.adjoint.bytes.matmul + channel.adjoint.bytes.matmul
+        result["bytes", "primal", "matmul"].sum()
+        == 2 * token["bytes", "primal", "matmul"].sum()
+        + channel["bytes", "primal", "matmul"].sum()
     )
-    norm_token = cost(finalized.norm_token, rows=12, itemsize=2)
-    norm_channel = cost(finalized.norm_channel, rows=6, itemsize=2)
     assert (
-        result.adjoint.flops.reduction
-        == 2 * norm_token.adjoint.flops.reduction + norm_channel.adjoint.flops.reduction
+        result["bytes", "adjoint", "matmul"].sum()
+        == 2 * token["bytes", "adjoint", "matmul"].sum()
+        + channel["bytes", "adjoint", "matmul"].sum()
+    )
+    norm_token = cost(
+        finalized.norm_token,
+        seq_len=12,
+        batch_size=1,
+        dtype=torch.bfloat16,
+    )
+    norm_channel = cost(
+        finalized.norm_channel,
+        seq_len=6,
+        batch_size=1,
+        dtype=torch.bfloat16,
+    )
+    assert (
+        result["flops", "adjoint", "reduction"].sum()
+        == 2 * norm_token["flops", "adjoint", "reduction"].sum()
+        + norm_channel["flops", "adjoint", "reduction"].sum()
     )
 
 

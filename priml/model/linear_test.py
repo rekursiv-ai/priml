@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from priml.model import linear
-from priml.model.cost import Bytes, Flops, matmul_cost
+from priml.model.cost import Cost, matmul_cost
 from priml.model.linear import EnsembleLinear, Linear
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -231,46 +231,82 @@ def test_linear_cost_is_the_matmul() -> None:
     analytical = assert_cost_matches_torch(
         Linear.Config(4, 3),
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
     assert analytical == matmul_cost(channels_in=4, channels_out=3, rows=2)
-    assert analytical.primal.flops == Flops(matmul=2 * 4 * 3)
-    assert analytical.adjoint.flops == Flops(matmul=4 * 4 * 3)
-    assert analytical.primal.bytes == Bytes(matmul=4 * (4 + 3 + 12 / 2))
+    f32 = torch.float32
+    assert analytical["flops", "primal"].cells == {("matmul", f32): 2 * 4 * 3}
+    assert analytical["flops", "adjoint"].cells == {("matmul", f32): 4 * 4 * 3}
+    assert analytical["bytes", "primal"].cells == {
+        ("matmul", f32): 4 * (4 + 3 + 12 / 2),
+    }
 
 
-def test_linear_cost_counts_uniform_bytes() -> None:
-    config = Linear.Config(4, 3)
-    result = config.cost(rows=2, itemsize=2)
-    assert result.primal.bytes.matmul == 2 * (4 + 3 + 12 / 2)
-    assert result.adjoint.bytes.matmul == 4 * (4 + 3 + 12 / 2)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
+def test_linear_cost_prices_bytes_at_the_bus_dtype(dtype: torch.dtype) -> None:
+    result = Linear.Config(4, 3).cost(seq_len=2, batch_size=1, dtype=dtype)
+    s = dtype.itemsize
+    assert result["bytes", "primal", "matmul", dtype] == s * (4 + 3 + 12 / 2)
+    assert result["bytes", "adjoint", "matmul", dtype] == 2 * s * (4 + 3 + 12 / 2)
+    assert (
+        result[
+            "bytes",
+            :,
+            :,
+            torch.float32 if dtype != torch.float32 else torch.float16,
+        ]
+        == Cost()
+    )
+
+
+def test_linear_cost_uses_its_own_storage_dtype_over_the_bus() -> None:
+    config = Linear.Config(4, 3, dtype=torch.bfloat16)
+    result = config.cost(seq_len=2, batch_size=1, dtype=torch.float32)
+    assert result["bytes", :, :, torch.float32] == Cost()
+    assert result["bytes", "primal", "matmul", torch.bfloat16] == 2 * (4 + 3 + 12 / 2)
 
 
 def test_linear_cost_counts_bias_separately_from_matmuls() -> None:
     biased = assert_cost_matches_torch(
         Linear.Config(4, 3, bias=True),
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
-    plain = Linear.Config(4, 3).copy_tree().finalize().cost(rows=2)
+    plain = (
+        Linear.Config(4, 3)
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=2, batch_size=1, dtype=None)
+    )
     assert biased.params == plain.params + 3
-    assert biased.primal.bytes.matmul == plain.primal.bytes.matmul
-    assert biased.primal.bytes.elementwise == 4 * (2 * 3 + 3 / 2)
-    assert biased.training.flops.matmul == plain.training.flops.matmul
-    assert biased.primal.flops.elementwise == 3
-    assert biased.adjoint.flops.reduction == 3 * (2 - 1) / 2
+    assert biased["bytes", "primal", "matmul"] == plain["bytes", "primal", "matmul"]
+    assert biased["bytes", "primal", "elementwise"].sum() == 4 * (2 * 3 + 3 / 2)
+    assert biased["flops", :, "matmul"].sum() == plain["flops", :, "matmul"].sum()
+    assert biased["flops", "primal", "elementwise"].sum() == 3
+    assert biased["flops", "adjoint", "reduction"].sum() == 3 * (2 - 1) / 2
 
 
 def test_ensemble_linear_cost_is_every_member() -> None:
     analytical = assert_cost_matches_torch(
         EnsembleLinear.Config(4, 3, num_ensemble=5, bias=True),
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
-    assert analytical.primal.flops.matmul == 2 * 4 * 3 * 5
-    assert analytical.primal.bytes.matmul == 4 * (4 + 3 * 5 + 4 * 3 * 5 / 2)
-    assert analytical.adjoint.flops.matmul == 2 * analytical.primal.flops.matmul
-    assert analytical.primal.bytes.elementwise == 4 * (2 * 3 + 3 / 2) * 5
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 4 * 3 * 5
+    assert analytical["bytes", "primal", "matmul"].sum() == 4 * (
+        4 + 3 * 5 + 4 * 3 * 5 / 2
+    )
+    assert (
+        analytical["flops", "adjoint", "matmul"].sum()
+        == 2 * analytical["flops", "primal", "matmul"].sum()
+    )
+    assert analytical["bytes", "primal", "elementwise"].sum() == 4 * (2 * 3 + 3 / 2) * 5
 
 
 if __name__ == "__main__":

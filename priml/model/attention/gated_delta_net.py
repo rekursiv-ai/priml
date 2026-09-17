@@ -24,6 +24,8 @@ from priml.model.cost import (
     elementwise_cost,
     matmul_cost,
     reduction_cost,
+    shared_rows,
+    with_rows,
 )
 from priml.model.custom_types import (
     ChannelsIn,
@@ -107,8 +109,9 @@ class GatedDeltaNet(nn.Module):
         def cost(
             self,
             *,
-            rows: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price the projections, the depthwise conv, and the recurrent scan.
@@ -125,14 +128,17 @@ class GatedDeltaNet(nn.Module):
             ``bytes_state`` is zero: no cache grows with token count.
 
             Args:
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
             h = self.channels_in
             k_dim = self.num_heads_k * self.channels_k_head
             v_dim = self.num_heads_v * self.channels_v_head
@@ -143,7 +149,7 @@ class GatedDeltaNet(nn.Module):
                         channels_in=c_in,
                         channels_out=c_out,
                         rows=rows,
-                        itemsize=itemsize,
+                        dtype=dt,
                     )
                     for c_in, c_out in (
                         (h, conv_dim),
@@ -157,18 +163,18 @@ class GatedDeltaNet(nn.Module):
             )
             # Depthwise: each channel is its own ``[taps] -> [1]`` map, followed
             # by a SiLU.
-            conv = conv_dim * matmul_cost(
+            conv = matmul_cost(
                 channels_in=self.conv_kernel_size,
                 channels_out=1,
                 bias=False,
                 rows=rows,
-                itemsize=itemsize,
-            ) + elementwise_cost(
+                dtype=dt,
+            ).tile(conv_dim, copies=conv_dim) + elementwise_cost(
                 primal=5 * conv_dim,
                 adjoint=5 * conv_dim,
                 channels=conv_dim,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
             # The recurrence: per value head, ``k^T v`` writes the state and
             # ``S q`` reads it -- two activation products of ``k_head x v_head``
@@ -180,25 +186,36 @@ class GatedDeltaNet(nn.Module):
                 channels_out=self.channels_v_head,
                 weight=False,
                 rows=1,
-                itemsize=itemsize,
+                dtype=dt,
             )
             state_read = matmul_cost(
                 channels_in=self.channels_k_head,
                 channels_out=self.channels_v_head,
                 weight=False,
                 rows=1,
-                itemsize=itemsize,
+                dtype=dt,
             )
             # Decay, delta, and weighted update over the state; the q/k L2 norms
             # each reduce their own row once in both primal and adjoint.
             state = self.num_heads_v * self.channels_k_head * self.channels_v_head
-            norms = 2 * reduction_cost(
-                input_elements=self.num_heads_v * self.channels_k_head,
-                output_groups=self.num_heads_v,
-                itemsize=itemsize,
-            )
+            norms = (
+                reduction_cost(
+                    input_elements=self.num_heads_v * self.channels_k_head,
+                    output_groups=self.num_heads_v,
+                    dtype=dt,
+                )
+                + reduction_cost(
+                    input_elements=self.num_heads_v * self.channels_k_head,
+                    output_groups=self.num_heads_v,
+                    dtype=dt,
+                    phase="adjoint",
+                )
+            ).tile(2, copies=2)
             scan = (
-                self.num_heads_v * (state_write + state_read)
+                (state_write + state_read).tile(
+                    self.num_heads_v,
+                    copies=self.num_heads_v,
+                )
                 + elementwise_cost(
                     primal=2 * state
                     + 2 * v_dim
@@ -214,12 +231,9 @@ class GatedDeltaNet(nn.Module):
                     adjoint_inputs=7,
                     adjoint_outputs=3,
                     rows=rows,
-                    itemsize=itemsize,
+                    dtype=dt,
                 )
-                + Cost(
-                    primal=norms,
-                    adjoint=norms,
-                )
+                + norms
             )
             # ``dt_bias`` and ``A_log``: one gate parameter per value head each.
             # ``A_log`` is exponentiated once per batch, so that is shared.
@@ -232,29 +246,29 @@ class GatedDeltaNet(nn.Module):
                 adjoint_inputs=6,
                 adjoint_outputs=3,
                 params=2 * self.num_heads_v,
-                itemsize=itemsize,
+                dtype=dt,
                 rows=rows,
             )
             # The norm runs once per value head; its parameters exist once.
             norm = cost(
                 self.norm,
-                itemsize=itemsize,
-                rows=rows * self.num_heads_v,
-                **kwargs,
-            ).tile(self.num_heads_v)
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **with_rows(rows * self.num_heads_v, **kwargs),
+            ).tile(
+                self.num_heads_v,
+            )
             return (
                 projections
                 + conv
                 + scan
                 + gates
                 + norm
-                + self._output_gate_cost(
-                    rows=rows,
-                    itemsize=itemsize,
-                )
+                + self._output_gate_cost(rows=rows, dtype=dt)
             )
 
-        def _output_gate_cost(self, *, rows: int, itemsize: int) -> Cost:
+        def _output_gate_cost(self, *, rows: float, dtype: torch.dtype | None) -> Cost:
             """Price the separate post-norm SiLU and product."""
             width = self.num_heads_v * self.channels_v_head
             return elementwise_cost(
@@ -266,7 +280,7 @@ class GatedDeltaNet(nn.Module):
                 adjoint_inputs=6,
                 adjoint_outputs=3,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:

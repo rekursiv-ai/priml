@@ -379,7 +379,13 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
     config.channels_head = 4
     config.gate_channels = 4
     config.gated = False
-    baseline = cost(config.copy_tree().finalize(), seq_len=4, rows=8, itemsize=2)
+    baseline = cost(
+        config.copy_tree().finalize(),
+        seq_len=4,
+        batch_size=1,
+        dtype=torch.bfloat16,
+        rows=8,
+    )
     if feature == "head_gate":
         config.head_gate = Linear.Config()
     elif feature == "norm_out":
@@ -387,23 +393,50 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
     else:
         setattr(config, feature, True)
     config = config.finalize()
-    counted = cost(config, seq_len=4, rows=8, itemsize=2)
+    counted = cost(config, seq_len=4, batch_size=1, dtype=torch.bfloat16, rows=8)
     assert counted.params == sum(p.numel() for p in config.make().parameters())
     if feature == "norm_out":
-        extra = cost(config.norm_out, rows=24, itemsize=2).tile(3)
+        extra = cost(
+            config.norm_out,
+            seq_len=24,
+            batch_size=1,
+            dtype=torch.bfloat16,
+        ).tile(
+            3,
+        )
         assert counted == baseline + extra
     else:
         assert counted.params - baseline.params == 12
-        assert counted.primal.flops.matmul - baseline.primal.flops.matmul == 24
-        assert counted.adjoint.flops.matmul - baseline.adjoint.flops.matmul == 48
-        assert counted.primal.bytes.matmul - baseline.primal.bytes.matmul == 2 * (
-            4 + 3 + 12 / 8
+        assert (
+            counted["flops", "primal", "matmul"].sum()
+            - baseline["flops", "primal", "matmul"].sum()
+            == 24
         )
-        assert counted.adjoint.flops.reduction - baseline.adjoint.flops.reduction == 9
-        assert counted.adjoint.bytes.reduction - baseline.adjoint.bytes.reduction == 30
-        assert counted.primal.flops.elementwise - baseline.primal.flops.elementwise == (
-            15 + (12 if feature == "head_gate" else 24)
+        assert (
+            counted["flops", "adjoint", "matmul"].sum()
+            - baseline["flops", "adjoint", "matmul"].sum()
+            == 48
         )
+        assert counted["bytes", "primal", "matmul"].sum() - baseline[
+            "bytes",
+            "primal",
+            "matmul",
+        ].sum() == 2 * (4 + 3 + 12 / 8)
+        assert (
+            counted["flops", "adjoint", "reduction"].sum()
+            - baseline["flops", "adjoint", "reduction"].sum()
+            == 9
+        )
+        assert (
+            counted["bytes", "adjoint", "reduction"].sum()
+            - baseline["bytes", "adjoint", "reduction"].sum()
+            == 30
+        )
+        assert counted["flops", "primal", "elementwise"].sum() - baseline[
+            "flops",
+            "primal",
+            "elementwise",
+        ].sum() == (15 + (12 if feature == "head_gate" else 24))
 
 
 def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> None:
@@ -415,12 +448,16 @@ def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> 
     config.head_gate = Linear.Config()
     config.norm_out = RMSNorm.Config(elementwise_affine=True)
     config = config.finalize()
-    narrow = cost(config, seq_len=4, rows=8, itemsize=2)
-    wide = cost(config, seq_len=4, rows=8, itemsize=4)
-    assert wide.training.bytes == 2 * narrow.training.bytes
-    assert wide.training.flops == narrow.training.flops
+    narrow = cost(config, seq_len=4, batch_size=1, dtype=torch.bfloat16, rows=8)
+    wide = cost(config, seq_len=4, batch_size=1, dtype=None, rows=8)
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+    )
+    assert wide["bytes", :, :, torch.int64] == narrow["bytes", :, :, torch.int64]
+    assert wide["flops"].sum() == narrow["flops"].sum()
     config.fused_qk_rope = True
-    assert cost(config, seq_len=4, rows=8, itemsize=2) == narrow
+    assert cost(config, seq_len=4, batch_size=1, dtype=torch.bfloat16, rows=8) == narrow
 
 
 def test_cost_extension_matmuls_match_executed_forward_and_backward() -> None:
@@ -435,8 +472,9 @@ def test_cost_extension_matmuls_match_executed_forward_and_backward() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(2, 4, 12, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 4},
+        seq_len=4,
+        batch_size=2,
+        dtype=None,
         run=_run_all_attention_gates,
     )
 

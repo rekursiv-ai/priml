@@ -192,8 +192,9 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
             torch.randn(3, 16, requires_grad=True),
             torch.randn(3, 16, requires_grad=True),
         ),
-        num_tokens=3,
-        bus={"batch_size": 3},
+        seq_len=1,
+        batch_size=3,
+        dtype=None,
         run=_stepped,
     )
     gates = 4 * 16 * (16 + 5) + 4 * 16 * 16
@@ -201,22 +202,28 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
     biases = 16 + 2 * 4 * 16 + 5
     renorm = BatchRenorm.Config()
     renorm.channels_in = 12
-    norms = cost(renorm, rows=3) + cost(
+    norms = cost(renorm, seq_len=1, batch_size=3, dtype=None) + cost(
         LayerNorm.Config(16, elementwise_affine=True),
-        rows=3,
+        seq_len=1,
+        batch_size=3,
+        dtype=None,
     )
     assert analytical.params == weights + biases + norms.params
-    assert analytical.primal.flops.matmul == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
     # Beyond the norms: biases, the encoder's ReLU, the reset of both carried
     # tensors, and thirteen operations per LSTM unit.
-    assert analytical.primal.flops.elementwise - norms.primal.flops.elementwise == (
-        biases + 16 + 2 * 16 + 13 * 16
-    )
-    assert analytical.adjoint.flops.elementwise - norms.adjoint.flops.elementwise == (
-        16 + 2 * 16 + 22 * 16
-    )
+    assert analytical["flops", "primal", "elementwise"].sum() - norms[
+        "flops",
+        "primal",
+        "elementwise",
+    ].sum() == (biases + 16 + 2 * 16 + 13 * 16)
+    assert analytical["flops", "adjoint", "elementwise"].sum() - norms[
+        "flops",
+        "adjoint",
+        "elementwise",
+    ].sum() == (16 + 2 * 16 + 22 * 16)
     # The one-hot previous action is written, not computed.
-    assert analytical.primal.bytes.selection == 4 * 5
+    assert analytical["bytes", "primal", "selection"].sum() == 4 * 5
     assert analytical.bytes_state == 4 * 2 * 16
 
 
@@ -225,13 +232,16 @@ def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
     config.observation_size = 3
     config.channels_in = 2
     config.num_actions = 4
-    narrow = config.cost(batch_size=4, itemsize=2)
-    wide = config.cost(batch_size=4, itemsize=4)
+    narrow = config.cost(seq_len=1, batch_size=4, dtype=torch.bfloat16)
+    wide = config.cost(seq_len=1, batch_size=4, dtype=None)
     assert narrow.bytes_state == 8
     assert wide.bytes_state == 16
-    assert narrow.primal.bytes.selection == 8
-    assert wide.training.bytes == 2 * narrow.training.bytes
-    assert wide.training.flops == narrow.training.flops
+    assert narrow["bytes", "primal", "selection"].sum() == 8
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+    )
+    assert wide["flops"].sum() == narrow["flops"].sum()
 
 
 def test_exploration_starts_certain_and_ends_rare() -> None:

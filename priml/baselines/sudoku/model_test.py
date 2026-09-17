@@ -214,7 +214,9 @@ def test_deep_recurrence_cost_is_zero() -> None:
     analytical = assert_cost_matches_torch(
         DeepRecurrence.Config(slow_cycles=2, fast_cycles=2),
         build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
         run=_run_identity_core,
     )
     assert analytical == Cost()
@@ -231,12 +233,14 @@ def test_plain_cost_matches_torch(prefix: bool) -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 11, (1, 2)),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
         run=_logits_and_halt,
     )
     # The sequence length is the config's own: a bus value cannot reprice it.
     finalized = config.copy_tree().finalize()
-    assert cost(finalized, seq_len=1_000) == analytical
+    assert cost(finalized, seq_len=1000, batch_size=1, dtype=None) == analytical
 
 
 def test_recurrent_cost_matches_torch() -> None:
@@ -246,37 +250,56 @@ def test_recurrent_cost_matches_torch() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 11, (1, 2)),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
         run=_logits_and_halt,
     )
     one_cycle = _cost_config(prefix=True)
     one_cycle.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=2)
-    single = cost(one_cycle.copy_tree().finalize(), rows=2)
-    assert analytical.adjoint == single.adjoint
+    single = cost(one_cycle.copy_tree().finalize(), seq_len=2, batch_size=1, dtype=None)
+    assert analytical["flops", "adjoint"] == single["flops", "adjoint"]
+    assert analytical["bytes", "adjoint"] == single["bytes", "adjoint"]
     assert analytical.params == single.params
-    assert analytical.primal.flops.matmul > single.primal.flops.matmul
+    assert (
+        analytical["flops", "primal", "matmul"].sum()
+        > single["flops", "primal", "matmul"].sum()
+    )
 
 
 def test_cost_uses_puzzles_for_halt_and_register_gradient_reductions() -> None:
     config = _cost_config(prefix=True)
     config.block = Identity.Config()
     config = config.finalize()
-    two = cost(config, batch_size=2)
-    four = cost(config, batch_size=4)
+    two = cost(config, seq_len=1, batch_size=2, dtype=None)
+    four = cost(config, seq_len=1, batch_size=4, dtype=None)
     # Each puzzle owns one halt row and two register rows, not four latent rows.
-    assert two.adjoint.flops.reduction == (2 + 2 * 16) * (2 - 1) / 2 / 2
-    assert four.adjoint.flops.reduction == (2 + 2 * 16) * (4 - 1) / 4 / 2
-    assert four.primal.bytes.matmul < two.primal.bytes.matmul
-    assert four.primal.flops == two.primal.flops
-    # A puzzle is the sequence: the bus's seq_len and rows cannot reprice it.
-    assert cost(config) == cost(config, seq_len=1_000, rows=7)
+    assert two["flops", "adjoint", "reduction"].sum() == (2 + 2 * 16) * (2 - 1) / 2 / 2
+    assert four["flops", "adjoint", "reduction"].sum() == (2 + 2 * 16) * (4 - 1) / 4 / 2
+    assert (
+        four["bytes", "primal", "matmul"].sum() < two["bytes", "primal", "matmul"].sum()
+    )
+    assert four["flops", "primal"] == two["flops", "primal"]
+    # A puzzle is the sequence: the batch's seq_len and rows cannot reprice it.
+    assert cost(config, seq_len=1, batch_size=1, dtype=None) == cost(
+        config,
+        seq_len=1000,
+        batch_size=1,
+        dtype=None,
+        rows=7,
+    )
 
 
 def test_cost_counts_grid_prefix_concatenation() -> None:
-    plain = _cost_config(prefix=False).finalize().cost(batch_size=2)
-    prefix = _cost_config(prefix=True).finalize().cost(batch_size=2)
+    plain = (
+        _cost_config(prefix=False).finalize().cost(seq_len=1, batch_size=2, dtype=None)
+    )
+    prefix = (
+        _cost_config(prefix=True).finalize().cost(seq_len=1, batch_size=2, dtype=None)
+    )
     assert (
-        prefix.primal.bytes.selection - plain.primal.bytes.selection
+        prefix["bytes", "primal", "selection"].sum()
+        - plain["bytes", "primal", "selection"].sum()
         == 4 * 2 * (2 + 2) * 16 / 2
     )
 
@@ -285,8 +308,8 @@ def test_cost_halt_bias_reduction_uses_batch_not_grid_cells() -> None:
     config = _cost_config(prefix=False)
     config.block = Identity.Config()
     config = config.finalize()
-    priced = cost(config, batch_size=4)
-    assert priced.adjoint.flops.reduction == 2 * (4 - 1) / 4 / 2
+    priced = cost(config, seq_len=1, batch_size=4, dtype=None)
+    assert priced["flops", "adjoint", "reduction"].sum() == 2 * (4 - 1) / 4 / 2
 
 
 def _cost_config(*, prefix: bool) -> SudokuNet.Config:

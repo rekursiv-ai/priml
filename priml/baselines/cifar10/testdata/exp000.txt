@@ -8,13 +8,16 @@ Cifar10TrainLoop(
                 │       model=ResNet.Config(
                 │               channels_in=3,
                 │               channels_out=10,
+                │               image_size=(32, 32),
                 │               channels_hidden=(64, 128, 256),
                 │               block=ResidualBlock.Config(
                 │                       channels_in=-1,
                 │                       channels_out=-1,
                 │                       stride=1,
                 │                       activation=<built-in method relu of type object at 0xdefacedeface>,
-                │                       norm_momentum=0.1
+                │                       norm_momentum=0.1,
+                │                       image_size=(0, 0),
+                │                       grid=(0, 0)
                 │               ),
                 │               blocks_per_stage=2,
                 │               activation=<built-in method relu of type object at 0xdefacedeface>,
@@ -32,7 +35,8 @@ Cifar10TrainLoop(
                 │       loss=SimpleLoss.Config(
                 │               loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
                 │               target_key='label',
-                │               kwargs={'reduction': 'none'}
+                │               kwargs={'reduction': 'none'},
+                │               channels_out=-1
                 │       ),
                 │       accumulate_grad_batches=1,
                 │       drop_partial_accumulation_on_epoch_end=True,

@@ -373,21 +373,24 @@ def test_the_cost_matches_torch_on_a_step() -> None:
             torch.randn(3, 12, requires_grad=True),
             torch.randn(3, 8, 2, 16, requires_grad=True),
         ),
-        num_tokens=3,
-        bus={"batch_size": 3},
+        seq_len=1,
+        batch_size=3,
+        dtype=None,
         run=_stepped,
     )
     keys = 8 + 1
     # Per layer: the table projection's forward, spread over the workers.
     table = 2 * 16 * 16 * keys / 3
-    assert analytical.adjoint.flops.matmul == (
-        2 * analytical.primal.flops.matmul - 2 * table
+    assert analytical["flops", "adjoint", "matmul"].sum() == (
+        2 * analytical["flops", "primal", "matmul"].sum() - 2 * table
     )
     # The relative scores are gathered into place: elements moved forward,
     # one scatter-add per element back.
-    assert analytical.primal.flops.selection == 0
-    assert analytical.primal.bytes.selection == 4 * 2 * 2 * 2 * keys
-    assert analytical.adjoint.flops.selection == 2 * 2 * keys
+    assert analytical["flops", "primal", "selection"].sum() == 0
+    # Per layer and head: the score moved (fp32) and its index read (int64).
+    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 2 * 2 * keys
+    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * 2 * 2 * keys
+    assert analytical["flops", "adjoint", "selection"].sum() == 2 * 2 * keys
     # One remembered layer input per layer per step.
     assert analytical.bytes_state == 4 * 2 * 16
 
@@ -406,23 +409,29 @@ def test_the_cost_matches_torch_on_a_gradient_window() -> None:
             torch.randn(4, 2, 12, requires_grad=True),
             torch.randn(2, 8, 2, 16, requires_grad=True),
         ),
-        num_tokens=4 * 2,
-        bus={"seq_len": 4, "batch_size": 2},
+        seq_len=4,
+        batch_size=2,
+        dtype=None,
         run=_sequenced,
     )
 
 
 def test_cost_accounts_for_attention_operand_bytes_and_dtype() -> None:
     config = _config()
-    narrow = config.cost(seq_len=4, batch_size=2, itemsize=2)
-    wide = config.cost(seq_len=4, batch_size=2, itemsize=4)
+    narrow = config.cost(seq_len=4, batch_size=2, dtype=torch.bfloat16)
+    wide = config.cost(seq_len=4, batch_size=2, dtype=None)
     assert narrow.bytes_state == 2 * 2 * 16
     assert wide.bytes_state == 4 * 2 * 16
-    assert wide.training.bytes == 2 * narrow.training.bytes
-    assert wide.training.flops == narrow.training.flops
-    assert narrow.primal.bytes.selection == 2 * 2 * 2 * 2 * 12
-    assert narrow.adjoint.bytes.selection == 2 * 3 * 2 * 2 * 12
-    assert narrow.primal.bytes.reduction > 0
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+    )
+    assert wide["flops"].sum() == narrow["flops"].sum()
+    assert narrow["bytes", "primal", "selection", torch.bfloat16] == 2 * 2 * 2 * 12
+    assert narrow["bytes", "primal", "selection", torch.int64] == 8 * 2 * 2 * 12
+    assert narrow["bytes", "adjoint", "selection", torch.bfloat16] == 2 * 2 * 2 * 2 * 12
+    assert narrow["bytes", "adjoint", "selection", torch.int64] == 8 * 2 * 2 * 12
+    assert narrow["bytes", "primal", "reduction"].sum() > 0
 
 
 if __name__ == "__main__":

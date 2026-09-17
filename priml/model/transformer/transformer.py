@@ -18,7 +18,12 @@ from typing import Self, cast, override
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
-from priml.model.cost import Cost, cost
+import torch
+
+from priml.model.cost import (
+    Cost,
+    cost,
+)
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsInOutConfig,
@@ -141,11 +146,21 @@ class Transformer(nn.Module):
                 )
             return finalized
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the projections and every block of the finalized list.
 
             Args:
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
@@ -153,7 +168,19 @@ class Transformer(nn.Module):
             """
             assert isinstance(self.block, list)
             projections = [p for p in (self.proj_in, self.proj_out) if p is not None]
-            return sum((cost(c, **kwargs) for c in (*projections, *self.block)), Cost())
+            return sum(
+                (
+                    cost(
+                        c,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for c in (*projections, *self.block)
+                ),
+                Cost(),
+            )
 
     def __init__(self, config: Config) -> None:
         if not isinstance(config.block, list):

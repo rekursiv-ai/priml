@@ -24,7 +24,7 @@ from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import Cost, cost
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import mmdit
@@ -492,17 +492,16 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
 def test_adaln_zero_cost_is_one_biased_matmul() -> None:
     config = AdaLNZero.Config(channels_in=8, cond_dim=4)
     finalized = config.copy_tree().finalize()
-    proj = cost(finalized.proj, seq_len=8)
+    proj = cost(finalized.proj, seq_len=8, batch_size=1, dtype=None)
     assert proj.params == 4 * 6 * 8 + 6 * 8
-    assert finalized.cost(seq_len=8) == proj + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=5 * 4),
-            bytes=Bytes(elementwise=4 * 2 * 4),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=5 * 4),
-            bytes=Bytes(elementwise=4 * 3 * 4),
-        ),
+    f32 = torch.float32
+    assert finalized.cost(seq_len=8, batch_size=1, dtype=None) == proj + Cost(
+        cells={
+            ("flops", "primal", "elementwise", f32): 5 * 4,
+            ("flops", "adjoint", "elementwise", f32): 5 * 4,
+            ("bytes", "primal", "elementwise", f32): 4 * 2 * 4,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 3 * 4,
+        },
     )
     assert proj.params == sum(p.numel() for p in config.make().parameters())
 
@@ -515,25 +514,27 @@ def test_stream_cost_sums_its_branches_and_leaves_attention_to_the_joint() -> No
     config.norm1 = RMSNorm.Config(elementwise_affine=True)
     finalized = config.copy_tree().finalize()
     children = (finalized.norm1, finalized.norm2, finalized.ffn, finalized.adaln)
-    expected = sum((cost(child, seq_len=8) for child in children), Cost()) + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=10 * 8),
-            bytes=Bytes(elementwise=4 * 28 * 8),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=10 * 8),
-            bytes=Bytes(elementwise=4 * 40 * 8),
-        ),
+    f32 = torch.float32
+    expected = sum(
+        (cost(child, seq_len=8, batch_size=1, dtype=None) for child in children),
+        Cost(),
+    ) + Cost(
+        cells={
+            ("flops", "primal", "elementwise", f32): 10 * 8,
+            ("flops", "adjoint", "elementwise", f32): 10 * 8,
+            ("bytes", "primal", "elementwise", f32): 4 * 28 * 8,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 40 * 8,
+        },
     )
-    assert finalized.cost(seq_len=8) == expected
+    assert finalized.cost(seq_len=8, batch_size=1, dtype=None) == expected
     assert expected.params == sum(p.numel() for p in config.make().parameters())
     assert expected.params == 8 + (8 * 24 + 12 * 8) + (4 * 48 + 48)
 
 
-@pytest.mark.parametrize("itemsize", [2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("conditioned", [False, True])
 def test_stream_traffic_counts_residual_and_modulation_operands(
-    itemsize: int,
+    dtype: torch.dtype,
     conditioned: bool,
 ) -> None:
     config = mmdit.MMDiTStream.Config()
@@ -542,26 +543,32 @@ def test_stream_traffic_counts_residual_and_modulation_operands(
         config.adaln = AdaLNZero.Config()
         config.adaln.cond_dim = 4
     config = config.finalize()
+    itemsize = dtype.itemsize
     children = (config.norm1, config.norm2, config.ffn)
-    child_cost = sum((cost(child, itemsize=itemsize) for child in children), Cost())
+    child_cost = sum(
+        (cost(child, seq_len=1, batch_size=1, dtype=dtype) for child in children),
+        Cost(),
+    )
     if config.adaln is not None:
-        child_cost += cost(config.adaln, itemsize=itemsize)
-    actual = config.cost(itemsize=itemsize)
+        child_cost += cost(config.adaln, seq_len=1, batch_size=1, dtype=dtype)
+    actual = config.cost(seq_len=1, batch_size=1, dtype=dtype)
     # Per branch: unary scale offset, scale, shift, gate, residual.
     primal_elements = 2 * (2 + 3 + 3 + 3 + 3) if conditioned else 2 * 3
     adjoint_elements = 2 * (2 + 6 + 3 + 6 + 3) if conditioned else 2 * 3
-    assert actual.primal.bytes.elementwise == (
-        child_cost.primal.bytes.elementwise + itemsize * 8 * primal_elements
+    assert actual["bytes", "primal", "elementwise"].sum() == (
+        child_cost["bytes", "primal", "elementwise"].sum()
+        + itemsize * 8 * primal_elements
     )
-    assert actual.adjoint.bytes.elementwise == (
-        child_cost.adjoint.bytes.elementwise + itemsize * 8 * adjoint_elements
+    assert actual["bytes", "adjoint", "elementwise"].sum() == (
+        child_cost["bytes", "adjoint", "elementwise"].sum()
+        + itemsize * 8 * adjoint_elements
     )
 
 
-@pytest.mark.parametrize("itemsize", [2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("conditioned", [False, True])
 def test_explicit_and_implicit_stream_costs_agree(
-    itemsize: int,
+    dtype: torch.dtype,
     conditioned: bool,
 ) -> None:
     implicit = _cfg(channels_in=8, num_streams=1, num_heads=2)
@@ -574,9 +581,11 @@ def test_explicit_and_implicit_stream_costs_agree(
         stream.adaln = AdaLNZero.Config()
         stream.adaln.cond_dim = 4
     explicit.streams = [stream]
-    assert implicit.finalize().cost(seq_len=4, rows=4, itemsize=itemsize) == (
-        explicit.finalize().cost(seq_len=4, rows=4, itemsize=itemsize)
-    )
+    assert implicit.finalize().cost(
+        seq_len=4,
+        batch_size=1,
+        dtype=dtype,
+    ) == explicit.finalize().cost(seq_len=4, batch_size=1, dtype=dtype)
 
 
 def test_block_cost_with_implicit_streams_is_the_hand_formula() -> None:
@@ -585,23 +594,33 @@ def test_block_cost_with_implicit_streams_is_the_hand_formula() -> None:
     config.ffn = SwiGLU.Config(channels_hidden=12)
     seq_len = 16
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=seq_len)
-    attn = cost(finalized.attn, seq_len=seq_len)
-    ffn = cost(finalized.ffn, seq_len=seq_len)
+    model_cost = finalized.cost(seq_len=seq_len, batch_size=1, dtype=None)
+    attn = cost(finalized.attn, seq_len=seq_len, batch_size=1, dtype=None)
+    ffn = cost(finalized.ffn, seq_len=seq_len, batch_size=1, dtype=None)
     adaln = cost(
         AdaLNZero.Config(channels_in=8, cond_dim=4).finalize(),
         seq_len=seq_len,
+        batch_size=1,
+        dtype=None,
     )
     assert attn.params == 2 * ((2 + 2 * 2) * 8 * 4 + 2 * 4 * 8)
     assert ffn.params == 8 * 24 + 12 * 8
     assert adaln.params == 4 * 48 + 48
-    assert model_cost.primal.flops.matmul == (
-        attn.primal.flops.matmul
-        + 2 * (ffn.primal.flops.matmul + adaln.primal.flops.matmul)
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        attn["flops", "primal", "matmul"].sum()
+        + 2
+        * (
+            ffn["flops", "primal", "matmul"].sum()
+            + adaln["flops", "primal", "matmul"].sum()
+        )
     )
-    assert model_cost.adjoint.flops.matmul == (
-        attn.adjoint.flops.matmul
-        + 2 * (ffn.adjoint.flops.matmul + adaln.adjoint.flops.matmul)
+    assert model_cost["flops", "adjoint", "matmul"].sum() == (
+        attn["flops", "adjoint", "matmul"].sum()
+        + 2
+        * (
+            ffn["flops", "adjoint", "matmul"].sum()
+            + adaln["flops", "adjoint", "matmul"].sum()
+        )
     )
     assert model_cost.params == attn.params + 2 * (ffn.params + adaln.params)
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
@@ -617,9 +636,12 @@ def test_block_cost_with_explicit_streams_prices_each_once() -> None:
     config.streams[1].ffn = SwiGLU.Config(channels_hidden=16)
     config.streams[1].attn.norm_qk = RMSNorm.Config(elementwise_affine=True)
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=8)
-    expected = cost(finalized.attn, seq_len=8) + sum(
-        (cost(stream, seq_len=8) for stream in finalized.streams),
+    model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    expected = cost(finalized.attn, seq_len=8, batch_size=1, dtype=None) + sum(
+        (
+            cost(stream, seq_len=8, batch_size=1, dtype=None)
+            for stream in finalized.streams
+        ),
         Cost(),
     )
     assert model_cost == expected
@@ -645,8 +667,10 @@ def test_block_cost_matches_torch_without_conditioning() -> None:
         build_input=lambda: tuple(
             torch.randn(1, 4, 8, requires_grad=True) for _ in range(2)
         ),
-        num_tokens=4,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
+        rows=4,
         run=lambda module, xs: _run_mmdit(module, list(xs)).sum(),
     )
 

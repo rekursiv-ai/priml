@@ -12,7 +12,7 @@ from torch.distributed.tensor import DTensor
 
 import torch
 
-from priml.model.attention.kernel import SdpaFused
+from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.self_attention import (
@@ -21,7 +21,13 @@ from priml.model.attention.self_attention import (
     _validate_head_dims,
 )
 from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import Cost, cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    resolve_dtype,
+    shared_rows,
+    with_rows,
+)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -146,8 +152,8 @@ class MultiStreamAttention(nn.Module):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one position: every stream's token, each attending jointly.
@@ -159,23 +165,24 @@ class MultiStreamAttention(nn.Module):
             values. A shared norm runs on every stream's rows but is owned once.
 
             Args:
-              seq_len: Keys a query reaches before any window.
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
             if self.streams:
                 total = sum(
                     (
                         cost(
                             s,
                             seq_len=seq_len,
-                            itemsize=itemsize,
-                            rows=rows,
+                            batch_size=batch_size,
+                            dtype=dtype,
                             **kwargs,
                         )
                         for s in self.streams
@@ -191,27 +198,28 @@ class MultiStreamAttention(nn.Module):
                     num_heads_kv=self.num_heads_kv,
                     bias=self.bias,
                 )
-                total = self.num_streams * template.cost(
+                total = template.cost(
                     seq_len=seq_len,
-                    itemsize=itemsize,
-                    rows=rows,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
-                )
+                ).tile(self.num_streams, copies=self.num_streams)
                 for rope in self.rope:
                     if rope is None:
                         continue
                     total += cost(
                         rope,
-                        itemsize=itemsize,
-                        rows=rows,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
                         **kwargs,
                     )
                     total += rotation_cost(
                         rope,
+                        rows=rows,
+                        dtype=dtype,
                         channels_head=self.channels_head,
                         heads=self.num_heads + self.num_heads_kv,
-                        rows=rows,
-                        itemsize=itemsize,
                     )
                 if self.norm_qk is not None:
                     groups = (
@@ -223,31 +231,29 @@ class MultiStreamAttention(nn.Module):
                         head_rows = self.num_streams * heads
                         total += cost(
                             self.norm_qk,
-                            itemsize=itemsize,
-                            rows=rows * head_rows,
-                            **kwargs,
+                            seq_len=seq_len,
+                            batch_size=batch_size,
+                            dtype=dtype,
+                            **with_rows(rows * head_rows, **kwargs),
                         ).tile(head_rows)
                 if self.norm_out is not None:
                     total += cost(
                         self.norm_out,
-                        itemsize=itemsize,
-                        rows=rows * self.num_streams,
-                        **kwargs,
-                    ).tile(
-                        self.num_streams,
-                    )
-            kernel = cost(
-                self.attn_kernel,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **with_rows(rows * self.num_streams, **kwargs),
+                    ).tile(self.num_streams)
+            kernel = attention_kernel_cost(
                 seq_len=seq_len,
+                dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
-                itemsize=itemsize,
-                rows=rows,
-                **kwargs,
+                dropout_p=self.dropout,
             )
             return replace(
-                total + self.num_streams * kernel,
-                bytes_state=itemsize
+                total + kernel.tile(self.num_streams, copies=self.num_streams),
+                bytes_state=resolve_dtype(dtype).itemsize
                 * self.num_streams
                 * 2
                 * self.num_heads_kv

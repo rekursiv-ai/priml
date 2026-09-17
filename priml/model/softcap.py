@@ -27,7 +27,11 @@ from torch import Tensor, nn
 import torch
 
 from priml.math.numeric import softcap
-from priml.model.cost import Cost, cost, elementwise_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+)
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -86,18 +90,33 @@ class SoftCap(nn.Module):
             )
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price projection and divide/tanh/multiply; the adjoint uses saved tanh.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.inner, itemsize=itemsize, **kwargs) + elementwise_cost(
+            return cost(
+                self.inner,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            ) + elementwise_cost(
                 primal=3 * self.channels_out,
                 adjoint=5 * self.channels_out,
                 channels=self.channels_out,
@@ -105,7 +124,7 @@ class SoftCap(nn.Module):
                 outputs=3,
                 adjoint_inputs=4,
                 adjoint_outputs=3,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:

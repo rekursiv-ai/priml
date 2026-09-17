@@ -290,18 +290,21 @@ def test_graft_cost_prices_host_projections_and_joint_blocks_once(
     """The host's layers live inside the joint blocks, so they are not re-added."""
     config = _config(depth=2, tie=tie, conditioned=True)
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=8)
+    model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
     backbone = finalized.backbone
     projections = [p for p in (backbone.proj_in, backbone.proj_out) if p is not None]
     expected = sum(
-        (cost(c, seq_len=8) for c in (*projections, *finalized.block)),
+        (
+            cost(c, seq_len=8, batch_size=1, dtype=None)
+            for c in (*projections, *finalized.block)
+        ),
         Cost(),
     )
     assert model_cost == expected
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    host = cost(backbone, seq_len=8)
+    host = cost(backbone, seq_len=8, batch_size=1, dtype=None)
     assert model_cost.params > host.params
-    assert model_cost.training.flops.matmul > host.training.flops.matmul
+    assert model_cost["flops", :, "matmul"].sum() > host["flops", :, "matmul"].sum()
 
 
 @pytest.mark.parametrize("tie", [False, True])
@@ -319,8 +322,10 @@ def test_graft_cost_matches_torch(tie: bool) -> None:
             torch.randint(0, 32, (1, 3)),
             torch.randn(1, 3, 16, requires_grad=True),
         ),
-        num_tokens=3,
-        bus={"seq_len": 6},
+        seq_len=6,
+        batch_size=1,
+        dtype=None,
+        rows=3,
         run=run_graft,
     )
 

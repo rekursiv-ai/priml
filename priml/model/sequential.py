@@ -8,7 +8,12 @@ from typing import Self, cast, override
 from configgle import Fig, Makeable, Maker
 from torch import Tensor, nn
 
-from priml.model.cost import Cost, cost
+import torch
+
+from priml.model.cost import (
+    Cost,
+    cost,
+)
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -111,18 +116,40 @@ class Sequential(nn.Sequential):
                     self.channels_out = last.channels_out
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the finalized element list.
 
             Args:
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
             assert isinstance(self.elements, list)
-            return sum((cost(element, **kwargs) for element in self.elements), Cost())
+            return sum(
+                (
+                    cost(
+                        element,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for element in self.elements
+                ),
+                Cost(),
+            )
 
     def __init__(self, config: Config) -> None:
         # ``finalize`` has already flattened ``elements`` (repeat expanded, depth

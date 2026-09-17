@@ -26,6 +26,8 @@ from dataclasses import field
 from functools import partial
 from typing import Protocol, Self, cast, override
 
+import functools
+
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
 
@@ -41,13 +43,13 @@ from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
 )
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     cost,
     elementwise_cost,
     reduction_cost,
+    shared_rows,
+    traffic,
+    with_rows,
 )
 from priml.model.custom_types import (
     ChannelsHead,
@@ -264,6 +266,7 @@ class NanoChatLM(nn.Module):
                 protocol=ChannelsIn,
             )
             self.mix.num_layers = self.num_layers
+            self.mix.channels_in = self.channels_in
             self.rope.channels_head = _head_shape(self.block[0], self.channels_in)[0]
             self._propagate_layer_table_widths()
             finalized = super().finalize()
@@ -283,9 +286,9 @@ class NanoChatLM(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Sum the tables, both norms, the mix, every block, and the head.
@@ -295,36 +298,40 @@ class NanoChatLM(nn.Module):
             residual mix at the model width. The gate that reads a value table
             is the attention's own and is priced there.
 
-            This is the model root, so it states the batch geometry itself:
-            every token of ``batch_size`` sequences of ``seq_len`` shares the
-            weights, and a ``rows`` already on the bus is discarded.
+            This is the model root: every token of ``batch_size`` sequences of
+            ``seq_len`` shares the weights, so a caller's own ``rows`` is
+            replaced by the batch's tokens.
 
             Args:
-              seq_len: Tokens per sequence; every attention's reach.
-              batch_size: Sequences per step; amortizes weights only.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The rest of the open message bus.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
             assert isinstance(self.block, list)
-            kwargs |= {
-                "seq_len": seq_len,
-                "batch_size": batch_size,
-                "rows": seq_len * batch_size,
-                "itemsize": itemsize,
-            }
             _, width = _head_shape(self.block[0], self.channels_in)
             table = _value_table_config(self, width=width)
+            price = functools.partial(
+                cost,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **with_rows(seq_len * batch_size, **kwargs),
+            )
             return sum(
-                (cost(child, **kwargs) for child in (*self.block, self.lm_head)),
-                cost(self.embedding, **kwargs)
-                + 2 * cost(self.norm, **kwargs)
-                + cost(self.mix, channels_in=self.channels_in, **kwargs)
-                + cost(self.rope, **kwargs)
-                + len(self.value_embedding_layers) * cost(table, **kwargs),
+                (price(child) for child in (*self.block, self.lm_head)),
+                price(self.embedding)
+                + price(self.norm).tile(2, copies=2)
+                + price(self.mix)
+                + price(self.rope)
+                + price(table).tile(
+                    len(self.value_embedding_layers),
+                    copies=len(self.value_embedding_layers),
+                ),
             )
 
         def _propagate_layer_table_widths(self) -> None:
@@ -599,16 +606,35 @@ class OutputNormFeedForward(SwiGLUReluSquared):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the feed-forward and its output normalization."""
+            """Price the feed-forward and its output normalization.
+
+            Args:
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
             return super().cost(
-                rows=rows,
-                itemsize=itemsize,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
                 **kwargs,
-            ) + cost(self.norm_out, rows=rows, itemsize=itemsize, **kwargs)
+            ) + cost(
+                self.norm_out,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -653,18 +679,30 @@ class GatedResidualMix(ResidualMix):
         def cost(
             self,
             *,
-            channels_in: int,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the mean gate and its scalar parameter at every layer."""
+            """Price the mean gate and its scalar parameter at every layer.
+
+            Args:
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
             base = super().cost(
-                channels_in=channels_in,
-                rows=rows,
-                itemsize=itemsize,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
                 **kwargs,
             )
+            dt = dtype
             gate = (
                 elementwise_cost(
                     primal=8,
@@ -675,27 +713,22 @@ class GatedResidualMix(ResidualMix):
                     adjoint_inputs=11,
                     adjoint_outputs=5,
                     params=1,
-                    rows=rows,
-                    itemsize=itemsize,
+                    rows=shared_rows(seq_len, batch_size, **kwargs),
+                    dtype=dt,
                 )
                 + elementwise_cost(
                     primal=0,
-                    adjoint=2 * channels_in,
-                    channels=channels_in,
+                    adjoint=2 * self.channels_in,
+                    channels=self.channels_in,
                     inputs=0,
                     outputs=0,
                     adjoint_inputs=2,
                     adjoint_outputs=2,
-                    itemsize=itemsize,
+                    dtype=dt,
                 )
-                + Cost(
-                    primal=reduction_cost(
-                        input_elements=channels_in,
-                        itemsize=itemsize,
-                    ),
-                )
+                + reduction_cost(input_elements=self.channels_in, dtype=dt)
             )
-            return base + self.num_layers * gate
+            return base + gate.tile(self.num_layers, copies=self.num_layers)
 
     def __init__(self, config: Config) -> None:
         # The parent's constructor invokes reset before this added vector exists.
@@ -813,49 +846,67 @@ class MemoryNanoChatLM(NanoChatLM):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price inherited decoding, additional lookup tables, and layer pooling."""
-            kwargs.pop("rows", None)
+            """Price inherited decoding, additional lookup tables, and layer pooling.
+
+            Args:
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
+
+            Returns:
+              cost: Per-token cost of this module.
+
+            """
+            batch = with_rows(seq_len * batch_size, **kwargs)
             rows = seq_len * batch_size
+            dt = dtype
             total = super().cost(
                 seq_len=seq_len,
                 batch_size=batch_size,
-                itemsize=itemsize,
-                **kwargs,
+                dtype=dtype,
+                **batch,
             )
             for table in (*self.bigrams.values(), *self.trigrams.values()):
-                total += cost(table, rows=rows, itemsize=itemsize, **kwargs)
+                total += cost(
+                    table,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **batch,
+                )
             pooled = self.num_pool_layers - 1
             if pooled:
-                total += pooled * Cost(
-                    primal=Compute(
-                        flops=Flops(elementwise=2 * self.channels_in),
-                        bytes=Bytes(
-                            elementwise=itemsize * (5 * self.channels_in + 1 / rows),
-                        ),
-                    ),
-                    adjoint=Compute(
-                        flops=Flops(elementwise=2 * self.channels_in),
-                        bytes=Bytes(
-                            elementwise=itemsize * (6 * self.channels_in + 1 / rows),
-                        ),
+                c = self.channels_in
+                total += (
+                    traffic(
+                        "primal",
+                        "elementwise",
+                        elements=5 * c + 1 / rows,
+                        flops=2 * c,
+                        dtype=dt,
                     )
-                    + reduction_cost(
-                        input_elements=self.channels_in,
-                        itemsize=itemsize,
+                    + traffic(
+                        "adjoint",
+                        "elementwise",
+                        elements=6 * c + 1 / rows,
+                        flops=2 * c,
+                        dtype=dt,
                     )
+                    + reduction_cost(input_elements=c, dtype=dt, phase="adjoint")
                     + reduction_cost(
                         input_elements=rows,
                         rows=rows,
-                        itemsize=itemsize,
-                    ),
-                    params=1,
-                    params_active=1,
-                )
+                        dtype=dt,
+                        phase="adjoint",
+                    )
+                    + Cost(params=1, params_active=1)
+                ).tile(pooled, copies=pooled)
             return total
 
         @override

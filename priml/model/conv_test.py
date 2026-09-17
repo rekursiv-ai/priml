@@ -131,13 +131,15 @@ def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
     analytical = assert_cost_matches_torch(
         Conv2d.Config(2, 3, kernel_size=(3, 5), bias=True),
         build_input=lambda: torch.randn(1, 2, 4, 6, requires_grad=True),
-        num_tokens=4 * 6,
+        seq_len=4 * 6,
+        batch_size=1,
+        dtype=None,
     )
     weights = 3 * 2 * 15
-    assert analytical.primal.flops.matmul == 2 * weights
-    assert analytical.adjoint.flops.matmul == 4 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
+    assert analytical["flops", "adjoint", "matmul"].sum() == 4 * weights
     assert analytical.params == weights + 3
-    assert analytical.primal.bytes.elementwise == 4 * (2 * 3 + 3 / 24)
+    assert analytical["bytes", "primal", "elementwise"].sum() == 4 * (2 * 3 + 3 / 24)
 
 
 def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
@@ -151,22 +153,28 @@ def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
     analytical = assert_cost_matches_torch(
         Conv1d.Config(4, 6, kernel_size=3, groups=2),
         build_input=lambda: torch.randn(1, 4, 7, requires_grad=True),
-        num_tokens=7,
+        seq_len=7,
+        batch_size=1,
+        dtype=None,
         expected_ratio=0.75,
     )
     weights = 6 * (4 // 2) * 3
-    assert analytical.primal.flops.matmul == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
     assert analytical.params == weights
-    assert analytical.primal.bytes.matmul == 4 * (4 * 3 + 6 + weights / 7)
+    assert analytical["bytes", "primal", "matmul"].sum() == 4 * (
+        4 * 3 + 6 + weights / 7
+    )
 
 
 def test_conv3d_cost_cubes_a_scalar_kernel() -> None:
     analytical = assert_cost_matches_torch(
         Conv3d.Config(2, 3, kernel_size=3),
         build_input=lambda: torch.randn(1, 2, 3, 4, 5, requires_grad=True),
-        num_tokens=3 * 4 * 5,
+        seq_len=3 * 4 * 5,
+        batch_size=1,
+        dtype=None,
     )
-    assert analytical.primal.flops.matmul == 2 * 3 * 2 * 27
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 3 * 2 * 27
 
 
 if __name__ == "__main__":

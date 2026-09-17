@@ -236,38 +236,50 @@ def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
         conv_kernel_size=3,
     )
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost()
+    model_cost = finalized.cost(seq_len=1, batch_size=1, dtype=None)
     k_dim, v_dim = 2 * 8, 4 * 4
     conv_dim = 2 * k_dim + v_dim
     projections = 16 * conv_dim + 16 * v_dim + 2 * 16 * 4 + v_dim * 16
     conv = conv_dim * 3
     gates = 2 * 4  # dt_bias and A_log, one per value head.
-    norm = cost(finalized.norm).params
+    norm = cost(finalized.norm, seq_len=1, batch_size=1, dtype=None).params
     assert norm == 4
     assert model_cost.params == projections + conv + gates + norm
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     state = 4 * 8 * 4  # num_heads_v x channels_k_head x channels_v_head.
-    assert model_cost.primal.flops.matmul == 2 * (projections + conv) + 4 * state
-    assert model_cost.adjoint.flops.matmul == 4 * (projections + conv) + 8 * state
+    assert (
+        model_cost["flops", "primal", "matmul"].sum()
+        == 2 * (projections + conv) + 4 * state
+    )
+    assert (
+        model_cost["flops", "adjoint", "matmul"].sum()
+        == 4 * (projections + conv) + 8 * state
+    )
     assert model_cost.bytes_state == 0
     # The q/k L2 norms sum each key row once each way, per value head.
-    assert model_cost.primal.flops.reduction == 2 * 4 * (8 - 1) + norm_reduction(
+    assert model_cost["flops", "primal", "reduction"].sum() == 2 * 4 * (
+        8 - 1
+    ) + norm_reduction(
         finalized,
     )
-    norm_cost = cost(finalized.norm, rows=4).tile(4)
+    norm_cost = cost(finalized.norm, seq_len=4, batch_size=1, dtype=None).tile(4)
     assert (
-        model_cost.adjoint.flops.reduction
-        == 2 * 4 * (8 - 1) + norm_cost.adjoint.flops.reduction
+        model_cost["flops", "adjoint", "reduction"].sum()
+        == 2 * 4 * (8 - 1) + norm_cost["flops", "adjoint", "reduction"].sum()
     )
     assert (
-        model_cost.primal.bytes.reduction
-        == 2 * 4 * 4 * (8 + 1) + norm_cost.primal.bytes.reduction
+        model_cost["bytes", "primal", "reduction"].sum()
+        == 2 * 4 * 4 * (8 + 1) + norm_cost["bytes", "primal", "reduction"].sum()
     )
 
 
 def norm_reduction(finalized: GatedDeltaNet.Config) -> float:
     """Reduction FLOPs the injected norm contributes, tiled over the value heads."""
-    return cost(finalized.norm).tile(finalized.num_heads_v).primal.flops.reduction
+    return (
+        cost(finalized.norm, seq_len=1, batch_size=1, dtype=None)
+        .tile(finalized.num_heads_v)["flops", "primal", "reduction"]
+        .sum()
+    )
 
 
 def test_gated_delta_net_projections_match_torch() -> None:
@@ -289,7 +301,9 @@ def test_gated_delta_net_projections_match_torch() -> None:
             conv_kernel_size=3,
         ),
         build_input=lambda: torch.randn(1, 4, 16, requires_grad=True),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
         expected_ratio=10_464 / 541_664,
     )
 
@@ -297,7 +311,18 @@ def test_gated_delta_net_projections_match_torch() -> None:
 def test_gated_delta_net_cost_ignores_seq_len() -> None:
     config = GatedDeltaNet.Config(channels_in=8, num_heads_k=1, num_heads_v=1)
     finalized = config.copy_tree().finalize()
-    assert finalized.cost(seq_len=8) == finalized.cost(seq_len=1024)
+    # Same rows sharing the weights: the recurrence has no attention reach.
+    assert finalized.cost(
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
+        rows=8,
+    ) == finalized.cost(
+        seq_len=1024,
+        batch_size=1,
+        dtype=None,
+        rows=8,
+    )
 
 
 def test_delta_traffic_amortizes_projection_and_convolution_weights() -> None:
@@ -308,17 +333,26 @@ def test_delta_traffic_amortizes_projection_and_convolution_weights() -> None:
     config.channels_k_head = 4
     config.channels_v_head = 3
     config = config.copy_tree().finalize()
-    one = config.cost(rows=1, itemsize=2)
-    batch = config.cost(rows=4, itemsize=2)
+    one = config.cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
+    batch = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     weights = 8 * 14 + 8 * 6 + 2 * 8 * 2 + 6 * 8 + 14 * 4
-    assert one.primal.bytes.matmul - batch.primal.bytes.matmul == 2 * weights * 3 / 4
-    wide = config.cost(rows=4, itemsize=4)
-    assert wide.training.bytes == batch.training.bytes * 2
-    assert batch.primal.bytes.reduction > 0
+    assert (
+        one["bytes", "primal", "matmul"].sum()
+        - batch["bytes", "primal", "matmul"].sum()
+        == 2 * weights * 3 / 4
+    )
+    wide = config.cost(seq_len=4, batch_size=1, dtype=None)
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == batch["bytes", :, :, torch.bfloat16].sum() * 2
+    )
+    assert batch["bytes", "primal", "reduction"].sum() > 0
 
 
-@pytest.mark.parametrize("itemsize", [2, 4])
-def test_delta_normalizes_query_and_key_with_separate_reductions(itemsize: int) -> None:
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_delta_normalizes_query_and_key_with_separate_reductions(
+    dtype: torch.dtype,
+) -> None:
     config = GatedDeltaNet.Config()
     config.channels_in = 8
     config.num_heads_k = 1
@@ -326,12 +360,15 @@ def test_delta_normalizes_query_and_key_with_separate_reductions(itemsize: int) 
     config.channels_k_head = 4
     config.channels_v_head = 3
     config.norm = Identity.Config()
-    actual = config.copy_tree().finalize().cost(itemsize=itemsize)
-    assert actual.primal.flops.reduction == 2 * 2 * (4 - 1)
-    assert actual.adjoint.flops.reduction == 2 * 2 * (4 - 1)
-    assert actual.primal.bytes.reduction == itemsize * 2 * 2 * (4 + 1)
+    actual = config.copy_tree().finalize().cost(seq_len=1, batch_size=1, dtype=dtype)
+    itemsize = dtype.itemsize
+    assert actual["flops", "primal", "reduction"].sum() == 2 * 2 * (4 - 1)
+    assert actual["flops", "adjoint", "reduction"].sum() == 2 * 2 * (4 - 1)
+    assert actual["bytes", "primal", "reduction"].sum() == itemsize * 2 * 2 * (4 + 1)
     # The two learned decay vectors additionally reduce their row gradients.
-    assert actual.adjoint.bytes.reduction == itemsize * (2 * 2 * (4 + 1) + 2 * 2 * 2)
+    assert actual["bytes", "adjoint", "reduction"].sum() == itemsize * (
+        2 * 2 * (4 + 1) + 2 * 2 * 2
+    )
 
 
 if __name__ == "__main__":

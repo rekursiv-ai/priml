@@ -12,11 +12,19 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import rotation_cost
 from priml.model.attention.window import causal_chunk_mask, window_mask
-from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+    resolve_dtype,
+    shared_rows,
+    with_rows,
+)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -85,8 +93,8 @@ class GatedSelfAttention(nn.Module):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price four projections, two norms, rotary, the kernel, and the gate.
@@ -97,15 +105,17 @@ class GatedSelfAttention(nn.Module):
             channel; its adjoint pulls a gradient back through both factors.
 
             Args:
-              seq_len: Keys a query reaches.
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
             inner = self.num_heads * self.channels_head
             kv = self.num_heads_kv * self.channels_head
             total = (
@@ -113,55 +123,53 @@ class GatedSelfAttention(nn.Module):
                     channels_in=self.channels_in,
                     channels_out=2 * inner,
                     bias=self.bias,
-                    itemsize=itemsize,
+                    dtype=dt,
                     rows=rows,
                 )
-                + 2
-                * matmul_cost(
+                + matmul_cost(
                     channels_in=self.channels_in,
                     channels_out=kv,
                     bias=self.bias,
-                    itemsize=itemsize,
+                    dtype=dt,
                     rows=rows,
-                )
+                ).tile(2, copies=2)
                 + matmul_cost(
                     channels_in=inner,
                     channels_out=self.channels_out,
                     bias=self.bias,
-                    itemsize=itemsize,
+                    dtype=dt,
                     rows=rows,
                 )
             )
             for heads in (self.num_heads, self.num_heads_kv):
                 total += cost(
                     self.norm_qk,
-                    itemsize=itemsize,
-                    rows=rows * heads,
-                    **kwargs,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **with_rows(rows * heads, **kwargs),
                 ).tile(heads)
             if self.rope is not None:
                 total += cost(
                     self.rope,
-                    itemsize=itemsize,
-                    rows=rows,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 )
                 total += rotation_cost(
                     self.rope,
+                    rows=rows,
+                    dtype=dt,
                     channels_head=self.channels_head,
                     heads=self.num_heads + self.num_heads_kv,
-                    rows=rows,
-                    itemsize=itemsize,
                 )
-            total += cost(
-                self.attn_kernel,
+            total += attention_kernel_cost(
                 seq_len=seq_len,
+                dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
-                itemsize=itemsize,
-                rows=rows,
-                **kwargs,
             )
             total += elementwise_cost(
                 primal=5 * inner,
@@ -172,9 +180,9 @@ class GatedSelfAttention(nn.Module):
                 adjoint_inputs=9,
                 adjoint_outputs=3,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
-            return replace(total, bytes_state=itemsize * 2 * kv)
+            return replace(total, bytes_state=resolve_dtype(dtype).itemsize * 2 * kv)
 
     def __init__(self, config: Config) -> None:
         super().__init__()

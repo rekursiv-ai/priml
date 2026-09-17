@@ -16,7 +16,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import Cost, cost
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.testing.bfb import assert_bfb_against_golden
@@ -99,16 +99,26 @@ def test_narrow_embedding_cost_is_the_inner_gather() -> None:
     model_cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 8, (3,)),
-        num_tokens=3,
+        seq_len=3,
+        batch_size=1,
+        dtype=None,
         run=_embed_float,
     )
-    assert model_cost == cost(config.copy_tree().finalize().inner, rows=3)
+    assert model_cost == cost(
+        config.copy_tree().finalize().inner,
+        seq_len=3,
+        batch_size=1,
+        dtype=torch.bfloat16,
+    )
+    bf16, i64 = torch.bfloat16, torch.int64
     assert model_cost == Cost(
-        primal=Compute(bytes=Bytes(selection=4 * (1 + 2 * 4))),
-        adjoint=Compute(
-            flops=Flops(selection=4),
-            bytes=Bytes(selection=4 * (1 + 3 * 4 + 32 / 3)),
-        ),
+        cells={
+            ("flops", "adjoint", "selection", bf16): 4,
+            ("bytes", "primal", "selection", i64): 8,
+            ("bytes", "primal", "selection", bf16): 2 * 2 * 4,
+            ("bytes", "adjoint", "selection", i64): 8,
+            ("bytes", "adjoint", "selection", bf16): 2 * (3 * 4 + 32 / 3),
+        },
         params=32,
         params_active=4,
     )

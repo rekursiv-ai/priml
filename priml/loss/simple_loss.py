@@ -10,8 +10,15 @@ import functools
 from configgle import Fig
 from torch.nn import functional
 
+import torch
+
 from priml.loss.custom_types import LossOutput, SimpleLossFn
-from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
+from priml.model.cost import (
+    Cost,
+    reduction_cost,
+    shared_rows,
+    traffic,
+)
 
 
 if TYPE_CHECKING:
@@ -56,12 +63,16 @@ class SimpleLoss:
         )
         """Extra keyword arguments passed to loss_fn."""
 
+        channels_out: int = -1
+        """Classes per prediction row; read only by ``cross_entropy``, which
+        is priced per row of this many logits. -1 leaves it unpriced."""
+
         def cost(
             self,
             *,
-            rows: int,
-            channels_out: int = -1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price ``loss_fn`` by identity on one token of the prediction.
@@ -84,15 +95,16 @@ class SimpleLoss:
               adjoint scales the saved difference by the upstream gradient.
 
             ``reduction="none"`` stops there. ``"mean"`` and ``"sum"`` add one
-            reduction over the ``rows`` tokens, ``(n - 1) / n`` per token;
+            reduction over the batch's tokens, ``(n - 1) / n`` per token;
             ``"mean"`` also scales the adjoint by ``1 / n``, one more op. The
-            loss owns no parameters and issues no matmul.
+            loss owns no parameters and issues no matmul. Labels are
+            ``int64``; predictions and losses are at the batch's dtype.
 
             Args:
-              rows: Tokens the reduction spans.
-              channels_out: Classes per row; read only by ``cross_entropy``.
-              itemsize: Bytes per logical tensor element, including labels.
-              **kwargs: The rest of the bus, unread.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this loss.
@@ -104,7 +116,10 @@ class SimpleLoss:
                 BCE ``weight`` is priced as one extra tensor multiply each way.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
+            index = torch.int64
+            channels_out = self.channels_out
             weighted = False
             for option, value in self.kwargs.items():
                 if option == "reduction":
@@ -136,37 +151,35 @@ class SimpleLoss:
             reduction = self.kwargs.get("reduction", "mean")
             reduced = Cost()
             if reduction != "none":
-                reduced = Cost(
-                    primal=reduction_cost(
-                        input_elements=rows,
-                        rows=rows,
-                        itemsize=itemsize,
-                    ),
-                    adjoint=Compute(
-                        bytes=Bytes(reduction=itemsize * (rows + 1) / rows),
-                    ),
+                reduced = reduction_cost(
+                    input_elements=rows,
+                    rows=rows,
+                    dtype=dt,
+                ) + traffic(
+                    "adjoint",
+                    "reduction",
+                    elements=(rows + 1) / rows,
+                    dtype=dt,
                 )
             rescale = int(reduction == "mean")
             if rescale:
-                reduced += Cost(
-                    primal=Compute(bytes=Bytes(elementwise=2 * itemsize / rows)),
-                )
+                reduced += traffic("primal", "elementwise", elements=2 / rows, dtype=dt)
             if self.loss_fn is functional.binary_cross_entropy_with_logits:
+                w = int(weighted)
                 return (
-                    Cost(
-                        primal=Compute(
-                            flops=Flops(elementwise=8 + int(weighted)),
-                            bytes=Bytes(
-                                elementwise=(21 + 3 * int(weighted)) * itemsize,
-                            ),
-                        ),
-                        adjoint=Compute(
-                            flops=Flops(elementwise=5 + rescale + int(weighted)),
-                            bytes=Bytes(
-                                elementwise=(10 + 2 * rescale + 3 * int(weighted))
-                                * itemsize,
-                            ),
-                        ),
+                    traffic(
+                        "primal",
+                        "elementwise",
+                        elements=21 + 3 * w,
+                        flops=8 + w,
+                        dtype=dt,
+                    )
+                    + traffic(
+                        "adjoint",
+                        "elementwise",
+                        elements=10 + 2 * rescale + 3 * w,
+                        flops=5 + rescale + w,
+                        dtype=dt,
                     )
                     + reduced
                 )
@@ -174,33 +187,37 @@ class SimpleLoss:
                 if channels_out == -1:
                     raise ValueError(
                         "cross_entropy is priced per row of channels_out classes; "
-                        "put channels_out on the bus.",
+                        "set channels_out on the loss config.",
                     )
+                c = channels_out
+                # The label is read forward and back, once as an index each
+                # way; the gathered logit and the scattered -1 are payload.
                 return (
-                    Cost(
-                        primal=Compute(
-                            flops=Flops(
-                                elementwise=3 * channels_out + 2,
-                                reduction=2 * (channels_out - 1),
-                            ),
-                            bytes=Bytes(
-                                elementwise=(6 * channels_out + 6) * itemsize,
-                                reduction=2 * (channels_out + 1) * itemsize,
-                                selection=3 * itemsize,
-                            ),
-                        ),
-                        adjoint=Compute(
-                            flops=Flops(
-                                elementwise=2 * channels_out + rescale,
-                                selection=1,
-                            ),
-                            bytes=Bytes(
-                                elementwise=(4 * channels_out + 1 + 2 * rescale)
-                                * itemsize,
-                                selection=4 * itemsize,
-                            ),
-                        ),
+                    traffic(
+                        "primal",
+                        "elementwise",
+                        elements=6 * c + 6,
+                        flops=3 * c + 2,
+                        dtype=dt,
                     )
+                    + traffic(
+                        "primal",
+                        "reduction",
+                        elements=2 * (c + 1),
+                        flops=2 * (c - 1),
+                        dtype=dt,
+                    )
+                    + traffic("primal", "selection", elements=1, dtype=index)
+                    + traffic("primal", "selection", elements=2, dtype=dt)
+                    + traffic(
+                        "adjoint",
+                        "elementwise",
+                        elements=4 * c + 1 + 2 * rescale,
+                        flops=2 * c + rescale,
+                        dtype=dt,
+                    )
+                    + traffic("adjoint", "selection", elements=1, dtype=index)
+                    + traffic("adjoint", "selection", elements=3, flops=1, dtype=dt)
                     + reduced
                 )
             if (
@@ -208,15 +225,13 @@ class SimpleLoss:
                 or self.loss_fn is functional.l1_loss
             ):
                 return (
-                    Cost(
-                        primal=Compute(
-                            flops=Flops(elementwise=2),
-                            bytes=Bytes(elementwise=5 * itemsize),
-                        ),
-                        adjoint=Compute(
-                            flops=Flops(elementwise=2 + rescale),
-                            bytes=Bytes(elementwise=(5 + 2 * rescale) * itemsize),
-                        ),
+                    traffic("primal", "elementwise", elements=5, flops=2, dtype=dt)
+                    + traffic(
+                        "adjoint",
+                        "elementwise",
+                        elements=5 + 2 * rescale,
+                        flops=2 + rescale,
+                        dtype=dt,
                     )
                     + reduced
                 )

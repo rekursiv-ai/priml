@@ -416,7 +416,7 @@ def test_transformer_cost_is_the_palm_formula() -> None:
     """``6N`` over matrix params plus ``12 * L * inner * seq_len`` attention."""
     config = _tiny_config()
     finalized = config.copy_tree().finalize()
-    cost = finalized.cost(seq_len=16)
+    cost = finalized.cost(seq_len=16, batch_size=1, dtype=None)
 
     model = config.make()
     params = sum(p.numel() for p in model.parameters())
@@ -424,7 +424,7 @@ def test_transformer_cost_is_the_palm_formula() -> None:
     embedding = 128 * 32
     matrix = params - embedding
     attention = 12 * 2 * (4 * 8) * 16
-    assert cost.training.flops.matmul == 6 * matrix + attention
+    assert cost["flops", :, "matmul"].sum() == 6 * matrix + attention
     assert cost.bytes_state == 4 * 2 * 2 * 4 * 8
 
 
@@ -441,16 +441,27 @@ def test_transformer_cost_matches_torch_through_a_naive_kernel() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 128, (1, 8)),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
         run=_logits_float,
     )
 
 
 def test_tied_head_cost_owns_no_parameters_but_pays_the_matmul() -> None:
-    tied = _tiny_config(tie=True).copy_tree().finalize().cost(seq_len=8)
-    untied = _tiny_config(tie=False).copy_tree().finalize().cost(seq_len=8)
-    assert tied.training.flops.matmul == untied.training.flops.matmul
+    tied = (
+        _tiny_config(tie=True)
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=None)
+    )
+    untied = (
+        _tiny_config(tie=False)
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=None)
+    )
+    assert tied["flops", :, "matmul"].sum() == untied["flops", :, "matmul"].sum()
     assert tied.params == untied.params - 128 * 32
 
 
@@ -463,8 +474,14 @@ def test_transformer_cost_reads_every_block_of_a_list() -> None:
     config.block = [config.block, wide]
     finalized = config.copy_tree().finalize()
     assert isinstance(finalized.block, list)
-    blocks = sum((cost(block, seq_len=8) for block in finalized.block), Cost())
-    assert finalized.cost(seq_len=8).params == blocks.params + 2 * 128 * 32
+    blocks = sum(
+        (cost(block, seq_len=8, batch_size=1, dtype=None) for block in finalized.block),
+        Cost(),
+    )
+    assert (
+        finalized.cost(seq_len=8, batch_size=1, dtype=None).params
+        == blocks.params + 2 * 128 * 32
+    )
 
 
 class _Unpriced(torch.nn.Module):
@@ -489,7 +506,7 @@ def test_transformer_cost_rejects_an_unpriced_slot() -> None:
     config = _tiny_config()
     config.proj_out = _Unpriced.Config()
     with pytest.raises(TypeError, match=r"_Unpriced\.Config has no cost"):
-        config.copy_tree().finalize().cost(seq_len=8)
+        config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
 
 
 def _logits_float(module: nn.Module, tokens: Tensor) -> Tensor:

@@ -34,14 +34,15 @@ from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.window import layer_window, window_mask
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
+    resolve_dtype,
+    shared_rows,
+    traffic,
+    with_rows,
 )
 from priml.model.custom_types import (
     AttentionKernel,
@@ -99,7 +100,7 @@ class SdpaCausal:
     """
 
     class Config(Fig["SdpaCausal"]):
-        cost = attention_kernel_cost
+        pass
 
     def __init__(self, config: Config) -> None:
         del config
@@ -253,60 +254,63 @@ class ValueGatedAttention(nn.Module):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price four projections, the gate, two norms, and the kernel.
 
-            The kernel is handed this layer's window on the bus, so it counts
-            its two products over ``min(window, seq_len)`` keys; the rotation
-            and the gate are counted here, since no child owns them.
+            The kernel counts its two products over ``min(window, seq_len)``
+            keys for this layer's window; the rotation and the gate are
+            counted here, since no child owns them.
 
             Args:
-              seq_len: Keys a query reaches before any window.
-              rows: Rows sharing each parameter.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
             inner = self.num_heads * self.channels_head
-            total = 3 * matmul_cost(
+            total = matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=inner,
                 rows=rows,
-                itemsize=itemsize,
-            ) + matmul_cost(
+                dtype=dt,
+            ).tile(3, copies=3) + matmul_cost(
                 channels_in=inner,
                 channels_out=self.channels_in,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
             if self.gated:
                 total += matmul_cost(
                     channels_in=self.gate_channels,
                     channels_out=self.num_heads,
                     rows=rows,
-                    itemsize=itemsize,
+                    dtype=dt,
                 )
             total += cost(
                 self.norm_qk,
-                rows=rows * self.num_heads,
-                itemsize=itemsize,
-                **kwargs,
-            ).tile(2 * self.num_heads, copies=2)
-            total += cost(
-                self.kernel,
                 seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **with_rows(rows * self.num_heads, **kwargs),
+            ).tile(
+                2 * self.num_heads,
+                copies=2,
+            )
+            total += attention_kernel_cost(
+                seq_len=seq_len,
+                dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 window=self.window if self.window > 0 else -1,
-                rows=rows,
-                itemsize=itemsize,
-                **kwargs,
             )
             total += elementwise_cost(
                 primal=6 * inner,
@@ -317,36 +321,34 @@ class ValueGatedAttention(nn.Module):
                 adjoint_inputs=6,
                 adjoint_outputs=3,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             )
             if self.gated:
                 # Sigmoid/scale, then broadcast product and addition. The head
                 # gradient reduces channels; the input slice merges two paths.
-                total += Cost(
-                    primal=Compute(
-                        flops=Flops(elementwise=5 * self.num_heads + 2 * inner),
-                        bytes=Bytes(
-                            elementwise=itemsize * (5 * self.num_heads + 5 * inner),
-                        ),
-                    ),
-                    adjoint=Compute(
-                        flops=Flops(
-                            elementwise=5 * self.num_heads
-                            + 2 * inner
-                            + self.channels_in,
-                        ),
-                        bytes=Bytes(
-                            elementwise=itemsize
-                            * (6 * self.num_heads + 5 * inner + 3 * self.channels_in),
-                        ),
+                total += (
+                    traffic(
+                        "primal",
+                        "elementwise",
+                        elements=5 * self.num_heads + 5 * inner,
+                        flops=5 * self.num_heads + 2 * inner,
+                        dtype=dt,
+                    )
+                    + traffic(
+                        "adjoint",
+                        "elementwise",
+                        elements=6 * self.num_heads + 5 * inner + 3 * self.channels_in,
+                        flops=5 * self.num_heads + 2 * inner + self.channels_in,
+                        dtype=dt,
                     )
                     + reduction_cost(
                         input_elements=inner,
                         output_groups=self.num_heads,
-                        itemsize=itemsize,
-                    ),
+                        dtype=dt,
+                        phase="adjoint",
+                    )
                 )
-            return replace(total, bytes_state=itemsize * 2 * inner)
+            return replace(total, bytes_state=resolve_dtype(dtype).itemsize * 2 * inner)
 
     def __init__(self, config: Config) -> None:
         # Only constraints torch cannot state: RoPE pairs the head width, and

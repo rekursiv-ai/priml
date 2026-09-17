@@ -12,7 +12,11 @@ from torch import Tensor, nn
 import torch
 
 from priml.loss.custom_types import LossOutput
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    traffic,
+)
 
 
 if TYPE_CHECKING:
@@ -31,48 +35,70 @@ class WeightedSum(nn.Module):
         weights: Sequence[float] = field(default_factory=list[float])
         """Weight for each loss function."""
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum every child's price plus one weight multiply and one add each.
 
-            A token is whatever the children call one: the bus is forwarded
-            unchanged, so ``rows`` means the same thing at every level. A
+            A token is whatever the children call one: the geometry is handed
+            on unchanged, so its rows mean the same thing at every level. A
             child may be an ``nn.Module`` config or a plain callable's; either
             must price itself or :func:`cost` raises. The stack-and-sum costs
             one add per child per token, the weight one multiply; the adjoint
             is the same two ops.
 
             Traffic is per child-output element: weight reads/writes, stack
-            reads/writes, then reduction and its adjoint broadcast. The bus
-            does not describe a child's output reduction geometry.
+            reads/writes, then reduction and its adjoint broadcast. The
+            geometry does not describe a child's output reduction shape.
 
             Args:
-              itemsize: Bytes per logical tensor element; forwarded to children.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this combiner.
 
             """
             children = sum(
-                (cost(fn, itemsize=itemsize, **kwargs) for fn in self.fns),
+                (
+                    cost(
+                        fn,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for fn in self.fns
+                ),
                 Cost(),
             )
             count = len(self.fns)
-            return children + Cost(
-                primal=Compute(
-                    flops=Flops(elementwise=2 * count),
-                    bytes=Bytes(
-                        elementwise=4 * count * itemsize,
-                        reduction=(count + 1) * itemsize,
-                    ),
-                ),
-                adjoint=Compute(
-                    flops=Flops(elementwise=2 * count),
-                    bytes=Bytes(
-                        elementwise=2 * count * itemsize,
-                        reduction=(count + 1) * itemsize,
-                    ),
-                ),
+            dt = dtype
+            return (
+                children
+                + traffic(
+                    "primal",
+                    "elementwise",
+                    elements=4 * count,
+                    flops=2 * count,
+                    dtype=dt,
+                )
+                + traffic("primal", "reduction", elements=count + 1, dtype=dt)
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=2 * count,
+                    flops=2 * count,
+                    dtype=dt,
+                )
+                + traffic("adjoint", "reduction", elements=count + 1, dtype=dt)
             )
 
     def __init__(self, config: Config):

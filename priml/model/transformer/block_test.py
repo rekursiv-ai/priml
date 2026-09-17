@@ -26,7 +26,7 @@ import torch
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import Cost, cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -290,23 +290,23 @@ def test_block_cost_sums_its_four_children() -> None:
     model_cost = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
-        num_tokens=8,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
     )
     finalized = config.copy_tree().finalize()
     children = (finalized.attn, finalized.ffn, finalized.norm1, finalized.norm2)
+    f32 = torch.float32
     expected = sum(
-        (cost(child, seq_len=8, rows=8) for child in children),
+        (cost(child, seq_len=8, batch_size=1, dtype=None) for child in children),
         Cost(),
     ) + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=2 * 16),
-            bytes=Bytes(elementwise=4 * 2 * 3 * 16),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=2 * 16),
-            bytes=Bytes(elementwise=4 * 2 * 3 * 16),
-        ),
+        cells={
+            ("flops", "primal", "elementwise", f32): 2 * 16,
+            ("flops", "adjoint", "elementwise", f32): 2 * 16,
+            ("bytes", "primal", "elementwise", f32): 4 * 2 * 3 * 16,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 2 * 3 * 16,
+        },
     )
     assert model_cost == expected
 
@@ -317,7 +317,9 @@ def test_block_cost_ignores_checkpointing() -> None:
     checkpointed = TransformerBlock.Config(channels_in=16, checkpoint=True)
     assert plain.copy_tree().finalize().cost(
         seq_len=8,
-    ) == checkpointed.copy_tree().finalize().cost(seq_len=8)
+        batch_size=1,
+        dtype=None,
+    ) == checkpointed.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
 
 
 if __name__ == "__main__":

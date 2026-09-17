@@ -16,7 +16,11 @@ from priml.math.gated_delta_rule import (
     recurrent_gated_delta_rule,
 )
 from priml.model.attention.gated_delta_net import GatedDeltaNet
-from priml.model.cost import Cost, elementwise_cost
+from priml.model.cost import (
+    Cost,
+    elementwise_cost,
+    shared_rows,
+)
 from priml.model.custom_types import TensorModule
 from priml.model.init import InitFn
 from priml.model.norm import RMSNorm
@@ -35,8 +39,9 @@ class Qwen35RMSNormGated(nn.Module):
         def cost(
             self,
             *,
-            rows: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count an affine RMSNorm, a SiLU on the gate, and their product.
@@ -48,22 +53,24 @@ class Qwen35RMSNormGated(nn.Module):
             reduces over rows.
 
             Args:
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             width = self.channels_in
             norm = RMSNorm.Config()
             norm.channels_in = width
             norm.elementwise_affine = True
             return norm.cost(
-                rows=rows,
-                itemsize=itemsize,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
             ) + elementwise_cost(
                 primal=6 * width,
                 adjoint=7 * width,
@@ -72,8 +79,8 @@ class Qwen35RMSNormGated(nn.Module):
                 outputs=2,
                 adjoint_inputs=6,
                 adjoint_outputs=3,
-                itemsize=itemsize,
-                rows=rows,
+                dtype=dtype,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
             )
 
     def __init__(self, config: Config) -> None:
@@ -124,9 +131,9 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         """Initialize log decay rates from the public Qwen3.5 reference range."""
 
         @override
-        def _output_gate_cost(self, *, rows: int, itemsize: int) -> Cost:
+        def _output_gate_cost(self, *, rows: float, dtype: torch.dtype | None) -> Cost:
             """Leave the complete post-delta transform to the injected norm."""
-            del rows, itemsize
+            del rows, dtype
             return Cost()
 
     @override

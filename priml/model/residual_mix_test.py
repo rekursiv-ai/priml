@@ -75,26 +75,32 @@ def _run_residual(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
 
 def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
     """Two learned scalar weights per layer contribute only elementwise work."""
-    config = ResidualMix.Config(num_layers=3)
+    config = ResidualMix.Config(num_layers=3, channels_in=4)
     cost = assert_cost_matches_torch(
         config,
         build_input=lambda: (
             torch.randn(2, 4, requires_grad=True),
             torch.randn(2, 4, requires_grad=True),
         ),
-        num_tokens=2,
-        bus={"channels_in": 4},
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
         run=_mix_layer_one,
     )
-    assert cost.training.flops.matmul == 0
-    assert cost.primal.flops.elementwise == 3 * 4 * 3
-    assert cost.adjoint.flops.elementwise == 4 * 4 * 3
+    assert cost["flops", :, "matmul"].sum() == 0
+    assert cost["flops", "primal", "elementwise"].sum() == 3 * 4 * 3
+    assert cost["flops", "adjoint", "elementwise"].sum() == 4 * 4 * 3
     # Each scalar's gradient sums over the row, then over the two rows.
-    assert cost.adjoint.flops.reduction == 2 * (4 - 1) * 3 + 2 * 3 * (2 - 1) / 2
+    assert (
+        cost["flops", "adjoint", "reduction"].sum()
+        == 2 * (4 - 1) * 3 + 2 * 3 * (2 - 1) / 2
+    )
     assert cost.params == 2 * 3
-    assert cost.primal.bytes.elementwise == 4 * (7 * 4 * 3 + 2 * 3 / 2)
-    assert cost.adjoint.bytes.elementwise == 4 * (10 * 4 * 3 + 2 * 3 / 2)
-    assert cost.adjoint.bytes.reduction == 4 * (2 * (4 + 1) * 3 + 6 * (1 + 1 / 2))
+    assert cost["bytes", "primal", "elementwise"].sum() == 4 * (7 * 4 * 3 + 2 * 3 / 2)
+    assert cost["bytes", "adjoint", "elementwise"].sum() == 4 * (10 * 4 * 3 + 2 * 3 / 2)
+    assert cost["bytes", "adjoint", "reduction"].sum() == 4 * (
+        2 * (4 + 1) * 3 + 6 * (1 + 1 / 2)
+    )
 
 
 def _mix_layer_one(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:

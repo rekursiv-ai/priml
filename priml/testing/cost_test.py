@@ -21,7 +21,9 @@ def test_a_linear_matches_torch_exactly() -> None:
     analytical = assert_cost_matches_torch(
         Linear.Config(8, 16, bias=True),
         build_input=lambda: torch.randn(4, 8, requires_grad=True),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
     )
     assert analytical.params == 8 * 16 + 16
 
@@ -30,7 +32,9 @@ def test_a_swiglu_matches_torch_exactly() -> None:
     assert_cost_matches_torch(
         SwiGLU.Config(8, 8, channels_hidden=16, round_to=1),
         build_input=lambda: torch.randn(4, 8, requires_grad=True),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
     )
 
 
@@ -38,10 +42,12 @@ def test_a_matmul_free_leaf_measures_zero() -> None:
     analytical = assert_cost_matches_torch(
         RMSNorm.Config(8, elementwise_affine=True),
         build_input=lambda: torch.randn(4, 8, requires_grad=True),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
     )
-    assert analytical.training.flops.matmul == 0
-    assert analytical.training.flops.elementwise > 0
+    assert analytical["flops", :, "matmul"].sum() == 0
+    assert analytical["flops", :, "elementwise"].sum() > 0
 
 
 def test_a_wrong_matmul_count_is_caught() -> None:
@@ -50,7 +56,9 @@ def test_a_wrong_matmul_count_is_caught() -> None:
         assert_cost_matches_torch(
             Linear.Config(8, 16),
             build_input=lambda: torch.randn(4, 8, requires_grad=True),
-            num_tokens=4,
+            seq_len=4,
+            batch_size=1,
+            dtype=None,
             expected_ratio=2.0,
         )
 
@@ -63,11 +71,17 @@ class _OvercountingLinear(Linear):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            true = super().cost(rows=rows, itemsize=itemsize, **kwargs)
+            true = super().cost(
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
             return replace(true, params=true.params + 1)
 
 
@@ -80,7 +94,9 @@ def test_a_wrong_param_count_is_caught() -> None:
         assert_cost_matches_torch(
             _OvercountingLinear.Config(8, 16),
             build_input=lambda: torch.randn(4, 8, requires_grad=True),
-            num_tokens=4,
+            seq_len=4,
+            batch_size=1,
+            dtype=None,
         )
 
 

@@ -37,7 +37,7 @@ from priml.math.seed import RngState, get_rng_state
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
 from priml.metrics.utilization import Utilization
-from priml.model.cost import Cost, matmul_cost
+from priml.model.cost import Cost, matmul_cost, shared_rows
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.timer import CheckpointableStepTimer
 from priml.train import train_loop
@@ -2481,12 +2481,20 @@ class _PricedLinearModel(nn.Module):
         in_features: int = -1
         out_features: int = -1
 
-        def cost(self, **kwargs: object) -> Cost:
-            del kwargs
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             return matmul_cost(
                 channels_in=self.in_features,
                 channels_out=self.out_features,
                 bias=True,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=dtype,
             )
 
     def __init__(self, in_features: int, out_features: int) -> None:

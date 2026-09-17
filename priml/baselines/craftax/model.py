@@ -21,7 +21,11 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Cost, elementwise_cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    elementwise_cost,
+    matmul_cost,
+)
 
 
 class ActorCritic(nn.Module):
@@ -45,9 +49,9 @@ class ActorCritic(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one observation through both towers.
@@ -58,15 +62,15 @@ class ActorCritic(nn.Module):
             biased matmul and a tanh; the tanh's adjoint is ``g * (1 - t**2)``
             on the saved output, three operations per unit.
 
-            This is the model root: it states the batch geometry itself, so
-            a ``rows`` already on the bus is discarded and every parameter is
-            shared by ``batch_size * seq_len`` tokens.
+            This is the model root: every parameter is shared by
+            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
+            replaced by the batch's tokens.
 
             Args:
-              seq_len: Steps per worker in one pass.
-              batch_size: Workers stepped together.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The rest of the open message bus; nothing here reads it.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
@@ -74,6 +78,7 @@ class ActorCritic(nn.Module):
             """
             del kwargs
             rows = seq_len * batch_size
+            dt = dtype
             return sum(
                 (
                     _tower_cost(
@@ -82,7 +87,7 @@ class ActorCritic(nn.Module):
                         num_layers=self.num_layers,
                         output_size=output_size,
                         rows=rows,
-                        itemsize=itemsize,
+                        dt=dt,
                     )
                     for output_size in (self.num_actions, 1)
                 ),
@@ -166,7 +171,7 @@ def _tower_cost(
     num_layers: int,
     output_size: int,
     rows: int,
-    itemsize: int,
+    dt: torch.dtype | None,
 ) -> Cost:
     """Price one tower: ``num_layers`` biased tanh layers, then a biased readout."""
     total = Cost()
@@ -177,13 +182,13 @@ def _tower_cost(
             channels_out=channels_in,
             bias=True,
             rows=rows,
-            itemsize=itemsize,
+            dtype=dt,
         )
         total += elementwise_cost(
             primal=channels_in,
             adjoint=3 * channels_in,
             channels=channels_in,
-            itemsize=itemsize,
+            dtype=dt,
         )
         width = channels_in
     return total + matmul_cost(
@@ -191,7 +196,7 @@ def _tower_cost(
         channels_out=output_size,
         bias=True,
         rows=rows,
-        itemsize=itemsize,
+        dtype=dt,
     )
 
 

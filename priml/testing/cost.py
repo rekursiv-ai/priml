@@ -13,7 +13,7 @@ estimate to exactly that factor of the measurement.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import cast
 
 from configgle import Makeable
@@ -22,32 +22,38 @@ from torch.utils.flop_counter import FlopCounterMode
 
 import torch
 
-from priml.model.cost import Cost, cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    shared_rows,
+)
 
 
 def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
     config: Makeable[nn.Module],
     *,
     build_input: Callable[[], I],
-    num_tokens: int,
-    bus: Mapping[str, object] | None = None,
+    seq_len: int,
+    batch_size: int,
+    dtype: torch.dtype | None,
     run: Callable[[nn.Module, I], Tensor] | None = None,
     expected_ratio: float = 1.0,
     seed: int = 0,
+    **bus: object,
 ) -> Cost:
     """Build ``config``, measure one forward+backward, compare to its ``cost``.
 
     Args:
       config: Finalized on a copy; the caller's is untouched.
       build_input: Produces the forward input, a tensor or a tuple of them.
-      num_tokens: Tokens the input holds; divides torch's total. Also the
-        default ``rows`` on the bus, for a leaf priced outside any root.
-      bus: Messages ``cost`` needs: ``seq_len``/``batch_size`` for a root or
-        an attention, ``image_size`` for a vision model, and so on.
+      seq_len: Tokens per sequence.
+      batch_size: Sequences per step.
+      dtype: Activation dtype; ``None`` is torch's default.
       run: Applies the module to the built input; defaults to
         ``module(*inputs)``. Must return a tensor to reduce for backward.
       expected_ratio: ``analytical / measured`` to hold; ``1.0`` is exact.
       seed: For ``build_input`` and any random init.
+      **bus: The rest of the bus (``rows``, ...), forwarded unchanged.
 
     Returns:
       analytical: The config's own cost, for further assertions.
@@ -57,7 +63,14 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
 
     """
     finalized = config.copy_tree().finalize()
-    analytical = cost(finalized, **{"rows": num_tokens, **(bus or {})})
+    analytical = cost(
+        finalized,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        dtype=dtype,
+        **bus,
+    )
+    num_tokens = shared_rows(seq_len, batch_size, **bus)
 
     torch.manual_seed(seed)
     module = finalized.make()
@@ -82,7 +95,7 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
             output.sum().backward()
     measured = counter.get_total_flops() / num_tokens
 
-    matmul = analytical.training.flops.matmul
+    matmul = analytical["flops", :, "matmul"].sum()
     assert matmul == expected_ratio * measured, (
         f"cost reports {matmul} matmul FLOPs/token; torch measured {measured} "
         f"(ratio {matmul / measured if measured else float('inf'):.4f}, "

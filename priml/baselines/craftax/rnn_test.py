@@ -211,8 +211,9 @@ def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
             torch.randn(3, 12, requires_grad=True),
             torch.randn(3, 16, requires_grad=True),
         ),
-        num_tokens=3,
-        bus={"batch_size": 3},
+        seq_len=1,
+        batch_size=3,
+        dtype=None,
         run=_stepped,
     )
     gates = 2 * 3 * 16 * 16
@@ -220,13 +221,16 @@ def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
     weights = 12 * 16 + gates + heads
     biases = 16 + 2 * 3 * 16 + 2 * (16 + 16) + 5 + 1
     assert analytical.params == weights + biases
-    assert analytical.primal.flops.matmul == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
     # Biases, the embedding's ReLU, the episode reset, eleven operations per
     # GRU unit, and a ReLU after each hidden head layer.
-    assert analytical.primal.flops.elementwise == (
+    assert analytical["flops", "primal", "elementwise"].sum() == (
         biases + 16 + 16 + 11 * 16 + 2 * 2 * 16
     )
-    assert analytical.adjoint.flops.elementwise == 16 + 16 + 17 * 16 + 2 * 2 * 16
+    assert (
+        analytical["flops", "adjoint", "elementwise"].sum()
+        == 16 + 16 + 17 * 16 + 2 * 2 * 16
+    )
     assert analytical.bytes_state == 4 * 16
 
 
@@ -235,16 +239,21 @@ def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
     config.observation_size = 3
     config.channels_in = 2
     config.num_actions = 4
-    narrow = config.cost(batch_size=4, itemsize=2)
-    wide = config.cost(batch_size=4, itemsize=4)
+    narrow = config.cost(seq_len=1, batch_size=4, dtype=torch.bfloat16)
+    wide = config.cost(seq_len=1, batch_size=4, dtype=None)
     assert narrow.bytes_state == 4
     assert wide.bytes_state == 8
-    assert wide.training.bytes == 2 * narrow.training.bytes
-    assert wide.training.flops == narrow.training.flops
+    assert (
+        wide["bytes", :, :, torch.float32].sum()
+        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+    )
+    assert wide["flops"].sum() == narrow["flops"].sum()
     biases = 2 + 2 * 6 + 4 * 2 + 4 + 1
     bias_io = 2 * biases + biases / 4
     activation_io = 2 * 2 + 3 * 2 + 8 * 2 + 4 * 2 * 2
-    assert narrow.primal.bytes.elementwise == 2 * (bias_io + activation_io)
+    assert narrow["bytes", "primal", "elementwise"].sum() == 2 * (
+        bias_io + activation_io
+    )
 
 
 if __name__ == "__main__":

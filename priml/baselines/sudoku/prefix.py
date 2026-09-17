@@ -30,7 +30,13 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost, cost, elementwise_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+    shared_rows,
+    traffic,
+)
 from priml.model.custom_types import ChannelsOut
 from priml.model.init import truncated_normal
 
@@ -68,8 +74,9 @@ class RegisterTokens(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one scale over every register token, per puzzle.
@@ -78,27 +85,25 @@ class RegisterTokens(nn.Module):
             reduction over puzzles vanishes with its parameters.
 
             Args:
-              rows: Puzzles sharing the tokens; divides their gradient
-                reduction. The bus's row count, not this config's own
-                ``num_tokens``, which is how many tokens it prepends.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus; nothing here reads it.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-puzzle cost of this module.
 
             """
-            del kwargs
             width = self.num_tokens * self.channels_out
             return elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
                 params=width if self.learnable else 0,
-                rows=rows,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
                 inputs=0 if self.learnable else 1,
                 adjoint_inputs=1,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -148,7 +153,7 @@ class SparsePuzzleEmbedding(nn.Module):
     """
 
     class Config(Fig["SparsePuzzleEmbedding"], kw_only=False):
-        """Table size, prefix width, and the per-batch gradient buffer."""
+        """Cost size, prefix width, and the per-batch gradient buffer."""
 
         channels_in: int = -1
         """Model width; -1 inherits it. Sets the reshaped token width."""
@@ -185,35 +190,47 @@ class SparsePuzzleEmbedding(nn.Module):
         dtype: torch.dtype | None = None
         """Cast applied to the forward output; ``None`` keeps the table dtype."""
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price one row gathered and the prefix scaled, per puzzle; nothing owned.
 
             The table is a buffer, so there are no parameters, and the scatter
             back into it is the sparse optimizer's work, which the counting
             policy excludes: the adjoint holds only the scale. The pad is a
-            zero fill and the reshape a view.
+            zero fill and the reshape a view. The puzzle id is one ``int64``
+            read, plus two more for the gather's bookkeeping.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus; nothing here reads it.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-puzzle cost of this module.
 
             """
-            del kwargs
+            del seq_len, batch_size, kwargs
             width = self.num_tokens * self.channels_out
-            copied = 3 + 4 * self.channels_out
+            copied = 4 * self.channels_out
             if width > self.channels_out:
                 copied += self.channels_out + width
-            return Cost(
-                primal=Compute(bytes=Bytes(selection=copied * itemsize)),
-            ) + elementwise_cost(
-                primal=width,
-                adjoint=width,
-                channels=width,
-                adjoint_inputs=1,
-                itemsize=itemsize,
+            return (
+                traffic("primal", "selection", elements=3, dtype=torch.int64)
+                + traffic("primal", "selection", elements=copied, dtype=dtype)
+                + elementwise_cost(
+                    primal=width,
+                    adjoint=width,
+                    channels=width,
+                    adjoint_inputs=1,
+                    dtype=dtype,
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -342,25 +359,44 @@ class PrefixStack(nn.Module):
                     part.channels_out = self.channels_out
             return super().finalize()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum every part and the concatenation's input/output copy.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every part.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-puzzle cost of this module.
 
             """
             children = sum(
-                (cost(part, itemsize=itemsize, **kwargs) for part in self.parts),
+                (
+                    cost(
+                        part,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for part in self.parts
+                ),
                 Cost(),
             )
-            return children + Cost(
-                primal=Compute(
-                    bytes=Bytes(selection=2 * _prefix_elements(self) * itemsize),
-                ),
+            return children + traffic(
+                "primal",
+                "selection",
+                elements=2 * _prefix_elements(self),
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:

@@ -567,6 +567,7 @@ NanoChatLoop.Config(
                 │       │       ),
                 │       │       mix=ResidualMix.Config(
                 │       │               num_layers=8,
+                │       │               channels_in=512,
                 │       │               running=1.0,
                 │       │               original=0.1
                 │       │       )

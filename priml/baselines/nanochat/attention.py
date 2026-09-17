@@ -42,13 +42,13 @@ from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.value_gated_attention import ValueGatedAttention
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     cost,
     matmul_cost,
     reduction_cost,
+    shared_rows,
+    traffic,
+    with_rows,
 )
 from priml.model.custom_types import TensorModule, propagate_attr
 from priml.model.linear import Linear
@@ -120,8 +120,8 @@ class CausalAttention(ValueGatedAttention):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price base attention plus memory gates, output norm, and head gate.
@@ -130,53 +130,56 @@ class CausalAttention(ValueGatedAttention):
             mixing. Fused kernels retain the same logical unfused accounting.
 
             Args:
-              seq_len: Sequence length before windowing.
-              rows: Rows sharing the projection parameters.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: Remaining child cost messages.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               total: Per-token work, traffic, and owned parameters.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
             total = super().cost(
                 seq_len=seq_len,
-                rows=rows,
-                itemsize=itemsize,
+                batch_size=batch_size,
+                dtype=dtype,
                 **kwargs,
             ) + cost(
                 self.norm_out,
-                rows=rows * self.num_heads,
-                itemsize=itemsize,
-                **kwargs,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **with_rows(rows * self.num_heads, **kwargs),
             ).tile(self.num_heads)
             memory = int(self.bigram) + int(self.trigram)
-            total += memory * (
+            total += (
                 matmul_cost(
                     channels_in=self.gate_channels,
                     channels_out=self.num_heads,
                     rows=rows,
-                    itemsize=itemsize,
+                    dtype=dtype,
                 )
                 + _value_mix_cost(
                     heads=self.num_heads,
                     channels_head=self.channels_head,
                     channels_in=self.channels_in,
-                    itemsize=itemsize,
+                    dtype=dtype,
                     add=True,
                 )
-            )
+            ).tile(memory, copies=memory)
             if self.head_gate is not None:
                 total += cost(
                     self.head_gate,
-                    rows=rows,
-                    itemsize=itemsize,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 ) + _value_mix_cost(
                     heads=self.num_heads,
                     channels_head=self.channels_head,
                     channels_in=self.channels_in,
-                    itemsize=itemsize,
+                    dtype=dtype,
                     add=False,
                 )
             return total
@@ -1458,23 +1461,33 @@ def _value_mix_cost(
     heads: int,
     channels_head: int,
     channels_in: int,
-    itemsize: int,
+    dtype: torch.dtype | None,
     add: bool,
 ) -> Cost:
     """Price scaled sigmoid gates, broadcast products, and optional value additions."""
     inner = heads * channels_head
-    return Cost(
-        primal=Compute(
-            flops=Flops(elementwise=5 * heads + (2 if add else 1) * inner),
-            bytes=Bytes(elementwise=itemsize * (5 * heads + (5 if add else 3) * inner)),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=5 * heads + 2 * inner + channels_in),
-            bytes=Bytes(
-                elementwise=itemsize * (6 * heads + 5 * inner + 3 * channels_in),
-            ),
+    dt = dtype
+    return (
+        traffic(
+            "primal",
+            "elementwise",
+            elements=5 * heads + (5 if add else 3) * inner,
+            flops=5 * heads + (2 if add else 1) * inner,
+            dtype=dt,
         )
-        + reduction_cost(input_elements=inner, output_groups=heads, itemsize=itemsize),
+        + traffic(
+            "adjoint",
+            "elementwise",
+            elements=6 * heads + 5 * inner + 3 * channels_in,
+            flops=5 * heads + 2 * inner + channels_in,
+            dtype=dt,
+        )
+        + reduction_cost(
+            input_elements=inner,
+            output_groups=heads,
+            dtype=dt,
+            phase="adjoint",
+        )
     )
 
 

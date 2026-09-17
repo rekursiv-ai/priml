@@ -10,7 +10,15 @@ from configgle import Fig, LateBound, Makeable
 from torch import Tensor, nn
 from torch.nn import functional
 
-from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
+import torch
+
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+    shared_rows,
+)
 from priml.model.custom_types import (
     TensorModule,
     WeightedTensorModule,
@@ -42,17 +50,27 @@ class Identity(nn.Identity):
             infer_same_width(self)
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price nothing: no parameters, no arithmetic, no copy.
 
             Args:
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            del seq_len, batch_size, dtype, kwargs
             return Cost()
 
     def __init__(self, config: Config) -> None:
@@ -82,25 +100,43 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         channels_in = PassthroughAttribute[int]()
         channels_out = PassthroughAttribute[int]()
 
-        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price the branch, residual add, and input-gradient accumulation.
 
             Args:
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
+            Raises:
+              ValueError: No ``inner`` to wrap.
+
             """
             if self.inner is None:
                 raise ValueError("Must specify `inner`.")
-            return cost(self.inner, itemsize=itemsize, **kwargs) + elementwise_cost(
+            return cost(
+                self.inner,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            ) + elementwise_cost(
                 primal=self.channels_out,
                 adjoint=self.channels_in,
                 channels=self.channels_out,
                 inputs=2,
-                itemsize=itemsize,
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -156,29 +192,30 @@ class TiedLinear(nn.Module, LateBound):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price the matmul; the weight is counted where it is owned.
 
             Args:
-              rows: Rows sharing the borrowed weight.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return replace(
                 matmul_cost(
                     channels_in=self.channels_in,
                     channels_out=self.channels_out,
                     bias=False,
-                    rows=rows,
-                    itemsize=itemsize,
+                    rows=shared_rows(seq_len, batch_size, **kwargs),
+                    dtype=dtype,
                 ),
                 params=0,
             )

@@ -72,31 +72,45 @@ def test_hashed_tables_cost_is_one_gather_per_hash_and_matches_torch() -> None:
     priced = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 17, (2, 5)),
-        num_tokens=10,
+        seq_len=10,
+        batch_size=1,
+        dtype=None,
     )
     assert priced.params == 2 * 17 * 2
-    assert priced.primal.bytes.selection == 4 * (2 * (1 + 2 * 2) + 2 * 4 + 2 * 2)
-    assert priced.adjoint.flops.selection == 4
+    # Per hash: an int64 index read and a half-width row read and written;
+    # then the output copy at fp32 and the two shifted ids at int64.
+    assert priced["bytes", "primal", "selection", torch.int64] == 8 * (2 + 2 * 2)
+    assert priced["bytes", "primal", "selection", torch.float32] == 4 * (
+        2 * 2 * 2 + 2 * 4
+    )
+    assert priced["flops", "adjoint", "selection"].sum() == 4
     # Three multiplies, two XORs, one modulo per hash.
-    assert priced.primal.flops.elementwise == 2 * 2 * 3
+    assert priced["flops", "primal", "elementwise"].sum() == 2 * 2 * 3
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
-def test_hash_traffic_counts_integer_operands(itemsize: int) -> None:
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
+def test_hash_traffic_counts_integer_operands(dtype: torch.dtype) -> None:
     config = HashedNgramTables.Config()
     config.channels_out = 4
     config.hash_multipliers = ((3, 5, 7), (11, 13, 17))
-    priced = config.finalize().cost(itemsize=itemsize)
-    assert priced.primal.bytes.elementwise == itemsize * 2 * (2 * 3 + 3 * 2 + 2)
-    assert priced.adjoint.bytes.elementwise == 0
+    priced = config.finalize().cost(seq_len=1, batch_size=1, dtype=dtype)
+    # The hash is integer arithmetic on token ids: int64 whatever the batch's dtype.
+    assert priced["bytes", "primal", "elementwise", torch.int64] == 8 * 2 * (
+        2 * 3 + 3 * 2 + 2
+    )
+    assert priced["bytes", "primal", "elementwise", dtype] == 0
+    assert priced["bytes", "adjoint", "elementwise"].sum() == 0
 
 
 def test_hashed_tables_cost_counts_shift_and_output_copies() -> None:
     config = HashedNgramTables.Config()
     config.channels_out = 4
     config.hash_multipliers = ((3, 5, 7), (11, 13, 17))
-    priced = config.finalize().cost(itemsize=2)
-    assert priced.primal.bytes.selection == 2 * (2 * (1 + 2 * 2) + 2 * 4 + 2 * 2)
+    priced = config.finalize().cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
+    assert priced["bytes", "primal", "selection", torch.int64] == 8 * (2 + 2 * 2)
+    assert priced["bytes", "primal", "selection", torch.bfloat16] == 2 * (
+        2 * 2 * 2 + 2 * 4
+    )
 
 
 def test_ngram_cost_counts_padding_and_masked_prefix_copy() -> None:
@@ -104,11 +118,21 @@ def test_ngram_cost_counts_padding_and_masked_prefix_copy() -> None:
     config.channels_in = 13
     config.channels_out = 2
     config.multipliers = (1, 3, 5)
-    priced = config.finalize().cost(seq_len=8, rows=8, itemsize=2)
-    gather = 1 + 2 * 2
+    priced = config.finalize().cost(
+        seq_len=8,
+        batch_size=1,
+        dtype=torch.bfloat16,
+        rows=8,
+    )
+    gather = 2 * 2
     shifted = (2 + 1 / 8) + (2 + 2 / 8)
     output = 2 * 2 + 2 * 2 / 8
-    assert priced.primal.bytes.selection == 2 * (gather + shifted + output)
+    # The gathered row moves at the table's dtype (torch's default, fp32); the
+    # padded output is the batch's activation, bf16; the lookup index and the
+    # shifted ids are int64.
+    assert priced["bytes", "primal", "selection", torch.int64] == 8 * (1 + shifted)
+    assert priced["bytes", "primal", "selection", torch.float32] == 4 * gather
+    assert priced["bytes", "primal", "selection", torch.bfloat16] == 2 * output
 
 
 def test_ngram_cost_includes_context_table_and_scale() -> None:
@@ -119,10 +143,10 @@ def test_ngram_cost_includes_context_table_and_scale() -> None:
     context = NgramEmbedding.Config()
     context.channels_in = 7
     config.contexts = {"previous": context}
-    priced = config.finalize().cost(rows=4, itemsize=2)
+    priced = config.finalize().cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     assert priced.params == (13 + 7) * 2
-    assert priced.primal.flops.elementwise == 2 + 2
-    assert priced.primal.bytes.elementwise == 2 * 2 * (2 + 3)
+    assert priced["flops", "primal", "elementwise"].sum() == 2 + 2
+    assert priced["bytes", "primal", "elementwise"].sum() == 2 * 2 * (2 + 3)
 
 
 def test_table_initialization_transform_preserves_rng_draws() -> None:

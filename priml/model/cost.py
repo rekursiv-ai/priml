@@ -28,9 +28,9 @@ Counting policy:
   primitives write that term.
 - Attention is counted over ``min(window, seq_len)`` keys with no causal
   discount (PaLM convention). Recompute excluded: MFU, not HFU.
-- ``Bytes`` and ``bytes_state`` hold bytes, not element counts. Helpers use
-  a uniform ``itemsize=4`` unless the caller specifies another width. This is
-  an accounting assumption, not mixed-dtype profiling.
+- ``bytes`` and ``bytes_state`` hold bytes, not element counts. Each leaf
+  prices its tensors at its own storage dtype (``None`` is torch's default)
+  and tags every cell with it, so traffic can be read per dtype.
 - Traffic is the analytical unfused algorithm's minimum tensor operand I/O:
   each primitive reads its inputs and writes its outputs once. Intermediates
   between primitives count even when a fused implementation keeps them on chip.
@@ -38,180 +38,114 @@ Counting policy:
   Traffic geometry is explicit and never inferred from FLOP counts. Nonlinear
   tensor operators move operands once, not once per internal scalar operation.
 
-``cost(**kwargs)`` takes ``forward``'s open keyword bus. A leaf names what it
-reads and ``del``s the rest; a container forwards the bus to every child.
+``cost(*, seq_len, batch_size, dtype, **kwargs)`` takes the batch shape and
+dtype as required keywords -- no defaults, so a caller that forgets one fails
+here rather than pricing a guessed batch -- and an open message bus. A leaf
+reads its own config for everything else and forwards the bus unchanged; a
+container that shares a child's weights over rows other than the batch's
+tokens sends ``rows=`` on the bus, which :func:`shared_rows` reads.
 
 :func:`matmul_cost` (``weight=False`` for ``QK^T``) and
 :func:`elementwise_cost` are the two primitives that own parameters. The other
 silos are ``Cost`` literals. A module-level function assigned as a class
 attribute (``cost = attention_kernel_cost``) binds as the method.
 
-A differentiation mode is a ``Compute`` field on ``Cost``: ``primal`` and
-``adjoint`` (VJP) today; a ``tangent`` (JVP) or ``hessian_vector`` is one
-more field and one line in each operator when a consumer needs it.
+A :class:`Cost` is a sparse table over ``measure x phase x kernel x dtype``,
+the measures being ``flops`` and ``bytes``, plus three owned integers. The phases are ``primal`` and
+``adjoint`` (VJP) today; a ``tangent`` (JVP) or ``hessian_vector`` is one more
+phase and one line in each operator when a consumer needs it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Protocol, Self, overload, runtime_checkable
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import (
+    Final,
+    Literal,
+    Protocol,
+    overload,
+    override,
+    runtime_checkable,
+)
 
 import math
 
+import torch
+
 
 __all__ = [
-    "Bytes",
-    "Compute",
+    "KERNELS",
+    "MEASURES",
+    "PHASES",
     "Cost",
-    "Flops",
     "HasCost",
-    "KernelStats",
+    "Index",
+    "Kernel",
+    "Key",
+    "Measure",
+    "Phase",
     "cost",
     "elementwise_cost",
     "matmul_cost",
     "mbu",
     "mfu",
     "reduction_cost",
+    "resolve_dtype",
+    "shared_rows",
+    "traffic",
     "utilization",
+    "with_rows",
 ]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class KernelStats:
-    """One number per kernel silo."""
+type Measure = Literal["flops", "bytes"]
+type Phase = Literal["primal", "adjoint"]
+type Kernel = Literal["matmul", "elementwise", "reduction", "selection", "sort"]
+type Key = tuple[Measure, Phase, Kernel, torch.dtype]
 
-    matmul: float = 0
-    elementwise: float = 0
-    reduction: float = 0
-    selection: float = 0
-    sort: float = 0
+type Axis = str | torch.dtype
+type _Part = Axis | slice
+# A sub-table index: fewer than four parts, or four with at least one ``:``. A
+# full ``Key`` is none of these, so the two ``__getitem__`` overloads are disjoint.
+type Index = (
+    Axis
+    | tuple[_Part]
+    | tuple[_Part, _Part]
+    | tuple[_Part, _Part, _Part]
+    | tuple[slice, _Part, _Part, _Part]
+    | tuple[_Part, slice, _Part, _Part]
+    | tuple[_Part, _Part, slice, _Part]
+    | tuple[_Part, _Part, _Part, slice]
+)
 
-    @property
-    def total(self) -> float:
-        """Sum over every silo."""
-        return (
-            self.matmul + self.elementwise + self.reduction + self.selection + self.sort
-        )
-
-    def __add__(self, other: Self) -> Self:
-        return replace(
-            self,
-            matmul=self.matmul + other.matmul,
-            elementwise=self.elementwise + other.elementwise,
-            reduction=self.reduction + other.reduction,
-            selection=self.selection + other.selection,
-            sort=self.sort + other.sort,
-        )
-
-    @overload
-    def __mul__(self, other: float) -> Self: ...
-    @overload
-    def __mul__(self, other: KernelStats) -> KernelStats: ...
-    def __mul__(self, other: float | KernelStats) -> Self | KernelStats:
-        if isinstance(other, bool):
-            return NotImplemented
-        if isinstance(other, KernelStats):
-            return KernelStats(
-                matmul=self.matmul * other.matmul,
-                elementwise=self.elementwise * other.elementwise,
-                reduction=self.reduction * other.reduction,
-                selection=self.selection * other.selection,
-                sort=self.sort * other.sort,
-            )
-        return self._scale(other)
-
-    __rmul__ = __mul__
-
-    @overload
-    def __truediv__(self, other: float) -> Self: ...
-    @overload
-    def __truediv__(self, other: KernelStats) -> KernelStats: ...
-    def __truediv__(self, other: float | KernelStats) -> Self | KernelStats:
-        """Divide per silo; zero over zero is NaN, nonzero over zero is signed infinity."""
-        if isinstance(other, KernelStats):
-            return KernelStats(
-                matmul=_div(self.matmul, other.matmul),
-                elementwise=_div(self.elementwise, other.elementwise),
-                reduction=_div(self.reduction, other.reduction),
-                selection=_div(self.selection, other.selection),
-                sort=_div(self.sort, other.sort),
-            )
-        return replace(
-            self,
-            matmul=_div(self.matmul, other),
-            elementwise=_div(self.elementwise, other),
-            reduction=_div(self.reduction, other),
-            selection=_div(self.selection, other),
-            sort=_div(self.sort, other),
-        )
-
-    def _scale(self, factor: float) -> Self:
-        return replace(
-            self,
-            matmul=self.matmul * factor,
-            elementwise=self.elementwise * factor,
-            reduction=self.reduction * factor,
-            selection=self.selection * factor,
-            sort=self.sort * factor,
-        )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Flops(KernelStats):
-    """Floating operations per token."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Bytes(KernelStats):
-    """Bytes moved per token under the analytical tensor-I/O convention."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Total:
-    """A pass's FLOPs and bytes summed over every silo."""
-
-    flops: float
-    bytes: float
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Compute:
-    """What one differentiation pass computes and moves."""
-
-    flops: Flops = field(default_factory=Flops)
-    bytes: Bytes = field(default_factory=Bytes)
-
-    @property
-    def intensity(self) -> KernelStats:
-        """Return FLOPs per byte moved, by silo: the roofline's x-axis.
-
-        Its ``total`` sums the silo ratios and means nothing; the pass as a
-        whole is memory-bound or not by ``total.flops / total.bytes``.
-        """
-        return self.flops / self.bytes
-
-    @property
-    def total(self) -> Total:
-        """Sum every silo: all FLOPs and all bytes of this pass."""
-        return Total(flops=self.flops.total, bytes=self.bytes.total)
-
-    def __add__(self, other: Compute) -> Compute:
-        return Compute(flops=self.flops + other.flops, bytes=self.bytes + other.bytes)
-
-    def __mul__(self, other: int) -> Compute:
-        if isinstance(other, bool) or not isinstance(other, int):  # pyright: ignore[reportUnnecessaryIsInstance] -- Python operator dispatch must reject non-integers from untyped callers.
-            return NotImplemented
-        return Compute(flops=self.flops * other, bytes=self.bytes * other)
-
-    __rmul__ = __mul__
+MEASURES: Final = ("flops", "bytes")
+PHASES: Final = ("primal", "adjoint")
+KERNELS: Final = ("matmul", "elementwise", "reduction", "selection", "sort")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Cost:
-    """Per-token cost of one module, additive over children."""
+    """Per-token cost of one module: a sparse table plus what it owns.
 
-    primal: Compute = field(default_factory=Compute)
-    adjoint: Compute = field(default_factory=Compute)
+    ``cells`` is a ``measure x phase x kernel x dtype`` grid of floats; a
+    cell never written is zero. Index with a full key for the float, or a
+    prefix -- leading axes, ``:`` to skip one -- for the sub-table, then
+    ``sum()`` it: ``cost["flops", "primal", "matmul"].sum()`` is the forward
+    matmul work, ``cost["bytes", :, :, torch.int64].sum()`` the index traffic.
+    Fixed leading axes are dropped from the sub-table's keys, so
+    ``cost["flops"] / cost["bytes"]`` lines up cell for cell; ``/`` follows
+    the IEEE conventions of :func:`_div`.
+
+    The three integers are not per cell: a slice is cells alone and owns
+    nothing; they add under ``+`` and scale only by ``copies`` in :meth:`tile`.
+    """
+
+    cells: Mapping[tuple[object, ...], float] = field(
+        default_factory=dict[tuple[object, ...], float],
+    )
+    """Nonzero cells; zeros are dropped on construction."""
 
     params: int = 0
     """Parameters the module owns."""
@@ -222,64 +156,211 @@ class Cost:
     bytes_state: int = 0
     """Bytes of per-token state carried across a decode step."""
 
-    @property
-    def training(self) -> Compute:
-        """Primal plus adjoint: one training step's work."""
-        return self.primal + self.adjoint
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "cells",
+            MappingProxyType(
+                {
+                    key: value
+                    for key, value in self.cells.items()
+                    if value != 0 or math.isnan(value)
+                },
+            ),
+        )
+
+    @overload
+    def __getitem__(self, index: Key) -> float: ...
+    @overload
+    def __getitem__(self, index: Index) -> Cost: ...
+    def __getitem__(self, index: Key | Index) -> float | Cost:
+        parts: tuple[_Part, ...] = index if isinstance(index, tuple) else (index,)
+        width = len(next(iter(self.cells))) if self.cells else 4
+        if len(parts) == width and not any(isinstance(p, slice) for p in parts):
+            return self.cells.get(parts, 0)
+        keep = [i for i, p in enumerate(parts) if isinstance(p, slice)]
+        keep += range(len(parts), width)
+        return Cost(
+            cells={
+                tuple(key[i] for i in keep): value
+                for key, value in self.cells.items()
+                if all(
+                    isinstance(want, slice) or want == have
+                    for want, have in zip(parts, key, strict=False)
+                )
+            },
+        )
+
+    def sum(self) -> float:
+        """Total over every cell."""
+        return math.fsum(self.cells.values())
 
     def __add__(self, other: Cost) -> Cost:
+        merged = dict(self.cells)
+        for key, value in other.cells.items():
+            merged[key] = merged.get(key, 0) + value
         return Cost(
-            primal=self.primal + other.primal,
-            adjoint=self.adjoint + other.adjoint,
+            cells=merged,
             params=self.params + other.params,
             params_active=self.params_active + other.params_active,
             bytes_state=self.bytes_state + other.bytes_state,
         )
 
-    def __mul__(self, other: int) -> Cost:
-        # A Cost is repeated over modules, never scaled by a fraction.
-        if isinstance(other, bool) or not isinstance(other, int):  # pyright: ignore[reportUnnecessaryIsInstance] -- Python operator dispatch must reject non-integers from untyped callers.
-            return NotImplemented
+    def __truediv__(self, other: float | Cost) -> Cost:
+        """Divide cell-wise; the quotient is a ratio table and owns nothing."""
+        if isinstance(other, Cost):
+            keys = self.cells.keys() | other.cells.keys()
+            return Cost(
+                cells={
+                    key: _div(self.cells.get(key, 0), other.cells.get(key, 0))
+                    for key in keys
+                },
+            )
         return Cost(
-            primal=self.primal * other,
-            adjoint=self.adjoint * other,
-            params=self.params * other,
-            params_active=self.params_active * other,
-            bytes_state=self.bytes_state * other,
+            cells={key: _div(value, other) for key, value in self.cells.items()},
         )
 
-    __rmul__ = __mul__
-
-    def tile(self, rows: int, *, copies: int = 1) -> Cost:
+    def tile(self, rows: float, *, copies: int = 1) -> Cost:
         """Run ``rows`` times per token, owned ``copies`` times.
 
         A norm over every head row of one shared weight runs ``rows`` times
-        but is owned once; ``rows * cost`` would multiply its parameters too.
+        but is owned once; a stack of ``n`` blocks is ``tile(n, copies=n)``; a
+        child priced per its own row spread over a container's rows is
+        ``tile(child_rows / container_rows)``.
 
         Args:
-          rows: Times the work runs per token.
+          rows: Multiplier on every cell.
           copies: Times the parameters exist.
 
         Returns:
-          tiled: Work and all traffic scaled by ``rows``; ownership by ``copies``.
+          tiled: Cells scaled by ``rows``; ownership by ``copies``;
+            ``bytes_state`` by ``rows``, since state is per row.
 
         """
-        return replace(
-            rows * self,
+        return Cost(
+            cells={key: value * rows for key, value in self.cells.items()},
             params=copies * self.params,
             params_active=copies * self.params_active,
+            bytes_state=int(self.bytes_state * rows),
         )
+
+    @override
+    def __hash__(self) -> int:
+        return hash(
+            (
+                frozenset(self.cells.items()),
+                self.params,
+                self.params_active,
+                self.bytes_state,
+            ),
+        )
+
+    @override
+    def __repr__(self) -> str:
+        return (
+            f"Cost(params={self.params}, params_active={self.params_active}, "
+            f"bytes_state={self.bytes_state})\n{_grid(self.cells)}"
+        )
+
+
+def traffic(
+    phase: Phase,
+    kernel: Kernel,
+    *,
+    elements: float,
+    dtype: torch.dtype | None = None,
+    flops: float = 0,
+) -> Cost:
+    """One cell of tensor I/O, and optionally its FLOPs, owning nothing.
+
+    Args:
+      phase: Pass the traffic belongs to.
+      kernel: Silo the kernel dispatches to.
+      elements: Elements moved; bytes are ``elements * dtype.itemsize``.
+      dtype: Element type; ``None`` is torch's default.
+      flops: Operations in the same cell, when the literal carries both.
+
+    Returns:
+      cost: The one-cell ledger.
+
+    """
+    dt = resolve_dtype(dtype)
+    return Cost(
+        cells={
+            ("flops", phase, kernel, dt): flops,
+            ("bytes", phase, kernel, dt): elements * dt.itemsize,
+        },
+    )
+
+
+def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
+    """Return ``dtype``, or torch's default when a config left it ``None``."""
+    return torch.get_default_dtype() if dtype is None else dtype
+
+
+def shared_rows(seq_len: int, batch_size: int, **kwargs: object) -> float:
+    """Rows sharing one parameter: ``rows`` on the bus, else the batch's tokens.
+
+    Args:
+      seq_len: Tokens per sequence.
+      batch_size: Sequences per step.
+      **kwargs: The bus; ``rows`` overrides when a container shares a child's
+        weights over something other than the batch's tokens.
+
+    Returns:
+      rows: Finite and at least one.
+
+    Raises:
+      TypeError: ``rows`` is on the bus but is not a number.
+
+    """
+    if seq_len < 1 or batch_size < 1:
+        raise ValueError("seq_len and batch_size must be at least one.")
+    rows = kwargs.get("rows")
+    if rows is None:
+        return seq_len * batch_size
+    if isinstance(rows, bool) or not isinstance(rows, (int, float)):
+        raise TypeError(f"rows must be a number; got {rows!r}.")
+    _validate_rows(rows)
+    return rows
+
+
+def with_rows(rows: float, /, **kwargs: object) -> dict[str, object]:
+    """Return the bus with ``rows`` replaced, for a child's own sharing rows.
+
+    ``rows`` is positional-only so a bus already carrying one passes through
+    ``**kwargs`` and is overwritten rather than colliding.
+
+    Args:
+      rows: The child's sharing rows.
+      **kwargs: The bus, with or without a ``rows`` of its own.
+
+    Returns:
+      bus: ``kwargs`` with ``rows`` set.
+
+    """
+    return {**kwargs, "rows": rows}
 
 
 @runtime_checkable
 class HasCost(Protocol):
     """A config that prices the module it builds."""
 
-    def cost(self, **kwargs: object) -> Cost:
+    def cost(
+        self,
+        *,
+        seq_len: int,
+        batch_size: int,
+        dtype: torch.dtype | None,
+        **kwargs: object,
+    ) -> Cost:
         """Price one token through the module ``self`` builds.
 
         Args:
-          **kwargs: The open message bus (``seq_len``, ``rows``, ...).
+          seq_len: Tokens per sequence: attention's reach before any window.
+          batch_size: Sequences per step; amortizes weights only.
+          dtype: Activation dtype; ``None`` is torch's default.
+          **kwargs: The open bus, forwarded to every child.
 
         Returns:
           cost: Per-token cost.
@@ -288,29 +369,28 @@ class HasCost(Protocol):
         ...
 
 
-def cost(config: object, **kwargs: object) -> Cost:
+def cost(
+    config: object,
+    *,
+    seq_len: int,
+    batch_size: int,
+    dtype: torch.dtype | None,
+    **kwargs: object,
+) -> Cost:
     """Price a config per token for ``batch_size`` sequences of ``seq_len`` tokens.
-
-    A caller states the batch geometry, never the sharing rows. Every token of
-    the batch reads the same weights, so ``rows`` -- what one parameter and
-    its gradient reduction are amortized over -- is ``seq_len * batch_size``
-    unless a container already set it for a child with its own geometry (a
-    puzzle, an image position, an expert's occupancy). Both default to one,
-    so ``seq_len`` alone prices one sequence of that length.
 
     Args:
       config: A config with ``cost``.
-      **kwargs: The open message bus. ``seq_len`` is tokens per sequence,
-        attention's reach before any window; ``batch_size`` is sequences per
-        step and amortizes weights only, since attention never reuses
-        another sequence's keys. Anything else is forwarded unchanged.
+      seq_len: Tokens per sequence.
+      batch_size: Sequences per step.
+      dtype: Activation dtype; ``None`` is torch's default.
+      **kwargs: The open bus, forwarded unchanged.
 
     Returns:
       cost: The config's per-token cost.
 
     Raises:
-      TypeError: ``config`` has no ``cost``, or ``seq_len``/``batch_size``
-        is not an integer.
+      TypeError: ``config`` has no ``cost``.
 
     """
     if not isinstance(config, HasCost):
@@ -318,12 +398,7 @@ def cost(config: object, **kwargs: object) -> Cost:
             f"{type(config).__qualname__} has no cost(); every config under a "
             "priced container must implement HasCost.",
         )
-    seq_len = kwargs.setdefault("seq_len", 1)
-    batch_size = kwargs.setdefault("batch_size", 1)
-    if not isinstance(seq_len, int) or not isinstance(batch_size, int):
-        raise TypeError("seq_len and batch_size must be integers.")
-    kwargs.setdefault("rows", seq_len * batch_size)
-    return config.cost(**kwargs)
+    return config.cost(seq_len=seq_len, batch_size=batch_size, dtype=dtype, **kwargs)
 
 
 def matmul_cost(
@@ -333,7 +408,7 @@ def matmul_cost(
     bias: bool = False,
     weight: bool = True,
     rows: float = 1,
-    itemsize: int = 4,
+    dtype: torch.dtype | None = None,
 ) -> Cost:
     """Price one row of ``[M, K] @ [K, N]`` and its two adjoint products.
 
@@ -346,7 +421,8 @@ def matmul_cost(
       rows: Rows M sharing the right matrix and bias, or an analytical
         average of at least one. For attention, use rows sharing one sequence's
         matrix, not rows across the batch.
-      itemsize: Uniform bytes per operand element, including gradients.
+      dtype: Element type of every operand, gradients included; ``None`` is
+        torch's default. Tags every cell and sets the bytes per element.
 
     Returns:
       cost: Per-row FLOPs and unfused tensor I/O. The primal moves
@@ -354,33 +430,27 @@ def matmul_cost(
         same amount. Bias traffic belongs to elementwise and reduction silos.
 
     Raises:
-      ValueError: ``rows`` is nonfinite or below one, or ``itemsize``
-        is not positive.
+      ValueError: ``rows`` is nonfinite or below one.
 
     """
-    _validate_geometry(rows=rows, itemsize=itemsize)
+    _validate_rows(rows)
+    dt = resolve_dtype(dtype)
+    s = dt.itemsize
     products = channels_in * channels_out
     biases = channels_out if bias else 0
     params = (products if weight else 0) + biases
-    moved = itemsize * (channels_in + channels_out + products / rows)
+    moved = s * (channels_in + channels_out + products / rows)
     return Cost(
-        primal=Compute(
-            flops=Flops(matmul=2 * products, elementwise=biases),
-            bytes=Bytes(
-                matmul=moved,
-                elementwise=itemsize * (2 * biases + biases / rows),
-            ),
-        ),
-        adjoint=Compute(
-            flops=Flops(
-                matmul=4 * products,
-                reduction=biases * (rows - 1) / rows,
-            ),
-            bytes=Bytes(
-                matmul=2 * moved,
-                reduction=itemsize * (biases + biases / rows),
-            ),
-        ),
+        cells={
+            ("flops", "primal", "matmul", dt): 2 * products,
+            ("flops", "primal", "elementwise", dt): biases,
+            ("flops", "adjoint", "matmul", dt): 4 * products,
+            ("flops", "adjoint", "reduction", dt): biases * (rows - 1) / rows,
+            ("bytes", "primal", "matmul", dt): moved,
+            ("bytes", "primal", "elementwise", dt): s * (2 * biases + biases / rows),
+            ("bytes", "adjoint", "matmul", dt): 2 * moved,
+            ("bytes", "adjoint", "reduction", dt): s * (biases + biases / rows),
+        },
         params=params,
         params_active=params,
     )
@@ -393,7 +463,7 @@ def elementwise_cost(
     channels: float = 0,
     params: int = 0,
     rows: float = 1,
-    itemsize: int = 4,
+    dtype: torch.dtype | None = None,
     inputs: int = 1,
     outputs: int = 1,
     adjoint_inputs: int = 2,
@@ -413,7 +483,8 @@ def elementwise_cost(
         Adjoint elementwise traffic includes one temporary gradient write per
         parameter per row; reduction then reads these and writes the result.
       rows: Rows sharing parameters and their gradient reduction.
-      itemsize: Uniform bytes per operand element, including gradients.
+      dtype: Element type of every operand, gradients included; ``None`` is
+        torch's default.
       inputs: Primal input operands, excluding owned parameters.
       outputs: Primal output operands.
       adjoint_inputs: Adjoint input operands, excluding owned parameters.
@@ -423,33 +494,23 @@ def elementwise_cost(
       cost: Explicit operand I/O with parameter reductions in the adjoint.
 
     Raises:
-      ValueError: ``rows`` is nonfinite or below one, or ``itemsize``
-        is not positive.
+      ValueError: ``rows`` is nonfinite or below one.
 
     """
-    _validate_geometry(rows=rows, itemsize=itemsize)
+    _validate_rows(rows)
+    dt = resolve_dtype(dtype)
+    s = dt.itemsize
     return Cost(
-        primal=Compute(
-            flops=Flops(elementwise=primal),
-            bytes=Bytes(
-                elementwise=itemsize * (channels * (inputs + outputs) + params / rows),
-            ),
-        ),
-        adjoint=Compute(
-            flops=Flops(
-                elementwise=adjoint,
-                reduction=params * (rows - 1) / rows,
-            ),
-            bytes=Bytes(
-                elementwise=itemsize
-                * (
-                    channels * (adjoint_inputs + adjoint_outputs)
-                    + params / rows
-                    + params
-                ),
-                reduction=itemsize * (params + params / rows),
-            ),
-        ),
+        cells={
+            ("flops", "primal", "elementwise", dt): primal,
+            ("flops", "adjoint", "elementwise", dt): adjoint,
+            ("flops", "adjoint", "reduction", dt): params * (rows - 1) / rows,
+            ("bytes", "primal", "elementwise", dt): s
+            * (channels * (inputs + outputs) + params / rows),
+            ("bytes", "adjoint", "elementwise", dt): s
+            * (channels * (adjoint_inputs + adjoint_outputs) + params / rows + params),
+            ("bytes", "adjoint", "reduction", dt): s * (params + params / rows),
+        },
         params=params,
         params_active=params,
     )
@@ -460,47 +521,58 @@ def reduction_cost(
     input_elements: float,
     output_groups: float = 1,
     rows: float = 1,
-    itemsize: int = 4,
-) -> Compute:
+    dtype: torch.dtype | None = None,
+    phase: Phase = "primal",
+) -> Cost:
     """Price one reduction's explicit tensor geometry, amortized over tokens.
 
     Args:
       input_elements: Total elements read across all output groups.
       output_groups: Reduced elements written; each group uses n-1 operations.
       rows: Tokens sharing this reduction's work and traffic.
-      itemsize: Uniform bytes per input and output element.
+      dtype: Element type of the input and output; ``None`` is torch's default.
+      phase: Which pass runs the reduction.
 
     Returns:
-      compute: Reduction FLOPs and minimum unfused operand I/O. Singleton
-        groups copy their elements; empty groups write the identity. Both use
-        zero FLOPs. This describes one reduction, not its derivative or HBM.
+      cost: Reduction FLOPs and minimum unfused operand I/O, owning nothing.
+        Singleton groups copy their elements; empty groups write the identity.
+        Both use zero FLOPs. This describes one reduction, not its derivative.
 
     Raises:
-      ValueError: ``rows`` is nonfinite or below one, or ``itemsize``
-        is not positive.
+      ValueError: ``rows`` is nonfinite or below one.
 
     """
-    _validate_geometry(rows=rows, itemsize=itemsize)
-    return Compute(
-        flops=Flops(reduction=max(0, input_elements - output_groups) / rows),
-        bytes=Bytes(reduction=itemsize * (input_elements + output_groups) / rows),
+    _validate_rows(rows)
+    dt = resolve_dtype(dtype)
+    return Cost(
+        cells={
+            ("flops", phase, "reduction", dt): max(
+                0,
+                input_elements - output_groups,
+            )
+            / rows,
+            ("bytes", phase, "reduction", dt): dt.itemsize
+            * (input_elements + output_groups)
+            / rows,
+        },
     )
 
 
-def utilization(cost: Cost, *, tokens_per_sec: float, peak: KernelStats) -> KernelStats:
-    """Achieved fraction of each silo's ceiling on a training step; ``.matmul`` is MFU.
+def utilization(cost: Cost, *, tokens_per_sec: float, peak: Cost) -> Cost:
+    """Achieved fraction of each cell's ceiling on a training step.
 
     Args:
       cost: Per-token cost at the batch's sequence length.
       tokens_per_sec: Measured ``tokens_per_step / step_time``.
-      peak: Per-silo ceiling summed over every device the tokens spanned.
-        ``matmul`` is the dense FLOP/s for the dtype.
+      peak: Per-cell FLOP/s ceiling summed over every device the tokens
+        spanned, at ``(phase, kernel, dtype)`` keys and owning nothing; a
+        matmul cell is the dense tensor-core peak for its dtype.
 
     Returns:
-      achieved: Fraction of peak per silo.
+      achieved: Fraction of peak per cell; the matmul cells are MFU.
 
     """
-    return cost.training.flops * tokens_per_sec / peak
+    return cost["flops"].tile(tokens_per_sec) / peak
 
 
 def mfu(cost: Cost, *, tokens_per_sec: float, peak_flops_per_sec: float) -> float:
@@ -516,7 +588,7 @@ def mfu(cost: Cost, *, tokens_per_sec: float, peak_flops_per_sec: float) -> floa
       achieved: Fraction of peak; ``0.4`` is a well-tuned dense run.
 
     """
-    return cost.training.flops.matmul * tokens_per_sec / peak_flops_per_sec
+    return cost["flops", :, "matmul"].sum() * tokens_per_sec / peak_flops_per_sec
 
 
 def mbu(
@@ -549,11 +621,100 @@ def mbu(
     return moved * steps_per_sec / peak_bytes_per_sec
 
 
-def _validate_geometry(*, rows: float, itemsize: int) -> None:
+def _validate_rows(rows: float) -> None:
     if not math.isfinite(rows) or rows < 1:
         raise ValueError("rows must be finite and at least one.")
-    if itemsize <= 0:
-        raise ValueError("itemsize must be positive.")
+
+
+# Columns are the last key axis (``dtype`` unless it was sliced away), crossed with
+# ``measure`` when a table still holds one; rows are every axis between. A table
+# holding both measures ends each row with its flops/bytes.
+def _grid(cells: Mapping[tuple[object, ...], float]) -> str:
+    """Render a table as an aligned grid with a totals row."""
+    if not cells:
+        return "(empty)"
+    width = len(next(iter(cells)))
+    if width == 0:
+        return _si(next(iter(cells.values())))
+    measured = any(k[0] in MEASURES for k in cells) and width > 1
+    measures: list[str] = (
+        [m for m in MEASURES if any(k[0] == m for k in cells)] if measured else [""]
+    )
+    columns_axis = sorted({k[-1] for k in cells}, key=_column_order)
+    order = (*PHASES, *KERNELS)
+    labels = sorted(
+        {tuple(str(x) for x in k[measured:-1]) for k in cells},
+        key=lambda label: tuple(order.index(x) if x in order else -1 for x in label),
+    )
+    depth = max(1, *(len(label) for label in labels))
+    columns = [
+        f"{m}[{_axis_name(d)}]" if m else _axis_name(d)
+        for m in measures
+        for d in columns_axis
+    ]
+    per_column = len(columns_axis) if measures == ["flops", "bytes"] else 0
+    if per_column:
+        columns.append("flops/bytes")
+    rows: list[list[str]] = [[*[""] * depth, *columns]]
+    totals = [0.0] * (len(measures) * len(columns_axis))
+    for label in labels:
+        values = [
+            cells.get(((m,) if measured else ()) + label + (d,), 0.0)
+            for m in measures
+            for d in columns_axis
+        ]
+        totals = [t + v for t, v in zip(totals, values, strict=True)]
+        rows.append(_line(label, values, depth=depth, per_column=per_column))
+    if len(labels) > 1:
+        rows.append(_line(("total",), totals, depth=depth, per_column=per_column))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    return "\n".join(
+        " ".join(
+            cell.ljust(widths[i]) if i < depth else cell.rjust(widths[i])
+            for i, cell in enumerate(row)
+        ).rstrip()
+        for row in rows
+    )
+
+
+def _column_order(axis: object) -> tuple[int, str]:
+    if isinstance(axis, torch.dtype):
+        return (axis.itemsize, str(axis))
+    order = (*MEASURES, *PHASES, *KERNELS)
+    return (order.index(axis) if axis in order else -1, str(axis))
+
+
+def _line(
+    label: tuple[str, ...],
+    values: list[float],
+    *,
+    depth: int,
+    per_column: int,
+) -> list[str]:
+    """Format one grid row; ``per_column > 0`` appends the row's flops/bytes."""
+    out = [*label, *[""] * (depth - len(label)), *(_si(v) for v in values)]
+    if per_column:
+        out.append(
+            _si(_div(math.fsum(values[:per_column]), math.fsum(values[per_column:]))),
+        )
+    return out
+
+
+def _axis_name(axis: object) -> str:
+    return str(axis).removeprefix("torch.")
+
+
+def _si(value: float) -> str:
+    """Format with an SI suffix at four significant digits; zero is ``-``."""
+    if value == 0:
+        return "-"
+    if not math.isfinite(value):
+        return str(value)
+    magnitude = abs(value)
+    for exponent, suffix in ((12, "T"), (9, "G"), (6, "M"), (3, "K")):
+        if magnitude >= 10**exponent:
+            return f"{value / 10**exponent:.4g}{suffix}"
+    return f"{value:.4g}"
 
 
 def _div(numerator: float, denominator: float) -> float:

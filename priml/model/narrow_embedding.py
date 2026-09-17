@@ -27,7 +27,10 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Cost, cost
+from priml.model.cost import (
+    Cost,
+    cost,
+)
 from priml.model.custom_types import (
     ChannelsOut,
     LookupTable,
@@ -68,22 +71,31 @@ class NarrowEmbedding(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the table it narrows; storage dtype does not select cost itemsize.
+            """Price the table it narrows, at the narrowed dtype.
 
             Args:
-              seq_len: Sequence length forwarded to contextual lookup tables.
-              itemsize: Uniform bytes per analytical operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.inner, seq_len=seq_len, itemsize=itemsize, **kwargs)
+            del dtype
+            return cost(
+                self.inner,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=self.dtype,
+                **kwargs,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

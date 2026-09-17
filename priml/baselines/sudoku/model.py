@@ -26,7 +26,7 @@ is simply unused without one.
 
 from __future__ import annotations
 
-from dataclasses import field, replace
+from dataclasses import field
 from typing import NamedTuple, Protocol, Self, cast, override, runtime_checkable
 
 import copy
@@ -39,7 +39,13 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.model.cost import Bytes, Compute, Cost, cost, elementwise_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+    traffic,
+    with_rows,
+)
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
@@ -195,19 +201,29 @@ class DeepRecurrence(nn.Module):
         fast_cycles: int = 9
         """Inner iterations refining the fast latent per slow cycle."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price nothing: the schedule owns no weights and does no arithmetic.
 
             The core it repeats is the model's, which prices every cycle.
 
             Args:
-              **kwargs: The open message bus; nothing here reads it.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Zero.
 
             """
-            del kwargs
+            del seq_len, batch_size, dtype, kwargs
             return Cost()
 
     def __init__(self, config: Config) -> None:
@@ -367,8 +383,9 @@ class SudokuNet(nn.Module):
         def cost(
             self,
             *,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one forward per grid cell: embed, every core pass, both heads.
@@ -384,35 +401,46 @@ class SudokuNet(nn.Module):
             only the last runs backward, so the primal is repeated
             ``slow_cycles`` times and the adjoint once.
 
-            A puzzle is the sequence, so ``seq_len`` and ``rows`` on the bus
-            are discarded: the reach of every block is this config's own
-            ``total_seq_len``, which a batch cannot change, and every child is
-            handed the rows its own geometry implies.
+            A puzzle is the sequence, so ``seq_len`` is discarded:
+            the reach of every block is this config's own ``total_seq_len``,
+            which a batch cannot change, and every child is handed the rows
+            its own geometry implies.
 
             Args:
-              batch_size: Puzzles in the batch; amortizes weights and their
-                gradient reductions.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The rest of the open message bus, forwarded to every
-                child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-cell cost of this module.
 
             """
-            kwargs.pop("seq_len", None)
-            kwargs.pop("rows", None)
+            del seq_len
             puzzles = batch_size
+            dt = dtype
             grid_len = self.grid_len
             latent = self.total_seq_len
             slow_cycles, fast_cycles = _cycles(self.recurrence)
             width = self.channels_in
-            stack = self.num_layers * cost(
-                self.block,
+
+            over_rows = functools.partial(
+                cost,
                 seq_len=latent,
-                rows=puzzles * latent,
-                itemsize=itemsize,
-                **kwargs,
+                batch_size=puzzles,
+                dtype=dt,
+                **with_rows(latent * puzzles, **kwargs),
+            )
+            over_puzzles = functools.partial(
+                cost,
+                seq_len=latent,
+                batch_size=puzzles,
+                dtype=dt,
+                **with_rows(puzzles, **kwargs),
+            )
+            stack = over_rows(self.block).tile(
+                self.num_layers,
+                copies=self.num_layers,
             )
             # ``z_slow + input_emb``, one add per fast cycle, and the slow
             # update: each an add forward and an accumulation back.
@@ -421,45 +449,43 @@ class SudokuNet(nn.Module):
                 adjoint=(fast_cycles + 2) * width,
                 channels=(fast_cycles + 2) * width,
                 inputs=2,
-                itemsize=itemsize,
+                dtype=dt,
             )
-            per_row = (
-                stack.tile(fast_cycles + 1)
-                + adds
-                + cost(
-                    _head(self),
-                    rows=puzzles * latent,
-                    itemsize=itemsize,
-                    **kwargs,
-                )
-            )
-            core = _spread(per_row, latent / grid_len) + _spread(
-                cost(_halt_head(self), rows=puzzles, itemsize=itemsize, **kwargs),
+            per_row = stack.tile(fast_cycles + 1) + adds + over_rows(_head(self))
+            core = per_row.tile(latent / grid_len) + over_puzzles(
+                _halt_head(self),
+            ).tile(
                 1 / grid_len,
+            )
+            # Every slow cycle runs the core forward; only the last runs backward.
+            primal_only = Cost(
+                cells={
+                    key: value
+                    for key, value in core.cells.items()
+                    if key[1] == "primal"
+                },
             )
             total = (
                 cost(
                     self.embedding,
+                    seq_len=grid_len,
                     batch_size=puzzles,
-                    rows=puzzles * grid_len,
-                    itemsize=itemsize,
-                    **kwargs,
+                    dtype=dt,
+                    **with_rows(grid_len * puzzles, **kwargs),
                 )
                 + core
-                + (slow_cycles - 1) * Cost(primal=core.primal)
+                + primal_only.tile(slow_cycles - 1)
             )
             if self.prefix is not None:
-                total += _spread(
-                    cost(self.prefix, rows=puzzles, itemsize=itemsize, **kwargs),
-                    1 / grid_len,
-                )
-                total += Cost(
-                    primal=Compute(
-                        bytes=Bytes(selection=2 * latent * width * itemsize / grid_len),
-                    ),
+                total += over_puzzles(self.prefix).tile(1 / grid_len)
+                total += traffic(
+                    "primal",
+                    "selection",
+                    elements=2 * latent * width / grid_len,
+                    dtype=dt,
                 )
             if self.recurrence is not None:
-                total += cost(self.recurrence, itemsize=itemsize, **kwargs)
+                total += over_rows(self.recurrence)
             return total
 
     def __init__(self, config: Config) -> None:
@@ -658,21 +684,6 @@ def _cycles(recurrence: Makeable[Recurrence] | None) -> tuple[int, int]:
     if isinstance(recurrence, DeepRecurrence.Config):
         return recurrence.slow_cycles, recurrence.fast_cycles
     return 1, 1
-
-
-def _spread(total: Cost, rows_per_cell: float) -> Cost:
-    """Spread work done on ``rows_per_cell`` rows over one cell; ownership unchanged."""
-    return replace(
-        total,
-        primal=Compute(
-            flops=total.primal.flops * rows_per_cell,
-            bytes=total.primal.bytes * rows_per_cell,
-        ),
-        adjoint=Compute(
-            flops=total.adjoint.flops * rows_per_cell,
-            bytes=total.adjoint.bytes * rows_per_cell,
-        ),
-    )
 
 
 # Read from the config rather than by constructing the module: ``finalize`` runs during

@@ -792,6 +792,7 @@ NgramTrainLoop.Config(
                 │       │       ),
                 │       │       mix=GatedResidualMix.Config(
                 │       │               num_layers=8,
+                │       │               channels_in=768,
                 │       │               running=1.0,
                 │       │               original=0.1,
                 │       │               gate_scale=0.0

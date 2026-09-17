@@ -13,7 +13,11 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 import torch
 
-from priml.model.cost import Cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    matmul_cost,
+    shared_rows,
+)
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
@@ -66,28 +70,29 @@ class Linear(nn.Linear):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one row, amortizing bias reduction over ``rows`` rows.
+            """Price one row; this layer's own ``dtype`` wins over the batch's.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 bias=self.bias,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=self.dtype if self.dtype is not None else dtype,
             )
 
     def __init__(self, config: Config) -> None:
@@ -157,28 +162,29 @@ class EnsembleLinear(nn.Module):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price the flattened ensemble as one matrix, sharing its input row.
 
             Args:
-              rows: Rows sharing each parameter and its gradient reduction.
-              itemsize: Uniform bytes per operand element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out * self.num_ensemble,
                 bias=self.bias,
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=dtype,
             )
 
     def __init__(self, config: Config) -> None:

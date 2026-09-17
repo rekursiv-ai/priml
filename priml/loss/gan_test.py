@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from torch import Tensor, nn
 
 import pytest
@@ -9,8 +11,27 @@ import torch
 
 from priml.loss.gan import AdversarialLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+def _fp32(
+    *,
+    primal: Mapping[str, Mapping[Kernel, float]] | None = None,
+    adjoint: Mapping[str, Mapping[Kernel, float]] | None = None,
+    **fields: int,
+) -> Cost:
+    """Build a ``Cost`` from per-phase, per-kernel fp32 FLOPs and bytes."""
+    cells: dict[tuple[object, ...], float] = {}
+    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, float]] | None], ...] = (
+        ("primal", primal),
+        ("adjoint", adjoint),
+    )
+    for phase, silos in phases:
+        for measure in MEASURES:
+            for kernel, value in (silos or {}).get(measure, {}).items():
+                cells[(measure, phase, kernel, torch.float32)] = value
+    return Cost(cells=cells, **fields)
 
 
 def test_adversarial_loss_is_pointwise_over_batch() -> None:
@@ -39,7 +60,9 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
             torch.randn(2, 1, requires_grad=True),
             torch.randn(2, 3, 4, requires_grad=True),
         ),
-        num_tokens=12,
+        seq_len=12,
+        batch_size=1,
+        dtype=None,
         run=lambda module, inputs: _loss(
             module,
             inputs[1],
@@ -48,38 +71,39 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
             real_media=real_media,
         ),
     )
-    expected = Cost(
-        primal=Compute(
-            flops=Flops(elementwise=2 + 11 / 12, reduction=11 / 12),
-            bytes=Bytes(elementwise=4 * (5 + 33 / 12), reduction=5),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=3 + 7 / 12),
-            bytes=Bytes(elementwise=4 * (7 + 16 / 12), reduction=5),
-        ),
+    expected = _fp32(
+        primal={
+            "flops": {"elementwise": 2 + 11 / 12, "reduction": 11 / 12},
+            "bytes": {"elementwise": 4 * (5 + 33 / 12), "reduction": 5},
+        },
+        adjoint={
+            "flops": {"elementwise": 3 + 7 / 12},
+            "bytes": {"elementwise": 4 * (7 + 16 / 12), "reduction": 5},
+        },
     )
-    assert cost(config, rows=12) == expected
-    assert measured == expected + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=2),
-            bytes=Bytes(elementwise=16, reduction=8),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=2),
-            bytes=Bytes(elementwise=8, reduction=8),
-        ),
+    assert cost(config, seq_len=12, batch_size=1, dtype=None) == expected
+    assert measured == expected + _fp32(
+        primal={
+            "flops": {"elementwise": 2},
+            "bytes": {"elementwise": 16, "reduction": 8},
+        },
+        adjoint={
+            "flops": {"elementwise": 2},
+            "bytes": {"elementwise": 8, "reduction": 8},
+        },
     )
     assert measured.params == 0
-    assert measured.training.flops.matmul == 0
+    assert measured["flops", :, "matmul"].sum() == 0
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
-def test_adversarial_loss_operand_traffic(itemsize: int) -> None:
-    priced = cost(AdversarialLoss.Config(), rows=12, itemsize=itemsize)
-    assert priced.primal.bytes.elementwise == (5 + 33 / 12) * itemsize
-    assert priced.primal.bytes.reduction == 15 * itemsize / 12
-    assert priced.adjoint.bytes.elementwise == (7 + 16 / 12) * itemsize
-    assert priced.adjoint.bytes.reduction == 15 * itemsize / 12
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
+def test_adversarial_loss_operand_traffic(dtype: torch.dtype) -> None:
+    priced = cost(AdversarialLoss.Config(), seq_len=12, batch_size=1, dtype=dtype)
+    itemsize = dtype.itemsize
+    assert priced["bytes", "primal", "elementwise"].sum() == (5 + 33 / 12) * itemsize
+    assert priced["bytes", "primal", "reduction"].sum() == 15 * itemsize / 12
+    assert priced["bytes", "adjoint", "elementwise"].sum() == (7 + 16 / 12) * itemsize
+    assert priced["bytes", "adjoint", "reduction"].sum() == 15 * itemsize / 12
 
 
 def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:

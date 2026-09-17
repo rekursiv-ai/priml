@@ -12,7 +12,13 @@ import torch
 
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+    matmul_cost,
+    shared_rows,
+)
 from priml.model.custom_types import (
     CachedAttention,
     ChannelsHead,
@@ -91,28 +97,37 @@ class OutputGate(nn.Module):
         def cost(
             self,
             *,
-            rows: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count projection, sigmoid, product and the two-path input gradient.
 
             Args:
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
             return (
-                cost(self.inner, itemsize=itemsize, rows=rows, **kwargs)
+                cost(
+                    self.inner,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
                 + matmul_cost(
                     channels_in=self.channels_in,
                     channels_out=self.channels_in,
                     bias=self.bias,
-                    itemsize=itemsize,
+                    dtype=dtype,
                     rows=rows,
                 )
                 + elementwise_cost(
@@ -124,7 +139,7 @@ class OutputGate(nn.Module):
                     adjoint_inputs=9,
                     adjoint_outputs=3,
                     rows=rows,
-                    itemsize=itemsize,
+                    dtype=dtype,
                 )
             )
 

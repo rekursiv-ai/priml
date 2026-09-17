@@ -21,7 +21,7 @@ from priml.model.attention.rope import (
     RoPEMixed,
     YarnScaling,
 )
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import Cost, cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -740,7 +740,10 @@ def test_frequency_table_cost_is_free(
     | YarnScaling.Config,
 ) -> None:
     """A table is constants: no products, no parameters, nothing per token."""
-    assert cost(frequencies.copy_tree().finalize(), seq_len=8) == Cost()
+    assert (
+        cost(frequencies.copy_tree().finalize(), seq_len=8, batch_size=1, dtype=None)
+        == Cost()
+    )
     model = RoPE.Config(8, frequencies=frequencies).make()
     assert sum(p.numel() for p in model.parameters()) == 0
 
@@ -749,10 +752,17 @@ class _LearnedTable:
     """A frequency table that owns parameters, so pricing it is not free."""
 
     class Config(Fig["_LearnedTable"]):
-        def cost(self, **kwargs: object) -> Cost:
-            del kwargs
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            del seq_len, batch_size, dtype, kwargs
             return Cost(
-                primal=Compute(bytes=Bytes(matmul=7)),
+                cells={("bytes", "primal", "matmul", torch.float32): 7},
                 params=7,
                 params_active=7,
             )
@@ -770,49 +780,96 @@ class _LearnedTable:
 def test_yarn_cost_is_its_inner_table() -> None:
     """The wrapper rescales constants; whatever the inner table owns is priced."""
     yarn = YarnScaling.Config(inner=_LearnedTable.Config())
-    assert cost(yarn) == cost(_LearnedTable.Config())
+    assert cost(yarn, seq_len=1, batch_size=1, dtype=None) == cost(
+        _LearnedTable.Config(),
+        seq_len=1,
+        batch_size=1,
+        dtype=None,
+    )
 
 
 def test_rope_cost_is_factors_plus_one_table_per_axis() -> None:
     """A template is copied per axis in ``__init__``, so it is priced per axis."""
-    plain = RoPE.Config([8, 8]).copy_tree().finalize().cost()
-    learned = RoPE.Config([8, 8], frequencies=_LearnedTable.Config())
-    assert learned.copy_tree().finalize().cost() == plain + 2 * cost(
-        _LearnedTable.Config(),
+    plain = (
+        RoPE.Config([8, 8])
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=1, batch_size=1, dtype=None)
     )
-    # ``cat`` over [8, 8]: 8 frequencies, 8 outputs, no reductions.
+    learned = RoPE.Config([8, 8], frequencies=_LearnedTable.Config())
+    assert learned.copy_tree().finalize().cost(
+        seq_len=1,
+        batch_size=1,
+        dtype=None,
+    ) == plain + cost(_LearnedTable.Config(), seq_len=1, batch_size=1, dtype=None).tile(
+        2,
+        copies=2,
+    )
+    # ``cat`` over [8, 8]: 8 frequencies, 8 outputs, no reductions. The two
+    # position reads are int64; the angles and factors are fp32.
+    f32 = torch.float32
     assert plain == Cost(
-        primal=Compute(
-            flops=Flops(elementwise=8 + 4 * 8),
-            bytes=Bytes(elementwise=4 * (2 + 8 + 8 + 8 * 8)),
-        ),
+        cells={
+            ("flops", "primal", "elementwise", f32): 8 + 4 * 8,
+            ("bytes", "primal", "elementwise", torch.int64): 8 * 2,
+            ("bytes", "primal", "elementwise", f32): 4 * (8 + 8 + 8 * 8),
+        },
     )
     # ``sum`` over [8, 8]: two axes' angles added into 4 outputs.
-    summed = RoPE.Config([8, 8], reduction_mode="sum").copy_tree().finalize().cost()
-    assert summed.primal.flops == Flops(elementwise=8 + 4 * 4, reduction=4)
+    summed = (
+        RoPE.Config([8, 8], reduction_mode="sum")
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=1, batch_size=1, dtype=None)
+    )
+    assert summed["flops", "primal"].cells == {
+        ("elementwise", f32): 8 + 4 * 4,
+        ("reduction", f32): 4,
+    }
 
 
 def test_rope_cost_prices_an_explicit_table_list_once_each() -> None:
     config = RoPE.Config([8, 8])
     config.frequencies = [_LearnedTable.Config(), HuggingFaceFrequencies.Config()]
-    plain = RoPE.Config([8, 8]).copy_tree().finalize().cost()
-    assert config.copy_tree().finalize().cost() == plain + cost(_LearnedTable.Config())
+    plain = (
+        RoPE.Config([8, 8])
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=1, batch_size=1, dtype=None)
+    )
+    assert config.copy_tree().finalize().cost(
+        seq_len=1,
+        batch_size=1,
+        dtype=None,
+    ) == plain + cost(
+        _LearnedTable.Config(),
+        seq_len=1,
+        batch_size=1,
+        dtype=None,
+    )
 
 
 def test_rope_mixed_cost_scales_factors_per_head_and_tables_once() -> None:
     """Heads multiply the emitted factors; the seed tables are built once."""
     heads = 3
-    plain = RoPE.Config(8).copy_tree().finalize().cost()
+    plain = (
+        RoPE.Config(8).copy_tree().finalize().cost(seq_len=1, batch_size=1, dtype=None)
+    )
     mixed = RoPEMixed.Config(8, num_heads=heads, frequencies=_LearnedTable.Config())
-    fixed = mixed.copy_tree().finalize().cost()
-    assert fixed.primal.flops.elementwise == heads * plain.primal.flops.elementwise
-    assert fixed.adjoint.flops.elementwise == 0
+    fixed = mixed.copy_tree().finalize().cost(seq_len=1, batch_size=1, dtype=None)
+    assert (
+        fixed["flops", "primal", "elementwise"].sum()
+        == heads * plain["flops", "primal", "elementwise"].sum()
+    )
+    assert fixed["flops", "adjoint", "elementwise"].sum() == 0
     # Per-head frequencies are owned once each, plus the seed table once.
     assert fixed.params == heads * 4 + 7
     mixed.learnable = True
-    learned = mixed.copy_tree().finalize().cost(rows=4)
-    assert learned.adjoint.flops.elementwise == 5 * (heads * 4) + heads * 4
-    assert learned.adjoint.flops.reduction == heads * 4 * 3 / 4
+    learned = mixed.copy_tree().finalize().cost(seq_len=4, batch_size=1, dtype=None)
+    assert (
+        learned["flops", "adjoint", "elementwise"].sum() == 5 * (heads * 4) + heads * 4
+    )
+    assert learned["flops", "adjoint", "reduction"].sum() == heads * 4 * 3 / 4
     assert (
         learned.params
         == sum(
@@ -855,10 +912,12 @@ def test_rope_cost_matches_torch(config: RoPE.Config) -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: positions,
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
         run=lambda module, pos: torch.cat(cast(RoPE, module)(pos), dim=-1),
     )
-    assert analytical.training.flops.matmul == 0
+    assert analytical["flops", :, "matmul"].sum() == 0
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

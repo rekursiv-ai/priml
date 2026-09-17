@@ -126,15 +126,22 @@ def test_register_tokens_cost_is_one_scale_over_the_owned_tokens() -> None:
     analytical = assert_cost_matches_torch(
         RegisterTokens.Config(num_tokens=2, channels_out=8),
         build_input=lambda: torch.arange(4, dtype=torch.int32),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
         run=_run_prefix,
     )
     assert analytical.params == analytical.params_active == 2 * 8
-    assert analytical.primal.flops.elementwise == 2 * 8
-    assert analytical.adjoint.flops.elementwise == 2 * 8
+    assert analytical["flops", "primal", "elementwise"].sum() == 2 * 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 2 * 8
     # The gradient is summed back over the four puzzles sharing the tokens.
-    assert analytical.adjoint.flops.reduction == 2 * 8 * 3 / 4
-    frozen = cost(RegisterTokens.Config(num_tokens=2, channels_out=8, learnable=False))
+    assert analytical["flops", "adjoint", "reduction"].sum() == 2 * 8 * 3 / 4
+    frozen = cost(
+        RegisterTokens.Config(num_tokens=2, channels_out=8, learnable=False),
+        seq_len=1,
+        batch_size=1,
+        dtype=None,
+    )
     assert frozen.params == frozen.params_active == 0
 
 
@@ -149,14 +156,19 @@ def test_sparse_embedding_cost_owns_no_parameters() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.arange(4, dtype=torch.int32),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
         run=_run_prefix,
     )
     assert analytical.params == analytical.params_active == 0
-    assert analytical.primal.bytes.selection == 4 * (3 + 4 * 8 + 8 + 16)
-    assert analytical.adjoint.flops.selection == 0
-    assert analytical.primal.flops.elementwise == 2 * 8
-    assert analytical.adjoint.flops.elementwise == 2 * 8
+    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * 3
+    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * (
+        4 * 8 + 8 + 16
+    )
+    assert analytical["flops", "adjoint", "selection"].sum() == 0
+    assert analytical["flops", "primal", "elementwise"].sum() == 2 * 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 2 * 8
 
 
 def test_stack_cost_sums_its_parts() -> None:
@@ -169,30 +181,42 @@ def test_stack_cost_sums_its_parts() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.arange(4, dtype=torch.int32),
-        num_tokens=4,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
         run=_run_prefix,
     )
-    children = cost(puzzle, rows=4) + cost(registers, rows=4)
-    assert analytical.primal.flops == children.primal.flops
-    assert analytical.adjoint == children.adjoint
+    children = cost(puzzle, seq_len=4, batch_size=1, dtype=None) + cost(
+        registers,
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
+    )
+    assert analytical["flops", "primal"] == children["flops", "primal"]
+    assert analytical["flops", "adjoint"] == children["flops", "adjoint"]
+    assert analytical["bytes", "adjoint"] == children["bytes", "adjoint"]
     assert analytical.params == children.params
     assert (
-        analytical.primal.bytes.selection - children.primal.bytes.selection
+        analytical["bytes", "primal", "selection"].sum()
+        - children["bytes", "primal", "selection"].sum()
         == 4 * 2 * 5 * 8
     )
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_sparse_prefix_traffic_counts_lookup_copy_padding_and_scale(
-    itemsize: int,
+    dtype: torch.dtype,
 ) -> None:
     config = SparsePuzzleEmbedding.Config()
     config.channels_out = 8
     config.num_tokens = 2
-    priced = config.cost(itemsize=itemsize)
-    assert priced.primal.bytes.selection == itemsize * (3 + 4 * 8 + 8 + 16)
-    assert priced.primal.bytes.elementwise == itemsize * 2 * 16
-    assert priced.adjoint.bytes.elementwise == itemsize * 2 * 16
+    priced = config.cost(seq_len=1, batch_size=1, dtype=dtype)
+    itemsize = dtype.itemsize
+    # Three int64 bookkeeping reads; the row, pad, and prefix at ``dtype``.
+    assert priced["bytes", "primal", "selection", torch.int64] == 8 * 3
+    assert priced["bytes", "primal", "selection", dtype] == itemsize * (4 * 8 + 8 + 16)
+    assert priced["bytes", "primal", "elementwise"].sum() == itemsize * 2 * 16
+    assert priced["bytes", "adjoint", "elementwise"].sum() == itemsize * 2 * 16
 
 
 def _run_prefix(module: nn.Module, identifiers: Tensor) -> Tensor:

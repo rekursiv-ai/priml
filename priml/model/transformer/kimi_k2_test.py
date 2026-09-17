@@ -138,8 +138,9 @@ def test_kimi_k2_cost_matches_torch(q_lora_rank: int | None) -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 32, (2, 5)),
-        num_tokens=10,
-        bus={"seq_len": 5},
+        seq_len=5,
+        batch_size=2,
+        dtype=None,
     )
     assert analytical.params_active < analytical.params
 

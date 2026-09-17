@@ -19,7 +19,7 @@ from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.cost import Bytes, Compute, Cost, Flops
+from priml.model.cost import Cost
 from priml.model.custom_types import (
     ChannelsInOut,
     ChannelsOut,
@@ -321,7 +321,9 @@ def test_identity_cost_is_free() -> None:
     free = assert_cost_matches_torch(
         Identity.Config(8),
         build_input=lambda: torch.randn(2, 8, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
     assert free == Cost()
 
@@ -331,25 +333,46 @@ def test_skip_cost_is_the_inner_cost_plus_residual_additions() -> None:
     skip = assert_cost_matches_torch(
         Skip.Config(inner=inner),
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
-        num_tokens=2,
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
     )
-    assert skip == inner.copy_tree().finalize().cost(rows=2) + Cost(
-        primal=Compute(flops=Flops(elementwise=4), bytes=Bytes(elementwise=4 * 3 * 4)),
-        adjoint=Compute(flops=Flops(elementwise=4), bytes=Bytes(elementwise=4 * 3 * 4)),
+    f32 = torch.float32
+    assert skip == inner.copy_tree().finalize().cost(
+        seq_len=2,
+        batch_size=1,
+        dtype=None,
+    ) + Cost(
+        cells={
+            ("flops", "primal", "elementwise", f32): 4,
+            ("flops", "adjoint", "elementwise", f32): 4,
+            ("bytes", "primal", "elementwise", f32): 4 * 3 * 4,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 3 * 4,
+        },
     )
 
 
 def test_skip_cost_without_inner_raises() -> None:
     with pytest.raises(ValueError, match="inner"):
-        Skip.Config().cost()
+        Skip.Config().cost(seq_len=1, batch_size=1, dtype=None)
 
 
 def test_tied_linear_cost_pays_flops_and_owns_nothing() -> None:
-    tied = TiedLinear.Config(4, 8, tied="embed").copy_tree().finalize().cost()
-    owned = Linear.Config(4, 8).copy_tree().finalize().cost()
-    assert tied.training.flops.matmul == owned.training.flops.matmul
+    tied = (
+        TiedLinear.Config(4, 8, tied="embed")
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=1, batch_size=1, dtype=None)
+    )
+    owned = (
+        Linear.Config(4, 8)
+        .copy_tree()
+        .finalize()
+        .cost(seq_len=1, batch_size=1, dtype=None)
+    )
+    assert tied["flops", :, "matmul"].sum() == owned["flops", :, "matmul"].sum()
     assert tied.params == 0
-    assert tied.training.bytes.matmul == owned.training.bytes.matmul
+    assert tied["bytes", :, "matmul"].sum() == owned["bytes", :, "matmul"].sum()
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from priml.metrics.custom_types import MetricProtocol
 from priml.metrics.utilization import Utilization
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Compute, Cost, Flops
+from priml.model.cost import Cost
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -49,12 +49,24 @@ class _Counted:
         calls: int = 0
         """Times ``cost`` ran."""
 
-        def cost(self, **kwargs: object) -> Cost:
-            del kwargs
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
+            del seq_len, batch_size, dtype, kwargs
             self.calls += 1
+            f32 = torch.float32
             return Cost(
-                primal=Compute(flops=Flops(matmul=2, elementwise=3_000_000)),
-                adjoint=Compute(flops=Flops(matmul=4, elementwise=5_000_000)),
+                cells={
+                    ("flops", "primal", "matmul", f32): 2,
+                    ("flops", "primal", "elementwise", f32): 3_000_000,
+                    ("flops", "adjoint", "matmul", f32): 4,
+                    ("flops", "adjoint", "elementwise", f32): 5_000_000,
+                },
             )
 
     def __init__(self, config: Config) -> None:
@@ -187,14 +199,28 @@ def test_cost_is_priced_once_per_sequence_length_and_token_count() -> None:
     assert priced.calls == 3
 
 
-def test_update_prices_the_batch_by_its_shape_not_by_rows() -> None:
-    """The metric states ``seq_len`` and ``batch_size``; ``cost`` derives the rows."""
+def test_update_prices_the_batch_by_its_shape_and_the_steps_autocast_dtype() -> None:
+    """The metric states ``seq_len``, ``batch_size``, and the step's dtype; rows derive."""
     seen: list[dict[str, object]] = []
 
     class _Spy:
         class Config(Fig["_Spy"]):
-            def cost(self, **kwargs: object) -> Cost:
-                seen.append(kwargs)
+            def cost(
+                self,
+                *,
+                seq_len: int,
+                batch_size: int,
+                dtype: torch.dtype | None,
+                **kwargs: object,
+            ) -> Cost:
+                seen.append(
+                    {
+                        "seq_len": seq_len,
+                        "batch_size": batch_size,
+                        "dtype": dtype,
+                        **kwargs,
+                    },
+                )
                 return Cost()
 
         def __init__(self, config: Config) -> None:
@@ -203,7 +229,21 @@ def test_update_prices_the_batch_by_its_shape_not_by_rows() -> None:
     meter = Utilization(Utilization.Config())
     meter.bind(_root(_Spy.Config()))
     meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
-    assert seen == [{"seq_len": 8, "batch_size": 3, "rows": 24}]
+    assert seen == [{"seq_len": 8, "batch_size": 3, "dtype": None}]
+
+    autocast = Utilization(Utilization.Config())
+    autocast.bind(
+        SimpleNamespace(
+            step=SimpleNamespace(
+                config=SimpleNamespace(
+                    model=_Spy.Config(),
+                    dtype_autocast=torch.bfloat16,
+                ),
+            ),
+        ),
+    )
+    autocast.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
+    assert seen[-1] == {"seq_len": 8, "batch_size": 3, "dtype": torch.bfloat16}
 
 
 def test_parameter_reductions_use_each_updates_actual_token_count() -> None:

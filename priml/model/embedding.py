@@ -11,7 +11,11 @@ from torch import nn
 
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost, Flops
+from priml.model.cost import (
+    Cost,
+    resolve_dtype,
+    shared_rows,
+)
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, truncated_normal
 
@@ -60,8 +64,9 @@ class Embedding(nn.Embedding):
         def cost(
             self,
             *,
-            rows: float = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price a gather and its dense scatter-add adjoint.
@@ -70,28 +75,32 @@ class Embedding(nn.Embedding):
             repeated indices do not change the count. Padding rows skip it, so
             this is an upper bound when padding is present. Include the index,
             row read/write, and dense gradient-table zeroing shared over rows.
-            Index and payload use the same assumed itemsize, not runtime dtype.
+            The index is one ``int64`` per pass; the table and its gradient are
+            at this layer's dtype.
 
             Args:
-              rows: Rows sharing the dense gradient initialization.
-              itemsize: Uniform bytes per operand element, including indices.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = self.dtype if self.dtype is not None else resolve_dtype(dtype)
+            index = torch.int64
             row = self.channels_out
             return Cost(
-                primal=Compute(bytes=Bytes(selection=itemsize * (1 + 2 * row))),
-                adjoint=Compute(
-                    flops=Flops(selection=row),
-                    bytes=Bytes(
-                        selection=itemsize
-                        * (1 + 3 * row + self.channels_in * row / rows),
-                    ),
-                ),
+                cells={
+                    ("flops", "adjoint", "selection", dt): row,
+                    ("bytes", "primal", "selection", index): index.itemsize,
+                    ("bytes", "primal", "selection", dt): dt.itemsize * 2 * row,
+                    ("bytes", "adjoint", "selection", index): index.itemsize,
+                    ("bytes", "adjoint", "selection", dt): dt.itemsize
+                    * (3 * row + self.channels_in * row / rows),
+                },
                 params=self.channels_in * row,
                 params_active=row,
             )

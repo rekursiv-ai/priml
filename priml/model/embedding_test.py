@@ -10,7 +10,7 @@ from configgle.testing import assert_pprint_golden
 
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost, Flops
+from priml.model.cost import Cost
 from priml.model.embedding import Embedding
 from priml.model.init import normal
 from priml.testing.bfb import assert_bfb_against_golden
@@ -102,14 +102,19 @@ def test_embedding_cost_is_a_gather() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 8, (3,)),
-        num_tokens=3,
+        seq_len=3,
+        batch_size=1,
+        dtype=None,
     )
+    f32, i64 = torch.float32, torch.int64
     assert analytical == Cost(
-        primal=Compute(bytes=Bytes(selection=4 * (1 + 2 * 4))),
-        adjoint=Compute(
-            flops=Flops(selection=4),
-            bytes=Bytes(selection=4 * (1 + 3 * 4 + 32 / 3)),
-        ),
+        cells={
+            ("flops", "adjoint", "selection", f32): 4,
+            ("bytes", "primal", "selection", i64): 8,
+            ("bytes", "primal", "selection", f32): 4 * 2 * 4,
+            ("bytes", "adjoint", "selection", i64): 8,
+            ("bytes", "adjoint", "selection", f32): 4 * (3 * 4 + 32 / 3),
+        },
         params=32,
         params_active=4,
     )

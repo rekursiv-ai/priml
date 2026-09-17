@@ -12,7 +12,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
 )
@@ -437,17 +437,19 @@ def test_multi_stream_cost_sums_projections_and_scores_per_stream() -> None:
         rope=[RoPE.Config(channels_head=8), None],
     )
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=8)
-    kernel = cost(finalized.attn_kernel, seq_len=8, num_heads=2, channels_head=8)
+    model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    kernel = attention_kernel_cost(seq_len=8, dtype=None, num_heads=2, channels_head=8)
     stream = (2 + 2 + 2) * 16 * 8 + 16 * 16
-    assert kernel.primal.flops.matmul == 4 * 2 * 8 * 8  # One query row, joint keys.
+    assert (
+        kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 8
+    )  # One query row, joint keys.
     assert model_cost.params == 2 * stream
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    assert model_cost.primal.flops.matmul == 2 * (
-        2 * stream + kernel.primal.flops.matmul
+    assert model_cost["flops", "primal", "matmul"].sum() == 2 * (
+        2 * stream + kernel["flops", "primal", "matmul"].sum()
     )
-    assert model_cost.adjoint.flops.matmul == 2 * (
-        2 * 2 * stream + kernel.adjoint.flops.matmul
+    assert model_cost["flops", "adjoint", "matmul"].sum() == 2 * (
+        2 * 2 * stream + kernel["flops", "adjoint", "matmul"].sum()
     )
     # A position holds one token per stream, each caching its own K and V.
     assert model_cost.bytes_state == 4 * 2 * 2 * 2 * 8
@@ -474,8 +476,10 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
         build_input=lambda: tuple(
             torch.randn(1, 4, 16, requires_grad=True) for _ in range(2)
         ),
-        num_tokens=4,
-        bus={"seq_len": 8},
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
+        rows=4,
         run=_joint_sum,
     )
 
@@ -490,7 +494,7 @@ def test_multi_stream_cost_counts_shared_norms_once() -> None:
         norm_out=RMSNorm.Config(elementwise_affine=True),
         share_qk_norm=False,
     )
-    cost = config.copy_tree().finalize().cost(seq_len=8)
+    cost = config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
     assert cost.params == 2 * ((2 + 2 + 2) * 16 * 8 + 16 * 16) + 2 * 8 + 16
     assert cost.params == sum(p.numel() for p in config.make().parameters())
 
@@ -508,13 +512,17 @@ def test_multi_stream_cost_prices_explicit_streams_by_their_own_config() -> None
         streams=[stream.copy_tree(), stream.copy_tree()],
     )
     finalized = config.copy_tree().finalize()
-    model_cost = finalized.cost(seq_len=8)
-    owned = sum((cost(s, seq_len=8) for s in finalized.streams), Cost())
-    kernel = cost(finalized.attn_kernel, seq_len=8, num_heads=2, channels_head=8)
+    model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    owned = sum(
+        (cost(s, seq_len=8, batch_size=1, dtype=None) for s in finalized.streams),
+        Cost(),
+    )
+    kernel = attention_kernel_cost(seq_len=8, dtype=None, num_heads=2, channels_head=8)
     assert model_cost.params == owned.params
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    assert model_cost.primal.flops.matmul == (
-        owned.primal.flops.matmul + 2 * kernel.primal.flops.matmul
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        owned["flops", "primal", "matmul"].sum()
+        + 2 * kernel["flops", "primal", "matmul"].sum()
     )
 
 
@@ -524,9 +532,12 @@ def test_multi_stream_traffic_propagates_itemsize_to_rotary_and_projections() ->
     config.num_heads = 2
     config.rope = [RoPE.Config(4)]
     config = config.copy_tree().finalize()
-    small = config.cost(seq_len=8, rows=4, itemsize=2)
-    large = config.cost(seq_len=8, rows=4, itemsize=4)
-    assert large.training.bytes == small.training.bytes * 2
+    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    large = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
+    assert (
+        large["bytes", :, :, torch.float32].sum()
+        == small["bytes", :, :, torch.bfloat16].sum() * 2
+    )
     assert small.bytes_state == 2 * 2 * 2 * 8
 
 
@@ -537,11 +548,21 @@ def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
     config.num_heads_kv = 1
     config.norm_qk = RMSNorm.Config()
     config.norm_qk.elementwise_affine = True
-    shared = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    shared = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    )
     config.share_qk_norm = False
-    separate = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    separate = (
+        config.copy_tree()
+        .finalize()
+        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    )
     assert (
-        separate.primal.bytes.elementwise - shared.primal.bytes.elementwise == 2 * 4 / 4
+        separate["bytes", "primal", "elementwise"].sum()
+        - shared["bytes", "primal", "elementwise"].sum()
+        == 2 * 4 / 4
     )
 
 

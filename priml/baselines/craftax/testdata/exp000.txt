@@ -15,7 +15,8 @@ CraftaxTrainLoop(
                 │       loss=SimpleLoss.Config(
                 │               loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
                 │               target_key='label',
-                │               kwargs={'reduction': 'none'}
+                │               kwargs={'reduction': 'none'},
+                │               channels_out=-1
                 │       ),
                 │       accumulate_grad_batches=1,
                 │       drop_partial_accumulation_on_epoch_end=True,

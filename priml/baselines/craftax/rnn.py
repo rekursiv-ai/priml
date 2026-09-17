@@ -35,7 +35,12 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Cost, elementwise_cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    elementwise_cost,
+    matmul_cost,
+    resolve_dtype,
+)
 
 
 class ActorCriticRNN(nn.Module):
@@ -62,9 +67,9 @@ class ActorCriticRNN(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int = 1,
-            batch_size: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price one recurrent step of one worker.
@@ -86,15 +91,15 @@ class ActorCriticRNN(nn.Module):
             six projected-gate gradients and the state gradient.
             The episode reset is one select per state unit each way.
 
-            This is the model root: it states the batch geometry itself, so
-            a ``rows`` already on the bus is discarded and every parameter is
-            shared by ``batch_size * seq_len`` tokens.
+            This is the model root: every parameter is shared by
+            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
+            replaced by the batch's tokens.
 
             Args:
-              seq_len: Steps per worker in one pass.
-              batch_size: Workers stepped together.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The rest of the open message bus; nothing here reads it.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
@@ -102,33 +107,34 @@ class ActorCriticRNN(nn.Module):
             """
             del kwargs
             rows = seq_len * batch_size
+            dt = dtype
             width = self.channels_in
             embed = matmul_cost(
                 channels_in=self.observation_size,
                 channels_out=width,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
+                dtype=dt,
             ) + elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
-                itemsize=itemsize,
+                dtype=dt,
             )
             reset = elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
                 inputs=2,
-                itemsize=itemsize,
+                dtype=dt,
             )
-            gates = 2 * matmul_cost(
+            gates = matmul_cost(
                 channels_in=width,
                 channels_out=3 * width,
                 bias=True,
                 rows=rows,
-                itemsize=itemsize,
-            )
+                dtype=dt,
+            ).tile(2, copies=2)
             cell = elementwise_cost(
                 primal=11 * width,
                 adjoint=17 * width,
@@ -136,7 +142,7 @@ class ActorCriticRNN(nn.Module):
                 inputs=7,
                 adjoint_inputs=6,
                 adjoint_outputs=7,
-                itemsize=itemsize,
+                dtype=dt,
             )
             heads = sum(
                 (
@@ -144,7 +150,7 @@ class ActorCriticRNN(nn.Module):
                         channels_in=width,
                         output_size=output_size,
                         rows=rows,
-                        itemsize=itemsize,
+                        dt=dt,
                     )
                     for output_size in (self.num_actions, 1)
                 ),
@@ -152,7 +158,7 @@ class ActorCriticRNN(nn.Module):
             )
             return replace(
                 embed + reset + gates + cell + heads,
-                bytes_state=itemsize * width,
+                bytes_state=resolve_dtype(dtype).itemsize * width,
             )
 
     def __init__(self, config: Config) -> None:
@@ -309,7 +315,7 @@ def _head_cost(
     channels_in: int,
     output_size: int,
     rows: int,
-    itemsize: int,
+    dt: torch.dtype | None,
 ) -> Cost:
     """Price one head: two biased ReLU layers, then a biased readout."""
     hidden = matmul_cost(
@@ -317,19 +323,19 @@ def _head_cost(
         channels_out=channels_in,
         bias=True,
         rows=rows,
-        itemsize=itemsize,
+        dtype=dt,
     ) + elementwise_cost(
         primal=channels_in,
         adjoint=channels_in,
         channels=channels_in,
-        itemsize=itemsize,
+        dtype=dt,
     )
-    return 2 * hidden + matmul_cost(
+    return hidden.tile(2, copies=2) + matmul_cost(
         channels_in=channels_in,
         channels_out=output_size,
         bias=True,
         rows=rows,
-        itemsize=itemsize,
+        dtype=dt,
     )
 
 

@@ -369,51 +369,92 @@ def test_cost_matches_torch_through_a_naive_kernel() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, VOCAB, (2, SEQ)),
-        num_tokens=2 * SEQ,
-        bus={"seq_len": SEQ, "batch_size": 2},
+        seq_len=SEQ,
+        batch_size=2,
+        dtype=None,
     )
 
 
 def test_cost_matmul_flops_agree_with_the_palm_estimate() -> None:
     """Both count six FLOPs per matrix parameter plus the attention products."""
     finalized = _config(value_embedding_stride=1).copy_tree().finalize()
-    priced = cost(finalized, seq_len=SEQ)
+    priced = cost(finalized, seq_len=SEQ, batch_size=1, dtype=None)
     torch.manual_seed(0)
-    assert priced.training.flops.matmul == finalized.make().flops_per_token()
+    assert priced["flops", :, "matmul"].sum() == finalized.make().flops_per_token()
 
 
 def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
     """The token and value tables are parameters that cost one gather each."""
-    plain = cost(_config().copy_tree().finalize(), seq_len=SEQ)
-    gated = cost(_config(value_embedding_stride=1).copy_tree().finalize(), seq_len=SEQ)
+    plain = cost(
+        _config().copy_tree().finalize(),
+        seq_len=SEQ,
+        batch_size=1,
+        dtype=None,
+    )
+    gated = cost(
+        _config(value_embedding_stride=1).copy_tree().finalize(),
+        seq_len=SEQ,
+        batch_size=1,
+        dtype=None,
+    )
     # Two value tables of ``VOCAB x (num_heads * channels_head)`` and one gate
     # of ``gate_channels x num_heads`` per layer.
     assert gated.params - plain.params == 2 * (VOCAB * 16 + 4 * 2)
-    assert gated.primal.flops.selection == plain.primal.flops.selection == 0
-    assert gated.primal.bytes.selection - plain.primal.bytes.selection == 4 * 2 * (
-        1 + 2 * 16
+    assert (
+        gated["flops", "primal", "selection"].sum()
+        == plain["flops", "primal", "selection"].sum()
+        == 0
+    )
+    # Two gathers: an int64 index each, a 16-wide row read and written at fp32.
+    assert (
+        gated["bytes", "primal", "selection", torch.int64]
+        - plain["bytes", "primal", "selection", torch.int64]
+        == 8 * 2
+    )
+    assert (
+        gated["bytes", "primal", "selection", torch.float32]
+        - plain["bytes", "primal", "selection", torch.float32]
+        == 4 * 2 * 2 * 16
     )
 
 
 def test_cost_distinguishes_batch_reuse_from_attention_window() -> None:
     config = _config().finalize()
-    small = config.cost(seq_len=SEQ, itemsize=4)
-    large = config.cost(seq_len=SEQ, batch_size=4, itemsize=4)
-    narrow = config.cost(seq_len=SEQ, batch_size=4, itemsize=2)
-    assert large.primal.flops == small.primal.flops
-    assert large.primal.bytes.matmul < small.primal.bytes.matmul
-    assert large.training.intensity.matmul > small.training.intensity.matmul
-    assert narrow.training.bytes == large.training.bytes / 2
+    small = config.cost(seq_len=SEQ, batch_size=1, dtype=None)
+    large = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
+    narrow = config.cost(seq_len=SEQ, batch_size=4, dtype=torch.bfloat16)
+    assert large["flops", "primal"] == small["flops", "primal"]
+    assert (
+        large["bytes", "primal", "matmul"].sum()
+        < small["bytes", "primal", "matmul"].sum()
+    )
+    assert large["flops", :, "matmul"].sum() / large["bytes", :, "matmul"].sum() > (
+        small["flops", :, "matmul"].sum() / small["bytes", :, "matmul"].sum()
+    )
+    # Activations halve; the tables are stored at torch's default and the
+    # lookups' indices are int64, so the selection silo is unchanged.
+    for kernel in ("matmul", "elementwise", "reduction"):
+        assert (
+            narrow["bytes", :, kernel, torch.bfloat16].sum()
+            == large["bytes", :, kernel, torch.float32].sum() / 2
+        )
+    assert narrow["bytes", :, "selection"] == large["bytes", :, "selection"]
     # The method and the dispatcher agree: seq_len alone means seq_len rows.
-    assert small == cost(config, seq_len=SEQ)
-    assert large == cost(config, seq_len=SEQ, batch_size=4)
+    assert small == cost(config, seq_len=SEQ, batch_size=1, dtype=None)
+    assert large == cost(config, seq_len=SEQ, batch_size=4, dtype=None)
     # Past the window a longer sequence changes only weight amortization:
     # attention work is identical and matmul traffic only shrinks.
-    long = config.cost(seq_len=8192)
-    longer = config.cost(seq_len=32_768)
-    assert longer.primal.flops == long.primal.flops
-    assert longer.primal.bytes.matmul < long.primal.bytes.matmul
-    assert longer.primal.bytes.reduction == long.primal.bytes.reduction
+    long = config.cost(seq_len=8192, batch_size=1, dtype=None)
+    longer = config.cost(seq_len=32_768, batch_size=1, dtype=None)
+    assert longer["flops", "primal"] == long["flops", "primal"]
+    assert (
+        longer["bytes", "primal", "matmul"].sum()
+        < long["bytes", "primal", "matmul"].sum()
+    )
+    assert (
+        longer["bytes", "primal", "reduction"].sum()
+        == long["bytes", "primal", "reduction"].sum()
+    )
 
 
 def test_the_token_table_is_drawn_at_unit_variance() -> None:
@@ -767,38 +808,51 @@ def test_output_norm_feed_forward_cost_includes_output_norm() -> None:
     config.channels_in = 4
     config.channels_out = 4
     config.round_to = 1
-    plain = config.copy_tree().finalize().cost(rows=8)
+    plain = config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
     config.norm_out = RMSNorm.Config(elementwise_affine=True)
     config = config.finalize()
-    assert config.cost(rows=8) == plain + cost(config.norm_out, rows=8)
+    assert config.cost(seq_len=8, batch_size=1, dtype=None) == plain + cost(
+        config.norm_out,
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
+    )
 
 
 def test_gated_residual_cost_counts_mean_and_gate_parameters() -> None:
     config = GatedResidualMix.Config()
     config.num_layers = 2
-    priced = config.cost(channels_in=4, rows=8, itemsize=2)
+    config.channels_in = 4
+    priced = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
     assert priced.params == 3 * 2
-    assert priced.primal.flops.reduction == 2 * (4 - 1)
-    assert priced.primal.bytes.reduction == 2 * 2 * (4 + 1)
+    assert priced["flops", "primal", "reduction"].sum() == 2 * (4 - 1)
+    assert priced["bytes", "primal", "reduction"].sum() == 2 * 2 * (4 + 1)
 
 
 def test_gated_residual_prices_sigmoid_as_one_tensor_operator() -> None:
     config = GatedResidualMix.Config()
     config.num_layers = 2
+    config.channels_in = 4
     base = ResidualMix.Config()
     base.num_layers = 2
-    gated = config.cost(channels_in=4, rows=8, itemsize=2)
-    plain = base.cost(channels_in=4, rows=8, itemsize=2)
-    assert gated.primal.bytes.elementwise - plain.primal.bytes.elementwise == 2 * 2 * (
-        11 + 1 / 8
-    )
-    assert (
-        gated.adjoint.bytes.elementwise - plain.adjoint.bytes.elementwise
-        == 2 * 2 * (4 * 4 + 17 + 1 / 8)
-    )
-    assert gated.adjoint.flops.elementwise - plain.adjoint.flops.elementwise == 2 * (
-        8 + 2 * 4
-    )
+    base.channels_in = 4
+    gated = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    plain = base.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    assert gated["bytes", "primal", "elementwise"].sum() - plain[
+        "bytes",
+        "primal",
+        "elementwise",
+    ].sum() == 2 * 2 * (11 + 1 / 8)
+    assert gated["bytes", "adjoint", "elementwise"].sum() - plain[
+        "bytes",
+        "adjoint",
+        "elementwise",
+    ].sum() == 2 * 2 * (4 * 4 + 17 + 1 / 8)
+    assert gated["flops", "adjoint", "elementwise"].sum() - plain[
+        "flops",
+        "adjoint",
+        "elementwise",
+    ].sum() == 2 * (8 + 2 * 4)
 
 
 def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
@@ -808,19 +862,25 @@ def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
     config.bigrams = {"0": HashedNgramTables.Config(num_embeddings=7)}
     config = config.finalize()
     base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
-    priced = config.cost(seq_len=SEQ, batch_size=4)
-    plain = base.cost(seq_len=SEQ, batch_size=4)
+    priced = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
+    plain = base.cost(seq_len=SEQ, batch_size=4, dtype=None)
     assert priced.params - plain.params == 7 * 16 + 1
     assert (
-        priced.primal.flops.elementwise - plain.primal.flops.elementwise == 2 + 2 * 16
+        priced["flops", "primal", "elementwise"].sum()
+        - plain["flops", "primal", "elementwise"].sum()
+        == 2 + 2 * 16
     )
-    assert priced.primal.bytes.selection - plain.primal.bytes.selection > 0
+    assert (
+        priced["bytes", "primal", "selection"].sum()
+        - plain["bytes", "primal", "selection"].sum()
+        > 0
+    )
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 @pytest.mark.parametrize("batch_size", [1, 2])
 def test_pooling_gradient_temporary_is_written_only_by_width_reduction(
-    itemsize: int,
+    dtype: torch.dtype,
     batch_size: int,
 ) -> None:
     config = MemoryNanoChatLM.Config()
@@ -828,24 +888,29 @@ def test_pooling_gradient_temporary_is_written_only_by_width_reduction(
     config.num_pool_layers = 2
     config = config.finalize()
     base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
-    pooled = config.cost(seq_len=SEQ, batch_size=batch_size, itemsize=itemsize)
-    plain = base.cost(seq_len=SEQ, batch_size=batch_size, itemsize=itemsize)
+    pooled = config.cost(seq_len=SEQ, batch_size=batch_size, dtype=dtype)
+    plain = base.cost(seq_len=SEQ, batch_size=batch_size, dtype=dtype)
+    itemsize = dtype.itemsize
     width = config.channels_in
     rows = SEQ * batch_size
+    assert pooled["bytes", "primal", "elementwise"].sum() - plain[
+        "bytes",
+        "primal",
+        "elementwise",
+    ].sum() == itemsize * (5 * width + 1 / rows)
+    assert pooled["bytes", "adjoint", "elementwise"].sum() - plain[
+        "bytes",
+        "adjoint",
+        "elementwise",
+    ].sum() == itemsize * (6 * width + 1 / rows)
+    assert pooled["bytes", "adjoint", "reduction"].sum() - plain[
+        "bytes",
+        "adjoint",
+        "reduction",
+    ].sum() == itemsize * (width + 1 + 1 + 1 / rows)
     assert (
-        pooled.primal.bytes.elementwise - plain.primal.bytes.elementwise
-        == itemsize * (5 * width + 1 / rows)
-    )
-    assert (
-        pooled.adjoint.bytes.elementwise - plain.adjoint.bytes.elementwise
-        == itemsize * (6 * width + 1 / rows)
-    )
-    assert (
-        pooled.adjoint.bytes.reduction - plain.adjoint.bytes.reduction
-        == itemsize * (width + 1 + 1 + 1 / rows)
-    )
-    assert (
-        pooled.adjoint.flops.reduction - plain.adjoint.flops.reduction
+        pooled["flops", "adjoint", "reduction"].sum()
+        - plain["flops", "adjoint", "reduction"].sum()
         == width - 1 + (rows - 1) / rows
     )
 

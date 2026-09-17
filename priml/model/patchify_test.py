@@ -11,7 +11,7 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
-from priml.model.cost import Bytes, Compute, Cost
+from priml.model.cost import Cost
 from priml.model.patchify import Patchify, Unpatchify
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -154,12 +154,17 @@ def test_patchify_cost_counts_payload_reordering(
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(*shape, requires_grad=True),
-        num_tokens=2 * 2 * 2,
+        seq_len=2 * 2 * 2,
+        batch_size=1,
+        dtype=None,
     )
     moved = 4 * 2 * 48
+    f32 = torch.float32
     assert analytical == Cost(
-        primal=Compute(bytes=Bytes(selection=moved)),
-        adjoint=Compute(bytes=Bytes(selection=moved)),
+        cells={
+            ("bytes", "primal", "selection", f32): moved,
+            ("bytes", "adjoint", "selection", f32): moved,
+        },
     )
     source = torch.randn(*shape)
     assert config.make()(source).data_ptr() != source.data_ptr()

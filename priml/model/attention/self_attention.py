@@ -11,11 +11,18 @@ from torch.distributed.tensor import DTensor
 
 import torch
 
-from priml.model.attention.kernel import SdpaFused
+from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import Cost, cost, matmul_cost
+from priml.model.cost import (
+    Cost,
+    cost,
+    matmul_cost,
+    resolve_dtype,
+    shared_rows,
+    with_rows,
+)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -125,27 +132,24 @@ class AttentionProjections(nn.Module):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Price the projections, norms, and rotary; no kernel here.
 
-            ``seq_len`` is named though unread: it is the message every
-            attention on this bus requires, so a subclass adding the kernel
-            can narrow nothing and the override stays compatible.
-
             Args:
-              seq_len: Keys a query reaches before any window.
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del seq_len
+            rows = shared_rows(seq_len, batch_size, **kwargs)
+            dt = dtype
             inner = self.num_heads * self.channels_head
             projection_heads = (
                 (self.num_heads, self.num_heads_kv, self.num_heads_kv)
@@ -158,7 +162,7 @@ class AttentionProjections(nn.Module):
                         channels_in=self.channels_in,
                         channels_out=heads * self.channels_head,
                         bias=self.bias,
-                        itemsize=itemsize,
+                        dtype=dt,
                         rows=rows,
                     )
                     for heads in projection_heads
@@ -169,7 +173,7 @@ class AttentionProjections(nn.Module):
                 channels_in=inner,
                 channels_out=self.channels_in,
                 bias=self.bias,
-                itemsize=itemsize,
+                dtype=dt,
                 rows=rows,
             )
             total = qkv + out
@@ -182,30 +186,33 @@ class AttentionProjections(nn.Module):
                 for head_rows in groups:
                     total += cost(
                         self.norm_qk,
-                        itemsize=itemsize,
-                        rows=rows * head_rows,
-                        **kwargs,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **with_rows(rows * head_rows, **kwargs),
                     ).tile(head_rows)
             if self.norm_out is not None:
                 total += cost(
                     self.norm_out,
-                    itemsize=itemsize,
-                    rows=rows,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 )
             if self.rope is not None:
                 total += cost(
                     self.rope,
-                    itemsize=itemsize,
-                    rows=rows,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 )
                 total += rotation_cost(
                     self.rope,
+                    rows=rows,
+                    dtype=dt,
                     channels_head=self.channels_head,
                     heads=self.num_heads + self.num_heads_kv,
-                    rows=rows,
-                    itemsize=itemsize,
                 )
             return total
 
@@ -385,40 +392,45 @@ class SelfAttention(AttentionProjections):
             self,
             *,
             seq_len: int,
-            rows: int = 1,
-            itemsize: int = 4,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Add the kernel's products and the per-token KV cache.
 
+            The kernel is priced at the configured ``dropout`` over the whole
+            sequence: a window is a ``forward`` argument, not a config field,
+            so the analytical reach is ``seq_len``.
+
             Args:
-              seq_len: Keys a query reaches before any window.
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            kernel = cost(
-                self.attn_kernel,
+            kernel = attention_kernel_cost(
                 seq_len=seq_len,
+                dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
-                itemsize=itemsize,
-                rows=rows,
-                **kwargs,
+                dropout_p=self.dropout,
             )
             return replace(
                 super().cost(
                     seq_len=seq_len,
-                    itemsize=itemsize,
-                    rows=rows,
+                    batch_size=batch_size,
+                    dtype=dtype,
                     **kwargs,
                 )
                 + kernel,
-                bytes_state=itemsize * 2 * self.num_heads_kv * self.channels_head,
+                bytes_state=resolve_dtype(dtype).itemsize
+                * 2
+                * self.num_heads_kv
+                * self.channels_head,
             )
 
     def __init__(self, config: Config) -> None:

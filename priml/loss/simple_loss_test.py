@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from torch import Tensor, nn
 from torch.nn import functional
 
@@ -11,8 +13,27 @@ import torch
 from priml.loss.custom_types import SimpleLossFn
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+def _fp32(
+    *,
+    primal: Mapping[str, Mapping[Kernel, float]] | None = None,
+    adjoint: Mapping[str, Mapping[Kernel, float]] | None = None,
+    **fields: int,
+) -> Cost:
+    """Build a ``Cost`` from per-phase, per-kernel fp32 FLOPs and bytes."""
+    cells: dict[tuple[object, ...], float] = {}
+    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, float]] | None], ...] = (
+        ("primal", primal),
+        ("adjoint", adjoint),
+    )
+    for phase, silos in phases:
+        for measure in MEASURES:
+            for kernel, value in (silos or {}).get(measure, {}).items():
+                cells[(measure, phase, kernel, torch.float32)] = value
+    return Cost(cells=cells, **fields)
 
 
 def test_simple_loss_basic():
@@ -119,26 +140,28 @@ def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
     measured = assert_cost_matches_torch(
         WeightedSum.Config(fns=[config], weights=[1.0]),
         build_input=lambda: torch.randn(4, 3, requires_grad=True),
-        num_tokens=12,
+        seq_len=12,
+        batch_size=1,
+        dtype=None,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
-    expected = Cost(
-        primal=Compute(flops=Flops(elementwise=8), bytes=Bytes(elementwise=84)),
-        adjoint=Compute(flops=Flops(elementwise=5), bytes=Bytes(elementwise=40)),
+    expected = _fp32(
+        primal={"flops": {"elementwise": 8}, "bytes": {"elementwise": 84}},
+        adjoint={"flops": {"elementwise": 5}, "bytes": {"elementwise": 40}},
     )
-    assert cost(config, rows=12) == expected
-    assert measured == expected + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=2),
-            bytes=Bytes(elementwise=16, reduction=8),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=2),
-            bytes=Bytes(elementwise=8, reduction=8),
-        ),
+    assert cost(config, seq_len=12, batch_size=1, dtype=None) == expected
+    assert measured == expected + _fp32(
+        primal={
+            "flops": {"elementwise": 2},
+            "bytes": {"elementwise": 16, "reduction": 8},
+        },
+        adjoint={
+            "flops": {"elementwise": 2},
+            "bytes": {"elementwise": 8, "reduction": 8},
+        },
     )
     assert measured.params == 0
-    assert measured.training.flops.matmul == 0
+    assert measured["flops", :, "matmul"].sum() == 0
 
 
 def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
@@ -146,107 +169,116 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
     config = SimpleLoss.Config(
         loss_fn=functional.cross_entropy,
         kwargs={"reduction": "mean"},
+        channels_out=5,
     )
     label = torch.randint(0, 5, (4,))
     measured = assert_cost_matches_torch(
         WeightedSum.Config(fns=[config], weights=[1.0]),
         build_input=lambda: torch.randn(4, 5, requires_grad=True),
-        num_tokens=4,
-        bus={"channels_out": 5},
+        seq_len=4,
+        batch_size=1,
+        dtype=None,
         run=lambda module, logits: _loss(module, logits, label=label),
     )
-    expected = Cost(
-        primal=Compute(
-            flops=Flops(
-                elementwise=3 * 5 + 2,
-                reduction=2 * (5 - 1) + (4 - 1) / 4,
-            ),
-            bytes=Bytes(elementwise=144 + 2, reduction=48 + 5, selection=12),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=2 * 5 + 1, selection=1),
-            bytes=Bytes(elementwise=92, reduction=5, selection=16),
-        ),
+    # The label is one int64 read each way; the gathered logit and the
+    # scattered ``-1`` are fp32 payload.
+    label_bytes = Cost(
+        cells={
+            ("bytes", "primal", "selection", torch.int64): 8,
+            ("bytes", "adjoint", "selection", torch.int64): 8,
+        },
     )
-    assert cost(config, rows=4, channels_out=5) == expected
-    assert measured == expected + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=2),
-            bytes=Bytes(elementwise=16, reduction=8),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=2),
-            bytes=Bytes(elementwise=8, reduction=8),
-        ),
+    expected = _fp32(
+        primal={
+            "flops": {"elementwise": 3 * 5 + 2, "reduction": 2 * (5 - 1) + (4 - 1) / 4},
+            "bytes": {"elementwise": 144 + 2, "reduction": 48 + 5, "selection": 8},
+        },
+        adjoint={
+            "flops": {"elementwise": 2 * 5 + 1, "selection": 1},
+            "bytes": {"elementwise": 92, "reduction": 5, "selection": 12},
+        },
     )
-    assert measured.training.flops.matmul == 0
+    expected = expected + label_bytes
+    assert cost(config, seq_len=4, batch_size=1, dtype=None) == expected
+    assert measured == expected + _fp32(
+        primal={
+            "flops": {"elementwise": 2},
+            "bytes": {"elementwise": 16, "reduction": 8},
+        },
+        adjoint={
+            "flops": {"elementwise": 2},
+            "bytes": {"elementwise": 8, "reduction": 8},
+        },
+    )
+    assert measured["flops", :, "matmul"].sum() == 0
 
 
 def test_simple_loss_cost_cross_entropy_needs_channels_out() -> None:
     config = SimpleLoss.Config(loss_fn=functional.cross_entropy)
     with pytest.raises(ValueError, match="channels_out"):
-        cost(config, rows=4)
+        cost(config, seq_len=4, batch_size=1, dtype=None)
 
 
 @pytest.mark.parametrize("loss_fn", [functional.mse_loss, functional.l1_loss])
 def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -> None:
     """MSE and L1: subtract then square/abs; the adjoint scales the saved difference."""
     none = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "none"})
-    expected = Cost(
-        primal=Compute(flops=Flops(elementwise=2), bytes=Bytes(elementwise=20)),
-        adjoint=Compute(flops=Flops(elementwise=2), bytes=Bytes(elementwise=20)),
+    expected = _fp32(
+        primal={"flops": {"elementwise": 2}, "bytes": {"elementwise": 20}},
+        adjoint={"flops": {"elementwise": 2}, "bytes": {"elementwise": 20}},
     )
-    assert cost(none, rows=6) == expected
-    reduced = Cost(
-        primal=Compute(flops=Flops(reduction=5 / 6), bytes=Bytes(reduction=28 / 6)),
-        adjoint=Compute(bytes=Bytes(reduction=28 / 6)),
+    assert cost(none, seq_len=6, batch_size=1, dtype=None) == expected
+    reduced = _fp32(
+        primal={"flops": {"reduction": 5 / 6}, "bytes": {"reduction": 28 / 6}},
+        adjoint={"bytes": {"reduction": 28 / 6}},
     )
     mean = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "mean"})
-    assert cost(mean, rows=6) == expected + reduced + Cost(
-        primal=Compute(bytes=Bytes(elementwise=8 / 6)),
-        adjoint=Compute(flops=Flops(elementwise=1), bytes=Bytes(elementwise=8)),
+    assert cost(
+        mean,
+        seq_len=6,
+        batch_size=1,
+        dtype=None,
+    ) == expected + reduced + _fp32(
+        primal={"bytes": {"elementwise": 8 / 6}},
+        adjoint={"flops": {"elementwise": 1}, "bytes": {"elementwise": 8}},
     )
     total = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "sum"})
-    assert cost(total, rows=6) == expected + reduced
+    assert cost(total, seq_len=6, batch_size=1, dtype=None) == expected + reduced
 
 
 def test_simple_loss_cost_rejects_unpriced_loss_fn() -> None:
     config = SimpleLoss.Config(loss_fn=functional.smooth_l1_loss)
     with pytest.raises(TypeError, match="smooth_l1_loss"):
-        cost(config, rows=4)
+        cost(config, seq_len=4, batch_size=1, dtype=None)
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
-def test_simple_loss_operand_traffic(itemsize: int) -> None:
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
+def test_simple_loss_operand_traffic(dtype: torch.dtype) -> None:
     config = SimpleLoss.Config()
     config.loss_fn = functional.mse_loss
-    priced = cost(config, rows=6, itemsize=itemsize)
-    assert priced.primal.bytes.elementwise == 5 * itemsize
-    assert priced.adjoint.bytes.elementwise == 5 * itemsize
+    itemsize = dtype.itemsize
+    priced = cost(config, seq_len=6, batch_size=1, dtype=dtype)
+    assert priced["bytes", "primal", "elementwise"].sum() == 5 * itemsize
+    assert priced["bytes", "adjoint", "elementwise"].sum() == 5 * itemsize
     config.kwargs = {"reduction": "sum"}
-    reduced = cost(config, rows=6, itemsize=itemsize)
-    assert reduced.primal.bytes.reduction == 7 * itemsize / 6
-    assert reduced.adjoint.bytes.reduction == 7 * itemsize / 6
+    reduced = cost(config, seq_len=6, batch_size=1, dtype=dtype)
+    assert reduced["bytes", "primal", "reduction"].sum() == 7 * itemsize / 6
+    assert reduced["bytes", "adjoint", "reduction"].sum() == 7 * itemsize / 6
     config.kwargs = {"reduction": "mean"}
-    mean = cost(config, rows=6, itemsize=itemsize)
-    assert mean.primal.bytes.elementwise == 5 * itemsize + 2 * itemsize / 6
+    mean = cost(config, seq_len=6, batch_size=1, dtype=dtype)
+    assert (
+        mean["bytes", "primal", "elementwise"].sum() == 5 * itemsize + 2 * itemsize / 6
+    )
 
 
-@pytest.mark.parametrize("itemsize", [2, 4, 8])
-def test_simple_loss_bce_weight_prices_multiply(itemsize: int) -> None:
+def test_simple_loss_bce_weight_prices_multiply() -> None:
     config = SimpleLoss.Config()
-    plain = cost(config, rows=6, itemsize=itemsize)
+    plain = cost(config, seq_len=6, batch_size=1, dtype=None)
     config.kwargs["weight"] = torch.ones(6)
-    weighted = cost(config, rows=6, itemsize=itemsize)
-    assert weighted == plain + Cost(
-        primal=Compute(
-            flops=Flops(elementwise=1),
-            bytes=Bytes(elementwise=3 * itemsize),
-        ),
-        adjoint=Compute(
-            flops=Flops(elementwise=1),
-            bytes=Bytes(elementwise=3 * itemsize),
-        ),
+    weighted = cost(config, seq_len=6, batch_size=1, dtype=None)
+    assert weighted == plain + _fp32(
+        primal={"flops": {"elementwise": 1}, "bytes": {"elementwise": 3 * 4}},
+        adjoint={"flops": {"elementwise": 1}, "bytes": {"elementwise": 3 * 4}},
     )
 
 
@@ -266,11 +298,11 @@ def test_simple_loss_rejects_unpriced_options(
     option: str,
     value: object,
 ) -> None:
-    config = SimpleLoss.Config()
+    config = SimpleLoss.Config(channels_out=2)
     config.loss_fn = loss_fn
     config.kwargs[option] = value
     with pytest.raises(NotImplementedError, match=option):
-        cost(config, rows=6, channels_out=2)
+        cost(config, seq_len=6, batch_size=1, dtype=None)
 
 
 @pytest.mark.parametrize(
@@ -291,11 +323,11 @@ def test_simple_loss_explicit_noop_options(
     loss_fn: SimpleLossFn,
     options: dict[str, object],
 ) -> None:
-    config = SimpleLoss.Config()
+    config = SimpleLoss.Config(channels_out=2)
     config.loss_fn = loss_fn
-    plain = cost(config, rows=6, channels_out=2)
+    plain = cost(config, seq_len=6, batch_size=1, dtype=None)
     config.kwargs.update(options)
-    assert cost(config, rows=6, channels_out=2) == plain
+    assert cost(config, seq_len=6, batch_size=1, dtype=None) == plain
 
 
 def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:

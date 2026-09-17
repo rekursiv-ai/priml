@@ -25,13 +25,13 @@ import torch
 
 from priml.math.basic import broadcast_sequences, floor_multiple
 from priml.model.cost import (
-    Bytes,
-    Compute,
     Cost,
-    Flops,
     cost,
     elementwise_cost,
     reduction_cost,
+    resolve_dtype,
+    shared_rows,
+    traffic,
 )
 
 
@@ -103,17 +103,27 @@ class GeometricFrequencies:
         base: float = 10_000.0
         """Controls the longest wavelength: period ``2*pi*base^((c-2)/c)``."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price nothing: a table of constants, no products and no parameters.
 
             Args:
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            del seq_len, batch_size, dtype, kwargs
             return Cost()
 
     def __init__(self, config: Config) -> None:
@@ -147,17 +157,27 @@ class HuggingFaceFrequencies:
         base: float = 10_000.0
         """Controls the longest wavelength; HF spells this ``rope_theta``."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price nothing: a table of constants, no products and no parameters.
 
             Args:
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            del kwargs
+            del seq_len, batch_size, dtype, kwargs
             return Cost()
 
     def __init__(self, config: Config) -> None:
@@ -229,19 +249,35 @@ class YarnScaling:
         inner: Makeable[FrequencyTable] = field(
             default_factory=HuggingFaceFrequencies.Config,
         )
-        """Table this rescales; matches ``RoPE.Config.frequencies``' default."""
+        """Cost this rescales; matches ``RoPE.Config.frequencies``' default."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Price the table this rescales; the rescaling itself is constants.
 
             Args:
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.inner, **kwargs)
+            return cost(
+                self.inner,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
+                **kwargs,
+            )
 
     def __init__(self, config: Config) -> None:
         # NaN is checked separately because it fails EVERY comparison, so
@@ -327,7 +363,7 @@ class RoPE(nn.Module):
           across 3 axes -> [44, 42, 42]), sum mode replicates (e.g. 64 across
           2 axes -> [64, 64]). A sequence allocates explicitly. Each nonzero
           value must be even and >= 2. Use 0 to skip an axis.
-      frequencies: Table template, or one per axis. Each carries its own
+      frequencies: Cost template, or one per axis. Each carries its own
           ``base`` where it has one; ``smallest_recommended_base`` computes
           one from a max position count.
       reduction_mode: "cat" (axial; default) or "sum" (RoPE-Mixed).
@@ -385,8 +421,9 @@ class RoPE(nn.Module):
         def cost(
             self,
             *,
-            rows: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count the factors this emits, plus whatever the tables own.
@@ -398,25 +435,30 @@ class RoPE(nn.Module):
             here rather than reporting as free.
 
             Args:
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
             return self._factor_cost(
-                rows=rows,
-                itemsize=itemsize,
+                rows=shared_rows(seq_len, batch_size, **kwargs),
+                dtype=resolve_dtype(dtype),
             ) + self._table_cost(
-                itemsize=itemsize,
-                rows=rows,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                dtype=dtype,
                 **kwargs,
             )
 
-        def _factor_cost(self, *, rows: int, itemsize: int) -> Cost:
+        # The position is one ``int64`` read per axis; the frequencies and the factors
+        # are at the batch's dtype.
+        def _factor_cost(self, *, rows: float, dtype: torch.dtype) -> Cost:
             """Count position products, trigonometric factors, and their scaling."""
+            dt = dtype
             axes = _axis_channels(
                 self.channels_head,
                 tables=self.frequencies,
@@ -426,33 +468,41 @@ class RoPE(nn.Module):
             outputs = frequencies if self.reduction_mode == "cat" else max(axes) // 2
             # ``sum`` mode adds the axes' angles into one row before cos/sin.
             reduction = (
-                Compute()
+                Cost()
                 if self.reduction_mode == "cat"
                 else reduction_cost(
                     input_elements=frequencies,
                     output_groups=outputs,
-                    itemsize=itemsize,
+                    dtype=dt,
                 )
             )
             # Position products read one scalar per axis and shared frequencies;
             # cos/sin and their scale maps each read and write one output row.
-            return Cost(
-                primal=Compute(
-                    flops=Flops(elementwise=frequencies + 4 * outputs),
-                    bytes=Bytes(
-                        elementwise=itemsize
-                        * (
-                            sum(axis > 0 for axis in axes)
-                            + frequencies / rows
-                            + frequencies
-                            + 8 * outputs
-                        ),
-                    ),
+            return (
+                traffic(
+                    "primal",
+                    "elementwise",
+                    elements=sum(axis > 0 for axis in axes),
+                    dtype=torch.int64,
                 )
-                + reduction,
+                + traffic(
+                    "primal",
+                    "elementwise",
+                    elements=frequencies / rows + frequencies + 8 * outputs,
+                    flops=frequencies + 4 * outputs,
+                    dtype=dt,
+                )
+                + reduction
             )
 
-        def _table_cost(self, **kwargs: object) -> Cost:
+        def _table_cost(
+            self,
+            *,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the frequency tables: one per axis from a template, else each."""
             tables = self.frequencies
             if not isinstance(tables, list):
@@ -462,7 +512,19 @@ class RoPE(nn.Module):
                     reduction_mode=self.reduction_mode,
                 )
                 tables = [tables] * len(axes)
-            return sum((cost(table, **kwargs) for table in tables), Cost())
+            return sum(
+                (
+                    cost(
+                        table,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for table in tables
+                ),
+                Cost(),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -799,10 +861,10 @@ class RoPE(nn.Module):
 def rotation_cost(
     rope: object,
     *,
+    rows: float,
+    dtype: torch.dtype | None,
     channels_head: int,
     heads: int,
-    rows: int = 1,
-    itemsize: int = 4,
 ) -> Cost:
     """Price applying rotary factors to ``heads`` rows of ``channels_head``.
 
@@ -815,10 +877,10 @@ def rotation_cost(
 
     Args:
       rope: The rotary slot's config.
+      rows: Rows sharing the factors' reads.
+      dtype: Activation dtype; ``None`` is torch's default.
       channels_head: Width of each rotated row.
       heads: Rows rotated per token: query heads plus key heads.
-      rows: Rows on the cost message bus; rotations own no parameters.
-      itemsize: Uniform bytes per tensor element.
 
     Returns:
       cost: Scalar work only; the factors are the rotary module's.
@@ -841,7 +903,7 @@ def rotation_cost(
         adjoint_inputs=6,
         adjoint_outputs=3,
         rows=rows,
-        itemsize=itemsize,
+        dtype=dtype,
     )
 
 
@@ -930,8 +992,9 @@ class RoPEMixed(RoPE):
         def cost(
             self,
             *,
-            rows: int = 1,
-            itemsize: int = 4,
+            seq_len: int,
+            batch_size: int,
+            dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Count per-head factors and, when learned, their frequency gradients.
@@ -944,14 +1007,16 @@ class RoPEMixed(RoPE):
             head.
 
             Args:
-              rows: Rows sharing each parameter; divides its gradient reduction.
-              itemsize: Uniform bytes per tensor element.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            rows = shared_rows(seq_len, batch_size, **kwargs)
             axes = _axis_channels(
                 self.channels_head,
                 tables=self.frequencies,
@@ -970,16 +1035,29 @@ class RoPEMixed(RoPE):
                 channels=outputs if self.learnable else 0,
                 adjoint_inputs=6,
                 adjoint_outputs=4,
-                itemsize=itemsize,
+                dtype=dtype,
                 rows=rows if self.learnable else 1,
             )
+            # The frequencies' primal work is the factors', counted per head
+            # above; only the parameters and, when learned, the adjoint remain.
             return (
-                self.num_heads * self._factor_cost(rows=rows, itemsize=itemsize)
-                + self._table_cost(itemsize=itemsize, rows=rows, **kwargs)
+                self._factor_cost(rows=rows, dtype=resolve_dtype(dtype)).tile(
+                    self.num_heads,
+                    copies=self.num_heads,
+                )
+                + self._table_cost(
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    dtype=dtype,
+                    **kwargs,
+                )
                 + replace(
                     frequencies,
-                    primal=Compute(),
-                    adjoint=frequencies.adjoint if self.learnable else Compute(),
+                    cells={
+                        key: value
+                        for key, value in frequencies.cells.items()
+                        if self.learnable and key[1] == "adjoint"
+                    },
                 )
             )
 
