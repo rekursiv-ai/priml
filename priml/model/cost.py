@@ -597,7 +597,7 @@ def mbu(
     batch: int,
     context_len: int,
     steps_per_sec: float,
-    itemsize: int,
+    dtype: torch.dtype | None,
     peak_bytes_per_sec: float,
 ) -> float:
     """Model bandwidth utilization of a decode step.
@@ -610,14 +610,18 @@ def mbu(
       batch: Sequences decoded per step.
       context_len: Positions each sequence's state holds.
       steps_per_sec: Measured decode step rate.
-      itemsize: Bytes per weight element; state is already counted in bytes.
+      dtype: Storage dtype of the weights; ``None`` is torch's default. State
+        is already counted in bytes.
       peak_bytes_per_sec: Datasheet HBM bandwidth.
 
     Returns:
       achieved: Fraction of peak bandwidth.
 
     """
-    moved = cost.params_active * itemsize + batch * context_len * cost.bytes_state
+    moved = (
+        cost.params_active * resolve_dtype(dtype).itemsize
+        + batch * context_len * cost.bytes_state
+    )
     return moved * steps_per_sec / peak_bytes_per_sec
 
 

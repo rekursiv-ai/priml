@@ -298,7 +298,7 @@ def test_mbu_reads_active_weights_once_and_state_per_position() -> None:
         batch=2,
         context_len=8,
         steps_per_sec=10,
-        itemsize=2,
+        dtype=torch.bfloat16,
         peak_bytes_per_sec=1e4,
     )
     assert achieved == (100 * 2 + 2 * 8 * 4) * 10 / 1e4
