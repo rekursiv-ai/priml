@@ -9,7 +9,9 @@ achieved fraction of its datasheet ceiling; the ``matmul`` silo is MFU.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import override
+from typing import Protocol, override, runtime_checkable
+
+import math
 
 from configgle import Fig, LateBound
 from torch import Tensor
@@ -41,6 +43,12 @@ class Utilization(LateBound):
         """Batch tensor whose element count is the token count."""
 
     def __init__(self, config: Config) -> None:
+        for name, peak in (
+            ("peak_flops_per_sec", config.peak_flops_per_sec),
+            ("peak_vector_flops_per_sec", config.peak_vector_flops_per_sec),
+        ):
+            if not math.isfinite(peak) or peak <= 0:
+                raise ValueError(f"{name} must be positive and finite; got {peak}.")
         vector = config.peak_vector_flops_per_sec
         self.peak = KernelStats(
             matmul=config.peak_flops_per_sec,
@@ -51,8 +59,13 @@ class Utilization(LateBound):
         )
         self.tokens_key = config.tokens_key
         self._model_config: HasCost | None = None
-        self._cost_by_seq_len: dict[int, Cost] = {}
+        self._cost_by_shape: dict[tuple[int, int], Cost] = {}
         self.reset()
+
+    @property
+    def requires_device_timing(self) -> bool:
+        """Require the timed step to include completed accelerator work."""
+        return True
 
     @override
     def bind(self, root: object) -> None:
@@ -65,8 +78,13 @@ class Utilization(LateBound):
         Raises:
           TypeError: ``root`` carries no model config there, or the config
             cannot price itself; a silent zero would report every run as idle.
+          ValueError: This training metric is placed in ``metrics_eval``.
 
         """
+        if isinstance(root, _HasEvaluationMetrics) and any(
+            metric is self for metric in root.metrics_eval.values()
+        ):
+            raise ValueError("Utilization belongs in metrics_train, not metrics_eval.")
         # ``runtime_checkable`` tests attribute NAMES one level deep, so the
         # path is walked by hand: a root whose ``step`` lacks a config would
         # otherwise pass the protocol and fail on the read.
@@ -111,8 +129,7 @@ class Utilization(LateBound):
         step_sec = batch.get("step_sec")
         if not isinstance(step_sec, float):
             raise TypeError(
-                "update() needs step_sec on the bus; only a timed train step "
-                "supplies it, so this metric belongs in metrics_train.",
+                "update() needs a floating-point step_sec on the metric bus.",
             )
         tokens = batch[self.tokens_key]
         if not isinstance(tokens, Tensor):
@@ -121,15 +138,18 @@ class Utilization(LateBound):
                 "not a Tensor; tokens_key must select the token tensor.",
             )
         seq_len = tokens.shape[-1]
-        per_token = self._cost_by_seq_len.get(seq_len)
+        num_tokens = tokens.numel()
+        shape = (seq_len, num_tokens)
+        per_token = self._cost_by_shape.get(shape)
         if per_token is None:
-            per_token = self._cost_by_seq_len[seq_len] = cost(
+            per_token = self._cost_by_shape[shape] = cost(
                 self._model_config,
                 seq_len=seq_len,
+                batch_size=num_tokens // seq_len,
             )
-        self.tokens += tokens.numel()
+        self.tokens += num_tokens
         self.seconds += step_sec
-        self.flops = self.flops + per_token.training.flops * tokens.numel()
+        self.flops = self.flops + per_token.training.flops * num_tokens
 
     def compute(self) -> dict[str, float]:
         """Report throughput and utilization over the updates since ``reset``.
@@ -171,3 +191,8 @@ class Utilization(LateBound):
 
         """
         del state_dict
+
+
+@runtime_checkable
+class _HasEvaluationMetrics(Protocol):
+    metrics_eval: Mapping[str, object]

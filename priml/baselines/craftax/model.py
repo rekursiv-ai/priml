@@ -42,7 +42,14 @@ class ActorCritic(nn.Module):
         num_layers: int = 3
         """Hidden layers per tower."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one observation through both towers.
 
             A token is one environment step of one worker: the observation
@@ -51,15 +58,22 @@ class ActorCritic(nn.Module):
             biased matmul and a tanh; the tanh's adjoint is ``g * (1 - t**2)``
             on the saved output, three operations per unit.
 
+            This is the model root: it states the batch geometry itself, so
+            a ``rows`` already on the bus is discarded and every parameter is
+            shared by ``batch_size * seq_len`` tokens.
+
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
-              **kwargs: The open message bus; nothing here reads it.
+              seq_len: Steps per worker in one pass.
+              batch_size: Workers stepped together.
+              itemsize: Uniform bytes per tensor element.
+              **kwargs: The rest of the open message bus; nothing here reads it.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
             del kwargs
+            rows = seq_len * batch_size
             return sum(
                 (
                     _tower_cost(
@@ -67,7 +81,8 @@ class ActorCritic(nn.Module):
                         channels_in=self.channels_in,
                         num_layers=self.num_layers,
                         output_size=output_size,
-                        num_tokens=num_tokens,
+                        rows=rows,
+                        itemsize=itemsize,
                     )
                     for output_size in (self.num_actions, 1)
                 ),
@@ -150,7 +165,8 @@ def _tower_cost(
     channels_in: int,
     num_layers: int,
     output_size: int,
-    num_tokens: int,
+    rows: int,
+    itemsize: int,
 ) -> Cost:
     """Price one tower: ``num_layers`` biased tanh layers, then a biased readout."""
     total = Cost()
@@ -160,19 +176,22 @@ def _tower_cost(
             channels_in=width,
             channels_out=channels_in,
             bias=True,
-            num_tokens=num_tokens,
+            rows=rows,
+            itemsize=itemsize,
         )
         total += elementwise_cost(
             primal=channels_in,
             adjoint=3 * channels_in,
             channels=channels_in,
+            itemsize=itemsize,
         )
         width = channels_in
     return total + matmul_cost(
         channels_in=width,
         channels_out=output_size,
         bias=True,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )
 
 

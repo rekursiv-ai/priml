@@ -86,19 +86,26 @@ class SoftCap(nn.Module):
             )
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price projection and divide/tanh/multiply; the adjoint uses saved tanh.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.inner, **kwargs) + elementwise_cost(
+            return cost(self.inner, itemsize=itemsize, **kwargs) + elementwise_cost(
                 primal=3 * self.channels_out,
                 adjoint=5 * self.channels_out,
+                channels=self.channels_out,
+                inputs=3,
+                outputs=3,
+                adjoint_inputs=4,
+                adjoint_outputs=3,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:

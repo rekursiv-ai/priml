@@ -63,11 +63,18 @@ class Linear(nn.Linear):
                 self.channels_out = self.channels_in
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
-            """Price one row, amortizing bias reduction over ``num_tokens`` rows.
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price one row, amortizing bias reduction over ``rows`` rows.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -79,7 +86,8 @@ class Linear(nn.Linear):
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -146,11 +154,18 @@ class EnsembleLinear(nn.Module):
                 self.channels_out = self.channels_in
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
-            """Price every member, each sharing its bias over ``num_tokens`` rows.
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the flattened ensemble as one matrix, sharing its input row.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -158,11 +173,12 @@ class EnsembleLinear(nn.Module):
 
             """
             del kwargs
-            return self.num_ensemble * matmul_cost(
+            return matmul_cost(
                 channels_in=self.channels_in,
-                channels_out=self.channels_out,
+                channels_out=self.channels_out * self.num_ensemble,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:

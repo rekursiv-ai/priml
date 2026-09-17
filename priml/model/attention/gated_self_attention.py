@@ -24,6 +24,7 @@ from priml.model.custom_types import (
     HasResetParameters,
     RotaryFactors,
     TensorModule,
+    infer_same_width,
 )
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.legacy_keys import absorb_legacy_keys
@@ -36,10 +37,10 @@ class GatedSelfAttention(nn.Module):
 
     class Config(Fig["GatedSelfAttention"]):
         channels_in: int = -1
-        """Input feature width."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Output feature width; -1 inherits channels_in."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -75,13 +76,19 @@ class GatedSelfAttention(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
+            infer_same_width(self)
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
                 self.norm_qk.channels_in = self.channels_head
             return super().finalize()
 
-        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price four projections, two norms, rotary, the kernel, and the gate.
 
             The query projection emits the gate beside the queries, so it is
@@ -91,7 +98,8 @@ class GatedSelfAttention(nn.Module):
 
             Args:
               seq_len: Keys a query reaches.
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -105,34 +113,45 @@ class GatedSelfAttention(nn.Module):
                     channels_in=self.channels_in,
                     channels_out=2 * inner,
                     bias=self.bias,
-                    num_tokens=num_tokens,
+                    itemsize=itemsize,
+                    rows=rows,
                 )
                 + 2
                 * matmul_cost(
                     channels_in=self.channels_in,
                     channels_out=kv,
                     bias=self.bias,
-                    num_tokens=num_tokens,
+                    itemsize=itemsize,
+                    rows=rows,
                 )
                 + matmul_cost(
                     channels_in=inner,
                     channels_out=self.channels_out,
                     bias=self.bias,
-                    num_tokens=num_tokens,
+                    itemsize=itemsize,
+                    rows=rows,
                 )
             )
             for heads in (self.num_heads, self.num_heads_kv):
                 total += cost(
                     self.norm_qk,
-                    num_tokens=num_tokens * heads,
+                    itemsize=itemsize,
+                    rows=rows * heads,
                     **kwargs,
                 ).tile(heads)
             if self.rope is not None:
-                total += cost(self.rope, num_tokens=num_tokens, **kwargs)
+                total += cost(
+                    self.rope,
+                    itemsize=itemsize,
+                    rows=rows,
+                    **kwargs,
+                )
                 total += rotation_cost(
                     self.rope,
                     channels_head=self.channels_head,
                     heads=self.num_heads + self.num_heads_kv,
+                    rows=rows,
+                    itemsize=itemsize,
                 )
             total += cost(
                 self.attn_kernel,
@@ -140,11 +159,22 @@ class GatedSelfAttention(nn.Module):
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
-                num_tokens=num_tokens,
+                itemsize=itemsize,
+                rows=rows,
                 **kwargs,
             )
-            total += elementwise_cost(primal=5 * inner, adjoint=6 * inner)
-            return replace(total, bytes_state=2 * kv)
+            total += elementwise_cost(
+                primal=5 * inner,
+                adjoint=6 * inner,
+                channels=inner,
+                inputs=4,
+                outputs=1,
+                adjoint_inputs=9,
+                adjoint_outputs=3,
+                rows=rows,
+                itemsize=itemsize,
+            )
+            return replace(total, bytes_state=itemsize * 2 * kv)
 
     def __init__(self, config: Config) -> None:
         super().__init__()

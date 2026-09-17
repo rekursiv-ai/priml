@@ -24,7 +24,7 @@ from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Compute, Cost, Flops, cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import mmdit
@@ -495,8 +495,14 @@ def test_adaln_zero_cost_is_one_biased_matmul() -> None:
     proj = cost(finalized.proj, seq_len=8)
     assert proj.params == 4 * 6 * 8 + 6 * 8
     assert finalized.cost(seq_len=8) == proj + Cost(
-        primal=Compute(flops=Flops(elementwise=5 * 4)),
-        adjoint=Compute(flops=Flops(elementwise=5 * 4)),
+        primal=Compute(
+            flops=Flops(elementwise=5 * 4),
+            bytes=Bytes(elementwise=4 * 2 * 4),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=5 * 4),
+            bytes=Bytes(elementwise=4 * 3 * 4),
+        ),
     )
     assert proj.params == sum(p.numel() for p in config.make().parameters())
 
@@ -510,12 +516,67 @@ def test_stream_cost_sums_its_branches_and_leaves_attention_to_the_joint() -> No
     finalized = config.copy_tree().finalize()
     children = (finalized.norm1, finalized.norm2, finalized.ffn, finalized.adaln)
     expected = sum((cost(child, seq_len=8) for child in children), Cost()) + Cost(
-        primal=Compute(flops=Flops(elementwise=10 * 8)),
-        adjoint=Compute(flops=Flops(elementwise=10 * 8)),
+        primal=Compute(
+            flops=Flops(elementwise=10 * 8),
+            bytes=Bytes(elementwise=4 * 28 * 8),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=10 * 8),
+            bytes=Bytes(elementwise=4 * 40 * 8),
+        ),
     )
     assert finalized.cost(seq_len=8) == expected
     assert expected.params == sum(p.numel() for p in config.make().parameters())
     assert expected.params == 8 + (8 * 24 + 12 * 8) + (4 * 48 + 48)
+
+
+@pytest.mark.parametrize("itemsize", [2, 4])
+@pytest.mark.parametrize("conditioned", [False, True])
+def test_stream_traffic_counts_residual_and_modulation_operands(
+    itemsize: int,
+    conditioned: bool,
+) -> None:
+    config = mmdit.MMDiTStream.Config()
+    config.channels_in = 8
+    if conditioned:
+        config.adaln = AdaLNZero.Config()
+        config.adaln.cond_dim = 4
+    config = config.finalize()
+    children = (config.norm1, config.norm2, config.ffn)
+    child_cost = sum((cost(child, itemsize=itemsize) for child in children), Cost())
+    if config.adaln is not None:
+        child_cost += cost(config.adaln, itemsize=itemsize)
+    actual = config.cost(itemsize=itemsize)
+    # Per branch: unary scale offset, scale, shift, gate, residual.
+    primal_elements = 2 * (2 + 3 + 3 + 3 + 3) if conditioned else 2 * 3
+    adjoint_elements = 2 * (2 + 6 + 3 + 6 + 3) if conditioned else 2 * 3
+    assert actual.primal.bytes.elementwise == (
+        child_cost.primal.bytes.elementwise + itemsize * 8 * primal_elements
+    )
+    assert actual.adjoint.bytes.elementwise == (
+        child_cost.adjoint.bytes.elementwise + itemsize * 8 * adjoint_elements
+    )
+
+
+@pytest.mark.parametrize("itemsize", [2, 4])
+@pytest.mark.parametrize("conditioned", [False, True])
+def test_explicit_and_implicit_stream_costs_agree(
+    itemsize: int,
+    conditioned: bool,
+) -> None:
+    implicit = _cfg(channels_in=8, num_streams=1, num_heads=2)
+    if conditioned:
+        implicit.cond_dim = 4
+    explicit = implicit.copy_tree()
+    stream = mmdit.MMDiTStream.Config()
+    stream.ffn = implicit.ffn.copy_tree()
+    if conditioned:
+        stream.adaln = AdaLNZero.Config()
+        stream.adaln.cond_dim = 4
+    explicit.streams = [stream]
+    assert implicit.finalize().cost(seq_len=4, rows=4, itemsize=itemsize) == (
+        explicit.finalize().cost(seq_len=4, rows=4, itemsize=itemsize)
+    )
 
 
 def test_block_cost_with_implicit_streams_is_the_hand_formula() -> None:
@@ -545,7 +606,7 @@ def test_block_cost_with_implicit_streams_is_the_hand_formula() -> None:
     assert model_cost.params == attn.params + 2 * (ffn.params + adaln.params)
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     # Two streams per position, each caching its own K and V.
-    assert model_cost.bytes_state == 2 * 2 * 2 * 4
+    assert model_cost.bytes_state == 4 * 2 * 2 * 2 * 4
 
 
 def test_block_cost_with_explicit_streams_prices_each_once() -> None:

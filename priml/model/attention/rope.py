@@ -6,7 +6,7 @@ Ported from ~/projects/sic/code/model.py (RoPE, RoPEMixed).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import (
     Literal,
     Protocol,
@@ -24,7 +24,15 @@ from torch import Tensor, nn
 import torch
 
 from priml.math.basic import broadcast_sequences, floor_multiple
-from priml.model.cost import Compute, Cost, Flops, cost, elementwise_cost
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+    reduction_cost,
+)
 
 
 @runtime_checkable
@@ -374,7 +382,13 @@ class RoPE(nn.Module):
         reference held them.
         """
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count the factors this emits, plus whatever the tables own.
 
             The attention owner counts applying factors to each query/key head;
@@ -384,19 +398,24 @@ class RoPE(nn.Module):
             here rather than reporting as free.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return self._factor_cost() + self._table_cost(
-                num_tokens=num_tokens,
+            return self._factor_cost(
+                rows=rows,
+                itemsize=itemsize,
+            ) + self._table_cost(
+                itemsize=itemsize,
+                rows=rows,
                 **kwargs,
             )
 
-        def _factor_cost(self) -> Cost:
+        def _factor_cost(self, *, rows: int, itemsize: int) -> Cost:
             """Count position products, trigonometric factors, and their scaling."""
             axes = _axis_channels(
                 self.channels_head,
@@ -406,9 +425,31 @@ class RoPE(nn.Module):
             frequencies = sum(axis // 2 for axis in axes)
             outputs = frequencies if self.reduction_mode == "cat" else max(axes) // 2
             # ``sum`` mode adds the axes' angles into one row before cos/sin.
-            reductions = 0 if self.reduction_mode == "cat" else frequencies - outputs
-            return elementwise_cost(primal=frequencies + 4 * outputs, adjoint=0) + Cost(
-                primal=Compute(flops=Flops(reduction=reductions)),
+            reduction = (
+                Compute()
+                if self.reduction_mode == "cat"
+                else reduction_cost(
+                    input_elements=frequencies,
+                    output_groups=outputs,
+                    itemsize=itemsize,
+                )
+            )
+            # Position products read one scalar per axis and shared frequencies;
+            # cos/sin and their scale maps each read and write one output row.
+            return Cost(
+                primal=Compute(
+                    flops=Flops(elementwise=frequencies + 4 * outputs),
+                    bytes=Bytes(
+                        elementwise=itemsize
+                        * (
+                            sum(axis > 0 for axis in axes)
+                            + frequencies / rows
+                            + frequencies
+                            + 8 * outputs
+                        ),
+                    ),
+                )
+                + reduction,
             )
 
         def _table_cost(self, **kwargs: object) -> Cost:
@@ -755,7 +796,14 @@ class RoPE(nn.Module):
         return dims
 
 
-def rotation_cost(rope: object, *, channels_head: int, heads: int) -> Cost:
+def rotation_cost(
+    rope: object,
+    *,
+    channels_head: int,
+    heads: int,
+    rows: int = 1,
+    itemsize: int = 4,
+) -> Cost:
     """Price applying rotary factors to ``heads`` rows of ``channels_head``.
 
     The owner of the queries and keys pays this, not the rotary module: the
@@ -769,6 +817,8 @@ def rotation_cost(rope: object, *, channels_head: int, heads: int) -> Cost:
       rope: The rotary slot's config.
       channels_head: Width of each rotated row.
       heads: Rows rotated per token: query heads plus key heads.
+      rows: Rows on the cost message bus; rotations own no parameters.
+      itemsize: Uniform bytes per tensor element.
 
     Returns:
       cost: Scalar work only; the factors are the rotary module's.
@@ -782,7 +832,17 @@ def rotation_cost(rope: object, *, channels_head: int, heads: int) -> Cost:
         else:
             channels = max(axes) if rope.reduction_mode == "sum" else sum(axes)
     rotations = 3 * channels * heads
-    return elementwise_cost(primal=rotations, adjoint=rotations)
+    return elementwise_cost(
+        primal=rotations,
+        adjoint=rotations,
+        channels=channels * heads,
+        inputs=6,
+        outputs=3,
+        adjoint_inputs=6,
+        adjoint_outputs=3,
+        rows=rows,
+        itemsize=itemsize,
+    )
 
 
 def _axis_channels(
@@ -867,7 +927,13 @@ class RoPEMixed(RoPE):
         """Whether per-head frequencies are learnable parameters."""
 
         @override
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count per-head factors and, when learned, their frequency gradients.
 
             The adjoint uses saved sine/cosine: two scale products, two
@@ -878,7 +944,8 @@ class RoPEMixed(RoPE):
             head.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -900,12 +967,20 @@ class RoPEMixed(RoPE):
                 primal=0,
                 adjoint=5 * outputs + params if self.learnable else 0,
                 params=params,
-                num_tokens=num_tokens if self.learnable else 1,
+                channels=outputs if self.learnable else 0,
+                adjoint_inputs=6,
+                adjoint_outputs=4,
+                itemsize=itemsize,
+                rows=rows if self.learnable else 1,
             )
             return (
-                self.num_heads * self._factor_cost()
-                + self._table_cost(num_tokens=num_tokens, **kwargs)
-                + frequencies
+                self.num_heads * self._factor_cost(rows=rows, itemsize=itemsize)
+                + self._table_cost(itemsize=itemsize, rows=rows, **kwargs)
+                + replace(
+                    frequencies,
+                    primal=Compute(),
+                    adjoint=frequencies.adjoint if self.learnable else Compute(),
+                )
             )
 
     def __init__(self, config: Config) -> None:

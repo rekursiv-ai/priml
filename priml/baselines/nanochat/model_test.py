@@ -33,6 +33,7 @@ from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
+from priml.model.residual_mix import ResidualMix
 from priml.model.softcap import SoftCap
 from priml.model.special import Identity
 from priml.model.transformer.block import TransformerBlock
@@ -369,7 +370,7 @@ def test_cost_matches_torch_through_a_naive_kernel() -> None:
         config,
         build_input=lambda: torch.randint(0, VOCAB, (2, SEQ)),
         num_tokens=2 * SEQ,
-        bus={"seq_len": SEQ},
+        bus={"seq_len": SEQ, "batch_size": 2},
     )
 
 
@@ -389,7 +390,30 @@ def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
     # of ``gate_channels x num_heads`` per layer.
     assert gated.params - plain.params == 2 * (VOCAB * 16 + 4 * 2)
     assert gated.primal.flops.selection == plain.primal.flops.selection == 0
-    assert gated.primal.bytes.selection - plain.primal.bytes.selection == 2 * 16
+    assert gated.primal.bytes.selection - plain.primal.bytes.selection == 4 * 2 * (
+        1 + 2 * 16
+    )
+
+
+def test_cost_distinguishes_batch_reuse_from_attention_window() -> None:
+    config = _config().finalize()
+    small = config.cost(seq_len=SEQ, itemsize=4)
+    large = config.cost(seq_len=SEQ, batch_size=4, itemsize=4)
+    narrow = config.cost(seq_len=SEQ, batch_size=4, itemsize=2)
+    assert large.primal.flops == small.primal.flops
+    assert large.primal.bytes.matmul < small.primal.bytes.matmul
+    assert large.training.intensity.matmul > small.training.intensity.matmul
+    assert narrow.training.bytes == large.training.bytes / 2
+    # The method and the dispatcher agree: seq_len alone means seq_len rows.
+    assert small == cost(config, seq_len=SEQ)
+    assert large == cost(config, seq_len=SEQ, batch_size=4)
+    # Past the window a longer sequence changes only weight amortization:
+    # attention work is identical and matmul traffic only shrinks.
+    long = config.cost(seq_len=8192)
+    longer = config.cost(seq_len=32_768)
+    assert longer.primal.flops == long.primal.flops
+    assert longer.primal.bytes.matmul < long.primal.bytes.matmul
+    assert longer.primal.bytes.reduction == long.primal.bytes.reduction
 
 
 def test_the_token_table_is_drawn_at_unit_variance() -> None:
@@ -736,6 +760,94 @@ def test_output_norm_feed_forward_config_builds_the_specialized_class() -> None:
     config.channels_out = 4
     config.round_to = 1
     assert isinstance(config.make(), OutputNormFeedForward)
+
+
+def test_output_norm_feed_forward_cost_includes_output_norm() -> None:
+    config = OutputNormFeedForward.Config()
+    config.channels_in = 4
+    config.channels_out = 4
+    config.round_to = 1
+    plain = config.copy_tree().finalize().cost(rows=8)
+    config.norm_out = RMSNorm.Config(elementwise_affine=True)
+    config = config.finalize()
+    assert config.cost(rows=8) == plain + cost(config.norm_out, rows=8)
+
+
+def test_gated_residual_cost_counts_mean_and_gate_parameters() -> None:
+    config = GatedResidualMix.Config()
+    config.num_layers = 2
+    priced = config.cost(channels_in=4, rows=8, itemsize=2)
+    assert priced.params == 3 * 2
+    assert priced.primal.flops.reduction == 2 * (4 - 1)
+    assert priced.primal.bytes.reduction == 2 * 2 * (4 + 1)
+
+
+def test_gated_residual_prices_sigmoid_as_one_tensor_operator() -> None:
+    config = GatedResidualMix.Config()
+    config.num_layers = 2
+    base = ResidualMix.Config()
+    base.num_layers = 2
+    gated = config.cost(channels_in=4, rows=8, itemsize=2)
+    plain = base.cost(channels_in=4, rows=8, itemsize=2)
+    assert gated.primal.bytes.elementwise - plain.primal.bytes.elementwise == 2 * 2 * (
+        11 + 1 / 8
+    )
+    assert (
+        gated.adjoint.bytes.elementwise - plain.adjoint.bytes.elementwise
+        == 2 * 2 * (4 * 4 + 17 + 1 / 8)
+    )
+    assert gated.adjoint.flops.elementwise - plain.adjoint.flops.elementwise == 2 * (
+        8 + 2 * 4
+    )
+
+
+def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
+    config = MemoryNanoChatLM.Config()
+    config.update(_config(), skip_missing=True)
+    config.num_pool_layers = 2
+    config.bigrams = {"0": HashedNgramTables.Config(num_embeddings=7)}
+    config = config.finalize()
+    base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
+    priced = config.cost(seq_len=SEQ, batch_size=4)
+    plain = base.cost(seq_len=SEQ, batch_size=4)
+    assert priced.params - plain.params == 7 * 16 + 1
+    assert (
+        priced.primal.flops.elementwise - plain.primal.flops.elementwise == 2 + 2 * 16
+    )
+    assert priced.primal.bytes.selection - plain.primal.bytes.selection > 0
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_pooling_gradient_temporary_is_written_only_by_width_reduction(
+    itemsize: int,
+    batch_size: int,
+) -> None:
+    config = MemoryNanoChatLM.Config()
+    config.update(_config(), skip_missing=True)
+    config.num_pool_layers = 2
+    config = config.finalize()
+    base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
+    pooled = config.cost(seq_len=SEQ, batch_size=batch_size, itemsize=itemsize)
+    plain = base.cost(seq_len=SEQ, batch_size=batch_size, itemsize=itemsize)
+    width = config.channels_in
+    rows = SEQ * batch_size
+    assert (
+        pooled.primal.bytes.elementwise - plain.primal.bytes.elementwise
+        == itemsize * (5 * width + 1 / rows)
+    )
+    assert (
+        pooled.adjoint.bytes.elementwise - plain.adjoint.bytes.elementwise
+        == itemsize * (6 * width + 1 / rows)
+    )
+    assert (
+        pooled.adjoint.bytes.reduction - plain.adjoint.bytes.reduction
+        == itemsize * (width + 1 + 1 + 1 / rows)
+    )
+    assert (
+        pooled.adjoint.flops.reduction - plain.adjoint.flops.reduction
+        == width - 1 + (rows - 1) / rows
+    )
 
 
 def test_output_norm_feed_forward_reset_initializes_affine_output_norm() -> None:

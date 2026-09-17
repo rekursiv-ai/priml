@@ -30,8 +30,6 @@ from priml.model.norm import (
     BatchNorm2d,
     GroupNorm,
     LayerNorm,
-    NormConfigProtocol,
-    NormProtocol,
     RMSNorm,
 )
 from priml.model.patchify import Patchify, Unpatchify
@@ -67,8 +65,6 @@ __all__ = [
     "MoE",
     "MultiHeadLatentAttention",
     "MultiStreamAttention",
-    "NormConfigProtocol",
-    "NormProtocol",
     "Patchify",
     "Qwen3",
     "Qwen35",

@@ -16,9 +16,10 @@ choice not to redistribute is about package weight, not permission.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, Self, cast
+from typing import cast
 
 import hashlib
+import http.client
 import os
 import urllib.error
 import urllib.request
@@ -64,7 +65,7 @@ def fetch(
     url = url_template.format(revision=revision, name=name)
     try:
         response = cast(
-            _ReadableBody,
+            http.client.HTTPResponse,
             urllib.request.urlopen(  # noqa: S310 -- Craftax assets use a fixed public dataset host.
                 url,
                 timeout=30,
@@ -108,13 +109,3 @@ def digest(directory: Path | None = None) -> str:
         accumulator.update(path.name.encode())
         accumulator.update(path.read_bytes())
     return accumulator.hexdigest()
-
-
-class _ReadableBody(Protocol):
-    """The response slice used by the downloader."""
-
-    def read(self) -> bytes: ...
-
-    def __enter__(self) -> Self: ...
-
-    def __exit__(self, *exc: object) -> None: ...

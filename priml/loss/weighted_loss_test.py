@@ -13,7 +13,7 @@ import torch
 
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import cost, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -139,10 +139,19 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
         num_tokens=12,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
-    assert measured == cost(bce, num_tokens=12) + cost(
+    assert measured == cost(bce, rows=12) + cost(
         mse,
-        num_tokens=12,
-    ) + elementwise_cost(primal=2 * 2, adjoint=2 * 2)
+        rows=12,
+    ) + Cost(
+        primal=Compute(
+            flops=Flops(elementwise=4),
+            bytes=Bytes(elementwise=32, reduction=12),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=4),
+            bytes=Bytes(elementwise=16, reduction=12),
+        ),
+    )
     assert measured.params == 0
     assert measured.training.flops.matmul == 0
 
@@ -151,7 +160,26 @@ def test_weighted_sum_cost_rejects_unpriced_child() -> None:
     """A child without ``cost`` raises instead of pricing zero."""
     config = WeightedSum.Config(fns=[DummyLoss.Config()], weights=[1.0])
     with pytest.raises(TypeError, match=r"DummyLoss\.Config has no cost"):
-        cost(config, num_tokens=1)
+        cost(config, rows=1)
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_weighted_sum_operand_traffic(itemsize: int) -> None:
+    config = WeightedSum.Config()
+    config.fns = [SimpleLoss.Config(), SimpleLoss.Config()]
+    config.weights = [0.5, 0.5]
+    priced = cost(config, rows=6, itemsize=itemsize)
+    child = cost(config.fns[0], rows=6, itemsize=itemsize)
+    assert (
+        priced.primal.bytes.elementwise
+        == 2 * child.primal.bytes.elementwise + 8 * itemsize
+    )
+    assert priced.primal.bytes.reduction == 3 * itemsize
+    assert (
+        priced.adjoint.bytes.elementwise
+        == 2 * child.adjoint.bytes.elementwise + 4 * itemsize
+    )
+    assert priced.adjoint.bytes.reduction == 3 * itemsize
 
 
 def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:

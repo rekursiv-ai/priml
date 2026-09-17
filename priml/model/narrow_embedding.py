@@ -65,17 +65,25 @@ class NarrowEmbedding(nn.Module):
             propagate_attr(self.inner, "channels_in", self.channels_in)
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
-            """Price the table it narrows; a cast is a move, not arithmetic.
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the table it narrows; storage dtype does not select cost itemsize.
 
             Args:
+              seq_len: Sequence length forwarded to contextual lookup tables.
+              itemsize: Uniform bytes per analytical operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.inner, **kwargs)
+            return cost(self.inner, seq_len=seq_len, itemsize=itemsize, **kwargs)
 
     def __init__(self, config: Config) -> None:
         super().__init__()

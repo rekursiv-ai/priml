@@ -102,10 +102,13 @@ def test_narrow_embedding_cost_is_the_inner_gather() -> None:
         num_tokens=3,
         run=_embed_float,
     )
-    assert model_cost == cost(config.copy_tree().finalize().inner, num_tokens=3)
+    assert model_cost == cost(config.copy_tree().finalize().inner, rows=3)
     assert model_cost == Cost(
-        primal=Compute(bytes=Bytes(selection=4)),
-        adjoint=Compute(flops=Flops(selection=4), bytes=Bytes(selection=4)),
+        primal=Compute(bytes=Bytes(selection=4 * (1 + 2 * 4))),
+        adjoint=Compute(
+            flops=Flops(selection=4),
+            bytes=Bytes(selection=4 * (1 + 3 * 4 + 32 / 3)),
+        ),
         params=32,
         params_active=4,
     )

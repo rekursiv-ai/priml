@@ -41,6 +41,15 @@ from priml.baselines.nanochat.ngram import (
 from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.value_gated_attention import ValueGatedAttention
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    matmul_cost,
+    reduction_cost,
+)
 from priml.model.custom_types import TensorModule, propagate_attr
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -105,6 +114,72 @@ class CausalAttention(ValueGatedAttention):
                 )
             propagate_attr(self.norm_out, "channels_in", self.channels_head)
             return super().finalize()
+
+        @override
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price base attention plus memory gates, output norm, and head gate.
+
+            Ngram tables own their lookups; this module owns the gates and value
+            mixing. Fused kernels retain the same logical unfused accounting.
+
+            Args:
+              seq_len: Sequence length before windowing.
+              rows: Rows sharing the projection parameters.
+              itemsize: Uniform bytes per operand element.
+              **kwargs: Remaining child cost messages.
+
+            Returns:
+              total: Per-token work, traffic, and owned parameters.
+
+            """
+            total = super().cost(
+                seq_len=seq_len,
+                rows=rows,
+                itemsize=itemsize,
+                **kwargs,
+            ) + cost(
+                self.norm_out,
+                rows=rows * self.num_heads,
+                itemsize=itemsize,
+                **kwargs,
+            ).tile(self.num_heads)
+            memory = int(self.bigram) + int(self.trigram)
+            total += memory * (
+                matmul_cost(
+                    channels_in=self.gate_channels,
+                    channels_out=self.num_heads,
+                    rows=rows,
+                    itemsize=itemsize,
+                )
+                + _value_mix_cost(
+                    heads=self.num_heads,
+                    channels_head=self.channels_head,
+                    channels_in=self.channels_in,
+                    itemsize=itemsize,
+                    add=True,
+                )
+            )
+            if self.head_gate is not None:
+                total += cost(
+                    self.head_gate,
+                    rows=rows,
+                    itemsize=itemsize,
+                    **kwargs,
+                ) + _value_mix_cost(
+                    heads=self.num_heads,
+                    channels_head=self.channels_head,
+                    channels_in=self.channels_in,
+                    itemsize=itemsize,
+                    add=False,
+                )
+            return total
 
     def __init__(self, config: Config) -> None:
         norm = config.norm_qk
@@ -1376,6 +1451,31 @@ def _run_output(command: list[str]) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def _value_mix_cost(
+    *,
+    heads: int,
+    channels_head: int,
+    channels_in: int,
+    itemsize: int,
+    add: bool,
+) -> Cost:
+    """Price scaled sigmoid gates, broadcast products, and optional value additions."""
+    inner = heads * channels_head
+    return Cost(
+        primal=Compute(
+            flops=Flops(elementwise=5 * heads + (2 if add else 1) * inner),
+            bytes=Bytes(elementwise=itemsize * (5 * heads + (5 if add else 3) * inner)),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=5 * heads + 2 * inner + channels_in),
+            bytes=Bytes(
+                elementwise=itemsize * (6 * heads + 5 * inner + 3 * channels_in),
+            ),
+        )
+        + reduction_cost(input_elements=inner, output_groups=heads, itemsize=itemsize),
+    )
 
 
 if __name__ == "__main__":

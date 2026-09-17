@@ -193,6 +193,7 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
             torch.randn(3, 16, requires_grad=True),
         ),
         num_tokens=3,
+        bus={"batch_size": 3},
         run=_stepped,
     )
     gates = 4 * 16 * (16 + 5) + 4 * 16 * 16
@@ -200,9 +201,9 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
     biases = 16 + 2 * 4 * 16 + 5
     renorm = BatchRenorm.Config()
     renorm.channels_in = 12
-    norms = cost(renorm, num_tokens=3) + cost(
+    norms = cost(renorm, rows=3) + cost(
         LayerNorm.Config(16, elementwise_affine=True),
-        num_tokens=3,
+        rows=3,
     )
     assert analytical.params == weights + biases + norms.params
     assert analytical.primal.flops.matmul == 2 * weights
@@ -215,8 +216,22 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
         16 + 2 * 16 + 22 * 16
     )
     # The one-hot previous action is written, not computed.
-    assert analytical.primal.bytes.selection == 5
-    assert analytical.bytes_state == 2 * 16
+    assert analytical.primal.bytes.selection == 4 * 5
+    assert analytical.bytes_state == 4 * 2 * 16
+
+
+def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
+    config = RecurrentQNetwork.Config()
+    config.observation_size = 3
+    config.channels_in = 2
+    config.num_actions = 4
+    narrow = config.cost(batch_size=4, itemsize=2)
+    wide = config.cost(batch_size=4, itemsize=4)
+    assert narrow.bytes_state == 8
+    assert wide.bytes_state == 16
+    assert narrow.primal.bytes.selection == 8
+    assert wide.training.bytes == 2 * narrow.training.bytes
+    assert wide.training.flops == narrow.training.flops
 
 
 def test_exploration_starts_certain_and_ends_rare() -> None:

@@ -31,15 +31,7 @@ identical weights stay identical regardless of what else drew in between.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import (
-    TYPE_CHECKING,
-    NotRequired,
-    Protocol,
-    Self,
-    TypedDict,
-    cast,
-    override,
-)
+from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -48,7 +40,7 @@ import torch
 
 
 if TYPE_CHECKING:
-    from priml.baselines.sudoku.model import ForwardOutput, SudokuNet
+    from priml.baselines.sudoku.model import SudokuNet
 
 
 class ActPool:
@@ -249,7 +241,7 @@ class ActPool:
         model: SudokuNet,
         *,
         media: Tensor,
-        prefix_kwargs: dict[str, Tensor] | None = None,
+        prefix_kwargs: Mapping[str, object] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Run one puzzle batch to the step cap, carrying latents throughout.
 
@@ -259,7 +251,8 @@ class ActPool:
         Args:
           model: The network to run.
           media: ``[B, grid_len]`` puzzles.
-          prefix_kwargs: Batch fields a prefix module consumes, if any.
+          prefix_kwargs: Batch fields a prefix module consumes, if any;
+            forwarded verbatim to the model's ``**prefix_kwargs``.
 
         Returns:
           logits: Final ``[B, grid_len, V]`` predictions.
@@ -271,10 +264,14 @@ class ActPool:
         logits = halt = None
         for _ in range(self.config.max_steps):
             self._set_feedback(model, feedback=feedback)
-            out = cast(_SudokuForward, model)(
+            # Spelled out although it is the default: the unpacked mapping is
+            # ``object``-valued, so a checker otherwise sees it as a candidate
+            # for this ``bool`` keyword.
+            out = model(
                 media,
                 z_slow,
                 z_fast,
+                collect_intermediates=False,
                 **(prefix_kwargs or {}),
             )
             z_slow, z_fast = out.z_slow, out.z_fast
@@ -417,15 +414,3 @@ class ActPool:
             minimum = torch.where(explore, sampled, torch.ones_like(sampled))
             return at_cap | (fired & (self.steps >= minimum))
         return at_cap | (fired & ~explore)
-
-
-class _SudokuForward(Protocol):
-    """Callable slice needed from the model during a rollout."""
-
-    def __call__(
-        self,
-        media: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        **prefix_kwargs: object,
-    ) -> ForwardOutput: ...

@@ -35,23 +35,13 @@ def test_output_gate_config_pprint() -> None:
     )
 
 
-def test_output_gate_mismatched_widths_validate_on_construction() -> None:
+def test_output_gate_mismatched_widths_reject_at_make() -> None:
     config = OutputGate.Config()
     config.channels_in = 8
     config.channels_out = 16
 
-    finalized = config.copy_tree().finalize()
-    assert (finalized.channels_in, finalized.channels_out) == (8, 16)
-    with pytest.raises(ValueError, match="for OutputGate"):
+    with pytest.raises(ValueError, match="channels_in=8 must equal channels_out=16"):
         config.make()
-    with pytest.raises(ValueError, match="for OutputGate"):
-        OutputGate(config)
-
-    class DerivedOutputGate(OutputGate):
-        pass
-
-    with pytest.raises(ValueError, match="for DerivedOutputGate"):
-        DerivedOutputGate(config)
 
 
 def test_output_gate_basic():
@@ -162,12 +152,28 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
         num_tokens=8,
         bus={"seq_len": 8},
     )
-    inner = cost(config.copy_tree().finalize().inner, seq_len=8, num_tokens=8)
+    inner = cost(config.copy_tree().finalize().inner, seq_len=8, rows=8)
     gate = 16 * 16
     assert model_cost.primal.flops.matmul == inner.primal.flops.matmul + 2 * gate
     assert model_cost.adjoint.flops.matmul == inner.adjoint.flops.matmul + 4 * gate
     assert model_cost.params == inner.params + gate
     assert model_cost.bytes_state == inner.bytes_state
+
+
+def test_output_gate_traffic_prices_projection_and_scalar_operands() -> None:
+    config = OutputGate.Config()
+    config.channels_in = 8
+    config.inner = RMSNorm.Config()
+    config = config.copy_tree().finalize()
+    inner = cost(config.inner, rows=4, itemsize=2)
+    actual = config.cost(rows=4, itemsize=2)
+    assert actual.primal.bytes.matmul == 2 * (8 + 8 + 64 / 4)
+    assert actual.primal.bytes.elementwise - inner.primal.bytes.elementwise == 2 * 5 * 8
+    assert (
+        actual.adjoint.bytes.elementwise - inner.adjoint.bytes.elementwise == 2 * 12 * 8
+    )
+    wide = config.cost(rows=4, itemsize=4)
+    assert wide.training.bytes == actual.training.bytes * 2
 
 
 if __name__ == "__main__":

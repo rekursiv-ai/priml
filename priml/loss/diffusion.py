@@ -26,7 +26,7 @@ from priml.math.diffusion.target import (
     target_x,
 )
 from priml.math.numeric import safe_log
-from priml.model.cost import Compute, Cost, Flops, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
 
 
 class DiffusionLoss(nn.Module):
@@ -66,10 +66,16 @@ class DiffusionLoss(nn.Module):
         Reference: arXiv:2303.09556.
         """
 
-        def cost(self, *, num_tokens: int, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one element of ``x0``; per-sample scalar work is spread ``1 / n``.
 
-            A token is one element of ``x0``; ``num_tokens`` is the elements one
+            A token is one element of ``x0``; ``rows`` is the elements one
             sample holds. The ``denoiser`` is the model: it arrives at forward
             time, no config here holds it, and ``TrainStep.Config.model`` prices
             it, so it is excluded.
@@ -82,17 +88,21 @@ class DiffusionLoss(nn.Module):
             ``1 / n``, three ops, plus whatever the ``target_fn`` adds through
             ``predict``.
 
-            Per SAMPLE, so divided by ``num_tokens``: ``log_t`` is one log;
+            Per SAMPLE, so divided by ``rows``: ``log_t`` is one log;
             ``logsnr_fn``, ``corruption_fn``, and ``time_transform`` (when set)
             are each counted as a fixed eight scalar ops -- they are injected
             schedule transforms of a handful of ops, not priced by identity;
             ``compute_log_alpha`` and the two exponentials are four; the
             ``target_fn``'s own coefficient preparation is another fixed eight.
             ``snr_gamma > 0`` adds five forward (log, clamp, subtract, exp,
-            multiply) and one back.
+            multiply) and one back. Traffic counts unfused tensor operands;
+            injected schedules expose only their scalar input/output boundary.
+            Random draws count their output writes, not RNG internal state.
+            The scalar ledger includes broadcast coefficients and mean scaling.
 
             Args:
-              num_tokens: Elements per sample; the mean's width.
+              rows: Elements per sample; the mean's width.
+              itemsize: Bytes per logical tensor element.
               **kwargs: The rest of the bus, unread.
 
             Returns:
@@ -112,11 +122,44 @@ class DiffusionLoss(nn.Module):
             if self.snr_gamma > 0:
                 per_sample += 5
                 per_sample_adjoint += 1
-            return elementwise_cost(
-                primal=3 + target_primal + 2 + per_sample / num_tokens,
-                adjoint=3 + target_adjoint + per_sample_adjoint / num_tokens,
-            ) + Cost(
-                primal=Compute(flops=Flops(reduction=(num_tokens - 1) / num_tokens)),
+            target_elements, target_scalars = _target_fn_elements(self.target_fn)
+            scalar_elements = 22 + target_scalars
+            predict_scaled = (
+                self.target_fn is target_v_x or self.target_fn is target_v_eps
+            )
+            if self.time_transform is not None:
+                scalar_elements += 2
+            if self.snr_gamma > 0:
+                scalar_elements += 14
+            return Cost(
+                primal=Compute(
+                    flops=Flops(
+                        elementwise=3 + target_primal + 2 + per_sample / rows,
+                    ),
+                    bytes=Bytes(
+                        elementwise=itemsize
+                        * (13 + target_elements + scalar_elements / rows),
+                    ),
+                )
+                + reduction_cost(
+                    input_elements=rows,
+                    rows=rows,
+                    itemsize=itemsize,
+                ),
+                adjoint=Compute(
+                    flops=Flops(
+                        elementwise=3 + target_adjoint + per_sample_adjoint / rows,
+                    ),
+                    bytes=Bytes(
+                        elementwise=itemsize
+                        * (
+                            7
+                            + int(predict_scaled) * (2 + 1 / rows)
+                            + 3 * int(self.snr_gamma > 0) / rows
+                        ),
+                        reduction=itemsize * (rows + 1) / rows,
+                    ),
+                ),
             )
 
     class Output(TypedDict):
@@ -224,6 +267,17 @@ class DiffusionLoss(nn.Module):
 # ``target_v_x``/``target_v_eps`` derive ``predict`` as a two-multiply-one-add
 # combination, so the adjoint through ``predict`` is one multiply by the saved
 # coefficient.
+def _target_fn_elements(target_fn: TargetFn) -> tuple[int, int]:
+    """Return vector and scalar operand IO, including coefficient construction."""
+    if target_fn is target_x or target_fn is target_eps:
+        return 7, 13
+    if target_fn is target_rectified_flow:
+        return 17, 26
+    if target_fn is target_v:
+        return 21, 32
+    return 14, 26
+
+
 def _target_fn_flops(target_fn: TargetFn) -> tuple[int, int]:
     """Per-element (primal, adjoint) ops of a known target parameterization."""
     if target_fn is target_x or target_fn is target_eps:

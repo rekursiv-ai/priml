@@ -210,7 +210,7 @@ def test_value_gated_attention_cost_is_projections_gate_and_the_kernel() -> None
     assert model_cost.adjoint.flops.matmul == (
         4 * (projections + gate) + kernel.adjoint.flops.matmul
     )
-    assert model_cost.bytes_state == 2 * 2 * 8
+    assert model_cost.bytes_state == 4 * 2 * 2 * 8
     # The gate's gradient reduces over each head's channels; the norm runs on
     # every q and k head row.
     norm = cost(finalized.norm_qk).tile(2 * 2, copies=2)
@@ -304,6 +304,23 @@ def test_value_gated_attention_cost_prices_an_injected_kernel() -> None:
     assert injected.primal.flops.matmul - baseline.primal.flops.matmul == (
         1_000_003 - default_kernel.primal.flops.matmul
     )
+
+
+def test_value_attention_traffic_amortizes_weights_and_preserves_window() -> None:
+    config = ValueGatedAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.channels_head = 4
+    config.gate_channels = 4
+    config.window = 4
+    config = config.copy_tree().finalize()
+    one = config.cost(seq_len=8, rows=1, itemsize=2)
+    batch = config.cost(seq_len=8, rows=4, itemsize=2)
+    assert one.primal.bytes.matmul - batch.primal.bytes.matmul == 2 * one.params * 3 / 4
+    wide = config.cost(seq_len=8, rows=4, itemsize=4)
+    assert wide.training.bytes == batch.training.bytes * 2
+    assert config.cost(seq_len=32, rows=4, itemsize=2) == batch
+    assert batch.bytes_state == 2 * 2 * 8
 
 
 if __name__ == "__main__":

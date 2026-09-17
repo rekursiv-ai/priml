@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from priml.model.attention.kernel import SdpaFused, SdpaNaive
+from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
 from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
@@ -129,7 +130,11 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys(
                 elementwise=2 * 4 * 32,
                 reduction=2 * 62,
             ),
-            bytes=Bytes(elementwise=2 * 8),
+            bytes=Bytes(
+                matmul=4 * 2 * (4 * 8 + 2 * 32),
+                elementwise=4 * 2 * (8 * 32 + 2),
+                reduction=4 * 2 * 2 * (32 + 1),
+            ),
         ),
         adjoint=Compute(
             flops=Flops(
@@ -137,7 +142,11 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys(
                 elementwise=2 * 4 * 32,
                 reduction=2 * 31,
             ),
-            bytes=Bytes(elementwise=2 * 8),
+            bytes=Bytes(
+                matmul=4 * 2 * 2 * (4 * 8 + 2 * 32),
+                elementwise=4 * 2 * (10 * 32 + 1),
+                reduction=4 * 2 * (32 + 1),
+            ),
         ),
     )
     windowed = cost(config, seq_len=32, num_heads=2, channels_head=8, window=4)
@@ -149,6 +158,52 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys(
     assert (
         dropped.primal.flops.elementwise == full.primal.flops.elementwise + 2 * 2 * 32
     )
+
+
+@pytest.mark.parametrize("config", [SdpaFused.Config(), SdpaNaive.Config()])
+@pytest.mark.parametrize("window", [-1, 4])
+def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(
+    config: SdpaFused.Config | SdpaNaive.Config,
+    window: int,
+) -> None:
+    small = cost(
+        config,
+        seq_len=8,
+        num_heads=2,
+        channels_head=4,
+        window=window,
+        rows=8,
+        itemsize=2,
+    )
+    large = cost(
+        config,
+        seq_len=8,
+        num_heads=2,
+        channels_head=4,
+        window=window,
+        rows=32,
+        itemsize=4,
+    )
+    assert large.primal.bytes == small.primal.bytes * 2
+    assert large.adjoint.bytes == small.adjoint.bytes * 2
+    assert small.primal.bytes.matmul == 2 * 2 * (4 * 4 + 2 * (4 if window == 4 else 8))
+    assert small.primal.flops == large.primal.flops
+
+
+def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
+    config = RoPE.Config(8)
+    factors = config.cost(rows=4, itemsize=2)
+    assert factors.primal.bytes.elementwise == 2 * (1 + 4 / 4 + 4 + 8 * 4)
+    assert factors.adjoint.bytes.total == 0
+    rotation = rotation_cost(config, channels_head=8, heads=3, itemsize=2)
+    assert rotation.primal.bytes.elementwise == 2 * 9 * 8 * 3
+    assert rotation.adjoint.bytes.elementwise == 2 * 9 * 8 * 3
+    mixed = RoPEMixed.Config(8)
+    mixed.num_heads = 2
+    mixed.learnable = True
+    small = mixed.cost(rows=4, itemsize=2)
+    large = mixed.cost(rows=4, itemsize=4)
+    assert large.training.bytes == small.training.bytes * 2
 
 
 def test_naive_kernel_cost_matches_torch() -> None:

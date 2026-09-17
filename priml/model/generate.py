@@ -19,7 +19,7 @@ Example::
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol
 
 import math
 
@@ -27,39 +27,13 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.custom_types import TensorModule, has_weight
-
-
-@runtime_checkable
-class AttentionLike(Protocol):
-    """The attention member ``generate`` reaches for on each block."""
-
-    def alloc_kv_cache(
-        self,
-        *,
-        batch: int | tuple[int, ...],
-        max_seq: int,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> object:
-        """Alloc kv cache."""
-        ...
-
-
-class BlockLike(Protocol):
-    """One transformer block with an explicit cached path."""
-
-    attn: AttentionLike
-
-    def forward_cached[CacheT](
-        self,
-        x: Tensor,
-        /,
-        *,
-        cache: CacheT,
-    ) -> tuple[Tensor, CacheT]:
-        """Forward cached."""
-        ...
+from priml.model.custom_types import (
+    HasForwardCached,
+    TensorModule,
+    has_forward_cached,
+    has_weight,
+    is_cached_attention,
+)
 
 
 class TransformerLike(Protocol):
@@ -145,29 +119,30 @@ def generate(
     forward = proj_in
     dtype = proj_in.weight.dtype
 
-    # Delegate cache alloc to block; keeps generate arch-agnostic
-    # (MLA caches compressed latent).
-    blocks: list[BlockLike] = []
+    # Delegate cache alloc to the block's attention; keeps generate
+    # arch-agnostic (MLA caches a compressed latent).
+    blocks: list[HasForwardCached[object]] = []
+    caches: list[object] = []
     for block in model.blocks:
-        if not isinstance(getattr(block, "attn", None), AttentionLike):
+        attn = getattr(block, "attn", None)
+        if not is_cached_attention(attn):
             raise TypeError(
                 "Token generation requires blocks with an attn attribute "
                 "implementing alloc_kv_cache.",
             )
-        if not isinstance(block, _HasForwardCached):
+        if not has_forward_cached(block):
             raise TypeError(
                 "Token generation requires blocks with a forward_cached method.",
             )
-        blocks.append(cast(BlockLike, block))
-    caches = [
-        block.attn.alloc_kv_cache(
-            batch=B,
-            max_seq=max_seq_len,
-            device=device,
-            dtype=dtype,
+        caches.append(
+            attn.alloc_kv_cache(
+                batch=B,
+                max_seq=max_seq_len,
+                device=device,
+                dtype=dtype,
+            ),
         )
-        for block in blocks
-    ]
+        blocks.append(block)
 
     x: Tensor = forward(prompt_ids)
     for i, block in enumerate(blocks):
@@ -205,28 +180,6 @@ def generate(
     if not generated:
         return prompt_ids
     return torch.cat([prompt_ids, *generated], dim=-1)
-
-
-# `isinstance` against a runtime-checkable Protocol resolves a data member
-# (BlockLike.attn) via inspect.getattr_static, which never sees an nn.Module
-# submodule -- submodules surface only through nn.Module's own __getattr__,
-# which getattr_static deliberately bypasses. So isinstance(block, BlockLike)
-# is never True for a real block; this method-only half of it is what CAN be
-# checked, and `attn` is checked separately above with a plain getattr
-# (which, unlike getattr_static, does trigger __getattr__).
-@runtime_checkable
-class _HasForwardCached(Protocol):
-    """The half of ``BlockLike`` an isinstance check can prove."""
-
-    def forward_cached[CacheT](
-        self,
-        x: Tensor,
-        /,
-        *,
-        cache: CacheT,
-    ) -> tuple[Tensor, CacheT]:
-        """Forward cached."""
-        ...
 
 
 def _sample(

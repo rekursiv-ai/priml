@@ -65,16 +65,23 @@ class RegisterTokens(nn.Module):
         Must match the grid embedding's, or the prefix enters the sequence at
         a different magnitude than the tokens it precedes."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one scale over every register token, per puzzle.
 
             The expand is a view. A frozen basis owns nothing, so its gradient
             reduction over puzzles vanishes with its parameters.
 
             Args:
-              num_tokens: Puzzles sharing the tokens; divides their gradient
+              rows: Puzzles sharing the tokens; divides their gradient
                 reduction. The bus's row count, not this config's own
                 ``num_tokens``, which is how many tokens it prepends.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus; nothing here reads it.
 
             Returns:
@@ -88,7 +95,10 @@ class RegisterTokens(nn.Module):
                 adjoint=width,
                 channels=width,
                 params=width if self.learnable else 0,
-                num_tokens=num_tokens,
+                rows=rows,
+                inputs=0 if self.learnable else 1,
+                adjoint_inputs=1,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -175,7 +185,7 @@ class SparsePuzzleEmbedding(nn.Module):
         dtype: torch.dtype | None = None
         """Cast applied to the forward output; ``None`` keeps the table dtype."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price one row gathered and the prefix scaled, per puzzle; nothing owned.
 
             The table is a buffer, so there are no parameters, and the scatter
@@ -184,6 +194,7 @@ class SparsePuzzleEmbedding(nn.Module):
             zero fill and the reshape a view.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus; nothing here reads it.
 
             Returns:
@@ -192,9 +203,18 @@ class SparsePuzzleEmbedding(nn.Module):
             """
             del kwargs
             width = self.num_tokens * self.channels_out
+            copied = 3 + 4 * self.channels_out
+            if width > self.channels_out:
+                copied += self.channels_out + width
             return Cost(
-                primal=Compute(bytes=Bytes(selection=self.channels_out)),
-            ) + elementwise_cost(primal=width, adjoint=width, channels=width)
+                primal=Compute(bytes=Bytes(selection=copied * itemsize)),
+            ) + elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+                adjoint_inputs=1,
+                itemsize=itemsize,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -322,17 +342,26 @@ class PrefixStack(nn.Module):
                     part.channels_out = self.channels_out
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
-            """Sum every part; the concatenation is a copy, not arithmetic.
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+            """Sum every part and the concatenation's input/output copy.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every part.
 
             Returns:
               cost: Per-puzzle cost of this module.
 
             """
-            return sum((cost(part, **kwargs) for part in self.parts), Cost())
+            children = sum(
+                (cost(part, itemsize=itemsize, **kwargs) for part in self.parts),
+                Cost(),
+            )
+            return children + Cost(
+                primal=Compute(
+                    bytes=Bytes(selection=2 * _prefix_elements(self) * itemsize),
+                ),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -348,3 +377,13 @@ class PrefixStack(nn.Module):
         """Concatenate every part's tokens along the sequence axis."""
         pieces = [part(batch_size, **kwargs) for part in self.parts]
         return torch.cat(pieces, dim=1)
+
+
+def _prefix_elements(config: object) -> int:
+    """Read the output shape of nested prefix configs without building tensors."""
+    if isinstance(config, PrefixStack.Config):
+        return sum(_prefix_elements(part) for part in config.parts)
+    tokens = getattr(config, "num_tokens", None)
+    if not isinstance(tokens, int) or not isinstance(config, ChannelsOut):
+        raise TypeError("Prefix cost needs num_tokens and channels_out.")
+    return tokens * config.channels_out

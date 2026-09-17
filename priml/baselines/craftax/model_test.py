@@ -133,6 +133,7 @@ def test_the_cost_matches_torch_and_prices_the_tanh_towers() -> None:
         config,
         build_input=lambda: torch.randn(3, 12, requires_grad=True),
         num_tokens=3,
+        bus={"batch_size": 3},
         run=_scored,
     )
     weights = 2 * (12 * 16 + 16 * 16) + 16 * 5 + 16 * 1
@@ -146,6 +147,21 @@ def test_the_cost_matches_torch_and_prices_the_tanh_towers() -> None:
     assert analytical.adjoint.flops.elementwise == 3 * hidden_units
     assert analytical.adjoint.flops.reduction == biases * 2 / 3
     assert analytical.bytes_state == 0
+
+
+def test_cost_accounts_for_operand_bytes_and_dtype() -> None:
+    config = ActorCritic.Config()
+    config.observation_size = 3
+    config.channels_in = 2
+    config.num_actions = 4
+    config.num_layers = 1
+    counted = config.cost(batch_size=4, itemsize=2)
+    assert counted.primal.bytes.matmul == 2 * (
+        2 * (3 + 2 + 6 / 4) + (2 + 4 + 8 / 4) + (2 + 1 + 2 / 4)
+    )
+    wide = config.cost(batch_size=4, itemsize=4)
+    assert wide.training.bytes == 2 * counted.training.bytes
+    assert wide.training.flops == counted.training.flops
 
 
 if __name__ == "__main__":

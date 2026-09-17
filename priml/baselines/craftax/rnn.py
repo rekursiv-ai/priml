@@ -59,7 +59,14 @@ class ActorCriticRNN(nn.Module):
         channels_in: int = 512
         """Width of the embedding, the GRU state, and each head."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one recurrent step of one worker.
 
             A token is one environment step: the observation in, the carried
@@ -74,48 +81,79 @@ class ActorCriticRNN(nn.Module):
             and a sigmoid each), the candidate (a product, an add, a tanh),
             and the interpolation (a subtraction, two products, an add):
             eleven operations. The adjoint reuses the saved gates: seventeen.
+            Scalar-region I/O reads six projected gates plus state and writes
+            state; backward reads saved gates/state and the gradient, writing
+            six projected-gate gradients and the state gradient.
             The episode reset is one select per state unit each way.
 
+            This is the model root: it states the batch geometry itself, so
+            a ``rows`` already on the bus is discarded and every parameter is
+            shared by ``batch_size * seq_len`` tokens.
+
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
-              **kwargs: The open message bus; nothing here reads it.
+              seq_len: Steps per worker in one pass.
+              batch_size: Workers stepped together.
+              itemsize: Uniform bytes per tensor element.
+              **kwargs: The rest of the open message bus; nothing here reads it.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
             del kwargs
+            rows = seq_len * batch_size
             width = self.channels_in
             embed = matmul_cost(
                 channels_in=self.observation_size,
                 channels_out=width,
                 bias=True,
-                num_tokens=num_tokens,
-            ) + elementwise_cost(primal=width, adjoint=width)
-            reset = elementwise_cost(primal=width, adjoint=width)
+                rows=rows,
+                itemsize=itemsize,
+            ) + elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+                itemsize=itemsize,
+            )
+            reset = elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+                inputs=2,
+                itemsize=itemsize,
+            )
             gates = 2 * matmul_cost(
                 channels_in=width,
                 channels_out=3 * width,
                 bias=True,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
             cell = elementwise_cost(
                 primal=11 * width,
                 adjoint=17 * width,
                 channels=width,
+                inputs=7,
+                adjoint_inputs=6,
+                adjoint_outputs=7,
+                itemsize=itemsize,
             )
             heads = sum(
                 (
                     _head_cost(
                         channels_in=width,
                         output_size=output_size,
-                        num_tokens=num_tokens,
+                        rows=rows,
+                        itemsize=itemsize,
                     )
                     for output_size in (self.num_actions, 1)
                 ),
                 Cost(),
             )
-            return replace(embed + reset + gates + cell + heads, bytes_state=width)
+            return replace(
+                embed + reset + gates + cell + heads,
+                bytes_state=itemsize * width,
+            )
 
     def __init__(self, config: Config) -> None:
         """Build the embedding, the recurrent cell, and both heads.
@@ -266,19 +304,32 @@ def _head(*, channels_in: int, output_size: int, output_gain: float) -> nn.Seque
     )
 
 
-def _head_cost(*, channels_in: int, output_size: int, num_tokens: int) -> Cost:
+def _head_cost(
+    *,
+    channels_in: int,
+    output_size: int,
+    rows: int,
+    itemsize: int,
+) -> Cost:
     """Price one head: two biased ReLU layers, then a biased readout."""
     hidden = matmul_cost(
         channels_in=channels_in,
         channels_out=channels_in,
         bias=True,
-        num_tokens=num_tokens,
-    ) + elementwise_cost(primal=channels_in, adjoint=channels_in, channels=channels_in)
+        rows=rows,
+        itemsize=itemsize,
+    ) + elementwise_cost(
+        primal=channels_in,
+        adjoint=channels_in,
+        channels=channels_in,
+        itemsize=itemsize,
+    )
     return 2 * hidden + matmul_cost(
         channels_in=channels_in,
         channels_out=output_size,
         bias=True,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )
 
 

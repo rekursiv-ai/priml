@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol
 from typing_extensions import TypedDict
 
 from torch import Tensor
@@ -10,7 +10,6 @@ from torch import Tensor
 
 __all__ = [
     "LossOutput",
-    "LossProtocol",
     "SimpleLossFn",
 ]
 
@@ -39,21 +38,4 @@ class SimpleLossFn(Protocol):
         reduction: Literal["none", "mean", "sum"] = "mean",
     ) -> Tensor:
         """Compute loss between input and target."""
-        ...
-
-
-@runtime_checkable
-class LossProtocol(Protocol):
-    """Protocol for loss functions."""
-
-    def __call__(self, **batch: object) -> LossOutput:
-        """Compute loss.
-
-        Args:
-          **batch: Batch data as kwargs (typically includes logits, targets, etc).
-
-        Returns:
-          loss: Dict with 'loss' key (and optional auxiliary losses).
-
-        """
         ...

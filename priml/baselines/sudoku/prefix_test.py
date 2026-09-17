@@ -153,7 +153,7 @@ def test_sparse_embedding_cost_owns_no_parameters() -> None:
         run=_run_prefix,
     )
     assert analytical.params == analytical.params_active == 0
-    assert analytical.primal.bytes.selection == 8
+    assert analytical.primal.bytes.selection == 4 * (3 + 4 * 8 + 8 + 16)
     assert analytical.adjoint.flops.selection == 0
     assert analytical.primal.flops.elementwise == 2 * 8
     assert analytical.adjoint.flops.elementwise == 2 * 8
@@ -172,7 +172,27 @@ def test_stack_cost_sums_its_parts() -> None:
         num_tokens=4,
         run=_run_prefix,
     )
-    assert analytical == cost(puzzle, num_tokens=4) + cost(registers, num_tokens=4)
+    children = cost(puzzle, rows=4) + cost(registers, rows=4)
+    assert analytical.primal.flops == children.primal.flops
+    assert analytical.adjoint == children.adjoint
+    assert analytical.params == children.params
+    assert (
+        analytical.primal.bytes.selection - children.primal.bytes.selection
+        == 4 * 2 * 5 * 8
+    )
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_sparse_prefix_traffic_counts_lookup_copy_padding_and_scale(
+    itemsize: int,
+) -> None:
+    config = SparsePuzzleEmbedding.Config()
+    config.channels_out = 8
+    config.num_tokens = 2
+    priced = config.cost(itemsize=itemsize)
+    assert priced.primal.bytes.selection == itemsize * (3 + 4 * 8 + 8 + 16)
+    assert priced.primal.bytes.elementwise == itemsize * 2 * 16
+    assert priced.adjoint.bytes.elementwise == itemsize * 2 * 16
 
 
 def _run_prefix(module: nn.Module, identifiers: Tensor) -> Tensor:

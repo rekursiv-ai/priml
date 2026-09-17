@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import functools
 import tempfile
@@ -34,6 +34,7 @@ from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.custom_types import TensorModule
 from priml.model.embedding import Embedding
 from priml.model.linear import EnsembleLinear, Linear
 from priml.model.moe import MoE, SoftmaxRouter
@@ -342,7 +343,7 @@ def _record_case(
         torch.manual_seed(0)
         model, x = build()
         randomize_parameters(model, seed=7, std=0.2)
-        dense = cast(_TensorModule, model)(x)
+        dense = cast(TensorModule, model)(x)
         assert torch.count_nonzero(dense) > 0
         sharded = apply_tensor_parallel(model, mesh)
         # Guard against silent replication: for a case meant to shard,
@@ -354,7 +355,7 @@ def _record_case(
         if sharding_expected and not has_dtensor:
             target.write_text("FAIL:no-dtensor-param (silently replicated?)")
             return
-        out = cast(_TensorModule, sharded)(x)
+        out = cast(TensorModule, sharded)(x)
         full = out.full_tensor() if isinstance(out, DTensor) else out
         if torch.allclose(full, dense, rtol=1e-4, atol=1e-5):
             target.write_text("ok")
@@ -401,12 +402,6 @@ def test_sharded_equals_dense_and_guard_tp2(warm_pools: WarmPoolGetter) -> None:
         f"{case}_rank{rank}": "ok" for case in expected_cases for rank in (0, 1)
     }
     assert results == expected, results
-
-
-class _TensorModule(Protocol):
-    """Callable module boundary for the heterogeneous test registry."""
-
-    def __call__(self, x: Tensor) -> Tensor: ...
 
 
 if __name__ == "__main__":

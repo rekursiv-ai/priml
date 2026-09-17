@@ -10,7 +10,7 @@ from typing import cast
 import sys
 
 from configgle import PartialConfig
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -25,9 +25,12 @@ from priml.baselines.nanochat.attention import (
     _qk_reference,
     fused_qk_norm_rope,
 )
+from priml.model.attention.kernel import SdpaNaive
+from priml.model.cost import cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
+from priml.testing.cost import assert_cost_matches_torch
 
 import priml.baselines.nanochat.attention
 
@@ -367,6 +370,85 @@ class _FakeInterface(ModuleType):
         assert lse.shape == (q.shape[0], q.shape[2], q.shape[1])
         self.windows.append((window_size_left, window_size_right))
         return grad_output.clone(), 2 * grad_output, 3 * grad_output
+
+
+@pytest.mark.parametrize("feature", ["bigram", "trigram", "head_gate", "norm_out"])
+def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
+    config = CausalAttention.Config()
+    config.channels_in = 12
+    config.channels_head = 4
+    config.gate_channels = 4
+    config.gated = False
+    baseline = cost(config.copy_tree().finalize(), seq_len=4, rows=8, itemsize=2)
+    if feature == "head_gate":
+        config.head_gate = Linear.Config()
+    elif feature == "norm_out":
+        config.norm_out = RMSNorm.Config(elementwise_affine=True)
+    else:
+        setattr(config, feature, True)
+    config = config.finalize()
+    counted = cost(config, seq_len=4, rows=8, itemsize=2)
+    assert counted.params == sum(p.numel() for p in config.make().parameters())
+    if feature == "norm_out":
+        extra = cost(config.norm_out, rows=24, itemsize=2).tile(3)
+        assert counted == baseline + extra
+    else:
+        assert counted.params - baseline.params == 12
+        assert counted.primal.flops.matmul - baseline.primal.flops.matmul == 24
+        assert counted.adjoint.flops.matmul - baseline.adjoint.flops.matmul == 48
+        assert counted.primal.bytes.matmul - baseline.primal.bytes.matmul == 2 * (
+            4 + 3 + 12 / 8
+        )
+        assert counted.adjoint.flops.reduction - baseline.adjoint.flops.reduction == 9
+        assert counted.adjoint.bytes.reduction - baseline.adjoint.bytes.reduction == 30
+        assert counted.primal.flops.elementwise - baseline.primal.flops.elementwise == (
+            15 + (12 if feature == "head_gate" else 24)
+        )
+
+
+def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> None:
+    config = CausalAttention.Config()
+    config.channels_in = 12
+    config.channels_head = 4
+    config.gate_channels = 4
+    config.bigram = config.trigram = True
+    config.head_gate = Linear.Config()
+    config.norm_out = RMSNorm.Config(elementwise_affine=True)
+    config = config.finalize()
+    narrow = cost(config, seq_len=4, rows=8, itemsize=2)
+    wide = cost(config, seq_len=4, rows=8, itemsize=4)
+    assert wide.training.bytes == 2 * narrow.training.bytes
+    assert wide.training.flops == narrow.training.flops
+    config.fused_qk_rope = True
+    assert cost(config, seq_len=4, rows=8, itemsize=2) == narrow
+
+
+def test_cost_extension_matmuls_match_executed_forward_and_backward() -> None:
+    config = CausalAttention.Config()
+    config.kernel = SdpaNaive.Config()
+    config.channels_in = 12
+    config.channels_head = 4
+    config.gate_channels = 4
+    config.bigram = config.trigram = True
+    config.head_gate = Linear.Config()
+    config.norm_out = RMSNorm.Config(elementwise_affine=True)
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 4, 12, requires_grad=True),
+        num_tokens=8,
+        bus={"seq_len": 4},
+        run=_run_all_attention_gates,
+    )
+
+
+def _run_all_attention_gates(module: nn.Module, x: Tensor) -> Tensor:
+    return cast(CausalAttention, module)(
+        x,
+        cos_sin=(torch.ones(4, 1, 2), torch.zeros(4, 1, 2)),
+        value_embedding=torch.ones_like(x),
+        bigram_value=torch.ones_like(x),
+        trigram_value=torch.ones_like(x),
+    )
 
 
 if __name__ == "__main__":

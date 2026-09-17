@@ -514,7 +514,7 @@ def test_projection_stage_width_error_names_the_owner() -> None:
     cfg.channels_in = 8
     cfg.channels_out = 16
     cfg.num_heads = 2
-    with pytest.raises(ValueError, match="for AttentionProjections"):
+    with pytest.raises(ValueError, match="channels_in=8 must equal channels_out=16"):
         cfg.make()
 
 
@@ -544,7 +544,7 @@ def test_self_attention_cost_is_projections_plus_scores() -> None:
     assert model_cost.adjoint.flops.matmul == (
         4 * (qkv + out) + kernel.adjoint.flops.matmul
     )
-    assert model_cost.bytes_state == 2 * 2 * 8
+    assert model_cost.bytes_state == 4 * 2 * 2 * 8
 
 
 def test_attention_projections_cost_is_its_projections_and_slots() -> None:
@@ -561,7 +561,7 @@ def test_attention_projections_cost_is_its_projections_and_slots() -> None:
     model_cost = finalized.cost(seq_len=32)
     qkv = matmul_cost(channels_in=16, channels_out=8, bias=False)
     out = matmul_cost(channels_in=16, channels_out=16, bias=False)
-    norm_qk = cost(finalized.norm_qk, num_tokens=4)
+    norm_qk = cost(finalized.norm_qk, rows=4)
     norm_out = cost(finalized.norm_out)
     assert model_cost.primal.flops.matmul == (
         6 * qkv.primal.flops.matmul + out.primal.flops.matmul
@@ -586,7 +586,7 @@ def test_gqa_cost_caches_only_kv_heads() -> None:
         num_heads_kv=2,
     )
     cost = config.copy_tree().finalize().cost(seq_len=8)
-    assert cost.bytes_state == 2 * 2 * 4
+    assert cost.bytes_state == 4 * 2 * 2 * 4
     assert cost.params == sum(p.numel() for p in config.make().parameters())
 
 
@@ -608,11 +608,49 @@ def test_attention_cost_counts_its_norms_and_rotary() -> None:
     )
 
 
-def test_attention_cost_requires_seq_len() -> None:
-    """A container forwarding a bus without ``seq_len`` fails at the leaf."""
-    config = SelfAttention.Config(channels_in=16, num_heads=2, channels_head=8)
-    with pytest.raises(TypeError, match="seq_len"):
-        cost(config.copy_tree().finalize())
+def test_attention_projection_traffic_amortizes_weights_and_scales_itemsize() -> None:
+    config = SelfAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.channels_head = 4
+    config.rope = RoPE.Config(4)
+    config = config.copy_tree().finalize()
+    one = config.cost(seq_len=8, rows=1, itemsize=2)
+    batch = config.cost(seq_len=8, rows=4, itemsize=2)
+    assert one.primal.bytes.matmul - batch.primal.bytes.matmul == 2 * one.params * 3 / 4
+    assert batch.bytes_state == 2 * 2 * 2 * 4
+    wide = config.cost(seq_len=8, rows=4, itemsize=4)
+    assert wide.training.bytes == batch.training.bytes * 2
+    assert wide.bytes_state == batch.bytes_state * 2
+
+
+def test_independent_qk_norms_read_each_owned_scale_once_per_batch() -> None:
+    config = AttentionProjections.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.norm_qk = RMSNorm.Config()
+    config.norm_qk.elementwise_affine = True
+    shared = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    config.share_qk_norm = False
+    separate = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    assert (
+        separate.primal.bytes.elementwise - shared.primal.bytes.elementwise == 2 * 4 / 4
+    )
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_qkv_traffic_reads_input_per_projection_not_per_head(split: bool) -> None:
+    config = AttentionProjections.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.split_qkv_projection = split
+    actual = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    qkv = (3 if split else 1) * 8 + 16 + 8 * 16 / 4
+    output = 8 + 8 + 8 * 8 / 4
+    assert actual.primal.bytes.matmul == 2 * (qkv + output)
+    assert actual.adjoint.bytes.matmul == 4 * (qkv + output)
 
 
 if __name__ == "__main__":

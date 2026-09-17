@@ -48,6 +48,7 @@ from priml.model.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    reduction_cost,
 )
 from priml.model.norm import LayerNorm
 
@@ -99,7 +100,8 @@ class ActorCriticGTrXL(nn.Module):
             self,
             *,
             seq_len: int = 1,
-            num_tokens: int = 1,
+            batch_size: int = 1,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Price one environment step of one worker.
@@ -111,7 +113,7 @@ class ActorCriticGTrXL(nn.Module):
             the ``memory_length + seq_len`` key rows are normalized and
             projected once per window, so a token pays ``keys / seq_len`` of
             them. The relative-position table is one constant shared by the
-            whole batch, so its projection is spread over ``num_tokens`` and,
+            whole batch, so its projection is spread over ``rows`` and,
             having no input gradient, its adjoint is the weight gradient
             alone. Attention is counted over every key with no mask discount.
 
@@ -119,31 +121,41 @@ class ActorCriticGTrXL(nn.Module):
             input per layer. Maintaining that memory -- the reset, the
             append -- is cache bookkeeping, unpriced like a KV-cache update.
 
+            This is the model root: it states the batch geometry itself, so
+            a ``rows`` already on the bus is discarded and every parameter is
+            shared by ``batch_size * seq_len`` tokens.
+
             Args:
               seq_len: Steps scored in one pass over shared keys.
-              num_tokens: Rows sharing each parameter; divides its gradient
-                reduction. A multiple of ``seq_len``.
-              **kwargs: The open message bus, forwarded to every child.
+              batch_size: Workers stepped together.
+              itemsize: Uniform bytes per tensor element.
+              **kwargs: The rest of the open message bus, forwarded to every
+                child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            kwargs.pop("rows", None)
+            rows = seq_len * batch_size
             keys = self.memory_length + seq_len
             layer = _layer_cost(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
                 qkv_dim=self.qkv_dim,
                 keys=keys,
-                key_rows=num_tokens * keys // seq_len,
-                num_tokens=num_tokens,
+                key_rows=rows * keys // seq_len,
+                seq_len=seq_len,
+                rows=rows,
+                itemsize=itemsize,
                 **kwargs,
             )
             encoder = matmul_cost(
                 channels_in=self.observation_size,
                 channels_out=self.embed_dim,
                 bias=True,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
             heads = sum(
                 (
@@ -151,7 +163,8 @@ class ActorCriticGTrXL(nn.Module):
                         embed_dim=self.embed_dim,
                         channels_in=self.channels_in,
                         output_size=output_size,
-                        num_tokens=num_tokens,
+                        rows=rows,
+                        itemsize=itemsize,
                     )
                     for output_size in (self.num_actions, 1)
                 ),
@@ -159,7 +172,7 @@ class ActorCriticGTrXL(nn.Module):
             )
             return replace(
                 encoder + self.num_layers * layer + heads,
-                bytes_state=self.num_layers * self.embed_dim,
+                bytes_state=itemsize * self.num_layers * self.embed_dim,
             )
 
     def __init__(self, config: Config) -> None:
@@ -593,40 +606,45 @@ def _head_cost(
     embed_dim: int,
     channels_in: int,
     output_size: int,
-    num_tokens: int,
+    rows: int,
+    itemsize: int,
 ) -> Cost:
     """Price one head: two biased ReLU layers, then a biased readout."""
     relu = elementwise_cost(
         primal=channels_in,
         adjoint=channels_in,
         channels=channels_in,
+        itemsize=itemsize,
     )
     return (
         matmul_cost(
             channels_in=embed_dim,
             channels_out=channels_in,
             bias=True,
-            num_tokens=num_tokens,
+            rows=rows,
+            itemsize=itemsize,
         )
         + relu
         + matmul_cost(
             channels_in=channels_in,
             channels_out=channels_in,
             bias=True,
-            num_tokens=num_tokens,
+            rows=rows,
+            itemsize=itemsize,
         )
         + relu
         + matmul_cost(
             channels_in=channels_in,
             channels_out=output_size,
             bias=True,
-            num_tokens=num_tokens,
+            rows=rows,
+            itemsize=itemsize,
         )
     )
 
 
 # ``key_rows`` is how many key rows the whole batch normalizes and projects; a token
-# pays ``key_rows / num_tokens`` of them, plus its own query row. The shared
+# pays ``key_rows / rows`` of them, plus its own query row. The shared
 # normalization's parameters see both.
 def _layer_cost(
     *,
@@ -635,28 +653,32 @@ def _layer_cost(
     qkv_dim: int,
     keys: int,
     key_rows: int,
-    num_tokens: int,
+    seq_len: int,
+    rows: int,
+    itemsize: int,
     **kwargs: object,
 ) -> Cost:
     """Price one layer for one token that attends over ``keys`` rows."""
-    per_token_key_rows = key_rows / num_tokens
+    per_token_key_rows = key_rows / rows
     norm = LayerNorm.Config(embed_dim, elementwise_affine=True).finalize()
     norm_attention = _spread(
-        cost(norm, num_tokens=num_tokens + key_rows, **kwargs),
+        cost(norm, rows=rows + key_rows, itemsize=itemsize, **kwargs),
         1 + per_token_key_rows,
     )
     projection = matmul_cost(
         channels_in=embed_dim,
         channels_out=qkv_dim,
         bias=True,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )
     key_value = 2 * _spread(
         matmul_cost(
             channels_in=embed_dim,
             channels_out=qkv_dim,
             bias=True,
-            num_tokens=key_rows,
+            rows=key_rows,
+            itemsize=itemsize,
         ),
         per_token_key_rows,
     )
@@ -665,8 +687,13 @@ def _layer_cost(
     query_biases = elementwise_cost(
         primal=2 * qkv_dim,
         adjoint=qkv_dim,
+        channels=qkv_dim,
+        inputs=2,
+        outputs=2,
+        adjoint_inputs=2,
         params=2 * qkv_dim,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )
     attention = (
         norm_attention
@@ -676,31 +703,56 @@ def _layer_cost(
         + _relative_table_cost(
             embed_dim=embed_dim,
             qkv_dim=qkv_dim,
-            rows=keys / num_tokens,
+            keys=keys,
+            rows=rows,
+            itemsize=itemsize,
         )
-        + _relative_scores_cost(num_heads=num_heads, qkv_dim=qkv_dim, keys=keys)
+        + _relative_scores_cost(
+            num_heads=num_heads,
+            qkv_dim=qkv_dim,
+            keys=keys,
+            seq_len=seq_len,
+            itemsize=itemsize,
+        )
         + matmul_cost(
             channels_in=qkv_dim,
             channels_out=embed_dim,
             bias=True,
-            num_tokens=num_tokens,
+            rows=rows,
+            itemsize=itemsize,
         )
-        + elementwise_cost(primal=embed_dim, adjoint=embed_dim)
+        + elementwise_cost(
+            primal=embed_dim,
+            adjoint=embed_dim,
+            channels=embed_dim,
+            itemsize=itemsize,
+        )
     )
     # GELU: scale, erf, add, halve, multiply; the adjoint adds the density.
     mlp = (
-        cost(norm, num_tokens=num_tokens, **kwargs)
+        cost(norm, rows=rows, itemsize=itemsize, **kwargs)
         + 2
         * matmul_cost(
             channels_in=embed_dim,
             channels_out=embed_dim,
             bias=True,
-            num_tokens=num_tokens,
+            rows=rows,
+            itemsize=itemsize,
         )
-        + elementwise_cost(primal=5 * embed_dim, adjoint=6 * embed_dim)
-        + elementwise_cost(primal=embed_dim, adjoint=embed_dim)
+        + elementwise_cost(
+            primal=5 * embed_dim,
+            adjoint=6 * embed_dim,
+            channels=embed_dim,
+            itemsize=itemsize,
+        )
+        + elementwise_cost(
+            primal=embed_dim,
+            adjoint=embed_dim,
+            channels=embed_dim,
+            itemsize=itemsize,
+        )
     )
-    gate = _gate_cost(embed_dim=embed_dim, num_tokens=num_tokens)
+    gate = _gate_cost(embed_dim=embed_dim, rows=rows, itemsize=itemsize)
     return attention + gate + mlp + gate
 
 
@@ -709,41 +761,69 @@ def _layer_cost(
 # scatter-add back. The combined score is added, scaled, masked, then softmaxed: subtract
 # the max, exponentiate, divide, with the max and the sum as the reductions and the
 # adjoint's ``sum(g * p)`` as one more.
-def _relative_scores_cost(*, num_heads: int, qkv_dim: int, keys: int) -> Cost:
-    """Price both score products, the gather, the softmax, and the value product."""
+def _relative_scores_cost(
+    *,
+    num_heads: int,
+    qkv_dim: int,
+    keys: int,
+    seq_len: int,
+    itemsize: int,
+) -> Cost:
+    """Price unfused relative attention, sharing K/V within each query sequence."""
     channels_head = qkv_dim // num_heads
-    scores = matmul_cost(channels_in=channels_head, channels_out=keys, weight=False)
-    values = matmul_cost(channels_in=keys, channels_out=channels_head, weight=False)
-    # The score rows are scratch the layer never writes out; only the head row is.
-    scores = replace(
-        scores,
-        primal=Compute(flops=scores.primal.flops),
-        adjoint=Compute(flops=scores.adjoint.flops),
+    scores = matmul_cost(
+        channels_in=channels_head,
+        channels_out=keys,
+        weight=False,
+        rows=seq_len,
+        itemsize=itemsize,
+    )
+    values = matmul_cost(
+        channels_in=keys,
+        channels_out=channels_head,
+        weight=False,
+        rows=seq_len,
+        itemsize=itemsize,
     )
     gather = Cost(
-        primal=Compute(bytes=Bytes(selection=keys)),
-        adjoint=Compute(flops=Flops(selection=keys), bytes=Bytes(selection=keys)),
+        primal=Compute(bytes=Bytes(selection=itemsize * 2 * keys)),
+        adjoint=Compute(
+            flops=Flops(selection=keys),
+            bytes=Bytes(selection=itemsize * 3 * keys),
+        ),
     )
-    softmax = elementwise_cost(primal=6 * keys, adjoint=6 * keys) + Cost(
-        primal=Compute(flops=Flops(reduction=2 * (keys - 1))),
-        adjoint=Compute(flops=Flops(reduction=keys - 1)),
+    # Add, scale, mask, subtract, exp, divide; backward includes the two score paths.
+    softmax = elementwise_cost(
+        primal=6 * keys,
+        adjoint=6 * keys,
+        channels=keys,
+        inputs=9,
+        outputs=6,
+        adjoint_inputs=10,
+        adjoint_outputs=6,
+        itemsize=itemsize,
+    ) + Cost(
+        primal=2 * reduction_cost(input_elements=keys, itemsize=itemsize),
+        adjoint=reduction_cost(input_elements=keys, itemsize=itemsize),
     )
     return num_heads * (2 * scores + gather + softmax + values)
 
 
-def _relative_table_cost(*, embed_dim: int, qkv_dim: int, rows: float) -> Cost:
-    """Price projecting ``rows`` constant encodings: forward and weight gradient only."""
-    products = 2 * embed_dim * qkv_dim * rows
+def _relative_table_cost(
+    *,
+    embed_dim: int,
+    qkv_dim: int,
+    keys: int,
+    rows: int,
+    itemsize: int,
+) -> Cost:
+    """Price one shared constant table's projection and weight gradient."""
+    products = 2 * embed_dim * qkv_dim * (keys / rows)
     params = embed_dim * qkv_dim
+    moved = itemsize * (keys * (embed_dim + qkv_dim) + params) / rows
     return Cost(
-        primal=Compute(
-            flops=Flops(matmul=products),
-            bytes=Bytes(matmul=params, elementwise=qkv_dim * rows),
-        ),
-        adjoint=Compute(
-            flops=Flops(matmul=products),
-            bytes=Bytes(matmul=params, elementwise=qkv_dim * rows),
-        ),
+        primal=Compute(flops=Flops(matmul=products), bytes=Bytes(matmul=moved)),
+        adjoint=Compute(flops=Flops(matmul=products), bytes=Bytes(matmul=moved)),
         params=params,
         params_active=params,
     )
@@ -754,18 +834,24 @@ def _relative_table_cost(*, embed_dim: int, qkv_dim: int, rows: float) -> Cost:
 # subtraction, two products, and an add. The adjoint reuses the saved gates: five for the
 # interpolation, three for each of the three nonlinearities, two through the reset
 # product, and three accumulating the residual's four gradient paths.
-def _gate_cost(*, embed_dim: int, num_tokens: int) -> Cost:
-    """Price one gated residual: six unbiased projections, the bias, and the gating."""
+def _gate_cost(*, embed_dim: int, rows: int, itemsize: int) -> Cost:
+    """Price one gated residual's projections and scalar-region tensor boundary."""
     return 6 * matmul_cost(
         channels_in=embed_dim,
         channels_out=embed_dim,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     ) + elementwise_cost(
         primal=12 * embed_dim,
         adjoint=19 * embed_dim,
         channels=embed_dim,
+        inputs=7,
+        outputs=2,
+        adjoint_inputs=7,
+        adjoint_outputs=8,
         params=embed_dim,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )
 
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Final, Protocol, override
+from typing import Final, override
 
 from configgle import Fig, Makeable
 from configgle.testing import assert_pprint_golden
-from torch import Tensor
+from torch import Tensor, nn
 
 import pytest
 import torch
@@ -19,7 +19,7 @@ from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.cost import Compute, Cost, Flops
+from priml.model.cost import Bytes, Compute, Cost, Flops
 from priml.model.custom_types import (
     ChannelsInOut,
     ChannelsOut,
@@ -108,7 +108,8 @@ def test_identity_channels_infer():
 def test_identity_invalid_widths_print_before_make_rejects() -> None:
     config = Identity.Config(channels_in=128, channels_out=64)
 
-    rendered = config.pformat(hide_default_values=False)
+    with pytest.warns(UserWarning, match="must equal"):
+        rendered = config.pformat(hide_default_values=False)
 
     assert "channels_in=128" in rendered
     assert "channels_out=64" in rendered
@@ -149,14 +150,16 @@ _SKIP_CONFIG_TYPES = [
     ids=[config_type.__qualname__ for config_type in _SKIP_CONFIG_TYPES],
 )
 def test_skip_preserving_configs_infer_either_channel_boundary(
-    config_type: type[_ChannelsConfig],
+    config_type: type[Fig[nn.Module]],
 ) -> None:
     from_output = config_type()
+    assert isinstance(from_output, ChannelsInOut)
     from_output.channels_out = 128
     from_output.finalize()
     assert from_output.channels_in == 128
 
     from_input = config_type()
+    assert isinstance(from_input, ChannelsInOut)
     from_input.channels_in = 128
     from_input.finalize()
     assert from_input.channels_out == 128
@@ -168,9 +171,10 @@ def test_skip_preserving_configs_infer_either_channel_boundary(
     ids=[config_type.__qualname__ for config_type in _SKIP_CONFIG_TYPES],
 )
 def test_skip_preserving_modules_reject_width_changes(
-    config_type: type[_ChannelsConfig],
+    config_type: type[Fig[nn.Module]],
 ) -> None:
     config = config_type()
+    assert isinstance(config, ChannelsInOut)
     config.channels_in = 128
     config.channels_out = 64
 
@@ -329,9 +333,9 @@ def test_skip_cost_is_the_inner_cost_plus_residual_additions() -> None:
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
         num_tokens=2,
     )
-    assert skip == inner.copy_tree().finalize().cost(num_tokens=2) + Cost(
-        primal=Compute(flops=Flops(elementwise=4)),
-        adjoint=Compute(flops=Flops(elementwise=4)),
+    assert skip == inner.copy_tree().finalize().cost(rows=2) + Cost(
+        primal=Compute(flops=Flops(elementwise=4), bytes=Bytes(elementwise=4 * 3 * 4)),
+        adjoint=Compute(flops=Flops(elementwise=4), bytes=Bytes(elementwise=4 * 3 * 4)),
     )
 
 
@@ -346,10 +350,6 @@ def test_tied_linear_cost_pays_flops_and_owns_nothing() -> None:
     assert tied.training.flops.matmul == owned.training.flops.matmul
     assert tied.params == 0
     assert tied.training.bytes.matmul == owned.training.bytes.matmul
-
-
-class _ChannelsConfig(Makeable[object], ChannelsInOut, Protocol):
-    """A width-carrying config; ``make()`` may build any module (MMDiT is a pair)."""
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from torch import nn
 import torch
 
 from priml.loss.custom_types import LossOutput
-from priml.model.cost import Compute, Cost, Flops, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
 
 
 if TYPE_CHECKING:
@@ -33,23 +33,33 @@ class AdversarialLoss:
         content_weight: float = 100.0
         """Weight for L1 content reconstruction loss."""
 
-        def cost(self, *, num_tokens: int, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one media element; per-sample scalar work is spread ``1 / n``.
 
-            A token is one element of ``fake_media``; ``num_tokens`` is the
+            A token is one element of ``fake_media``; ``rows`` is the
             elements one sample holds. Per element, the L1 term is a subtract
             and a magnitude, then the mean over the sample is one reduction of
             ``(n - 1) / n``; its adjoint scales the saved sign by the upstream
             gradient and by ``1 / n``, three ops. Per SAMPLE, and so divided by
-            ``num_tokens``: BCE with logits on the single ``[B, 1]`` logit
+            ``rows``: BCE with logits on the single ``[B, 1]`` logit
             (eight forward, five back, as :class:`SimpleLoss` prices it; the
             mean over a width of one reduces nothing) and the two weights
             (two multiplies and an add forward, two multiplies back).
             ``model_output`` is unread, and the discriminator that produced
             ``fake_logits`` is priced by its own config, not here.
 
+            Traffic includes the generated label, both mean scales, and all
+            logical intermediate reads/writes, even for the width-one mean.
+
             Args:
-              num_tokens: Elements per sample; the L1 mean's width.
+              rows: Elements per sample; the L1 mean's width.
+              itemsize: Bytes per logical tensor element.
               **kwargs: The rest of the bus, unread.
 
             Returns:
@@ -57,11 +67,24 @@ class AdversarialLoss:
 
             """
             del kwargs
-            return elementwise_cost(
-                primal=2 + (8 + 3) / num_tokens,
-                adjoint=3 + (5 + 2) / num_tokens,
-            ) + Cost(
-                primal=Compute(flops=Flops(reduction=(num_tokens - 1) / num_tokens)),
+            return Cost(
+                primal=Compute(
+                    flops=Flops(elementwise=2 + (8 + 3) / rows),
+                    bytes=Bytes(elementwise=(5 + 33 / rows) * itemsize),
+                )
+                + reduction_cost(
+                    input_elements=rows + 1,
+                    output_groups=2,
+                    rows=rows,
+                    itemsize=itemsize,
+                ),
+                adjoint=Compute(
+                    flops=Flops(elementwise=3 + (5 + 2) / rows),
+                    bytes=Bytes(
+                        elementwise=(7 + 16 / rows) * itemsize,
+                        reduction=(rows + 3) * itemsize / rows,
+                    ),
+                ),
             )
 
     def __init__(self, config: Config) -> None:

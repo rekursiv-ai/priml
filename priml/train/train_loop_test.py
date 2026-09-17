@@ -1470,10 +1470,14 @@ def test_phase_timer_instruments_data_load_and_model_init():
     assert s["model_init"] > 0
 
 
-def _make_step_logging_loop_config() -> TrainLoop.Config:
+def _make_step_logging_loop_config(
+    *,
+    step_config: TrainStep.Config | None = None,
+) -> TrainLoop.Config:
     """Minimal CPU loop that logs a per-step loss line on every step."""
     config = TrainLoop.Config()
-    step_config = TrainStep.Config()
+    if step_config is None:
+        step_config = TrainStep.Config()
     step_config.model = _LinearModel.Config(in_features=2, out_features=2)
     step_config.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
     step_config.loss = PartialConfig(_cross_entropy)
@@ -2493,6 +2497,115 @@ class _PricedLinearModel(nn.Module):
     def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
         """Forward pass."""
         return self.linear(media)
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.parametrize("accumulate_grad_batches", [1, 2])
+def test_device_timing_metric_waits_for_every_microbatch(
+    accumulate_grad_batches: int,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("Requires CUDA.")
+    step = TrainStep.Config()
+    config = _make_step_logging_loop_config(step_config=step)
+    step.model = _PricedLinearModel.Config(in_features=2, out_features=2)
+    step.parallelism = NoParallel.Config(device="cuda")
+    step.accumulate_grad_batches = accumulate_grad_batches
+    config.runtime = SingleProcess.Config(device="cuda")
+    config.tracker = _RecordingTracker.Config()
+    config.early_train_log_steps = 0
+    metric = Utilization.Config()
+    metric.tokens_key = "media"
+    metric.peak_flops_per_sec = 1e6
+    config.metrics_train = {"": metric}
+    loop = config.make()
+    batch: dict[str, object] = {
+        "media": torch.randn(4, 2, device="cuda"),
+        "label": torch.zeros(4, dtype=torch.long, device="cuda"),
+    }
+    for _ in range(accumulate_grad_batches):
+        loop._do_train_step(batch)
+    measured = cast(Utilization, loop.metrics_train[""])
+    measured.reset()
+    assert isinstance(loop.step, TrainStep)
+    handle = loop.step.model.register_forward_pre_hook(_enqueue_cuda_delay)
+    try:
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        loop._do_train_step(batch)
+        end.record()
+        end.synchronize()
+        gpu_seconds = start.elapsed_time(end) / 1000
+        seconds = measured.seconds
+        if accumulate_grad_batches == 1:
+            tracker = cast(_RecordingTracker, loop.tracker)
+            payload = next(
+                values
+                for values, _ in reversed(tracker.metrics_by_step)
+                if "train/step_time" in values
+            )
+            seconds = cast(float, payload["train/step_time"])
+        assert seconds >= 0.8 * gpu_seconds
+    finally:
+        handle.remove()
+        loop._destroy_runtime_once()
+
+
+def _enqueue_cuda_delay(module: nn.Module, inputs: tuple[object, ...]) -> None:
+    del module, inputs
+    torch.cuda._sleep(100_000_000)
+
+
+def test_cpu_timing_metric_does_not_synchronize_an_accelerator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = TrainStep.Config()
+    config = _make_step_logging_loop_config(step_config=step)
+    step.model = _PricedLinearModel.Config(in_features=2, out_features=2)
+    config.runtime = SingleProcess.Config(device="cpu")
+    metric = Utilization.Config()
+    metric.tokens_key = "media"
+    config.metrics_train = {"": metric}
+    loop = config.make()
+    calls: list[object] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", calls.append)
+    try:
+        loop._do_train_step(
+            {"media": torch.randn(4, 2), "label": torch.zeros(4, dtype=torch.long)},
+        )
+        assert calls == []
+    finally:
+        loop._destroy_runtime_once()
+
+
+@pytest.mark.gpu_torch_cuda
+def test_loop_without_device_timing_metric_does_not_synchronize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("Requires CUDA.")
+    step = TrainStep.Config()
+    config = _make_step_logging_loop_config(step_config=step)
+    step.parallelism = NoParallel.Config(device="cuda")
+    step.accumulate_grad_batches = 2
+    config.runtime = SingleProcess.Config(device="cuda")
+    config.metrics_train = {}
+    config.early_train_log_steps = 0
+    loop = config.make()
+    calls: list[object] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", calls.append)
+    try:
+        loop._do_train_step(
+            {
+                "media": torch.randn(4, 2, device="cuda"),
+                "label": torch.zeros(4, dtype=torch.long, device="cuda"),
+            },
+        )
+        assert calls == []
+    finally:
+        loop._destroy_runtime_once()
 
 
 def test_a_train_metric_publishes_on_the_train_payload() -> None:

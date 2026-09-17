@@ -60,8 +60,14 @@ class _OvercountingLinear(Linear):
 
     class Config(Makes["_OvercountingLinear"], Linear.Config, kw_only=False):
         @override
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
-            true = super().cost(num_tokens=num_tokens, **kwargs)
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            true = super().cost(rows=rows, itemsize=itemsize, **kwargs)
             return replace(true, params=true.params + 1)
 
 

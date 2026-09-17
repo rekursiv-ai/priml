@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import override
 
 from configgle import Fig
@@ -12,7 +11,15 @@ from torch.nn import functional as f
 import torch
 
 from priml.model.attention.window import window_mask
-from priml.model.cost import Compute, Cost, Flops, elementwise_cost, matmul_cost
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    elementwise_cost,
+    matmul_cost,
+    reduction_cost,
+)
 
 
 def attention_kernel_cost(
@@ -21,8 +28,11 @@ def attention_kernel_cost(
     seq_len: int,
     num_heads: int,
     channels_head: int,
+    channels_v_head: int = -1,
     window: int = -1,
     dropout_p: float = 0.0,
+    rows: int = 1,
+    itemsize: int = 4,
     **kwargs: object,
 ) -> Cost:
     """Price ``softmax(QK^T)V`` for one query row across every head.
@@ -38,37 +48,60 @@ def attention_kernel_cost(
       config: The kernel config; carries nothing this needs.
       seq_len: Keys before any window.
       num_heads: Query heads.
-      channels_head: Width of each head.
+      channels_head: Width of each query/key head.
+      channels_v_head: Value width; -1 uses the query/key width.
+      rows: Batch rows; activation reuse is limited to one full window.
+      itemsize: Uniform bytes per tensor element.
       window: Keys each query reaches, or ``-1`` for the whole sequence.
       dropout_p: Attention dropout rate; nonzero adds a mask and a rescale.
       **kwargs: The rest of the bus, ignored here.
 
     Returns:
-      cost: Two products of ``[keys] x [channels_head]`` per head, twice that
-        in the adjoint, and one output row written.
+      cost: Unfused logical tensor I/O and FLOPs, not measured HBM traffic.
+        Fused and naive kernels share this algorithmic accounting convention.
 
     """
-    del config, kwargs
+    del config, rows, kwargs
     keys = seq_len if window < 0 else min(window, seq_len)
-    # ``QK^T``: the head width summed into one score per key. ``PV``: the keys
-    # summed back into one head row. Both operands are activations.
-    scores = matmul_cost(channels_in=channels_head, channels_out=keys, weight=False)
-    values = matmul_cost(channels_in=keys, channels_out=channels_head, weight=False)
-    # Stable softmax: scale, subtract the max, exp, divide by the sum; the max
-    # and the sum are the reductions. The adjoint's ``sum(g * p)`` is one more.
-    softmax = elementwise_cost(primal=4 * keys, adjoint=4 * keys) + Cost(
-        primal=Compute(flops=Flops(reduction=2 * (keys - 1))),
-        adjoint=Compute(flops=Flops(reduction=keys - 1)),
+    value_width = channels_head if channels_v_head < 0 else channels_v_head
+    # Full-window blocks share K/V across their query rows, never across batches.
+    scores = matmul_cost(
+        channels_in=channels_head,
+        channels_out=keys,
+        weight=False,
+        rows=keys,
+        itemsize=itemsize,
+    )
+    values = matmul_cost(
+        channels_in=keys,
+        channels_out=value_width,
+        weight=False,
+        rows=keys,
+        itemsize=itemsize,
+    )
+    # Logical unfused I/O, including scores, even when execution uses fused SDPA.
+    # Scale/subtract/exp/divide read two row scalars; VJP reads one row sum.
+    softmax = Cost(
+        primal=Compute(
+            flops=Flops(elementwise=4 * keys),
+            bytes=Bytes(elementwise=itemsize * (8 * keys + 2)),
+        )
+        + 2 * reduction_cost(input_elements=keys, itemsize=itemsize),
+        adjoint=Compute(
+            flops=Flops(elementwise=4 * keys),
+            bytes=Bytes(elementwise=itemsize * (10 * keys + 1)),
+        )
+        + reduction_cost(input_elements=keys, itemsize=itemsize),
     )
     dropout = elementwise_cost(
         primal=2 * keys if dropout_p > 0 else 0,
         adjoint=2 * keys if dropout_p > 0 else 0,
-    )
-    # The score row is scratch the kernel never writes out; only the head row is.
-    scores = replace(
-        scores,
-        primal=Compute(flops=scores.primal.flops),
-        adjoint=Compute(flops=scores.adjoint.flops),
+        channels=keys if dropout_p > 0 else 0,
+        inputs=3,
+        outputs=2,
+        adjoint_inputs=2,
+        rows=keys,
+        itemsize=itemsize,
     )
     return num_heads * (scores + values + softmax + dropout)
 

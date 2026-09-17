@@ -10,7 +10,7 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
-from priml.model.cost import Compute, Cost, Flops, cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.model.softcap import SoftCap
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -93,11 +93,17 @@ def test_softcap_cost_separates_projection_and_squash() -> None:
         build_input=lambda: torch.randn(3, 4, requires_grad=True),
         num_tokens=3,
     )
-    inner = cost(config.copy_tree().finalize().inner, num_tokens=3)
+    inner = cost(config.copy_tree().finalize().inner, rows=3)
     assert inner.params == 4 * 6
     assert model_cost == inner + Cost(
-        primal=Compute(flops=Flops(elementwise=3 * 6)),
-        adjoint=Compute(flops=Flops(elementwise=5 * 6)),
+        primal=Compute(
+            flops=Flops(elementwise=3 * 6),
+            bytes=Bytes(elementwise=4 * 6 * 6),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=5 * 6),
+            bytes=Bytes(elementwise=4 * 7 * 6),
+        ),
     )
 
 

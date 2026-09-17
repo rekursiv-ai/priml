@@ -212,6 +212,7 @@ def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
             torch.randn(3, 16, requires_grad=True),
         ),
         num_tokens=3,
+        bus={"batch_size": 3},
         run=_stepped,
     )
     gates = 2 * 3 * 16 * 16
@@ -226,7 +227,24 @@ def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
         biases + 16 + 16 + 11 * 16 + 2 * 2 * 16
     )
     assert analytical.adjoint.flops.elementwise == 16 + 16 + 17 * 16 + 2 * 2 * 16
-    assert analytical.bytes_state == 16
+    assert analytical.bytes_state == 4 * 16
+
+
+def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
+    config = ActorCriticRNN.Config()
+    config.observation_size = 3
+    config.channels_in = 2
+    config.num_actions = 4
+    narrow = config.cost(batch_size=4, itemsize=2)
+    wide = config.cost(batch_size=4, itemsize=4)
+    assert narrow.bytes_state == 4
+    assert wide.bytes_state == 8
+    assert wide.training.bytes == 2 * narrow.training.bytes
+    assert wide.training.flops == narrow.training.flops
+    biases = 2 + 2 * 6 + 4 * 2 + 4 + 1
+    bias_io = 2 * biases + biases / 4
+    activation_io = 2 * 2 + 3 * 2 + 8 * 2 + 4 * 2 * 2
+    assert narrow.primal.bytes.elementwise == 2 * (bias_io + activation_io)
 
 
 if __name__ == "__main__":

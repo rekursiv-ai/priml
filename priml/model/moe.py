@@ -28,6 +28,7 @@ from priml.model.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
+    reduction_cost,
 )
 from priml.model.custom_types import (
     ChannelsIn,
@@ -127,12 +128,23 @@ class Router(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price the gate matmul, the top-k pick, and the picked weights' gather.
 
-            The correction bias is a buffer, not a weight.
+            The correction bias is a buffer, not a weight. Top-k traffic is
+            its minimum operand I/O (input plus selected values and indices),
+            not an implementation-dependent sorting-pass or scratch estimate.
+            Indices use the uniform analytical itemsize too.
 
             Args:
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element, including indices.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -144,13 +156,20 @@ class Router(nn.Module):
                 channels_in=self.channels_in,
                 channels_out=self.num_experts,
                 bias=False,
+                rows=rows,
+                itemsize=itemsize,
             ) + Cost(
                 primal=Compute(
-                    bytes=Bytes(sort=self.num_experts, selection=self.top_k),
+                    bytes=Bytes(
+                        sort=itemsize * (self.num_experts + 2 * self.top_k),
+                        selection=itemsize * 3 * self.top_k,
+                    ),
                 ),
                 adjoint=Compute(
                     flops=Flops(selection=self.top_k),
-                    bytes=Bytes(selection=self.top_k),
+                    bytes=Bytes(
+                        selection=itemsize * (4 * self.top_k + self.num_experts),
+                    ),
                 ),
             )
             if self.norm_topk_prob:
@@ -158,7 +177,22 @@ class Router(nn.Module):
                 total += elementwise_cost(
                     primal=self.top_k,
                     adjoint=4 * self.top_k,
-                ) + Cost(primal=Compute(flops=Flops(reduction=self.top_k - 1)))
+                    channels=self.top_k,
+                    inputs=1,
+                    outputs=1,
+                    adjoint_inputs=5,
+                    adjoint_outputs=4,
+                    itemsize=itemsize,
+                ) + Cost(
+                    primal=reduction_cost(input_elements=self.top_k, itemsize=itemsize)
+                    + Compute(bytes=Bytes(elementwise=itemsize)),
+                    adjoint=Compute(
+                        bytes=Bytes(
+                            elementwise=3 * itemsize,
+                            reduction=itemsize * (self.top_k + 1),
+                        ),
+                    ),
+                )
             return total
 
     def __init__(
@@ -220,7 +254,13 @@ class SoftmaxRouter(Router):
         """Multiplicative uniform noise scale for training regularization."""
 
         @override
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count stable softmax and optional training jitter.
 
             Softmax over ``E`` experts: max and sum are two reductions of
@@ -228,6 +268,8 @@ class SoftmaxRouter(Router):
             adjoint's dot product is the same split.
 
             Args:
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element, including indices.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -237,14 +279,22 @@ class SoftmaxRouter(Router):
             jitter = self.channels_in if self.jitter_noise > 0 else 0
             width = self.num_experts
             return (
-                super().cost(**kwargs)
+                super().cost(rows=rows, itemsize=itemsize, **kwargs)
                 + elementwise_cost(
                     primal=3 * width + jitter,
                     adjoint=3 * width + jitter,
+                    channels=width,
+                    inputs=3,
+                    outputs=3,
+                    adjoint_inputs=5,
+                    adjoint_outputs=3,
+                    itemsize=itemsize,
                 )
                 + Cost(
-                    primal=Compute(flops=Flops(reduction=2 * (width - 1))),
-                    adjoint=Compute(flops=Flops(reduction=width - 1)),
+                    primal=2 * reduction_cost(input_elements=width, itemsize=itemsize)
+                    + Compute(bytes=Bytes(elementwise=itemsize * (2 + 4 * jitter))),
+                    adjoint=reduction_cost(input_elements=width, itemsize=itemsize)
+                    + Compute(bytes=Bytes(elementwise=itemsize * (1 + 3 * jitter))),
                 )
             )
 
@@ -316,13 +366,21 @@ class SigmoidRouter(Router):
             return super().finalize()
 
         @override
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count sigmoid, selection-only bias/group sums, and weight scaling.
 
             Grouped routing sorts each group for its top-2 and the groups for
             ``topk_group``; the group sums are reductions.
 
             Args:
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element, including indices.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -337,14 +395,38 @@ class SigmoidRouter(Router):
                 groups = Cost(
                     primal=Compute(
                         flops=Flops(reduction=self.n_group * (min(2, group_size) - 1)),
-                        bytes=Bytes(sort=width + self.n_group),
+                        bytes=Bytes(
+                            sort=itemsize
+                            * (
+                                width
+                                + 2 * self.n_group * min(2, group_size)
+                                + self.n_group
+                                + 2 * self.topk_group
+                            ),
+                            reduction=itemsize
+                            * self.n_group
+                            * (min(2, group_size) + 1),
+                            selection=itemsize
+                            * (self.n_group + 2 * self.topk_group + 5 * width),
+                        ),
                     ),
                 )
             return (
-                super().cost(**kwargs)
+                super().cost(rows=rows, itemsize=itemsize, **kwargs)
                 + elementwise_cost(
                     primal=4 * width + bias + self.top_k,
                     adjoint=3 * width + self.top_k,
+                    channels=width,
+                    itemsize=itemsize,
+                )
+                + Cost(
+                    primal=Compute(
+                        bytes=Bytes(
+                            elementwise=itemsize
+                            * (2 * bias + bias / rows + 2 * self.top_k),
+                        ),
+                    ),
+                    adjoint=Compute(bytes=Bytes(elementwise=itemsize * 2 * self.top_k)),
                 )
                 + groups
             )
@@ -490,7 +572,13 @@ class MoE(nn.Module):
                     cfg.shard = "colwise"
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price the router, ``top_k`` routed experts, and every shared expert.
 
             ``params`` counts every routed expert; every other field counts what
@@ -499,11 +587,15 @@ class MoE(nn.Module):
             ``top_k`` assignments, gathers the token's row into each expert,
             and scatter-adds the gated outputs back; the adjoint's gate gradient
             is a dot product per routed expert. Expert batch reductions use the
-            supplied geometry as an estimate: actual per-expert token occupancy
-            depends on the routing decisions. The auxiliary loss is excluded,
-            like the external training loss.
+            balanced occupancy ``max(1, rows * top_k / num_experts)``.
+            This fractional average is an estimate; actual occupancy depends on
+            routing. Indices, gate weights, and payloads use uniform itemsize.
+            Dispatch counts assignment permutation and payload gather/scatter,
+            excluding sorting workspace and the external auxiliary loss.
 
             Args:
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element, including indices.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -514,12 +606,24 @@ class MoE(nn.Module):
             # Every expert exists, but one token runs ``top_k`` of them, so only
             # ``params`` follows the module count; ``tile`` would scale
             # ``params_active`` and the weight bytes by it too.
-            expert = cost(self.expert, **kwargs)
+            expert = cost(
+                self.expert,
+                rows=max(1, rows * top_k / self.router.num_experts),
+                itemsize=itemsize,
+                **kwargs,
+            )
             routed = replace(
                 top_k * expert,
                 params=self.router.num_experts * expert.params,
             )
-            shared = self.num_shared_experts * cost(self.shared_expert, **kwargs)
+            shared = Cost()
+            if self.num_shared_experts:
+                shared = self.num_shared_experts * cost(
+                    self.shared_expert,
+                    rows=rows,
+                    itemsize=itemsize,
+                    **kwargs,
+                )
             width = self.channels_out
             width_in = self.channels_in
             dispatch = Cost(
@@ -528,7 +632,16 @@ class MoE(nn.Module):
                         elementwise=top_k * width,
                         selection=(top_k + self.num_shared_experts) * width,
                     ),
-                    bytes=Bytes(sort=top_k, selection=top_k * (width_in + width)),
+                    bytes=Bytes(
+                        sort=itemsize * 2 * top_k,
+                        elementwise=itemsize * top_k * (2 * width + 1),
+                        selection=itemsize
+                        * (
+                            top_k * (2 * width_in + 3 * width + 11)
+                            + width
+                            + 3 * self.num_shared_experts * width
+                        ),
+                    ),
                 ),
                 adjoint=Compute(
                     flops=Flops(
@@ -536,10 +649,24 @@ class MoE(nn.Module):
                         reduction=top_k * (width - 1),
                         selection=(top_k + self.num_shared_experts) * width_in,
                     ),
-                    bytes=Bytes(selection=top_k * (width_in + width)),
+                    bytes=Bytes(
+                        elementwise=itemsize * top_k * (5 * width + 1),
+                        reduction=itemsize * top_k * (width + 1),
+                        selection=itemsize
+                        * (
+                            top_k * (3 * width_in + 2 * width + 11)
+                            + width_in
+                            + 3 * self.num_shared_experts * width_in
+                        ),
+                    ),
                 ),
             )
-            return cost(self.router, **kwargs) + routed + shared + dispatch
+            return (
+                cost(self.router, rows=rows, itemsize=itemsize, **kwargs)
+                + routed
+                + shared
+                + dispatch
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -585,7 +712,7 @@ class MoE(nn.Module):
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
         shape = x.shape
         x_flat = x.reshape(-1, shape[-1])
-        num_tokens = x_flat.shape[0]
+        rows = x_flat.shape[0]
 
         weights, indices, logits = self.router(x_flat, **kwargs)
         if (
@@ -599,7 +726,7 @@ class MoE(nn.Module):
             x_flat,
             weights,
             indices,
-            num_tokens,
+            rows,
             **kwargs,
         )
         for shared in self.shared_experts:
@@ -607,7 +734,7 @@ class MoE(nn.Module):
             y = y + shared_out
         return y.reshape(*shape[:-1], self.channels_out)
 
-    # Produces one expert forward per *active* expert (at most ``top_k * num_tokens``,
+    # Produces one expert forward per *active* expert (at most ``top_k * rows``,
     # typically ≪ ``num_experts`` for large MoEs). Numerically equivalent to the mask-
     # per-expert form.
     def _dispatch_routed(
@@ -615,7 +742,7 @@ class MoE(nn.Module):
         x_flat: Tensor,
         weights: Tensor,
         indices: Tensor,
-        num_tokens: int,
+        rows: int,
         **kwargs: object,
     ) -> Tensor:
         """Sort (token, expert) pairs by expert; dispatch contiguously."""
@@ -623,7 +750,7 @@ class MoE(nn.Module):
         flat_idx = indices.reshape(-1)
         flat_w = weights.reshape(-1)
         token_ix = (
-            torch.arange(num_tokens, device=x_flat.device).unsqueeze(-1).expand(-1, k)
+            torch.arange(rows, device=x_flat.device).unsqueeze(-1).expand(-1, k)
         ).reshape(-1)
 
         order = flat_idx.argsort()

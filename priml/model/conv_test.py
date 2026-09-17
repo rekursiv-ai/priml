@@ -137,7 +137,7 @@ def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
     assert analytical.primal.flops.matmul == 2 * weights
     assert analytical.adjoint.flops.matmul == 4 * weights
     assert analytical.params == weights + 3
-    assert analytical.primal.bytes.elementwise == 3
+    assert analytical.primal.bytes.elementwise == 4 * (2 * 3 + 3 / 24)
 
 
 def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
@@ -157,6 +157,7 @@ def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
     weights = 6 * (4 // 2) * 3
     assert analytical.primal.flops.matmul == 2 * weights
     assert analytical.params == weights
+    assert analytical.primal.bytes.matmul == 4 * (4 * 3 + 6 + weights / 7)
 
 
 def test_conv3d_cost_cubes_a_scalar_kernel() -> None:

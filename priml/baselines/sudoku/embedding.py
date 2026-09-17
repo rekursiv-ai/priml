@@ -20,7 +20,7 @@ precisely so the order is visible in ``pprint`` rather than buried in a method.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field
+from dataclasses import KW_ONLY, field, replace
 from typing import Protocol, Self, override, runtime_checkable
 
 import math
@@ -37,6 +37,7 @@ from priml.model.cost import (
     Flops,
     cost,
     elementwise_cost,
+    reduction_cost,
 )
 from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
@@ -110,39 +111,85 @@ class FactoredPositions(nn.Module):
         multiplies by ``sqrt(C)`` at runtime, so this must match whatever the
         token embedding uses or the channels enter at different magnitudes."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price three table gathers, two adds, and a scale per cell.
 
             Each table is a gather and a scatter-add back, as
             :class:`~priml.model.embedding.Embedding` prices one; the adds
-            pass gradient through, so only the scale pulls one back. Counted
-            per cell as though evaluated per batch row: the module evaluates
-            its ``[grid_len, C]`` sum once per forward and broadcasts it, so
-            for a batch this is an upper bound.
+            pass gradient through, so only the scale pulls one back. The
+            ``[grid_len, C]`` sum runs once and broadcasts over puzzles; its
+            adjoint first reduces the broadcast gradient across puzzles.
+
+            A cell is the token and the grid is fixed by ``grid_shape``, so
+            ``seq_len`` and ``rows`` on the bus are ignored: the batch is
+            ``batch_size`` whole grids.
 
             Args:
-              **kwargs: The open message bus; nothing here reads it.
+              batch_size: Puzzles in the batch.
+              itemsize: Uniform bytes per operand element.
+              **kwargs: The rest of the open message bus, unread.
 
             Returns:
               cost: Per-cell cost of this module.
 
             """
             del kwargs
-            rows, cols = self.grid_shape
+            puzzles = batch_size
+            grid_rows, grid_cols = self.grid_shape
             box_rows, box_cols = self.box_shape
             width = self.channels_out
-            tables = (rows, cols, (rows // box_rows) * (cols // box_cols))
+            tables = (
+                grid_rows,
+                grid_cols,
+                (grid_rows // box_rows) * (grid_cols // box_cols),
+            )
             gathers = sum(
                 (
-                    cost(Embedding.Config(channels_in=n, channels_out=width))
+                    cost(
+                        Embedding.Config(channels_in=n, channels_out=width),
+                        rows=grid_rows * grid_cols,
+                        itemsize=itemsize,
+                    )
                     for n in tables
                 ),
                 Cost(),
             )
-            return gathers + elementwise_cost(
+            shared = gathers + elementwise_cost(
                 primal=3 * width,
                 adjoint=width,
                 channels=width,
+                inputs=5,
+                outputs=3,
+                adjoint_inputs=1,
+                itemsize=itemsize,
+            )
+            broadcast = (
+                reduction_cost(
+                    input_elements=puzzles * width,
+                    output_groups=width,
+                    rows=puzzles,
+                    itemsize=itemsize,
+                )
+                if puzzles > 1
+                else Compute()
+            )
+            return replace(
+                shared,
+                primal=Compute(
+                    flops=shared.primal.flops / puzzles,
+                    bytes=shared.primal.bytes / puzzles,
+                ),
+                adjoint=Compute(
+                    flops=shared.adjoint.flops / puzzles,
+                    bytes=shared.adjoint.bytes / puzzles,
+                )
+                + broadcast,
             )
 
     def __init__(self, config: Config) -> None:
@@ -224,26 +271,28 @@ class PredictionFeedback(nn.Module):
         """Runtime multiplier; -1 inherits the model's (see
         :class:`FactoredPositions.Config.embed_scale`)."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price one table gather and a scale per cell.
 
             Priced with a grid stashed, as every step under adaptive
             computation time is; a forward without one contributes nothing.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus; nothing here reads it.
 
             Returns:
               cost: Per-cell cost of this module.
 
             """
-            del kwargs
             width = self.channels_out
             table = Embedding.Config(channels_in=self.channels_in, channels_out=width)
-            return cost(table) + elementwise_cost(
+            return cost(table, itemsize=itemsize, **kwargs) + elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
+                adjoint_inputs=1,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -340,7 +389,7 @@ class GridEmbedding(nn.Module):
                     channel.channels_in = self.channels_in
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price the token table, its scale, and every channel plus one add each.
 
             The stream before an add feeds a channel only for its dtype, so
@@ -348,6 +397,7 @@ class GridEmbedding(nn.Module):
             its primal is counted.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every channel.
 
             Returns:
@@ -355,19 +405,25 @@ class GridEmbedding(nn.Module):
 
             """
             width = self.channels_out
-            total = cost(_token_table(self), **kwargs) + elementwise_cost(
+            total = cost(
+                _token_table(self),
+                itemsize=itemsize,
+                **kwargs,
+            ) + elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
+                adjoint_inputs=1,
+                itemsize=itemsize,
             )
             add = Cost(
                 primal=Compute(
                     flops=Flops(elementwise=width),
-                    bytes=Bytes(elementwise=width),
+                    bytes=Bytes(elementwise=3 * width * itemsize),
                 ),
             )
             for channel in self.channels:
-                total += cost(channel, **kwargs) + add
+                total += cost(channel, itemsize=itemsize, **kwargs) + add
             return total
 
     def __init__(self, config: Config) -> None:

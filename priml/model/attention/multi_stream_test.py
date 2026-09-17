@@ -388,21 +388,15 @@ def test_attention_loading_rejects_invalid_indices(index: int) -> None:
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_width_mismatch_is_rejected_only_when_building(explicit: bool) -> None:
+def test_width_mismatch_is_rejected_at_make(explicit: bool) -> None:
     cfg = MultiStreamAttention.Config()
     cfg.channels_in = 8
     cfg.channels_out = 12
     cfg.num_heads = 2
     if explicit:
         cfg.streams = [AttentionProjections.Config()]
-    finalized = cfg.copy_tree().finalize()
-    assert finalized.channels_in == 8
-    assert finalized.channels_out == 12
-    assert finalized.channels_head == 4
-    with pytest.raises(ValueError, match="MultiStreamAttention"):
+    with pytest.raises(ValueError, match="channels_in=8 must equal channels_out=12"):
         cfg.make()
-    with pytest.raises(ValueError, match="MultiStreamAttention"):
-        MultiStreamAttention(finalized)
 
 
 @pytest.mark.parametrize("channels", [-1, 7])
@@ -456,7 +450,7 @@ def test_multi_stream_cost_sums_projections_and_scores_per_stream() -> None:
         2 * 2 * stream + kernel.adjoint.flops.matmul
     )
     # A position holds one token per stream, each caching its own K and V.
-    assert model_cost.bytes_state == 2 * 2 * 2 * 8
+    assert model_cost.bytes_state == 4 * 2 * 2 * 2 * 8
 
 
 def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
@@ -521,6 +515,33 @@ def test_multi_stream_cost_prices_explicit_streams_by_their_own_config() -> None
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost.primal.flops.matmul == (
         owned.primal.flops.matmul + 2 * kernel.primal.flops.matmul
+    )
+
+
+def test_multi_stream_traffic_propagates_itemsize_to_rotary_and_projections() -> None:
+    config = MultiStreamAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.rope = [RoPE.Config(4)]
+    config = config.copy_tree().finalize()
+    small = config.cost(seq_len=8, rows=4, itemsize=2)
+    large = config.cost(seq_len=8, rows=4, itemsize=4)
+    assert large.training.bytes == small.training.bytes * 2
+    assert small.bytes_state == 2 * 2 * 2 * 8
+
+
+def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
+    config = MultiStreamAttention.Config()
+    config.channels_in = 8
+    config.num_heads = 2
+    config.num_heads_kv = 1
+    config.norm_qk = RMSNorm.Config()
+    config.norm_qk.elementwise_affine = True
+    shared = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    config.share_qk_norm = False
+    separate = config.copy_tree().finalize().cost(seq_len=8, rows=4, itemsize=2)
+    assert (
+        separate.primal.bytes.elementwise - shared.primal.bytes.elementwise == 2 * 4 / 4
     )
 
 

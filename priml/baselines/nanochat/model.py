@@ -40,7 +40,15 @@ from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
 )
-from priml.model.cost import Cost, cost
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    Flops,
+    cost,
+    elementwise_cost,
+    reduction_cost,
+)
 from priml.model.custom_types import (
     ChannelsHead,
     ChannelsIn,
@@ -272,7 +280,14 @@ class NanoChatLM(nn.Module):
             _reject_ragged_heads(finalized.block, channels_in=finalized.channels_in)
             return finalized
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the tables, both norms, the mix, every block, and the head.
 
             What the stack owns and no child can price: the value tables, one
@@ -280,14 +295,27 @@ class NanoChatLM(nn.Module):
             residual mix at the model width. The gate that reads a value table
             is the attention's own and is priced there.
 
+            This is the model root, so it states the batch geometry itself:
+            every token of ``batch_size`` sequences of ``seq_len`` shares the
+            weights, and a ``rows`` already on the bus is discarded.
+
             Args:
-              **kwargs: The open message bus (``seq_len``, ``num_tokens``).
+              seq_len: Tokens per sequence; every attention's reach.
+              batch_size: Sequences per step; amortizes weights only.
+              itemsize: Uniform bytes per operand element.
+              **kwargs: The rest of the open message bus.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
             assert isinstance(self.block, list)
+            kwargs |= {
+                "seq_len": seq_len,
+                "batch_size": batch_size,
+                "rows": seq_len * batch_size,
+                "itemsize": itemsize,
+            }
             _, width = _head_shape(self.block[0], self.channels_in)
             table = _value_table_config(self, width=width)
             return sum(
@@ -312,8 +340,10 @@ class NanoChatLM(nn.Module):
         # Construction order fixes the global-RNG draw order, so a seeded init
         # is reproducible: tokens, head, blocks, value embeddings.
         embedding = config.embedding.make()
+        # Registration: ``nn.Module.__setattr__`` only adopts a child that IS a
+        # Module, so a plain-callable embedding would silently never train.
         assert isinstance(embedding, nn.Module)
-        self.embed = embedding
+        self.embed: TensorModule = embedding
         self.lm_head = config.lm_head.make()
         blocks: list[nn.Module] = []
         for block in config.block:
@@ -396,8 +426,7 @@ class NanoChatLM(nn.Module):
                 f"Input length {length} exceeds max_seq_len={self.config.max_seq_len}.",
             )
         cos_sin = self._rotation_table(length, device=tokens.device)
-        embed = cast(_TensorCallable, self.embed)
-        x = self.norm_embed(embed(tokens))
+        x = self.norm_embed(self.embed(tokens))
         original = x
         for layer, block in enumerate(self.blocks):
             x = self.mix(x, original=original, layer=layer)
@@ -448,9 +477,11 @@ class NanoChatLM(nn.Module):
           flops: FLOPs attributable to one token of one sequence.
 
         """
+        embed = self.embed
+        assert isinstance(embed, nn.Module)
         gathered = {
             id(parameter)
-            for module in (self.embed, *self.value_embeds.values(), self.mix)
+            for module in (embed, *self.value_embeds.values(), self.mix)
             for parameter in module.parameters()
         }
         matrix = sum(
@@ -497,12 +528,6 @@ class _BlockCallable(Protocol):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None,
     ) -> Tensor: ...
-
-
-class _TensorCallable(Protocol):
-    """Callable tensor module slice used where ``nn.Module`` is untyped."""
-
-    def __call__(self, x: Tensor) -> Tensor: ...
 
 
 def _window(block: nn.Module) -> int:
@@ -570,6 +595,21 @@ class OutputNormFeedForward(SwiGLUReluSquared):
             )
             return super().finalize()
 
+        @override
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the feed-forward and its output normalization."""
+            return super().cost(
+                rows=rows,
+                itemsize=itemsize,
+                **kwargs,
+            ) + cost(self.norm_out, rows=rows, itemsize=itemsize, **kwargs)
+
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.norm_out = config.norm_out.make()
@@ -608,6 +648,54 @@ class GatedResidualMix(ResidualMix):
     class Config(Makes["GatedResidualMix"], ResidualMix.Config):
         gate_scale: float = 0.0
         """Initial gate scale; zero gives a neutral multiplier of one."""
+
+        @override
+        def cost(
+            self,
+            *,
+            channels_in: int,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price the mean gate and its scalar parameter at every layer."""
+            base = super().cost(
+                channels_in=channels_in,
+                rows=rows,
+                itemsize=itemsize,
+                **kwargs,
+            )
+            gate = (
+                elementwise_cost(
+                    primal=8,
+                    adjoint=8,
+                    channels=1,
+                    inputs=6,
+                    outputs=5,
+                    adjoint_inputs=11,
+                    adjoint_outputs=5,
+                    params=1,
+                    rows=rows,
+                    itemsize=itemsize,
+                )
+                + elementwise_cost(
+                    primal=0,
+                    adjoint=2 * channels_in,
+                    channels=channels_in,
+                    inputs=0,
+                    outputs=0,
+                    adjoint_inputs=2,
+                    adjoint_outputs=2,
+                    itemsize=itemsize,
+                )
+                + Cost(
+                    primal=reduction_cost(
+                        input_elements=channels_in,
+                        itemsize=itemsize,
+                    ),
+                )
+            )
+            return base + self.num_layers * gate
 
     def __init__(self, config: Config) -> None:
         # The parent's constructor invokes reset before this added vector exists.
@@ -720,6 +808,55 @@ class MemoryNanoChatLM(NanoChatLM):
             ):
                 raise ValueError("Attention source must precede every receiving layer.")
             return super().finalize()
+
+        @override
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price inherited decoding, additional lookup tables, and layer pooling."""
+            kwargs.pop("rows", None)
+            rows = seq_len * batch_size
+            total = super().cost(
+                seq_len=seq_len,
+                batch_size=batch_size,
+                itemsize=itemsize,
+                **kwargs,
+            )
+            for table in (*self.bigrams.values(), *self.trigrams.values()):
+                total += cost(table, rows=rows, itemsize=itemsize, **kwargs)
+            pooled = self.num_pool_layers - 1
+            if pooled:
+                total += pooled * Cost(
+                    primal=Compute(
+                        flops=Flops(elementwise=2 * self.channels_in),
+                        bytes=Bytes(
+                            elementwise=itemsize * (5 * self.channels_in + 1 / rows),
+                        ),
+                    ),
+                    adjoint=Compute(
+                        flops=Flops(elementwise=2 * self.channels_in),
+                        bytes=Bytes(
+                            elementwise=itemsize * (6 * self.channels_in + 1 / rows),
+                        ),
+                    )
+                    + reduction_cost(
+                        input_elements=self.channels_in,
+                        itemsize=itemsize,
+                    )
+                    + reduction_cost(
+                        input_elements=rows,
+                        rows=rows,
+                        itemsize=itemsize,
+                    ),
+                    params=1,
+                    params_active=1,
+                )
+            return total
 
         @override
         def _propagate_layer_table_widths(self) -> None:

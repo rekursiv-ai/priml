@@ -57,14 +57,24 @@ class Embedding(nn.Embedding):
         out and wants unit variance, while one summed into a residual stream
         does not."""
 
-        def cost(self, **kwargs: object) -> Cost:
-            """Price a gather and its scatter-add adjoint.
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price a gather and its dense scatter-add adjoint.
 
             Every gradient element is added to a zero-initialized table, so
             repeated indices do not change the count. Padding rows skip it, so
-            this is an upper bound when padding is present.
+            this is an upper bound when padding is present. Include the index,
+            row read/write, and dense gradient-table zeroing shared over rows.
+            Index and payload use the same assumed itemsize, not runtime dtype.
 
             Args:
+              rows: Rows sharing the dense gradient initialization.
+              itemsize: Uniform bytes per operand element, including indices.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -74,8 +84,14 @@ class Embedding(nn.Embedding):
             del kwargs
             row = self.channels_out
             return Cost(
-                primal=Compute(bytes=Bytes(selection=row)),
-                adjoint=Compute(flops=Flops(selection=row), bytes=Bytes(selection=row)),
+                primal=Compute(bytes=Bytes(selection=itemsize * (1 + 2 * row))),
+                adjoint=Compute(
+                    flops=Flops(selection=row),
+                    bytes=Bytes(
+                        selection=itemsize
+                        * (1 + 3 * row + self.channels_in * row / rows),
+                    ),
+                ),
                 params=self.channels_in * row,
                 params_active=row,
             )

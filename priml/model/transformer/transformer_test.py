@@ -387,11 +387,10 @@ def test_transformer_rejects_wrong_block_input_width() -> None:
     assert isinstance(config.block, TransformerBlock.Config)
     config.block.channels_in = 16
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    # The BLOCK owns its own width invariant; pformat still prints the tree as typed.
+    with pytest.warns(UserWarning, match="channels_in=16 must equal channels_out=32"):
         assert "Transformer.Config" in config.pformat(hide_default_values=False)
-    # The BLOCK owns its own width invariant and names itself in the failure.
-    with pytest.raises(ValueError, match="for TransformerBlock"):
+    with pytest.raises(ValueError, match="channels_in=16 must equal channels_out=32"):
         config.make()
 
 
@@ -426,7 +425,7 @@ def test_transformer_cost_is_the_palm_formula() -> None:
     matrix = params - embedding
     attention = 12 * 2 * (4 * 8) * 16
     assert cost.training.flops.matmul == 6 * matrix + attention
-    assert cost.bytes_state == 2 * 2 * 4 * 8
+    assert cost.bytes_state == 4 * 2 * 2 * 4 * 8
 
 
 def test_transformer_cost_matches_torch_through_a_naive_kernel() -> None:

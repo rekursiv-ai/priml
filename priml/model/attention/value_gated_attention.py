@@ -34,18 +34,21 @@ from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.window import layer_window, window_mask
 from priml.model.cost import (
+    Bytes,
     Compute,
     Cost,
     Flops,
     cost,
     elementwise_cost,
     matmul_cost,
+    reduction_cost,
 )
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
     DepthIndex,
     TensorModule,
+    infer_same_width,
     propagate_attr,
 )
 from priml.model.init import InitFn, unit_fan_in_uniform
@@ -145,10 +148,10 @@ class ValueGatedAttention(nn.Module):
         """Head geometry, the gate width, and the injected norm."""
 
         channels_in: int = -1
-        """Model width; -1 inherits from the block."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -219,10 +222,9 @@ class ValueGatedAttention(nn.Module):
 
         @override
         def finalize(self) -> Self:
+            infer_same_width(self)
             if self.channels_in == -1:
                 self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
             if (
                 self.num_heads == -1
                 and self.channels_head > 0
@@ -247,7 +249,14 @@ class ValueGatedAttention(nn.Module):
             )
             return super().finalize()
 
-        def cost(self, *, seq_len: int, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price four projections, the gate, two norms, and the kernel.
 
             The kernel is handed this layer's window on the bus, so it counts
@@ -256,6 +265,8 @@ class ValueGatedAttention(nn.Module):
 
             Args:
               seq_len: Keys a query reaches before any window.
+              rows: Rows sharing each parameter.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -266,57 +277,78 @@ class ValueGatedAttention(nn.Module):
             total = 3 * matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=inner,
-                bias=False,
-            )
-            total += matmul_cost(
+                rows=rows,
+                itemsize=itemsize,
+            ) + matmul_cost(
                 channels_in=inner,
                 channels_out=self.channels_in,
-                bias=False,
+                rows=rows,
+                itemsize=itemsize,
             )
             if self.gated:
                 total += matmul_cost(
                     channels_in=self.gate_channels,
                     channels_out=self.num_heads,
-                    bias=False,
+                    rows=rows,
+                    itemsize=itemsize,
                 )
-            # One norm config prices one head row; it runs on every q and k
-            # head, while its parameters exist twice (norm_q and norm_k).
-            total += cost(self.norm_qk, **kwargs).tile(2 * self.num_heads, copies=2)
+            total += cost(
+                self.norm_qk,
+                rows=rows * self.num_heads,
+                itemsize=itemsize,
+                **kwargs,
+            ).tile(2 * self.num_heads, copies=2)
             total += cost(
                 self.kernel,
                 seq_len=seq_len,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 window=self.window if self.window > 0 else -1,
+                rows=rows,
+                itemsize=itemsize,
                 **kwargs,
             )
-            # Queries and keys are each rotated: two products and an add per channel.
-            total += elementwise_cost(primal=6 * inner, adjoint=6 * inner)
+            total += elementwise_cost(
+                primal=6 * inner,
+                adjoint=6 * inner,
+                channels=2 * inner,
+                inputs=6,
+                outputs=3,
+                adjoint_inputs=6,
+                adjoint_outputs=3,
+                rows=rows,
+                itemsize=itemsize,
+            )
             if self.gated:
-                # ``2 * sigmoid`` per head, then a scale-and-add over the values;
-                # the adjoint also reduces the gate's gradient over each head's
-                # channels and accumulates into the input slice.
-                total += elementwise_cost(
-                    primal=5 * self.num_heads + 2 * inner,
-                    adjoint=5 * self.num_heads + 2 * inner + self.channels_in,
-                ) + Cost(
-                    adjoint=Compute(
-                        flops=Flops(
-                            reduction=self.num_heads * (self.channels_head - 1),
+                # Sigmoid/scale, then broadcast product and addition. The head
+                # gradient reduces channels; the input slice merges two paths.
+                total += Cost(
+                    primal=Compute(
+                        flops=Flops(elementwise=5 * self.num_heads + 2 * inner),
+                        bytes=Bytes(
+                            elementwise=itemsize * (5 * self.num_heads + 5 * inner),
                         ),
                     ),
+                    adjoint=Compute(
+                        flops=Flops(
+                            elementwise=5 * self.num_heads
+                            + 2 * inner
+                            + self.channels_in,
+                        ),
+                        bytes=Bytes(
+                            elementwise=itemsize
+                            * (6 * self.num_heads + 5 * inner + 3 * self.channels_in),
+                        ),
+                    )
+                    + reduction_cost(
+                        input_elements=inner,
+                        output_groups=self.num_heads,
+                        itemsize=itemsize,
+                    ),
                 )
-            return replace(total, bytes_state=2 * inner)
+            return replace(total, bytes_state=itemsize * 2 * inner)
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for ValueGatedAttention.",
-            )
         # Only constraints torch cannot state: RoPE pairs the head width, and
         # the gate indexes into the layer input. A nonpositive extent is torch's
         # to reject (STYLE.md "Let the leaf complain").

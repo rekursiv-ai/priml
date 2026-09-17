@@ -409,8 +409,8 @@ def test_router_cost_is_the_gate_matmul(config: Router.Config) -> None:
     assert model_cost.primal.flops.matmul == 2 * 8 * 4
     assert model_cost.adjoint.flops.matmul == 4 * 8 * 4
     assert model_cost.params == 8 * 4
-    assert model_cost.primal.bytes.sort == 4
-    assert model_cost.primal.bytes.selection == 2
+    assert model_cost.primal.bytes.sort == 4 * (4 + 2 * 2)
+    assert model_cost.primal.bytes.selection == 4 * 3 * 2
     assert model_cost.adjoint.flops.selection == 2
 
 
@@ -423,11 +423,22 @@ def test_softmax_router_counts_the_softmax_reductions() -> None:
     assert model_cost.primal.flops.elementwise == 3 * 4
 
 
+def test_sigmoid_router_prices_nonlinearity_as_one_tensor_operator() -> None:
+    config = SigmoidRouter.Config()
+    config.channels_in = 8
+    config.num_experts = 4
+    config.norm_topk_prob = False
+    config.use_correction_bias = False
+    result = config.cost(itemsize=2)
+    assert result.primal.bytes.elementwise == 2 * (2 * 4 + 2 * 2)
+    assert result.adjoint.bytes.elementwise == 2 * (3 * 4 + 2 * 2)
+
+
 def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
     """Torch's count agrees: every token runs exactly ``top_k`` experts.
 
     Sort-and-dispatch issues one matmul per active expert with as many rows
-    as it received, so the total is ``top_k * num_tokens`` expert rows however
+    as it received, so the total is ``top_k * rows`` expert rows however
     the router assigns them.
     """
     expert = SwiGLU.Config(channels_hidden=16, round_to=1)
@@ -444,8 +455,8 @@ def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
         num_tokens=6,
     )
     finalized = config.copy_tree().finalize()
-    router = cost(finalized.router, num_tokens=6)
-    one_expert = cost(finalized.expert, num_tokens=6)
+    router = cost(finalized.router, rows=6)
+    one_expert = cost(finalized.expert, rows=6)
     assert router.params == 8 * 4
     assert one_expert.params == 8 * 32 + 16 * 8
     assert model_cost.params == router.params + (4 + 1) * one_expert.params
@@ -457,11 +468,47 @@ def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
         router.adjoint.flops.matmul + (2 + 1) * one_expert.adjoint.flops.matmul
     )
     # Dispatch: gather each routed token's row in and scatter its output back.
-    assert model_cost.primal.bytes.sort == router.primal.bytes.sort + 2
+    assert model_cost.primal.bytes.sort == router.primal.bytes.sort + 4 * 2 * 2
     assert model_cost.primal.flops.selection == (2 + 1) * 8
     assert (
         model_cost.adjoint.flops.selection
         == (2 + 1) * 8 + router.adjoint.flops.selection
+    )
+
+
+def test_moe_cost_does_not_price_an_unused_shared_expert() -> None:
+    config = MoE.Config()
+    config.channels_in = 4
+    config.shared_expert = SwiGLU.Config()
+    config.shared_expert.act = torch.nn.functional.gelu
+    config.make()
+    assert config.finalize().cost().params > 0
+
+
+def test_moe_cost_shares_weights_over_balanced_expert_rows() -> None:
+    config = MoE.Config()
+    config.channels_in = 4
+    config.router.num_experts = 4
+    config.expert = SwiGLU.Config()
+    config.expert.channels_hidden = 3
+    config.expert.bias = True
+    finalized = config.finalize()
+    result = finalized.cost(rows=8, itemsize=2)
+    router = cost(finalized.router, rows=8, itemsize=2)
+    expert = cost(finalized.expert, rows=4, itemsize=2)
+    assert (
+        result.primal.bytes.matmul
+        == router.primal.bytes.matmul + 2 * expert.primal.bytes.matmul
+    )
+    assert (
+        result.adjoint.bytes.matmul
+        == router.adjoint.bytes.matmul + 2 * expert.adjoint.bytes.matmul
+    )
+    assert (
+        result.adjoint.flops.reduction
+        == router.adjoint.flops.reduction
+        + 2 * expert.adjoint.flops.reduction
+        + 2 * (4 - 1)
     )
 
 

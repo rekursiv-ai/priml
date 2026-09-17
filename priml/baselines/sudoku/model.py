@@ -39,7 +39,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.model.cost import Compute, Cost, cost, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, cost, elementwise_cost
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
@@ -364,7 +364,13 @@ class SudokuNet(nn.Module):
                 self.num_prefix_tokens = _count_prefix_tokens(self.prefix)
             return super().finalize()
 
-        def cost(self, *, seq_len: int = -1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one forward per grid cell: embed, every core pass, both heads.
 
             The latent sequence is ``total_seq_len`` rows per puzzle -- prefix
@@ -378,42 +384,82 @@ class SudokuNet(nn.Module):
             only the last runs backward, so the primal is repeated
             ``slow_cycles`` times and the adjoint once.
 
+            A puzzle is the sequence, so ``seq_len`` and ``rows`` on the bus
+            are discarded: the reach of every block is this config's own
+            ``total_seq_len``, which a batch cannot change, and every child is
+            handed the rows its own geometry implies.
+
             Args:
-              seq_len: Read and discarded. The bus carries the grid width of
-                the batch, but the reach of every block is this config's own
-                ``total_seq_len``, which a batch cannot change.
-              **kwargs: The open message bus, forwarded to every child.
+              batch_size: Puzzles in the batch; amortizes weights and their
+                gradient reductions.
+              itemsize: Uniform bytes per tensor element.
+              **kwargs: The rest of the open message bus, forwarded to every
+                child.
 
             Returns:
               cost: Per-cell cost of this module.
 
             """
-            del seq_len
+            kwargs.pop("seq_len", None)
+            kwargs.pop("rows", None)
+            puzzles = batch_size
             grid_len = self.grid_len
-            rows = self.total_seq_len
+            latent = self.total_seq_len
             slow_cycles, fast_cycles = _cycles(self.recurrence)
             width = self.channels_in
-            stack = self.num_layers * cost(self.block, seq_len=rows, **kwargs)
+            stack = self.num_layers * cost(
+                self.block,
+                seq_len=latent,
+                rows=puzzles * latent,
+                itemsize=itemsize,
+                **kwargs,
+            )
             # ``z_slow + input_emb``, one add per fast cycle, and the slow
             # update: each an add forward and an accumulation back.
             adds = elementwise_cost(
                 primal=(fast_cycles + 2) * width,
                 adjoint=(fast_cycles + 2) * width,
+                channels=(fast_cycles + 2) * width,
+                inputs=2,
+                itemsize=itemsize,
             )
-            per_row = stack.tile(fast_cycles + 1) + adds + cost(_head(self), **kwargs)
-            core = _spread(per_row, rows / grid_len) + _spread(
-                cost(_halt_head(self), **kwargs),
+            per_row = (
+                stack.tile(fast_cycles + 1)
+                + adds
+                + cost(
+                    _head(self),
+                    rows=puzzles * latent,
+                    itemsize=itemsize,
+                    **kwargs,
+                )
+            )
+            core = _spread(per_row, latent / grid_len) + _spread(
+                cost(_halt_head(self), rows=puzzles, itemsize=itemsize, **kwargs),
                 1 / grid_len,
             )
             total = (
-                cost(self.embedding, **kwargs)
+                cost(
+                    self.embedding,
+                    batch_size=puzzles,
+                    rows=puzzles * grid_len,
+                    itemsize=itemsize,
+                    **kwargs,
+                )
                 + core
                 + (slow_cycles - 1) * Cost(primal=core.primal)
             )
             if self.prefix is not None:
-                total += _spread(cost(self.prefix, **kwargs), 1 / grid_len)
+                total += _spread(
+                    cost(self.prefix, rows=puzzles, itemsize=itemsize, **kwargs),
+                    1 / grid_len,
+                )
+                total += Cost(
+                    primal=Compute(
+                        bytes=Bytes(selection=2 * latent * width * itemsize / grid_len),
+                    ),
+                )
             if self.recurrence is not None:
-                total += cost(self.recurrence, **kwargs)
+                total += cost(self.recurrence, itemsize=itemsize, **kwargs)
             return total
 
     def __init__(self, config: Config) -> None:
@@ -641,7 +687,7 @@ def _count_prefix_tokens(prefix: Makeable[nn.Module] | None) -> int:
         return prefix.num_tokens
     raise ValueError(
         f"{type(prefix).__name__} fills the prefix slot but declares no "
-        "num_tokens, so the model cannot size its sequence; add the field or "
+        "rows, so the model cannot size its sequence; add the field or "
         "set num_prefix_tokens explicitly.",
     )
 

@@ -41,17 +41,21 @@ class LPIPSLoss(nn.Module):
             self,
             *,
             image_size: tuple[int, int],
-            num_tokens: int = 1,
+            batch_size: int = 1,
+            frames_scored: int = 1,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Price both branches through the frozen trunk and the linear head.
 
             A token is one ``(h, w)`` position of one SCORED frame of one
-            video, so ``num_tokens`` is ``batch * frames_scored * height *
-            width``. ``forward`` scores ``min(max_num_random_frames, T)`` of
-            each video's ``T`` frames, so a caller holding ``T`` frames of
-            which ``k`` are scored spreads the cost over ``k / T`` of its
-            frame positions; the unscored frames cost nothing.
+            video, so a step holds ``batch_size * frames_scored * height *
+            width`` of them and every parameter is shared by that many. This
+            is a root: ``seq_len`` and ``rows`` on the bus are discarded.
+            ``forward`` scores ``min(max_num_random_frames, T)`` of each
+            video's ``T`` frames, so a caller holding ``T`` frames of which
+            ``k`` are scored spreads the cost over ``k / T`` of its frame
+            positions; the unscored frames cost nothing.
 
             The trunk is built with random weights on the meta device, so
             pricing downloads nothing and allocates nothing. Its layers are
@@ -72,9 +76,19 @@ class LPIPSLoss(nn.Module):
             one division. ``NetLinLayer``'s dropout is unpriced: ``lpips.LPIPS``
             puts itself in eval mode at construction, where it is the identity.
 
+            Each branch gathers a selected RGB frame: read/write its pixels
+            and read the shared frame index once. Both input adjoints scatter
+            to those selected pixels, reading the gradient and destination
+            before writing it. Unique frame indices need no collision adds.
+            Permutation generation and unsampled gradient initialization are
+            excluded: their original frame count is not on this scored-frame bus.
+            No sort is assumed for ``randperm`` and no layout-copy is guessed.
+
             Args:
               image_size: ``(height, width)`` of one frame; the token grid.
-              num_tokens: Frame positions sharing each parameter, batch included.
+              batch_size: Videos in the batch.
+              frames_scored: Frames of each video the loss scores.
+              itemsize: Bytes per logical tensor element, including saved indices.
               **kwargs: The rest of the bus, unread.
 
             Returns:
@@ -83,6 +97,7 @@ class LPIPSLoss(nn.Module):
             """
             del kwargs
             positions = math.prod(image_size)
+            rows = batch_size * frames_scored * positions
             with torch.device("meta"):
                 model = _lpips(self.net, pretrained=False)
             traced: list[tuple[nn.Module, tuple[int, ...]]] = []
@@ -98,41 +113,89 @@ class LPIPSLoss(nn.Module):
                 model.net(torch.empty(1, 3, *image_size, device="meta")),
             )
 
-            branch = _repeat(elementwise_cost(primal=2 * 3, adjoint=3), positions)
+            branch = _repeat(
+                Cost(
+                    primal=Compute(
+                        flops=Flops(elementwise=2 * 3),
+                        bytes=Bytes(elementwise=2 * 3 * 3 * itemsize),
+                    ),
+                    adjoint=Compute(
+                        flops=Flops(elementwise=3),
+                        bytes=Bytes(elementwise=3 * 3 * itemsize),
+                    ),
+                ),
+                positions,
+            )
             for module, shape in traced:
                 channels, grid = shape[1], math.prod(shape[2:])
                 if isinstance(module, nn.Conv2d):
                     priced = _conv2d_cost(
                         module,
-                        num_tokens=_rows(num_tokens, positions=positions, grid=grid),
+                        rows=_rows(rows, positions=positions, grid=grid),
+                        itemsize=itemsize,
                     )
                 elif isinstance(module, nn.MaxPool2d):
-                    priced = _max_pool_cost(channels, kernel_size=module.kernel_size)
+                    priced = _max_pool_cost(
+                        channels,
+                        kernel_size=module.kernel_size,
+                        itemsize=itemsize,
+                    )
                 else:
-                    priced = elementwise_cost(primal=channels, adjoint=channels)
+                    priced = elementwise_cost(
+                        primal=channels,
+                        adjoint=channels,
+                        channels=channels,
+                        itemsize=itemsize,
+                    )
                 branch += _repeat(priced, grid)
 
-            head = elementwise_cost(primal=model.L + 1, adjoint=1)
+            head = Cost(
+                primal=Compute(
+                    flops=Flops(elementwise=model.L + 1),
+                    bytes=Bytes(
+                        elementwise=3 * model.L * itemsize,
+                        reduction=2 * itemsize,
+                    ),
+                ),
+                adjoint=Compute(
+                    flops=Flops(elementwise=1),
+                    bytes=Bytes(elementwise=2 * itemsize, reduction=2 * itemsize),
+                ),
+            )
             heads = model.lins  # codespell:ignore lins
             for lin, out in zip(heads, stages, strict=True):
                 assert isinstance(out, Tensor)
                 channels, grid = out.shape[1], math.prod(out.shape[2:])
-                branch += _repeat(_normalize_cost(channels), grid)
+                branch += _repeat(_normalize_cost(channels, itemsize=itemsize), grid)
                 conv = next(m for m in lin.modules() if isinstance(m, nn.Conv2d))
                 head += _repeat(
-                    elementwise_cost(
-                        primal=2 * channels,
-                        adjoint=3 * channels,
-                        channels=channels,
+                    Cost(
+                        primal=Compute(
+                            flops=Flops(elementwise=2 * channels),
+                            bytes=Bytes(elementwise=5 * channels * itemsize),
+                        ),
+                        adjoint=Compute(
+                            flops=Flops(elementwise=3 * channels),
+                            bytes=Bytes(elementwise=7 * channels * itemsize),
+                        ),
                     )
                     + _conv2d_cost(
                         conv,
-                        num_tokens=_rows(num_tokens, positions=positions, grid=grid),
+                        rows=_rows(rows, positions=positions, grid=grid),
+                        itemsize=itemsize,
                     ),
                     grid,
                 )
-                head += _spatial_average_cost(grid)
-            return _per_position(_repeat(branch, 2) + head, positions)
+                head += _spatial_average_cost(grid, itemsize=itemsize)
+            selected = Cost(
+                primal=Compute(
+                    bytes=Bytes(selection=(2 * 3 * 2 * positions + 2) * itemsize),
+                ),
+                adjoint=Compute(
+                    bytes=Bytes(selection=(2 * 3 * 3 * positions + 2) * itemsize),
+                ),
+            )
+            return _per_position(_repeat(branch, 2) + head + selected, positions)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -216,7 +279,7 @@ def _record_output_shape(
     traced.append((module, tuple(output.shape)))
 
 
-def _conv2d_cost(module: nn.Conv2d, *, num_tokens: int) -> Cost:
+def _conv2d_cost(module: nn.Conv2d, *, rows: int, itemsize: int = 4) -> Cost:
     """Price one output position of ``module``; a frozen weight pays no weight gradient."""
     priced = conv_cost(
         channels_in=module.in_channels,
@@ -225,7 +288,8 @@ def _conv2d_cost(module: nn.Conv2d, *, num_tokens: int) -> Cost:
         ndim=2,
         groups=module.groups,
         bias=module.bias is not None,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )
     if module.weight.requires_grad:
         return priced
@@ -234,11 +298,17 @@ def _conv2d_cost(module: nn.Conv2d, *, num_tokens: int) -> Cost:
         adjoint=replace(
             priced.adjoint,
             flops=Flops(matmul=priced.primal.flops.matmul),
+            bytes=Bytes(matmul=priced.primal.bytes.matmul),
         ),
     )
 
 
-def _max_pool_cost(channels: int, *, kernel_size: int | tuple[int, ...]) -> Cost:
+def _max_pool_cost(
+    channels: int,
+    *,
+    kernel_size: int | tuple[int, ...],
+    itemsize: int = 4,
+) -> Cost:
     """Price one pooled position: compares forward, one gradient routed to the argmax."""
     taps = math.prod(
         kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * 2,
@@ -246,11 +316,11 @@ def _max_pool_cost(channels: int, *, kernel_size: int | tuple[int, ...]) -> Cost
     return Cost(
         primal=Compute(
             flops=Flops(reduction=channels * (taps - 1)),
-            bytes=Bytes(reduction=channels),
+            bytes=Bytes(reduction=channels * (taps + 2) * itemsize),
         ),
         adjoint=Compute(
             flops=Flops(selection=channels),
-            bytes=Bytes(selection=channels),
+            bytes=Bytes(selection=channels * (taps + 2) * itemsize),
         ),
     )
 
@@ -258,37 +328,45 @@ def _max_pool_cost(channels: int, *, kernel_size: int | tuple[int, ...]) -> Cost
 # ``y = x / (||x|| + eps)``: square, sum, sqrt, add, divide forward. Back,
 # ``g / d - x (g . x) / (d^2 ||x||)``: one dot product, three scalar ops, then
 # a divide, a multiply, and a subtract per channel.
-def _normalize_cost(channels: int) -> Cost:
+def _normalize_cost(channels: int, *, itemsize: int = 4) -> Cost:
     """Price ``lpips.normalize_tensor`` at one position over ``channels``."""
-    return elementwise_cost(
-        primal=2 * channels + 2,
-        adjoint=4 * channels + 3,
-        channels=channels,
-    ) + Cost(
-        primal=Compute(flops=Flops(reduction=channels - 1)),
-        adjoint=Compute(flops=Flops(reduction=channels - 1)),
+    return Cost(
+        primal=Compute(
+            flops=Flops(elementwise=2 * channels + 2, reduction=channels - 1),
+            bytes=Bytes(
+                elementwise=(4 * channels + 5) * itemsize,
+                reduction=(channels + 1) * itemsize,
+            ),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=4 * channels + 3, reduction=channels - 1),
+            bytes=Bytes(
+                elementwise=(10 * channels + 9) * itemsize,
+                reduction=(channels + 1) * itemsize,
+            ),
+        ),
     )
 
 
-def _spatial_average_cost(positions: int) -> Cost:
+def _spatial_average_cost(positions: int, *, itemsize: int = 4) -> Cost:
     """Price the mean of one channel over ``positions``: a sum, a scale, a broadcast back."""
     return Cost(
         primal=Compute(
             flops=Flops(reduction=positions - 1, elementwise=1),
-            bytes=Bytes(reduction=1),
+            bytes=Bytes(reduction=(positions + 1) * itemsize, elementwise=2 * itemsize),
         ),
         adjoint=Compute(
             flops=Flops(elementwise=positions),
-            bytes=Bytes(elementwise=positions),
+            bytes=Bytes(elementwise=(positions + 1) * itemsize),
         ),
     )
 
 
 # Rounded up, so the one-row shape estimate stays one row through a downsampling
 # layer instead of dividing by zero.
-def _rows(num_tokens: int, *, positions: int, grid: int) -> int:
-    """Return the rows a layer on ``grid`` sees when a frame holds ``num_tokens``."""
-    return (num_tokens * grid + positions - 1) // positions
+def _rows(rows: int, *, positions: int, grid: int) -> int:
+    """Return the rows a layer on ``grid`` sees when a frame holds ``rows``."""
+    return (rows * grid + positions - 1) // positions
 
 
 def _repeat(priced: Cost, rows: int) -> Cost:

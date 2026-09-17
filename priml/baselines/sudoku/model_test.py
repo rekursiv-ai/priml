@@ -24,6 +24,7 @@ from priml.model.cost import Cost, cost
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
+from priml.model.special import Identity
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
@@ -235,7 +236,7 @@ def test_plain_cost_matches_torch(prefix: bool) -> None:
     )
     # The sequence length is the config's own: a bus value cannot reprice it.
     finalized = config.copy_tree().finalize()
-    assert cost(finalized, num_tokens=2, seq_len=1_000) == analytical
+    assert cost(finalized, seq_len=1_000) == analytical
 
 
 def test_recurrent_cost_matches_torch() -> None:
@@ -250,10 +251,42 @@ def test_recurrent_cost_matches_torch() -> None:
     )
     one_cycle = _cost_config(prefix=True)
     one_cycle.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=2)
-    single = cost(one_cycle.copy_tree().finalize(), num_tokens=2)
+    single = cost(one_cycle.copy_tree().finalize(), rows=2)
     assert analytical.adjoint == single.adjoint
     assert analytical.params == single.params
     assert analytical.primal.flops.matmul > single.primal.flops.matmul
+
+
+def test_cost_uses_puzzles_for_halt_and_register_gradient_reductions() -> None:
+    config = _cost_config(prefix=True)
+    config.block = Identity.Config()
+    config = config.finalize()
+    two = cost(config, batch_size=2)
+    four = cost(config, batch_size=4)
+    # Each puzzle owns one halt row and two register rows, not four latent rows.
+    assert two.adjoint.flops.reduction == (2 + 2 * 16) * (2 - 1) / 2 / 2
+    assert four.adjoint.flops.reduction == (2 + 2 * 16) * (4 - 1) / 4 / 2
+    assert four.primal.bytes.matmul < two.primal.bytes.matmul
+    assert four.primal.flops == two.primal.flops
+    # A puzzle is the sequence: the bus's seq_len and rows cannot reprice it.
+    assert cost(config) == cost(config, seq_len=1_000, rows=7)
+
+
+def test_cost_counts_grid_prefix_concatenation() -> None:
+    plain = _cost_config(prefix=False).finalize().cost(batch_size=2)
+    prefix = _cost_config(prefix=True).finalize().cost(batch_size=2)
+    assert (
+        prefix.primal.bytes.selection - plain.primal.bytes.selection
+        == 4 * 2 * (2 + 2) * 16 / 2
+    )
+
+
+def test_cost_halt_bias_reduction_uses_batch_not_grid_cells() -> None:
+    config = _cost_config(prefix=False)
+    config.block = Identity.Config()
+    config = config.finalize()
+    priced = cost(config, batch_size=4)
+    assert priced.adjoint.flops.reduction == 2 * (4 - 1) / 4 / 2
 
 
 def _cost_config(*, prefix: bool) -> SudokuNet.Config:

@@ -142,22 +142,12 @@ def test_projection_slot_keeps_caller_set_fields() -> None:
     assert config.proj_out.channels_out == 128
 
 
-def test_mla_mismatched_widths_validate_on_construction() -> None:
+def test_mla_mismatched_widths_reject_at_make() -> None:
     config, _ = _mla_config()
     config.channels_out = 64
 
-    finalized = config.copy_tree().finalize()
-    assert (finalized.channels_in, finalized.channels_out) == (32, 64)
-    with pytest.raises(ValueError, match="for MultiHeadLatentAttention"):
+    with pytest.raises(ValueError, match="channels_in=32 must equal channels_out=64"):
         config.make()
-    with pytest.raises(ValueError, match="for MultiHeadLatentAttention"):
-        MultiHeadLatentAttention(config)
-
-    class DerivedLatentAttention(MultiHeadLatentAttention):
-        pass
-
-    with pytest.raises(ValueError, match="for DerivedLatentAttention"):
-        DerivedLatentAttention(config)
 
 
 def test_forward_shape():
@@ -349,8 +339,8 @@ def test_mla_config_reports_derived_boundary_geometry() -> None:
 def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
     """Absorbed: K is latent + rope key, V is the latent; both count once.
 
-    The inner kernel is priced at the summed width and halved, so the total is
-    the inner kernel's own cost at ``(6 + 4) + 6`` channels, halved.
+    FLOPs equal half a symmetric summed-width kernel, while operand traffic
+    follows the separate key and value widths.
     """
     latent = LatentAttention.Config().copy_tree().finalize()
     model_cost = latent.cost(
@@ -367,7 +357,11 @@ def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
     assert model_cost.primal.flops.matmul == 2 * 4 * 32 * ((6 + 4) + 6)
     assert model_cost.primal.flops.elementwise == inner.primal.flops.elementwise
     assert model_cost.params == 0
-    assert model_cost.primal.bytes.elementwise == 4 * 6
+    assert (
+        model_cost.primal.bytes.matmul
+        == 4 * 4 * (2 * 10 + 2 * 6 + 2 * 32) + 4 * (2 * 4 - 1) * 6
+    )
+    assert model_cost.primal.bytes.elementwise == inner.primal.bytes.elementwise
 
 
 def test_latent_attention_cost_attends_over_expanded_heads_when_not() -> None:
@@ -382,7 +376,8 @@ def test_latent_attention_cost_attends_over_expanded_heads_when_not() -> None:
     )
     inner = cost(latent.attn_kernel, seq_len=32, num_heads=4, channels_head=12 + 16)
     assert model_cost.primal.flops.matmul == inner.primal.flops.matmul / 2
-    assert model_cost.primal.bytes.elementwise == 4 * 16
+    assert model_cost.primal.bytes.matmul == 4 * 4 * (2 * 12 + 2 * 16 + 2 * 32)
+    assert model_cost.primal.bytes.elementwise == inner.primal.bytes.elementwise
 
 
 def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
@@ -418,7 +413,7 @@ def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
     assert model_cost.adjoint.flops.matmul == (
         owned.adjoint.flops.matmul + kernel.adjoint.flops.matmul
     )
-    assert model_cost.bytes_state == 12 + 4
+    assert model_cost.bytes_state == 4 * (12 + 4)
 
 
 def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
@@ -445,10 +440,77 @@ def test_mla_cost_counts_the_q_lora_path_and_rotary() -> None:
     assert cost.params == sum(p.numel() for p in config.make().parameters())
 
 
-def test_mla_cost_requires_seq_len() -> None:
+def test_mla_traffic_scales_all_children_and_cache() -> None:
     config, _ = _mla_config()
-    with pytest.raises(TypeError, match="seq_len"):
-        cost(config.copy_tree().finalize())
+    config.rope = RoPE.Config(4)
+    config = config.copy_tree().finalize()
+    small = config.cost(seq_len=8, rows=4, itemsize=2)
+    large = config.cost(seq_len=8, rows=4, itemsize=4)
+    assert large.training.bytes == small.training.bytes * 2
+    assert small.bytes_state == 2 * (12 + 4)
+
+
+@pytest.mark.parametrize("absorb", [False, True])
+@pytest.mark.parametrize("itemsize", [2, 4])
+def test_mla_cost_prices_absorbed_projection_intermediates(
+    absorb: bool,
+    itemsize: int,
+) -> None:
+    config, latent = _mla_config()
+    latent.absorb = absorb
+    config = config.copy_tree().finalize()
+    projections = sum(
+        (
+            cost(child, rows=8, itemsize=itemsize)
+            for child in (
+                config.proj_q,
+                config.proj_kv_a,
+                config.norm_kv_lora,
+                config.proj_kv_b,
+                config.proj_out,
+            )
+        ),
+        Cost(),
+    )
+    kernel = cost(
+        SdpaNaive.Config(),
+        seq_len=8,
+        num_heads=4,
+        channels_head=16 if absorb else 12,
+        channels_v_head=12 if absorb else 16,
+        rows=8,
+        itemsize=itemsize,
+    )
+    actual = config.cost(seq_len=8, rows=8, itemsize=itemsize)
+    extra = itemsize * (2 * 4 - 1) * 12 if absorb else 0
+    assert (
+        actual.primal.bytes.matmul
+        == projections.primal.bytes.matmul + kernel.primal.bytes.matmul + extra
+    )
+    assert (
+        actual.adjoint.bytes.matmul
+        == projections.adjoint.bytes.matmul + kernel.adjoint.bytes.matmul + 2 * extra
+    )
+    assert (
+        actual.training.flops.matmul
+        == projections.training.flops.matmul + kernel.training.flops.matmul
+    )
+    assert actual.params == projections.params
+
+
+def test_mla_cost_prices_configured_dropout_and_accepts_override() -> None:
+    config, _ = _mla_config()
+    dry = config.copy_tree().finalize().cost(seq_len=8, itemsize=2)
+    config.dropout = 0.25
+    config = config.copy_tree().finalize()
+    wet = config.cost(seq_len=8, itemsize=2)
+    assert wet.primal.flops.elementwise - dry.primal.flops.elementwise == 2 * 4 * 8
+    assert wet.adjoint.flops.elementwise - dry.adjoint.flops.elementwise == 2 * 4 * 8
+    assert wet.primal.bytes.elementwise - dry.primal.bytes.elementwise == 2 * 5 * 4 * 8
+    assert (
+        wet.adjoint.bytes.elementwise - dry.adjoint.bytes.elementwise == 2 * 3 * 4 * 8
+    )
+    assert config.cost(seq_len=8, itemsize=2, dropout_p=0.0) == dry
 
 
 @pytest.mark.parametrize("inner", [SdpaFused.Config, SdpaNaive.Config])

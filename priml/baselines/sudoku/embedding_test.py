@@ -126,7 +126,7 @@ def test_factored_positions_cost_is_three_gathers_two_adds_and_a_scale() -> None
     )
     assert analytical.params == (4 + 4 + 4) * 8
     assert analytical.params_active == 3 * 8
-    assert analytical.primal.bytes.selection == 3 * 8
+    assert analytical.primal.bytes.selection == 4 * 3 * (1 + 2 * 8)
     assert analytical.adjoint.flops.selection == 3 * 8
     assert analytical.primal.flops.elementwise == 3 * 8
     assert analytical.adjoint.flops.elementwise == 8
@@ -142,7 +142,7 @@ def test_prediction_feedback_cost_is_a_gather_and_a_scale() -> None:
     )
     assert analytical.params == 11 * 8
     assert analytical.params_active == 8
-    assert analytical.primal.bytes.selection == 8
+    assert analytical.primal.bytes.selection == 4 * (1 + 2 * 8)
     assert analytical.adjoint.flops.selection == 8
     assert analytical.primal.flops.elementwise == 8
     assert analytical.adjoint.flops.elementwise == 8
@@ -161,12 +161,49 @@ def test_grid_embedding_cost_sums_the_token_table_and_every_channel() -> None:
     assert analytical.params == 11 * 8 + (9 + 9 + 9) * 8 + 11 * 8
     assert analytical.params_active == 8 + 3 * 8 + 8
     # Token row, three position rows, one feedback row.
-    assert analytical.primal.bytes.selection == 8 + 3 * 8 + 8
+    assert analytical.primal.bytes.selection == 4 * 5 * (1 + 2 * 8)
     assert analytical.adjoint.flops.selection == 8 + 3 * 8 + 8
     # Token scale; positions' two adds and scale; feedback scale; two channel adds.
     assert analytical.primal.flops.elementwise == 8 + 3 * 8 + 8 + 2 * 8
     # The channel adds accumulate no gradient, so only the three scales pull back.
     assert analytical.adjoint.flops.elementwise == 8 + 8 + 8
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_grid_embedding_traffic_counts_scale_and_channel_add(itemsize: int) -> None:
+    config = GridEmbedding.Config()
+    config.channels_in = 11
+    config.channels_out = 8
+    config.channels = [PredictionFeedback.Config()]
+    priced = config.finalize().cost(itemsize=itemsize)
+    assert priced.primal.bytes.elementwise == itemsize * 8 * (2 + 2 + 3)
+    assert priced.adjoint.bytes.elementwise == itemsize * 8 * (2 + 2)
+
+
+def test_feedback_table_gradient_zeroing_amortizes_over_batch() -> None:
+    config = PredictionFeedback.Config()
+    config.channels_in = 11
+    config.channels_out = 8
+    small = config.cost(rows=4)
+    large = config.cost(rows=8)
+    assert (
+        small.adjoint.bytes.selection - large.adjoint.bytes.selection
+        == 4 * 11 * 8 * (1 / 4 - 1 / 8)
+    )
+
+
+def test_factored_position_cost_amortizes_broadcast_over_puzzles() -> None:
+    config = FactoredPositions.Config()
+    config.channels_out = 8
+    config.grid_shape = (4, 4)
+    config.box_shape = (2, 2)
+    single = config.cost(batch_size=1, itemsize=2)
+    batch = config.cost(batch_size=2, itemsize=2)
+    assert batch.primal.flops == single.primal.flops / 2
+    assert batch.primal.bytes == single.primal.bytes / 2
+    assert batch.adjoint.flops.reduction == 8 / 2
+    assert batch.adjoint.bytes.reduction == 2 * (8 + 8 / 2)
+    assert batch.params == single.params
 
 
 def _run_feedback(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:

@@ -18,7 +18,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Compute, Cost, Flops, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
 
 
 class ResidualMix(nn.Module):
@@ -45,7 +45,8 @@ class ResidualMix(nn.Module):
             self,
             *,
             channels_in: int,
-            num_tokens: int = 1,
+            rows: float = 1,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Count two weighted streams over every layer at the supplied width.
@@ -56,7 +57,8 @@ class ResidualMix(nn.Module):
 
             Args:
               channels_in: Width of the rows being mixed.
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -64,15 +66,34 @@ class ResidualMix(nn.Module):
 
             """
             del kwargs
-            return elementwise_cost(
-                primal=3 * channels_in * self.num_layers,
-                adjoint=4 * channels_in * self.num_layers,
-                params=2 * self.num_layers,
-                num_tokens=num_tokens,
-            ) + Cost(
-                adjoint=Compute(
-                    flops=Flops(reduction=2 * (channels_in - 1) * self.num_layers),
+            width = channels_in * self.num_layers
+            params = 2 * self.num_layers
+            return Cost(
+                primal=Compute(
+                    flops=Flops(elementwise=3 * width),
+                    bytes=Bytes(
+                        elementwise=itemsize * (7 * width + params / rows),
+                    ),
                 ),
+                adjoint=Compute(
+                    flops=Flops(elementwise=4 * width),
+                    bytes=Bytes(
+                        elementwise=itemsize * (10 * width + params / rows),
+                    ),
+                )
+                + reduction_cost(
+                    input_elements=params * channels_in,
+                    output_groups=params,
+                    itemsize=itemsize,
+                )
+                + reduction_cost(
+                    input_elements=params * rows,
+                    output_groups=params,
+                    rows=rows,
+                    itemsize=itemsize,
+                ),
+                params=params,
+                params_active=params,
             )
 
     def __init__(self, config: Config) -> None:

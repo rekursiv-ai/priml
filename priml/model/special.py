@@ -15,6 +15,7 @@ from priml.model.custom_types import (
     TensorModule,
     WeightedTensorModule,
     has_weight,
+    infer_same_width,
 )
 from priml.model.passthrough import (
     PassthroughAttribute,
@@ -28,19 +29,17 @@ class Identity(nn.Identity):
 
     class Config(Fig["Identity"], kw_only=False):
         channels_in: int = -1
-        """Number of input channels (-1 to infer from channels_out)."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
+            """Fill and validate the preserved channel width."""
+            infer_same_width(self)
             return super().finalize()
 
         def cost(self, **kwargs: object) -> Cost:
@@ -57,14 +56,7 @@ class Identity(nn.Identity):
             return Cost()
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for Identity.",
-            )
+        del config
         super().__init__()
 
     def reset_parameters(self) -> None:
@@ -90,10 +82,11 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
         channels_in = PassthroughAttribute[int]()
         channels_out = PassthroughAttribute[int]()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price the branch, residual add, and input-gradient accumulation.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -102,9 +95,12 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
             """
             if self.inner is None:
                 raise ValueError("Must specify `inner`.")
-            return cost(self.inner, **kwargs) + elementwise_cost(
+            return cost(self.inner, itemsize=itemsize, **kwargs) + elementwise_cost(
                 primal=self.channels_out,
                 adjoint=self.channels_in,
+                channels=self.channels_out,
+                inputs=2,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -157,10 +153,18 @@ class TiedLinear(nn.Module, LateBound):
         transpose: bool = True
         """Read the weight as ``weight.T``; the usual head-over-embedding tie."""
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price the matmul; the weight is counted where it is owned.
 
             Args:
+              rows: Rows sharing the borrowed weight.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -173,6 +177,8 @@ class TiedLinear(nn.Module, LateBound):
                     channels_in=self.channels_in,
                     channels_out=self.channels_out,
                     bias=False,
+                    rows=rows,
+                    itemsize=itemsize,
                 ),
                 params=0,
             )

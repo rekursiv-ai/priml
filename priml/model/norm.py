@@ -3,73 +3,34 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import Protocol, Self, override, runtime_checkable
+from typing import Self, override
 
-from configgle import Fig, Makes
+from configgle import Fig
 from torch import Tensor, nn
 from torch.nn import functional as f
 
 import torch
 
-from priml.model.cost import Compute, Cost, Flops, elementwise_cost
-
-
-@runtime_checkable
-class NormProtocol(Protocol):
-    """Protocol for normalization layers."""
-
-    def __call__(self, input: Tensor, **kwargs: object) -> Tensor:
-        """Apply to the input."""
-        ...
-
-
-class NormConfigProtocol(Protocol):
-    """Protocol for normalization layer configs.
-
-    Captures the fields common to all norm configs, useful for
-    propagating ``channels_in`` or ``elementwise_affine`` into
-    nested norm configs without knowing the concrete norm type.
-    """
-
-    channels_in: int
-    eps: float
-    elementwise_affine: bool
-    device: torch.device | str | None
-    dtype: torch.dtype | None
-
-
-class SameWidthConfig(Fig[nn.Module], kw_only=False):
-    """Config of a width-preserving layer: each width infers the other.
-
-    A norm neither widens nor narrows, so a parent may push either width down
-    and ``finalize`` fills the other. Both set and unequal is a wiring error,
-    raised here so the ``pprint`` of the offending tree names both values.
-    """
-
-    channels_in: int = -1
-    """Number of input channels (-1 to infer from channels_out)."""
-
-    channels_out: int = -1
-    """Number of output channels (-1 to infer from channels_in)."""
-
-    @override
-    def finalize(self) -> Self:
-        if self.channels_in == -1:
-            self.channels_in = self.channels_out
-        if self.channels_out == -1:
-            self.channels_out = self.channels_in
-        if self.channels_in != self.channels_out:
-            raise ValueError(
-                f"channels_in={self.channels_in} must equal "
-                f"channels_out={self.channels_out}.",
-            )
-        return super().finalize()
+from priml.model.cost import (
+    Bytes,
+    Compute,
+    Cost,
+    elementwise_cost,
+    reduction_cost,
+)
+from priml.model.custom_types import infer_same_width
 
 
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization."""
 
-    class Config(Makes["RMSNorm"], SameWidthConfig, kw_only=False):
+    class Config(Fig["RMSNorm"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels (normalized shape)."""
+
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         eps: float | None = 1e-6
@@ -89,7 +50,18 @@ class RMSNorm(nn.Module):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        @override
+        def finalize(self) -> Self:
+            infer_same_width(self)
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count square/mean/rsqrt/scale and its saved-rsqrt derivative.
 
             The adjoint forms sum(g*x), scales by r**3 / width, then subtracts
@@ -97,7 +69,8 @@ class RMSNorm(nn.Module):
             two sums over the row are the reductions.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -111,9 +84,23 @@ class RMSNorm(nn.Module):
                 primal=2 * width + 3 + params,
                 adjoint=4 * width + 4 + 2 * params,
                 channels=width,
+                inputs=2,
+                outputs=2,
+                adjoint_inputs=6,
+                adjoint_outputs=4,
                 params=params,
-                num_tokens=num_tokens,
-            ) + _reduction_cost(primal=width - 1, adjoint=width - 1)
+                rows=rows,
+                itemsize=itemsize,
+            ) + Cost(
+                primal=Compute(
+                    bytes=Bytes(elementwise=itemsize * (7 + 2 * params)),
+                )
+                + reduction_cost(input_elements=width, itemsize=itemsize),
+                adjoint=Compute(
+                    bytes=Bytes(elementwise=itemsize * (12 + 4 * params)),
+                )
+                + reduction_cost(input_elements=width, itemsize=itemsize),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -154,17 +141,35 @@ class CenteredRMSNorm(nn.Module):
     Computation is done in float32 for numerical precision.
     """
 
-    class Config(Makes["CenteredRMSNorm"], SameWidthConfig, kw_only=False):
+    class Config(Fig["CenteredRMSNorm"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels (normalized shape)."""
+
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         eps: float = 1e-6
         """Epsilon for numerical stability."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        @override
+        def finalize(self) -> Self:
+            infer_same_width(self)
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count affine RMSNorm plus one ``1 + weight`` fold shared by every row.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -174,12 +179,26 @@ class CenteredRMSNorm(nn.Module):
             del kwargs
             width = self.channels_in
             return elementwise_cost(
-                primal=3 * width + 3 + width / num_tokens,
+                primal=3 * width + 3 + width / rows,
                 adjoint=6 * width + 4,
                 channels=width,
+                inputs=3,
+                outputs=3,
+                adjoint_inputs=8,
+                adjoint_outputs=6,
                 params=width,
-                num_tokens=num_tokens,
-            ) + _reduction_cost(primal=width - 1, adjoint=width - 1)
+                rows=rows,
+                itemsize=itemsize,
+            ) + Cost(
+                primal=Compute(
+                    bytes=Bytes(elementwise=itemsize * (7 + 2 * width / rows)),
+                )
+                + reduction_cost(input_elements=width, itemsize=itemsize),
+                adjoint=Compute(
+                    bytes=Bytes(elementwise=itemsize * 12),
+                )
+                + reduction_cost(input_elements=width, itemsize=itemsize),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -202,7 +221,13 @@ class CenteredRMSNorm(nn.Module):
 class LayerNorm(nn.LayerNorm):
     """Layer Normalization."""
 
-    class Config(Makes["LayerNorm"], SameWidthConfig, kw_only=False):
+    class Config(Fig["LayerNorm"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels (normalized shape)."""
+
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         eps: float = 1e-5
@@ -217,11 +242,23 @@ class LayerNorm(nn.LayerNorm):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        @override
+        def finalize(self) -> Self:
+            infer_same_width(self)
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count centered statistics, normalization, and affine gradients.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -233,7 +270,8 @@ class LayerNorm(nn.LayerNorm):
                 channels=self.channels_in,
                 groups_per_token=1,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -254,7 +292,13 @@ class LayerNorm(nn.LayerNorm):
 class BatchNorm(nn.BatchNorm1d):
     """BatchNorm1d for (B, L, C) input."""
 
-    class Config(Makes["BatchNorm"], SameWidthConfig, kw_only=False):
+    class Config(Fig["BatchNorm"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels."""
+
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
 
         momentum: float = 0.1
@@ -272,17 +316,29 @@ class BatchNorm(nn.BatchNorm1d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        @override
+        def finalize(self) -> Self:
+            infer_same_width(self)
+            return super().finalize()
+
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Estimate training statistics and running updates per position.
 
-            ``num_tokens`` is batch times spatial/sequence positions. The
+            ``rows`` is batch times spatial/sequence positions. The
             analytical population-variance algorithm includes six operations
             per channel for the two running averages and two for the unbiased
             variance correction. One-row defaults are shape estimates only;
             a training batch norm requires more than one sample per channel.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -292,10 +348,20 @@ class BatchNorm(nn.BatchNorm1d):
             del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=self.channels_in / num_tokens,
+                groups_per_token=self.channels_in / rows,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                num_tokens=num_tokens,
-            ) + elementwise_cost(primal=8 * self.channels_in / num_tokens, adjoint=0)
+                rows=rows,
+                itemsize=itemsize,
+            ) + elementwise_cost(
+                primal=8 * self.channels_in / rows,
+                adjoint=0,
+                channels=self.channels_in / rows,
+                inputs=10,
+                outputs=8,
+                adjoint_inputs=0,
+                adjoint_outputs=0,
+                itemsize=itemsize,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__(
@@ -340,10 +406,22 @@ class BatchRenorm(nn.Module):
 
     """
 
-    class Config(Makes["BatchRenorm"], SameWidthConfig):
+    class Config(Fig["BatchRenorm"]):
         """Configure the normalization."""
 
+        channels_in: int = -1
+        """Width of the axis being normalized (-1 to infer from channels_out)."""
+
+        channels_out: int = -1
+        """Number of output channels (-1 to infer from channels_in)."""
+
         _: KW_ONLY
+
+        @override
+        def finalize(self) -> Self:
+            """Fill and validate the preserved channel width."""
+            infer_same_width(self)
+            return super().finalize()
 
         momentum: float = 0.999
         """Retention of the running statistics per update.
@@ -367,7 +445,13 @@ class BatchRenorm(nn.Module):
         max_drift: float = 5.0
         """Bound on the mean correction, in running standard deviations."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Estimate warm training, including detached corrections and updates.
 
             Warmup skips five scalar operations per channel; this prices the
@@ -376,7 +460,8 @@ class BatchRenorm(nn.Module):
             corrected mean and variance in addition to ordinary normalization.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -387,12 +472,19 @@ class BatchRenorm(nn.Module):
             width = self.channels_in
             return _normalization_cost(
                 channels=width,
-                groups_per_token=width / num_tokens,
+                groups_per_token=width / rows,
                 params=2 * width,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             ) + elementwise_cost(
-                primal=18 * width / num_tokens,
-                adjoint=5 * width / num_tokens,
+                primal=18 * width / rows,
+                adjoint=5 * width / rows,
+                channels=width / rows,
+                inputs=26,
+                outputs=20,
+                adjoint_inputs=8,
+                adjoint_outputs=5,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -515,8 +607,20 @@ class BatchRenorm(nn.Module):
 class BatchNorm2d(nn.BatchNorm2d):
     """BatchNorm2d for (B, C, H, W) input."""
 
-    class Config(Makes["BatchNorm2d"], SameWidthConfig, kw_only=False):
+    class Config(Fig["BatchNorm2d"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels."""
+
+        channels_out: int = -1
+        """Number of output channels."""
+
         _: KW_ONLY
+
+        @override
+        def finalize(self) -> Self:
+            """Fill and validate the preserved channel width."""
+            infer_same_width(self)
+            return super().finalize()
 
         momentum: float = 0.1
         """Running stats exponential moving average factor."""
@@ -533,17 +637,24 @@ class BatchNorm2d(nn.BatchNorm2d):
         dtype: torch.dtype | None = None
         """Data type for parameters."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Estimate training statistics and running updates per position.
 
-            ``num_tokens`` is batch times spatial/sequence positions. The
+            ``rows`` is batch times spatial/sequence positions. The
             analytical population-variance algorithm includes six operations
             per channel for the two running averages and two for the unbiased
             variance correction. One-row defaults are shape estimates only;
             a training batch norm requires more than one sample per channel.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -553,10 +664,20 @@ class BatchNorm2d(nn.BatchNorm2d):
             del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=self.channels_in / num_tokens,
+                groups_per_token=self.channels_in / rows,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                num_tokens=num_tokens,
-            ) + elementwise_cost(primal=8 * self.channels_in / num_tokens, adjoint=0)
+                rows=rows,
+                itemsize=itemsize,
+            ) + elementwise_cost(
+                primal=8 * self.channels_in / rows,
+                adjoint=0,
+                channels=self.channels_in / rows,
+                inputs=10,
+                outputs=8,
+                adjoint_inputs=0,
+                adjoint_outputs=0,
+                itemsize=itemsize,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__(
@@ -583,8 +704,20 @@ class GroupNorm2d(nn.GroupNorm):
     per-iteration activation distributions.
     """
 
-    class Config(Makes["GroupNorm2d"], SameWidthConfig, kw_only=False):
+    class Config(Fig["GroupNorm2d"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels."""
+
+        channels_out: int = -1
+        """Number of output channels."""
+
         _: KW_ONLY
+
+        @override
+        def finalize(self) -> Self:
+            """Fill and validate the preserved channel width."""
+            infer_same_width(self)
+            return super().finalize()
 
         num_groups: int = 8
         """Number of groups to divide channels into."""
@@ -604,17 +737,19 @@ class GroupNorm2d(nn.GroupNorm):
         def cost(
             self,
             *,
-            num_tokens: int = 1,
+            rows: float = 1,
             seq_len: int = 1,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Count groups spanning ``seq_len`` positions within each sample.
 
             For images, ``seq_len`` is the product of spatial extents;
-            ``num_tokens`` is batch times that extent for affine gradients.
+            ``rows`` is batch times that extent for affine gradients.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               seq_len: Positions each normalization group spans within one sample.
               **kwargs: The open message bus, forwarded to every child.
 
@@ -627,7 +762,8 @@ class GroupNorm2d(nn.GroupNorm):
                 channels=self.channels_in,
                 groups_per_token=self.num_groups / seq_len,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -649,8 +785,20 @@ class GroupNorm2d(nn.GroupNorm):
 class GroupNorm(nn.GroupNorm):
     """GroupNorm for (B, L, C) input."""
 
-    class Config(Makes["GroupNorm"], SameWidthConfig, kw_only=False):
+    class Config(Fig["GroupNorm"], kw_only=False):
+        channels_in: int = -1
+        """Number of input channels."""
+
+        channels_out: int = -1
+        """Number of output channels."""
+
         _: KW_ONLY
+
+        @override
+        def finalize(self) -> Self:
+            """Fill and validate the preserved channel width."""
+            infer_same_width(self)
+            return super().finalize()
 
         num_groups: int = 8
         """Number of groups to divide channels into."""
@@ -670,17 +818,19 @@ class GroupNorm(nn.GroupNorm):
         def cost(
             self,
             *,
-            num_tokens: int = 1,
+            rows: float = 1,
             seq_len: int = 1,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Count groups spanning ``seq_len`` positions within each sample.
 
             For images, ``seq_len`` is the product of spatial extents;
-            ``num_tokens`` is batch times that extent for affine gradients.
+            ``rows`` is batch times that extent for affine gradients.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               seq_len: Positions each normalization group spans within one sample.
               **kwargs: The open message bus, forwarded to every child.
 
@@ -693,7 +843,8 @@ class GroupNorm(nn.GroupNorm):
                 channels=self.channels_in,
                 groups_per_token=self.num_groups / seq_len,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -724,21 +875,42 @@ def _normalization_cost(
     channels: int,
     groups_per_token: float,
     params: int,
-    num_tokens: int,
+    rows: float,
+    itemsize: int,
 ) -> Cost:
-    """Count two-pass centered variance and the saved-normalized-input derivative."""
+    """Count unfused centered statistics, scalar broadcasts, and affine maps."""
     sums = 2 * (channels - groups_per_token)
     return elementwise_cost(
         primal=5 * channels + 2 * groups_per_token + params - sums,
         adjoint=7 * channels + params - sums,
         channels=channels,
+        inputs=3,
+        outputs=3,
+        adjoint_inputs=7,
+        adjoint_outputs=5,
         params=params,
-        num_tokens=num_tokens,
-    ) + _reduction_cost(primal=sums, adjoint=sums)
-
-
-def _reduction_cost(*, primal: float, adjoint: float) -> Cost:
-    return Cost(
-        primal=Compute(flops=Flops(reduction=primal)),
-        adjoint=Compute(flops=Flops(reduction=adjoint)),
+        rows=rows,
+        itemsize=itemsize,
+    ) + Cost(
+        primal=Compute(
+            bytes=Bytes(elementwise=itemsize * (10 * groups_per_token + 2 * params)),
+        )
+        + 2
+        * reduction_cost(
+            input_elements=channels,
+            output_groups=groups_per_token,
+            itemsize=itemsize,
+        ),
+        adjoint=Compute(
+            bytes=Bytes(
+                elementwise=itemsize
+                * (7 * groups_per_token + 1.5 * params - params / (2 * rows)),
+            ),
+        )
+        + 2
+        * reduction_cost(
+            input_elements=channels,
+            output_groups=groups_per_token,
+            itemsize=itemsize,
+        ),
     )

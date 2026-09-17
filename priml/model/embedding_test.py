@@ -105,8 +105,11 @@ def test_embedding_cost_is_a_gather() -> None:
         num_tokens=3,
     )
     assert analytical == Cost(
-        primal=Compute(bytes=Bytes(selection=4)),
-        adjoint=Compute(flops=Flops(selection=4), bytes=Bytes(selection=4)),
+        primal=Compute(bytes=Bytes(selection=4 * (1 + 2 * 4))),
+        adjoint=Compute(
+            flops=Flops(selection=4),
+            bytes=Bytes(selection=4 * (1 + 3 * 4 + 32 / 3)),
+        ),
         params=32,
         params_active=4,
     )

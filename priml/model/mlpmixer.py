@@ -15,6 +15,7 @@ from priml.model.custom_types import (
     DepthIndex,
     HasDepthIndex,
     TensorModule,
+    infer_same_width,
     propagate_attr,
 )
 from priml.model.norm import RMSNorm
@@ -26,10 +27,10 @@ class MLPMixerBlock(nn.Module):
 
     class Config(Fig["MLPMixerBlock"], kw_only=False):
         channels_in: int = -1
-        """Number of input channels."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -56,15 +57,7 @@ class MLPMixerBlock(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for MLPMixerBlock.",
-                )
+            infer_same_width(self)
             # Token mixer operates on the seq_len dimension.
             propagate_attr(
                 self.token_mixer,
@@ -107,7 +100,13 @@ class MLPMixerBlock(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Sum the four children per token and two residual additions.
 
             The token mixer and its norm map rows of ``seq_len``, and there are
@@ -116,6 +115,8 @@ class MLPMixerBlock(nn.Module):
             Transposes are views.
 
             Args:
+              rows: Original token rows; transposed rows scale by width/length.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -125,14 +126,19 @@ class MLPMixerBlock(nn.Module):
             rows_per_token = self.channels_in / self.seq_len
             over_tokens = sum(
                 (
-                    cost(child, **kwargs)
+                    cost(
+                        child,
+                        rows=max(1, rows * rows_per_token),
+                        itemsize=itemsize,
+                        **kwargs,
+                    )
                     for child in (self.token_mixer, self.norm_token)
                 ),
                 Cost(),
             )
             over_channels = sum(
                 (
-                    cost(child, **kwargs)
+                    cost(child, rows=rows, itemsize=itemsize, **kwargs)
                     for child in (self.channel_mixer, self.norm_channel)
                 ),
                 Cost(),
@@ -140,6 +146,9 @@ class MLPMixerBlock(nn.Module):
             residual_adds = elementwise_cost(
                 primal=2 * self.channels_in,
                 adjoint=2 * self.channels_in,
+                channels=2 * self.channels_in,
+                inputs=2,
+                itemsize=itemsize,
             )
             return (
                 replace(
@@ -152,14 +161,6 @@ class MLPMixerBlock(nn.Module):
             )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for MLPMixerBlock.",
-            )
         super().__init__()
         self.prenorm = config.prenorm
         self.depth_index = config.depth_index

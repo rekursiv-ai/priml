@@ -40,8 +40,10 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
     Args:
       config: Finalized on a copy; the caller's is untouched.
       build_input: Produces the forward input, a tensor or a tuple of them.
-      num_tokens: Rows the input holds; also passed to ``cost``.
-      bus: Extra messages ``cost`` needs (``seq_len`` for attention).
+      num_tokens: Tokens the input holds; divides torch's total. Also the
+        default ``rows`` on the bus, for a leaf priced outside any root.
+      bus: Messages ``cost`` needs: ``seq_len``/``batch_size`` for a root or
+        an attention, ``image_size`` for a vision model, and so on.
       run: Applies the module to the built input; defaults to
         ``module(*inputs)``. Must return a tensor to reduce for backward.
       expected_ratio: ``analytical / measured`` to hold; ``1.0`` is exact.
@@ -55,7 +57,7 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
 
     """
     finalized = config.copy_tree().finalize()
-    analytical = cost(finalized, num_tokens=num_tokens, **(bus or {}))
+    analytical = cost(finalized, **{"rows": num_tokens, **(bus or {})})
 
     torch.manual_seed(seed)
     module = finalized.make()

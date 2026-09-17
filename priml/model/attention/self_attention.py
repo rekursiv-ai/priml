@@ -23,6 +23,7 @@ from priml.model.custom_types import (
     HasResetParameters,
     RotaryFactors,
     TensorModule,
+    infer_same_width,
 )
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.linear import EnsembleLinear, Linear
@@ -42,10 +43,10 @@ class AttentionProjections(nn.Module):
         """
 
         channels_in: int = -1
-        """Model width (-1 to infer from num_heads * channels_head)."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -108,8 +109,6 @@ class AttentionProjections(nn.Module):
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
             )
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.num_heads
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
@@ -119,9 +118,17 @@ class AttentionProjections(nn.Module):
                 and self.norm_out.channels_in == -1
             ):
                 self.norm_out.channels_in = self.num_heads * self.channels_head
+            infer_same_width(self)
             return super().finalize()
 
-        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price the projections, norms, and rotary; no kernel here.
 
             ``seq_len`` is named though unread: it is the message every
@@ -130,7 +137,8 @@ class AttentionProjections(nn.Module):
 
             Args:
               seq_len: Keys a query reaches before any window.
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -139,36 +147,65 @@ class AttentionProjections(nn.Module):
             """
             del seq_len
             inner = self.num_heads * self.channels_head
-            qkv = (self.num_heads + 2 * self.num_heads_kv) * matmul_cost(
-                channels_in=self.channels_in,
-                channels_out=self.channels_head,
-                bias=self.bias,
-                num_tokens=num_tokens,
+            projection_heads = (
+                (self.num_heads, self.num_heads_kv, self.num_heads_kv)
+                if self.split_qkv_projection
+                else (self.num_heads + 2 * self.num_heads_kv,)
+            )
+            qkv = sum(
+                (
+                    matmul_cost(
+                        channels_in=self.channels_in,
+                        channels_out=heads * self.channels_head,
+                        bias=self.bias,
+                        itemsize=itemsize,
+                        rows=rows,
+                    )
+                    for heads in projection_heads
+                ),
+                Cost(),
             )
             out = matmul_cost(
                 channels_in=inner,
                 channels_out=self.channels_in,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                itemsize=itemsize,
+                rows=rows,
             )
             total = qkv + out
             if self.norm_qk is not None:
-                # One norm config prices one head row; it runs on every q and k
-                # head, while its parameters exist once (shared) or twice.
-                head_rows = self.num_heads + self.num_heads_kv
-                total += cost(
-                    self.norm_qk,
-                    num_tokens=num_tokens * head_rows,
-                    **kwargs,
-                ).tile(head_rows, copies=1 if self.share_qk_norm else 2)
+                groups = (
+                    (self.num_heads + self.num_heads_kv,)
+                    if self.share_qk_norm
+                    else (self.num_heads, self.num_heads_kv)
+                )
+                for head_rows in groups:
+                    total += cost(
+                        self.norm_qk,
+                        itemsize=itemsize,
+                        rows=rows * head_rows,
+                        **kwargs,
+                    ).tile(head_rows)
             if self.norm_out is not None:
-                total += cost(self.norm_out, num_tokens=num_tokens, **kwargs)
+                total += cost(
+                    self.norm_out,
+                    itemsize=itemsize,
+                    rows=rows,
+                    **kwargs,
+                )
             if self.rope is not None:
-                total += cost(self.rope, num_tokens=num_tokens, **kwargs)
+                total += cost(
+                    self.rope,
+                    itemsize=itemsize,
+                    rows=rows,
+                    **kwargs,
+                )
                 total += rotation_cost(
                     self.rope,
                     channels_head=self.channels_head,
                     heads=self.num_heads + self.num_heads_kv,
+                    rows=rows,
+                    itemsize=itemsize,
                 )
             return total
 
@@ -178,14 +215,6 @@ class AttentionProjections(nn.Module):
             num_heads=config.num_heads,
             channels_head=config.channels_head,
         )
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         if config.num_heads % config.num_heads_kv != 0:
             raise ValueError(
@@ -352,12 +381,20 @@ class SelfAttention(AttentionProjections):
         """Attention kernel shared by all heads."""
 
         @override
-        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Add the kernel's products and the per-token KV cache.
 
             Args:
               seq_len: Keys a query reaches before any window.
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -369,12 +406,19 @@ class SelfAttention(AttentionProjections):
                 seq_len=seq_len,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
-                num_tokens=num_tokens,
+                itemsize=itemsize,
+                rows=rows,
                 **kwargs,
             )
             return replace(
-                super().cost(seq_len=seq_len, num_tokens=num_tokens, **kwargs) + kernel,
-                bytes_state=2 * self.num_heads_kv * self.channels_head,
+                super().cost(
+                    seq_len=seq_len,
+                    itemsize=itemsize,
+                    rows=rows,
+                    **kwargs,
+                )
+                + kernel,
+                bytes_state=itemsize * 2 * self.num_heads_kv * self.channels_head,
             )
 
     def __init__(self, config: Config) -> None:

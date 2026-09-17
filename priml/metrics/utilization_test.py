@@ -80,6 +80,26 @@ def test_utilization_is_a_metric() -> None:
     assert isinstance(Utilization(Utilization.Config()), MetricProtocol)
 
 
+def test_utilization_requires_completed_device_work() -> None:
+    meter = Utilization(Utilization.Config())
+    assert meter.requires_device_timing
+
+
+@pytest.mark.parametrize("peak", [0.0, -1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("vector", [False, True])
+def test_utilization_rejects_nonpositive_or_nonfinite_peaks(
+    peak: float,
+    vector: bool,
+) -> None:
+    config = Utilization.Config()
+    if vector:
+        config.peak_vector_flops_per_sec = peak
+    else:
+        config.peak_flops_per_sec = peak
+    with pytest.raises(ValueError, match="positive and finite"):
+        Utilization(config)
+
+
 def test_built_alone_it_is_unbound() -> None:
     """A bare ``make`` binds against the metric itself, which holds no model."""
     with pytest.raises(TypeError, match=r"step\.config\.model"):
@@ -153,17 +173,63 @@ def test_compute_without_an_update_is_empty() -> None:
     assert meter.compute() == {}
 
 
-def test_cost_is_priced_once_per_sequence_length() -> None:
+def test_cost_is_priced_once_per_sequence_length_and_token_count() -> None:
     priced = _Counted.Config()
     meter = Utilization(Utilization.Config())
     meter.bind(_root(priced))
 
     meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
-    meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
     assert priced.calls == 1
-
-    meter.update(torch.empty(0), input_ids=torch.zeros(1, 16), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
     assert priced.calls == 2
+    meter.update(torch.empty(0), input_ids=torch.zeros(1, 16), step_sec=1.0)
+    assert priced.calls == 3
+
+
+def test_update_prices_the_batch_by_its_shape_not_by_rows() -> None:
+    """The metric states ``seq_len`` and ``batch_size``; ``cost`` derives the rows."""
+    seen: list[dict[str, object]] = []
+
+    class _Spy:
+        class Config(Fig["_Spy"]):
+            def cost(self, **kwargs: object) -> Cost:
+                seen.append(kwargs)
+                return Cost()
+
+        def __init__(self, config: Config) -> None:
+            del config
+
+    meter = Utilization(Utilization.Config())
+    meter.bind(_root(_Spy.Config()))
+    meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
+    assert seen == [{"seq_len": 8, "batch_size": 3, "rows": 24}]
+
+
+def test_parameter_reductions_use_each_updates_actual_token_count() -> None:
+    model = Linear.Config()
+    model.channels_in = 2
+    model.channels_out = 3
+    model.bias = True
+    config = Utilization.Config()
+    config.peak_vector_flops_per_sec = 1_000
+    meter = Utilization(config)
+    meter.bind(_root(model.finalize()))
+
+    meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
+
+    assert meter.compute()["utilization_reduction"] == 3 * (7 + 23) / 2 / 1_000
+
+
+def test_bind_rejects_evaluation_placement() -> None:
+    meter = Utilization(Utilization.Config())
+    root = SimpleNamespace(
+        step=SimpleNamespace(config=SimpleNamespace(model=_Counted.Config())),
+        metrics_eval={"utilization": meter},
+    )
+    with pytest.raises(ValueError, match=r"metrics_train.*metrics_eval"):
+        meter.bind(root)
 
 
 def test_bind_rejects_a_model_config_without_cost() -> None:

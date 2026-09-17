@@ -8,7 +8,7 @@ CPU fallback. Plugs into ``TransformerBlock.Config(attn=...)`` as a
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field, replace
+from dataclasses import KW_ONLY, field
 from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig, Makeable
@@ -19,14 +19,18 @@ import torch
 
 from priml.math.basic import ceil_multiple
 from priml.model.cost import (
-    Compute,
     Cost,
-    Flops,
     cost,
     elementwise_cost,
     matmul_cost,
+    reduction_cost,
 )
-from priml.model.custom_types import ChannelsIn, DepthIndex, TensorModule
+from priml.model.custom_types import (
+    ChannelsIn,
+    DepthIndex,
+    TensorModule,
+    infer_same_width,
+)
 from priml.model.init import InitFn, call_init, kaiming_uniform
 from priml.model.legacy_keys import absorb_legacy_keys
 from priml.model.linear import Linear
@@ -56,10 +60,10 @@ class GatedDeltaNet(nn.Module):
 
     class Config(Fig["GatedDeltaNet"], kw_only=False):
         channels_in: int = -1
-        """Model width read from the residual stream."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -95,15 +99,18 @@ class GatedDeltaNet(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
+            infer_same_width(self)
             if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
                 self.norm.channels_in = self.channels_v_head
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price the projections, the depthwise conv, and the recurrent scan.
 
             Matrix scan counts retain the recurrent-model proxy of two MACs
@@ -112,10 +119,14 @@ class GatedDeltaNet(nn.Module):
             with its analytical derivative. Chunking, triangular solves and
             padding change executed work and are not represented by this model.
             Nonlinearities and q/k normalization are included separately.
+            Scalar scan I/O uses two binary-map passes over the state, values
+            and two key rows, with a three-output VJP over that working set.
+            This is the same recurrent proxy, not executed chunk-kernel traffic.
             ``bytes_state`` is zero: no cache grows with token count.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -126,12 +137,23 @@ class GatedDeltaNet(nn.Module):
             k_dim = self.num_heads_k * self.channels_k_head
             v_dim = self.num_heads_v * self.channels_v_head
             conv_dim = 2 * k_dim + v_dim
-            projections = (
-                matmul_cost(channels_in=h, channels_out=conv_dim, bias=False)
-                + matmul_cost(channels_in=h, channels_out=v_dim, bias=False)
-                + 2
-                * matmul_cost(channels_in=h, channels_out=self.num_heads_v, bias=False)
-                + matmul_cost(channels_in=v_dim, channels_out=h, bias=False)
+            projections = sum(
+                (
+                    matmul_cost(
+                        channels_in=c_in,
+                        channels_out=c_out,
+                        rows=rows,
+                        itemsize=itemsize,
+                    )
+                    for c_in, c_out in (
+                        (h, conv_dim),
+                        (h, v_dim),
+                        (h, self.num_heads_v),
+                        (h, self.num_heads_v),
+                        (v_dim, h),
+                    )
+                ),
+                Cost(),
             )
             # Depthwise: each channel is its own ``[taps] -> [1]`` map, followed
             # by a SiLU.
@@ -139,31 +161,42 @@ class GatedDeltaNet(nn.Module):
                 channels_in=self.conv_kernel_size,
                 channels_out=1,
                 bias=False,
-            ) + elementwise_cost(primal=5 * conv_dim, adjoint=5 * conv_dim)
+                rows=rows,
+                itemsize=itemsize,
+            ) + elementwise_cost(
+                primal=5 * conv_dim,
+                adjoint=5 * conv_dim,
+                channels=conv_dim,
+                rows=rows,
+                itemsize=itemsize,
+            )
             # The recurrence: per value head, ``k^T v`` writes the state and
             # ``S q`` reads it -- two activation products of ``k_head x v_head``
             # per token. That is the recurrent-model proxy; the chunked kernel
-            # executes a different (larger) product count. The state written is
-            # scratch, not an output row; the read produces the head row.
+            # executes a different (larger) product count. Logical state I/O is
+            # counted even when the implementation keeps the state on chip.
             state_write = matmul_cost(
                 channels_in=self.channels_k_head,
                 channels_out=self.channels_v_head,
                 weight=False,
-            )
-            state_write = replace(
-                state_write,
-                primal=Compute(flops=state_write.primal.flops),
-                adjoint=Compute(flops=state_write.adjoint.flops),
+                rows=1,
+                itemsize=itemsize,
             )
             state_read = matmul_cost(
                 channels_in=self.channels_k_head,
                 channels_out=self.channels_v_head,
                 weight=False,
+                rows=1,
+                itemsize=itemsize,
             )
             # Decay, delta, and weighted update over the state; the q/k L2 norms
-            # reduce each key row once each way.
+            # each reduce their own row once in both primal and adjoint.
             state = self.num_heads_v * self.channels_k_head * self.channels_v_head
-            norms = self.num_heads_v * (self.channels_k_head - 1)
+            norms = 2 * reduction_cost(
+                input_elements=self.num_heads_v * self.channels_k_head,
+                output_groups=self.num_heads_v,
+                itemsize=itemsize,
+            )
             scan = (
                 self.num_heads_v * (state_write + state_read)
                 + elementwise_cost(
@@ -173,38 +206,70 @@ class GatedDeltaNet(nn.Module):
                     adjoint=4 * state
                     + 4 * v_dim
                     + self.num_heads_v * (10 * self.channels_k_head + 7),
+                    channels=state
+                    + v_dim
+                    + 2 * self.num_heads_v * self.channels_k_head,
+                    inputs=4,
+                    outputs=2,
+                    adjoint_inputs=7,
+                    adjoint_outputs=3,
+                    rows=rows,
+                    itemsize=itemsize,
                 )
                 + Cost(
-                    primal=Compute(flops=Flops(reduction=norms)),
-                    adjoint=Compute(flops=Flops(reduction=norms)),
+                    primal=norms,
+                    adjoint=norms,
                 )
             )
             # ``dt_bias`` and ``A_log``: one gate parameter per value head each.
             # ``A_log`` is exponentiated once per batch, so that is shared.
             gates = elementwise_cost(
-                primal=(9 + 2 / num_tokens) * self.num_heads_v + 6 * v_dim,
-                adjoint=9 * self.num_heads_v + 7 * v_dim,
+                primal=(9 + 2 / rows) * self.num_heads_v,
+                adjoint=9 * self.num_heads_v,
                 channels=self.num_heads_v,
+                inputs=4,
+                outputs=2,
+                adjoint_inputs=6,
+                adjoint_outputs=3,
                 params=2 * self.num_heads_v,
-                num_tokens=num_tokens,
+                itemsize=itemsize,
+                rows=rows,
             )
             # The norm runs once per value head; its parameters exist once.
             norm = cost(
                 self.norm,
-                num_tokens=num_tokens * self.num_heads_v,
+                itemsize=itemsize,
+                rows=rows * self.num_heads_v,
                 **kwargs,
             ).tile(self.num_heads_v)
-            return projections + conv + scan + gates + norm
+            return (
+                projections
+                + conv
+                + scan
+                + gates
+                + norm
+                + self._output_gate_cost(
+                    rows=rows,
+                    itemsize=itemsize,
+                )
+            )
+
+        def _output_gate_cost(self, *, rows: int, itemsize: int) -> Cost:
+            """Price the separate post-norm SiLU and product."""
+            width = self.num_heads_v * self.channels_v_head
+            return elementwise_cost(
+                primal=6 * width,
+                adjoint=7 * width,
+                channels=width,
+                inputs=3,
+                outputs=2,
+                adjoint_inputs=6,
+                adjoint_outputs=3,
+                rows=rows,
+                itemsize=itemsize,
+            )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         # Every count, not just num_heads_k: a zero elsewhere builds a zero-width
         # Linear or a negative Conv padding and fails inside torch, naming a

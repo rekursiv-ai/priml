@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import Protocol, Self, cast, override
+from typing import Self, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -14,6 +14,7 @@ from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.model.custom_types import (
+    CachedAttention,
     ChannelsHead,
     ChannelsIn,
     ChannelsOut,
@@ -21,34 +22,10 @@ from priml.model.custom_types import (
     HasDepthIndex,
     NumHeads,
     TensorModule,
+    infer_same_width,
     propagate_attr,
 )
 from priml.model.linear import Linear
-
-
-class CachedAttention(Protocol):
-    """An attention module with an explicit cached path."""
-
-    def alloc_kv_cache(
-        self,
-        *,
-        batch: int | tuple[int, ...],
-        max_seq: int,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> KVCache:
-        """Alloc kv cache."""
-        ...
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: KVCache,
-        **kwargs: object,
-    ) -> tuple[Tensor, KVCache]:
-        """Forward cached."""
-        ...
 
 
 class OutputGate(nn.Module):
@@ -60,10 +37,10 @@ class OutputGate(nn.Module):
 
     class Config(Fig["OutputGate"], kw_only=False):
         channels_in: int = -1
-        """Model width for the gate projection."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -90,10 +67,7 @@ class OutputGate(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
+            infer_same_width(self)
             propagate_attr(
                 self.inner,
                 "channels_in",
@@ -103,7 +77,7 @@ class OutputGate(nn.Module):
             propagate_attr(
                 self.inner,
                 "channels_out",
-                self.channels_out,
+                self.channels_in,
                 protocol=ChannelsOut,
             )
             propagate_attr(
@@ -114,11 +88,18 @@ class OutputGate(nn.Module):
             )
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count projection, sigmoid, product and the two-path input gradient.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -126,28 +107,28 @@ class OutputGate(nn.Module):
 
             """
             return (
-                cost(self.inner, num_tokens=num_tokens, **kwargs)
+                cost(self.inner, itemsize=itemsize, rows=rows, **kwargs)
                 + matmul_cost(
                     channels_in=self.channels_in,
                     channels_out=self.channels_in,
                     bias=self.bias,
-                    num_tokens=num_tokens,
+                    itemsize=itemsize,
+                    rows=rows,
                 )
                 + elementwise_cost(
                     primal=5 * self.channels_in,
                     adjoint=6 * self.channels_in,
+                    channels=self.channels_in,
+                    inputs=4,
+                    outputs=1,
+                    adjoint_inputs=9,
+                    adjoint_outputs=3,
+                    rows=rows,
+                    itemsize=itemsize,
                 )
             )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         self.inner = config.inner.make()
         self.gate_proj = Linear.Config(
@@ -182,7 +163,7 @@ class OutputGate(nn.Module):
           cache: Empty KV cache ready for generation.
 
         """
-        inner = cast(CachedAttention, self.inner)
+        inner = cast(CachedAttention[KVCache], self.inner)
         return inner.alloc_kv_cache(
             batch=batch,
             max_seq=max_seq,
@@ -218,6 +199,6 @@ class OutputGate(nn.Module):
 
         """
         gate = torch.sigmoid(self.gate_proj(x))
-        inner = cast(CachedAttention, self.inner)
+        inner = cast(CachedAttention[KVCache], self.inner)
         out, updated = inner.forward_cached(x, cache=cache, **kwargs)
         return out * gate, updated

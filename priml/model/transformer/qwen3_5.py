@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import field
 from functools import partial
 from pathlib import Path
-from typing import Literal, Self, TypeGuard, cast, override
+from typing import Literal, Self, cast, override
 
 import math
 
@@ -28,14 +28,19 @@ from priml.lib.custom_json import (
 from priml.model.attention.gated_self_attention import GatedSelfAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE
-from priml.model.custom_types import ChannelsIn, TensorModule, propagate_attr
+from priml.model.custom_types import (
+    ChannelsIn,
+    TensorModule,
+    has_forward_cached,
+    is_cached_attention,
+    propagate_attr,
+)
 from priml.model.embedding import Embedding
-from priml.model.generate import AttentionLike
 from priml.model.linear import Linear
 from priml.model.norm import CenteredRMSNorm
 from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
-from priml.model.transformer.block import CachedAttention, TransformerBlock
+from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
 from priml.model.transformer.transformer import Transformer
 
@@ -267,7 +272,7 @@ class Qwen35(Transformer):
             if cache is None:
                 x = cast(Tensor, block(x, **block_kwargs))
             else:
-                if not _has_cached_forward(block):
+                if not has_forward_cached(block):
                     raise TypeError(
                         "Cached decoding requires blocks with a forward_cached method.",
                     )
@@ -325,7 +330,7 @@ class Qwen35(Transformer):
                 raise TypeError(
                     "Cached decoding requires blocks with an attn submodule.",
                 ) from error
-            if not isinstance(attention, AttentionLike):
+            if not is_cached_attention(attention):
                 raise TypeError(
                     "Cached decoding requires attention with an alloc_kv_cache method.",
                 )
@@ -505,8 +510,3 @@ def _full_attention_mask(attention_mask: Tensor | None, *, x: Tensor) -> Tensor 
         fill,
         0,
     )
-
-
-def _has_cached_forward(block: nn.Module) -> TypeGuard[CachedAttention[object]]:
-    """Return whether a block exposes the existing cached-forward contract."""
-    return isinstance(block, CachedAttention)

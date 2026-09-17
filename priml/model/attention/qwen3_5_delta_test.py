@@ -8,11 +8,12 @@ from torch import nn
 import pytest
 import torch
 
+from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.qwen3_5_delta import (
     Qwen35GatedDeltaNet,
     Qwen35RMSNormGated,
 )
-from priml.model.norm import CenteredRMSNorm
+from priml.model.norm import CenteredRMSNorm, RMSNorm
 from priml.testing.bfb import portable_half_precision
 from priml.testing.cost import assert_cost_matches_torch
 from priml.testing.qwen3_5 import hf_tensor, torch_reference
@@ -316,6 +317,39 @@ def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
     assert model_cost.adjoint.flops.elementwise == 13 * 8 + 4
     assert model_cost.primal.flops.reduction == 8 - 1
     assert model_cost.adjoint.flops.reduction == (8 - 1) + 8 * (3 - 1) / 3
+
+
+def test_delta_norm_traffic_counts_row_reductions() -> None:
+    config = Qwen35RMSNormGated.Config()
+    config.channels_in = 8
+    small = config.cost(rows=4, itemsize=2)
+    large = config.cost(rows=4, itemsize=4)
+    assert small.primal.bytes.reduction == 2 * (8 + 1)
+    assert small.adjoint.bytes.reduction == 2 * (8 + 1 + 8 + 8 / 4)
+    assert large.training.bytes == small.training.bytes * 2
+    norm = RMSNorm.Config(8)
+    norm.elementwise_affine = True
+    base = norm.cost(rows=4, itemsize=2)
+    assert small.primal.bytes.elementwise - base.primal.bytes.elementwise == 2 * 5 * 8
+    assert small.adjoint.bytes.elementwise - base.adjoint.bytes.elementwise == 2 * 9 * 8
+
+
+def test_qwen_delta_cost_does_not_repeat_the_norm_owned_output_gate() -> None:
+    config = Qwen35GatedDeltaNet.Config()
+    config.channels_in = 8
+    config.num_heads_k = 1
+    config.num_heads_v = 2
+    config.channels_k_head = 4
+    config.channels_v_head = 3
+    parent = GatedDeltaNet.Config().update(config, skip_missing=True)
+    reference = parent.copy_tree().finalize().cost(rows=4, itemsize=2)
+    actual = config.copy_tree().finalize().cost(rows=4, itemsize=2)
+    assert reference.primal.flops.elementwise - actual.primal.flops.elementwise == 6 * 6
+    assert (
+        reference.adjoint.flops.elementwise - actual.adjoint.flops.elementwise == 7 * 6
+    )
+    assert reference.params == actual.params
+    assert reference.training.flops.matmul == actual.training.flops.matmul
 
 
 def _is_tensor_cache(value: object) -> TypeGuard[dict[str, torch.Tensor]]:

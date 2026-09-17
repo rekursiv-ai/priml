@@ -70,7 +70,7 @@ from priml.model.attention.kernel import SdpaFused, SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import Compute, Cost, cost
+from priml.model.cost import Bytes, Compute, Cost, cost
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -82,6 +82,7 @@ from priml.model.custom_types import (
     RotaryFactors,
     TensorModule,
     WeightedTensorModule,
+    infer_same_width,
 )
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.legacy_keys import absorb_legacy_keys
@@ -142,20 +143,21 @@ class LatentAttention(nn.Module):
             channels_v_head: int,
             kv_lora_rank: int,
             channels_qk_rope_head: int,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Price the kernel's two products at the widths this form hands it.
 
             Absorbed, K is the latent plus the rope key and V the latent alone;
             re-expanded, they are the per-head Q/K width and ``channels_v_head``.
-            The latent projections are not priced here: folded into the query or
-            applied to the key, ``W_KR``/``W_UV`` are one matmul per token either
-            way, and the owner prices that matmul as ``proj_kv_b``.
+            The owner prices projection FLOPs and weights as ``proj_kv_b``.
+            Absorption additionally moves two per-head latent rows where that
+            dense projection moves one shared row; charge that operand delta
+            here because this config owns the association choice.
 
-            The kernel prices both products at ONE width, ``4 * heads * keys *
-            width``, so it is handed the two widths' sum and the result halved:
-            ``2 * heads * keys * (channels_k + channels_v)``, which is ``QK^T`` at
-            the key width plus ``PV`` at the value width, exactly.
+            The kernel receives separate query/key and value widths so each
+            product's operands are priced directly, without scaling unrelated
+            score or softmax traffic.
 
             Args:
               seq_len: Keys a query reaches before any window.
@@ -164,6 +166,7 @@ class LatentAttention(nn.Module):
               channels_v_head: Width of each value head.
               kv_lora_rank: Width of the shared KV latent.
               channels_qk_rope_head: Width of the rotated key slice.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -175,18 +178,19 @@ class LatentAttention(nn.Module):
                 channels_v = kv_lora_rank
             else:
                 channels_k, channels_v = channels_head, channels_v_head
-            doubled = cost(
+            kernel = cost(
                 self.attn_kernel,
                 seq_len=seq_len,
                 num_heads=num_heads,
-                channels_head=channels_k + channels_v,
+                channels_head=channels_k,
+                channels_v_head=channels_v,
+                itemsize=itemsize,
                 **kwargs,
             )
-            written = num_heads * channels_v
-            return replace(
-                doubled,
-                primal=_halve_matmul(doubled.primal, written=written),
-                adjoint=_halve_matmul(doubled.adjoint, written=written),
+            moved = itemsize * (2 * num_heads - 1) * kv_lora_rank if self.absorb else 0
+            return kernel + Cost(
+                primal=Compute(bytes=Bytes(matmul=moved)),
+                adjoint=Compute(bytes=Bytes(matmul=2 * moved)),
             )
 
     def __init__(self, config: Config) -> None:
@@ -232,14 +236,6 @@ class LatentAttention(nn.Module):
         return torch.einsum("...shl,hvl->...shv", out, w_uv) if self.absorb else out
 
 
-def _halve_matmul(compute: Compute, *, written: int) -> Compute:
-    """Undo the doubled width's products; the row written is the value width."""
-    return Compute(
-        flops=replace(compute.flops, matmul=compute.flops.matmul / 2),
-        bytes=replace(compute.bytes, elementwise=written),
-    )
-
-
 def _broadcast_heads(x: Tensor, num_heads: int) -> Tensor:
     """View a head-shared tensor as per-head, without copying it."""
     return x.unsqueeze(-2).expand(*x.shape[:-1], num_heads, x.shape[-1])
@@ -250,10 +246,10 @@ class MultiHeadLatentAttention(nn.Module):
 
     class Config(Fig["MultiHeadLatentAttention"], kw_only=False):
         channels_in: int = -1
-        """Model width."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -380,10 +376,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
+            infer_same_width(self)
             if (
                 self.q_lora_rank is not None
                 and isinstance(self.norm_q_lora, ChannelsIn)
@@ -398,7 +391,15 @@ class MultiHeadLatentAttention(nn.Module):
             self._size_projections()
             return super().finalize()
 
-        def cost(self, *, seq_len: int, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            dropout_p: float | None = None,
+            **kwargs: object,
+        ) -> Cost:
             """Price the projections, norms, rotary, kernel, and the latent cache.
 
             ``bytes_state`` is what :meth:`alloc_kv_cache` stores per token: the
@@ -407,6 +408,9 @@ class MultiHeadLatentAttention(nn.Module):
 
             Args:
               seq_len: Keys a query reaches before any window.
+              rows: Rows sharing each parameter.
+              itemsize: Uniform bytes per tensor element.
+              dropout_p: Override configured training dropout when supplied.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -425,14 +429,27 @@ class MultiHeadLatentAttention(nn.Module):
                 self.proj_kv_b,
                 self.proj_out,
             )
-            total = sum((cost(child, **kwargs) for child in children), Cost())
+            total = sum(
+                (
+                    cost(child, rows=rows, itemsize=itemsize, **kwargs)
+                    for child in children
+                ),
+                Cost(),
+            )
             if self.rope is not None:
-                total += cost(self.rope, **kwargs)
+                total += cost(
+                    self.rope,
+                    rows=rows,
+                    itemsize=itemsize,
+                    **kwargs,
+                )
                 # Every query head and the one shared key row are rotated.
                 total += rotation_cost(
                     self.rope,
                     channels_head=self.channels_qk_rope_head,
                     heads=self.num_heads + 1,
+                    rows=rows,
+                    itemsize=itemsize,
                 )
             total += cost(
                 self.attn_kernel,
@@ -442,11 +459,14 @@ class MultiHeadLatentAttention(nn.Module):
                 channels_v_head=self.channels_v_head,
                 kv_lora_rank=self.kv_lora_rank,
                 channels_qk_rope_head=self.channels_qk_rope_head,
+                dropout_p=self.dropout if dropout_p is None else dropout_p,
+                rows=rows,
+                itemsize=itemsize,
                 **kwargs,
             )
             return replace(
                 total,
-                bytes_state=self.kv_lora_rank + self.channels_qk_rope_head,
+                bytes_state=itemsize * (self.kv_lora_rank + self.channels_qk_rope_head),
             )
 
         # Every width here is DERIVED -- a head count times a per-head width, or a LoRA
@@ -496,14 +516,6 @@ class MultiHeadLatentAttention(nn.Module):
                         slot.depth_index = self.depth_index
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         if config.dropout < 0.0 or config.dropout > 1.0:
             raise ValueError(f"dropout must be between 0 and 1, got {config.dropout}.")

@@ -26,7 +26,7 @@ from priml.math.diffusion.target import (
     target_v_x,
     target_x,
 )
-from priml.model.cost import Compute, Cost, Flops, cost, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -376,10 +376,16 @@ def test_diffusion_loss_cost_default_prices_rectified_flow_per_element() -> None
         run=lambda module, x0: _loss(module, denoiser=denoiser, x0=x0),
     )
     per_sample = 1 + 8 + 8 + 4 + 8
-    expected = elementwise_cost(
-        primal=3 + 7 + 2 + per_sample / 48,
-        adjoint=2 + 1,
-    ) + Cost(primal=Compute(flops=Flops(reduction=(48 - 1) / 48)))
+    expected = Cost(
+        primal=Compute(
+            flops=Flops(elementwise=3 + 7 + 2 + per_sample / 48, reduction=47 / 48),
+            bytes=Bytes(elementwise=4 * (30 + 48 / 48), reduction=4 * 49 / 48),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=3),
+            bytes=Bytes(elementwise=28, reduction=4 * 49 / 48),
+        ),
+    )
     assert measured == expected
     assert measured.params == 0
     assert measured.training.flops.matmul == 0
@@ -403,8 +409,20 @@ def test_diffusion_loss_cost_prices_target_fn_by_identity(
 ) -> None:
     """Passthrough targets add no adjoint; ``v_x``/``v_eps`` scale the gradient once."""
     config = DiffusionLoss.Config(target_fn=target_fn)
-    baseline = cost(DiffusionLoss.Config(target_fn=target_x), num_tokens=48)
-    priced = cost(config, num_tokens=48)
+    baseline = cost(DiffusionLoss.Config(target_fn=target_x), rows=48)
+    priced = cost(config, rows=48)
+    operand_counts: dict[TargetFn, tuple[int, int]] = {
+        target_x: (7, 13),
+        target_eps: (7, 13),
+        target_rectified_flow: (17, 26),
+        target_v: (21, 32),
+        target_v_x: (14, 26),
+        target_v_eps: (14, 26),
+    }
+    vector_io, scalar_io = operand_counts[target_fn]
+    assert priced.primal.bytes.elementwise == 4 * (
+        13 + vector_io + (22 + scalar_io) / 48
+    )
     assert priced.primal.flops.elementwise == pytest.approx(
         baseline.primal.flops.elementwise + primal - 3,
     )
@@ -415,8 +433,8 @@ def test_diffusion_loss_cost_prices_target_fn_by_identity(
 
 def test_diffusion_loss_cost_spreads_snr_weight_and_time_transform() -> None:
     """Min-SNR weighting and a time transform are per-sample scalars, spread 1/n."""
-    plain = cost(DiffusionLoss.Config(), num_tokens=48)
-    weighted = cost(DiffusionLoss.Config(snr_gamma=5.0), num_tokens=48)
+    plain = cost(DiffusionLoss.Config(), rows=48)
+    weighted = cost(DiffusionLoss.Config(snr_gamma=5.0), rows=48)
     assert weighted.primal.flops.elementwise == pytest.approx(
         plain.primal.flops.elementwise + 5 / 48,
     )
@@ -425,7 +443,7 @@ def test_diffusion_loss_cost_spreads_snr_weight_and_time_transform() -> None:
     )
     transformed = cost(
         DiffusionLoss.Config(time_transform=log_time_from_log_snr_per_logit),
-        num_tokens=48,
+        rows=48,
     )
     assert transformed.primal.flops.elementwise == pytest.approx(
         plain.primal.flops.elementwise + 8 / 48,
@@ -446,7 +464,16 @@ def test_diffusion_loss_cost_rejects_unpriced_target_fn() -> None:
         return TargetResult(x_original, model, model, model)
 
     with pytest.raises(TypeError, match="target_custom"):
-        cost(DiffusionLoss.Config(target_fn=target_custom), num_tokens=48)
+        cost(DiffusionLoss.Config(target_fn=target_custom), rows=48)
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_diffusion_loss_operand_traffic(itemsize: int) -> None:
+    priced = cost(DiffusionLoss.Config(), rows=48, itemsize=itemsize)
+    assert priced.primal.bytes.elementwise == (30 + 48 / 48) * itemsize
+    assert priced.primal.bytes.reduction == 49 * itemsize / 48
+    assert priced.adjoint.bytes.elementwise == 7 * itemsize
+    assert priced.adjoint.bytes.reduction == 49 * itemsize / 48
 
 
 def _loss(

@@ -86,13 +86,13 @@ def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
         num_tokens=2,
     )
     finalized = config.copy_tree().finalize()
-    over_tokens = cost(finalized.token_mixer, num_tokens=2) + cost(
+    over_tokens = cost(finalized.token_mixer, rows=2) + cost(
         finalized.norm_token,
-        num_tokens=2,
+        rows=2,
     )
-    over_channels = cost(finalized.channel_mixer, num_tokens=2) + cost(
+    over_channels = cost(finalized.channel_mixer, rows=2) + cost(
         finalized.norm_channel,
-        num_tokens=2,
+        rows=2,
     )
     token = 2 * (2 * 3) + 3 * 2  # up_proj is twice the hidden width when gated.
     channel = 4 * (2 * 5) + 5 * 4
@@ -104,6 +104,32 @@ def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
         + 2 * 4
     )
     assert model_cost.params == token + channel + 2
+
+
+def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
+    config = MLPMixerBlock.Config()
+    config.channels_in = 4
+    config.seq_len = 2
+    config.norm_token = RMSNorm.Config()
+    config.norm_token.elementwise_affine = True
+    finalized = config.finalize()
+    result = finalized.cost(rows=6, itemsize=2)
+    token = cost(finalized.token_mixer, rows=12, itemsize=2)
+    channel = cost(finalized.channel_mixer, rows=6, itemsize=2)
+    assert (
+        result.primal.bytes.matmul
+        == 2 * token.primal.bytes.matmul + channel.primal.bytes.matmul
+    )
+    assert (
+        result.adjoint.bytes.matmul
+        == 2 * token.adjoint.bytes.matmul + channel.adjoint.bytes.matmul
+    )
+    norm_token = cost(finalized.norm_token, rows=12, itemsize=2)
+    norm_channel = cost(finalized.norm_channel, rows=6, itemsize=2)
+    assert (
+        result.adjoint.flops.reduction
+        == 2 * norm_token.adjoint.flops.reduction + norm_channel.adjoint.flops.reduction
+    )
 
 
 if __name__ == "__main__":

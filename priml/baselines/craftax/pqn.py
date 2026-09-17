@@ -69,7 +69,14 @@ class RecurrentQNetwork(nn.Module):
         channels_in: int = 512
         """Width of the encoder and of the recurrent state."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            batch_size: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one recurrent step of one worker.
 
             A token is one environment step: the observation and the previous
@@ -86,68 +93,108 @@ class RecurrentQNetwork(nn.Module):
             ``[width] -> [4 width]`` matmul, then per unit: four gates (an add
             and a sigmoid or tanh each), the cell update (two products, an
             add), and the output (a tanh, a product): thirteen operations.
-            The adjoint reuses the saved gates: twenty-two. The episode reset
-            is one product per carried unit each way.
+            The adjoint reuses the saved gates: twenty-two. Scalar-region I/O
+            reads eight projected gates and the cell, writing two states;
+            backward reads four gates, two cell values, and two gradients,
+            writing eight projected-gate gradients and the old-cell gradient.
+            The episode reset is one product per carried unit each way.
+
+            This is the model root: it states the batch geometry itself, so
+            a ``rows`` already on the bus is discarded and every parameter is
+            shared by ``batch_size * seq_len`` tokens.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
-              **kwargs: The open message bus, forwarded to every child.
+              seq_len: Steps per worker in one pass.
+              batch_size: Workers stepped together.
+              itemsize: Uniform bytes per tensor element.
+              **kwargs: The rest of the open message bus, forwarded to every
+                child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
+            kwargs.pop("rows", None)
+            rows = seq_len * batch_size
             width, actions = self.channels_in, self.num_actions
             normalize = cost(
                 _renorm_config(self.observation_size),
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
                 **kwargs,
             )
             encoder = matmul_cost(
                 channels_in=self.observation_size,
                 channels_out=width,
                 bias=True,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
             encoder_norm = cost(
                 LayerNorm.Config(width, elementwise_affine=True),
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
                 **kwargs,
-            ) + elementwise_cost(primal=width, adjoint=width)
-            one_hot = Cost(primal=Compute(bytes=Bytes(selection=actions)))
-            reset = elementwise_cost(primal=2 * width, adjoint=2 * width)
+            ) + elementwise_cost(
+                primal=width,
+                adjoint=width,
+                channels=width,
+                itemsize=itemsize,
+            )
+            one_hot = Cost(primal=Compute(bytes=Bytes(selection=itemsize * actions)))
+            concatenate = Cost(
+                primal=Compute(
+                    bytes=Bytes(elementwise=2 * itemsize * (width + actions)),
+                ),
+            )
+            reset = elementwise_cost(
+                primal=2 * width,
+                adjoint=2 * width,
+                channels=2 * width,
+                inputs=2,
+                itemsize=itemsize,
+            )
             gates = matmul_cost(
                 channels_in=width + actions,
                 channels_out=4 * width,
                 bias=True,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             ) + matmul_cost(
                 channels_in=width,
                 channels_out=4 * width,
                 bias=True,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
             cell = elementwise_cost(
                 primal=13 * width,
                 adjoint=22 * width,
-                channels=2 * width,
+                channels=width,
+                inputs=9,
+                outputs=2,
+                adjoint_inputs=8,
+                adjoint_outputs=9,
+                itemsize=itemsize,
             )
             head = matmul_cost(
                 channels_in=width,
                 channels_out=actions,
                 bias=True,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
             return replace(
                 normalize
                 + encoder
                 + encoder_norm
                 + one_hot
+                + concatenate
                 + reset
                 + gates
                 + cell
                 + head,
-                bytes_state=2 * width,
+                bytes_state=itemsize * 2 * width,
             )
 
     def __init__(self, config: Config) -> None:

@@ -336,6 +336,16 @@ class _CachedIdentityAttention(torch.nn.Module):
         del batch, max_seq, device, dtype
         return {}
 
+    def forward_cached(
+        self,
+        x: torch.Tensor,
+        *,
+        cache: object,
+        **kwargs: object,
+    ) -> tuple[torch.Tensor, object]:
+        del kwargs
+        return x, cache
+
 
 class _CachedIdentityBlock(torch.nn.Module):
     """A Configgle-injectable cached block preserving hidden states."""

@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from priml.model.cost import Bytes, Compute, Cost, Flops, cost
+from priml.model.custom_types import ChannelsInOut
 from priml.model.norm import (
     BatchNorm,
     BatchNorm2d,
@@ -23,7 +24,6 @@ from priml.model.norm import (
     GroupNorm2d,
     LayerNorm,
     RMSNorm,
-    SameWidthConfig,
 )
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -314,11 +314,14 @@ def test_an_invalid_setting_is_refused(field: str, value: float) -> None:
     ids=_config_id,
 )
 def test_norm_infers_the_missing_width_and_rejects_unequal_widths(
-    config: SameWidthConfig,
+    config: Fig[nn.Module],
 ) -> None:
     """One finalize serves every norm: either width fills the other, both must agree."""
+    assert isinstance(config, ChannelsInOut)
     config.channels_out = 8
-    assert config.copy_tree().finalize().channels_in == 8
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized, ChannelsInOut)
+    assert finalized.channels_in == 8
     config.channels_in = 4
     with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
         config.make()
@@ -543,14 +546,48 @@ def test_norm_cost_splits_elementwise_from_row_sums(
     expected pairs are ``(elementwise, reduction)``.
     """
     model_cost = cost(config.copy_tree().finalize())
+    traffic: dict[type[Makeable[nn.Module]], tuple[float, float, float]] = {
+        RMSNorm.Config: (4 * 8 + 7 + 3 * params, 10 * 8 + 12 + 6 * params, 9),
+        CenteredRMSNorm.Config: (9 * 8 + 7, 16 * 8 + 12, 9),
+        LayerNorm.Config: (6 * 8 + 10 + 3 * params, 12 * 8 + 7 + 3 * params, 18),
+        BatchNorm.Config: (
+            6 * 8 + 10 * 8 + 3 * params + 18 * 8,
+            12 * 8 + 7 * 8 + 3 * params,
+            32,
+        ),
+        BatchNorm2d.Config: (
+            6 * 8 + 10 * 8 + 3 * params + 18 * 8,
+            12 * 8 + 7 * 8 + 3 * params,
+            32,
+        ),
+        BatchRenorm.Config: (
+            6 * 8 + 10 * 8 + 3 * params + 46 * 8,
+            12 * 8 + 7 * 8 + 3 * params + 13 * 8,
+            32,
+        ),
+        GroupNorm.Config: (
+            6 * 8 + 10 * 8 + 3 * params,
+            12 * 8 + 7 * 8 + 3 * params,
+            32,
+        ),
+        GroupNorm2d.Config: (
+            6 * 8 + 10 * 8 + 3 * params,
+            12 * 8 + 7 * 8 + 3 * params,
+            32,
+        ),
+    }
+    primal_io, adjoint_io, reduction_io = traffic[type(config)]
     assert model_cost == Cost(
         primal=Compute(
             flops=Flops(elementwise=primal[0], reduction=primal[1]),
-            bytes=Bytes(elementwise=8 + params),
+            bytes=Bytes(elementwise=4 * primal_io, reduction=4 * reduction_io),
         ),
         adjoint=Compute(
             flops=Flops(elementwise=adjoint[0], reduction=adjoint[1]),
-            bytes=Bytes(elementwise=8 + params),
+            bytes=Bytes(
+                elementwise=4 * adjoint_io,
+                reduction=4 * (reduction_io + 2 * params),
+            ),
         ),
         params=params,
         params_active=params,
@@ -596,14 +633,14 @@ def test_norm_cost_is_matmul_free(
     ids=_config_id,
 )
 def test_affine_gradients_reduce_over_the_rows(config: Makeable[nn.Module]) -> None:
-    """Every owned parameter's gradient is summed over ``num_tokens`` rows.
+    """Every owned parameter's gradient is summed over ``rows`` rows.
 
     Forward work per row is unchanged (the ``1 + weight`` fold aside); backward
     gains exactly ``(N - 1) / N`` additions per parameter, the primitive's rule.
     """
     finalized = config.copy_tree().finalize()
-    one = cost(finalized, num_tokens=1)
-    four = cost(finalized, num_tokens=4)
+    one = cost(finalized, rows=1)
+    four = cost(finalized, rows=4)
     assert four.params == one.params > 0
     fold = one.primal.flops.elementwise - four.primal.flops.elementwise
     assert fold in (0, 8 * (1 - 1 / 4))
@@ -611,6 +648,24 @@ def test_affine_gradients_reduce_over_the_rows(config: Makeable[nn.Module]) -> N
     assert four.adjoint.flops.reduction - one.adjoint.flops.reduction == (
         one.params * 3 / 4
     )
+
+
+def test_affine_norm_pullback_reads_only_scale_not_shift() -> None:
+    config = LayerNorm.Config(8)
+    plain = config.cost(rows=4, itemsize=2)
+    config.elementwise_affine = True
+    affine = config.cost(rows=4, itemsize=2)
+    assert affine.adjoint.bytes.elementwise - plain.adjoint.bytes.elementwise == 2 * (
+        5 * 8 + 8 / 4
+    )
+
+
+def test_rms_norm_cost_counts_unfused_tensor_operands() -> None:
+    result = RMSNorm.Config(8).cost(itemsize=2)
+    # Square, three scalar transforms, then vector-by-scalar scaling.
+    assert result.primal.bytes.elementwise == 2 * (2 * 8 + 6 + 2 * 8 + 1)
+    assert result.primal.bytes.reduction == 2 * (8 + 1)
+    assert result.adjoint.bytes.reduction == 2 * (8 + 1)
 
 
 if __name__ == "__main__":

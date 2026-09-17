@@ -233,10 +233,17 @@ def test_linear_cost_is_the_matmul() -> None:
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
         num_tokens=2,
     )
-    assert analytical == matmul_cost(channels_in=4, channels_out=3, num_tokens=2)
+    assert analytical == matmul_cost(channels_in=4, channels_out=3, rows=2)
     assert analytical.primal.flops == Flops(matmul=2 * 4 * 3)
     assert analytical.adjoint.flops == Flops(matmul=4 * 4 * 3)
-    assert analytical.primal.bytes == Bytes(matmul=12, elementwise=3)
+    assert analytical.primal.bytes == Bytes(matmul=4 * (4 + 3 + 12 / 2))
+
+
+def test_linear_cost_counts_uniform_bytes() -> None:
+    config = Linear.Config(4, 3)
+    result = config.cost(rows=2, itemsize=2)
+    assert result.primal.bytes.matmul == 2 * (4 + 3 + 12 / 2)
+    assert result.adjoint.bytes.matmul == 4 * (4 + 3 + 12 / 2)
 
 
 def test_linear_cost_counts_bias_separately_from_matmuls() -> None:
@@ -245,9 +252,10 @@ def test_linear_cost_counts_bias_separately_from_matmuls() -> None:
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
         num_tokens=2,
     )
-    plain = Linear.Config(4, 3).copy_tree().finalize().cost(num_tokens=2)
+    plain = Linear.Config(4, 3).copy_tree().finalize().cost(rows=2)
     assert biased.params == plain.params + 3
-    assert biased.primal.bytes.matmul == plain.primal.bytes.matmul + 3
+    assert biased.primal.bytes.matmul == plain.primal.bytes.matmul
+    assert biased.primal.bytes.elementwise == 4 * (2 * 3 + 3 / 2)
     assert biased.training.flops.matmul == plain.training.flops.matmul
     assert biased.primal.flops.elementwise == 3
     assert biased.adjoint.flops.reduction == 3 * (2 - 1) / 2
@@ -260,8 +268,9 @@ def test_ensemble_linear_cost_is_every_member() -> None:
         num_tokens=2,
     )
     assert analytical.primal.flops.matmul == 2 * 4 * 3 * 5
+    assert analytical.primal.bytes.matmul == 4 * (4 + 3 * 5 + 4 * 3 * 5 / 2)
     assert analytical.adjoint.flops.matmul == 2 * analytical.primal.flops.matmul
-    assert analytical.primal.bytes.elementwise == 3 * 5
+    assert analytical.primal.bytes.elementwise == 4 * (2 * 3 + 3 / 2) * 5
 
 
 if __name__ == "__main__":

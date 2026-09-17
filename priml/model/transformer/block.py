@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import Protocol, Self, cast, override, runtime_checkable
+from typing import Self, cast, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -15,6 +15,7 @@ import torch
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.cost import Cost, cost, elementwise_cost
 from priml.model.custom_types import (
+    CachedAttention,
     ChannelsHead,
     ChannelsIn,
     ChannelsOut,
@@ -23,25 +24,11 @@ from priml.model.custom_types import (
     NumHeads,
     Shardable,
     TensorModule,
+    infer_same_width,
     propagate_attr,
 )
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
-
-
-@runtime_checkable
-class CachedAttention[CacheT](Protocol):
-    """An attention sublayer with an explicit cached path."""
-
-    def forward_cached(
-        self,
-        x: Tensor,
-        *,
-        cache: CacheT,
-        **kwargs: object,
-    ) -> tuple[Tensor, CacheT]:
-        """Forward cached."""
-        ...
 
 
 class TransformerBlock(nn.Module):
@@ -53,10 +40,10 @@ class TransformerBlock(nn.Module):
 
     class Config(Fig["TransformerBlock"], kw_only=False):
         channels_in: int = -1
-        """Number of input channels."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -95,10 +82,7 @@ class TransformerBlock(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
+            infer_same_width(self)
             c = self.channels_in
             for cfg in (self.attn, self.ffn, self.norm1, self.norm2):
                 if isinstance(cfg, ChannelsIn) and cfg.channels_in == -1:
@@ -123,10 +107,11 @@ class TransformerBlock(nn.Module):
                 self.ffn.shard = "colwise"
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Sum the four sublayers; ``checkpoint`` is recompute, not model work.
 
             Args:
+              itemsize: Bytes per tensor element in the analytical traffic model.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -136,24 +121,19 @@ class TransformerBlock(nn.Module):
             residual_adds = elementwise_cost(
                 primal=2 * self.channels_in,
                 adjoint=2 * self.channels_in,
+                channels=2 * self.channels_in,
+                inputs=2,
+                itemsize=itemsize,
             )
             return sum(
                 (
-                    cost(child, **kwargs)
+                    cost(child, itemsize=itemsize, **kwargs)
                     for child in (self.attn, self.ffn, self.norm1, self.norm2)
                 ),
                 residual_adds,
             )
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for TransformerBlock.",
-            )
         # A one-channel FFN would silently broadcast across the residual stream.
         if (
             isinstance(config.ffn, ChannelsOut)

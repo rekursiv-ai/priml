@@ -19,7 +19,7 @@ from torch.nn import functional
 
 import torch
 
-from priml.model.cost import Cost, cost, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, cost, elementwise_cost
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 
@@ -66,6 +66,60 @@ class NgramEmbedding(NarrowEmbedding):
                 context.channels_out = self.channels_out
                 context.dtype = self.dtype
             return super().finalize()
+
+        @override
+        def cost(
+            self,
+            *,
+            seq_len: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price every lookup, scalar scale, context add, and integer hash."""
+            total = super().cost(seq_len=seq_len, itemsize=itemsize, **kwargs)
+            width = self.channels_out
+            if self.scale != 1.0:
+                total += elementwise_cost(
+                    primal=width,
+                    adjoint=width,
+                    channels=width,
+                    adjoint_inputs=1,
+                    itemsize=itemsize,
+                )
+            for context in self.contexts.values():
+                total += cost(context, seq_len=seq_len, itemsize=itemsize, **kwargs)
+                total += elementwise_cost(
+                    primal=width,
+                    adjoint=0,
+                    channels=width,
+                    inputs=2,
+                    adjoint_inputs=0,
+                    adjoint_outputs=0,
+                    itemsize=itemsize,
+                )
+            if self.multipliers:
+                order = len(self.multipliers)
+                shifted = sum(2 + lag / seq_len for lag in range(1, order))
+                prefix = min(order - 1, seq_len)
+                total += Cost(
+                    primal=Compute(
+                        bytes=Bytes(
+                            selection=itemsize
+                            * (shifted + 2 * width + prefix * width / seq_len),
+                        ),
+                    ),
+                )
+                total += elementwise_cost(
+                    primal=2 * order,
+                    adjoint=0,
+                    channels=1,
+                    inputs=order + 2 * (order - 1) + 1,
+                    outputs=2 * order,
+                    adjoint_inputs=0,
+                    adjoint_outputs=0,
+                    itemsize=itemsize,
+                )
+            return total
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -151,7 +205,7 @@ class HashedNgramTables(nn.Module):
             self.table.init_weight = partial(nn.init.uniform_, a=-bound, b=bound)
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price one gather per table plus the integer hash that indexes it.
 
             Each hash is ``order - 1`` multiply-XOR pairs and one multiply, then
@@ -160,6 +214,7 @@ class HashedNgramTables(nn.Module):
             themselves are the template's gather, once per hash.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -168,9 +223,31 @@ class HashedNgramTables(nn.Module):
             """
             order = len(self.hash_multipliers[0])
             hashes = len(self.hash_multipliers)
-            return hashes * cost(self.table, **kwargs) + elementwise_cost(
-                primal=2 * order * hashes,
-                adjoint=0,
+            copies = Cost(
+                primal=Compute(
+                    bytes=Bytes(
+                        selection=itemsize * (2 * self.channels_out + 2 * (order - 1)),
+                    ),
+                ),
+            )
+            return (
+                copies
+                + hashes
+                * cost(
+                    self.table,
+                    itemsize=itemsize,
+                    **kwargs,
+                )
+                + elementwise_cost(
+                    primal=2 * order * hashes,
+                    adjoint=0,
+                    channels=hashes,
+                    inputs=order + 2 * (order - 1) + 1,
+                    outputs=order + (order - 1) + 1,
+                    adjoint_inputs=0,
+                    adjoint_outputs=0,
+                    itemsize=itemsize,
+                )
             )
 
     def __init__(self, config: Config) -> None:

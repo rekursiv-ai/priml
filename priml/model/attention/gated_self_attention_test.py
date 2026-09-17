@@ -457,13 +457,13 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     assert model_cost.adjoint.flops.matmul == (
         4 * projections + kernel.adjoint.flops.matmul
     )
-    assert model_cost.bytes_state == 2 * 1 * 8
+    assert model_cost.bytes_state == 4 * 2 * 1 * 8
     assert finalized.rope is not None
     scalar = (
         kernel
-        + cost(finalized.norm_qk, num_tokens=8 * 2).tile(2)
-        + cost(finalized.norm_qk, num_tokens=8 * 1).tile(1)
-        + cost(finalized.rope, num_tokens=8)
+        + cost(finalized.norm_qk, rows=8 * 2).tile(2)
+        + cost(finalized.norm_qk, rows=8 * 1).tile(1)
+        + cost(finalized.rope, rows=8)
         + rotation_cost(finalized.rope, channels_head=8, heads=3)
     )
     assert model_cost.primal.flops.elementwise == (
@@ -488,14 +488,18 @@ def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
     assert wet.training.flops.matmul == dry.training.flops.matmul
 
 
-def test_gated_attention_cost_requires_seq_len() -> None:
+def test_gated_attention_traffic_propagates_itemsize() -> None:
     config = GatedSelfAttention.Config()
-    config.channels_in = 16
+    config.channels_in = 8
     config.num_heads = 2
     config.num_heads_kv = 1
-    config.channels_head = 8
-    with pytest.raises(TypeError, match="seq_len"):
-        cost(config.copy_tree().finalize())
+    config.channels_head = 4
+    config.rope = RoPE.Config(2)
+    config = config.copy_tree().finalize()
+    small = config.cost(seq_len=8, rows=8, itemsize=2)
+    large = config.cost(seq_len=8, rows=8, itemsize=4)
+    assert large.training.bytes == small.training.bytes * 2
+    assert small.bytes_state == 2 * 2 * 1 * 4
 
 
 if __name__ == "__main__":

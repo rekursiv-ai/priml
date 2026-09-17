@@ -11,7 +11,7 @@ from configgle import Fig
 from torch import Tensor, nn
 
 from priml.math.pixel import patchify, unpatchify
-from priml.model.cost import Cost
+from priml.model.cost import Bytes, Compute, Cost
 
 
 class Patchify(nn.Module):
@@ -56,10 +56,14 @@ class Patchify(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
-            """Price nothing: a reshape owns no weights and multiplies nothing.
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+            """Price one materialized payload permutation per patch, without FLOPs.
+
+            The geometry is patch positions in both directions. Nontrivial
+            patches assume a copy; degenerate spatial shapes may permit views.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -67,7 +71,13 @@ class Patchify(nn.Module):
 
             """
             del kwargs
-            return Cost()
+            if math.prod(self.patch_size) == 1:
+                return Cost()
+            moved = itemsize * 2 * max(self.channels_in, self.channels_out)
+            return Cost(
+                primal=Compute(bytes=Bytes(selection=moved)),
+                adjoint=Compute(bytes=Bytes(selection=moved)),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -120,10 +130,14 @@ class Unpatchify(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
-            """Price nothing: a reshape owns no weights and multiplies nothing.
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
+            """Price one materialized payload permutation per patch, without FLOPs.
+
+            The geometry is patch positions in both directions. Nontrivial
+            patches assume a copy; degenerate spatial shapes may permit views.
 
             Args:
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -131,7 +145,13 @@ class Unpatchify(nn.Module):
 
             """
             del kwargs
-            return Cost()
+            if math.prod(self.patch_size) == 1:
+                return Cost()
+            moved = itemsize * 2 * max(self.channels_in, self.channels_out)
+            return Cost(
+                primal=Compute(bytes=Bytes(selection=moved)),
+                adjoint=Compute(bytes=Bytes(selection=moved)),
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

@@ -16,6 +16,7 @@ from priml.math.custom_types import TensorFn
 __all__ = [
     "ActivationFn",
     "AttentionKernel",
+    "CachedAttention",
     "ChannelsHead",
     "ChannelsIn",
     "ChannelsInOut",
@@ -25,6 +26,7 @@ __all__ = [
     "DepthIndex",
     "HasAttention",
     "HasDepthIndex",
+    "HasForwardCached",
     "HasResetParameters",
     "LatentAttentionKernel",
     "LookupTable",
@@ -35,7 +37,10 @@ __all__ = [
     "TensorModule",
     "WeightedTensorModule",
     "flatten_depth_index",
+    "has_forward_cached",
     "has_weight",
+    "infer_same_width",
+    "is_cached_attention",
     "propagate_attr",
 ]
 
@@ -129,6 +134,50 @@ class RotaryFactors(Protocol):
 
     def __call__(self, positions: Tensor, /) -> tuple[Tensor, Tensor]:
         """Apply to the input."""
+        ...
+
+
+@runtime_checkable
+class HasForwardCached[CacheT](Protocol):
+    """A layer with an explicit cached decode path.
+
+    Method-only on purpose: ``isinstance`` against a runtime-checkable Protocol
+    resolves data members through ``inspect.getattr_static``, which never sees
+    an ``nn.Module`` submodule (those surface only via ``Module.__getattr__``).
+    A protocol naming ``attn`` as a member would therefore be False for every
+    real block; read the attribute with a plain ``getattr`` instead.
+    """
+
+    def forward_cached(
+        self,
+        x: Tensor,
+        *,
+        cache: CacheT,
+        **kwargs: object,
+    ) -> tuple[Tensor, CacheT]:
+        """Run the layer while reading and updating ``cache``."""
+        ...
+
+
+@runtime_checkable
+class CachedAttention[CacheT](HasForwardCached[CacheT], Protocol):
+    """An attention sublayer that also allocates its own cache.
+
+    Two shapes because the two roles differ: a BLOCK has a cached path but
+    delegates allocation to its ``attn`` (which alone knows whether the cache
+    holds K/V, a compressed latent, or a recurrent state), so a block is only a
+    :class:`HasForwardCached`; the attention is the one that allocates.
+    """
+
+    def alloc_kv_cache(
+        self,
+        *,
+        batch: int | tuple[int, ...],
+        max_seq: int,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> CacheT:
+        """Allocate an empty cache sized for this attention."""
         ...
 
 
@@ -348,6 +397,18 @@ def flatten_depth_index(depth_index: DepthIndex) -> int:
     return flattened
 
 
+# ``isinstance`` against a generic Protocol leaves ``CacheT`` unsolved, so
+# every downstream cache is Unknown; these guards name the erased parameter.
+def has_forward_cached(module: object) -> TypeGuard[HasForwardCached[object]]:
+    """Check for the cached decode path, with an opaque cache type."""
+    return isinstance(module, HasForwardCached)
+
+
+def is_cached_attention(module: object) -> TypeGuard[CachedAttention[object]]:
+    """Check for cache allocation plus the cached decode path."""
+    return isinstance(module, CachedAttention)
+
+
 def propagate_attr(
     config: object,
     name: str,
@@ -390,3 +451,30 @@ def propagate_attr(
             f"no attribute {name!r}; cannot propagate value {value!r}.",
         )
     setattr(config, name, value)
+
+
+def infer_same_width(config: ChannelsInOut) -> None:
+    """Fill a width-preserving layer's missing width; both set and unequal raises.
+
+    A norm, a residual block, an attention writing back into its own stream --
+    none widens or narrows, so a parent may push either width down and
+    ``finalize`` fills the other. Raised at finalize so the ``pprint`` of the
+    offending tree names both values.
+
+    Args:
+      config: A config declaring ``channels_in`` and ``channels_out`` with ``-1``
+        sentinels.
+
+    Raises:
+      ValueError: Both widths are set and differ.
+
+    """
+    if config.channels_in == -1:
+        config.channels_in = config.channels_out
+    if config.channels_out == -1:
+        config.channels_out = config.channels_in
+    if config.channels_in != config.channels_out:
+        raise ValueError(
+            f"channels_in={config.channels_in} must equal "
+            f"channels_out={config.channels_out}.",
+        )

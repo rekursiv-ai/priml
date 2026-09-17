@@ -128,7 +128,7 @@ def test_qwen3_cost_matches_torch(tie_embeddings: bool) -> None:
         num_tokens=10,
         bus={"seq_len": 5},
     )
-    assert analytical.bytes_state == 2 * 1 * 8  # One KV head cached per layer.
+    assert analytical.bytes_state == 4 * 2 * 1 * 8  # One KV head cached per layer.
 
 
 def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:

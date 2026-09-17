@@ -18,7 +18,7 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
 from pathlib import Path
-from typing import Protocol, Self, cast, override
+from typing import Self, cast, override
 
 import math
 
@@ -30,6 +30,7 @@ import torch
 
 from priml.baselines.cifar10.model import ResNet, SpeedNet
 from priml.data.augmentation_gpu import pad_crop_flip
+from priml.math.custom_types import TensorFn
 from priml.math.schedules import Schedule, cosine
 from priml.math.stats import PcaDecompose, pca_eigh
 from priml.optimizers import CompositeOptimizer, apply_lr_scale
@@ -295,9 +296,9 @@ class Cifar10TrainStep(TrainStep):
     # fakes, and ``nn.Module.__call__`` carries no signature of its own, so the
     # cast is the only place the images-to-logits shape can be stated.
     @property
-    def _classifier(self) -> _Classifier:
+    def _classifier(self) -> TensorFn:
         """The model, typed as a batch of images to logits."""
-        return cast(_Classifier, self.model)
+        return cast(TensorFn, self.model)
 
     def _maybe_init_whiten(self, media: Tensor) -> None:
         """Fit the model's whitening layer once, from the first batch seen."""
@@ -342,7 +343,7 @@ class Cifar10TrainStep(TrainStep):
 # Six forward passes: the image and two one-pixel-shifted crops, each paired with its
 # horizontal mirror. Shifts come from a reflect-padded copy, so no crop introduces a
 # border the network never saw in training.
-def _tta_logits(model: _Classifier, media: Tensor) -> Tensor:
+def _tta_logits(model: TensorFn, media: Tensor) -> Tensor:
     """Average logits over the mirror pair of three overlapping crops."""
     size = media.shape[-1]
     padded = functional.pad(media, (1,) * 4, "reflect")
@@ -353,12 +354,6 @@ def _tta_logits(model: _Classifier, media: Tensor) -> Tensor:
     ) / 3
 
 
-def _mirrored(model: _Classifier, view: Tensor) -> Tensor:
+def _mirrored(model: TensorFn, view: Tensor) -> Tensor:
     """Average the model over ``view`` and its horizontal mirror."""
     return 0.5 * (model(view) + model(view.flip(-1)))
-
-
-class _Classifier(Protocol):
-    """What this recipe calls the model through: a batch of images to logits."""
-
-    def __call__(self, media: Tensor, /) -> Tensor: ...

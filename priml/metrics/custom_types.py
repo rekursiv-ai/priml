@@ -14,7 +14,18 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MetricProtocol",
+    "RequiresDeviceTiming",
 ]
+
+
+@runtime_checkable
+class RequiresDeviceTiming(Protocol):
+    """Capability for metrics whose step time must include completed device work."""
+
+    @property
+    def requires_device_timing(self) -> bool:
+        """Return whether each measured microbatch must synchronize its device."""
+        ...
 
 
 @runtime_checkable

@@ -56,7 +56,7 @@ from priml.math.seed import (
     set_seed_distributed,
     set_seed_local,
 )
-from priml.metrics.custom_types import MetricProtocol
+from priml.metrics.custom_types import MetricProtocol, RequiresDeviceTiming
 from priml.paths import resolve_working_dir
 from priml.runtime import (
     RuntimeProtocol,
@@ -465,6 +465,11 @@ class TrainLoop:
             self.metrics_train = {
                 name: cfg.make() for name, cfg in config.metrics_train.items()
             }
+            self._requires_device_timing = self.runtime.device.type != "cpu" and any(
+                isinstance(metric, RequiresDeviceTiming)
+                and metric.requires_device_timing
+                for metric in self.metrics_train.values()
+            )
             self.metrics_eval = {
                 name: cfg.make() for name, cfg in config.metrics_eval.items()
             }
@@ -1035,6 +1040,8 @@ class TrainLoop:
                 time.perf_counter() - self._start_time,
             )
 
+        if self._requires_device_timing:
+            torch.accelerator.synchronize(self.runtime.device)
         step_start = time.perf_counter()
         # The first train step compiles the backward graph and can block for
         # minutes with no output (looks like a hang). Wrap the early steps in a
@@ -1045,6 +1052,8 @@ class TrainLoop:
                 step_results = self.step.train_step(**batch)
         else:
             step_results = self.step.train_step(**batch)
+        if self._requires_device_timing:
+            torch.accelerator.synchronize(self.runtime.device)
         step_time = time.perf_counter() - step_start
         self.local_step += 1
         # Hook for subclasses that accumulate train wall-clock (e.g. a

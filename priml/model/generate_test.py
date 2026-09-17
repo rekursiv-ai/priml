@@ -326,6 +326,16 @@ class _Attention:
         )
         return self.cache
 
+    def forward_cached(
+        self,
+        x: Tensor,
+        *,
+        cache: KVCache,
+        **kwargs: object,
+    ) -> tuple[Tensor, KVCache]:
+        del kwargs
+        return x, cache
+
 
 class _Block(nn.Module):
     def __init__(self) -> None:
@@ -336,10 +346,11 @@ class _Block(nn.Module):
     def forward_cached(
         self,
         x: Tensor,
-        /,
         *,
         cache: KVCache,
+        **kwargs: object,
     ) -> tuple[Tensor, KVCache]:
+        del kwargs
         self.seen_caches.append(cache)
         return x, cache
 
@@ -347,7 +358,14 @@ class _Block(nn.Module):
 class _NoAttn(nn.Module):
     """A block missing the ``attn`` attribute ``generate`` requires."""
 
-    def forward_cached(self, x: Tensor, /, *, cache: object) -> tuple[Tensor, object]:
+    def forward_cached(
+        self,
+        x: Tensor,
+        *,
+        cache: object,
+        **kwargs: object,
+    ) -> tuple[Tensor, object]:
+        del kwargs
         return x, cache
 
 

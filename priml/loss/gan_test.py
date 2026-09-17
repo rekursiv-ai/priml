@@ -9,7 +9,7 @@ import torch
 
 from priml.loss.gan import AdversarialLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import Compute, Cost, Flops, cost, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -48,19 +48,38 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
             real_media=real_media,
         ),
     )
-    expected = elementwise_cost(
-        primal=2 + (8 + 3) / 12,
-        adjoint=2 + 1 + (5 + 2) / 12,
-    ) + Cost(primal=Compute(flops=Flops(reduction=(12 - 1) / 12)))
-    assert cost(config, num_tokens=12) == expected
-    assert measured == expected + elementwise_cost(primal=2, adjoint=2)
+    expected = Cost(
+        primal=Compute(
+            flops=Flops(elementwise=2 + 11 / 12, reduction=11 / 12),
+            bytes=Bytes(elementwise=4 * (5 + 33 / 12), reduction=5),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=3 + 7 / 12),
+            bytes=Bytes(elementwise=4 * (7 + 16 / 12), reduction=5),
+        ),
+    )
+    assert cost(config, rows=12) == expected
+    assert measured == expected + Cost(
+        primal=Compute(
+            flops=Flops(elementwise=2),
+            bytes=Bytes(elementwise=16, reduction=8),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=2),
+            bytes=Bytes(elementwise=8, reduction=8),
+        ),
+    )
     assert measured.params == 0
     assert measured.training.flops.matmul == 0
 
 
-def test_adversarial_loss_cost_needs_num_tokens() -> None:
-    with pytest.raises(TypeError, match="num_tokens"):
-        cost(AdversarialLoss.Config())
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_adversarial_loss_operand_traffic(itemsize: int) -> None:
+    priced = cost(AdversarialLoss.Config(), rows=12, itemsize=itemsize)
+    assert priced.primal.bytes.elementwise == (5 + 33 / 12) * itemsize
+    assert priced.primal.bytes.reduction == 15 * itemsize / 12
+    assert priced.adjoint.bytes.elementwise == (7 + 16 / 12) * itemsize
+    assert priced.adjoint.bytes.reduction == 15 * itemsize / 12
 
 
 def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:

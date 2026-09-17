@@ -23,6 +23,7 @@ from priml.model.attention.gated_delta_net import (
     _torch_chunk_gated_delta_rule,
 )
 from priml.model.cost import cost
+from priml.model.special import Identity
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
@@ -66,23 +67,13 @@ def test_gated_delta_net_config_pprint() -> None:
     )
 
 
-def test_gated_delta_net_mismatched_widths_validate_on_construction() -> None:
+def test_gated_delta_net_mismatched_widths_reject_at_make() -> None:
     config = GatedDeltaNet.Config()
     config.channels_in = 8
     config.channels_out = 16
 
-    finalized = config.copy_tree().finalize()
-    assert (finalized.channels_in, finalized.channels_out) == (8, 16)
-    with pytest.raises(ValueError, match="for GatedDeltaNet"):
+    with pytest.raises(ValueError, match="channels_in=8 must equal channels_out=16"):
         config.make()
-    with pytest.raises(ValueError, match="for GatedDeltaNet"):
-        GatedDeltaNet(config)
-
-    class DerivedGatedDeltaNet(GatedDeltaNet):
-        pass
-
-    with pytest.raises(ValueError, match="for DerivedGatedDeltaNet"):
-        DerivedGatedDeltaNet(config)
 
 
 def test_gated_delta_net_forward():
@@ -260,7 +251,18 @@ def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
     assert model_cost.adjoint.flops.matmul == 4 * (projections + conv) + 8 * state
     assert model_cost.bytes_state == 0
     # The q/k L2 norms sum each key row once each way, per value head.
-    assert model_cost.primal.flops.reduction == 4 * (8 - 1) + norm_reduction(finalized)
+    assert model_cost.primal.flops.reduction == 2 * 4 * (8 - 1) + norm_reduction(
+        finalized,
+    )
+    norm_cost = cost(finalized.norm, rows=4).tile(4)
+    assert (
+        model_cost.adjoint.flops.reduction
+        == 2 * 4 * (8 - 1) + norm_cost.adjoint.flops.reduction
+    )
+    assert (
+        model_cost.primal.bytes.reduction
+        == 2 * 4 * 4 * (8 + 1) + norm_cost.primal.bytes.reduction
+    )
 
 
 def norm_reduction(finalized: GatedDeltaNet.Config) -> float:
@@ -296,6 +298,40 @@ def test_gated_delta_net_cost_ignores_seq_len() -> None:
     config = GatedDeltaNet.Config(channels_in=8, num_heads_k=1, num_heads_v=1)
     finalized = config.copy_tree().finalize()
     assert finalized.cost(seq_len=8) == finalized.cost(seq_len=1024)
+
+
+def test_delta_traffic_amortizes_projection_and_convolution_weights() -> None:
+    config = GatedDeltaNet.Config()
+    config.channels_in = 8
+    config.num_heads_k = 1
+    config.num_heads_v = 2
+    config.channels_k_head = 4
+    config.channels_v_head = 3
+    config = config.copy_tree().finalize()
+    one = config.cost(rows=1, itemsize=2)
+    batch = config.cost(rows=4, itemsize=2)
+    weights = 8 * 14 + 8 * 6 + 2 * 8 * 2 + 6 * 8 + 14 * 4
+    assert one.primal.bytes.matmul - batch.primal.bytes.matmul == 2 * weights * 3 / 4
+    wide = config.cost(rows=4, itemsize=4)
+    assert wide.training.bytes == batch.training.bytes * 2
+    assert batch.primal.bytes.reduction > 0
+
+
+@pytest.mark.parametrize("itemsize", [2, 4])
+def test_delta_normalizes_query_and_key_with_separate_reductions(itemsize: int) -> None:
+    config = GatedDeltaNet.Config()
+    config.channels_in = 8
+    config.num_heads_k = 1
+    config.num_heads_v = 2
+    config.channels_k_head = 4
+    config.channels_v_head = 3
+    config.norm = Identity.Config()
+    actual = config.copy_tree().finalize().cost(itemsize=itemsize)
+    assert actual.primal.flops.reduction == 2 * 2 * (4 - 1)
+    assert actual.adjoint.flops.reduction == 2 * 2 * (4 - 1)
+    assert actual.primal.bytes.reduction == itemsize * 2 * 2 * (4 + 1)
+    # The two learned decay vectors additionally reduce their row gradients.
+    assert actual.adjoint.bytes.reduction == itemsize * (2 * 2 * (4 + 1) + 2 * 2 * 2)
 
 
 if __name__ == "__main__":

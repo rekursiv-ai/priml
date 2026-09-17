@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from typing import (
     TYPE_CHECKING,
     Any,
     NotRequired,
     Protocol,
-    Self,
     TypedDict,
     overload,
     runtime_checkable,
@@ -32,7 +31,6 @@ __all__ = [
     "LossFn",
     "ModelOutput",
     "ModelQuantizationProtocol",
-    "ModuleLike",
     "OptimizerProtocol",
     "ParallelStrategyProtocol",
     "PhaseTimerProtocol",
@@ -137,74 +135,6 @@ class OptimizerProtocol(CheckpointableProtocol, Protocol):
 
         Args:
           set_to_none: Set gradients to None instead of zero.
-
-        """
-        ...
-
-
-@runtime_checkable
-class ModuleLike(CheckpointableProtocol, Protocol):
-    """Protocol for modules with parameters and buffers."""
-
-    def parameters(self) -> Iterator[Tensor]:
-        """Get model parameters.
-
-        Returns:
-          parameters: Every learnable tensor, recursively.
-
-        """
-        ...
-
-    def buffers(self) -> Iterator[Tensor]:
-        """Get model buffers.
-
-        Returns:
-          buffers: Every persistent non-learnable tensor, recursively.
-
-        """
-        ...
-
-    def to(self, device: torch.device | str | None = None) -> Self:
-        """Move module to device.
-
-        Args:
-          device: Where parameters and buffers should live.
-
-        Returns:
-          self: The same module, moved in place.
-
-        """
-        ...
-
-    def eval(self) -> Self:
-        """Set module to eval mode.
-
-        Returns:
-          self: The same module, for chaining.
-
-        """
-        ...
-
-    def train(self, mode: bool = True) -> Self:
-        """Set module to train mode.
-
-        Args:
-          mode: True for training behavior, False for evaluation.
-
-        Returns:
-          self: The same module, for chaining.
-
-        """
-        ...
-
-    def requires_grad_(self, requires_grad: bool = True) -> Self:
-        """Set requires_grad for all parameters.
-
-        Args:
-          requires_grad: Whether autograd should record operations on them.
-
-        Returns:
-          self: The same module, for chaining.
 
         """
         ...

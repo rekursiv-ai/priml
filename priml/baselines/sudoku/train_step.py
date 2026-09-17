@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
-from typing import NotRequired, Protocol, Self, TypedDict, cast, override
+from typing import NotRequired, Self, TypedDict, cast, override
 
 import math
 
@@ -448,8 +448,7 @@ class SudokuTrainStep(TrainStep):
         if self.act is None:
             out = self.net(media, **prefix_kwargs)
             return out.logits, out.halt
-        pool = cast(_ActRollout, self.act)
-        return pool.rollout(
+        return self.act.rollout(
             self.net,
             media=media,
             prefix_kwargs=dict(prefix_kwargs),
@@ -528,13 +527,3 @@ def _prefix_kwargs(batch: dict[str, object]) -> _PrefixKwargs:
     """Return the batch fields a prefix module consumes, if any."""
     identifiers = batch.get("puzzle_identifiers")
     return {} if identifiers is None else {"puzzle_identifiers": identifiers}
-
-
-class _ActRollout(Protocol):
-    def rollout(
-        self,
-        model: SudokuNet,
-        *,
-        media: Tensor,
-        prefix_kwargs: dict[str, object],
-    ) -> tuple[Tensor, Tensor]: ...

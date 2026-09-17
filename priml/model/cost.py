@@ -8,7 +8,7 @@ Work is attributed to five kernel silos, one per roofline regime:
 - ``reduction``: many inputs to one output; a scan is a reduction that keeps
   its prefixes.
 - ``selection``: gather in the primal, scatter-add in the adjoint.
-- ``sort``: argsort, top-k. Traffic is n log n.
+- ``sort``: argsort, top-k; operand traffic depends on input/output geometry.
 
 The silo follows the kernel dispatched, not the algebra: ``sum(x)`` is a
 reduction, ``ones @ x`` is a matmul. Softmax is elementwise, reduction,
@@ -17,17 +17,26 @@ elementwise.
 Counting policy:
 
 - A multiply-accumulate is two FLOPs; any other floating op is one. A
-  reduction over n is n-1. A gather is zero FLOPs, one element moved; its
-  scatter-add is one add per element.
+  nonempty reduction over n is n-1. A gather is zero FLOPs and reads/writes
+  its selected values; scatter-add adds once per element and reads/writes
+  the destination.
 - Analytical training algorithm with saved primal values, not a fused
   kernel. The adjoint includes local derivatives and parameter-gradient
   reductions; not the optimizer.
-- ``num_tokens`` is the rows sharing one parameter. Its gradient is summed
+- ``rows`` is the rows sharing one parameter. Its gradient is summed
   over them, (n-1)/n per row, in ``adjoint.flops.reduction``. Only the two
   primitives write that term.
 - Attention is counted over ``min(window, seq_len)`` keys with no causal
   discount (PaLM convention). Recompute excluded: MFU, not HFU.
-- Bytes are elements; multiply by itemsize at use.
+- ``Bytes`` and ``bytes_state`` hold bytes, not element counts. Helpers use
+  a uniform ``itemsize=4`` unless the caller specifies another width. This is
+  an accounting assumption, not mixed-dtype profiling.
+- Traffic is the analytical unfused algorithm's minimum tensor operand I/O:
+  each primitive reads its inputs and writes its outputs once. Intermediates
+  between primitives count even when a fused implementation keeps them on chip.
+  This does not predict HBM traffic, cache reuse, or physical memory transactions.
+  Traffic geometry is explicit and never inferred from FLOP counts. Nonlinear
+  tensor operators move operands once, not once per internal scalar operation.
 
 ``cost(**kwargs)`` takes ``forward``'s open keyword bus. A leaf names what it
 reads and ``del``s the rest; a container forwards the bus to every child.
@@ -47,6 +56,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Protocol, Self, overload, runtime_checkable
 
+import math
+
 
 __all__ = [
     "Bytes",
@@ -60,6 +71,7 @@ __all__ = [
     "matmul_cost",
     "mbu",
     "mfu",
+    "reduction_cost",
     "utilization",
 ]
 
@@ -115,7 +127,7 @@ class KernelStats:
     @overload
     def __truediv__(self, other: KernelStats) -> KernelStats: ...
     def __truediv__(self, other: float | KernelStats) -> Self | KernelStats:
-        """Divide per silo; a zero denominator is ``inf`` (nothing moved is compute-bound)."""
+        """Divide per silo; zero over zero is NaN, nonzero over zero is signed infinity."""
         if isinstance(other, KernelStats):
             return KernelStats(
                 matmul=_div(self.matmul, other.matmul),
@@ -124,7 +136,14 @@ class KernelStats:
                 selection=_div(self.selection, other.selection),
                 sort=_div(self.sort, other.sort),
             )
-        return self._scale(1 / other)
+        return replace(
+            self,
+            matmul=_div(self.matmul, other),
+            elementwise=_div(self.elementwise, other),
+            reduction=_div(self.reduction, other),
+            selection=_div(self.selection, other),
+            sort=_div(self.sort, other),
+        )
 
     def _scale(self, factor: float) -> Self:
         return replace(
@@ -144,7 +163,15 @@ class Flops(KernelStats):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Bytes(KernelStats):
-    """Elements moved per token."""
+    """Bytes moved per token under the analytical tensor-I/O convention."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Total:
+    """A pass's FLOPs and bytes summed over every silo."""
+
+    flops: float
+    bytes: float
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -156,8 +183,17 @@ class Compute:
 
     @property
     def intensity(self) -> KernelStats:
-        """FLOPs per element moved, by silo: the roofline's x-axis."""
+        """Return FLOPs per byte moved, by silo: the roofline's x-axis.
+
+        Its ``total`` sums the silo ratios and means nothing; the pass as a
+        whole is memory-bound or not by ``total.flops / total.bytes``.
+        """
         return self.flops / self.bytes
+
+    @property
+    def total(self) -> Total:
+        """Sum every silo: all FLOPs and all bytes of this pass."""
+        return Total(flops=self.flops.total, bytes=self.bytes.total)
 
     def __add__(self, other: Compute) -> Compute:
         return Compute(flops=self.flops + other.flops, bytes=self.bytes + other.bytes)
@@ -184,7 +220,7 @@ class Cost:
     """Parameters one token reads; fewer than ``params`` only when routed."""
 
     bytes_state: int = 0
-    """Per-token state carried across a decode step."""
+    """Bytes of per-token state carried across a decode step."""
 
     @property
     def training(self) -> Compute:
@@ -225,28 +261,13 @@ class Cost:
           copies: Times the parameters exist.
 
         Returns:
-          tiled: Work scaled by ``rows``; parameters and their reads by ``copies``.
+          tiled: Work and all traffic scaled by ``rows``; ownership by ``copies``.
 
         """
-        repeated = rows * self
         return replace(
-            repeated,
+            rows * self,
             params=copies * self.params,
             params_active=copies * self.params_active,
-            primal=replace(
-                repeated.primal,
-                bytes=replace(
-                    repeated.primal.bytes,
-                    matmul=copies * self.primal.bytes.matmul,
-                ),
-            ),
-            adjoint=replace(
-                repeated.adjoint,
-                bytes=replace(
-                    repeated.adjoint.bytes,
-                    matmul=copies * self.adjoint.bytes.matmul,
-                ),
-            ),
         )
 
 
@@ -258,7 +279,7 @@ class HasCost(Protocol):
         """Price one token through the module ``self`` builds.
 
         Args:
-          **kwargs: The open message bus (``seq_len``, ``num_tokens``, ...).
+          **kwargs: The open message bus (``seq_len``, ``rows``, ...).
 
         Returns:
           cost: Per-token cost.
@@ -268,17 +289,28 @@ class HasCost(Protocol):
 
 
 def cost(config: object, **kwargs: object) -> Cost:
-    """Price a child config; a child without ``cost`` raises rather than pricing zero.
+    """Price a config per token for ``batch_size`` sequences of ``seq_len`` tokens.
+
+    A caller states the batch geometry, never the sharing rows. Every token of
+    the batch reads the same weights, so ``rows`` -- what one parameter and
+    its gradient reduction are amortized over -- is ``seq_len * batch_size``
+    unless a container already set it for a child with its own geometry (a
+    puzzle, an image position, an expert's occupancy). Both default to one,
+    so ``seq_len`` alone prices one sequence of that length.
 
     Args:
-      config: A child config slot's value.
-      **kwargs: The open message bus, forwarded unchanged.
+      config: A config with ``cost``.
+      **kwargs: The open message bus. ``seq_len`` is tokens per sequence,
+        attention's reach before any window; ``batch_size`` is sequences per
+        step and amortizes weights only, since attention never reuses
+        another sequence's keys. Anything else is forwarded unchanged.
 
     Returns:
-      cost: The child's per-token cost.
+      cost: The config's per-token cost.
 
     Raises:
-      TypeError: ``config`` has no ``cost``.
+      TypeError: ``config`` has no ``cost``, or ``seq_len``/``batch_size``
+        is not an integer.
 
     """
     if not isinstance(config, HasCost):
@@ -286,6 +318,11 @@ def cost(config: object, **kwargs: object) -> Cost:
             f"{type(config).__qualname__} has no cost(); every config under a "
             "priced container must implement HasCost.",
         )
+    seq_len = kwargs.setdefault("seq_len", 1)
+    batch_size = kwargs.setdefault("batch_size", 1)
+    if not isinstance(seq_len, int) or not isinstance(batch_size, int):
+        raise TypeError("seq_len and batch_size must be integers.")
+    kwargs.setdefault("rows", seq_len * batch_size)
     return config.cost(**kwargs)
 
 
@@ -295,38 +332,54 @@ def matmul_cost(
     channels_out: int,
     bias: bool = False,
     weight: bool = True,
-    num_tokens: int = 1,
+    rows: float = 1,
+    itemsize: int = 4,
 ) -> Cost:
-    """Price a ``[channels_in] -> [channels_out]`` matmul on one token.
+    """Price one row of ``[M, K] @ [K, N]`` and its two adjoint products.
 
     Args:
-      channels_in: Input width.
-      channels_out: Output width.
-      bias: Add a bias vector to each output row.
-      weight: The other operand is a learned matrix. ``False`` prices an
-        activation-activation product: same FLOPs, no parameters.
-      num_tokens: Rows sharing the bias.
+      channels_in: Inner dimension K.
+      channels_out: Output width N.
+      bias: Add a separate bias map and its gradient reduction.
+      weight: Own the right matrix as parameters; False keeps its activation
+        traffic but owns no matrix parameters.
+      rows: Rows M sharing the right matrix and bias, or an analytical
+        average of at least one. For attention, use rows sharing one sequence's
+        matrix, not rows across the batch.
+      itemsize: Uniform bytes per operand element, including gradients.
 
     Returns:
-      cost: Two FLOPs per product in the primal, four in the adjoint; the
-        weight read once each way, the output row written once each way.
+      cost: Per-row FLOPs and unfused tensor I/O. The primal moves
+        ``itemsize * (K + N + K*N/M)`` bytes; each adjoint product moves the
+        same amount. Bias traffic belongs to elementwise and reduction silos.
+
+    Raises:
+      ValueError: ``rows`` is nonfinite or below one, or ``itemsize``
+        is not positive.
 
     """
+    _validate_geometry(rows=rows, itemsize=itemsize)
     products = channels_in * channels_out
-    weights = products if weight else 0
     biases = channels_out if bias else 0
-    params = weights + biases
+    params = (products if weight else 0) + biases
+    moved = itemsize * (channels_in + channels_out + products / rows)
     return Cost(
         primal=Compute(
             flops=Flops(matmul=2 * products, elementwise=biases),
-            bytes=Bytes(matmul=params, elementwise=channels_out),
+            bytes=Bytes(
+                matmul=moved,
+                elementwise=itemsize * (2 * biases + biases / rows),
+            ),
         ),
         adjoint=Compute(
             flops=Flops(
                 matmul=4 * products,
-                reduction=biases * (num_tokens - 1) / num_tokens,
+                reduction=biases * (rows - 1) / rows,
             ),
-            bytes=Bytes(matmul=params, elementwise=channels_out),
+            bytes=Bytes(
+                matmul=2 * moved,
+                reduction=itemsize * (biases + biases / rows),
+            ),
         ),
         params=params,
         params_active=params,
@@ -337,38 +390,100 @@ def elementwise_cost(
     *,
     primal: float,
     adjoint: float,
-    channels: int = 0,
+    channels: float = 0,
     params: int = 0,
-    num_tokens: int = 1,
+    rows: float = 1,
+    itemsize: int = 4,
+    inputs: int = 1,
+    outputs: int = 1,
+    adjoint_inputs: int = 2,
+    adjoint_outputs: int = 1,
 ) -> Cost:
-    """Price elementwise work plus the gradient of the parameters it owns.
+    """Price explicit elementwise operands and owned parameter gradients.
+
+    The default geometry is a unary map: primal input/output and adjoint
+    saved value/incoming gradient/outgoing gradient. Compound maps specify
+    summed operand counts explicitly; FLOPs never determine traffic.
 
     Args:
       primal: Operations per token evaluating the map.
-      adjoint: Operations per token pulling a gradient back, excluding the
-        parameter gradient's reduction over rows, which is added here.
-      channels: Width of the output row; zero writes nothing new.
-      params: Parameters owned, all read per primal.
-      num_tokens: Rows sharing the parameters.
+      adjoint: Backward operations excluding parameter-gradient reductions.
+      channels: Elements per operand row; may be amortized across tokens.
+      params: Owned parameters, read once per pass across ``rows`` rows.
+        Adjoint elementwise traffic includes one temporary gradient write per
+        parameter per row; reduction then reads these and writes the result.
+      rows: Rows sharing parameters and their gradient reduction.
+      itemsize: Uniform bytes per operand element, including gradients.
+      inputs: Primal input operands, excluding owned parameters.
+      outputs: Primal output operands.
+      adjoint_inputs: Adjoint input operands, excluding owned parameters.
+      adjoint_outputs: Adjoint outputs, excluding parameter-gradient temporaries.
 
     Returns:
-      cost: Elementwise FLOPs both ways; the parameters' reduction in the adjoint.
+      cost: Explicit operand I/O with parameter reductions in the adjoint.
+
+    Raises:
+      ValueError: ``rows`` is nonfinite or below one, or ``itemsize``
+        is not positive.
 
     """
+    _validate_geometry(rows=rows, itemsize=itemsize)
     return Cost(
         primal=Compute(
             flops=Flops(elementwise=primal),
-            bytes=Bytes(elementwise=channels + params),
+            bytes=Bytes(
+                elementwise=itemsize * (channels * (inputs + outputs) + params / rows),
+            ),
         ),
         adjoint=Compute(
             flops=Flops(
                 elementwise=adjoint,
-                reduction=params * (num_tokens - 1) / num_tokens,
+                reduction=params * (rows - 1) / rows,
             ),
-            bytes=Bytes(elementwise=channels + params),
+            bytes=Bytes(
+                elementwise=itemsize
+                * (
+                    channels * (adjoint_inputs + adjoint_outputs)
+                    + params / rows
+                    + params
+                ),
+                reduction=itemsize * (params + params / rows),
+            ),
         ),
         params=params,
         params_active=params,
+    )
+
+
+def reduction_cost(
+    *,
+    input_elements: float,
+    output_groups: float = 1,
+    rows: float = 1,
+    itemsize: int = 4,
+) -> Compute:
+    """Price one reduction's explicit tensor geometry, amortized over tokens.
+
+    Args:
+      input_elements: Total elements read across all output groups.
+      output_groups: Reduced elements written; each group uses n-1 operations.
+      rows: Tokens sharing this reduction's work and traffic.
+      itemsize: Uniform bytes per input and output element.
+
+    Returns:
+      compute: Reduction FLOPs and minimum unfused operand I/O. Singleton
+        groups copy their elements; empty groups write the identity. Both use
+        zero FLOPs. This describes one reduction, not its derivative or HBM.
+
+    Raises:
+      ValueError: ``rows`` is nonfinite or below one, or ``itemsize``
+        is not positive.
+
+    """
+    _validate_geometry(rows=rows, itemsize=itemsize)
+    return Compute(
+        flops=Flops(reduction=max(0, input_elements - output_groups) / rows),
+        bytes=Bytes(reduction=itemsize * (input_elements + output_groups) / rows),
     )
 
 
@@ -423,16 +538,27 @@ def mbu(
       batch: Sequences decoded per step.
       context_len: Positions each sequence's state holds.
       steps_per_sec: Measured decode step rate.
-      itemsize: Bytes per element of the weight and state dtype.
+      itemsize: Bytes per weight element; state is already counted in bytes.
       peak_bytes_per_sec: Datasheet HBM bandwidth.
 
     Returns:
       achieved: Fraction of peak bandwidth.
 
     """
-    moved = (cost.params_active + batch * context_len * cost.bytes_state) * itemsize
+    moved = cost.params_active * itemsize + batch * context_len * cost.bytes_state
     return moved * steps_per_sec / peak_bytes_per_sec
 
 
+def _validate_geometry(*, rows: float, itemsize: int) -> None:
+    if not math.isfinite(rows) or rows < 1:
+        raise ValueError("rows must be finite and at least one.")
+    if itemsize <= 0:
+        raise ValueError("itemsize must be positive.")
+
+
 def _div(numerator: float, denominator: float) -> float:
-    return numerator / denominator if denominator else float("inf")
+    if denominator:
+        return numerator / denominator
+    if numerator == 0 or math.isnan(numerator):
+        return math.nan
+    return math.copysign(math.inf, numerator) * math.copysign(1, denominator)

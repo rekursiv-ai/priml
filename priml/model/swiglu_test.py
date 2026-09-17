@@ -19,6 +19,7 @@ from torch.distributed.tensor.parallel import (
 import pytest
 import torch
 
+from priml.model.cost import Cost
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU, SwiGLUReluSquared, relu_squared
@@ -542,6 +543,42 @@ def test_swiglu_cost_is_both_projections() -> None:
     # and the sigmoid's derivative (5) in the adjoint.
     assert cost.primal.flops.elementwise == 6 * 32
     assert cost.adjoint.flops.elementwise == 7 * 32
+    assert cost.primal.bytes.elementwise == 4 * (2 + 3) * 32
+    assert cost.adjoint.bytes.elementwise == 4 * (3 + 6) * 32
+
+
+class _PricedIdentityActivation:
+    def __call__(self, value: Tensor) -> Tensor:
+        return value
+
+    def cost(self, **kwargs: object) -> Cost:
+        del kwargs
+        return Cost()
+
+
+def test_custom_activation_cost_keeps_the_gate_product() -> None:
+    config = SwiGLU.Config()
+    config.channels_in = 4
+    config.channels_hidden = 3
+    config.act = _PricedIdentityActivation()
+    result = config.finalize().cost(itemsize=2)
+    assert result.primal.flops.elementwise == 3
+    assert result.adjoint.flops.elementwise == 2 * 3
+    assert result.primal.bytes.elementwise == 2 * 3 * 3
+    assert result.adjoint.bytes.elementwise == 2 * 6 * 3
+
+
+def test_split_gate_cost_reads_input_for_each_projection() -> None:
+    config = SwiGLU.Config()
+    config.channels_in = 4
+    config.channels_hidden = 3
+    fused = config.copy_tree().finalize().cost(rows=2, itemsize=2)
+    config.split_gate_projection = True
+    split = config.finalize().cost(rows=2, itemsize=2)
+    assert split.primal.flops == fused.primal.flops
+    assert split.adjoint.flops == fused.adjoint.flops
+    assert split.primal.bytes.matmul == fused.primal.bytes.matmul + 2 * 4
+    assert split.adjoint.bytes.matmul == fused.adjoint.bytes.matmul + 2 * 2 * 4
 
 
 def test_ungated_cost_has_a_single_width_up_proj() -> None:
@@ -551,6 +588,8 @@ def test_ungated_cost_has_a_single_width_up_proj() -> None:
         num_tokens=3,
     )
     assert cost.params == 16 * 32 + 32 * 16
+    assert cost.primal.bytes.elementwise == 4 * 4 * 32
+    assert cost.adjoint.bytes.elementwise == 4 * 6 * 32
 
 
 def test_swiglu_cost_includes_a_gate_norm() -> None:

@@ -26,7 +26,7 @@ import torch
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Compute, Cost, Flops, cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -158,9 +158,6 @@ def test_transformer_block_rejects_width_changing_config() -> None:
         channels_out=8,
         attn=SelfAttention.Config(num_heads=2, channels_head=8),
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert "TransformerBlock.Config" in config.pformat(hide_default_values=False)
     with pytest.raises(ValueError, match="channels_in=16 must equal channels_out=8"):
         config.make()
 
@@ -299,11 +296,17 @@ def test_block_cost_sums_its_four_children() -> None:
     finalized = config.copy_tree().finalize()
     children = (finalized.attn, finalized.ffn, finalized.norm1, finalized.norm2)
     expected = sum(
-        (cost(child, seq_len=8, num_tokens=8) for child in children),
+        (cost(child, seq_len=8, rows=8) for child in children),
         Cost(),
     ) + Cost(
-        primal=Compute(flops=Flops(elementwise=2 * 16)),
-        adjoint=Compute(flops=Flops(elementwise=2 * 16)),
+        primal=Compute(
+            flops=Flops(elementwise=2 * 16),
+            bytes=Bytes(elementwise=4 * 2 * 3 * 16),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=2 * 16),
+            bytes=Bytes(elementwise=4 * 2 * 3 * 16),
+        ),
     )
     assert model_cost == expected
 

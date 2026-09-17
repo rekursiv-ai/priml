@@ -70,11 +70,18 @@ class Conv1d(nn.Conv1d):
                 self.channels_out = self.channels_in
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
-            """Price one output position; ``num_tokens`` counts output positions.
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price one output position; ``rows`` counts output positions.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -89,7 +96,8 @@ class Conv1d(nn.Conv1d):
                 ndim=1,
                 groups=self.groups,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -174,11 +182,18 @@ class Conv2d(nn.Conv2d):
                 self.channels_out = self.channels_in
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
-            """Price one output position; ``num_tokens`` counts output positions.
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price one output position; ``rows`` counts output positions.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -193,7 +208,8 @@ class Conv2d(nn.Conv2d):
                 ndim=2,
                 groups=self.groups,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -278,11 +294,18 @@ class Conv3d(nn.Conv3d):
                 self.channels_out = self.channels_in
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
-            """Price one output position; ``num_tokens`` counts output positions.
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
+            """Price one output position; ``rows`` counts output positions.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -297,7 +320,8 @@ class Conv3d(nn.Conv3d):
                 ndim=3,
                 groups=self.groups,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -337,7 +361,8 @@ def conv_cost(
     ndim: int,
     groups: int,
     bias: bool,
-    num_tokens: int = 1,
+    rows: float = 1,
+    itemsize: int = 4,
 ) -> Cost:
     """Price a convolution at one OUTPUT position.
 
@@ -346,7 +371,10 @@ def conv_cost(
     [channels_out]`` applied once per output position. The bus carries no
     spatial extent, so the "token" here is one output position; a caller with
     a grid multiplies by its size. Stride, padding, and dilation move where the
-    products land, not how many there are per position.
+    products land, not how many there are per position. Traffic counts each
+    group's receptive-field operand independently at every output position;
+    overlapping patches are reread, with no im2col workspace or cache model.
+    This is logical operand I/O, not a lower bound on whole-convolution HBM.
 
     Args:
       channels_in: Input channels, before grouping.
@@ -355,7 +383,8 @@ def conv_cost(
       ndim: Spatial rank, which a scalar ``kernel_size`` is raised to.
       groups: Blocked connections; each output sees ``channels_in / groups``.
       bias: Whether a bias vector is owned.
-      num_tokens: Output positions sharing the bias; one by default.
+      rows: Output positions sharing the weights and bias.
+      itemsize: Uniform bytes per operand element.
 
     Returns:
       cost: The matmul's price; parameters equal the weight plus bias numel.
@@ -364,9 +393,10 @@ def conv_cost(
     taps = math.prod(
         kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * ndim,
     )
-    return matmul_cost(
+    return groups * matmul_cost(
         channels_in=channels_in // groups * taps,
-        channels_out=channels_out,
+        channels_out=channels_out // groups,
         bias=bias,
-        num_tokens=num_tokens,
+        rows=rows,
+        itemsize=itemsize,
     )

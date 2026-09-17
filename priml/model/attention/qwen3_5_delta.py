@@ -16,9 +16,10 @@ from priml.math.gated_delta_rule import (
     recurrent_gated_delta_rule,
 )
 from priml.model.attention.gated_delta_net import GatedDeltaNet
-from priml.model.cost import Compute, Cost, Flops, elementwise_cost
+from priml.model.cost import Cost, elementwise_cost
 from priml.model.custom_types import TensorModule
 from priml.model.init import InitFn
+from priml.model.norm import RMSNorm
 
 
 class Qwen35RMSNormGated(nn.Module):
@@ -31,7 +32,13 @@ class Qwen35RMSNormGated(nn.Module):
         eps: float = 1e-6
         """Epsilon added to the fp32 mean square."""
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Count an affine RMSNorm, a SiLU on the gate, and their product.
 
             Per row: square, mean, epsilon and rsqrt, normalize, scale, SiLU
@@ -41,7 +48,8 @@ class Qwen35RMSNormGated(nn.Module):
             reduces over rows.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -50,15 +58,22 @@ class Qwen35RMSNormGated(nn.Module):
             """
             del kwargs
             width = self.channels_in
-            return elementwise_cost(
-                primal=9 * width + 3,
-                adjoint=13 * width + 4,
+            norm = RMSNorm.Config()
+            norm.channels_in = width
+            norm.elementwise_affine = True
+            return norm.cost(
+                rows=rows,
+                itemsize=itemsize,
+            ) + elementwise_cost(
+                primal=6 * width,
+                adjoint=7 * width,
                 channels=width,
-                params=width,
-                num_tokens=num_tokens,
-            ) + Cost(
-                primal=Compute(flops=Flops(reduction=width - 1)),
-                adjoint=Compute(flops=Flops(reduction=width - 1)),
+                inputs=3,
+                outputs=2,
+                adjoint_inputs=6,
+                adjoint_outputs=3,
+                itemsize=itemsize,
+                rows=rows,
             )
 
     def __init__(self, config: Config) -> None:
@@ -107,6 +122,12 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
 
         init_decay: InitFn = _init_decay
         """Initialize log decay rates from the public Qwen3.5 reference range."""
+
+        @override
+        def _output_gate_cost(self, *, rows: int, itemsize: int) -> Cost:
+            """Leave the complete post-delta transform to the injected norm."""
+            del rows, itemsize
+            return Cost()
 
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:

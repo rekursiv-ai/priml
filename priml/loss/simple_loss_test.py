@@ -11,7 +11,7 @@ import torch
 from priml.loss.custom_types import SimpleLossFn
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import Bytes, Compute, Cost, Flops, cost, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, cost
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -122,9 +122,21 @@ def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
         num_tokens=12,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
-    expected = elementwise_cost(primal=8, adjoint=5)
-    assert cost(config, num_tokens=12) == expected
-    assert measured == expected + elementwise_cost(primal=2, adjoint=2)
+    expected = Cost(
+        primal=Compute(flops=Flops(elementwise=8), bytes=Bytes(elementwise=84)),
+        adjoint=Compute(flops=Flops(elementwise=5), bytes=Bytes(elementwise=40)),
+    )
+    assert cost(config, rows=12) == expected
+    assert measured == expected + Cost(
+        primal=Compute(
+            flops=Flops(elementwise=2),
+            bytes=Bytes(elementwise=16, reduction=8),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=2),
+            bytes=Bytes(elementwise=8, reduction=8),
+        ),
+    )
     assert measured.params == 0
     assert measured.training.flops.matmul == 0
 
@@ -149,41 +161,141 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
                 elementwise=3 * 5 + 2,
                 reduction=2 * (5 - 1) + (4 - 1) / 4,
             ),
-            bytes=Bytes(selection=1),
+            bytes=Bytes(elementwise=144 + 2, reduction=48 + 5, selection=12),
         ),
-        adjoint=Compute(flops=Flops(elementwise=2 * 5 + 1, selection=1)),
+        adjoint=Compute(
+            flops=Flops(elementwise=2 * 5 + 1, selection=1),
+            bytes=Bytes(elementwise=92, reduction=5, selection=16),
+        ),
     )
-    assert cost(config, num_tokens=4, channels_out=5) == expected
-    assert measured == expected + elementwise_cost(primal=2, adjoint=2)
+    assert cost(config, rows=4, channels_out=5) == expected
+    assert measured == expected + Cost(
+        primal=Compute(
+            flops=Flops(elementwise=2),
+            bytes=Bytes(elementwise=16, reduction=8),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=2),
+            bytes=Bytes(elementwise=8, reduction=8),
+        ),
+    )
     assert measured.training.flops.matmul == 0
 
 
 def test_simple_loss_cost_cross_entropy_needs_channels_out() -> None:
     config = SimpleLoss.Config(loss_fn=functional.cross_entropy)
     with pytest.raises(ValueError, match="channels_out"):
-        cost(config, num_tokens=4)
+        cost(config, rows=4)
 
 
 @pytest.mark.parametrize("loss_fn", [functional.mse_loss, functional.l1_loss])
 def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -> None:
     """MSE and L1: subtract then square/abs; the adjoint scales the saved difference."""
     none = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "none"})
-    assert cost(none, num_tokens=6) == elementwise_cost(primal=2, adjoint=2)
-    # ``mean`` adds one reduction over the tokens and a ``1 / n`` scale backward.
+    expected = Cost(
+        primal=Compute(flops=Flops(elementwise=2), bytes=Bytes(elementwise=20)),
+        adjoint=Compute(flops=Flops(elementwise=2), bytes=Bytes(elementwise=20)),
+    )
+    assert cost(none, rows=6) == expected
+    reduced = Cost(
+        primal=Compute(flops=Flops(reduction=5 / 6), bytes=Bytes(reduction=28 / 6)),
+        adjoint=Compute(bytes=Bytes(reduction=28 / 6)),
+    )
     mean = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "mean"})
-    assert cost(mean, num_tokens=6) == elementwise_cost(primal=2, adjoint=3) + Cost(
-        primal=Compute(flops=Flops(reduction=(6 - 1) / 6)),
+    assert cost(mean, rows=6) == expected + reduced + Cost(
+        primal=Compute(bytes=Bytes(elementwise=8 / 6)),
+        adjoint=Compute(flops=Flops(elementwise=1), bytes=Bytes(elementwise=8)),
     )
     total = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "sum"})
-    assert cost(total, num_tokens=6) == elementwise_cost(primal=2, adjoint=2) + Cost(
-        primal=Compute(flops=Flops(reduction=(6 - 1) / 6)),
-    )
+    assert cost(total, rows=6) == expected + reduced
 
 
 def test_simple_loss_cost_rejects_unpriced_loss_fn() -> None:
     config = SimpleLoss.Config(loss_fn=functional.smooth_l1_loss)
     with pytest.raises(TypeError, match="smooth_l1_loss"):
-        cost(config, num_tokens=4)
+        cost(config, rows=4)
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_simple_loss_operand_traffic(itemsize: int) -> None:
+    config = SimpleLoss.Config()
+    config.loss_fn = functional.mse_loss
+    priced = cost(config, rows=6, itemsize=itemsize)
+    assert priced.primal.bytes.elementwise == 5 * itemsize
+    assert priced.adjoint.bytes.elementwise == 5 * itemsize
+    config.kwargs = {"reduction": "sum"}
+    reduced = cost(config, rows=6, itemsize=itemsize)
+    assert reduced.primal.bytes.reduction == 7 * itemsize / 6
+    assert reduced.adjoint.bytes.reduction == 7 * itemsize / 6
+    config.kwargs = {"reduction": "mean"}
+    mean = cost(config, rows=6, itemsize=itemsize)
+    assert mean.primal.bytes.elementwise == 5 * itemsize + 2 * itemsize / 6
+
+
+@pytest.mark.parametrize("itemsize", [2, 4, 8])
+def test_simple_loss_bce_weight_prices_multiply(itemsize: int) -> None:
+    config = SimpleLoss.Config()
+    plain = cost(config, rows=6, itemsize=itemsize)
+    config.kwargs["weight"] = torch.ones(6)
+    weighted = cost(config, rows=6, itemsize=itemsize)
+    assert weighted == plain + Cost(
+        primal=Compute(
+            flops=Flops(elementwise=1),
+            bytes=Bytes(elementwise=3 * itemsize),
+        ),
+        adjoint=Compute(
+            flops=Flops(elementwise=1),
+            bytes=Bytes(elementwise=3 * itemsize),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("loss_fn", "option", "value"),
+    [
+        (functional.binary_cross_entropy_with_logits, "pos_weight", torch.ones(2)),
+        (functional.cross_entropy, "weight", torch.ones(2)),
+        (functional.cross_entropy, "label_smoothing", 0.1),
+        (functional.cross_entropy, "ignore_index", 0),
+        (functional.mse_loss, "size_average", True),
+        (functional.l1_loss, "reduce", False),
+    ],
+)
+def test_simple_loss_rejects_unpriced_options(
+    loss_fn: SimpleLossFn,
+    option: str,
+    value: object,
+) -> None:
+    config = SimpleLoss.Config()
+    config.loss_fn = loss_fn
+    config.kwargs[option] = value
+    with pytest.raises(NotImplementedError, match=option):
+        cost(config, rows=6, channels_out=2)
+
+
+@pytest.mark.parametrize(
+    ("loss_fn", "options"),
+    [
+        (
+            functional.binary_cross_entropy_with_logits,
+            {"weight": None, "pos_weight": None},
+        ),
+        (
+            functional.cross_entropy,
+            {"weight": None, "label_smoothing": 0, "ignore_index": -100},
+        ),
+        (functional.mse_loss, {"size_average": None, "reduce": None}),
+    ],
+)
+def test_simple_loss_explicit_noop_options(
+    loss_fn: SimpleLossFn,
+    options: dict[str, object],
+) -> None:
+    config = SimpleLoss.Config()
+    config.loss_fn = loss_fn
+    plain = cost(config, rows=6, channels_out=2)
+    config.kwargs.update(options)
+    assert cost(config, rows=6, channels_out=2) == plain
 
 
 def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:

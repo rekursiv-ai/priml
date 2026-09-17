@@ -781,7 +781,12 @@ def test_rope_cost_is_factors_plus_one_table_per_axis() -> None:
         _LearnedTable.Config(),
     )
     # ``cat`` over [8, 8]: 8 frequencies, 8 outputs, no reductions.
-    assert plain == Cost(primal=Compute(flops=Flops(elementwise=8 + 4 * 8)))
+    assert plain == Cost(
+        primal=Compute(
+            flops=Flops(elementwise=8 + 4 * 8),
+            bytes=Bytes(elementwise=4 * (2 + 8 + 8 + 8 * 8)),
+        ),
+    )
     # ``sum`` over [8, 8]: two axes' angles added into 4 outputs.
     summed = RoPE.Config([8, 8], reduction_mode="sum").copy_tree().finalize().cost()
     assert summed.primal.flops == Flops(elementwise=8 + 4 * 4, reduction=4)
@@ -805,7 +810,7 @@ def test_rope_mixed_cost_scales_factors_per_head_and_tables_once() -> None:
     # Per-head frequencies are owned once each, plus the seed table once.
     assert fixed.params == heads * 4 + 7
     mixed.learnable = True
-    learned = mixed.copy_tree().finalize().cost(num_tokens=4)
+    learned = mixed.copy_tree().finalize().cost(rows=4)
     assert learned.adjoint.flops.elementwise == 5 * (heads * 4) + heads * 4
     assert learned.adjoint.flops.reduction == heads * 4 * 3 / 4
     assert (

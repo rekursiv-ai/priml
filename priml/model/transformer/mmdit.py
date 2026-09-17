@@ -17,7 +17,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import NamedTuple, Protocol, Self, cast, override
+from typing import NamedTuple, Protocol, Self, override
+from typing_extensions import ParamSpec
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -29,6 +30,7 @@ from priml.model.attention.multi_stream import (
 from priml.model.attention.self_attention import AttentionProjections
 from priml.model.cost import Cost, cost, elementwise_cost
 from priml.model.custom_types import (
+    AttentionKernel,
     ChannelsHead,
     ChannelsIn,
     ChannelsOut,
@@ -37,12 +39,34 @@ from priml.model.custom_types import (
     HasResetParameters,
     NumHeads,
     TensorModule,
+    infer_same_width,
     propagate_attr,
 )
 from priml.model.linear import Linear
 from priml.model.norm import LayerNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
+
+
+_AttentionKwargs = ParamSpec("_AttentionKwargs", default=...)
+
+
+class _JointAttention(Protocol[_AttentionKwargs]):
+    """Joint stream attention preserving its implementation's keyword bus."""
+
+    streams: nn.ModuleList[AttentionProjections]
+    proj_outs: nn.ModuleList[Linear]
+    attn_kernel: AttentionKernel
+
+    def reset_parameters(self) -> None: ...
+
+    def __call__(
+        self,
+        xs: Sequence[Tensor],
+        /,
+        *args: _AttentionKwargs.args,
+        **kwargs: _AttentionKwargs.kwargs,
+    ) -> tuple[Tensor, ...]: ...
 
 
 class AdaLNZero(nn.Module):
@@ -93,7 +117,7 @@ class AdaLNZero(nn.Module):
                 self.proj.channels_out = 6 * self.channels_in
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Price the projection; the SiLU is elementwise.
 
             Counted per token like every leaf, though ``c`` is often one vector
@@ -101,15 +125,18 @@ class AdaLNZero(nn.Module):
             sequence, so the per-token figure is an upper bound.
 
             Args:
+              itemsize: Bytes per tensor element in the analytical traffic model.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            return cost(self.proj, **kwargs) + elementwise_cost(
+            return cost(self.proj, itemsize=itemsize, **kwargs) + elementwise_cost(
                 primal=5 * self.cond_dim,
                 adjoint=5 * self.cond_dim,
+                channels=self.cond_dim,
+                itemsize=itemsize,
             )
 
     def __init__(self, config: Config) -> None:
@@ -180,7 +207,7 @@ class MMDiTStream(nn.Module):
                     child.depth_index = self.depth_index
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Sum the residual branches; ``attn`` is priced by the joint attention.
 
             The joint attention registers ``attn`` as one of its own streams and
@@ -188,6 +215,7 @@ class MMDiTStream(nn.Module):
             stream's projections twice.
 
             Args:
+              itemsize: Bytes per tensor element in the analytical traffic model.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -195,12 +223,25 @@ class MMDiTStream(nn.Module):
 
             """
             children = (self.norm1, self.norm2, self.ffn)
-            total = sum((cost(child, **kwargs) for child in children), Cost())
+            total = sum(
+                (cost(child, itemsize=itemsize, **kwargs) for child in children),
+                Cost(),
+            )
             if self.adaln is not None:
-                total += cost(self.adaln, **kwargs)
-            # Two residual adds; adaLN adds a scale, shift, and gate per branch.
-            adds = (10 if self.adaln is not None else 2) * self.channels_in
-            return total + elementwise_cost(primal=adds, adjoint=adds)
+                total += cost(self.adaln, itemsize=itemsize, **kwargs)
+            # Per branch: scale offset, scale, shift, gate, residual.
+            modulated = self.adaln is not None
+            adds = (10 if modulated else 2) * self.channels_in
+            return total + elementwise_cost(
+                primal=adds,
+                adjoint=adds,
+                channels=2 * self.channels_in,
+                inputs=9 if modulated else 2,
+                outputs=5 if modulated else 1,
+                adjoint_inputs=13 if modulated else 2,
+                adjoint_outputs=7 if modulated else 1,
+                itemsize=itemsize,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -226,17 +267,17 @@ class MMDiTBlock(nn.Module):
 
     class Config(Fig["MMDiTBlock"], kw_only=False):
         channels_in: int = -1
-        """Channel width shared across streams (-1 to infer from channels_out)."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
         num_streams: int = 2
         """Number of parallel token streams when streams is empty."""
 
-        attn: Makeable[MultiStreamAttention] = field(
+        attn: Makeable[_JointAttention] = field(
             default_factory=MultiStreamAttention.Config,
         )
         """Multi-stream attention config.
@@ -261,7 +302,7 @@ class MMDiTBlock(nn.Module):
         """FFN template for implicit streams; explicit streams own their FFNs."""
 
         depth_index: DepthIndex = ()
-        """Block depth for depth-scaled init (-1 = no scaling)."""
+        """Block depth for depth-scaled init (empty = no scaling)."""
 
         @property
         def num_heads(self) -> int:
@@ -277,15 +318,7 @@ class MMDiTBlock(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if self.channels_in == -1:
-                self.channels_in = self.channels_out
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
-            if self.channels_in != self.channels_out:
-                raise ValueError(
-                    f"channels_in={self.channels_in} must equal "
-                    f"channels_out={self.channels_out} for MMDiTBlock.",
-                )
+            infer_same_width(self)
             if self.streams:
                 self.num_streams = len(self.streams)
                 if isinstance(self.attn, MultiStreamAttention.Config):
@@ -327,7 +360,7 @@ class MMDiTBlock(nn.Module):
                 )
             return super().finalize()
 
-        def cost(self, **kwargs: object) -> Cost:
+        def cost(self, *, itemsize: int = 4, **kwargs: object) -> Cost:
             """Sum the joint attention and every stream's residual branches.
 
             ``seq_len`` on the bus is the JOINT key length -- every stream's
@@ -339,34 +372,32 @@ class MMDiTBlock(nn.Module):
             builds.
 
             Args:
+              itemsize: Bytes per tensor element in the analytical traffic model.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            total = cost(self.attn, **kwargs)
+            total = cost(self.attn, itemsize=itemsize, **kwargs)
             if self.streams:
-                return total + sum((cost(s, **kwargs) for s in self.streams), Cost())
-            D = self.channels_in
-            stream = 2 * cost(LayerNorm.Config(channels_in=D), **kwargs)
-            stream += cost(self.ffn, **kwargs)
+                return total + sum(
+                    (cost(s, itemsize=itemsize, **kwargs) for s in self.streams),
+                    Cost(),
+                )
+            stream = MMDiTStream.Config()
+            stream.channels_in = self.channels_in
+            stream.norm1 = LayerNorm.Config(channels_in=self.channels_in)
+            stream.norm2 = LayerNorm.Config(channels_in=self.channels_in)
+            stream.ffn = self.ffn
             if self.cond_dim > 0:
-                adaln = AdaLNZero.Config(channels_in=D, cond_dim=self.cond_dim)
-                stream += cost(adaln.finalize(), **kwargs)
-            adds = (10 if self.cond_dim > 0 else 2) * D
-            stream += elementwise_cost(primal=adds, adjoint=adds)
-            return total + self.num_streams * stream
+                adaln = AdaLNZero.Config()
+                adaln.channels_in = self.channels_in
+                adaln.cond_dim = self.cond_dim
+                stream.adaln = adaln.finalize()
+            return total + self.num_streams * cost(stream, itemsize=itemsize, **kwargs)
 
     def __init__(self, config: Config) -> None:
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for MMDiTBlock.",
-            )
         super().__init__()
         N = config.num_streams
         D = config.channels_in
@@ -523,8 +554,7 @@ class MMDiTBlock(nn.Module):
                 h = h * (1 + mod.attn_scale) + mod.attn_shift
             normed.append(h)
 
-        attention = cast(_MultiStreamModule, self.attn)
-        attn_outs = attention(normed, cos_sin=cos_sin, **kwargs)
+        attn_outs = self.attn(normed, cos_sin=cos_sin, **kwargs)
 
         results: list[Tensor] = []
         for i in range(N):
@@ -543,11 +573,3 @@ class MMDiTBlock(nn.Module):
             results.append(y + ffn_out)
 
         return tuple(results)
-
-
-class _MultiStreamModule(Protocol):
-    def __call__(
-        self,
-        xs: Sequence[Tensor],
-        **kwargs: object,
-    ) -> tuple[Tensor, ...]: ...

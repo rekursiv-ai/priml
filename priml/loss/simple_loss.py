@@ -11,7 +11,7 @@ from configgle import Fig
 from torch.nn import functional
 
 from priml.loss.custom_types import LossOutput, SimpleLossFn
-from priml.model.cost import Bytes, Compute, Cost, Flops, elementwise_cost
+from priml.model.cost import Bytes, Compute, Cost, Flops, reduction_cost
 
 
 if TYPE_CHECKING:
@@ -59,8 +59,9 @@ class SimpleLoss:
         def cost(
             self,
             *,
-            num_tokens: int,
+            rows: int,
             channels_out: int = -1,
+            itemsize: int = 4,
             **kwargs: object,
         ) -> Cost:
             """Price ``loss_fn`` by identity on one token of the prediction.
@@ -83,13 +84,14 @@ class SimpleLoss:
               adjoint scales the saved difference by the upstream gradient.
 
             ``reduction="none"`` stops there. ``"mean"`` and ``"sum"`` add one
-            reduction over the ``num_tokens`` tokens, ``(n - 1) / n`` per token;
+            reduction over the ``rows`` tokens, ``(n - 1) / n`` per token;
             ``"mean"`` also scales the adjoint by ``1 / n``, one more op. The
             loss owns no parameters and issues no matmul.
 
             Args:
-              num_tokens: Tokens the reduction spans.
+              rows: Tokens the reduction spans.
               channels_out: Classes per row; read only by ``cross_entropy``.
+              itemsize: Bytes per logical tensor element, including labels.
               **kwargs: The rest of the bus, unread.
 
             Returns:
@@ -98,20 +100,76 @@ class SimpleLoss:
             Raises:
               TypeError: ``loss_fn`` is not one of the four priced above.
               ValueError: ``cross_entropy`` without ``channels_out``.
+              NotImplementedError: A non-default loss option lacks an analytical price.
+                BCE ``weight`` is priced as one extra tensor multiply each way.
 
             """
             del kwargs
+            weighted = False
+            for option, value in self.kwargs.items():
+                if option == "reduction":
+                    continue
+                if (
+                    option in ("weight", "pos_weight", "size_average", "reduce")
+                    and value is None
+                ):
+                    continue
+                if (
+                    option == "label_smoothing"
+                    and isinstance(value, (int, float))
+                    and value == 0
+                ):
+                    continue
+                if (
+                    option == "ignore_index"
+                    and isinstance(value, int)
+                    and value == -100
+                ):
+                    continue
+                if (
+                    option == "weight"
+                    and self.loss_fn is functional.binary_cross_entropy_with_logits
+                ):
+                    weighted = True
+                    continue
+                raise NotImplementedError(f"SimpleLoss.cost has no price for {option}.")
             reduction = self.kwargs.get("reduction", "mean")
-            reduced = Cost(
-                primal=Compute(
-                    flops=Flops(reduction=(num_tokens - 1) / num_tokens),
-                ),
-            )
-            if reduction == "none":
-                reduced = Cost()
+            reduced = Cost()
+            if reduction != "none":
+                reduced = Cost(
+                    primal=reduction_cost(
+                        input_elements=rows,
+                        rows=rows,
+                        itemsize=itemsize,
+                    ),
+                    adjoint=Compute(
+                        bytes=Bytes(reduction=itemsize * (rows + 1) / rows),
+                    ),
+                )
             rescale = int(reduction == "mean")
+            if rescale:
+                reduced += Cost(
+                    primal=Compute(bytes=Bytes(elementwise=2 * itemsize / rows)),
+                )
             if self.loss_fn is functional.binary_cross_entropy_with_logits:
-                return elementwise_cost(primal=8, adjoint=5 + rescale) + reduced
+                return (
+                    Cost(
+                        primal=Compute(
+                            flops=Flops(elementwise=8 + int(weighted)),
+                            bytes=Bytes(
+                                elementwise=(21 + 3 * int(weighted)) * itemsize,
+                            ),
+                        ),
+                        adjoint=Compute(
+                            flops=Flops(elementwise=5 + rescale + int(weighted)),
+                            bytes=Bytes(
+                                elementwise=(10 + 2 * rescale + 3 * int(weighted))
+                                * itemsize,
+                            ),
+                        ),
+                    )
+                    + reduced
+                )
             if self.loss_fn is functional.cross_entropy:
                 if channels_out == -1:
                     raise ValueError(
@@ -125,12 +183,21 @@ class SimpleLoss:
                                 elementwise=3 * channels_out + 2,
                                 reduction=2 * (channels_out - 1),
                             ),
-                            bytes=Bytes(selection=1),
+                            bytes=Bytes(
+                                elementwise=(6 * channels_out + 6) * itemsize,
+                                reduction=2 * (channels_out + 1) * itemsize,
+                                selection=3 * itemsize,
+                            ),
                         ),
                         adjoint=Compute(
                             flops=Flops(
                                 elementwise=2 * channels_out + rescale,
                                 selection=1,
+                            ),
+                            bytes=Bytes(
+                                elementwise=(4 * channels_out + 1 + 2 * rescale)
+                                * itemsize,
+                                selection=4 * itemsize,
                             ),
                         ),
                     )
@@ -140,7 +207,19 @@ class SimpleLoss:
                 self.loss_fn is functional.mse_loss
                 or self.loss_fn is functional.l1_loss
             ):
-                return elementwise_cost(primal=2, adjoint=2 + rescale) + reduced
+                return (
+                    Cost(
+                        primal=Compute(
+                            flops=Flops(elementwise=2),
+                            bytes=Bytes(elementwise=5 * itemsize),
+                        ),
+                        adjoint=Compute(
+                            flops=Flops(elementwise=2 + rescale),
+                            bytes=Bytes(elementwise=(5 + 2 * rescale) * itemsize),
+                        ),
+                    )
+                    + reduced
+                )
             raise TypeError(
                 f"{getattr(self.loss_fn, '__qualname__', self.loss_fn)} has no "
                 "price; SimpleLoss.cost knows binary_cross_entropy_with_logits, "

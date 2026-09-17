@@ -143,59 +143,90 @@ class SwiGLU(nn.Module):
                 self.norm.channels_in = self.channels_hidden
             return super().finalize()
 
-        def cost(self, *, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            rows: float = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price projections, activation, products, and optional normalization.
 
             SiLU saves sigmoid for its five-operation derivative; squared ReLU
             uses two backward multiplies. Unknown injected activations must
             implement ``cost`` rather than silently receiving a zero estimate.
+            Nonlinear tensor operators read/write one row; squared ReLU is
+            two operators. Their scalar FLOPs do not imply extra tensor I/O.
 
             Args:
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter and its gradient reduction.
+              itemsize: Uniform bytes per operand element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
               cost: Per-token cost of this module.
 
             """
-            up = matmul_cost(
+            up_copies = 2 if self.gate and self.split_gate_projection else 1
+            up = up_copies * matmul_cost(
                 channels_in=self.channels_in,
-                channels_out=self.channels_hidden * 2
-                if self.gate
-                else self.channels_hidden,
+                channels_out=self.channels_hidden
+                * (2 if self.gate else 1)
+                // up_copies,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
             down = matmul_cost(
                 channels_in=self.channels_hidden,
                 channels_out=self.channels_out,
                 bias=self.bias,
-                num_tokens=num_tokens,
+                rows=rows,
+                itemsize=itemsize,
             )
+            activation = Cost()
             if self.act is nn.functional.silu:
                 fwd, bwd = (5, 5) if self.norm is None else (4, 3)
+                reads, writes = 1, 1
+                adj_reads, adj_writes = 2, 1
             elif self.act is relu_squared:
                 fwd, bwd = (1, 2) if self.norm is None else (0, 1)
+                reads, writes = (2, 2) if self.norm is None else (1, 1)
+                adj_reads, adj_writes = (4, 2) if self.norm is None else (2, 1)
             else:
-                return (
-                    up
-                    + down
-                    + cost(
-                        self.act,
-                        channels=self.channels_hidden,
-                        num_tokens=num_tokens,
-                        **kwargs,
-                    )
+                activation = cost(
+                    self.act,
+                    channels=self.channels_hidden,
+                    rows=rows,
+                    itemsize=itemsize,
+                    **kwargs,
                 )
+                fwd = bwd = reads = writes = adj_reads = adj_writes = 0
             # Each product is one multiply forward and two backward.
             products = int(self.gate) + int(self.norm is not None)
-            scalar = elementwise_cost(
+            scalar = activation + elementwise_cost(
                 primal=(fwd + products) * self.channels_hidden,
                 adjoint=(bwd + 2 * products) * self.channels_hidden,
+                channels=self.channels_hidden,
+                inputs=reads + 2 * products,
+                outputs=writes + products,
+                adjoint_inputs=adj_reads + 4 * products,
+                adjoint_outputs=adj_writes + 2 * products,
+                itemsize=itemsize,
             )
             if self.norm is None:
                 return up + down + scalar
-            return up + down + scalar + cost(self.norm, num_tokens=num_tokens, **kwargs)
+            return (
+                up
+                + down
+                + scalar
+                + cost(
+                    self.norm,
+                    rows=rows,
+                    itemsize=itemsize,
+                    **kwargs,
+                )
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()

@@ -29,6 +29,7 @@ from priml.model.custom_types import (
     HasResetParameters,
     RotaryFactors,
     TensorModule,
+    infer_same_width,
 )
 from priml.model.init import InitFn, kaiming_uniform
 from priml.model.linear import EnsembleLinear, Linear
@@ -44,10 +45,10 @@ class MultiStreamAttention(nn.Module):
 
     class Config(Fig["MultiStreamAttention"], kw_only=False):
         channels_in: int = -1
-        """Channel width shared across all streams."""
+        """Input channel width."""
 
         channels_out: int = -1
-        """Number of output channels (-1 to infer from channels_in)."""
+        """Output channel width."""
 
         _: KW_ONLY
 
@@ -120,8 +121,6 @@ class MultiStreamAttention(nn.Module):
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
             )
-            if self.channels_out == -1:
-                self.channels_out = self.channels_in
             if self.num_heads_kv == -1:
                 self.num_heads_kv = self.num_heads
             if isinstance(self.norm_qk, ChannelsIn) and self.norm_qk.channels_in == -1:
@@ -135,14 +134,22 @@ class MultiStreamAttention(nn.Module):
                 self.num_streams = len(self.streams)
                 for stream in self.streams:
                     stream.channels_in = self.channels_in
-                    stream.channels_out = self.channels_out
+                    stream.channels_out = self.channels_in
                     stream.num_heads = self.num_heads
                     stream.num_heads_kv = self.num_heads_kv
                     stream.channels_head = self.channels_head
                     stream.depth_index = self.depth_index
+            infer_same_width(self)
             return super().finalize()
 
-        def cost(self, *, seq_len: int, num_tokens: int = 1, **kwargs: object) -> Cost:
+        def cost(
+            self,
+            *,
+            seq_len: int,
+            rows: int = 1,
+            itemsize: int = 4,
+            **kwargs: object,
+        ) -> Cost:
             """Price one position: every stream's token, each attending jointly.
 
             A position holds ``num_streams`` tokens. Each pays its own
@@ -153,7 +160,8 @@ class MultiStreamAttention(nn.Module):
 
             Args:
               seq_len: Keys a query reaches before any window.
-              num_tokens: Rows sharing each parameter; divides its gradient reduction.
+              rows: Rows sharing each parameter; divides its gradient reduction.
+              itemsize: Uniform bytes per tensor element.
               **kwargs: The open message bus, forwarded to every child.
 
             Returns:
@@ -163,7 +171,13 @@ class MultiStreamAttention(nn.Module):
             if self.streams:
                 total = sum(
                     (
-                        cost(s, seq_len=seq_len, num_tokens=num_tokens, **kwargs)
+                        cost(
+                            s,
+                            seq_len=seq_len,
+                            itemsize=itemsize,
+                            rows=rows,
+                            **kwargs,
+                        )
                         for s in self.streams
                     ),
                     Cost(),
@@ -179,28 +193,47 @@ class MultiStreamAttention(nn.Module):
                 )
                 total = self.num_streams * template.cost(
                     seq_len=seq_len,
-                    num_tokens=num_tokens,
+                    itemsize=itemsize,
+                    rows=rows,
                     **kwargs,
                 )
                 for rope in self.rope:
                     if rope is None:
                         continue
-                    total += cost(rope, num_tokens=num_tokens, **kwargs)
+                    total += cost(
+                        rope,
+                        itemsize=itemsize,
+                        rows=rows,
+                        **kwargs,
+                    )
                     total += rotation_cost(
                         rope,
                         channels_head=self.channels_head,
                         heads=self.num_heads + self.num_heads_kv,
+                        rows=rows,
+                        itemsize=itemsize,
                     )
                 if self.norm_qk is not None:
-                    # One norm config prices one head row; it runs on every q
-                    # and k head of every stream, while its parameters exist
-                    # once (shared) or twice.
-                    total += cost(self.norm_qk, num_tokens=num_tokens, **kwargs).tile(
-                        self.num_streams * (self.num_heads + self.num_heads_kv),
-                        copies=1 if self.share_qk_norm else 2,
+                    groups = (
+                        (self.num_heads + self.num_heads_kv,)
+                        if self.share_qk_norm
+                        else (self.num_heads, self.num_heads_kv)
                     )
+                    for heads in groups:
+                        head_rows = self.num_streams * heads
+                        total += cost(
+                            self.norm_qk,
+                            itemsize=itemsize,
+                            rows=rows * head_rows,
+                            **kwargs,
+                        ).tile(head_rows)
                 if self.norm_out is not None:
-                    total += cost(self.norm_out, num_tokens=num_tokens, **kwargs).tile(
+                    total += cost(
+                        self.norm_out,
+                        itemsize=itemsize,
+                        rows=rows * self.num_streams,
+                        **kwargs,
+                    ).tile(
                         self.num_streams,
                     )
             kernel = cost(
@@ -208,12 +241,14 @@ class MultiStreamAttention(nn.Module):
                 seq_len=seq_len,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
-                num_tokens=num_tokens,
+                itemsize=itemsize,
+                rows=rows,
                 **kwargs,
             )
             return replace(
                 total + self.num_streams * kernel,
-                bytes_state=self.num_streams
+                bytes_state=itemsize
+                * self.num_streams
                 * 2
                 * self.num_heads_kv
                 * self.channels_head,
@@ -225,14 +260,6 @@ class MultiStreamAttention(nn.Module):
             num_heads=config.num_heads,
             channels_head=config.channels_head,
         )
-        if (
-            -1 not in (config.channels_in, config.channels_out)
-            and config.channels_in != config.channels_out
-        ):
-            raise ValueError(
-                f"channels_in={config.channels_in} must equal "
-                f"channels_out={config.channels_out} for {type(self).__name__}.",
-            )
         super().__init__()
         if config.num_heads % config.num_heads_kv != 0:
             raise ValueError(
