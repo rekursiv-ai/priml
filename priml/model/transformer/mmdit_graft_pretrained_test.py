@@ -1,4 +1,4 @@
-"""One retained layer of an actual Qwen3 checkpoint, compared on the GPU."""
+"""Actual Qwen3 checkpoints, one layer and full depth, compared on the GPU."""
 
 from pathlib import Path
 
@@ -12,10 +12,16 @@ from priml.lib.custom_json import DictCodec, ListCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.mmdit_graft_test import _assert_transferred
+from priml.model.transformer.mmdit_graft_test import (
+    _assert_transferred,
+    _language_only_masks,
+)
 from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 from priml.model.transformer.qwen3_mmdit_graft import Qwen3MMDiTGraft
 from priml.testing.bfb import host_agnostic_numerics
+
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.mark.gpu_torch_cuda
@@ -80,13 +86,59 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
         assert torch.count_nonzero(actual) > 0
         assert outputs[0].shape == other.shape
     peak = torch.cuda.max_memory_allocated()
-    logging.getLogger(__name__).info(
+    logger.info(
         "Qwen3 checkpoint=%s, retained_layers=1, width=%s, peak_cuda_bytes=%s",
         repo,
         config.channels_in,
         peak,
     )
     assert peak < 8 * 1024**3
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.network_huggingface
+def test_full_depth_pretrained_qwen3_graft() -> None:
+    """Compare every layer of the real checkpoint in its own bfloat16."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the real-checkpoint parity test")
+    pytest.importorskip("transformers")
+    repo = "Qwen/Qwen3-0.6B"
+    torch.cuda.reset_peak_memory_stats()
+    source = Qwen3.load(repo, device="cuda", dtype=torch.bfloat16).eval()
+    graft = Qwen3MMDiTGraft.load(repo, device="cuda", dtype=torch.bfloat16).eval()
+    _use_naive_attention(source, graft=graft)
+    assert len(graft.blocks) == source.num_layers
+    assert source.num_layers == 28
+    _assert_transferred(source, graft=graft)
+    tokens = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]], device="cuda")
+    other = torch.randn(2, 3, source.channels_in, device="cuda", dtype=torch.bfloat16)
+    masks = _language_only_masks(5, modality=3, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad(), host_agnostic_numerics():
+        expected = source(tokens)
+        actual, outputs = graft(tokens, [other], attn_mask=masks)
+    assert actual.dtype == torch.bfloat16
+    assert torch.equal(actual, expected)
+    assert torch.count_nonzero(actual) > 0
+    assert outputs[0].shape == other.shape
+    peak = torch.cuda.max_memory_allocated()
+    logger.info(
+        "Qwen3 checkpoint=%s, retained_layers=%s, width=%s, peak_cuda_bytes=%s",
+        repo,
+        source.num_layers,
+        source.channels_in,
+        peak,
+    )
+    assert peak < 8 * 1024**3
+
+
+def _use_naive_attention(source: Qwen3, *, graft: Qwen3MMDiTGraft) -> None:
+    """Put both stacks on the unfused kernel so they issue identical primitives."""
+    for block in source.blocks:
+        assert isinstance(block, TransformerBlock)
+        assert isinstance(block.attn, SelfAttention)
+        block.attn.attn_kernel = SdpaNaive.Config().make()
+    for block in graft.blocks:
+        block.attn.attn_kernel = SdpaNaive.Config().make()
 
 
 if __name__ == "__main__":

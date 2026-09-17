@@ -14,6 +14,7 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.mmdit import MMDiTStream
 from priml.model.transformer.mmdit_graft_test import (
     _assert_transferred,
+    _language_only_masks,
     run_graft,
 )
 from priml.model.transformer.qwen3 import Qwen3
@@ -24,6 +25,7 @@ from priml.model.transformer.qwen3_test import (
     _hf_config,
     _synth_hf_state_dict,
 )
+from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -38,19 +40,7 @@ def test_config_defaults_and_make() -> None:
 @pytest.mark.parametrize("tie", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_load_local_checkpoint(tmp_path: Path, tie: bool, dtype: torch.dtype) -> None:
-    hf = _hf_config(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=8,
-        tie_word_embeddings=tie,
-    )
-    (tmp_path / "config.json").write_text(json.dumps(hf))
-    backbone = Qwen3.Config.from_hf(hf)
-    torch.save(_synth_hf_state_dict(backbone), tmp_path / "pytorch_model.bin")
+    _write_synthetic_checkpoint(tmp_path, tie=tie)
     config = Qwen3MMDiTGraft.Config()
     config.streams = [MMDiTStream.Config(), MMDiTStream.Config()]
     config.streams[1].ffn = SwiGLU.Config(channels_hidden=24)
@@ -65,6 +55,66 @@ def test_load_local_checkpoint(tmp_path: Path, tie: bool, dtype: torch.dtype) ->
     assert ffn.up_proj.weight.shape[-2] == 48
     assert all(parameter.dtype == dtype for parameter in graft.parameters())
     assert config.pformat(finalize=False) == before
+
+
+def _write_synthetic_checkpoint(
+    directory: Path,
+    *,
+    layers: int = 1,
+    tie: bool = False,
+) -> None:
+    """Write a random tiny Qwen3 checkpoint in the HF on-disk layout."""
+    hf = _hf_config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=layers,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        tie_word_embeddings=tie,
+    )
+    (directory / "config.json").write_text(json.dumps(hf))
+    torch.save(
+        _synth_hf_state_dict(Qwen3.Config.from_hf(hf)),
+        directory / "pytorch_model.bin",
+    )
+
+
+def test_load_freeze_and_step_recipe(tmp_path: Path) -> None:
+    """Run the documented recipe: load, freeze, forward, backward, optimizer step."""
+    _write_synthetic_checkpoint(tmp_path, layers=2)
+    graft = Qwen3MMDiTGraft.load(tmp_path, dtype=torch.float32, device="cpu")
+    source = Qwen3.load(tmp_path, dtype=torch.float32)
+    graft.freeze_backbone()
+    before = {name: parameter.clone() for name, parameter in graft.named_parameters()}
+    frozen = {
+        name
+        for name, parameter in graft.named_parameters()
+        if not parameter.requires_grad
+    }
+    assert frozen
+    assert len(frozen) < len(before)
+    tokens = torch.tensor([[1, 2, 3]])
+    modality = torch.randn(1, 2, 16)
+    masks = _language_only_masks(3, modality=2)
+    optimizer = torch.optim.SGD(graft.parameters(), lr=0.1)
+    # Two steps, not one: the fresh modality FFN starts with a zero down
+    # projection, so its up projection receives an exactly zero gradient until
+    # the first step has moved the down projection.
+    for _ in range(2):
+        with host_agnostic_numerics():
+            logits, streams = graft(tokens, [modality], attn_mask=masks)
+            assert torch.equal(logits, source(tokens))
+        streams[0].square().mean().backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+    _assert_transferred(source, graft=graft)
+    for name, parameter in graft.named_parameters():
+        if name in frozen:
+            assert torch.equal(parameter, before[name]), name
+        else:
+            assert not torch.equal(parameter, before[name]), name
 
 
 def test_load_rejects_other_qwen_families(tmp_path: Path) -> None:

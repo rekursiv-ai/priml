@@ -1,4 +1,13 @@
-"""Architecture, transferred weights, and language-preserving graft behavior."""
+"""Architecture, transferred weights, and language-preserving graft behavior.
+
+Regenerate bit-for-bit goldens after an intentional numeric change::
+
+    BFB_REGENERATE=1 uv --quiet run --frozen pytest \
+        priml/model/transformer/mmdit_graft_test.py
+
+Run regeneration through pytest so priml's conftest establishes the required
+math environment before torch imports.
+"""
 
 from __future__ import annotations
 
@@ -96,6 +105,112 @@ def test_graft_constructor_bfb() -> None:
     )
 
 
+def test_graft_forward_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_CWD / "testdata",
+        golden_name="mmdit_graft_forward",
+        build_module=lambda: _config(conditioned=True).make(),
+        build_input=_graft_batch,
+        run=_run_graft_forward,
+    )
+
+
+def _graft_batch() -> tuple[Tensor, Tensor, Tensor]:
+    """Draw tokens, one modality stream, and its conditioning from the seeded RNG."""
+    return torch.tensor([[1, 2, 3]]), torch.randn(1, 2, 16), torch.randn(1, 4)
+
+
+def _run_graft_forward(
+    module: nn.Module,
+    batch: tuple[Tensor, Tensor, Tensor],
+) -> Tensor:
+    """Concatenate the language logits and modality stream of one recipe forward."""
+    assert isinstance(module, MMDiTGraft)
+    tokens, modality, conditioning = batch
+    logits, streams = module(
+        tokens,
+        [modality],
+        c=[None, conditioning],
+        attn_mask=_language_only_masks(3, modality=2),
+    )
+    return torch.cat([logits.flatten(), streams[0].flatten()])
+
+
+def _language_only_masks(
+    language: int,
+    *,
+    modality: int,
+    device: torch.device | str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> list[Tensor | None]:
+    """Return the recipe masks: causal language that never reads a modality key."""
+    mask = torch.full(
+        (language, language + modality),
+        float("-inf"),
+        device=device,
+        dtype=dtype,
+    )
+    mask[:, :language] = mask[:, :language].triu(1)
+    # The modality stream is unrestricted, so it reads every language key.
+    return [mask, None]
+
+
+def test_graft_frozen_step_bfb() -> None:
+    assert_bfb_against_golden(
+        golden_dir=_CWD / "testdata",
+        golden_name="mmdit_graft_frozen_step",
+        build_module=_frozen_graft,
+        build_input=_graft_batch,
+        run=_run_frozen_step,
+    )
+
+
+def _frozen_graft() -> MMDiTGraft:
+    """Build the conditioned graft with only its modality stream trainable."""
+    graft = _config(conditioned=True).make()
+    graft.freeze_backbone()
+    return graft
+
+
+def _run_frozen_step(
+    module: nn.Module,
+    batch: tuple[Tensor, Tensor, Tensor],
+) -> Tensor:
+    """Take one SGD step and return the loss, logits, and modality stream."""
+    assert isinstance(module, MMDiTGraft)
+    tokens, modality, conditioning = batch
+    before = {name: parameter.clone() for name, parameter in module.named_parameters()}
+    frozen = {
+        name
+        for name, parameter in module.named_parameters()
+        if not parameter.requires_grad
+    }
+    assert frozen
+    assert len(frozen) < len(before)
+    logits, streams = module(
+        tokens,
+        [modality],
+        c=[None, conditioning],
+        attn_mask=_language_only_masks(3, modality=2),
+    )
+    loss = logits.square().mean() + streams[0].square().mean()
+    loss.backward()
+    torch.optim.SGD(module.parameters(), lr=0.1).step()
+    module.zero_grad(set_to_none=True)
+    for name, parameter in module.named_parameters():
+        if name in frozen:
+            assert torch.equal(parameter, before[name]), name
+        else:
+            assert not torch.equal(parameter, before[name]), name
+    return torch.cat(
+        [
+            loss.detach().reshape(1),
+            logits.detach().flatten(),
+            streams[0].detach().flatten(),
+        ],
+    )
+
+
 def _assert_same_state(source: object, target: object) -> None:
     assert isinstance(source, nn.Module)
     assert isinstance(target, nn.Module)
@@ -123,39 +238,64 @@ def _assert_transferred(source: Transformer, graft: MMDiTGraft) -> None:
 
 @pytest.mark.parametrize("depth", [1, 2])
 @pytest.mark.parametrize("tie", [False, True])
-def test_weights_logits_and_stream_isolation(depth: int, tie: bool) -> None:
+def test_load_backbone_transfers_only_language_weights(depth: int, tie: bool) -> None:
+    source = _backbone(depth=depth, tie=tie).make()
+    graft = _config(depth=depth, tie=tie).make()
+    randomize_parameters(source, seed=7, std=0.2)
+    modality = nn.ModuleList([graft.blocks[0].attn.streams[1], graft.blocks[0].ffns[1]])
+    modality_before = {
+        name: value.clone()
+        for name, value in DictCodec.coerce(modality.state_dict(), Tensor).items()
+    }
+    graft.load_backbone(source)
+    _assert_transferred(source, graft=graft)
+    for name, value in DictCodec.coerce(modality.state_dict(), Tensor).items():
+        assert torch.equal(value, modality_before[name]), name
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+@pytest.mark.parametrize("tie", [False, True])
+def test_language_only_causal_mask_reproduces_standalone_logits(
+    depth: int,
+    tie: bool,
+) -> None:
     source = _backbone(depth=depth, tie=tie).make().eval()
     graft = _config(depth=depth, tie=tie).make().eval()
     randomize_parameters(source, seed=7, std=0.2)
-    other_state = DictCodec.coerce(graft.blocks[0].ffns[1].state_dict(), Tensor)
-    other_before = {name: value.clone() for name, value in other_state.items()}
     graft.load_backbone(source)
-    _assert_transferred(source, graft)
-    other_after = DictCodec.coerce(graft.blocks[0].ffns[1].state_dict(), Tensor)
-    for name, value in other_after.items():
-        assert torch.equal(value, other_before[name])
     tokens = torch.tensor([[1, 2, 3]])
     other = torch.randn(1, 2, 16)
-    masks = [
-        torch.cat(
-            (
-                torch.full((3, 3), float("-inf")).triu(1),
-                torch.full((3, 2), float("-inf")),
-            ),
-            -1,
-        ),
-        None,
-    ]
+    masks = _language_only_masks(3, modality=2)
     with torch.no_grad(), host_agnostic_numerics():
         expected = source(tokens)
         logits, streams = graft(tokens, [other], attn_mask=masks)
         assert torch.equal(logits, expected)
         assert streams[0].shape == other.shape
         assert torch.equal(graft(tokens, [other + 100], attn_mask=masks)[0], expected)
-        assert not torch.equal(
-            graft(tokens, [other], attn_mask=[None, None])[0],
-            expected,
-        )
+
+
+@pytest.mark.parametrize("visibility", ["unmasked", "modality_visible", "noncausal"])
+def test_wider_language_visibility_changes_logits(visibility: str) -> None:
+    source = _backbone().make().eval()
+    graft = _config().make().eval()
+    randomize_parameters(source, seed=7, std=0.2)
+    graft.load_backbone(source)
+    tokens = torch.tensor([[1, 2, 3]])
+    other = torch.randn(1, 2, 16)
+    recipe = _language_only_masks(3, modality=2)[0]
+    assert recipe is not None
+    if visibility == "unmasked":
+        mask = None
+    elif visibility == "modality_visible":
+        mask = recipe.clone()
+        mask[:, 3:] = 0
+    else:
+        mask = torch.zeros_like(recipe)
+        mask[:, 3:] = float("-inf")
+    with torch.no_grad(), host_agnostic_numerics():
+        expected = source(tokens)
+        logits, _ = graft(tokens, [other], attn_mask=[mask, None])
+        assert not torch.equal(logits, expected)
 
 
 @pytest.mark.parametrize("projected", [False, True])
@@ -203,16 +343,7 @@ def test_freezing_preserves_language_weights_while_new_stream_learns() -> None:
         tokens,
         [other],
         c=[None, torch.randn(1, 4)],
-        attn_mask=[
-            torch.cat(
-                (
-                    torch.full((3, 3), float("-inf")).triu(1),
-                    torch.full((3, 2), float("-inf")),
-                ),
-                -1,
-            ),
-            None,
-        ],
+        attn_mask=_language_only_masks(3, modality=2),
     )
     streams[0].square().sum().backward()
     ffn = graft.blocks[0].ffns[1]
