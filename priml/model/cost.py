@@ -80,19 +80,23 @@ __all__ = [
     "MEASURES",
     "PHASES",
     "Cost",
+    "Device",
     "HasCost",
     "Index",
     "Kernel",
     "Key",
     "Measure",
     "Phase",
+    "bound",
     "cost",
     "elementwise_cost",
     "matmul_cost",
     "mbu",
     "mfu",
+    "peak",
     "reduction_cost",
     "resolve_dtype",
+    "ridge",
     "shared_rows",
     "traffic",
     "utilization",
@@ -554,6 +558,211 @@ def reduction_cost(
             ("bytes", phase, "reduction", dt): dt.itemsize
             * (input_elements + output_groups)
             / rows,
+        },
+    )
+
+
+type Device = Literal[
+    "H100",
+    "H200",
+    "B200",
+    "RTX5050",
+    "RTX5070",
+    "RTX5090",
+    "RTXPRO6000",
+]
+
+# Dense figures, one device, at FP32 accumulate (what training runs): TB/s, then
+# tensor-core TFLOP/s by dtype, then the CUDA-core TFLOP/s every non-matmul silo
+# runs at. Sparse (2:4) is twice these and is not what a dense model achieves. The
+# ``float32`` tensor entry is TF32, what a matmul runs at under
+# ``torch.backends.cuda.matmul.allow_tf32``.
+#
+# H100 SXM5: NVIDIA H100 Tensor Core GPU datasheet, "no sparsity" column
+#   (FP64 TC 67 is not used; the vector rate is FP32 CUDA 67). Mirrored at
+#   https://www.spheron.network/blog/nvidia-h100-specs/ "Throughput by Precision".
+# H200 SXM: same GH100 die and rates; 4.8 TB/s HBM3e from the same source.
+# B200: HGX B200 PCF summary (8 GPUs) divided by 8 --
+#   https://images.nvidia.com/aem-dam/Solutions/documents/HGX-B200-PCF-Summary.pdf
+#   (FP4 72/8 = 9 PF, FP8 36/8 = 4.5, BF16 18/8 = 2.25, TF32 9/8 = 1.125,
+#   FP32 600/8 = 75, FP64 296/8 = 37; sparse marketing halved). 8 TB/s HBM3e.
+# RTX 5090, RTX 5070: NVIDIA RTX Blackwell GPU Architecture whitepaper --
+#   https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf
+#   Table 3 (5090) and Table 6 (5070), the dense figure of each "x/y" pair, at
+#   "with FP32 Accumulate". GeForce Blackwell halves FP16/FP8 tensor throughput
+#   under FP32 accumulate (5090 FP16: 419 fp16-acc, 209.5 fp32-acc), so the
+#   table's bf16 is half the "AI TOPS"-style number. INT8 has no accumulate
+#   split and equals the FP8 fp16-acc rate. FP4 is only published at FP32 acc.
+# RTX PRO 6000 Blackwell Workstation Edition: NVIDIA RTX PRO Blackwell GPU
+#   Architecture whitepaper Table 4 --
+#   https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/NVIDIA-RTX-Blackwell-PRO-GPU-Architecture-v1.0.pdf
+#   Dense figures; RTX PRO does not halve under FP32 accumulate (503.8 both).
+# RTX 5050: not in either whitepaper. NVIDIA's compare page --
+#   https://www.nvidia.com/en-us/geforce/graphics-cards/compare/ -- gives 2560
+#   CUDA cores (20 SMs), 2.57 GHz boost, 320 GB/s, 421 AI TOPS (FP4 sparse).
+#   Every tensor row is the RTX 5070 row times the SM x clock ratio
+#   20 x 2.57 / (48 x 2.512) = 0.4263: FP4 493.9 x 0.4263 = 210.5, twice which
+#   is the published 421, so the scaling is consistent. FP32 is
+#   2 x 2560 x 2.57 GHz = 13.2.
+_DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]]] = {
+    "H100": (
+        3.35,
+        {
+            torch.float64: 34,
+            torch.float32: 494,
+            torch.bfloat16: 989,
+            torch.float16: 989,
+            torch.float8_e4m3fn: 1979,
+            torch.float8_e5m2: 1979,
+            torch.int8: 1979,
+        },
+        67,
+    ),
+    "H200": (
+        4.8,
+        {
+            torch.float64: 34,
+            torch.float32: 494,
+            torch.bfloat16: 989,
+            torch.float16: 989,
+            torch.float8_e4m3fn: 1979,
+            torch.float8_e5m2: 1979,
+            torch.int8: 1979,
+        },
+        67,
+    ),
+    "B200": (
+        8.0,
+        {
+            torch.float64: 37,
+            torch.float32: 1125,
+            torch.bfloat16: 2250,
+            torch.float16: 2250,
+            torch.float8_e4m3fn: 4500,
+            torch.float8_e5m2: 4500,
+            torch.int8: 4500,
+            torch.float4_e2m1fn_x2: 9000,
+        },
+        75,
+    ),
+    "RTX5050": (
+        0.320,
+        {
+            torch.float32: 13.2,
+            torch.bfloat16: 26.3,
+            torch.float16: 26.3,
+            torch.float8_e4m3fn: 52.6,
+            torch.float8_e5m2: 52.6,
+            torch.int8: 105.3,
+            torch.float4_e2m1fn_x2: 210.5,
+        },
+        13.2,
+    ),
+    "RTX5070": (
+        0.672,
+        {
+            torch.float32: 30.9,
+            torch.bfloat16: 61.7,
+            torch.float16: 61.7,
+            torch.float8_e4m3fn: 123.5,
+            torch.float8_e5m2: 123.5,
+            torch.int8: 246.9,
+            torch.float4_e2m1fn_x2: 493.9,
+        },
+        30.9,
+    ),
+    "RTX5090": (
+        1.792,
+        {
+            torch.float32: 104.8,
+            torch.bfloat16: 209.5,
+            torch.float16: 209.5,
+            torch.float8_e4m3fn: 419,
+            torch.float8_e5m2: 419,
+            torch.int8: 838,
+            torch.float4_e2m1fn_x2: 1676,
+        },
+        104.8,
+    ),
+    "RTXPRO6000": (
+        1.792,
+        {
+            torch.float32: 251.9,
+            torch.bfloat16: 503.8,
+            torch.float16: 503.8,
+            torch.float8_e4m3fn: 1007.6,
+            torch.float8_e5m2: 1007.6,
+            torch.int8: 1007.6,
+            torch.float4_e2m1fn_x2: 2015.2,
+        },
+        126.0,
+    ),
+}
+"""``(TB/s, {dtype: tensor-core TFLOP/s}, CUDA-core TFLOP/s)`` per device."""
+
+
+def peak(device: Device) -> Cost:
+    """Per-``(kernel, dtype)`` FLOP/s ceiling of one device, owning nothing.
+
+    A ``matmul`` cell is the dense tensor-core peak for its dtype; every other
+    silo runs on the CUDA cores at the FP32 vector rate regardless of dtype.
+
+    Args:
+      device: Which datasheet to read.
+
+    Returns:
+      peak: FLOP/s per ``(kernel, dtype)``, shaped for :func:`ridge` and
+        :func:`utilization` (tile over phases first).
+
+    """
+    _, tensor, vector = _DEVICES[device]
+    return Cost(
+        cells={
+            **{("matmul", dtype): flops * 1e12 for dtype, flops in tensor.items()},
+            **{
+                (kernel, dtype): vector * 1e12
+                for kernel in KERNELS
+                if kernel != "matmul"
+                for dtype in tensor
+            },
+        },
+    )
+
+
+def ridge(device: Device) -> Cost:
+    """FLOP/byte at which each ``(kernel, dtype)`` cell turns compute-bound.
+
+    A cell whose model intensity ``cost["flops", p, k, d] / cost["bytes",
+    p, k, d]`` is below this is memory-bound on ``device``.
+
+    Args:
+      device: Which datasheet to read.
+
+    Returns:
+      ridge: ``peak(device) / bandwidth`` per ``(kernel, dtype)``.
+
+    """
+    bandwidth, _, _ = _DEVICES[device]
+    return peak(device) / (bandwidth * 1e12)
+
+
+def bound(cost: Cost, device: Device) -> Cost:
+    """Model intensity over the device ridge, per cell: ``> 1`` is compute-bound.
+
+    Args:
+      cost: Per-token cost.
+      device: Which datasheet to read.
+
+    Returns:
+      ratio: ``(flops / bytes) / ridge`` at ``(phase, kernel, dtype)`` keys.
+
+    """
+    intensity = cost["flops"] / cost["bytes"]
+    line = ridge(device).cells
+    return Cost(
+        cells={
+            key: _div(value, line.get(key[1:], 0))
+            for key, value in intensity.cells.items()
         },
     )
 
