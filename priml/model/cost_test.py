@@ -18,13 +18,16 @@ import torch
 from priml.model.cost import (
     Cost,
     HasCost,
+    bound,
     cost,
     elementwise_cost,
     matmul_cost,
     mbu,
     mfu,
+    peak,
     reduction_cost,
     resolve_dtype,
+    ridge,
     shared_rows,
     utilization,
     with_rows,
@@ -263,6 +266,75 @@ def test_scalar_division_does_not_overflow_a_reciprocal() -> None:
     assert (Cost(cells={key: 2}) / 0.0)[key] == math.inf
 
 
+def test_equal_costs_hash_alike_and_zero_cells_do_not_change_the_hash() -> None:
+    a = Cost(cells={("flops", "primal", "matmul", BF): 2}, params=3)
+    b = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 2,
+            ("bytes", "adjoint", "sort", BF): 0,
+        },
+        params=3,
+    )
+    assert hash(a) == hash(b)
+    assert hash(a) != hash(Cost(cells={("flops", "primal", "matmul", BF): 2}))
+
+
+def test_division_by_zero_follows_ieee() -> None:
+    key = ("flops", "primal", "matmul", F32)
+    assert math.isnan((Cost(cells={key: math.nan}) / 0.0)[key])
+    assert (Cost(cells={key: -2}) / 0.0)[key] == -math.inf
+    assert (Cost(cells={key: 2}) / -0.0)[key] == -math.inf
+
+
+def test_repr_is_a_grid_with_totals_and_intensity() -> None:
+    c = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 64_000,
+            ("bytes", "primal", "matmul", BF): 32,
+            ("bytes", "primal", "selection", I64): 8,
+            ("flops", "adjoint", "matmul", BF): 1.5e9,
+        },
+        params=7,
+    )
+    text = repr(c)
+    lines = text.splitlines()
+    assert lines[0] == "Cost(params=7, params_active=0, bytes_state=0)"
+    header, primal, selection, adjoint, total = lines[1:]
+    assert header.split() == [
+        "flops[bfloat16]",
+        "flops[int64]",
+        "bytes[bfloat16]",
+        "bytes[int64]",
+        "flops/bytes",
+    ]
+    assert primal.split() == ["primal", "matmul", "64K", "-", "32", "-", "2K"]
+    assert selection.split() == ["primal", "selection", "-", "-", "-", "8", "-"]
+    assert adjoint.split() == ["adjoint", "matmul", "1.5G", "-", "-", "-", "inf"]
+    assert total.split() == ["total", "1.5G", "-", "32", "8", "37.5M"]
+
+
+def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> None:
+    c = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 3,
+            ("bytes", "primal", "matmul", BF): 6,
+        },
+    )
+    assert repr(c["flops"]).splitlines()[1:] == [
+        "              bfloat16",
+        "primal matmul        3",
+    ]
+    assert repr(c["flops", :, :, BF]).splitlines()[1:] == [
+        "       matmul",
+        "primal      3",
+    ]
+    assert repr(c["flops", "primal", "matmul"]).splitlines()[1:] == [
+        " bfloat16",
+        "        3",
+    ]
+    assert repr(Cost()).splitlines()[1] == "(empty)"
+
+
 # -- metrics -----------------------------------------------------------------
 
 
@@ -289,6 +361,40 @@ def test_utilization_is_per_cell_and_matmul_is_mfu() -> None:
     assert achieved["primal", "elementwise", F32] == 0.03
     assert achieved["adjoint", "reduction", F32] == 0.05
     assert mfu(c, tokens_per_sec=10, peak_flops_per_sec=100) == 0.6
+
+
+def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() -> None:
+    h100 = peak("H100")
+    assert h100["matmul", BF] == 989e12
+    assert h100["matmul", F32] == 494e12
+    assert h100["elementwise", BF] == h100["reduction", F32] == 67e12
+    assert h100["sort", torch.float8_e4m3fn] == 67e12
+    assert h100["sort", I64] == 0
+    assert h100.params == 0
+
+
+def test_ridge_is_peak_over_bandwidth() -> None:
+    assert ridge("H100")["matmul", BF] == 989e12 / 3.35e12
+    assert ridge("B200")["matmul", torch.float4_e2m1fn_x2] == 9000 / 8
+    assert ridge("RTX5090")["elementwise", F32] == 104.8 / 1.792
+
+
+def test_bound_is_intensity_over_ridge_per_cell() -> None:
+    line = ridge("H100").cells[("matmul", BF)]
+    c = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 2 * line,
+            ("bytes", "primal", "matmul", BF): 1,
+            ("flops", "adjoint", "sort", F32): 1,
+            ("bytes", "adjoint", "sort", F32): 1,
+        },
+    )
+    ratio = bound(c, "H100")
+    assert ratio["primal", "matmul", BF] == 2
+    assert ratio["adjoint", "sort", F32] == 1 / ridge("H100").cells[("sort", F32)]
+    assert ratio.params == 0
+    unknown = Cost(cells={("flops", "primal", "matmul", torch.int32): 1})
+    assert bound(unknown, "H100")["primal", "matmul", torch.int32] == math.inf
 
 
 def test_mbu_reads_active_weights_once_and_state_per_position() -> None:
