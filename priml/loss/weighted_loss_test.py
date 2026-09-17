@@ -11,6 +11,7 @@ from torch.nn import functional
 import pytest
 import torch
 
+from priml.loss.custom_types import LossOutput
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
 from priml.model.cost import Cost, cost
@@ -192,6 +193,73 @@ def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:
     """Run the weighted-sum wrapper and return its ``loss`` tensor."""
     assert isinstance(module, WeightedSum)
     return module(prediction, **batch)["loss"]
+
+
+class _TensorLoss(nn.Module):
+    """A loss that returns a bare tensor, the pre-dict contract."""
+
+    class Config(Fig["_TensorLoss"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+
+    @override
+    def forward(self, *args: object, **kwargs: object) -> Tensor:
+        del kwargs
+        prediction, target = args
+        assert isinstance(prediction, Tensor)
+        assert isinstance(target, Tensor)
+        return (prediction - target).abs().mean()
+
+
+def test_weighted_sum_accepts_a_bare_tensor_loss_and_names_it_by_index() -> None:
+    config = WeightedSum.Config()
+    config.fns = [_TensorLoss.Config(), _TensorLoss.Config()]
+    config.weights = [1.0, 3.0]
+    out = config.make()(torch.ones(2, 3), torch.zeros(2, 3))
+    assert out["loss_0"] == 1
+    assert out["loss_1"] == 1
+    assert out["loss"] == 4.0
+
+
+def test_weighted_sum_rejects_a_weight_count_that_differs_from_the_losses() -> None:
+    config = WeightedSum.Config()
+    config.fns = [_TensorLoss.Config()]
+    config.weights = [1.0, 2.0]
+    with pytest.raises(ValueError, match="count mismatch"):
+        config.make()(torch.ones(2), torch.zeros(2))
+
+
+class _DictLoss(nn.Module):
+    """A loss that returns extra keys beside ``loss``."""
+
+    class Config(Fig["_DictLoss"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+
+    @override
+    def forward(self, *args: object, **kwargs: object) -> LossOutput:
+        del kwargs
+        prediction, target = args
+        assert isinstance(prediction, Tensor)
+        assert isinstance(target, Tensor)
+        error = (prediction - target).abs()
+        return {"loss": error.mean(), "max_error": error.max()}
+
+
+def test_weighted_sum_suffixes_every_extra_key_with_the_loss_index() -> None:
+    config = WeightedSum.Config()
+    config.fns = [_DictLoss.Config(), _DictLoss.Config()]
+    config.weights = [1.0, 1.0]
+    out = config.make()(torch.tensor([1.0, 3.0]), torch.zeros(2))
+    assert out["max_error_0"] == 3
+    assert out["max_error_1"] == 3
+    assert "max_error" not in out
 
 
 if __name__ == "__main__":

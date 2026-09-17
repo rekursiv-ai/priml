@@ -24,7 +24,7 @@ from priml.model.transformer.mmdit import AdaLNZero, MMDiTStream
 from priml.model.transformer.mmdit_graft import MMDiTGraft
 from priml.model.transformer.qwen3 import Qwen3
 from priml.model.transformer.qwen3_test import _canonical_config
-from priml.model.transformer.transformer import Transformer
+from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     host_agnostic_numerics,
@@ -336,6 +336,65 @@ def run_graft(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
     tokens, other = inputs
     logits, streams = module(tokens, [other], attn_mask=[None, None])
     return logits.sum() + streams[0].sum()
+
+
+def test_graft_finalize_skips_layers_that_are_not_prenorm_self_attention() -> None:
+    config = _config(depth=2)
+    block = config.backbone.block
+    assert isinstance(block, TransformerBlock.Config)
+    config.backbone.block = [block.copy_tree(), Linear.Config(16, 16)]
+    config.backbone.num_layers = 2
+    assert len(config.finalize().block) == 1
+
+
+def test_graft_rejects_a_backbone_with_no_layers() -> None:
+    config = _config()
+    finalized = config.finalize()
+    finalized.backbone.block = []
+    with pytest.raises(ValueError, match="nonempty language backbone"):
+        MMDiTGraft(finalized)
+
+
+def test_loading_rejects_a_source_whose_blocks_are_not_native() -> None:
+    source = _backbone().make()
+    source.blocks[0] = nn.Identity()
+    graft = _config().make()
+    with pytest.raises(ValueError, match="native prenorm SelfAttention"):
+        graft.load_backbone(source)
+
+
+def test_reset_parameters_redraws_every_owned_module() -> None:
+    graft = _config().make()
+    torch.manual_seed(0)
+    graft.reset_parameters()
+    first = DictCodec.coerce(graft.state_dict(), Tensor)["proj_in.weight"].clone()
+    torch.manual_seed(1)
+    graft.reset_parameters()
+    after = DictCodec.coerce(graft.state_dict(), Tensor)["proj_in.weight"]
+    assert not torch.equal(first, after)
+
+
+def test_forward_rejects_the_wrong_stream_count() -> None:
+    graft = _config().make()
+    with pytest.raises(ValueError, match="Expected 1 modality streams, got 0"):
+        graft(torch.zeros(1, 4, dtype=torch.long), [], attn_mask=torch.ones(4, 4))
+
+
+def test_load_backbone_state_accepts_transformer_named_weights() -> None:
+    source = _backbone().make()
+    graft = _config().make()
+    graft.load_backbone_state(DictCodec.coerce(source.state_dict(), Tensor))
+    loaded = DictCodec.coerce(graft.state_dict(), Tensor)
+    expected = DictCodec.coerce(source.state_dict(), Tensor)
+    assert torch.equal(loaded["proj_in.weight"], expected["proj_in.weight"])
+
+
+def test_head_is_tied_reads_through_a_sequential_head() -> None:
+    assert head_is_tied(_backbone(tie=True))
+    assert not head_is_tied(_backbone(tie=False))
+    bare = _backbone()
+    bare.proj_out = TiedLinear.Config(tied="proj_in")
+    assert head_is_tied(bare)
 
 
 if __name__ == "__main__":

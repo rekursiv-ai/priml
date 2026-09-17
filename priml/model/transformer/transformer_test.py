@@ -515,6 +515,33 @@ def _logits_float(module: nn.Module, tokens: Tensor) -> Tensor:
     return module(tokens).float()
 
 
+def test_channels_in_is_read_from_proj_in_or_falls_back_to_channels_out() -> None:
+    from_linear = Transformer.Config(channels_out=8)
+    from_linear.proj_in = Linear.Config(channels_in=6, channels_out=8)
+    assert from_linear.finalize().channels_in == 6
+
+    bare = Transformer.Config(channels_out=8)
+    bare.proj_in = None
+    assert bare.finalize().channels_in == 8
+
+
+def test_transformer_rejects_a_block_that_does_not_build_a_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Transformer.Config(channels_in=8, channels_out=8, num_layers=1)
+    config = config.finalize()
+    monkeypatch.setattr(TransformerBlock.Config, "make", Mock(return_value=object()))
+    with pytest.raises(TypeError, match=r"must build an nn\.Module"):
+        Transformer(config)
+
+
+def test_transformer_rejects_a_block_list_that_disagrees_with_num_layers() -> None:
+    config = Transformer.Config(channels_in=8, channels_out=8).finalize()
+    config.num_layers = 3
+    with pytest.raises(ValueError, match=r"num_layers=3\."):
+        Transformer(config)
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 
