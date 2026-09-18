@@ -21,10 +21,10 @@ halting is a learned decision rather than a fixed step count.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import field
-from typing import NotRequired, Self, TypedDict, cast, override
+from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
 import math
 
@@ -44,9 +44,14 @@ from priml.optimizers import (
 )
 from priml.optimizers.composite import complement, excluding
 from priml.optimizers.muon import Muon
-from priml.train.custom_types import TrainStepOutput
 from priml.train.ema import EMA, NoEMA
 from priml.train.train_step import TrainStep
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
+
+    from priml.train.custom_types import TrainStepOutput
 
 
 # Muon orthogonalizes each update, which suits the square-ish weight matrices inside the
@@ -331,7 +336,8 @@ class SudokuTrainStep(TrainStep):
     @override
     def call_eval(self, *args: object, **batch: object) -> Tensor:
         """Return evaluation logits under the EMA weights."""
-        assert not args
+        if args:
+            raise ValueError("Expected not args.")
         media = batch["media"]
         assert isinstance(media, Tensor)
         with self._eval_weights():

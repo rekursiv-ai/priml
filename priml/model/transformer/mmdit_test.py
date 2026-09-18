@@ -20,11 +20,11 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer import mmdit
@@ -667,10 +667,10 @@ def test_block_cost_matches_torch_without_conditioning() -> None:
         build_input=lambda: tuple(
             torch.randn(1, 4, 8, requires_grad=True) for _ in range(2)
         ),
-        seq_len=8,
+        seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
-        rows=4,
         run=lambda module, xs: _run_mmdit(module, list(xs)).sum(),
     )
 

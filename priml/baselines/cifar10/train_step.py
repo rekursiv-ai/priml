@@ -14,11 +14,11 @@ the library. Instead the config carries a callable; the builders live in
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import field
 from pathlib import Path
-from typing import Self, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 import math
 
@@ -34,8 +34,13 @@ from priml.math.custom_types import TensorFn
 from priml.math.schedules import Schedule, cosine
 from priml.math.stats import PcaDecompose, pca_eigh
 from priml.optimizers import CompositeOptimizer, apply_lr_scale
-from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
+
+    from priml.train.custom_types import TrainStepOutput
 
 
 class Cifar10TrainStep(TrainStep):
@@ -205,7 +210,8 @@ class Cifar10TrainStep(TrainStep):
     @override
     def call_eval(self, *args: object, **batch: object) -> object:
         """Return evaluation logits, optionally averaged over augmentations."""
-        assert not args
+        if args:
+            raise ValueError("Expected not args.")
         media = batch["media"]
         assert isinstance(media, Tensor)
         self.model.eval()

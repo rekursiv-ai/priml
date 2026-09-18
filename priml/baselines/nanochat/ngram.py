@@ -19,7 +19,7 @@ from torch.nn import functional
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
@@ -467,26 +467,44 @@ def _check_mix(
     indices: list[Tensor],
     sinks: list[Tensor],
 ) -> None:
-    assert 1 <= len(gates) <= 2
-    assert len(weights) == len(indices) == len(sinks) == 2 * len(gates)
-    assert v.ndim == 4
-    assert v.is_contiguous()
+    if len(gates) < 1 or len(gates) > 2:
+        raise ValueError("Expected 1 <= len(gates) <= 2.")
+    if not len(weights) == len(indices) == len(sinks) == 2 * len(gates):
+        raise ValueError(
+            "Expected len(weights) == len(indices) == len(sinks) == 2 * len(gates).",
+        )
+    if v.ndim != 4:
+        raise ValueError("Expected v.ndim == 4.")
+    if not v.is_contiguous():
+        raise ValueError("Expected v.is_contiguous().")
     b, t, h, d = v.shape
-    assert weights[0].shape[1] * 2 == h * d
+    if weights[0].shape[1] * 2 != h * d:
+        raise ValueError("Expected weights[0].shape[1] * 2 == h * d.")
     for w, s in zip(weights, sinks, strict=True):
-        assert w.shape == s.shape
-        assert w.is_contiguous()
-        assert s.is_contiguous()
-        assert s.dtype == torch.float32
-        assert w.dtype == v.dtype
+        if w.shape != s.shape:
+            raise ValueError("Expected w.shape == s.shape.")
+        if not w.is_contiguous():
+            raise ValueError("Expected w.is_contiguous().")
+        if not s.is_contiguous():
+            raise ValueError("Expected s.is_contiguous().")
+        if s.dtype != torch.float32:
+            raise ValueError("Expected s.dtype == torch.float32.")
+        if w.dtype != v.dtype:
+            raise ValueError("Expected w.dtype == v.dtype.")
     for index in indices:
-        assert index.numel() == b * t
-        assert index.dtype == torch.int64
-        assert index.is_contiguous()
+        if index.numel() != b * t:
+            raise ValueError("Expected index.numel() == b * t.")
+        if index.dtype != torch.int64:
+            raise ValueError("Expected index.dtype == torch.int64.")
+        if not index.is_contiguous():
+            raise ValueError("Expected index.is_contiguous().")
     for gate in gates:
-        assert gate.shape[-1] == h
-        assert gate.numel() == b * t * h
-        assert gate.is_contiguous()
+        if gate.shape[-1] != h:
+            raise ValueError("Expected gate.shape[-1] == h.")
+        if gate.numel() != b * t * h:
+            raise ValueError("Expected gate.numel() == b * t * h.")
+        if not gate.is_contiguous():
+            raise ValueError("Expected gate.is_contiguous().")
 
 
 @torch.library.custom_op(
@@ -696,10 +714,10 @@ def _jit_kernel(function: Callable[..., None]) -> "triton.JITFunction[..., None]
 
 @lru_cache(maxsize=1)
 def _compiled_ngram_forward() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_ngram_mix_fwd_kernel)
+    return _jit_kernel(_ngram_mix_fwd_triton)
 
 
-def _ngram_mix_fwd_kernel(
+def _ngram_mix_fwd_triton(
     buffers: "tuple[language.tensor, ...]",
     n_rows: int,
     n_head: int,
@@ -775,10 +793,10 @@ def _ngram_mix_fwd_kernel(
 
 @lru_cache(maxsize=1)
 def _compiled_ngram_backward() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_ngram_mix_bwd_kernel)
+    return _jit_kernel(_ngram_mix_bwd_triton)
 
 
-def _ngram_mix_bwd_kernel(  # noqa: PLR0917 -- Triton JIT binds the kernel operands by position.
+def _ngram_mix_bwd_triton(  # noqa: PLR0917 -- Triton JIT binds the kernel operands by position.
     buffers: "tuple[language.tensor, ...]",
     n_rows: int,
     n_head: int,
@@ -911,10 +929,10 @@ def _ngram_mix_bwd_kernel(  # noqa: PLR0917 -- Triton JIT binds the kernel opera
 
 @lru_cache(maxsize=1)
 def _compiled_sink_clear() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_clear_marked_sink_kernel)
+    return _jit_kernel(_clear_marked_sink_triton)
 
 
-def _clear_marked_sink_kernel(
+def _clear_marked_sink_triton(
     buffers: "tuple[language.tensor, ...]",
     n_cols: int,
     block: "language.constexpr",

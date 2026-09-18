@@ -13,10 +13,9 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     matmul_cost,
-    shared_rows,
 )
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, kaiming_uniform
@@ -87,11 +86,12 @@ class Linear(nn.Linear):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 bias=self.bias,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 
@@ -179,11 +179,12 @@ class EnsembleLinear(nn.Module):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out * self.num_ensemble,
                 bias=self.bias,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=dtype,
             )
 

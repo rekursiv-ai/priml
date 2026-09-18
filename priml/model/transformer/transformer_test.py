@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, override
+from typing import TYPE_CHECKING, Final, override
 from unittest.mock import Mock
 
 import warnings
@@ -15,11 +15,10 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost
-from priml.model.custom_types import DepthIndex, TensorModule
 from priml.model.embedding import Embedding
 from priml.model.generate import generate
 from priml.model.linear import Linear
@@ -30,6 +29,10 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.model.custom_types import DepthIndex, TensorModule
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -424,7 +427,7 @@ def test_transformer_cost_is_the_palm_formula() -> None:
     embedding = 128 * 32
     matrix = params - embedding
     attention = 12 * 2 * (4 * 8) * 16
-    assert cost["flops", :, "matmul"].sum() == 6 * matrix + attention
+    assert cost["flops", "matmul"].sum() == 6 * matrix + attention
     assert cost.bytes_state == 4 * 2 * 2 * 4 * 8
 
 
@@ -443,6 +446,7 @@ def test_transformer_cost_matches_torch_through_a_naive_kernel() -> None:
         build_input=lambda: torch.randint(0, 128, (1, 8)),
         seq_len=8,
         batch_size=1,
+        num_tokens=8,
         dtype=None,
         run=_logits_float,
     )
@@ -461,7 +465,7 @@ def test_tied_head_cost_owns_no_parameters_but_pays_the_matmul() -> None:
         .finalize()
         .cost(seq_len=8, batch_size=1, dtype=None)
     )
-    assert tied["flops", :, "matmul"].sum() == untied["flops", :, "matmul"].sum()
+    assert tied["flops", "matmul"].sum() == untied["flops", "matmul"].sum()
     assert tied.params == untied.params - 128 * 32
 
 

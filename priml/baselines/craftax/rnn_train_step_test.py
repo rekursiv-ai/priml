@@ -72,6 +72,11 @@ def test_one_step_consumes_the_declared_interactions() -> None:
     assert _step().steps_per_update == 2 * 2
 
 
+def test_the_loops_batch_passes_through_untouched() -> None:
+    batch: dict[str, object] = {"observation": object()}
+    assert _step().preprocess_batch(batch) is batch
+
+
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
     result = _step().train_step()
     assert math.isfinite(float(result["loss"]))

@@ -59,9 +59,8 @@ uv --quiet run --frozen python -m torch.distributed.run \
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import importlib
@@ -80,6 +79,10 @@ import torch
 
 from priml.custom_types import JobProtocol, LaunchableExperiment
 from priml.logger import setup_logging
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 
 class _Flags(Protocol):

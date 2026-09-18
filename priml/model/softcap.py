@@ -26,12 +26,12 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.math.numeric import softcap
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
 )
+from priml.math.numeric import softcap
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,

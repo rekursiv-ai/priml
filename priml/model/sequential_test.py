@@ -9,8 +9,8 @@ from configgle.testing import assert_pprint_golden
 
 import torch
 
+from priml.cost import Cost, cost
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost
 from priml.model.init import mup_output
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -215,6 +215,7 @@ def test_sequential_cost_matches_torch() -> None:
         build_input=lambda: torch.randn(3, 4, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * 4 * 4

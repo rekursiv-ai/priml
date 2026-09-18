@@ -8,6 +8,8 @@ import math
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+    from priml.math.custom_types import Tensorable
 from torch import Tensor
 from wrapt import lazy_import
 
@@ -15,7 +17,6 @@ import numpy as np
 import pytest
 import torch
 
-from priml.math.custom_types import Tensorable
 from priml.math.probability import (
     cdf_logit_normal,
     cdf_normal,

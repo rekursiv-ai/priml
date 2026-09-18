@@ -23,10 +23,10 @@ from torch.utils.checkpoint import checkpoint as real_checkpoint
 import pytest
 import torch
 
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -292,6 +292,7 @@ def test_block_cost_sums_its_four_children() -> None:
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
+        num_tokens=8,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()

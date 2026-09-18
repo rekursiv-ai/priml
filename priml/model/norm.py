@@ -11,12 +11,11 @@ from torch.nn import functional as f
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     elementwise_cost,
     reduction_cost,
     resolve_dtype,
-    shared_rows,
     traffic,
 )
 from priml.model.custom_types import infer_same_width
@@ -80,7 +79,8 @@ class RMSNorm(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = _dtype(self.dtype, dtype)
             width = self.channels_in
             params = width if self.elementwise_affine else 0
@@ -179,7 +179,8 @@ class CenteredRMSNorm(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             width = self.channels_in
             return (
@@ -273,11 +274,12 @@ class LayerNorm(nn.LayerNorm):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=1,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=_dtype(self.dtype, dtype),
             )
 
@@ -354,7 +356,8 @@ class BatchNorm(nn.BatchNorm1d):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = _dtype(self.dtype, dtype)
             return _normalization_cost(
                 channels=self.channels_in,
@@ -480,7 +483,8 @@ class BatchRenorm(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             width = self.channels_in
             return _normalization_cost(
@@ -676,7 +680,8 @@ class BatchNorm2d(nn.BatchNorm2d):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = _dtype(self.dtype, dtype)
             return _normalization_cost(
                 channels=self.channels_in,
@@ -773,11 +778,12 @@ class GroupNorm2d(nn.GroupNorm):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=self.num_groups / seq_len,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=_dtype(self.dtype, dtype),
             )
 
@@ -853,11 +859,12 @@ class GroupNorm(nn.GroupNorm):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
                 groups_per_token=self.num_groups / seq_len,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=_dtype(self.dtype, dtype),
             )
 

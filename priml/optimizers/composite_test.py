@@ -12,9 +12,11 @@ import torch
 
 from priml.optimizers.composite import (
     CompositeOptimizer,
+    _ChainedState,
     complement,
     everything,
     excluding,
+    matching,
 )
 from priml.optimizers.muon import Muon
 from priml.optimizers.newton import Newton
@@ -271,6 +273,104 @@ def test_config_rejects_two_selectors_claiming_one_parameter() -> None:
     config.select = [everything, everything]
     with pytest.raises(ValueError, match="claimed by selector"):
         _ = config.make()(split_model())
+
+
+def test_config_rejects_a_selector_that_claims_nothing() -> None:
+    config = CompositeOptimizer.Config()
+    config.optimizers = [PartialConfig(torch.optim.SGD, lr=0.1), Muon.Config()]
+    config.select = [complement(matching("ghost")), matching("ghost")]
+    with pytest.raises(ValueError, match="Selector 1 claimed no parameters"):
+        _ = config.make()(split_model())
+
+
+def test_drop_empty_removes_a_member_whose_selector_claims_nothing() -> None:
+    """An ablation naming a mechanism the model lacks keeps its siblings' rates."""
+    config = CompositeOptimizer.Config()
+    config.optimizers = [PartialConfig(torch.optim.SGD, lr=0.1), Muon.Config()]
+    config.select = [complement(matching("ghost")), matching("ghost")]
+    config.drop_empty = True
+    optimizer = config.make()(split_model())
+    assert [type(o).__name__ for o in optimizer.optimizers] == ["SGD"]
+
+
+def test_a_selector_receives_the_parameter_name() -> None:
+    model = split_model()
+    seen: list[str] = []
+
+    class _Recording:
+        def __call__(self, name: str, parameter: nn.Parameter) -> bool:
+            del parameter
+            seen.append(name)
+            return True
+
+    config = CompositeOptimizer.Config()
+    config.optimizers = [PartialConfig(torch.optim.SGD, lr=0.1)]
+    config.select = [_Recording()]
+    _ = config.make()(model)
+    assert seen == [name for name, _ in model.named_parameters()]
+
+
+def _weight() -> nn.Parameter:
+    return nn.Parameter(torch.zeros(2, 2))
+
+
+def test_matching_selects_by_name_fragment() -> None:
+    select = matching("embed", "head")
+    assert select("token_embed.weight", _weight())
+    assert select("lm_head.weight", _weight())
+    assert not select("block.0.attn.weight", _weight())
+
+
+def test_excluding_rejects_a_named_fragment_and_defers_otherwise() -> None:
+    select = excluding(Muon.eligible_tensor, "head")
+    assert select("block.weight", _weight())
+    assert not select("lm_head.weight", _weight())
+    assert not select("block.bias", nn.Parameter(torch.zeros(2)))
+
+
+def test_complement_inverts_its_selector() -> None:
+    select = complement(matching("head"))
+    assert select("block.weight", _weight())
+    assert not select("lm_head.weight", _weight())
+
+
+def test_selectors_compare_by_value_so_configs_can_be_diffed() -> None:
+    """A closure never equals another; these do, or forks could not be diffed."""
+    assert matching("a", "b") == matching("a", "b")
+    assert matching("a") != matching("b")
+    assert hash(matching("a")) == hash(matching("a"))
+    assert excluding(everything, "x") == excluding(everything, "x")
+    assert excluding(everything, "x") != excluding(everything, "y")
+    assert hash(excluding(everything, "x")) == hash(excluding(everything, "x"))
+    assert complement(everything) == complement(everything)
+    assert complement(everything) != complement(matching("x"))
+    assert hash(complement(everything)) == hash(complement(everything))
+    assert matching("a") != "matching('a')"
+
+
+def test_selector_reprs_name_functions_without_addresses() -> None:
+    assert repr(matching("a", "b")) == "matching('a', 'b')"
+    assert repr(excluding(everything, "head")) == "excluding(everything, 'head')"
+    assert repr(complement(matching("x"))) == "complement(matching('x'))"
+    assert (
+        repr(excluding(Muon.eligible_tensor, "head"))
+        == "excluding(Muon.eligible_tensor, 'head')"
+    )
+
+
+def test_chained_state_iterates_over_every_members_keys() -> None:
+    torch.manual_seed(0)
+    model = split_model()
+    optimizer = split_optimizer(model)
+    backward(model)
+    optimizer.step()
+    state = optimizer.state
+    assert isinstance(state, _ChainedState)
+    # Plain SGD keeps no per-parameter state; Muon holds a momentum buffer.
+    keys = list(state)
+    assert {id(k) for k in keys} == {id(p) for p in model.parameters() if p.ndim >= 2}
+    first = keys[0]
+    assert isinstance(state[first], dict)
 
 
 if __name__ == "__main__":

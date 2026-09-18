@@ -14,7 +14,7 @@ distant mob is not drawn would make every run depend on GitHub being up.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import hashlib
 import os
@@ -30,6 +30,10 @@ from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
 from priml.baselines.craftax.game.render import assets, sprites
 from priml.baselines.craftax.game.render.pixels import Renderer
 from priml.baselines.craftax.game.state import EnvState, empty_state
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 TILE = 8

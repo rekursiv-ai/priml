@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import math
 
@@ -12,6 +11,10 @@ from torch import Tensor, nn
 import torch
 
 from priml.lib.custom_json import FloatCodec
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 @runtime_checkable

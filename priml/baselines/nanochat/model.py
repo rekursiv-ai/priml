@@ -38,18 +38,16 @@ from priml.baselines.nanochat.ngram import (
     NgramSource,
     clear_marked_sinks,
 )
-from priml.model.attention.rope import RoPE
-from priml.model.attention.value_gated_attention import (
-    ValueGatedAttention,
-)
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     reduction_cost,
-    shared_rows,
     traffic,
-    with_rows,
+)
+from priml.model.attention.rope import RoPE
+from priml.model.attention.value_gated_attention import (
+    ValueGatedAttention,
 )
 from priml.model.custom_types import (
     ChannelsHead,
@@ -320,7 +318,7 @@ class NanoChatLM(nn.Module):
                 seq_len=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(seq_len * batch_size, **kwargs),
+                **kwargs,
             )
             return sum(
                 (price(child) for child in (*self.block, self.lm_head)),
@@ -713,7 +711,7 @@ class GatedResidualMix(ResidualMix):
                     adjoint_inputs=11,
                     adjoint_outputs=5,
                     params=1,
-                    rows=shared_rows(seq_len, batch_size, **kwargs),
+                    rows=seq_len * batch_size,
                     dtype=dt,
                 )
                 + elementwise_cost(
@@ -787,7 +785,8 @@ class SourceReuseTransformerBlock(TransformerBlock):
         source = kwargs.pop("attention_source", None)
         if source is None:
             return super()._forward(x, **kwargs)
-        assert self.prenorm
+        if not self.prenorm:
+            raise ValueError("Expected self.prenorm.")
         assert isinstance(source, Tensor)
         attention = self.attn(self.norm1(source, **kwargs), **kwargs)
         assert isinstance(attention, Tensor)
@@ -863,7 +862,7 @@ class MemoryNanoChatLM(NanoChatLM):
               cost: Per-token cost of this module.
 
             """
-            batch = with_rows(seq_len * batch_size, **kwargs)
+            batch = kwargs
             rows = seq_len * batch_size
             dt = dtype
             total = super().cost(
@@ -1091,7 +1090,8 @@ class MemoryNanoChatLM(NanoChatLM):
             # Recompute on the target device; moving factors retains different
             # transcendental rounding.
             self.materialize_rotation_table(device=device)
-        assert self._rotation is not None
+        if self._rotation is None:
+            raise ValueError("Expected self._rotation is not None.")
         cos, sin = self._rotation
         return cos[:length], sin[:length]
 

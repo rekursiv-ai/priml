@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
+
+import inspect
 
 from configgle import Fig
 
 import pytest
 import torch
 
-from priml.metrics.custom_types import MetricProtocol
+from priml.cost import Cost
+from priml.metrics.custom_types import MetricProtocol, RequiresDeviceTiming
 from priml.metrics.utilization import Utilization
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
@@ -94,7 +97,35 @@ def test_utilization_is_a_metric() -> None:
 
 def test_utilization_requires_completed_device_work() -> None:
     meter = Utilization(Utilization.Config())
+    assert isinstance(meter, RequiresDeviceTiming)
     assert meter.requires_device_timing
+
+
+class _StubMetric:
+    """Borrows every ``MetricProtocol`` stub body, which must be inert."""
+
+    update = MetricProtocol.update
+    compute = MetricProtocol.compute
+    reset = MetricProtocol.reset
+    state_dict = MetricProtocol.state_dict
+    load_state_dict = MetricProtocol.load_state_dict
+
+
+def test_metric_protocol_stub_bodies_are_inert() -> None:
+    metric: MetricProtocol = _StubMetric()
+    assert metric.update(torch.zeros(1), label=torch.zeros(1)) is None
+    assert metric.compute() is None
+    assert metric.reset() is None
+
+
+def test_requires_device_timing_stub_body_is_inert() -> None:
+    descriptor = cast(
+        object,
+        inspect.getattr_static(RequiresDeviceTiming, "requires_device_timing"),
+    )
+    assert isinstance(descriptor, property)
+    assert descriptor.fget is not None
+    assert descriptor.fget(object()) is None
 
 
 @pytest.mark.parametrize("peak", [0.0, -1.0, float("nan"), float("inf")])

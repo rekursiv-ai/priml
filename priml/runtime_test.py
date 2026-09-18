@@ -10,6 +10,7 @@ import torch
 from priml import runtime
 from priml.runtime import (
     MultiProcess,
+    RuntimeProtocol,
     SingleProcess,
     get_device,
     initialize_global_device_mesh,
@@ -19,6 +20,40 @@ from priml.runtime import (
 
 def test_get_device_explicit() -> None:
     assert get_device("cpu") == torch.device("cpu")
+
+
+def test_get_device_none_returns_the_torch_default() -> None:
+    assert get_device(None) == torch.get_default_device()
+
+
+@pytest.mark.parametrize(
+    ("cuda", "mps", "expected"),
+    [(True, True, "cuda"), (False, True, "mps"), (False, False, "cpu")],
+)
+def test_get_device_auto_prefers_cuda_then_mps_then_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda: bool,
+    mps: bool,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+    assert get_device("auto") == torch.device(expected)
+
+
+class _StubRuntime:
+    """Borrows the protocol's stub bodies, which acquire nothing."""
+
+    device = torch.device("cpu")
+    initialize = RuntimeProtocol.initialize
+    destroy = RuntimeProtocol.destroy
+
+
+def test_runtime_protocol_stub_bodies_are_inert() -> None:
+    strategy: RuntimeProtocol = _StubRuntime()
+    assert strategy.initialize() is None
+    assert strategy.destroy() is None
+    assert not runtime.runtime_initialized()
 
 
 def test_runtime_all_exports_public_helpers() -> None:
@@ -124,6 +159,28 @@ def test_single_process_initialize_rejects_conflicting_settings(
         ).make().initialize()
 
 
+def test_single_process_initialize_enables_determinism(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(runtime, "enable_determinism", lambda: calls.append("on"))
+    monkeypatch.setattr(runtime, "_runtime_initialized", False)
+    monkeypatch.setattr(runtime, "_single_process_settings", None)
+
+    SingleProcess.Config(device="cpu", deterministic=True).make().initialize()
+
+    assert calls == ["on"]
+
+
+def test_single_process_destroy_rejects_a_live_device_mesh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mesh means a multi-process runtime owns the process; do not clobber it."""
+    monkeypatch.setattr(runtime, "_device_mesh", object())
+    with pytest.raises(RuntimeError, match="Device mesh initialized"):
+        SingleProcess.Config(device="cpu").make().destroy()
+
+
 def test_single_process_initialize_rejects_multiprocess_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,6 +208,90 @@ def test_single_process_destroy_clears_settings(
     assert not runtime.runtime_initialized()
     # A conflicting config now initializes cleanly rather than raising.
     SingleProcess.Config(device="cpu", deterministic=True).make().initialize()
+
+
+@pytest.mark.parametrize(
+    "mesh_topology",
+    [{"dp": 0, "pp": 1, "tp": 1}, {"dp": -1, "pp": -1, "tp": 1}],
+)
+def test_multiprocess_rejects_a_zero_or_doubly_automatic_mesh(
+    mesh_topology: dict[str, int],
+) -> None:
+    with pytest.raises(ValueError, match="at most one negative"):
+        MultiProcess.Config(device="cpu", mesh_topology=mesh_topology).make()
+
+
+def test_multiprocess_finalize_resolves_the_device() -> None:
+    config = MultiProcess.Config(device="cpu").finalize()
+    assert config.device == torch.device("cpu")
+
+
+def test_multiprocess_initialize_and_destroy_drive_the_global_mesh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=2)
+    process = MultiProcess.Config(
+        device="cpu",
+        backend="gloo",
+        mesh_topology={"dp": -1, "pp": 1, "tp": 1},
+    ).make()
+
+    process.initialize()
+    assert runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is not None
+    assert record["mesh_device_type"] == "cpu"
+    with pytest.raises(RuntimeError, match="already initialized"):
+        process.initialize()
+
+    process.destroy()
+    assert not runtime.runtime_initialized()
+    assert runtime.global_device_mesh() is None
+    assert record["destroy_calls"] == 1
+    assert not torch.distributed.is_initialized()
+
+
+def test_destroy_without_an_initialized_runtime_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1, preinitialized=True)
+    monkeypatch.setattr(runtime, "_process_group_owned", True)
+
+    runtime.destroy_global_device_mesh()
+
+    assert "destroy_calls" not in record
+    assert torch.distributed.is_initialized()
+    assert not runtime._process_group_owned
+
+
+def test_multiprocess_initialize_enables_determinism(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(runtime, "enable_determinism", lambda: calls.append("on"))
+    _patch_distributed(monkeypatch, world_size=1)
+
+    initialize_global_device_mesh(
+        device=torch.device("cpu"),
+        backend="gloo",
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+        deterministic=True,
+    )
+
+    assert calls == ["on"]
+
+
+def test_initialize_defaults_the_backend_from_the_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _patch_distributed(monkeypatch, world_size=1)
+
+    initialize_global_device_mesh(
+        device=torch.device("cpu"),
+        mesh_topology={"dp": 1, "pp": 1, "tp": 1},
+    )
+
+    init_kwargs = cast(dict[str, object], record["init_kwargs"])
+    assert init_kwargs["backend"] == "gloo"
 
 
 def test_multiprocess_backend_resolved_once_by_init() -> None:

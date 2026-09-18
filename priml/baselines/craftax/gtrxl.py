@@ -40,16 +40,14 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
     resolve_dtype,
-    shared_rows,
     traffic,
-    with_rows,
 )
 from priml.model.norm import LayerNorm
 
@@ -122,10 +120,6 @@ class ActorCriticGTrXL(nn.Module):
             input per layer. Maintaining that memory -- the reset, the
             append -- is cache bookkeeping, unpriced like a KV-cache update.
 
-            This is the model root: every parameter is shared by
-            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
-            replaced by the batch's tokens.
-
             Args:
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
@@ -147,7 +141,7 @@ class ActorCriticGTrXL(nn.Module):
                 seq_len=seq_len,
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(rows, **kwargs),
+                **kwargs,
             )
             encoder = matmul_cost(
                 channels_in=self.observation_size,
@@ -661,16 +655,16 @@ def _layer_cost(
     **kwargs: object,
 ) -> Cost:
     """Price one layer for one token that attends over ``keys`` rows."""
-    rows = shared_rows(seq_len, batch_size, **kwargs)
+    rows = seq_len * batch_size
     dt = dtype
     per_token_key_rows = key_rows / rows
     norm = LayerNorm.Config(embed_dim, elementwise_affine=True).finalize()
     norm_attention = cost(
         norm,
-        seq_len=seq_len,
+        seq_len=seq_len + key_rows // batch_size,
         batch_size=batch_size,
         dtype=dtype,
-        **with_rows(rows + key_rows, **kwargs),
+        **kwargs,
     ).tile(1 + per_token_key_rows)
     projection = matmul_cost(
         channels_in=embed_dim,

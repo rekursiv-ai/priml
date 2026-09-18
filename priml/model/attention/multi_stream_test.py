@@ -12,6 +12,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
@@ -22,7 +23,6 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
-from priml.model.cost import Cost, cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import (
     assert_bfb_against_golden,
@@ -438,11 +438,10 @@ def test_multi_stream_cost_sums_projections_and_scores_per_stream() -> None:
     )
     finalized = config.copy_tree().finalize()
     model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
-    kernel = attention_kernel_cost(seq_len=8, dtype=None, num_heads=2, channels_head=8)
+    # One query row against both streams' keys.
+    kernel = attention_kernel_cost(seq_len=16, dtype=None, num_heads=2, channels_head=8)
     stream = (2 + 2 + 2) * 16 * 8 + 16 * 16
-    assert (
-        kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 8
-    )  # One query row, joint keys.
+    assert kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 16 * 8
     assert model_cost.params == 2 * stream
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost["flops", "primal", "matmul"].sum() == 2 * (
@@ -469,17 +468,17 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
         num_streams=2,
         attn_kernel=SdpaNaive.Config(),
     )
-    # ``cost`` prices one stream token's projections times ``num_streams``, so
-    # the token count is one stream's; ``seq_len`` is the joint key count.
+    # ``cost`` prices one position -- every stream's token -- so the token
+    # count is one stream's length.
     assert_cost_matches_torch(
         config,
         build_input=lambda: tuple(
             torch.randn(1, 4, 16, requires_grad=True) for _ in range(2)
         ),
-        seq_len=8,
+        seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
-        rows=4,
         run=_joint_sum,
     )
 
@@ -517,7 +516,7 @@ def test_multi_stream_cost_prices_explicit_streams_by_their_own_config() -> None
         (cost(s, seq_len=8, batch_size=1, dtype=None) for s in finalized.streams),
         Cost(),
     )
-    kernel = attention_kernel_cost(seq_len=8, dtype=None, num_heads=2, channels_head=8)
+    kernel = attention_kernel_cost(seq_len=16, dtype=None, num_heads=2, channels_head=8)
     assert model_cost.params == owned.params
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost["flops", "primal", "matmul"].sum() == (
@@ -532,11 +531,10 @@ def test_multi_stream_traffic_propagates_itemsize_to_rotary_and_projections() ->
     config.num_heads = 2
     config.rope = [RoPE.Config(4)]
     config = config.copy_tree().finalize()
-    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
-    large = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
+    small = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    large = config.cost(seq_len=4, batch_size=1, dtype=None)
     assert (
-        large["bytes", :, :, torch.float32].sum()
-        == small["bytes", :, :, torch.bfloat16].sum() * 2
+        large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
     assert small.bytes_state == 2 * 2 * 2 * 8
 
@@ -551,13 +549,13 @@ def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
     shared = (
         config.copy_tree()
         .finalize()
-        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+        .cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     )
     config.share_qk_norm = False
     separate = (
         config.copy_tree()
         .finalize()
-        .cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+        .cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     )
     assert (
         separate["bytes", "primal", "elementwise"].sum()

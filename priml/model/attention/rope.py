@@ -23,16 +23,15 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.math.basic import broadcast_sequences, floor_multiple
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     reduction_cost,
     resolve_dtype,
-    shared_rows,
     traffic,
 )
+from priml.math.basic import broadcast_sequences, floor_multiple
 
 
 @runtime_checkable
@@ -445,7 +444,7 @@ class RoPE(nn.Module):
 
             """
             return self._factor_cost(
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=resolve_dtype(dtype),
             ) + self._table_cost(
                 seq_len=seq_len,
@@ -1016,7 +1015,7 @@ class RoPEMixed(RoPE):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             axes = _axis_channels(
                 self.channels_head,
                 tables=self.frequencies,

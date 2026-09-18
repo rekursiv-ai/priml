@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
@@ -11,11 +10,16 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.loss.custom_types import LossOutput
 from priml.loss.gan import AdversarialLoss
 from priml.train.parallelism import NoParallel
 from priml.train.train_step import TrainStep
 from priml.train.train_step_gan import GANTrainStep
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from priml.loss.custom_types import LossOutput
 
 
 class SimpleGenerator(nn.Module):

@@ -14,6 +14,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.cost import Cost, cost
 from priml.model.attention.rope import (
     GeometricFrequencies,
     HuggingFaceFrequencies,
@@ -21,7 +22,6 @@ from priml.model.attention.rope import (
     RoPEMixed,
     YarnScaling,
 )
-from priml.model.cost import Cost, cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -914,10 +914,11 @@ def test_rope_cost_matches_torch(config: RoPE.Config) -> None:
         build_input=lambda: positions,
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
         run=lambda module, pos: torch.cat(cast(RoPE, module)(pos), dim=-1),
     )
-    assert analytical["flops", :, "matmul"].sum() == 0
+    assert analytical["flops", "matmul"].sum() == 0
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

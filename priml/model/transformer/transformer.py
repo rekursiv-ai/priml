@@ -20,7 +20,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
 )

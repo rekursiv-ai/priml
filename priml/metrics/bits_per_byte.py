@@ -18,8 +18,7 @@ full one.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import math
 
@@ -28,6 +27,10 @@ from torch import Tensor
 
 import torch
 import torch.distributed as dist
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class BitsPerByte:

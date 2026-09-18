@@ -127,6 +127,7 @@ def test_qwen3_cost_matches_torch(tie_embeddings: bool) -> None:
         build_input=lambda: torch.randint(0, 32, (2, 5)),
         seq_len=5,
         batch_size=2,
+        num_tokens=5 * 2,
         dtype=None,
     )
     assert analytical.bytes_state == 4 * 2 * 1 * 8  # One KV head cached per layer.

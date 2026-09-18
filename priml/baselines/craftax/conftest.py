@@ -10,8 +10,7 @@ itself imports it, so running the environment never touches JAX.
 
 from __future__ import annotations
 
-from types import ModuleType
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import copy
 import functools
@@ -26,7 +25,12 @@ import pytest
 import torch
 
 from priml.baselines.craftax.game import world_gen
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from types import ModuleType
+
+    from priml.baselines.craftax.game.state import EnvState
 
 
 # The reference package is JAX, whose CUDA backend cannot be shared: under

@@ -66,6 +66,12 @@ from torch.distributed.tensor.parallel import (
 
 import torch
 
+from priml.cost import (
+    Cost,
+    cost,
+    resolve_dtype,
+    traffic,
+)
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -74,13 +80,6 @@ from priml.model.attention.kernel import (
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import (
-    Cost,
-    cost,
-    resolve_dtype,
-    shared_rows,
-    traffic,
-)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -474,7 +473,7 @@ class MultiHeadLatentAttention(nn.Module):
                 # Every query head and the one shared key row are rotated.
                 total += rotation_cost(
                     self.rope,
-                    rows=shared_rows(seq_len, batch_size, **kwargs),
+                    rows=seq_len * batch_size,
                     dtype=dtype,
                     channels_head=self.channels_qk_rope_head,
                     heads=self.num_heads + 1,
@@ -728,7 +727,8 @@ class MultiHeadLatentAttention(nn.Module):
             attn_mask=attn_mask,
             **kwargs,
         )
-        assert updated is not None
+        if updated is None:
+            raise ValueError("Expected updated is not None.")
         return out, updated
 
     def _forward(
@@ -810,9 +810,12 @@ class MultiHeadLatentAttention(nn.Module):
         if self.proj_q is not None:
             q = self.proj_q(x)
         else:
-            assert self.proj_q_a is not None
-            assert self.q_a_layernorm is not None
-            assert self.proj_q_b is not None
+            if self.proj_q_a is None:
+                raise ValueError("Expected self.proj_q_a is not None.")
+            if self.q_a_layernorm is None:
+                raise ValueError("Expected self.q_a_layernorm is not None.")
+            if self.proj_q_b is None:
+                raise ValueError("Expected self.proj_q_b is not None.")
             q = self.proj_q_b(self.q_a_layernorm(self.proj_q_a(x)))
         return q.view(*q.shape[:-1], self._heads_local, self.channels_qk_head)
 

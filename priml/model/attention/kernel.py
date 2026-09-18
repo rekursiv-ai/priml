@@ -10,14 +10,14 @@ from torch.nn import functional as f
 
 import torch
 
-from priml.model.attention.window import window_mask
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
     traffic,
 )
+from priml.model.attention.window import window_mask
 
 
 def attention_kernel_cost(

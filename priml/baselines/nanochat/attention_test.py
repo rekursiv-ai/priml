@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from importlib.metadata import version
 from types import ModuleType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import sys
 
@@ -25,14 +24,18 @@ from priml.baselines.nanochat.attention import (
     _qk_reference,
     fused_qk_norm_rope,
 )
+from priml.cost import cost
 from priml.model.attention.kernel import SdpaNaive
-from priml.model.cost import cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
 from priml.testing.cost import assert_cost_matches_torch
 
 import priml.baselines.nanochat.attention
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def test_flash_backends_belong_to_attention() -> None:
@@ -381,10 +384,9 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
     config.gated = False
     baseline = cost(
         config.copy_tree().finalize(),
-        seq_len=4,
+        seq_len=8,
         batch_size=1,
         dtype=torch.bfloat16,
-        rows=8,
     )
     if feature == "head_gate":
         config.head_gate = Linear.Config()
@@ -393,7 +395,7 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
     else:
         setattr(config, feature, True)
     config = config.finalize()
-    counted = cost(config, seq_len=4, batch_size=1, dtype=torch.bfloat16, rows=8)
+    counted = cost(config, seq_len=8, batch_size=1, dtype=torch.bfloat16)
     assert counted.params == sum(p.numel() for p in config.make().parameters())
     if feature == "norm_out":
         extra = cost(
@@ -448,16 +450,15 @@ def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> 
     config.head_gate = Linear.Config()
     config.norm_out = RMSNorm.Config(elementwise_affine=True)
     config = config.finalize()
-    narrow = cost(config, seq_len=4, batch_size=1, dtype=torch.bfloat16, rows=8)
-    wide = cost(config, seq_len=4, batch_size=1, dtype=None, rows=8)
+    narrow = cost(config, seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    wide = cost(config, seq_len=8, batch_size=1, dtype=None)
     assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+        wide["bytes", torch.float32].sum() == 2 * narrow["bytes", torch.bfloat16].sum()
     )
-    assert wide["bytes", :, :, torch.int64] == narrow["bytes", :, :, torch.int64]
+    assert wide["bytes", torch.int64] == narrow["bytes", torch.int64]
     assert wide["flops"].sum() == narrow["flops"].sum()
     config.fused_qk_rope = True
-    assert cost(config, seq_len=4, batch_size=1, dtype=torch.bfloat16, rows=8) == narrow
+    assert cost(config, seq_len=8, batch_size=1, dtype=torch.bfloat16) == narrow
 
 
 def test_cost_extension_matmuls_match_executed_forward_and_backward() -> None:
@@ -474,6 +475,7 @@ def test_cost_extension_matmuls_match_executed_forward_and_backward() -> None:
         build_input=lambda: torch.randn(2, 4, 12, requires_grad=True),
         seq_len=4,
         batch_size=2,
+        num_tokens=4 * 2,
         dtype=None,
         run=_run_all_attention_gates,
     )

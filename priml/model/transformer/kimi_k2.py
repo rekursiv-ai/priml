@@ -41,11 +41,9 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import KW_ONLY, field
 from functools import partial
-from pathlib import Path
-from typing import Literal, Self, cast, override
+from typing import TYPE_CHECKING, Literal, Self, cast, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -71,6 +69,11 @@ from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer, head_is_tied
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
 
 
 _VALID_MODEL_TYPES = frozenset({"kimi_k2", "deepseek_v3"})

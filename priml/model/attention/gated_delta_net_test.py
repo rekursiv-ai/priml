@@ -18,11 +18,11 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.cost import cost
 from priml.model.attention.gated_delta_net import (
     GatedDeltaNet,
     _torch_chunk_gated_delta_rule,
 )
-from priml.model.cost import cost
 from priml.model.special import Identity
 from priml.testing.bfb import (
     assert_bfb_against_golden,
@@ -303,6 +303,7 @@ def test_gated_delta_net_projections_match_torch() -> None:
         build_input=lambda: torch.randn(1, 4, 16, requires_grad=True),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
         expected_ratio=10_464 / 541_664,
     )
@@ -316,12 +317,10 @@ def test_gated_delta_net_cost_ignores_seq_len() -> None:
         seq_len=8,
         batch_size=1,
         dtype=None,
-        rows=8,
     ) == finalized.cost(
-        seq_len=1024,
+        seq_len=8,
         batch_size=1,
         dtype=None,
-        rows=8,
     )
 
 
@@ -343,8 +342,7 @@ def test_delta_traffic_amortizes_projection_and_convolution_weights() -> None:
     )
     wide = config.cost(seq_len=4, batch_size=1, dtype=None)
     assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == batch["bytes", :, :, torch.bfloat16].sum() * 2
+        wide["bytes", torch.float32].sum() == batch["bytes", torch.bfloat16].sum() * 2
     )
     assert batch["bytes", "primal", "reduction"].sum() > 0
 

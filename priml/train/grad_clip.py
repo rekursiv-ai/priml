@@ -22,12 +22,16 @@ they are ever added, port torchtitan's ``pp_mesh`` / EP branches here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from torch import Tensor
 from torch.distributed.tensor import DTensor
 
 import torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 @torch.no_grad()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import math
 
 from torch import Tensor
 
@@ -9,11 +10,13 @@ import torch
 
 from priml.math.stats import (
     SlidingWindow,
+    _householder_qr,
     cov,
     ema_update,
     entropy_logits,
     entropy_logits_mean_all_to_all,
     entropy_probs,
+    jsd,
     pca,
     pca_eigh,
     pca_power,
@@ -71,6 +74,30 @@ def test_cov_1d_matches_numpy():
     torch.testing.assert_close(biased, torch.tensor(1.25))
     unbiased = cov(x, bias=False)
     torch.testing.assert_close(unbiased, torch.tensor(5.0 / 3.0))
+
+
+def test_cov_1d_cross_is_the_scalar_cross_covariance():
+    x = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    y = 2.0 * x
+    result = cov(x, y=y, bias=True)
+    assert result.ndim == 0
+    torch.testing.assert_close(result, torch.tensor(2.5))
+
+
+def test_jsd_is_zero_for_identical_members_and_log2_for_disjoint_ones():
+    torch.manual_seed(2)
+    identical = torch.log_softmax(torch.randn(1, 5), dim=-1).expand(3, 5)
+    torch.testing.assert_close(jsd(identical), torch.tensor(0.0), atol=1e-6, rtol=0)
+
+    disjoint = torch.tensor([[1.0, 0.0], [0.0, 1.0]]).log()
+    torch.testing.assert_close(jsd(disjoint), torch.tensor(math.log(2.0)))
+
+
+def test_jsd_squeezes_the_ensemble_and_event_dims():
+    logp = torch.log_softmax(torch.randn(4, 3, 6), dim=-1)
+    result = jsd(logp, ensemble_dim=1, event_dim=(-1,))
+    assert result.shape == (4,)
+    assert (result >= -1e-6).all()
 
 
 def test_entropy_self_consistency():
@@ -183,6 +210,28 @@ def test_pca_power_tol_early_exit_matches_full():
     vals_full, _ = pca_power(x_centered, num_iters=50, tol=0.0)
     vals_tol, _ = pca_power(x_centered, num_iters=50, tol=1e-6)
     torch.testing.assert_close(vals_tol, vals_full, atol=1e-3, rtol=1e-3)
+
+
+def test_pca_power_stops_iterating_once_within_tol():
+    """A loose ``tol`` exits after the first sweep; the result is that sweep's."""
+    x = torch.randn(32, 4)
+    x_centered = (x - x.mean(0)).float()
+    torch.manual_seed(7)
+    early, _ = pca_power(x_centered, num_iters=100, tol=1e3)
+    torch.manual_seed(7)
+    one_sweep, _ = pca_power(x_centered, num_iters=1, tol=0.0)
+    torch.manual_seed(7)
+    full, _ = pca_power(x_centered, num_iters=100, tol=0.0)
+    assert torch.equal(early, one_sweep)
+    assert not torch.equal(early, full)
+
+
+def test_householder_qr_leaves_a_zero_column_unreflected():
+    """An all-zero column has no reflection to apply; Q stays identity there."""
+    mat = torch.tensor([[0.0, 1.0], [0.0, 0.0]])
+    q, r = _householder_qr(mat)
+    assert torch.equal(q, torch.eye(2))
+    assert torch.equal(r, mat)
 
 
 def test_pca_accepts_injected_decompose():

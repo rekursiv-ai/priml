@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 from torch.nn import functional
@@ -10,11 +10,15 @@ from torch.nn import functional
 import pytest
 import torch
 
+from priml.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.loss.custom_types import SimpleLossFn
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _fp32(
@@ -34,6 +38,18 @@ def _fp32(
             for kernel, value in (silos or {}).get(measure, {}).items():
                 cells[(measure, phase, kernel, torch.float32)] = value
     return Cost(cells=cells, **fields)
+
+
+class _StubLossFn:
+    """Borrows the protocol's stub body, which computes nothing."""
+
+    __call__ = SimpleLossFn.__call__
+
+
+def test_simple_loss_fn_stub_computes_nothing() -> None:
+    loss_fn: SimpleLossFn = _StubLossFn()
+    assert loss_fn(torch.zeros(2), torch.zeros(2)) is None
+    assert loss_fn(torch.zeros(2), torch.zeros(2), reduction="sum") is None
 
 
 def test_simple_loss_basic():
@@ -142,6 +158,7 @@ def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
         build_input=lambda: torch.randn(4, 3, requires_grad=True),
         seq_len=12,
         batch_size=1,
+        num_tokens=12,
         dtype=None,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
@@ -161,7 +178,7 @@ def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
         },
     )
     assert measured.params == 0
-    assert measured["flops", :, "matmul"].sum() == 0
+    assert measured["flops", "matmul"].sum() == 0
 
 
 def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
@@ -177,6 +194,7 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
         build_input=lambda: torch.randn(4, 5, requires_grad=True),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
         run=lambda module, logits: _loss(module, logits, label=label),
     )
@@ -210,7 +228,7 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
             "bytes": {"elementwise": 8, "reduction": 8},
         },
     )
-    assert measured["flops", :, "matmul"].sum() == 0
+    assert measured["flops", "matmul"].sum() == 0
 
 
 def test_simple_loss_cost_cross_entropy_needs_channels_out() -> None:

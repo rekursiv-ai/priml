@@ -14,6 +14,8 @@ saturate.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 from torch.nn import functional
 
@@ -22,7 +24,10 @@ import torch
 from priml.baselines.craftax.game import constants, mechanics
 from priml.baselines.craftax.game.constants import BlockType, ItemType
 from priml.baselines.craftax.game.indexing import local_view
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 CHANNELS_PER_TILE: int = (

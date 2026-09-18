@@ -13,13 +13,13 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.cost import Cost
 from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.cost import Cost
 from priml.model.custom_types import (
     ChannelsInOut,
     ChannelsOut,
@@ -323,6 +323,7 @@ def test_identity_cost_is_free() -> None:
         build_input=lambda: torch.randn(2, 8, requires_grad=True),
         seq_len=2,
         batch_size=1,
+        num_tokens=2,
         dtype=None,
     )
     assert free == Cost()
@@ -335,6 +336,7 @@ def test_skip_cost_is_the_inner_cost_plus_residual_additions() -> None:
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
         seq_len=2,
         batch_size=1,
+        num_tokens=2,
         dtype=None,
     )
     f32 = torch.float32
@@ -370,9 +372,9 @@ def test_tied_linear_cost_pays_flops_and_owns_nothing() -> None:
         .finalize()
         .cost(seq_len=1, batch_size=1, dtype=None)
     )
-    assert tied["flops", :, "matmul"].sum() == owned["flops", :, "matmul"].sum()
+    assert tied["flops", "matmul"].sum() == owned["flops", "matmul"].sum()
     assert tied.params == 0
-    assert tied["bytes", :, "matmul"].sum() == owned["bytes", :, "matmul"].sum()
+    assert tied["bytes", "matmul"].sum() == owned["bytes", "matmul"].sum()
 
 
 if __name__ == "__main__":

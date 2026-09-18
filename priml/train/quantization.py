@@ -64,7 +64,7 @@ class Float8ModelQuantization:
 
         available, reason = _check_float8_available()
         if not available:
-            logger.warning(f"Float8 disabled: {reason}")
+            logger.warning("Float8 disabled: %s", reason)
             return
 
         from torchao.float8.config import (
@@ -106,8 +106,9 @@ class Float8ModelQuantization:
         self.enabled = True
 
         logger.info(
-            f"Float8Linear enabled: recipe={config.recipe}, "
-            f"fsdp_all_gather={config.enable_fsdp_float8_all_gather}",
+            "Float8Linear enabled: recipe=%s, fsdp_all_gather=%s",
+            config.recipe,
+            config.enable_fsdp_float8_all_gather,
         )
 
     # Pure predicate -- conversion counting happens in ``__call__``.
@@ -147,7 +148,7 @@ class Float8ModelQuantization:
             module_filter_fn=filter_fn,
         )
 
-        logger.info(f"Converted {self.converted_count} nn.Linear → Float8Linear")
+        logger.info("Converted %s nn.Linear → Float8Linear", self.converted_count)
         return model
 
 

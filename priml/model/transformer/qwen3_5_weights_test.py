@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
+from unittest.mock import patch
 
 import json
+
+from configgle import Fig, Makes
 
 import pytest
 import torch
 
+from priml.model.attention.gated_self_attention import GatedSelfAttention
+from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import has_weight
+from priml.model.linear import Linear
+from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5 import Qwen35
 from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
 from priml.testing.qwen3_5 import hf_config
@@ -20,6 +26,8 @@ pytest.importorskip("transformers")
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 else:
@@ -120,6 +128,158 @@ def test_local_text_loading_preserves_parameters_and_logits(tmp_path: Path) -> N
     tokens = torch.tensor([[1, 2, 3]])
     assert torch.equal(loaded(tokens), expected(tokens))
     assert torch.equal(loaded.hidden_states(tokens), expected.hidden_states(tokens))
+
+
+def test_rejects_an_unknown_non_text_policy() -> None:
+    config = hf_config()
+    reference = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config))
+    with pytest.raises(ValueError, match="Unsupported non_text policy"):
+        remap_hf_state_dict(
+            reference.state_dict(),
+            Qwen35.Config.from_hf(config),
+            non_text="keep",
+        )
+
+
+@pytest.mark.parametrize("mutation", ["none", "both"])
+def test_rejects_zero_or_two_text_embedding_namespaces(mutation: str) -> None:
+    config = hf_config()
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    if mutation == "none":
+        del state["model.embed_tokens.weight"]
+    else:
+        state["embed_tokens.weight"] = state["model.embed_tokens.weight"]
+    with pytest.raises(ValueError, match="exactly one text embedding namespace"):
+        remap_hf_state_dict(state, Qwen35.Config.from_hf(config))
+
+
+def test_rejects_a_config_that_builds_no_module() -> None:
+    config = hf_config()
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    native_config = Qwen35.Config.from_hf(config)
+    with (
+        patch.object(Qwen35.Config, "make", return_value=object()),
+        pytest.raises(TypeError, match=r"must build an nn\.Module"),
+    ):
+        remap_hf_state_dict(state, native_config)
+
+
+def test_rejects_an_injected_block_that_is_not_a_transformer_block() -> None:
+    config = hf_config()
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    native_config = Qwen35.Config.from_hf(config)
+    assert isinstance(native_config.block, list)
+    native_config.block[0] = _CustomBlock.Config()
+    with pytest.raises(TypeError, match="native TransformerBlock"):
+        remap_hf_state_dict(state, native_config)
+
+
+def test_rejects_a_top_level_parameter_without_an_hf_counterpart() -> None:
+    """A head bias exists in no Qwen3.5 checkpoint, so the mapping refuses it."""
+    config = hf_config()
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    native_config = Qwen35.Config.from_hf(config)
+    assert isinstance(native_config.proj_out, Linear.Config)
+    native_config.proj_out.bias = True
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported native checkpoint parameter: proj_out\.bias",
+    ):
+        remap_hf_state_dict(state, native_config)
+
+
+def test_rejects_an_injected_attention_without_an_hf_counterpart() -> None:
+    config = hf_config()
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    native_config = Qwen35.Config.from_hf(config)
+    assert isinstance(native_config.block, list)
+    block = native_config.block[1]
+    assert isinstance(block, TransformerBlock.Config)
+    attention = SelfAttention.Config()
+    attention.num_heads = 2
+    attention.num_heads_kv = 1
+    attention.channels_head = 8
+    block.attn = attention
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported native checkpoint parameter: blocks\.1\.attn",
+    ):
+        remap_hf_state_dict(state, native_config)
+
+
+def test_an_attention_parameter_outside_the_projections_maps_by_name() -> None:
+    """A gated-attention parameter with no projection prefix keeps its own name."""
+    config = hf_config()
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    native_config = Qwen35.Config.from_hf(config)
+    assert isinstance(native_config.block, list)
+    block = native_config.block[1]
+    assert isinstance(block, TransformerBlock.Config)
+    assert isinstance(block.attn, GatedSelfAttention.Config)
+    extra = _ExtraGatedAttention.Config()
+    extra.update(block.attn)
+    block.attn = extra
+    with pytest.raises(
+        ValueError,
+        match=r"Missing checkpoint weight: model\.layers\.1\.self_attn\.extra",
+    ):
+        remap_hf_state_dict(state, native_config)
+    state["model.layers.1.self_attn.extra"] = torch.full((1,), 7.0)
+    mapped = remap_hf_state_dict(state, native_config)
+    assert torch.equal(mapped["blocks.1.attn.extra"], torch.full((1,), 7.0))
+
+
+class _ExtraGatedAttention(GatedSelfAttention):
+    """Gated attention carrying one parameter outside the projection map."""
+
+    class Config(Makes["_ExtraGatedAttention"], GatedSelfAttention.Config):
+        """Same fields as the parent; only the built module differs."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.extra = torch.nn.Parameter(torch.zeros(1))
+
+
+def test_tied_head_on_a_different_device_is_rejected() -> None:
+    config = hf_config()
+    config["tie_word_embeddings"] = True
+    state = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config)).state_dict()
+    native_config = Qwen35.Config.from_hf(config)
+    with patch("torch.equal", side_effect=AssertionError("compared across devices")):
+        head = state["lm_head.weight"]
+        state["lm_head.weight"] = _OtherDevice(head)
+        with pytest.raises(ValueError, match="device"):
+            remap_hf_state_dict(state, native_config)
+
+
+class _OtherDevice(torch.Tensor):
+    """A CPU tensor reporting a different device, for the tied-head check."""
+
+    device = torch.device("meta")
+
+
+class _CustomBlock(torch.nn.Module):
+    """A Configgle-injectable block with a parameter but no HF layout."""
+
+    class Config(Fig["_CustomBlock"]):
+        channels_in: int = -1
+        """Input feature width."""
+
+        channels_out: int = -1
+        """Output feature width."""
+
+    def __init__(self, config: Config) -> None:
+        del config
+        super().__init__()
+        self.ffn = torch.nn.Linear(16, 16, bias=False)
+
+    def reset_parameters(self) -> None:
+        """Leave the test block unchanged."""
+
+    @override
+    def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        del kwargs
+        return self.ffn(x)
 
 
 def test_tied_head_alias_must_match_the_embedding() -> None:

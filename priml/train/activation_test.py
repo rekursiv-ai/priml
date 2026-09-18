@@ -48,8 +48,7 @@ class NestedModule(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         x = self.layer1(x)
         x = self.layer2(x)
-        x = self.layer3(x)
-        return x
+        return self.layer3(x)
 
 
 class BlockModule(nn.Module):
@@ -63,8 +62,7 @@ class BlockModule(nn.Module):
     @override
     def forward(self, x: Tensor) -> Tensor:
         x = self.attention(x) + x
-        x = self.ffn(x) + x
-        return x
+        return self.ffn(x) + x
 
 
 class TransformerModel(nn.Module):

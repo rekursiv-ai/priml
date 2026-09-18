@@ -204,6 +204,7 @@ def test_scaled_linear_cost_is_a_matmul_plus_one_scale_per_logit() -> None:
         build_input=lambda: torch.randn(3, 6, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     assert analytical.params == 6 * 4
@@ -225,6 +226,7 @@ def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> No
         build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
         seq_len=8 * 8,
         batch_size=2,
+        num_tokens=8 * 8 * 2,
         dtype=None,
     )
     conv1, conv2, shortcut = 6 * 4 * 9, 6 * 6 * 9, 6 * 4
@@ -266,6 +268,7 @@ def test_residual_block_cost_omits_the_shortcut_when_shape_is_preserved() -> Non
         build_input=lambda: torch.randn(2, 4, 4, 4, requires_grad=True),
         seq_len=4 * 4,
         batch_size=2,
+        num_tokens=4 * 4 * 2,
         dtype=None,
     )
     assert analytical.params == 2 * (4 * 4 * 9) + 2 * (2 * 4)
@@ -280,6 +283,7 @@ def test_conv_block_cost_pools_after_the_first_convolution() -> None:
         build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
         seq_len=8 * 8,
         batch_size=2,
+        num_tokens=8 * 8 * 2,
         dtype=None,
     )
     first, later = 6 * 4 * 9, 6 * 6 * 9
@@ -304,8 +308,8 @@ def test_resnet_cost_amortizes_each_stage_over_the_input_positions() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(2, 3, 8, 8, requires_grad=True),
-        seq_len=8 * 8,
         batch_size=2,
+        num_tokens=8 * 8 * 2,
         dtype=None,
     )
     stem, stage0 = 8 * 3 * 9, 2 * (8 * 8 * 9)
@@ -346,8 +350,8 @@ def test_speednet_cost_prices_the_frozen_whitening_and_every_pool() -> None:
     analytical = assert_cost_matches_torch(
         tiny_speednet(),
         build_input=lambda: torch.randn(1, 3, 32, 32, requires_grad=True),
-        seq_len=32 * 32,
         batch_size=1,
+        num_tokens=32 * 32,
         dtype=None,
     )
     whiten = 24 * 3 * 4
@@ -381,16 +385,15 @@ def test_speednet_cost_prices_the_frozen_whitening_and_every_pool() -> None:
 @pytest.mark.parametrize("speednet", [False, True])
 def test_image_cost_scales_bytes_not_flops_with_itemsize(speednet: bool) -> None:
     config = (tiny_speednet() if speednet else tiny_resnet()).finalize()
-    wide = config.cost(seq_len=1, batch_size=2, dtype=torch.float64)
-    narrow = config.cost(seq_len=1, batch_size=2, dtype=torch.bfloat16)
+    wide = config.cost(batch_size=2, dtype=torch.float64)
+    narrow = config.cost(batch_size=2, dtype=torch.bfloat16)
     assert wide["flops", "primal"].sum() == narrow["flops", "primal"].sum()
     assert wide["flops", "adjoint"].sum() == narrow["flops", "adjoint"].sum()
     # Saved argmax indices stay int64 at either width; payload cells scale.
     assert (
-        wide["bytes", :, :, torch.float64].sum()
-        == narrow["bytes", :, :, torch.bfloat16].sum() * 4
+        wide["bytes", torch.float64].sum() == narrow["bytes", torch.bfloat16].sum() * 4
     )
-    assert wide["bytes", :, :, torch.int64] == narrow["bytes", :, :, torch.int64]
+    assert wide["bytes", torch.int64] == narrow["bytes", torch.int64]
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])

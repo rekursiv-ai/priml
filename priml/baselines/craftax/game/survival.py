@@ -12,13 +12,18 @@ instead of in whole steps.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 
 import torch
 
 from priml.baselines.craftax.game import constants, mechanics
 from priml.baselines.craftax.game.constants import Achievement, Action
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 def move_player(state: EnvState, action: Tensor) -> EnvState:

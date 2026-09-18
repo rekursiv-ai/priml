@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Generator, Iterable, Sequence
-from typing import Final, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Final, NamedTuple, Protocol
 
 import functools
 import math
@@ -13,7 +12,6 @@ from torch import Tensor
 
 import torch
 
-from priml.math.custom_types import Tensorable
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
     log_sigma_from_log_snr_per_rectified_flow,
@@ -21,6 +19,12 @@ from priml.math.diffusion.schedule import (
 from priml.math.diffusion.target import TargetFn, target_rectified_flow
 from priml.math.numeric import log1mexp
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Iterable, Sequence
+
+    from priml.math.custom_types import Tensorable
 
 
 __all__ = [

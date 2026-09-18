@@ -30,9 +30,8 @@ Examples:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import importlib
@@ -49,6 +48,10 @@ from priml.baselines.nanochat.data import (
     PackedTokenStream,
 )
 from priml.baselines.nanochat.scripts.prepare_data import prepare
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 class _Tokenizer(Protocol):

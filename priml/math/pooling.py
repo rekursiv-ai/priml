@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import itertools
 import math
@@ -11,6 +10,10 @@ import math
 from torch import Tensor
 
 import torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _AVG_POOL: dict[int, Callable[[Tensor, tuple[int, ...], tuple[int, ...]], Tensor]] = {
@@ -130,7 +133,8 @@ def _dim_info(
     idx = start.unsqueeze(-1) + max_kernel_size_range
 
     if needs_irregular_kernel:
-        assert in_size > 0, f"in_size must be positive; got {in_size}."
+        if in_size <= 0:
+            raise ValueError(f"in_size must be positive; got {in_size}.")
         idx = torch.minimum(
             idx,
             torch.scalar_tensor(in_size - 1, dtype=idx.dtype, device=idx.device),
@@ -237,7 +241,8 @@ def _adaptive_avg_pool(
         term = vals[(..., *slc)]
         acc = term if acc is None else acc + term
 
-    assert acc is not None
+    if acc is None:
+        raise ValueError("Expected acc is not None.")
     if isinstance(window, int):
         # A Python float promotes to whatever ``acc`` carries.
         return acc / float(window**0.5)

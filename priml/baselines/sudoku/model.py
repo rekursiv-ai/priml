@@ -39,12 +39,11 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     traffic,
-    with_rows,
 )
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
 from priml.model.init import truncated_normal
@@ -201,29 +200,19 @@ class DeepRecurrence(nn.Module):
         fast_cycles: int = 9
         """Inner iterations refining the fast latent per slow cycle."""
 
-        def cost(
-            self,
-            *,
-            seq_len: int,
-            batch_size: int,
-            dtype: torch.dtype | None,
-            **kwargs: object,
-        ) -> Cost:
+        def cost(self, **kwargs: object) -> Cost:
             """Price nothing: the schedule owns no weights and does no arithmetic.
 
             The core it repeats is the model's, which prices every cycle.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
-              dtype: Activation dtype; ``None`` is torch's default.
-              **kwargs: The open bus, forwarded to every child.
+              **kwargs: The open bus, unread.
 
             Returns:
               cost: Zero.
 
             """
-            del seq_len, batch_size, dtype, kwargs
+            del kwargs
             return Cost()
 
     def __init__(self, config: Config) -> None:
@@ -380,14 +369,7 @@ class SudokuNet(nn.Module):
                 self.num_prefix_tokens = _count_prefix_tokens(self.prefix)
             return super().finalize()
 
-        def cost(
-            self,
-            *,
-            seq_len: int,
-            batch_size: int,
-            dtype: torch.dtype | None,
-            **kwargs: object,
-        ) -> Cost:
+        def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
             """Price one forward per grid cell: embed, every core pass, both heads.
 
             The latent sequence is ``total_seq_len`` rows per puzzle -- prefix
@@ -401,22 +383,14 @@ class SudokuNet(nn.Module):
             only the last runs backward, so the primal is repeated
             ``slow_cycles`` times and the adjoint once.
 
-            A puzzle is the sequence, so ``seq_len`` is discarded:
-            the reach of every block is this config's own ``total_seq_len``,
-            which a batch cannot change, and every child is handed the rows
-            its own geometry implies.
-
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              batch_size: Puzzles per step.
               dtype: Activation dtype; ``None`` is torch's default.
-              **kwargs: The open bus, forwarded to every child.
 
             Returns:
               cost: Per-cell cost of this module.
 
             """
-            del seq_len
             puzzles = batch_size
             dt = dtype
             grid_len = self.grid_len
@@ -429,14 +403,12 @@ class SudokuNet(nn.Module):
                 seq_len=latent,
                 batch_size=puzzles,
                 dtype=dt,
-                **with_rows(latent * puzzles, **kwargs),
             )
             over_puzzles = functools.partial(
                 cost,
-                seq_len=latent,
+                seq_len=1,
                 batch_size=puzzles,
                 dtype=dt,
-                **with_rows(puzzles, **kwargs),
             )
             stack = over_rows(self.block).tile(
                 self.num_layers,
@@ -454,9 +426,7 @@ class SudokuNet(nn.Module):
             per_row = stack.tile(fast_cycles + 1) + adds + over_rows(_head(self))
             core = per_row.tile(latent / grid_len) + over_puzzles(
                 _halt_head(self),
-            ).tile(
-                1 / grid_len,
-            )
+            ).tile(1 / grid_len)
             # Every slow cycle runs the core forward; only the last runs backward.
             primal_only = Cost(
                 cells={
@@ -471,7 +441,6 @@ class SudokuNet(nn.Module):
                     seq_len=grid_len,
                     batch_size=puzzles,
                     dtype=dt,
-                    **with_rows(grid_len * puzzles, **kwargs),
                 )
                 + core
                 + primal_only.tile(slow_cycles - 1)
@@ -650,8 +619,7 @@ class SudokuNet(nn.Module):
 
     def _mix(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
         """Run the block stack once over a latent state."""
-        out = self.reasoning(z, cos_sin=cos_sin)
-        return out
+        return self.reasoning(z, cos_sin=cos_sin)
 
 
 def _head(config: SudokuNet.Config) -> Linear.Config:

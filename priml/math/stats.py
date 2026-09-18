@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 from torch import Tensor
 
 import torch
 import torch.linalg
 
-from priml.math.custom_types import Tensorable
 from priml.math.distributed import logmeanexp_all_to_all
 from priml.math.numeric import logmeanexp
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import Tensorable
 
 
 type PcaDecompose = Callable[[Tensor], tuple[Tensor, Tensor]]
@@ -210,7 +214,6 @@ def entropy_logits_mean_all_to_all(
         dim_iter = (dim,) if isinstance(dim, int) else dim
         dim_mean = tuple(set(range(x.ndim)) - {a % x.ndim for a in dim_iter})
     p = torch.softmax(x, dim=dim)
-    assert dim_mean is not None
     mean_p = torch.mean(p, dim=dim_mean, keepdim=keepdim_mean)
     log_q = torch.log_softmax(y, dim=dim)
     log_mean_q = logmeanexp_all_to_all(

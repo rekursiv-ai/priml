@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import cast
+
+import inspect
+
+from torch import Tensor
+
 import pytest
 import torch
 
-from priml.math.tensor import as_batch_tensor, pad
+from priml.math import tensor
+from priml.math.tensor import (
+    as_batch_tensor,
+    compiled_scale_and_shift,
+    pad,
+    warmup_compiled_scale_and_shift,
+)
 
 
 def test_pad_constant():
@@ -81,6 +94,38 @@ def test_pad_circular():
     y = pad(x, pad=[1, 1], mode="circular")
     expected = torch.tensor([3.0, 1.0, 2.0, 3.0, 1.0])
     assert torch.allclose(y, expected)
+
+
+def test_scale_and_shift_casts_to_the_scale_dtype_before_the_affine() -> None:
+    # The eager body under the lazy compile wrapper; dynamo would trace the
+    # same arithmetic but hide the cast order behind its own kernel.
+    eager = cast(
+        Callable[[Tensor, Tensor, Tensor], Tensor],
+        inspect.unwrap(compiled_scale_and_shift),
+    )
+    x = torch.tensor([[0], [255]], dtype=torch.uint8)
+    shift = torch.tensor([1.0, -1.0], dtype=torch.bfloat16)
+    scale = torch.tensor([0.5, 2.0], dtype=torch.bfloat16)
+    y = eager(x, shift, scale)
+    assert y.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        y,
+        torch.tensor([[1.0, -1.0], [128.5, 509.0]]).to(torch.bfloat16),
+    )
+
+
+def test_warmup_primes_the_compiled_kernel_with_a_uint8_image_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[torch.dtype, tuple[int, ...], torch.dtype, torch.dtype]] = []
+
+    def spy(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        seen.append((x.dtype, tuple(x.shape), shift.dtype, scale.dtype))
+        return x
+
+    monkeypatch.setattr(tensor, "compiled_scale_and_shift", spy)
+    warmup_compiled_scale_and_shift(dtype_out=torch.float16)
+    assert seen == [(torch.uint8, (3, 1, 224, 224), torch.float16, torch.float16)]
 
 
 def test_as_batch_tensor_add_one_dim():

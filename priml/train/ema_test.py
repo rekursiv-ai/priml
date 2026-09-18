@@ -5,9 +5,7 @@ Default) and parameter-only (TRM-style) shadows.
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
@@ -19,6 +17,11 @@ import torch.distributed as dist
 
 from priml.testing.fixtures import get_device
 from priml.train.ema import EMA, NoEMA, karras_decay
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
 
 
 @pytest.fixture(scope="module")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from numbers import Real
@@ -31,6 +30,7 @@ from priml.train.custom_types import TrackerProtocol
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
     from typing import Self
 
 
@@ -242,7 +242,8 @@ class TensorBoardTracker:
           prefix: String prepended to every metric key before logging.
 
         """
-        assert self.writer is not None
+        if self.writer is None:
+            raise ValueError("Expected self.writer is not None.")
         for name, value in scalar_metrics(metrics).items():
             self.writer.add_scalar(f"{prefix}{name}", value, step)
 

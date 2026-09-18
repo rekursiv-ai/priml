@@ -136,8 +136,10 @@ def their_attention(
       out: Attention output, same shape as ``q``.
 
     """
-    assert causal, "the recipe attends causally"
-    assert window_size[1] == 0, f"unexpected future window {window_size[1]}"
+    if not causal:
+        raise ValueError("the recipe attends causally")
+    if window_size[1] != 0:
+        raise ValueError(f"unexpected future window {window_size[1]}")
     return sdpa_attention(q, k, v, window=window_size[0])
 
 
@@ -842,7 +844,8 @@ def _kernels_stub() -> types.ModuleType:
     module = types.ModuleType("kernels")
 
     def get_kernel(name: str) -> types.SimpleNamespace:
-        assert "flash-attention-3" in name, name
+        if "flash-attention-3" not in name:
+            raise ValueError(name)
         return types.SimpleNamespace(
             flash_attn_interface=types.SimpleNamespace(
                 flash_attn_func=their_attention,

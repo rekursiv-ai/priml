@@ -272,7 +272,8 @@ def _grid(text: str) -> NDArray[np.int64]:
 def _tokenize(grids: list[NDArray[np.int64]]) -> NDArray[np.int64]:
     """Stack digit grids and shift into the token vocabulary."""
     stacked = np.concatenate(grids).reshape(len(grids), -1)
-    assert np.all((stacked >= 0) & (stacked <= 9))
+    if not np.all((stacked >= 0) & (stacked <= 9)):
+        raise ValueError("Expected np.all((stacked >= 0) & (stacked <= 9)).")
     return stacked + 1
 
 

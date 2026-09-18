@@ -12,10 +12,9 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     matmul_cost,
-    shared_rows,
 )
 from priml.model.custom_types import DepthIndex
 from priml.model.init import InitFn, call_init, kaiming_uniform
@@ -94,6 +93,7 @@ class Conv1d(nn.Conv1d):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return conv_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
@@ -101,7 +101,7 @@ class Conv1d(nn.Conv1d):
                 ndim=1,
                 groups=self.groups,
                 bias=self.bias,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 
@@ -207,6 +207,7 @@ class Conv2d(nn.Conv2d):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return conv_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
@@ -214,7 +215,7 @@ class Conv2d(nn.Conv2d):
                 ndim=2,
                 groups=self.groups,
                 bias=self.bias,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 
@@ -320,6 +321,7 @@ class Conv3d(nn.Conv3d):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return conv_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
@@ -327,7 +329,7 @@ class Conv3d(nn.Conv3d):
                 ndim=3,
                 groups=self.groups,
                 bias=self.bias,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 

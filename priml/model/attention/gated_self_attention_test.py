@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from torch import Tensor, nn
 
 import pytest
 import torch
 
+from priml.cost import cost
 from priml.model.attention.gated_self_attention import GatedSelfAttention
 from priml.model.attention.kernel import (
     SdpaFused,
@@ -17,9 +18,11 @@ from priml.model.attention.kernel import (
 )
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
-from priml.model.cost import cost
-from priml.model.custom_types import AttentionKernel
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.model.custom_types import AttentionKernel
 
 
 def test_gated_attention_cache_continuation() -> None:
@@ -448,6 +451,7 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
+        num_tokens=8,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
@@ -491,10 +495,10 @@ def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
     config.dropout = 0.1
     wet = config.copy_tree().finalize().cost(seq_len=32, batch_size=1, dtype=None)
     assert (
-        wet["flops", :, "elementwise"].sum() - dry["flops", :, "elementwise"].sum()
+        wet["flops", "elementwise"].sum() - dry["flops", "elementwise"].sum()
         == 2 * 4 * 32
     )
-    assert wet["flops", :, "matmul"].sum() == dry["flops", :, "matmul"].sum()
+    assert wet["flops", "matmul"].sum() == dry["flops", "matmul"].sum()
 
 
 def test_gated_attention_traffic_propagates_itemsize() -> None:
@@ -505,11 +509,10 @@ def test_gated_attention_traffic_propagates_itemsize() -> None:
     config.channels_head = 4
     config.rope = RoPE.Config(2)
     config = config.copy_tree().finalize()
-    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=8)
-    large = config.cost(seq_len=8, batch_size=1, dtype=None, rows=8)
+    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    large = config.cost(seq_len=8, batch_size=1, dtype=None)
     assert (
-        large["bytes", :, :, torch.float32].sum()
-        == small["bytes", :, :, torch.bfloat16].sum() * 2
+        large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
     assert small.bytes_state == 2 * 2 * 1 * 4
 

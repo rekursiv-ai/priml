@@ -10,7 +10,7 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
-from priml.model.cost import Cost, cost
+from priml.cost import Cost, cost
 from priml.model.softcap import SoftCap
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
@@ -93,6 +93,7 @@ def test_softcap_cost_separates_projection_and_squash() -> None:
         build_input=lambda: torch.randn(3, 4, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     inner = cost(

@@ -141,9 +141,10 @@ class DataParallel:
             gradient_as_bucket_view=self.gradient_as_bucket_view,
         )
         logger.info(
-            f"Applied DataParallel: mesh_dim={self.config.mesh_dim}, "
-            f"bucket_cap_mb={self.bucket_cap_mb}, "
-            f"gradient_as_bucket_view={self.gradient_as_bucket_view}",
+            "Applied DataParallel: mesh_dim=%s, bucket_cap_mb=%s, gradient_as_bucket_view=%s",
+            self.config.mesh_dim,
+            self.bucket_cap_mb,
+            self.gradient_as_bucket_view,
         )
         return model
 
@@ -206,8 +207,9 @@ class FullySharded:
         # with the correct (DTensor-aware) parameter init.
         model = place(model, self.device)
         logger.info(
-            f"Applied FullySharded: mesh_dim={self.config.mesh_dim}, "
-            f"reshard_after_forward={self.reshard_after_forward}",
+            "Applied FullySharded: mesh_dim=%s, reshard_after_forward=%s",
+            self.config.mesh_dim,
+            self.reshard_after_forward,
         )
         return model
 
@@ -282,8 +284,10 @@ class HybridSharded:
         )
         model = place(model, self.device)
         logger.info(
-            f"Applied HybridSharded: replicate_dim={self.config.replicate_dim}, "
-            f"shard_dim={self.config.shard_dim}, mesh_shape={self.mesh.shape}",
+            "Applied HybridSharded: replicate_dim=%s, shard_dim=%s, mesh_shape=%s",
+            self.config.replicate_dim,
+            self.config.shard_dim,
+            self.mesh.shape,
         )
         return model
 
@@ -386,8 +390,10 @@ class RecursiveSharded:
 
         model = place(model, self.device)
         logger.info(
-            f"Applied RecursiveSharded: sharded {matched_count} modules matching "
-            f"{[t.__name__ for t in self.module_types]}, mesh_dim={self.config.mesh_dim}",
+            "Applied RecursiveSharded: sharded %s modules matching %s, mesh_dim=%s",
+            matched_count,
+            [t.__name__ for t in self.module_types],
+            self.config.mesh_dim,
         )
         return model
 

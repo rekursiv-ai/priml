@@ -9,6 +9,8 @@ levelling spends experience on the attributes that raise the meters.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 
 import torch
@@ -21,7 +23,10 @@ from priml.baselines.craftax.game.constants import (
     ProjectileType,
 )
 from priml.baselines.craftax.game.indexing import scatter_tiles_where
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 def drink_potion(state: EnvState, action: Tensor) -> EnvState:

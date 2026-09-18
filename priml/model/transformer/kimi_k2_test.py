@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType
@@ -35,6 +34,8 @@ from priml.testing.cost import assert_cost_matches_torch
 
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from transformers.modeling_outputs import CausalLMOutputWithPast
     from transformers.modeling_utils import PreTrainedModel
 
@@ -140,6 +141,7 @@ def test_kimi_k2_cost_matches_torch(q_lora_rank: int | None) -> None:
         build_input=lambda: torch.randint(0, 32, (2, 5)),
         seq_len=5,
         batch_size=2,
+        num_tokens=5 * 2,
         dtype=None,
     )
     assert analytical.params_active < analytical.params

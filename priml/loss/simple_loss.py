@@ -12,17 +12,18 @@ from torch.nn import functional
 
 import torch
 
-from priml.loss.custom_types import LossOutput, SimpleLossFn
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     reduction_cost,
-    shared_rows,
     traffic,
 )
+from priml.loss.custom_types import SimpleLossFn
 
 
 if TYPE_CHECKING:
     from torch import Tensor
+
+    from priml.loss.custom_types import LossOutput
 
 
 class SimpleLoss:
@@ -116,7 +117,8 @@ class SimpleLoss:
                 BCE ``weight`` is priced as one extra tensor multiply each way.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = dtype
             index = torch.int64
             channels_out = self.channels_out

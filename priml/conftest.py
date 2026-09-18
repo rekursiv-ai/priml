@@ -11,7 +11,6 @@ from this module instead of repeating it, so the two cannot drift.
 
 from __future__ import annotations
 
-from collections.abc import Generator, Mapping
 from contextlib import ExitStack
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -30,6 +29,8 @@ from priml.testing.fixtures import cleanup_cuda
 
 
 if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
+
     from priml.distributed.testing import WarmPoolGetter
 
 

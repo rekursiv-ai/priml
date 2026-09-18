@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor, nn
 
 import torch
 
-from priml.math.custom_types import Tensorable
 from priml.math.numeric import (
     log1mexp,
     log_arctan_exp,
@@ -19,6 +20,10 @@ from priml.math.probability import (
     quantile_truncated_normal,
 )
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import Tensorable
 
 
 __all__ = [
@@ -133,7 +138,8 @@ def log_snr_from_log_sigma_per_variance_preserving(
     if (sigma is None) == (log_sigma is None):
         raise ValueError("Exactly one of sigma, log_sigma must be provided.")
     if log_sigma is None:
-        assert sigma is not None
+        if sigma is None:
+            raise ValueError("Expected sigma is not None.")
         sigma = convert_to_tensor(sigma)
         log_sigma = safe_log(sigma)
     else:
@@ -215,7 +221,8 @@ def log_snr_from_log_sigma_per_rectified_flow(
     if (sigma is None) == (log_sigma is None):
         raise ValueError("Exactly one of sigma, log_sigma must be provided.")
     if log_sigma is None:
-        assert sigma is not None
+        if sigma is None:
+            raise ValueError("Expected sigma is not None.")
         sigma = convert_to_tensor(sigma)
         logit = torch.logit(sigma)
     else:
@@ -522,5 +529,4 @@ def input_conditioning_identity(
 
     """
     del log_snr
-    x = convert_to_tensor(x)
-    return x
+    return convert_to_tensor(x)

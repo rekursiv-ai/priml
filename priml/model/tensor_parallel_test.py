@@ -16,7 +16,6 @@ asserted separately. MLA is covered here only while replicated.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
@@ -46,6 +45,8 @@ from priml.train.tensor_parallel import TensorParallel, apply_tensor_parallel
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter

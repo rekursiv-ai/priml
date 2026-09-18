@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal, TypeGuard, cast, override
+from typing import TYPE_CHECKING, Literal, TypeGuard, cast, override
 
 import copy
 import random
@@ -19,7 +17,6 @@ from torch.nn.utils import parametrize
 import pytest
 import torch
 
-from priml.loss.custom_types import LossOutput
 from priml.math.seed import RngState, get_rng_state, numpy_rng
 from priml.model.linear import Linear
 from priml.model.transformer.qwen3_5 import Qwen35
@@ -28,9 +25,16 @@ from priml.runtime import SingleProcess
 from priml.testing.qwen3_5 import hf_config
 from priml.timer import CheckpointableStepTimer
 from priml.train.checkpointer import Checkpointer
-from priml.train.custom_types import OptimizerProtocol, TrainStepOutput
 from priml.train.train_loop import TrainLoop
 from priml.train.train_step import TrainStep
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
+    from pathlib import Path
+
+    from priml.loss.custom_types import LossOutput
+    from priml.train.custom_types import OptimizerProtocol, TrainStepOutput
 
 
 @pytest.mark.parametrize("source", ["cadence", "final"])

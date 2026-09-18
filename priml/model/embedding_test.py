@@ -10,7 +10,7 @@ from configgle.testing import assert_pprint_golden
 
 import torch
 
-from priml.model.cost import Cost
+from priml.cost import Cost
 from priml.model.embedding import Embedding
 from priml.model.init import normal
 from priml.testing.bfb import assert_bfb_against_golden
@@ -104,6 +104,7 @@ def test_embedding_cost_is_a_gather() -> None:
         build_input=lambda: torch.randint(0, 8, (3,)),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     f32, i64 = torch.float32, torch.int64

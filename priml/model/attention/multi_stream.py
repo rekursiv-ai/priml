@@ -12,6 +12,11 @@ from torch.distributed.tensor import DTensor
 
 import torch
 
+from priml.cost import (
+    Cost,
+    cost,
+    resolve_dtype,
+)
 from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
@@ -21,13 +26,6 @@ from priml.model.attention.self_attention import (
     _validate_head_dims,
 )
 from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import (
-    Cost,
-    cost,
-    resolve_dtype,
-    shared_rows,
-    with_rows,
-)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -160,12 +158,12 @@ class MultiStreamAttention(nn.Module):
 
             A position holds ``num_streams`` tokens. Each pays its own
             projections, runs the kernel as one query row against the
-            concatenated keys -- so ``seq_len`` is the joint key length and the
-            kernel is counted once per stream -- and caches its own keys and
-            values. A shared norm runs on every stream's rows but is owned once.
+            ``num_streams * seq_len`` concatenated keys -- counted once per
+            stream -- and caches its own keys and values. A shared norm runs
+            on every stream's rows but is owned once.
 
             Args:
-              seq_len: Tokens per sequence.
+              seq_len: Tokens per sequence of one stream.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
@@ -174,7 +172,7 @@ class MultiStreamAttention(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             if self.streams:
                 total = sum(
                     (
@@ -231,21 +229,21 @@ class MultiStreamAttention(nn.Module):
                         head_rows = self.num_streams * heads
                         total += cost(
                             self.norm_qk,
-                            seq_len=seq_len,
+                            seq_len=seq_len * head_rows,
                             batch_size=batch_size,
                             dtype=dtype,
-                            **with_rows(rows * head_rows, **kwargs),
+                            **kwargs,
                         ).tile(head_rows)
                 if self.norm_out is not None:
                     total += cost(
                         self.norm_out,
-                        seq_len=seq_len,
+                        seq_len=seq_len * self.num_streams,
                         batch_size=batch_size,
                         dtype=dtype,
-                        **with_rows(rows * self.num_streams, **kwargs),
+                        **kwargs,
                     ).tile(self.num_streams)
             kernel = attention_kernel_cost(
-                seq_len=seq_len,
+                seq_len=seq_len * self.num_streams,
                 dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
@@ -442,7 +440,8 @@ class MultiStreamAttention(nn.Module):
             attn_mask=attn_mask,
             **kwargs,
         )
-        assert caches is None
+        if caches is not None:
+            raise ValueError("Expected caches is None.")
         return outputs
 
     def forward_cached(
@@ -483,7 +482,8 @@ class MultiStreamAttention(nn.Module):
             attn_mask=attn_mask,
             **kwargs,
         )
-        assert updated is not None
+        if updated is None:
+            raise ValueError("Expected updated is not None.")
         return outputs, updated
 
     def _forward(

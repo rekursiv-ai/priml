@@ -12,12 +12,12 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.cost import cost
 from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
 )
-from priml.model.cost import cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
@@ -249,6 +249,7 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
+        num_tokens=8,
         dtype=None,
         run=lambda module, x: cast(ValueGatedAttention, module)(
             x,
@@ -286,19 +287,22 @@ def test_value_attention_traffic_amortizes_weights_and_preserves_window() -> Non
     config.gate_channels = 4
     config.window = 4
     config = config.copy_tree().finalize()
-    one = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=1)
-    batch = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
+    one = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    batch = config.cost(seq_len=8, batch_size=4, dtype=torch.bfloat16)
+    assert one["bytes", "primal", "matmul"].sum() - batch[
+        "bytes",
+        "primal",
+        "matmul",
+    ].sum() == 2 * one.params * (1 / 8 - 1 / 32)
+    wide = config.cost(seq_len=8, batch_size=4, dtype=None)
     assert (
-        one["bytes", "primal", "matmul"].sum()
-        - batch["bytes", "primal", "matmul"].sum()
-        == 2 * one.params * 3 / 4
+        wide["bytes", torch.float32].sum() == batch["bytes", torch.bfloat16].sum() * 2
     )
-    wide = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
-    assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == batch["bytes", :, :, torch.bfloat16].sum() * 2
+    assert config.cost(seq_len=32, batch_size=1, dtype=torch.bfloat16) == config.cost(
+        seq_len=8,
+        batch_size=4,
+        dtype=torch.bfloat16,
     )
-    assert config.cost(seq_len=32, batch_size=1, dtype=torch.bfloat16, rows=4) == batch
     assert batch.bytes_state == 2 * 2 * 8
 
 

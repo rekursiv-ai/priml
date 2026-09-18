@@ -14,7 +14,7 @@ from priml.baselines.sudoku.prefix import (
     RegisterTokens,
     SparsePuzzleEmbedding,
 )
-from priml.model.cost import cost
+from priml.cost import cost
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -128,6 +128,7 @@ def test_register_tokens_cost_is_one_scale_over_the_owned_tokens() -> None:
         build_input=lambda: torch.arange(4, dtype=torch.int32),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
         run=_run_prefix,
     )
@@ -158,6 +159,7 @@ def test_sparse_embedding_cost_owns_no_parameters() -> None:
         build_input=lambda: torch.arange(4, dtype=torch.int32),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
         run=_run_prefix,
     )
@@ -183,6 +185,7 @@ def test_stack_cost_sums_its_parts() -> None:
         build_input=lambda: torch.arange(4, dtype=torch.int32),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
         run=_run_prefix,
     )

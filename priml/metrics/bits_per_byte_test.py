@@ -104,6 +104,44 @@ def test_padding_rows_leave_both_sums() -> None:
     assert metric.state_dict() == {"nats": pytest.approx(4 * math.log(2)), "bytes": 4}
 
 
+@pytest.mark.parametrize("valid_count", [-1, 3])
+def test_a_valid_count_outside_the_batch_is_rejected(valid_count: int) -> None:
+    """A count past the rows would index the byte table from the back."""
+    metric = _metric()
+    with pytest.raises(ValueError, match="outside the batch"):
+        metric.update(
+            torch.zeros(2, 2),
+            label=torch.ones(2, 2, dtype=torch.int64),
+            token_bytes=torch.tensor([0, 1]),
+            valid_count=valid_count,
+        )
+
+
+def test_compute_sums_across_ranks_before_dividing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under a process group the sums are all-reduced once, then divided.
+
+    This rank holds 2 bits over 5 bytes and its peer 3 bits over 3 bytes:
+    summed first that is 5/8; a mean of per-rank ratios would say 0.7.
+    """
+
+    def all_reduce(totals: torch.Tensor, op: object) -> None:
+        del op
+        totals.add_(torch.tensor([3 * math.log(2), 3.0], dtype=torch.float64))
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda: "gloo")
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    metric = _metric()
+    metric.update(
+        torch.full((1, 2), math.log(2)),
+        label=torch.tensor([[1, 2]]),
+        token_bytes=torch.tensor([0, 1, 4]),
+    )
+    assert metric.compute()["bpb"] == pytest.approx(5 / 8)
+
+
 def test_a_shape_disagreement_is_rejected() -> None:
     """Silently broadcasting would pair each loss with another token's length."""
     metric = _metric()

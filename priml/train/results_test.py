@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import json
@@ -11,6 +10,8 @@ from priml.train.results import format_summary, read_metrics, summarize
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
 

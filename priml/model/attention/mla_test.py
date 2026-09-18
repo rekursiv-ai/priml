@@ -14,7 +14,6 @@ Run regeneration through ``pytest``: the priml ``conftest.py`` sets
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
@@ -31,6 +30,7 @@ import pytest
 import torch
 
 from priml import runtime
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -38,8 +38,6 @@ from priml.model.attention.kernel import (
 )
 from priml.model.attention.mla import LatentAttention, MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, RoPEMixed
-from priml.model.cost import Cost, cost
-from priml.model.custom_types import AttentionKernel
 from priml.model.linear import Linear
 from priml.testing.bfb import (
     assert_bfb_against_golden,
@@ -53,9 +51,12 @@ from priml.train.tensor_parallel import apply_tensor_parallel
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
+    from priml.model.custom_types import AttentionKernel
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -474,6 +475,7 @@ def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
         build_input=lambda: torch.randn(1, 8, 32, requires_grad=True),
         seq_len=8,
         batch_size=1,
+        num_tokens=8,
         dtype=None,
     )
 
@@ -490,11 +492,10 @@ def test_mla_traffic_scales_all_children_and_cache() -> None:
     config, _ = _mla_config()
     config.rope = RoPE.Config(4)
     config = config.copy_tree().finalize()
-    small = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16, rows=4)
-    large = config.cost(seq_len=8, batch_size=1, dtype=None, rows=4)
+    small = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    large = config.cost(seq_len=4, batch_size=1, dtype=None)
     assert (
-        large["bytes", :, :, torch.float32].sum()
-        == small["bytes", :, :, torch.bfloat16].sum() * 2
+        large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
     assert small.bytes_state == 2 * (12 + 4)
 
@@ -544,8 +545,8 @@ def test_mla_cost_prices_absorbed_projection_intermediates(
         + 2 * extra
     )
     assert (
-        actual["flops", :, "matmul"].sum()
-        == projections["flops", :, "matmul"].sum() + kernel["flops", :, "matmul"].sum()
+        actual["flops", "matmul"].sum()
+        == projections["flops", "matmul"].sum() + kernel["flops", "matmul"].sum()
     )
     assert actual.params == projections.params
 

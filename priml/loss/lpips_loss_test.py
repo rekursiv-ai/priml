@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import override
+from typing import TYPE_CHECKING, override
 from unittest.mock import MagicMock, patch
 
 from torch import Tensor, nn
@@ -18,6 +17,10 @@ from priml.loss.lpips_loss import (
     _spatial_average_cost,
 )
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _make_loss_with_mocked_lpips(
@@ -137,8 +140,8 @@ def test_lpips_cost_matches_torch_for_tiny_trunk() -> None:
             ),
             seq_len=t,
             batch_size=b,
+            num_tokens=b * t * h * w,
             dtype=None,
-            rows=b * t * h * w,
             run=lambda module, inputs: _loss(
                 module,
                 inputs[0],

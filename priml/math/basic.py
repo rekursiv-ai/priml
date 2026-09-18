@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
     import numpy as np
     import torch
+
+    from priml.math.custom_types import Tensorable
 else:
     from wrapt import lazy_import
 
@@ -21,8 +23,6 @@ else:
     Tensor = lazy_import("torch", "Tensor")
     torch = lazy_import("torch")
     np = lazy_import("numpy")
-
-from priml.math.custom_types import Tensorable
 
 
 def factors(n: int) -> tuple[int, ...]:

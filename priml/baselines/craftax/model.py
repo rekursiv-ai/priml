@@ -21,7 +21,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     elementwise_cost,
     matmul_cost,
@@ -206,6 +206,7 @@ def _linear(in_features: int, out_features: int, *, gain: float) -> nn.Linear:
     torch.nn.init.orthogonal_(layer.weight, gain=gain)
     # ``bias`` is optional on the module but always present here, since the
     # layer is constructed with the default ``bias=True``.
-    assert layer.bias is not None
+    if layer.bias is None:
+        raise ValueError("Expected layer.bias is not None.")
     torch.nn.init.zeros_(layer.bias)
     return layer

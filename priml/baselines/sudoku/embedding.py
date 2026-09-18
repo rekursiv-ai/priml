@@ -30,13 +30,12 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     reduction_cost,
     traffic,
-    with_rows,
 )
 from priml.model.custom_types import ChannelsIn, ChannelsOut
 from priml.model.embedding import Embedding
@@ -159,7 +158,7 @@ class FactoredPositions(nn.Module):
                         seq_len=cells,
                         batch_size=1,
                         dtype=dt,
-                        **with_rows(cells, **kwargs),
+                        **kwargs,
                     )
                     for n in tables
                 ),

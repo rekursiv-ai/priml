@@ -1,4 +1,4 @@
-"""Tests for priml.model.cost."""
+"""Tests for priml.cost."""
 
 from __future__ import annotations
 
@@ -15,23 +15,17 @@ from configgle import Fig
 import pytest
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
-    HasCost,
-    bound,
     cost,
     elementwise_cost,
     matmul_cost,
-    mbu,
-    mfu,
     peak,
     reduction_cost,
     resolve_dtype,
-    ridge,
-    shared_rows,
     utilization,
-    with_rows,
 )
+from priml.custom_types import HasCost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.softcap import SoftCap
@@ -72,11 +66,41 @@ def test_partial_keys_slice_and_drop_the_fixed_leading_axes() -> None:
     assert t["flops"].params == 0
 
 
-def test_colon_keeps_an_axis() -> None:
+def test_axes_are_named_by_their_values_in_any_order() -> None:
     t = _t()
-    assert t["flops", :, "matmul"].cells == {("primal", BF): 60, ("adjoint", BF): 120}
-    assert t[:, :, :, I64].cells == {("bytes", "adjoint", "selection"): 2}
-    assert t[:, :, :, F32].sum() == 4
+    assert t["flops", "matmul"].cells == {("primal", BF): 60, ("adjoint", BF): 120}
+    assert t[I64].cells == {("bytes", "adjoint", "selection"): 2}
+    assert t[F32].sum() == 4
+
+
+def test_an_unknown_axis_value_is_rejected_by_name() -> None:
+    with pytest.raises(KeyError, match="'gemm' is not a measure"):
+        _ = _t()["gemm"]
+
+
+def test_a_dtype_may_be_named_by_string_or_alias() -> None:
+    t = _t()
+    assert t["flops", "primal", "matmul", "bfloat16"] == 60
+    assert t["flops", "primal", "matmul", "bf16"] == 60
+    assert t["bf16", "flops"].cells == t[BF, "flops"].cells
+    assert t["f32", "flops"].cells == t[F32, "flops"].cells
+
+
+def test_intensity_is_a_virtual_measure_on_a_model_cost() -> None:
+    c = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 60,
+            ("bytes", "primal", "matmul", BF): 4,
+            ("flops", "adjoint", "matmul", BF): 120,
+            ("bytes", "adjoint", "matmul", BF): 4,
+            ("bytes", "primal", "selection", I64): 2,
+        },
+    )
+    assert c["intensity", "primal", "matmul", BF] == 15
+    assert c["matmul", BF, "intensity"].cells == {("primal",): 15, ("adjoint",): 30}
+    assert c["intensity", "primal", "selection", I64] == 0
+    assert (c["matmul", BF, "intensity"] / 15 - 1).cells == {("adjoint",): 1}
+    assert c["intensity"].params == 0
 
 
 def test_sum_totals_every_remaining_cell() -> None:
@@ -161,7 +185,7 @@ def test_matmul_cost_is_tagged_with_its_dtype() -> None:
     assert c["bytes", "adjoint", "matmul", BF] == 2 * 2 * (2 + 3 + 6 / 4)
     assert c["bytes", "primal", "elementwise", BF] == 2 * (6 + 3 / 4)
     assert c["bytes", "adjoint", "reduction", BF] == 2 * (3 + 3 / 4)
-    assert c["bytes", :, :, F32] == Cost()
+    assert c["bytes", F32] == Cost()
     assert c.params == c.params_active == 9
 
 
@@ -232,14 +256,14 @@ def test_elementwise_explicit_operand_geometry_is_independent_of_flops() -> None
 
 def test_reduction_empty_group_writes_identity_without_arithmetic() -> None:
     c = reduction_cost(input_elements=0)
-    assert c["flops"] == Cost()
+    assert c["flops", "primal", "reduction", F32] == 0
     assert c["bytes", "primal", "reduction", F32] == 4
 
 
 def test_reduction_in_the_adjoint_phase() -> None:
     c = reduction_cost(input_elements=6, output_groups=2, phase="adjoint")
     assert c["flops", "adjoint", "reduction", F32] == 4
-    assert c["flops", "primal"] == Cost()
+    assert c["flops", "primal", "reduction", F32] == 0
 
 
 def test_fractional_sharing_rows_remain_at_least_one() -> None:
@@ -299,14 +323,9 @@ def test_repr_is_a_grid_with_totals_and_intensity() -> None:
     text = repr(c)
     lines = text.splitlines()
     assert lines[0] == "Cost(params=7, params_active=0, bytes_state=0)"
-    header, primal, selection, adjoint, total = lines[1:]
-    assert header.split() == [
-        "flops[bfloat16]",
-        "flops[int64]",
-        "bytes[bfloat16]",
-        "bytes[int64]",
-        "flops/bytes",
-    ]
+    measure, dtype, primal, selection, adjoint, total = lines[1:]
+    assert measure.split() == ["flops", "flops", "bytes", "bytes"]
+    assert dtype.split() == ["bf16", "int64", "bf16", "int64", "intensity"]
     assert primal.split() == ["primal", "matmul", "64K", "-", "32", "-", "2K"]
     assert selection.split() == ["primal", "selection", "-", "-", "-", "8", "-"]
     assert adjoint.split() == ["adjoint", "matmul", "1.5G", "-", "-", "-", "inf"]
@@ -321,16 +340,16 @@ def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> N
         },
     )
     assert repr(c["flops"]).splitlines()[1:] == [
-        "              bfloat16",
-        "primal matmul        3",
+        "              bf16",
+        "primal matmul    3",
     ]
-    assert repr(c["flops", :, :, BF]).splitlines()[1:] == [
+    assert repr(c["flops", BF]).splitlines()[1:] == [
         "       matmul",
         "primal      3",
     ]
     assert repr(c["flops", "primal", "matmul"]).splitlines()[1:] == [
-        " bfloat16",
-        "        3",
+        " bf16",
+        "    3",
     ]
     assert repr(Cost()).splitlines()[1] == "(empty)"
 
@@ -338,76 +357,57 @@ def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> N
 # -- metrics -----------------------------------------------------------------
 
 
-def test_utilization_is_per_cell_and_matmul_is_mfu() -> None:
+def test_utilization_without_a_duration_is_intensity_over_the_ridge() -> None:
+    ridge = 989 / 3.35
     c = Cost(
         cells={
-            ("flops", "primal", "matmul", BF): 2,
-            ("flops", "primal", "elementwise", F32): 3_000_000,
-            ("flops", "adjoint", "matmul", BF): 4,
-            ("flops", "adjoint", "reduction", F32): 5_000_000,
+            ("flops", "primal", "matmul", BF): 2 * ridge,
+            ("bytes", "primal", "matmul", BF): 1,
+            ("flops", "adjoint", "sort", F32): 1,
+            ("bytes", "adjoint", "sort", F32): 1,
+            ("flops", "primal", "matmul", torch.int32): 1,
+            ("bytes", "primal", "matmul", torch.int32): 1,
         },
     )
-    peak = Cost(
-        cells={
-            ("primal", "matmul", BF): 100,
-            ("adjoint", "matmul", BF): 100,
-            ("primal", "elementwise", F32): 1e9,
-            ("adjoint", "reduction", F32): 1e9,
-        },
-    )
-    achieved = utilization(c, tokens_per_sec=10, peak=peak)
-    assert achieved["primal", "matmul", BF] == 0.2
-    assert achieved["adjoint", "matmul", BF] == 0.4
-    assert achieved["primal", "elementwise", F32] == 0.03
-    assert achieved["adjoint", "reduction", F32] == 0.05
-    assert mfu(c, tokens_per_sec=10, peak_flops_per_sec=100) == 0.6
+    ratio = utilization(c, device="h100", seq_len=4, batch_size=2)
+    assert ratio["primal", "matmul", BF] == pytest.approx(2)
+    assert ratio["adjoint", "sort", F32] == pytest.approx(3.35 / 67)
+    assert ratio["primal", "matmul", torch.int32] == math.inf
+    assert ratio.params == 0
 
 
-def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() -> None:
-    h100 = peak("H100")
-    assert h100["matmul", BF] == 989e12
-    assert h100["matmul", F32] == 494e12
-    assert h100["elementwise", BF] == h100["reduction", F32] == 67e12
-    assert h100["sort", torch.float8_e4m3fn] == 67e12
-    assert h100["sort", I64] == 0
-    assert h100.params == 0
-
-
-def test_ridge_is_peak_over_bandwidth() -> None:
-    assert ridge("H100")["matmul", BF] == 989e12 / 3.35e12
-    assert ridge("B200")["matmul", torch.float4_e2m1fn_x2] == 9000 / 8
-    assert ridge("RTX5090")["elementwise", F32] == 104.8 / 1.792
-
-
-def test_bound_is_intensity_over_ridge_per_cell() -> None:
-    line = ridge("H100").cells[("matmul", BF)]
+def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling() -> None:
+    # 8 tokens a step: one compute-bound matmul, one memory-bound sort.
     c = Cost(
         cells={
-            ("flops", "primal", "matmul", BF): 2 * line,
+            ("flops", "primal", "matmul", BF): 989e12 / 8,
             ("bytes", "primal", "matmul", BF): 1,
             ("flops", "adjoint", "sort", F32): 1,
             ("bytes", "adjoint", "sort", F32): 1,
         },
     )
-    ratio = bound(c, "H100")
-    assert ratio["primal", "matmul", BF] == 2
-    assert ratio["adjoint", "sort", F32] == 1 / ridge("H100").cells[("sort", F32)]
-    assert ratio.params == 0
-    unknown = Cost(cells={("flops", "primal", "matmul", torch.int32): 1})
-    assert bound(unknown, "H100")["primal", "matmul", torch.int32] == math.inf
+    achieved = utilization(c, device="h100", seq_len=4, batch_size=2, duration_sec=2)
+    assert achieved["primal", "matmul", BF] == pytest.approx(0.5)
+    # Sort at intensity 1 is capped at bandwidth, 3.35e12 FLOP/s, not 67e12.
+    assert achieved["adjoint", "sort", F32] == pytest.approx(8 / 2 / 3.35e12)
 
 
-def test_mbu_reads_active_weights_once_and_state_per_position() -> None:
-    c = Cost(params=1000, params_active=100, bytes_state=4)
-    achieved = mbu(
-        c,
-        batch=2,
-        context_len=8,
-        steps_per_sec=10,
-        dtype=torch.bfloat16,
-        peak_bytes_per_sec=1e4,
-    )
-    assert achieved == (100 * 2 + 2 * 8 * 4) * 10 / 1e4
+def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() -> None:
+    h100 = peak()["h100"]
+    assert h100[BF, "flops", "matmul"] == 989e12
+    assert h100[F32, "flops", "matmul"] == 494e12
+    assert h100[BF, "flops", "elementwise"] == h100[F32, "flops", "reduction"] == 67e12
+    assert h100[torch.float8_e4m3fn, "flops", "sort"] == 67e12
+    assert h100[I64, "flops", "sort"] == 67e12
+    assert h100[I64, "flops", "matmul"] == 0
+    assert h100[BF, "bytes", "matmul"] == h100[F32, "bytes", "sort"] == 3.35e12
+    assert h100[BF, "intensity", "matmul"] == 989 / 3.35
+    assert h100.params == 0
+
+
+def test_peak_intensity_is_the_ridge() -> None:
+    assert peak()["b200", "matmul", "fp4", "intensity"] == 9000 / 8
+    assert peak()["rtx5090", "elementwise", F32, "intensity"] == 104.8 / 1.792
 
 
 # -- dispatch ----------------------------------------------------------------
@@ -457,25 +457,12 @@ class _Rows:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
+            del kwargs
             del dtype
-            return Cost(params=int(shared_rows(seq_len, batch_size, **kwargs)))
+            return Cost(params=int(seq_len * batch_size))
 
     def __init__(self, config: Config) -> None:
         del config
-
-
-def test_shared_rows_is_the_batch_unless_a_container_put_rows_on_the_bus() -> None:
-    assert shared_rows(1, 1) == 1
-    assert shared_rows(8, 1) == 8
-    assert shared_rows(8, 4) == 32
-    assert shared_rows(8, 4, **with_rows(2)) == 2
-    assert with_rows(2, seq_len=8, rows=5) == {"seq_len": 8, "rows": 2}
-    with pytest.raises(ValueError, match="at least one"):
-        shared_rows(0, 1)
-    with pytest.raises(ValueError, match="rows"):
-        shared_rows(1, 1, rows=0.5)
-    with pytest.raises(TypeError, match="rows"):
-        shared_rows(1, 1, rows="2")
 
 
 def test_resolve_dtype_falls_back_to_the_torch_default() -> None:
@@ -486,13 +473,6 @@ def test_resolve_dtype_falls_back_to_the_torch_default() -> None:
 def test_cost_hands_the_bus_through() -> None:
     assert cost(_Rows.Config(), seq_len=1, batch_size=1, dtype=None) == Cost(params=1)
     assert cost(_Rows.Config(), seq_len=8, batch_size=4, dtype=None) == Cost(params=32)
-    assert cost(
-        _Rows.Config(),
-        seq_len=8,
-        batch_size=1,
-        dtype=None,
-        **with_rows(2),
-    ) == Cost(params=2)
 
 
 def test_a_linear_reads_its_rows_from_the_geometry() -> None:
@@ -536,10 +516,10 @@ def test_every_model_config_is_priced() -> None:
     :func:`attention_kernel_cost`; a kernel that priced itself would need
     the bus of shape arguments this design removed.
     """
-    root = pathlib.Path(__file__).parents[1]
+    root = pathlib.Path(__file__).parent
     # The package prefix is read off this module's own name rather than
     # spelled out, so the walk resolves under either import root.
-    package = __name__.rsplit(".", 2)[0]
+    package = __name__.rsplit(".", 1)[0]
     unpriced: list[str] = []
     for path in sorted(
         [

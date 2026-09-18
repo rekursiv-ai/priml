@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import field
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class TopK:

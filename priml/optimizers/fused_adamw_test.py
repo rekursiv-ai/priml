@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import partial
+from typing import TYPE_CHECKING
 
 from torch import Tensor
 
@@ -11,6 +11,10 @@ import pytest
 import torch
 
 from priml.optimizers.fused_adamw import FusedAdamW
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 # Independent of the implementation under test: it is the arithmetic the module claims

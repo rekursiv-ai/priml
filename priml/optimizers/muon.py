@@ -264,7 +264,8 @@ class Muon(Optimizer):
         ns_coefficients = group["ns_coefficients"]
         assert isinstance(ns_coefficients, tuple)
         ns_coefficients = cast(tuple[float, float, float], ns_coefficients)
-        assert len(ns_coefficients) == 3
+        if len(ns_coefficients) != 3:
+            raise ValueError("Expected len(ns_coefficients) == 3.")
         eps = FloatCodec.coerce(group["eps"], None)
         ns_steps = IntCodec.coerce(group["ns_steps"], None)
         ensemble_dims = IntCodec.coerce(group["ensemble_dims"], None)

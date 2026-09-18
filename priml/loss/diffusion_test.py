@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from torch import Tensor, nn
 
 import pytest
 import torch
 
+from priml.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.loss.diffusion import DiffusionLoss
 from priml.math.diffusion.schedule import (
     log_sigma_from_log_snr_per_variance_preserving,
@@ -26,8 +26,11 @@ from priml.math.diffusion.target import (
     target_v_x,
     target_x,
 )
-from priml.model.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 def _fp32(
@@ -393,6 +396,7 @@ def test_diffusion_loss_cost_default_prices_rectified_flow_per_element() -> None
         build_input=lambda: torch.randn(2, 3, 4, 4),
         seq_len=48,
         batch_size=1,
+        num_tokens=48,
         dtype=None,
         run=lambda module, x0: _loss(module, denoiser=denoiser, x0=x0),
     )
@@ -409,7 +413,7 @@ def test_diffusion_loss_cost_default_prices_rectified_flow_per_element() -> None
     )
     assert measured == expected
     assert measured.params == 0
-    assert measured["flops", :, "matmul"].sum() == 0
+    assert measured["flops", "matmul"].sum() == 0
 
 
 @pytest.mark.parametrize(

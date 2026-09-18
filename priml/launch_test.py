@@ -7,11 +7,13 @@ from typing import Self, override
 import os
 import sys
 
-from configgle import Fig, Makeable
+from configgle import Fig, InlineConfig, Makeable
 
 import pytest
+import torch
 
-from priml.launch import _graceful_sigterm, main
+from priml import launch
+from priml.launch import _derive_study_name, _graceful_sigterm, main
 
 
 class MockJob:
@@ -281,6 +283,132 @@ def test_main_derives_local_working_dir_without_environment(
 
     assert _captured_run_dirs == ["/scratch/runs/launchable_experiment"]
     assert {key: os.environ[key] for key in before} == before
+
+
+class _StampedJob:
+    """Launchable job recording the identity and docstring the launcher stamped."""
+
+    class Config(Fig["_StampedJob"]):
+        study_name: str = ""
+        experiment_name: str = ""
+        doc: str = ""
+
+    def __init__(self, config: Config) -> None:
+        _captured_identity.append(
+            (config.study_name, config.experiment_name, config.doc),
+        )
+
+    def run(self, *args: str) -> None:
+        del args
+
+
+_captured_identity: list[tuple[str, str, str]] = []
+
+
+def stamped_experiment() -> Makeable[_StampedJob]:
+    return _StampedJob.Config()
+
+
+def documented_experiment() -> Makeable[_StampedJob]:
+    """Hypothesis: the docstring lands on ``doc``."""
+    config = _StampedJob.Config()
+    config.study_name = "explicit/"
+    config.doc = "already set"
+    return config
+
+
+def _skip_setup_logging(level: str) -> None:
+    del level
+
+
+@pytest.fixture
+def keep_caplog_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``setup_logging`` clears the root handlers, which would drop caplog's."""
+    monkeypatch.setattr(launch, "setup_logging", _skip_setup_logging)
+
+
+@pytest.mark.usefixtures("keep_caplog_handler")
+def test_main_stamps_identity_and_doc_only_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _captured_identity.clear()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "priml.launch_test.stamped_experiment"],
+    )
+    with caplog.at_level("INFO", logger="priml.launch"):
+        main()
+    assert _captured_identity == [("", "stamped_experiment", "")]
+    assert "no docstring" in caplog.text
+
+    _captured_identity.clear()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "priml.launch_test.documented_experiment"],
+    )
+    with caplog.at_level("INFO", logger="priml.launch"):
+        main()
+    assert _captured_identity == [("explicit/", "documented_experiment", "already set")]
+    assert "Hypothesis: the docstring lands" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("module_name", "expected"),
+    [
+        ("pkg.experimental.vision.diffusion.experiments", "vision/diffusion/"),
+        ("pkg.experimental.experiments", ""),
+        ("pkg.baselines.cifar10.experiments", ""),
+        ("pkg.experimental.vision.configs", ""),
+    ],
+)
+def test_derive_study_name_reads_the_experimental_path(
+    module_name: str,
+    expected: str,
+) -> None:
+    assert _derive_study_name(module_name) == expected
+
+
+def inline_experiment() -> Makeable[MockJob]:
+    """Return a non-Fig ``Makeable``, which has no ``pformat`` for the launcher."""
+    return InlineConfig(MockJob, MockJob.Config())
+
+
+@pytest.mark.usefixtures("keep_caplog_handler")
+def test_main_logs_the_repr_of_a_config_without_pformat(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "priml.launch_test.inline_experiment"],
+    )
+    with caplog.at_level("INFO", logger="priml.launch"):
+        main()
+    assert "InlineConfig(" in caplog.text
+    assert "MockJob.Config(value=42))" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("cuda", "mps", "expected"),
+    [(True, False, "fake-gpu"), (False, True, "mps"), (False, False, "cpu")],
+)
+def test_log_hardware_names_the_device_it_finds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cuda: bool,
+    mps: bool,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda: "fake-gpu")
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+    with caplog.at_level("INFO", logger="priml.launch"):
+        launch._log_hardware()
+    assert f"| {expected} |" in caplog.text
 
 
 def test_graceful_sigterm_raises_keyboardinterrupt_then_restores() -> None:

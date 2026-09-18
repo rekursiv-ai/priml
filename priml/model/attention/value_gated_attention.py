@@ -30,20 +30,18 @@ from torch.nn import functional
 
 import torch
 
-from priml.model.attention.kernel import attention_kernel_cost
-from priml.model.attention.rope import rotate_conjugate
-from priml.model.attention.window import layer_window, window_mask
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
     resolve_dtype,
-    shared_rows,
     traffic,
-    with_rows,
 )
+from priml.model.attention.kernel import attention_kernel_cost
+from priml.model.attention.rope import rotate_conjugate
+from priml.model.attention.window import layer_window, window_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -274,7 +272,7 @@ class ValueGatedAttention(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = dtype
             inner = self.num_heads * self.channels_head
             total = matmul_cost(
@@ -297,10 +295,10 @@ class ValueGatedAttention(nn.Module):
                 )
             total += cost(
                 self.norm_qk,
-                seq_len=seq_len,
+                seq_len=seq_len * self.num_heads,
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(rows * self.num_heads, **kwargs),
+                **kwargs,
             ).tile(
                 2 * self.num_heads,
                 copies=2,
@@ -448,7 +446,8 @@ class ValueGatedAttention(nn.Module):
             # A layer handed an embedding must have been built with a gate; the
             # model derives both from one layer set, so the absence of one is a
             # wiring error rather than a case to fall back from.
-            assert self.value_gate is not None
+            if self.value_gate is None:
+                raise ValueError("Expected self.value_gate is not None.")
             gate = 2 * torch.sigmoid(self.value_gate(x[..., : config.gate_channels]))
             v = v + gate.unsqueeze(-1) * value_embedding.view(shape)
         cos, sin = cos_sin

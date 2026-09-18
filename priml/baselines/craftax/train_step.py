@@ -14,7 +14,6 @@ this policy just chose.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import field
 from typing import TYPE_CHECKING, Self, cast, override
 
@@ -23,7 +22,6 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import (
     evaluation_mode,
@@ -41,12 +39,14 @@ from priml.loss.policy_gradient import (
 from priml.math.advantage import explained_variance, generalized_advantage
 from priml.math.schedules import linear
 from priml.optimizers.lr import learning_rate
-from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator, Mapping
+
+    from priml.baselines.craftax.data import EvaluationActor
+    from priml.train.custom_types import TrainStepOutput
 
 
 class Rollout:
@@ -436,7 +436,8 @@ class CraftaxTrainStep(TrainStep):
           logits: Unnormalized action scores.
 
         """
-        assert not args
+        if args:
+            raise ValueError("Expected not args.")
         observation = batch["observation"]
         assert isinstance(observation, Tensor)
         with evaluation_mode(self.model), torch.no_grad():

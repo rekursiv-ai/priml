@@ -10,12 +10,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from priml.cost import Cost
 
 
 __all__ = [
     "CheckpointableProtocol",
+    "HasCost",
     "HasNormalizedWorkingDirPattern",
     "JobProtocol",
     "LaunchableExperiment",
@@ -23,6 +29,31 @@ __all__ = [
     "MetricObjective",
     "Vector",
 ]
+
+
+@runtime_checkable
+class HasCost(Protocol):
+    """A config that prices the module it builds.
+
+    Every argument is named: the protocol fixes no keyword, and each
+    implementation declares the ones it reads (``seq_len``, ``batch_size``,
+    ``dtype``, ...) as required keyword-only parameters, so a caller that
+    forgets one fails there rather than pricing a guessed batch. The rest of
+    the bus passes through ``**kwargs`` so a container can forward it unread.
+    """
+
+    def cost(self, **kwargs: object) -> Cost:
+        """Price one token through the module ``self`` builds.
+
+        Args:
+          **kwargs: The open bus, named arguments only; each implementation
+            declares what it reads.
+
+        Returns:
+          cost: Per-token cost.
+
+        """
+        ...
 
 
 @runtime_checkable

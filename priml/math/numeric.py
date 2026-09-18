@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 import math
 
@@ -12,8 +11,13 @@ from torch import Tensor
 import torch
 
 from priml.math.basic import broadcast_sequences, ceil_div
-from priml.math.custom_types import Tensorable
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from priml.math.custom_types import Tensorable
 
 
 def log_arctan_exp(x: Tensorable) -> Tensor:

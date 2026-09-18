@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     import torch
     import torch.distributed as dist
     import torch.distributed.checkpoint as dcp
+
+    from priml.custom_types import CheckpointableProtocol
 else:
     from wrapt import lazy_import
 
@@ -63,7 +65,6 @@ else:
 
 from configgle import Fig, Makeable
 
-from priml.custom_types import CheckpointableProtocol
 from priml.lib.custom_json import DictCodec, FloatCodec, IntCodec, StrCodec, loads
 from priml.paths import resolve_working_dir, validated_output_path
 from priml.runtime import is_rank_zero
@@ -442,11 +443,10 @@ def _read_checkpoint(path: Path, into: StateDict) -> StateDict:
     if path.is_dir():
         state_dict_loader.load(into, checkpoint_id=str(path))
         return into
-    blob = cast(
+    return cast(
         StateDict,
         torch.load(path, weights_only=True, map_location=torch.device("cpu")),
     )
-    return blob
 
 
 # A plain file is complete by existence (atomic rename). A DCP directory is complete

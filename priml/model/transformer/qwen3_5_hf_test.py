@@ -1,6 +1,8 @@
 """Pinned Qwen3.5 text-model reference checks on matching CPU kernels."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+import inspect
 
 from torch import Tensor
 
@@ -10,6 +12,7 @@ import torch
 from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
 from priml.testing.bfb import portable_half_precision
 from priml.testing.qwen3_5 import (
+    HfReference,
     hf_config,
     hf_logits,
     hf_reference,
@@ -212,6 +215,28 @@ def test_boolean_prepared_masks_are_rejected_before_prefill_and_cache(
     else:
         with pytest.raises(TypeError, match="floating additive"):
             native(tokens, attention_mask=boolean)
+
+
+class _StubReference:
+    """Borrows every ``HfReference`` stub body, which must be inert."""
+
+    __call__ = HfReference.__call__
+    named_parameters = HfReference.named_parameters
+    state_dict = HfReference.state_dict
+    get_parameter = HfReference.get_parameter
+
+
+def test_hf_reference_stub_bodies_are_inert() -> None:
+    """The protocol narrows a lazy HF model; its own bodies compute nothing."""
+    stub = _StubReference()
+    assert stub(torch.zeros(1)) is None
+    assert stub.named_parameters() is None
+    assert stub.state_dict() is None
+    assert stub.get_parameter("lm_head.weight") is None
+    descriptor = cast(object, inspect.getattr_static(HfReference, "config"))
+    assert isinstance(descriptor, property)
+    assert descriptor.fget is not None
+    assert descriptor.fget(stub) is None
 
 
 def _prepared_causal_boolean_mask(*, queries: int, keys: int) -> Tensor:

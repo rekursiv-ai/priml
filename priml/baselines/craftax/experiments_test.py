@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import patch
 
 from configgle import InlineConfig
@@ -43,9 +43,12 @@ from priml.baselines.craftax.model import ActorCritic
 from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
-from priml.testing.experiments import ExperimentFactory
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
+
+
+if TYPE_CHECKING:
+    from priml.testing.experiments import ExperimentFactory
 
 
 _CWD: Final = Path(__file__).resolve().parent

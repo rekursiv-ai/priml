@@ -143,10 +143,10 @@ def test_cost_is_inherited_and_matches_torch() -> None:
             torch.randint(0, 32, (1, 3)),
             torch.randn(1, 3, 16, requires_grad=True),
         ),
-        seq_len=6,
+        seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
-        rows=3,
         run=run_graft,
     )
 

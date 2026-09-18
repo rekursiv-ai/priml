@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast, override
@@ -14,6 +13,8 @@ import time
 
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     import torch
 else:
     from wrapt import lazy_import
@@ -243,7 +244,7 @@ class TorchProfiler:
                 )
                 trace_path.parent.mkdir(parents=True, exist_ok=True)
                 profiler.export_chrome_trace(str(trace_path))
-                logger.info(f"Saved profiler trace to {trace_path}")
+                logger.info("Saved profiler trace to %s", trace_path)
 
         if (
             self.memory_profile
@@ -256,7 +257,7 @@ class TorchProfiler:
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             torch.cuda.memory._dump_snapshot(str(snapshot_path))  # noqa: SLF001 -- PyTorch exposes this diagnostic API only through its private namespace.
             torch.cuda.memory._record_memory_history(enabled=None)  # noqa: SLF001 -- PyTorch exposes this diagnostic API only through its private namespace.
-            logger.info(f"Saved memory snapshot to {snapshot_path}")
+            logger.info("Saved memory snapshot to %s", snapshot_path)
 
     def _get_rank_suffix(self) -> str:
         """Get rank suffix for output filenames."""
@@ -654,7 +655,8 @@ class PhaseTimer:
             heartbeat.stop()
             elapsed = time.perf_counter() - started_at
             popped = self._stack.pop()
-            assert popped is frame
+            if popped is not frame:
+                raise ValueError("Expected popped is frame.")
             if self._stack:
                 self._stack[-1].child_sec += elapsed
             if self._enabled:

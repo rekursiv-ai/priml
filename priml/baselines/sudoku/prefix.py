@@ -21,24 +21,26 @@ carries the gradient, and the optimizer scatters those few rows back.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import KW_ONLY, field
-from typing import Self, override
+from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
-    shared_rows,
     traffic,
 )
 from priml.model.custom_types import ChannelsOut
 from priml.model.init import truncated_normal
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class RegisterTokens(nn.Module):
@@ -94,13 +96,14 @@ class RegisterTokens(nn.Module):
               cost: Per-puzzle cost of this module.
 
             """
+            del kwargs
             width = self.num_tokens * self.channels_out
             return elementwise_cost(
                 primal=width,
                 adjoint=width,
                 channels=width,
                 params=width if self.learnable else 0,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 inputs=0 if self.learnable else 1,
                 adjoint_inputs=1,
                 dtype=dtype,

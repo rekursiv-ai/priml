@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from threading import Event, Thread, get_ident
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import json
 import tempfile
 
-from configgle import Fig
+from configgle import Fig, Makes
 
 import pytest
 import torch
@@ -23,13 +22,15 @@ from priml.train.tracker import (
     WandbIngestion,
     WandbTracker,
     default_metrics_tracker,
+    flush_tracker,
+    unwrap_tracker_config,
 )
 
 import priml.train.tracker
 
 
 if TYPE_CHECKING:
-    import pytest
+    from collections.abc import Mapping
 
 
 class _FakeWriter:
@@ -94,6 +95,22 @@ def test_tensorboard_log_metrics_prepends_prefix() -> None:
 
 def test_tensorboard_default_working_dir_is_opinionated() -> None:
     assert TensorBoardTracker.Config().working_dir == "/tensorboard"
+
+
+def test_tensorboard_requires_the_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(priml.train.tracker, "_summary_writer_cls", None)
+    with pytest.raises(ImportError, match="tensorboard is not installed"):
+        TensorBoardTracker.Config(working_dir=tmp_path).make()
+
+
+def test_tensorboard_ignores_images_and_notes() -> None:
+    tracker, writer = _tracker_with_fake_writer()
+    tracker.log_images("samples", ["a.png"], 1)
+    tracker.log_notes("Hypothesis: X.")
+    assert writer.scalars == []
 
 
 def test_tensorboard_working_dir_is_scoped_to_the_run(
@@ -503,21 +520,21 @@ def test_wandb_no_tuning_keeps_default_settings(
     assert kwargs["settings"] is None
 
 
+class _FailingWandb:
+    class Settings:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    @classmethod
+    def init(cls, **kwargs: object) -> _FakeRun:
+        del kwargs
+        raise RuntimeError("wandb unavailable")
+
+
 def test_wandb_startup_failure_becomes_noop_tracker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A W&B init failure should not strand a distributed training run."""
-
-    class _FailingWandb:
-        class Settings:
-            def __init__(self, **kwargs: object) -> None:
-                self.kwargs = kwargs
-
-        @classmethod
-        def init(cls, **kwargs: object) -> _FakeRun:
-            del kwargs
-            raise RuntimeError("wandb unavailable")
-
     monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: True)
     monkeypatch.setattr(priml.train.tracker, "wandb", _FailingWandb)
 
@@ -526,6 +543,79 @@ def test_wandb_startup_failure_becomes_noop_tracker(
     tracker = WandbTracker(config)
 
     assert tracker._run is None
+
+
+def test_wandb_startup_failure_propagates_when_not_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(priml.train.tracker, "is_rank_zero", lambda: True)
+    monkeypatch.setattr(priml.train.tracker, "wandb", _FailingWandb)
+    config = WandbTracker.Config(project="trm", allow_startup_failure=False)
+    config.working_dir = tmp_path / "wandb"
+    with pytest.raises(RuntimeError, match="wandb unavailable"):
+        WandbTracker(config)
+
+
+def test_wandb_replays_startup_logs_only_when_console_is_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replays: list[int] = []
+    monkeypatch.setattr(
+        priml.train.tracker,
+        "bind_logging_to_current_stdout",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        priml.train.tracker,
+        "replay_buffered_logs",
+        lambda: replays.append(1),
+    )
+    _init_kwargs(
+        monkeypatch,
+        WandbTracker.Config(project="trm", replay_startup_logs=True),
+    )
+    assert replays == [1]
+    _init_kwargs(
+        monkeypatch,
+        WandbTracker.Config(
+            project="trm",
+            replay_startup_logs=True,
+            capture_console=False,
+        ),
+    )
+    assert replays == [1]
+
+
+def test_wandb_working_dir_is_scoped_by_owner() -> None:
+    config = WandbTracker.Config()
+    config.base_dir = "/scratch/runs/study/run-1"
+    assert config.finalize().working_dir == Path("/scratch/runs/study/run-1/wandb")
+
+
+def test_wandb_logs_the_non_scalar_skip_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tracker, run = _wandb_tracker_with_fake_run()
+    with caplog.at_level("DEBUG", logger=priml.train.tracker.__name__):
+        tracker.log_metrics({"score": 1.0, "extras": {"a": 1}}, step=0)
+        tracker.log_metrics({"score": 2.0, "extras": {"a": 2}}, step=1)
+    skips = [r for r in caplog.records if "skipping non-scalar" in r.message]
+    assert len(skips) == 1
+    assert "extras" in skips[0].message
+    assert len(run.logged) == 2
+
+
+def test_wandb_ignores_empty_notes() -> None:
+    tracker, run = _wandb_tracker_with_fake_run()
+    tracker.log_notes("")
+    assert run.notes is None
+
+
+def test_wandb_log_images_is_a_noop_without_a_run() -> None:
+    tracker = WandbTracker.__new__(WandbTracker)
+    tracker._run = None
+    tracker.log_images("samples", ["a.png"], step=0)
 
 
 # -- FileTracker -------------------------------------------------------------
@@ -586,6 +676,15 @@ def test_file_tracker_empty_path_is_noop(tmp_path: Path) -> None:
         0,
         prefix="eval/",
     )
+    assert not list(tmp_path.iterdir())
+
+
+def test_file_tracker_ignores_images_notes_and_close(tmp_path: Path) -> None:
+    target = tmp_path / "metrics.json"
+    tracker = FileTracker.Config(working_dir=str(target)).make()
+    tracker.log_images("samples", ["a.png"], 1)
+    tracker.log_notes("Hypothesis: X.")
+    tracker.close()
     assert not list(tmp_path.iterdir())
 
 
@@ -795,6 +894,83 @@ def test_async_tracker_can_be_disabled() -> None:
 
     assert child.metrics == [({"loss": 1.0}, 1, "")]
     assert child.closed == 1
+
+
+def test_async_tracker_requires_a_child() -> None:
+    with pytest.raises(ValueError, match="requires a child tracker config"):
+        AsyncTracker.Config().make()
+
+
+def test_unwrap_requires_a_child_beneath_the_wrapper() -> None:
+    with pytest.raises(ValueError, match="requires a child tracker config"):
+        unwrap_tracker_config(AsyncTracker.Config())
+
+
+def test_async_tracker_forwards_images_and_notes_to_the_child() -> None:
+    tracker = AsyncTracker.Config(tracker=_RecordingChild.Config()).make()
+    child = tracker.tracker
+    assert isinstance(child, _RecordingChild)
+    tracker.log_notes("Hypothesis: X.")
+    tracker.log_images("samples", ["a.png"], 4)
+    tracker.close()
+    assert child.notes == ["Hypothesis: X."]
+    assert child.images == [("samples", ["a.png"], 4)]
+    assert child.closed == 1
+
+
+def test_async_tracker_refuses_calls_after_close() -> None:
+    tracker = AsyncTracker.Config(tracker=_RecordingChild.Config()).make()
+    tracker.close()
+    tracker.close()
+    with pytest.raises(RuntimeError, match="is closed"):
+        tracker.log_metrics({"loss": 1.0}, 1)
+    with pytest.raises(RuntimeError, match="is closed"):
+        tracker.log_notes("late")
+
+
+class _FailingChild(_RecordingChild):
+    """A child whose delivery raises, so the failure must surface at flush."""
+
+    class Config(Makes["_FailingChild"], _RecordingChild.Config):
+        pass
+
+    @override
+    def log_metrics(
+        self,
+        metrics: Mapping[str, object],
+        step: int,
+        *,
+        prefix: str = "",
+    ) -> None:
+        del metrics, step, prefix
+        raise OSError("sink unavailable")
+
+
+def test_async_tracker_surfaces_delivery_failures_at_flush() -> None:
+    tracker = AsyncTracker.Config(tracker=_FailingChild.Config()).make()
+    tracker.log_metrics({"loss": 1.0}, 1)
+    with pytest.raises(OSError, match="sink unavailable"):
+        tracker.flush()
+    tracker.close()
+
+
+def test_tracker_list_flushes_deferred_children_only() -> None:
+    tracker_list = TrackerList(
+        TrackerList.Config(
+            trackers={
+                "sync": _RecordingChild.Config(),
+                "deferred": AsyncTracker.Config(tracker=_RecordingChild.Config()),
+            },
+        ),
+    )
+    deferred = tracker_list.trackers["deferred"]
+    assert isinstance(deferred, AsyncTracker)
+    deferred.log_metrics({"loss": 1.0}, 1)
+    assert deferred._pending
+    tracker_list.flush()
+    assert deferred._pending == []
+    flush_tracker(tracker_list.trackers["sync"])
+    tracker_list.close()
 
 
 def test_tracker_list_scopes_wrapped_child_working_directory(

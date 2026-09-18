@@ -79,6 +79,43 @@ def test_batched_smoothing_out_of_range_ignore_index() -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_scalar_smoothing_delegates_to_f_cross_entropy() -> None:
+    torch.manual_seed(3)
+    logits = torch.randn(6, 4)
+    target = torch.randint(0, 4, (6,))
+    actual = cross_entropy_with_batched_smoothing(logits, target, label_smoothing=0.2)
+    expected = nn.functional.cross_entropy(logits, target, label_smoothing=0.2)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_batched_smoothing_none_and_sum_reductions_agree_with_mean() -> None:
+    torch.manual_seed(4)
+    logits = torch.randn(5, 3)
+    target = torch.tensor([0, 1, 2, -100, 1])
+    smoothing = torch.tensor([0.0, 0.1, 0.2, 0.3, 0.4])
+    per_element = cross_entropy_with_batched_smoothing(
+        logits,
+        target,
+        label_smoothing=smoothing,
+        reduction="none",
+    )
+    total = cross_entropy_with_batched_smoothing(
+        logits,
+        target,
+        label_smoothing=smoothing,
+        reduction="sum",
+    )
+    mean = cross_entropy_with_batched_smoothing(
+        logits,
+        target,
+        label_smoothing=smoothing,
+    )
+    assert per_element.shape == (5,)
+    assert per_element[3] == 0.0
+    torch.testing.assert_close(total, per_element.sum())
+    torch.testing.assert_close(mean, total / 4)
+
+
 def test_log_stablemax_normalizes() -> None:
     x = torch.randn(3, 5, dtype=torch.float64)
     logp = log_stablemax(x, dim=-1)

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from priml.lib.custom_json import DictCodec, loads
 from priml.train.progress import write_progress
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_write_progress_lands_step_total_metrics(tmp_path: Path) -> None:

@@ -27,7 +27,6 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import (
     evaluation_mode,
@@ -40,12 +39,14 @@ from priml.lib.custom_json import ListCodec
 from priml.math.advantage import explained_variance, q_lambda_targets
 from priml.math.schedules import linear
 from priml.optimizers.lr import learning_rate
-from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from priml.baselines.craftax.data import EvaluationActor
+    from priml.train.custom_types import TrainStepOutput
 
 
 type _StepFn = Callable[
@@ -501,7 +502,8 @@ class CraftaxPQNTrainStep(TrainStep):
 
         """
         if args:
-            assert len(args) == 1
+            if len(args) != 1:
+                raise ValueError("Expected len(args) == 1.")
             observation = args[0]
         else:
             observation = kwargs["observation"]
@@ -633,8 +635,10 @@ class CraftaxPQNTrainStep(TrainStep):
                 }
                 final_loss = loss.detach()
                 final_values = values.detach()
-        assert final_loss is not None
-        assert final_values is not None
+        if final_loss is None:
+            raise ValueError("Expected final_loss is not None.")
+        if final_values is None:
+            raise ValueError("Expected final_values is not None.")
         return final_loss, final_values, metrics
 
     def _loss(self, minibatch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
@@ -724,8 +728,10 @@ class _EvaluationActor:
         generator: torch.Generator,
     ) -> Tensor:
         del generator
-        assert self._state is not None
-        assert self._previous_action is not None
+        if self._state is None:
+            raise ValueError("Expected self._state is not None.")
+        if self._previous_action is None:
+            raise ValueError("Expected self._previous_action is not None.")
         self._state, q_values = self.model.step(
             self._state,
             observation,

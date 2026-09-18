@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 from priml.custom_types import CheckpointableProtocol
-from priml.timer import CheckpointableStepTimer
+
+
+if TYPE_CHECKING:
+    from priml.timer import CheckpointableStepTimer
 
 
 __all__ = [

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import functools
 import math
@@ -12,9 +12,12 @@ from torch import Tensor, distributions
 
 import torch
 
-from priml.math.custom_types import Tensorable, TensorableFn
 from priml.math.numeric import logsubexp
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import Tensorable, TensorableFn
 
 
 # Adapted from tensorflow/probability.
@@ -507,8 +510,7 @@ def random_gamma(
     concentration = torch.broadcast_to(concentration, samples_size + params_size)
     # Detach: _standard_gamma's gradient is incorrect (not reparameterizable).
     y = torch._standard_gamma(concentration).detach() / rate  # noqa: SLF001 -- The probability helper tests the distribution's private numerical seam.
-    y = y.clamp_(min=torch.finfo(y.dtype).tiny)
-    return y
+    return y.clamp_(min=torch.finfo(y.dtype).tiny)
 
 
 # Adapted from tensorflow_probability:

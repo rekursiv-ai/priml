@@ -61,11 +61,29 @@ def test_the_network_is_sized_from_the_environment() -> None:
     assert step.model.head.out_features == step.env.num_actions
 
 
+def test_one_step_consumes_the_declared_interactions() -> None:
+    assert _step().steps_per_update == 2 * 2
+
+
+def test_the_loops_batch_passes_through_untouched() -> None:
+    batch: dict[str, object] = {"observation": object()}
+    assert _step().preprocess_batch(batch) is batch
+
+
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
     result = _step().train_step()
     assert math.isfinite(float(result["loss"]))
     for name in ("q_loss", "q_mean", "grad_norm", "learning_rate", "epsilon"):
         assert math.isfinite(float(_metrics(result)[name])), name
+
+
+def test_annealing_can_be_switched_off() -> None:
+    step = _config(anneal_learning_rate=False, learning_rate=1e-3).make()
+    # Two updates: the first is scheduled at progress zero, where an anneal
+    # that was wrongly still on would leave the rate untouched anyway.
+    step.train_step()
+    step.train_step()
+    assert step.optimizer.param_groups[0]["lr"] == pytest.approx(1e-3)
 
 
 def test_each_epoch_visits_every_minibatch() -> None:
@@ -183,6 +201,15 @@ def test_action_values_can_be_read_for_arbitrary_observations() -> None:
     values = step.call_eval(observation=torch.zeros(3, step.env.observation_size))
     assert values.shape == (3, step.env.num_actions)
     assert not values.requires_grad
+
+
+def test_a_positional_observation_scores_like_a_named_one() -> None:
+    step = _step()
+    observation = torch.zeros(3, step.env.observation_size)
+    assert torch.equal(
+        step.call_eval(observation),
+        step.call_eval(observation=observation),
+    )
 
 
 def test_evaluation_actor_is_greedy_and_carries_lstm_inputs() -> None:

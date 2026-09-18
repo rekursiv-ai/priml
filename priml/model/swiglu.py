@@ -17,18 +17,16 @@ from torch.distributed.tensor.parallel import (
 
 import torch
 
-from priml.math.basic import ceil_multiple
-from priml.math.custom_types import TensorFn
-from priml.model.cost import (
+from priml.cost import (
     Cost,
-    HasCost,
     cost,
     elementwise_cost,
     matmul_cost,
     resolve_dtype,
-    shared_rows,
-    with_rows,
 )
+from priml.custom_types import HasCost
+from priml.math.basic import ceil_multiple
+from priml.math.custom_types import TensorFn
 from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
@@ -184,7 +182,7 @@ class SwiGLU(nn.Module):
                 understate the model.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             up_copies = 2 if self.gate and self.split_gate_projection else 1
             up = matmul_cost(
@@ -219,7 +217,7 @@ class SwiGLU(nn.Module):
                     seq_len=seq_len,
                     batch_size=batch_size,
                     dtype=dtype,
-                    **with_rows(rows, **kwargs),
+                    **kwargs,
                 )
                 fwd = bwd = reads = writes = adj_reads = adj_writes = 0
             else:

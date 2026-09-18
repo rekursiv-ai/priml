@@ -19,18 +19,16 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.lib.custom_json import ListCodec
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
     resolve_dtype,
-    shared_rows,
     traffic,
-    with_rows,
 )
+from priml.lib.custom_json import ListCodec
 from priml.model.custom_types import (
     ChannelsIn,
     ChannelsOut,
@@ -155,7 +153,8 @@ class Router(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             s = dt.itemsize
             index = torch.int64
@@ -398,7 +397,7 @@ class SigmoidRouter(Router):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             s = dt.itemsize
             index = torch.int64
@@ -627,20 +626,21 @@ class MoE(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             s = dt.itemsize
             index = torch.int64
             top_k = self.router.top_k
             # Every expert exists, but one token runs ``top_k`` of them, so only
             # ``params`` follows the module count; ``tile`` would scale
-            # ``params_active`` and the weight bytes by it too.
+            # ``params_active`` and the weight bytes by it too. An expert sees
+            # its balanced share of the step's tokens, at least one.
             expert = cost(
                 self.expert,
-                seq_len=seq_len,
-                batch_size=batch_size,
+                seq_len=max(1, -(-rows * top_k // self.router.num_experts)),
+                batch_size=1,
                 dtype=dtype,
-                **with_rows(max(1, rows * top_k / self.router.num_experts), **kwargs),
+                **kwargs,
             )
             routed = replace(
                 expert.tile(top_k, copies=top_k),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 
@@ -10,9 +10,14 @@ import torch
 
 from priml.model.attention.gated_self_attention import GatedSelfAttention
 from priml.model.attention.qwen3_5_delta import Qwen35GatedDeltaNet
-from priml.model.custom_types import ChannelsInOutConfig, DeepModelConfig
 from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from priml.model.custom_types import ChannelsInOutConfig, DeepModelConfig
 
 
 def remap_hf_state_dict(

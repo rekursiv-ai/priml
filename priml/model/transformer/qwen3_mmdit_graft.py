@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
-from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast
 
 from configgle import Makes
@@ -25,6 +24,8 @@ from priml.model.transformer.qwen3 import Qwen3, remap_hf_state_dict
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import torch
 
 

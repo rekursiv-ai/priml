@@ -13,29 +13,30 @@ estimate to exactly that factor of the measurement.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from configgle import Makeable
 from torch import Tensor, nn
 from torch.utils.flop_counter import FlopCounterMode
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
-    shared_rows,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from configgle import Makeable
 
 
 def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
     config: Makeable[nn.Module],
     *,
     build_input: Callable[[], I],
-    seq_len: int,
-    batch_size: int,
-    dtype: torch.dtype | None,
+    num_tokens: int,
     run: Callable[[nn.Module, I], Tensor] | None = None,
     expected_ratio: float = 1.0,
     seed: int = 0,
@@ -46,39 +47,33 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
     Args:
       config: Finalized on a copy; the caller's is untouched.
       build_input: Produces the forward input, a tensor or a tuple of them.
-      seq_len: Tokens per sequence.
-      batch_size: Sequences per step.
-      dtype: Activation dtype; ``None`` is torch's default.
+      num_tokens: Tokens the built input holds, so torch's step total becomes
+        a per-token figure comparable to ``cost``.
       run: Applies the module to the built input; defaults to
         ``module(*inputs)``. Must return a tensor to reduce for backward.
       expected_ratio: ``analytical / measured`` to hold; ``1.0`` is exact.
       seed: For ``build_input`` and any random init.
-      **bus: The rest of the bus (``rows``, ...), forwarded unchanged.
+      **bus: Named arguments ``cost`` takes (``seq_len``, ``batch_size``,
+        ``dtype``, ...), forwarded unchanged.
 
     Returns:
       analytical: The config's own cost, for further assertions.
 
     Raises:
-      AssertionError: Matmul FLOPs per token or parameter count disagree.
+      ValueError: Matmul FLOPs per token or parameter count disagree.
 
     """
     finalized = config.copy_tree().finalize()
-    analytical = cost(
-        finalized,
-        seq_len=seq_len,
-        batch_size=batch_size,
-        dtype=dtype,
-        **bus,
-    )
-    num_tokens = shared_rows(seq_len, batch_size, **bus)
+    analytical = cost(finalized, **bus)
 
     torch.manual_seed(seed)
     module = finalized.make()
     module.train()
     params = sum(p.numel() for p in module.parameters())
-    assert analytical.params == params, (
-        f"cost.params={analytical.params} but the module owns {params}"
-    )
+    if analytical.params != params:
+        raise ValueError(
+            f"cost.params={analytical.params} but the module owns {params}",
+        )
 
     torch.manual_seed(seed)
     inputs = build_input()
@@ -95,10 +90,11 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
             output.sum().backward()
     measured = counter.get_total_flops() / num_tokens
 
-    matmul = analytical["flops", :, "matmul"].sum()
-    assert matmul == expected_ratio * measured, (
-        f"cost reports {matmul} matmul FLOPs/token; torch measured {measured} "
-        f"(ratio {matmul / measured if measured else float('inf'):.4f}, "
-        f"expected {expected_ratio})"
-    )
+    matmul = analytical["flops", "matmul"].sum()
+    if matmul != expected_ratio * measured:
+        raise ValueError(
+            f"cost reports {matmul} matmul FLOPs/token; torch measured {measured} "
+            f"(ratio {matmul / measured if measured else float('inf'):.4f}, "
+            f"expected {expected_ratio})",
+        )
     return analytical

@@ -14,8 +14,7 @@ on the policy.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -28,8 +27,13 @@ from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import evaluation_mode
 from priml.baselines.craftax.game import constants
 from priml.lib.custom_json import ListCodec
-from priml.math.custom_types import Tensorable
 from priml.math.numeric import shifted_geometric_mean
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from priml.math.custom_types import Tensorable
 
 
 class CraftaxScore:

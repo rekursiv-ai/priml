@@ -124,6 +124,7 @@ def test_factored_positions_cost_is_three_gathers_two_adds_and_a_scale() -> None
         ),
         seq_len=16,
         batch_size=1,
+        num_tokens=16,
         dtype=None,
     )
     assert analytical.params == (4 + 4 + 4) * 8
@@ -143,6 +144,7 @@ def test_prediction_feedback_cost_is_a_gather_and_a_scale() -> None:
         build_input=lambda: (torch.randint(0, 11, (1, 16)), torch.zeros(1, 16, 8)),
         seq_len=16,
         batch_size=1,
+        num_tokens=16,
         dtype=None,
         run=_run_feedback,
     )
@@ -164,6 +166,7 @@ def test_grid_embedding_cost_sums_the_token_table_and_every_channel() -> None:
         build_input=lambda: torch.randint(0, 11, (1, 81)),
         seq_len=81,
         batch_size=1,
+        num_tokens=81,
         dtype=None,
         run=_run_with_feedback,
     )

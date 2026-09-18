@@ -15,10 +15,21 @@ import torch
 
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
+    AttentionKernel,
+    CachedAttention,
     ChannelsIn,
     ChannelsOut,
+    HasForwardCached,
+    HasResetParameters,
+    LatentAttentionKernel,
+    LookupTable,
+    RotaryFactors,
+    TensorModule,
     flatten_depth_index,
+    has_forward_cached,
     has_weight,
+    infer_same_width,
+    is_cached_attention,
     propagate_attr,
 )
 from priml.model.moe import SoftmaxRouter
@@ -141,6 +152,93 @@ def test_propagate_missing_attr_raises():
 
     with pytest.raises(AttributeError, match="channels_out"):
         propagate_attr(NoChannels(), "channels_out", 64, protocol=ChannelsIn)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Widths:
+    channels_in: int = -1
+    channels_out: int = -1
+
+
+@pytest.mark.parametrize(
+    ("channels_in", "channels_out"),
+    [(-1, 8), (8, -1), (8, 8)],
+)
+def test_infer_same_width_fills_the_missing_side(
+    channels_in: int,
+    channels_out: int,
+) -> None:
+    widths = _Widths(channels_in=channels_in, channels_out=channels_out)
+    infer_same_width(widths)
+    assert widths.channels_in == 8
+    assert widths.channels_out == 8
+
+
+def test_infer_same_width_rejects_two_different_widths() -> None:
+    with pytest.raises(ValueError, match="channels_in=4 must equal channels_out=8"):
+        infer_same_width(_Widths(channels_in=4, channels_out=8))
+
+
+class _CachedStub:
+    """Borrows every cache-protocol stub body, which must be inert."""
+
+    forward_cached = HasForwardCached[object].forward_cached
+    alloc_kv_cache = CachedAttention[object].alloc_kv_cache
+
+
+class _KernelStub:
+    __call__ = AttentionKernel.__call__
+    reset_parameters = HasResetParameters.reset_parameters
+
+
+class _LatentKernelStub:
+    __call__ = LatentAttentionKernel.__call__
+
+
+class _TensorModuleStub:
+    __call__ = TensorModule.__call__
+    reset_parameters = HasResetParameters.reset_parameters
+
+
+class _RotaryStub:
+    __call__ = RotaryFactors.__call__
+
+
+class _LookupStub:
+    weight = torch.zeros(1)
+    __call__ = TensorModule.__call__
+    reset_parameters = HasResetParameters.reset_parameters
+    to = LookupTable.to
+
+
+def test_cache_guards_name_the_erased_cache_type() -> None:
+    cached = _CachedStub()
+    assert has_forward_cached(cached)
+    assert is_cached_attention(cached)
+    assert not has_forward_cached(object())
+    assert not is_cached_attention(object())
+    assert cached.forward_cached(torch.zeros(1), cache=object()) is None
+    assert cached.alloc_kv_cache(batch=1, max_seq=2) is None
+
+
+def test_protocol_stub_bodies_are_inert() -> None:
+    """A stub hides no behavior: every default body is a no-op returning None."""
+    x = torch.zeros(1)
+    kernel: AttentionKernel[...] = _KernelStub()
+    assert isinstance(kernel, AttentionKernel)
+    assert kernel(x, x, x) is None
+    latent: LatentAttentionKernel[...] = _LatentKernelStub()
+    assert isinstance(latent, LatentAttentionKernel)
+    assert latent(x, x, x, x) is None
+    module: TensorModule = _TensorModuleStub()
+    assert isinstance(module, HasResetParameters)
+    assert module(x) is None
+    assert module.reset_parameters() is None
+    rotary: RotaryFactors = _RotaryStub()
+    assert isinstance(rotary, RotaryFactors)
+    assert rotary(x) is None
+    assert has_weight(_LookupStub())
+    assert _LookupStub().to(dtype=torch.float32) is None
 
 
 @pytest.mark.compute_large_fixture

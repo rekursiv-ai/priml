@@ -9,17 +9,17 @@ from torch import nn
 
 import torch
 
-from priml.loss.custom_types import LossOutput
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     reduction_cost,
-    shared_rows,
     traffic,
 )
 
 
 if TYPE_CHECKING:
     from torch import Tensor
+
+    from priml.loss.custom_types import LossOutput
 
 
 class AdversarialLoss:
@@ -73,7 +73,8 @@ class AdversarialLoss:
               cost: Per-element cost of this loss.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = dtype
             return (
                 traffic(

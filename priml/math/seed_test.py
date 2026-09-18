@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import inspect
@@ -28,6 +27,10 @@ from priml.math.seed import (
     set_seed_distributed,
     set_seed_local,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 
 def test_make_seed_returns_nonzero():
@@ -309,7 +312,7 @@ def test_set_seed_distributed_raises_on_nccl_without_cuda(
     """
     _patch_dist(monkeypatch, rank=0, backend="nccl")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises((AssertionError, RuntimeError), match=r"(?i)nccl.*cuda"):
+    with pytest.raises(ValueError, match=r"(?i)nccl.*cuda"):
         set_seed_distributed(seed=42, mesh=None, salt_by_rank=False)
 
 
@@ -348,10 +351,7 @@ def test_set_seed_distributed_asserts_initialized(
     precondition at the boundary instead.
     """
     _patch_dist(monkeypatch, rank=0, initialized=False)
-    with pytest.raises(
-        (AssertionError, RuntimeError),
-        match=r"(?i)initialized|process group",
-    ):
+    with pytest.raises(ValueError, match=r"(?i)initialized|process group"):
         set_seed_distributed(seed=42, mesh=None, salt_by_rank=False)
 
 

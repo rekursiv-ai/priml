@@ -10,12 +10,10 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
-    shared_rows,
-    with_rows,
 )
 from priml.model.custom_types import (
     ChannelsIn,
@@ -124,7 +122,8 @@ class MLPMixerBlock(nn.Module):
             Transposes are views.
 
             Args:
-              seq_len: Tokens per sequence.
+              seq_len: Tokens per sequence; must equal this block's ``seq_len``,
+                the width its token mixer was built for.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
@@ -132,17 +131,23 @@ class MLPMixerBlock(nn.Module):
             Returns:
               cost: Per-token cost of this module.
 
+            Raises:
+              ValueError: ``seq_len`` differs from the block's own.
+
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            if seq_len != self.seq_len:
+                raise ValueError(
+                    f"MLPMixerBlock mixes {self.seq_len} tokens; priced at {seq_len}.",
+                )
             rows_per_token = self.channels_in / self.seq_len
             over_tokens = sum(
                 (
                     cost(
                         child,
-                        seq_len=seq_len,
+                        seq_len=self.channels_in,
                         batch_size=batch_size,
                         dtype=dtype,
-                        **with_rows(max(1, rows * rows_per_token), **kwargs),
+                        **kwargs,
                     )
                     for child in (self.token_mixer, self.norm_token)
                 ),
@@ -152,7 +157,7 @@ class MLPMixerBlock(nn.Module):
                 (
                     cost(
                         child,
-                        seq_len=seq_len,
+                        seq_len=self.seq_len,
                         batch_size=batch_size,
                         dtype=dtype,
                         **kwargs,

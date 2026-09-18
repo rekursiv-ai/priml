@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -11,11 +11,14 @@ from torch.nn import functional
 import pytest
 import torch
 
-from priml.loss.custom_types import LossOutput
+from priml.cost import Cost, cost
 from priml.loss.simple_loss import SimpleLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import Cost, cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.loss.custom_types import LossOutput
 
 
 class DummyLoss(nn.Module):
@@ -139,6 +142,7 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
         build_input=lambda: torch.randn(4, 3, requires_grad=True),
         seq_len=12,
         batch_size=1,
+        num_tokens=12,
         dtype=None,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
@@ -159,7 +163,7 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
         },
     )
     assert measured.params == 0
-    assert measured["flops", :, "matmul"].sum() == 0
+    assert measured["flops", "matmul"].sum() == 0
 
 
 def test_weighted_sum_cost_rejects_unpriced_child() -> None:

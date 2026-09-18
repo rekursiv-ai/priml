@@ -9,14 +9,17 @@ importing it (and a task's ``results.py`` shim) costs nothing.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import sys
 
 from priml.lib.custom_json import DictCodec, FloatCodec, loads
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 
 def read_metrics(path: Path) -> dict[str, float]:

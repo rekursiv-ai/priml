@@ -14,7 +14,6 @@ constructing a config never touches the network.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
@@ -32,7 +31,7 @@ from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
 
 logger = logging.getLogger(__name__)

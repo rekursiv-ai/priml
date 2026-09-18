@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import functools
 
@@ -24,6 +24,10 @@ from priml.math.diffusion.schedule import (
     log_time_from_log_snr_per_logtan,
     log_time_from_log_snr_per_truncnormicdf,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.mark.parametrize(

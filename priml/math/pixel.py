@@ -14,7 +14,6 @@ import torch
 
 from priml import image
 from priml.math.basic import ceil_div
-from priml.math.custom_types import Tensorable
 from priml.math.pooling import adaptive_avg_pool2d, adaptive_avg_pool3d
 from priml.memory import convert_to_tensor, is_private_conversion
 
@@ -23,6 +22,8 @@ if TYPE_CHECKING:
     from turbojpeg import TurboJPEG
 
     import numpy as np
+
+    from priml.math.custom_types import Tensorable
 
 
 def rgb2float(
@@ -415,8 +416,7 @@ def patchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
         *range(base + 1, out.ndim, 2),
     ]
     out = torch.permute(out, dims=tuple(perm))
-    out = out.reshape(*batch, -1, *out.shape[-rank:])
-    return out
+    return out.reshape(*batch, -1, *out.shape[-rank:])
 
 
 def unpatchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
@@ -470,8 +470,7 @@ def unpatchify(x: Tensorable, patch_size: Iterable[int]) -> Tensor:
             strict=True,
         )
     )
-    out = out.reshape(*out.shape[: -2 * rank], *restored_dims)
-    return out
+    return out.reshape(*out.shape[: -2 * rank], *restored_dims)
 
 
 InterpolateMode = Literal[
@@ -583,7 +582,8 @@ def interpolate(
         if not size_:
             # Reachable only with a scale factor: the check above already
             # raised when neither was given.
-            assert sf_ is not None
+            if sf_ is None:
+                raise ValueError("Expected sf_ is not None.")
             shape_slice: Sequence[int] = list(x.shape[-rank_:])
             size_ = tuple(int(o * s) for o, s in zip(shape_slice, sf_, strict=True))
         # Dispatched on the LENGTH of the size tuple, which is what each

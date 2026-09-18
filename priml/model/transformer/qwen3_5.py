@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import field
 from functools import partial
 from pathlib import Path
-from typing import Literal, Self, cast, override
+from typing import TYPE_CHECKING, Literal, Self, cast, override
 
 import math
 
@@ -43,6 +42,10 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5_weights import remap_hf_state_dict
 from priml.model.transformer.transformer import Transformer
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class Qwen35(Transformer):

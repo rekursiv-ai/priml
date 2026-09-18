@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import field
-from typing import Self, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 from configgle import Fig
 from torch import Tensor, nn
 
 import torch
 
+from priml.cost import (
+    Cost,
+    cost,
+)
 from priml.model.attention.multi_stream import (
     MultiStreamAttention,
     _validate_native_state,
@@ -19,14 +22,14 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
-from priml.model.cost import (
-    Cost,
-    cost,
-)
 from priml.model.custom_types import DeepModelConfig, HasResetParameters
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import MMDiTBlock, MMDiTStream
 from priml.model.transformer.transformer import Transformer
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class MMDiTGraft(nn.Module):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import functools
 import math
@@ -12,8 +12,13 @@ from torch import Tensor
 import torch
 import torch.fft
 
-from priml.math.custom_types import Tensorable, TensorableFn
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from priml.math.custom_types import Tensorable, TensorableFn
 
 
 def dct1d(x: Tensorable, *, normalize: bool = False) -> Tensor:

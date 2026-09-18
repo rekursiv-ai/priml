@@ -12,7 +12,7 @@ math environment before torch imports.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
@@ -20,10 +20,10 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.cost import Cost, cost
 from priml.lib.custom_json import DictCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import Cost, cost
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
@@ -31,7 +31,6 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import AdaLNZero, MMDiTStream
 from priml.model.transformer.mmdit_graft import MMDiTGraft
-from priml.model.transformer.qwen3 import Qwen3
 from priml.model.transformer.qwen3_test import _canonical_config
 from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing.bfb import (
@@ -40,6 +39,10 @@ from priml.testing.bfb import (
     randomize_parameters,
 )
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.model.transformer.qwen3 import Qwen3
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -435,7 +438,7 @@ def test_graft_cost_prices_host_projections_and_joint_blocks_once(
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     host = cost(backbone, seq_len=8, batch_size=1, dtype=None)
     assert model_cost.params > host.params
-    assert model_cost["flops", :, "matmul"].sum() > host["flops", :, "matmul"].sum()
+    assert model_cost["flops", "matmul"].sum() > host["flops", "matmul"].sum()
 
 
 @pytest.mark.parametrize("tie", [False, True])
@@ -453,10 +456,10 @@ def test_graft_cost_matches_torch(tie: bool) -> None:
             torch.randint(0, 32, (1, 3)),
             torch.randn(1, 3, 16, requires_grad=True),
         ),
-        seq_len=6,
+        seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
-        rows=3,
         run=run_graft,
     )
 

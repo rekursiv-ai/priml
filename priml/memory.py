@@ -19,7 +19,6 @@ pinning. Those have their own concerns and do not belong here.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, overload
 
 from torch import Tensor
@@ -32,6 +31,8 @@ if TYPE_CHECKING:
     # Deferred to break a cycle: ``custom_types`` re-exports
     # ``convert_to_tensor`` from here, so importing the alias at runtime would
     # have each module waiting on the other. It is only ever an annotation.
+    from collections.abc import Sequence
+
     from priml.math.custom_types import Tensorable
 
 

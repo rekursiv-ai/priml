@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import functools
 import importlib
@@ -27,15 +27,22 @@ from priml.train.parallelism import (
     HybridSharded,
     NoParallel,
     RecursiveSharded,
+    _create_mp_policy,
+    _mesh_device,
     _module_mp_policy,
+    _shard,
     materialize_meta,
 )
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from configgle import Makeable
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
+    from priml.train.custom_types import ParallelStrategyProtocol
 
 
 class _FakeMesh:
@@ -181,6 +188,128 @@ def test_recursive_sharded_requires_distributed():
         match="RecursiveSharded requires distributed mode",
     ):
         config.make()
+
+
+class _DpOnlyMesh(_FakeMesh):
+    mesh_dim_names = ("dp",)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: DataParallel.Config(mesh_dim="tp"),
+        lambda: FullySharded.Config(mesh_dim="tp"),
+        lambda: RecursiveSharded.Config(mesh_dim="tp", module_types=(nn.Linear,)),
+    ],
+    ids=["data_parallel", "fully_sharded", "recursive_sharded"],
+)
+def test_strategies_reject_a_mesh_dim_the_mesh_lacks(
+    monkeypatch: pytest.MonkeyPatch,
+    build: Callable[[], Makeable[ParallelStrategyProtocol]],
+) -> None:
+    monkeypatch.setattr(parallelism, "global_device_mesh", _DpOnlyMesh)
+    with pytest.raises(ValueError, match=r"'tp' not in \('dp',\)"):
+        build().make()
+
+
+def test_hybrid_sharded_names_every_missing_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parallelism, "global_device_mesh", _DpOnlyMesh)
+    with pytest.raises(ValueError, match=r"\['replica', 'tp'\] not in \('dp',\)"):
+        HybridSharded.Config(replicate_dim="replica", shard_dim="tp").make()
+
+
+def test_recursive_sharded_refuses_a_plan_that_matches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def ignore(
+        module: nn.Module,
+        mesh: DeviceMesh,
+        mp_policy: MixedPrecisionPolicy | None,
+        reshard_after_forward: bool,
+    ) -> None:
+        del module, mesh, mp_policy, reshard_after_forward
+
+    monkeypatch.setattr(parallelism, "global_device_mesh", _FakeMesh)
+    monkeypatch.setattr(parallelism, "_shard", ignore)
+    strategy = RecursiveSharded.Config(module_types=(nn.Conv2d,)).make()
+    with pytest.raises(ValueError, match="found 0 modules matching"):
+        strategy(SimpleModel())
+
+
+def test_mesh_device_pins_the_current_cuda_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every rank reduces on its own GPU; a shared index would pile onto one."""
+
+    class _CudaMesh(_FakeMesh):
+        device_type = "cuda"
+
+    # Scoped: the autouse ``cleanup_cuda`` teardown synchronizes the CURRENT
+    # device before monkeypatch unwinds, and index 3 is not a real ordinal.
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda, "current_device", lambda: 3)
+        assert _mesh_device(cast("DeviceMesh", _CudaMesh())) == torch.device("cuda", 3)
+    assert _mesh_device(cast("DeviceMesh", _FakeMesh())) == torch.device("cpu")
+
+
+def test_mixed_precision_policy_is_built_only_when_a_dtype_is_set() -> None:
+    assert _create_mp_policy(None, None, None) is None
+    policy = _create_mp_policy(torch.bfloat16, None, torch.float32)
+    assert policy is not None
+    assert policy.param_dtype == torch.bfloat16
+    assert policy.reduce_dtype is None
+    assert policy.output_dtype == torch.float32
+
+
+def test_shard_passes_a_policy_only_when_one_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def record(module: nn.Module, **kwargs: object) -> None:
+        calls.append({"module": module, **kwargs})
+
+    monkeypatch.setattr(parallelism, "fully_shard", record)
+    mesh = cast("DeviceMesh", _FakeMesh())
+    base = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
+    linear = nn.Linear(2, 2)
+    norm = nn.BatchNorm1d(2)
+
+    _shard(linear, mesh=mesh, mp_policy=None, reshard_after_forward=True)
+    _shard(linear, mesh=mesh, mp_policy=base, reshard_after_forward=False)
+    _shard(norm, mesh=mesh, mp_policy=base, reshard_after_forward=True)
+
+    assert calls[0] == {"module": linear, "mesh": mesh, "reshard_after_forward": True}
+    assert calls[1]["mp_policy"] is base
+    assert calls[1]["reshard_after_forward"] is False
+    bn_policy = calls[2]["mp_policy"]
+    assert isinstance(bn_policy, MixedPrecisionPolicy)
+    assert bn_policy.param_dtype == torch.float32
+
+
+def test_materialize_barriers_when_a_group_is_initialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ranks re-init in lockstep so no rank reads a peer's shard early."""
+    barriers: list[int] = []
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: barriers.append(1))
+    with torch.device("meta"):
+        model = SimpleModel()
+
+    materialize_meta(model, torch.device("cpu"))
+
+    assert barriers == [1]
+    assert torch.isfinite(next(model.parameters())).all()
+
+
+def test_materialize_meta_is_a_noop_on_an_allocated_model() -> None:
+    model = SimpleModel()
+    before = next(model.parameters()).detach().clone()
+    materialize_meta(model, torch.device("cpu"))
+    assert torch.equal(next(model.parameters()), before)
 
 
 def test_recursive_sharded_requires_module_types(

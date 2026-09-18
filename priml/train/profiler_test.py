@@ -14,7 +14,7 @@ import time
 import pytest
 
 from priml.train.custom_types import CudaEventProtocol, TrackerProtocol
-from priml.train.profiler import PhaseTimer, TorchProfiler
+from priml.train.profiler import PhaseTimer, ProfilerSchedule, TorchProfiler
 
 
 if TYPE_CHECKING:
@@ -585,6 +585,252 @@ def test_phase_timer_working_dir_is_scoped_by_owner() -> None:
     assert timer._torch_profile_path == Path(
         "/scratch/runs/study/run-1/profiling/phase_trace.json.gz",
     )
+
+
+def _fake_torch(*, cuda: bool) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """Build a torch stand-in, its recording profiler, and the profiler's table."""
+    averages = MagicMock()
+    averages.table.return_value = "ops"
+    profiler = MagicMock()
+    profiler.key_averages.return_value = averages
+    fake = MagicMock()
+    fake.cuda.is_available.return_value = cuda
+    fake.distributed.is_initialized.return_value = False
+    fake.profiler.profile.return_value = profiler
+    fake.profiler.ProfilerActivity.CPU = "cpu"
+    fake.profiler.ProfilerActivity.CUDA = "cuda"
+    fake.profiler.schedule.return_value = "schedule"
+    return fake, profiler, averages
+
+
+class TestTorchProfilerWindow:
+    def test_memory_profile_requires_cuda(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake, _, _ = _fake_torch(cuda=False)
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        with pytest.raises(RuntimeError, match="Memory profiling requires CUDA"):
+            TorchProfiler.Config(memory_profile=True).make()
+
+    def test_window_records_between_start_and_end_then_exports(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        fake, profiler, averages = _fake_torch(cuda=False)
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        profiling = TorchProfiler.Config(
+            torch_profile_start=2,
+            torch_profile_end=4,
+            profile_cuda=False,
+            schedule=ProfilerSchedule(wait=1, warmup=1, active=2),
+            working_dir=tmp_path / "prof",
+        ).make()
+        fake.profiler.schedule.assert_called_once_with(
+            wait=1,
+            warmup=1,
+            active=2,
+            repeat=1,
+        )
+        assert fake.profiler.profile.call_args.kwargs["activities"] == ["cpu"]
+        assert fake.profiler.profile.call_args.kwargs["schedule"] == "schedule"
+
+        with caplog.at_level(logging.INFO):
+            for step in range(6):
+                profiling.on_step_start(step)
+                profiling.on_step_end(step)
+
+        profiler.start.assert_called_once()
+        assert profiler.step.call_count == 2  # Steps 2 and 3.
+        profiler.stop.assert_called_once()
+        profiler.export_chrome_trace.assert_called_once_with(
+            str(tmp_path / "prof" / "trace_step_4.json.gz"),
+        )
+        assert averages.table.call_args.kwargs == {
+            "sort_by": "self_cpu_time_total",
+            "row_limit": 20,
+        }
+        assert (tmp_path / "prof").is_dir()
+        assert profiling.profiler is None
+        assert any("Profiler top ops" in r.message for r in caplog.records)
+
+    def test_cuda_activities_sort_by_cuda_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        fake, profiler, averages = _fake_torch(cuda=True)
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        profiling = TorchProfiler.Config(
+            torch_profile_start=0,
+            torch_profile_end=1,
+            export_trace=False,
+            working_dir=tmp_path,
+        ).make()
+        assert fake.profiler.profile.call_args.kwargs["activities"] == ["cpu", "cuda"]
+        assert fake.profiler.profile.call_args.kwargs["schedule"] is None
+
+        for step in range(2):
+            profiling.on_step_start(step)
+            profiling.on_step_end(step)
+
+        assert averages.table.call_args.kwargs["sort_by"] == "self_cuda_time_total"
+        profiler.export_chrome_trace.assert_not_called()
+
+    def test_memory_window_records_then_dumps_a_snapshot(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        fake, _, _ = _fake_torch(cuda=True)
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        profiling = TorchProfiler.Config(
+            torch_profile=False,
+            memory_profile=True,
+            memory_profile_start=1,
+            memory_profile_end=2,
+            working_dir=tmp_path / "mem",
+        ).make()
+
+        for step in range(3):
+            profiling.on_step_start(step)
+            profiling.on_step_end(step)
+
+        fake.cuda.memory._record_memory_history.assert_any_call()
+        fake.cuda.memory._dump_snapshot.assert_called_once_with(
+            str(tmp_path / "mem" / "memory_step_2.pickle"),
+        )
+        fake.cuda.memory._record_memory_history.assert_called_with(enabled=None)
+        assert (tmp_path / "mem").is_dir()
+
+    def test_unprofiled_rank_builds_no_profiler_and_ignores_steps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake, _, _ = _fake_torch(cuda=False)
+        fake.distributed.is_initialized.return_value = True
+        fake.distributed.get_rank.return_value = 1
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        profiling = TorchProfiler.Config(ranks=[0], torch_profile_start=0).make()
+
+        assert profiling.profiler is None
+        fake.profiler.profile.assert_not_called()
+        profiling.on_step_start(0)
+        profiling.on_step_end(0)
+        fake.cuda.memory._record_memory_history.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("ranks", "rank", "suffix"),
+        [
+            (None, 3, "_rank_3"),
+            ([0], 0, ""),
+            ([0, 1], 1, "_rank_1"),
+        ],
+        ids=["all_ranks", "single_rank", "several_ranks"],
+    )
+    def test_rank_suffix_disambiguates_multi_rank_traces(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ranks: list[int] | None,
+        rank: int,
+        suffix: str,
+    ) -> None:
+        fake, _, _ = _fake_torch(cuda=False)
+        fake.distributed.is_initialized.return_value = True
+        fake.distributed.get_rank.return_value = rank
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        profiling = TorchProfiler.Config(torch_profile=False, ranks=ranks).make()
+        assert profiling._should_profile()
+        assert profiling._get_rank_suffix() == suffix
+
+
+class TestPhaseTimerCudaPaths:
+    def test_measure_cuda_is_inert_without_events_enabled(self) -> None:
+        timer = _phase_timer_config(enabled=True, cuda_events=False).make()
+        with timer.measure_cuda("gpu"):
+            pass
+        assert timer._cuda_events == {}
+
+    def test_torch_profile_adds_cuda_activity_when_available(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake, _, _ = _fake_torch(cuda=True)
+        monkeypatch.setattr("priml.train.profiler.torch", fake)
+        _phase_timer_config(enabled=True, torch_profile=True).make()
+        assert fake.profiler.profile.call_args.kwargs["activities"] == ["cpu", "cuda"]
+
+    def test_record_outside_a_phase_uses_the_bare_name(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        with timer.phase("outer"):
+            timer.record("inner", 0.5)
+        timer.record("alone", 0.25)
+        summary = timer.summary()
+        assert summary["outer/inner"] == 0.5
+        assert summary["alone"] == 0.25
+        assert "inner" not in summary
+
+    def test_measure_is_silent_when_disabled(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        timer = _phase_timer_config(enabled=False).make()
+        with caplog.at_level(logging.INFO), timer.measure("quiet"):
+            pass
+        assert caplog.records == []
+        assert "quiet" not in timer.summary()
+
+    def test_publish_is_a_noop_when_disabled(self) -> None:
+        timer = _phase_timer_config(enabled=False).make()
+        tracker = MagicMock()
+        assert timer.publish_interval(cast(TrackerProtocol, tracker), step=1) == {}
+        assert timer.publish_summary(cast(TrackerProtocol, tracker), step=1) == {}
+        tracker.log_metrics.assert_not_called()
+
+    def test_summary_is_published_once_but_always_returned(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        tracker = MagicMock()
+        timer.record("work", 1.0)
+        first = timer.publish_summary(cast(TrackerProtocol, tracker), step=1)
+        timer.record("work", 1.0)
+        second = timer.publish_summary(cast(TrackerProtocol, tracker), step=2)
+        assert first["work_sec"] == 1.0
+        assert second["work_sec"] == 2.0
+        tracker.log_metrics.assert_called_once_with(first, 1, prefix="timing/")
+
+    def test_publish_is_rank_zero_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("priml.train.profiler.is_rank_zero", lambda: False)
+        timer = _phase_timer_config(enabled=True).make()
+        tracker = MagicMock()
+        timer.record("work", 1.0)
+        metrics = timer.publish_interval(cast(TrackerProtocol, tracker), step=1)
+        assert metrics["interval_work_sec"] == 1.0
+        tracker.log_metrics.assert_not_called()
+
+    def test_cuda_summary_is_resolved_once(self) -> None:
+        timer = _phase_timer_config(enabled=True, cuda_events=True).make()
+        start = MagicMock()
+        end = MagicMock()
+        start.elapsed_time.return_value = 4.0
+        timer.record_cuda_events(
+            "fwd",
+            cast(CudaEventProtocol, start),
+            cast(CudaEventProtocol, end),
+        )
+        timer.publish_summary(None, step=1)
+        timer.publish_summary(None, step=2)
+        end.synchronize.assert_called_once()
+
+    def test_nested_phases_attribute_self_time_to_the_parent(self) -> None:
+        timer = _phase_timer_config(enabled=True).make()
+        with timer.phase("outer"), timer.phase("inner"):
+            time.sleep(0.01)
+        summary = timer.summary()
+        assert "outer/inner" in summary
+        assert summary["outer"] >= summary["outer/inner"]
+        assert timer._self_phases["outer"] <= summary["outer"] - summary["outer/inner"]
 
 
 class TestTorchProfilerCleanup:

@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import NamedTuple, Protocol, Self, override
+from typing import TYPE_CHECKING, NamedTuple, Protocol, Self, override
 from typing_extensions import ParamSpec
 
 from configgle import Fig, Makeable
@@ -25,16 +25,16 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.cost import (
+    Cost,
+    cost,
+    elementwise_cost,
+)
 from priml.model.attention.multi_stream import (
     MultiStreamAttention,
     _validate_native_state,
 )
 from priml.model.attention.self_attention import AttentionProjections
-from priml.model.cost import (
-    Cost,
-    cost,
-    elementwise_cost,
-)
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsHead,
@@ -51,7 +51,10 @@ from priml.model.custom_types import (
 from priml.model.linear import Linear
 from priml.model.norm import LayerNorm
 from priml.model.swiglu import SwiGLU
-from priml.model.transformer.block import TransformerBlock
+
+
+if TYPE_CHECKING:
+    from priml.model.transformer.block import TransformerBlock
 
 
 _AttentionKwargs = ParamSpec("_AttentionKwargs", default=...)

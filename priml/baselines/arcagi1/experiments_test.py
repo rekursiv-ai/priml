@@ -10,9 +10,8 @@ ladder stays checkable on any machine.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from configgle.pprinting import pformat
 
@@ -30,6 +29,10 @@ from priml.baselines.sudoku.prefix import (
 from priml.baselines.sudoku.train_step import SudokuTrainStep
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.transformer.block import TransformerBlock
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent

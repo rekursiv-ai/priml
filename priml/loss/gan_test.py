@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 
 import pytest
 import torch
 
+from priml.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.loss.gan import AdversarialLoss
 from priml.loss.weighted_loss import WeightedSum
-from priml.model.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _fp32(
@@ -62,6 +66,7 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
         ),
         seq_len=12,
         batch_size=1,
+        num_tokens=12,
         dtype=None,
         run=lambda module, inputs: _loss(
             module,
@@ -93,7 +98,7 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
         },
     )
     assert measured.params == 0
-    assert measured["flops", :, "matmul"].sum() == 0
+    assert measured["flops", "matmul"].sum() == 0
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])

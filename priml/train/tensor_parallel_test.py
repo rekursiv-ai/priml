@@ -10,12 +10,18 @@ from typing import cast, override
 
 from torch import Tensor, nn
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import Replicate
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    ParallelStyle,
+    RowwiseParallel,
+)
 
 import pytest
 import torch
 
 from priml.model.embedding import Embedding
-from priml.model.linear import Linear
+from priml.model.linear import EnsembleLinear, Linear, _EnsembleParallel
 from priml.train import tensor_parallel
 from priml.train.tensor_parallel import (
     TensorParallel,
@@ -148,6 +154,147 @@ def test_tp1_applier_is_structural_noop() -> None:
     assert isinstance(sharded, TwoLinear)
     assert not any(p.__class__.__name__ == "DTensor" for p in sharded.parameters())
     assert torch.equal(sharded(x), expected)
+
+
+class _TpTwoSubmesh:
+    def size(self) -> int:
+        return 2
+
+
+class _TpTwoMesh:
+    device_type = "cpu"
+    mesh_dim_names = ("tp",)
+
+    def __getitem__(self, name: str) -> _TpTwoSubmesh:
+        assert name == "tp"
+        return _TpTwoSubmesh()
+
+
+class _Validated(nn.Module):
+    """A sharded block that also checks its own tensor-parallel preconditions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = Linear.Config(channels_in=8, channels_out=8, shard="colwise").make()
+        self.checked = 0
+
+    def assert_tensor_parallel_compatible(self) -> None:
+        self.checked += 1
+
+    @override
+    def forward(self, x: Tensor) -> Tensor:
+        return self.proj(x)
+
+
+def test_tp2_applier_plans_every_declared_style_then_validates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over a real tp axis the plan names each sharded leaf by its module path."""
+    plans: list[dict[str, ParallelStyle]] = []
+
+    def record(
+        module: nn.Module,
+        mesh: object,
+        plan: dict[str, ParallelStyle],
+    ) -> nn.Module:
+        del mesh
+        plans.append(dict(plan))
+        return module
+
+    monkeypatch.setattr(tensor_parallel, "parallelize_module", record)
+    model = nn.Sequential(TwoLinear(), _Validated())
+
+    sharded = apply_tensor_parallel(model, cast(DeviceMesh, _TpTwoMesh()))
+
+    assert sharded is model
+    assert len(plans) == 1
+    assert {name: type(style) for name, style in plans[0].items()} == {
+        "0.up": ColwiseParallel,
+        "0.down": RowwiseParallel,
+        "1.proj": ColwiseParallel,
+    }
+    validated = model[1]
+    assert isinstance(validated, _Validated)
+    assert validated.checked == 1
+
+
+def test_tp2_applier_leaves_a_model_with_no_shard_declarations_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    def record(module: nn.Module, mesh: object, plan: object) -> nn.Module:
+        calls.append((mesh, plan))
+        return module
+
+    monkeypatch.setattr(tensor_parallel, "parallelize_module", record)
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+
+    assert apply_tensor_parallel(model, cast(DeviceMesh, _TpTwoMesh())) is model
+    assert calls == []
+
+
+def test_strategy_requires_a_distributed_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tensor_parallel, "global_device_mesh", lambda: None)
+    with pytest.raises(RuntimeError, match="requires distributed mode"):
+        TensorParallel.Config().make()
+
+
+def test_strategy_rejects_a_mesh_dim_the_mesh_lacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tensor_parallel,
+        "global_device_mesh",
+        lambda: cast(DeviceMesh, _TpOneMesh()),
+    )
+    with pytest.raises(ValueError, match="'model' not in \\('tp',\\)"):
+        TensorParallel.Config(mesh_dim="model").make()
+
+
+def test_builtin_styles_dispatch_on_the_declared_shard() -> None:
+    colwise = _shard_style(
+        Linear.Config(channels_in=8, channels_out=8, shard="colwise").make(),
+    )
+    rowwise = _shard_style(
+        Linear.Config(channels_in=8, channels_out=8, shard="rowwise").make(),
+    )
+    assert isinstance(colwise, ColwiseParallel)
+    assert isinstance(rowwise, RowwiseParallel)
+    assert _shard_style(Linear.Config(channels_in=8, channels_out=8).make()) is None
+    assert _shard_style(nn.ReLU()) is None
+
+
+def test_vocab_shard_replicates_ids_in_and_logits_out() -> None:
+    """An embedding takes replicated ids; an lm head returns replicated logits."""
+    table = _shard_style(
+        Embedding.Config(channels_in=10, channels_out=8, shard="vocab").make(),
+    )
+    head = _shard_style(
+        Linear.Config(channels_in=8, channels_out=10, shard="vocab").make(),
+    )
+    assert isinstance(table, RowwiseParallel)
+    assert table.input_layouts == (Replicate(),)
+    assert isinstance(head, ColwiseParallel)
+    assert head.output_layouts == (Replicate(),)
+
+
+def test_a_custom_layer_supplies_its_own_style_only_when_sharded() -> None:
+    sharded = EnsembleLinear.Config(
+        channels_in=8,
+        channels_out=4,
+        num_ensemble=2,
+        shard="colwise",
+    ).make()
+    replicated = EnsembleLinear.Config(
+        channels_in=8,
+        channels_out=4,
+        num_ensemble=2,
+    ).make()
+    assert isinstance(_shard_style(sharded), _EnsembleParallel)
+    assert _shard_style(replicated) is None
 
 
 if __name__ == "__main__":

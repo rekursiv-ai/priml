@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
+
+import json
 
 from configgle import Fig
 from configgle.testing import assert_pprint_golden
@@ -14,9 +16,28 @@ from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.generate import generate
 from priml.model.norm import CenteredRMSNorm
+from priml.model.special import TiedLinear
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.qwen3_5 import Qwen35
 from priml.testing.qwen3_5 import hf_config
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+else:
+    from wrapt import lazy_import
+
+    Qwen3_5TextConfig = lazy_import(
+        "transformers.models.qwen3_5.configuration_qwen3_5",
+        "Qwen3_5TextConfig",
+    )
+    Qwen3_5ForCausalLM = lazy_import(
+        "transformers.models.qwen3_5.modeling_qwen3_5",
+        "Qwen3_5ForCausalLM",
+    )
 
 
 def _prepared_causal_mask(*, queries: int, keys: int) -> torch.Tensor:
@@ -120,21 +141,139 @@ def test_final_norm_width_inference_respects_explicit_configuration() -> None:
 
 
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("key", "value", "match"),
     [
-        ("model_type", "qwen3_5_moe"),
-        ("hidden_act", "gelu"),
-        ("layer_types", ["linear_attention"]),
-        ("num_attention_heads", 0),
-        ("initializer_range", -0.02),
-        ("num_key_value_heads", 3),
+        ("model_type", "qwen3_5_moe", "dense Qwen3.5 text config"),
+        ("hidden_act", "gelu", "SwiGLU/silu"),
+        ("layer_types", ["linear_attention"], "one supported attention type"),
+        (
+            "layer_types",
+            ["linear_attention", "sliding"],
+            "one supported attention type",
+        ),
+        ("num_attention_heads", 0, "must be positive"),
+        ("initializer_range", -0.02, "initializer_range"),
+        ("rms_norm_eps", 0.0, "rms_norm_eps"),
+        ("num_key_value_heads", 3, "divisible"),
+        ("quantization_config", {"bits": 4}, "Quantized"),
+        ("sliding_window", 128, "Sliding-window"),
+        ("attention_dropout", 1.0, "attention_dropout"),
+        ("rope_scaling", {"type": "yarn"}, "default text rotary"),
+        ("full_attention_interval", 0, "full_attention_interval"),
     ],
 )
-def test_unsupported_config_is_rejected(key: str, value: object) -> None:
+def test_unsupported_config_is_rejected(key: str, value: object, match: str) -> None:
     config = hf_config()
+    if key == "full_attention_interval":
+        del config["layer_types"]
     config[key] = value
-    with pytest.raises((ValueError, TypeError)):
+    with pytest.raises(ValueError, match=match):
         Qwen35.Config.from_hf(config)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "match"),
+    [
+        ("rope_type", "yarn", "default text rotary"),
+        ("partial_rotary_factor", 1.5, "partial_rotary_factor"),
+        ("partial_rotary_factor", 0.1, "positive even width"),
+    ],
+)
+def test_unsupported_rope_parameters_are_rejected(
+    key: str,
+    value: object,
+    match: str,
+) -> None:
+    config = hf_config()
+    rope = config["rope_parameters"]
+    assert isinstance(rope, dict)
+    rope[key] = value
+    with pytest.raises(ValueError, match=match):
+        Qwen35.Config.from_hf(config)
+
+
+def test_layer_types_default_to_a_full_attention_interval() -> None:
+    config = hf_config()
+    del config["layer_types"]
+    config["num_hidden_layers"] = 4
+    config["full_attention_interval"] = 2
+    native = Qwen35.Config.from_hf(config)
+    assert isinstance(native.block, list)
+    attentions = [
+        type(block.attn).__qualname__
+        for block in native.block
+        if isinstance(block, TransformerBlock.Config)
+    ]
+    assert attentions == [
+        "Qwen35GatedDeltaNet.Config",
+        "GatedSelfAttention.Config",
+        "Qwen35GatedDeltaNet.Config",
+        "GatedSelfAttention.Config",
+    ]
+
+
+def test_conditional_generation_config_unwraps_its_text_config() -> None:
+    """The multimodal wrapper nests the text config and owns the tie flag."""
+    wrapped: dict[str, object] = {
+        "model_type": "qwen3_5",
+        "text_config": hf_config(),
+        "tie_word_embeddings": True,
+    }
+    native = Qwen35.Config.from_hf(wrapped)
+    assert isinstance(native.proj_out, TiedLinear.Config)
+    assert native.proj_out.tied == "proj_in"
+    assert native.channels_out == 32
+
+    inner = hf_config()
+    inner["model_type"] = "qwen3_5_text_moe"
+    with pytest.raises(ValueError, match="nested text config"):
+        Qwen35.Config.from_hf({"model_type": "qwen3_5", "text_config": inner})
+
+
+def test_reset_parameters_reinitializes_the_final_norm_and_the_backbone() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+    assert isinstance(model.norm, CenteredRMSNorm)
+    with torch.no_grad():
+        model.norm.weight.fill_(3.0)
+        for parameter in model.blocks.parameters():
+            parameter.fill_(3.0)
+
+    model.reset_parameters()
+
+    assert torch.equal(model.norm.weight, torch.zeros_like(model.norm.weight))
+    assert all(
+        not torch.equal(p, torch.full_like(p, 3.0)) for p in model.blocks.parameters()
+    )
+
+
+def test_hidden_states_rejects_a_non_tensor_message_field() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+    with pytest.raises(TypeError, match="positions must be a Tensor or None"):
+        model(torch.tensor([[1, 2, 3]]), positions=[0, 1, 2])
+
+
+def test_hidden_states_rejects_an_integer_4d_attention_mask() -> None:
+    model = Qwen35.Config.from_hf(hf_config()).make()
+    with pytest.raises(TypeError, match="floating additive when it is 4-D"):
+        model(
+            torch.tensor([[1, 2, 3]]),
+            attention_mask=torch.zeros(1, 1, 3, 3, dtype=torch.long),
+        )
+
+
+def test_load_reads_a_local_checkpoint_onto_the_requested_dtype(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("transformers")
+    config = hf_config()
+    reference = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**config))
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    torch.save(reference.state_dict(), tmp_path / "pytorch_model.bin")
+
+    loaded = Qwen35.load(tmp_path, dtype=torch.bfloat16)
+
+    assert next(loaded.parameters()).dtype == torch.bfloat16
+    assert loaded(torch.tensor([[1, 2, 3]])).shape == (1, 3, 32)
 
 
 def test_unsupported_delta_head_ratio_is_rejected() -> None:

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from configgle import Makes
 
 import pytest
 import torch
 
-from priml.model.cost import Cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.cost import Cost
 
 
 def test_a_linear_matches_torch_exactly() -> None:
@@ -23,6 +26,7 @@ def test_a_linear_matches_torch_exactly() -> None:
         build_input=lambda: torch.randn(4, 8, requires_grad=True),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
     )
     assert analytical.params == 8 * 16 + 16
@@ -34,6 +38,7 @@ def test_a_swiglu_matches_torch_exactly() -> None:
         build_input=lambda: torch.randn(4, 8, requires_grad=True),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
     )
 
@@ -44,20 +49,22 @@ def test_a_matmul_free_leaf_measures_zero() -> None:
         build_input=lambda: torch.randn(4, 8, requires_grad=True),
         seq_len=4,
         batch_size=1,
+        num_tokens=4,
         dtype=None,
     )
-    assert analytical["flops", :, "matmul"].sum() == 0
-    assert analytical["flops", :, "elementwise"].sum() > 0
+    assert analytical["flops", "matmul"].sum() == 0
+    assert analytical["flops", "elementwise"].sum() > 0
 
 
 def test_a_wrong_matmul_count_is_caught() -> None:
     """Positive control: an estimate off by a factor must fail."""
-    with pytest.raises(AssertionError, match="matmul FLOPs/token"):
+    with pytest.raises(ValueError, match="matmul FLOPs/token"):
         assert_cost_matches_torch(
             Linear.Config(8, 16),
             build_input=lambda: torch.randn(4, 8, requires_grad=True),
             seq_len=4,
             batch_size=1,
+            num_tokens=4,
             dtype=None,
             expected_ratio=2.0,
         )
@@ -88,7 +95,7 @@ class _OvercountingLinear(Linear):
 def test_a_wrong_param_count_is_caught() -> None:
     """Positive control: the params check names both numbers."""
     with pytest.raises(
-        AssertionError,
+        ValueError,
         match=r"cost\.params=129 but the module owns 128",
     ):
         assert_cost_matches_torch(
@@ -96,6 +103,7 @@ def test_a_wrong_param_count_is_caught() -> None:
             build_input=lambda: torch.randn(4, 8, requires_grad=True),
             seq_len=4,
             batch_size=1,
+            num_tokens=4,
             dtype=None,
         )
 

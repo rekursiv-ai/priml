@@ -13,7 +13,7 @@ from torch import nn
 import pytest
 import torch
 
-from priml.model.cost import Cost, cost
+from priml.cost import Cost, cost
 from priml.model.custom_types import ChannelsInOut
 from priml.model.norm import (
     BatchNorm,
@@ -623,10 +623,11 @@ def test_norm_cost_is_matmul_free(
         build_input=build_input,
         seq_len=6,
         batch_size=1,
+        num_tokens=6,
         dtype=None,
     )
-    assert model_cost["flops", :, "matmul"].sum() == 0
-    assert model_cost["flops", :, "elementwise"].sum() > 0
+    assert model_cost["flops", "matmul"].sum() == 0
+    assert model_cost["flops", "elementwise"].sum() > 0
 
 
 @pytest.mark.parametrize(

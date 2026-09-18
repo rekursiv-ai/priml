@@ -34,13 +34,14 @@ from torch.distributed.tensor.parallel import (
 
 import torch
 
-from priml.model.custom_types import ShardStyle
 from priml.runtime import global_device_mesh
 from priml.train.parallelism import place
 
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
+
+    from priml.model.custom_types import ShardStyle
 
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ def apply_tensor_parallel(
     for submodule in model.modules():
         if isinstance(submodule, TensorParallelValidator):
             submodule.assert_tensor_parallel_compatible()
-    logger.info(f"Applied tensor parallel: {len(plan)} sharded submodules.")
+    logger.info("Applied tensor parallel: %s sharded submodules.", len(plan))
     return model
 
 

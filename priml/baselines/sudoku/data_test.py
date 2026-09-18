@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import json
 
@@ -14,6 +14,10 @@ import torch
 
 from priml.baselines.sudoku.data import SudokuData, augment_sudoku
 from priml.lib.custom_json import ListCodec
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture

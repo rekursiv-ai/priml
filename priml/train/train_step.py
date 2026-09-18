@@ -22,7 +22,7 @@ Features:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable
 from dataclasses import KW_ONLY, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, NotRequired, TypedDict, cast
 from typing_extensions import TypeVar
@@ -62,7 +62,7 @@ from priml.train.quantization import NoModelQuantization
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Mapping
 
 
 logger = logging.getLogger(__name__)

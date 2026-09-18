@@ -8,11 +8,12 @@ timers, EMA-aware evaluation, and what a checkpoint carries.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, TypedDict, Unpack, cast, override
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from configgle import Makeable
 
     from priml.train.custom_types import EMAProtocol

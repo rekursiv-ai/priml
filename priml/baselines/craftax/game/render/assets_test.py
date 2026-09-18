@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import urllib.error
 import urllib.request
@@ -10,6 +10,10 @@ import urllib.request
 import pytest
 
 from priml.baselines.craftax.game.render import assets, sprites
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _png(directory: Path, name: str, payload: bytes = b"\x89PNG-stub") -> Path:

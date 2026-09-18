@@ -134,6 +134,7 @@ def test_the_cost_matches_torch_and_prices_the_tanh_towers() -> None:
         build_input=lambda: torch.randn(3, 12, requires_grad=True),
         seq_len=1,
         batch_size=3,
+        num_tokens=1 * 3,
         dtype=None,
         run=_scored,
     )
@@ -162,8 +163,7 @@ def test_cost_accounts_for_operand_bytes_and_dtype() -> None:
     )
     wide = config.cost(seq_len=1, batch_size=4, dtype=None)
     assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == 2 * counted["bytes", :, :, torch.bfloat16].sum()
+        wide["bytes", torch.float32].sum() == 2 * counted["bytes", torch.bfloat16].sum()
     )
     assert wide["flops"].sum() == counted["flops"].sum()
 

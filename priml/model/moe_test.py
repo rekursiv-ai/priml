@@ -19,7 +19,7 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
-from priml.model.cost import cost
+from priml.cost import cost
 from priml.model.moe import MoE, Router, SigmoidRouter, SoftmaxRouter
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import (
@@ -405,6 +405,7 @@ def test_router_cost_is_the_gate_matmul(config: Router.Config) -> None:
         build_input=lambda: torch.randn(3, 8, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
         run=_first_tensor,
     )
@@ -465,6 +466,7 @@ def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
         build_input=lambda: torch.randn(2, 3, 8, requires_grad=True),
         seq_len=6,
         batch_size=1,
+        num_tokens=6,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()

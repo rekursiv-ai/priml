@@ -84,10 +84,11 @@ def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
         ),
         seq_len=2,
         batch_size=1,
+        num_tokens=2,
         dtype=None,
         run=_mix_layer_one,
     )
-    assert cost["flops", :, "matmul"].sum() == 0
+    assert cost["flops", "matmul"].sum() == 0
     assert cost["flops", "primal", "elementwise"].sum() == 3 * 4 * 3
     assert cost["flops", "adjoint", "elementwise"].sum() == 4 * 4 * 3
     # Each scalar's gradient sums over the row, then over the two rows.

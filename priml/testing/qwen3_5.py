@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from functools import partial
 from types import FunctionType
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
@@ -21,6 +20,8 @@ from priml.model.transformer.qwen3_5 import Qwen35
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from transformers.configuration_utils import PretrainedConfig
 
 
@@ -155,10 +156,11 @@ def torch_reference(reference: nn.Module) -> nn.Module:
       reference: The same module with PyTorch fallback functions bound.
 
     """
-    assert importlib.metadata.version("transformers") == "5.17.0"
-    forward: object = reference.forward
-    assert callable(forward)
-    original = cast(FunctionType, inspect.unwrap(forward))
+    if importlib.metadata.version("transformers") != "5.17.0":
+        raise ValueError(
+            'Expected importlib.metadata.version("transformers") == "5.17.0".',
+        )
+    original = cast(FunctionType, inspect.unwrap(reference.forward))
     assert isinstance(original, FunctionType)
     globals_ref = original.__globals__.copy()
     for name in (
@@ -173,7 +175,8 @@ def torch_reference(reference: nn.Module) -> nn.Module:
                 object,
                 inspect.getclosurevars(kernel.forward).nonlocals["func"],
             )
-        assert callable(kernel)
+        if not callable(kernel):
+            raise TypeError("Expected callable(kernel).")
         globals_ref[name] = inspect.unwrap(kernel)
     # The exact upstream code runs with private function bindings; installed FLA
     # otherwise selects CUDA kernels even for this CPU reference.

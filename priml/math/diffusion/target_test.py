@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor, exp
 
 import pytest
 import torch
 
-from priml.math.custom_types import TensorFn
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
     log_sigma_from_log_snr_per_rectified_flow,
@@ -20,6 +21,10 @@ from priml.math.diffusion.target import (
     target_v_x,
     target_x,
 )
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import TensorFn
 
 
 @pytest.mark.parametrize(

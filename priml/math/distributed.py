@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import math
 
@@ -11,8 +11,13 @@ from torch import Tensor
 import torch
 import torch.distributed
 
-from priml.math.custom_types import Tensorable
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from priml.math.custom_types import Tensorable
 
 
 def logsumexp_all_to_all(

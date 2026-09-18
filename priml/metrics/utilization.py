@@ -1,6 +1,6 @@
 """Hardware utilization: the model's analytical cost against measured throughput.
 
-The model config prices one token (:mod:`priml.model.cost`); the train
+The model config prices one token (:mod:`priml.cost`); the train
 loop times each step and puts ``step_sec`` on the metric bus. This metric sums
 tokens and seconds between ``reset`` calls and reports each kernel silo's
 achieved fraction of its datasheet ceiling; the ``matmul`` silo is MFU.
@@ -8,8 +8,7 @@ achieved fraction of its datasheet ceiling; the ``matmul`` silo is MFU.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Protocol, override, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, override, runtime_checkable
 
 import math
 
@@ -18,7 +17,12 @@ from torch import Tensor
 
 import torch
 
-from priml.model.cost import KERNELS, Cost, HasCost, Kernel, cost
+from priml.cost import KERNELS, Cost, Kernel, cost
+from priml.custom_types import HasCost
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class Utilization(LateBound):
@@ -159,7 +163,7 @@ class Utilization(LateBound):
         self.tokens += num_tokens
         self.seconds += step_sec
         for kernel in KERNELS:
-            self.flops[kernel] += per_token["flops", :, kernel].sum() * num_tokens
+            self.flops[kernel] += per_token["flops", kernel].sum() * num_tokens
 
     def compute(self) -> dict[str, float]:
         """Report throughput and utilization over the updates since ``reset``.

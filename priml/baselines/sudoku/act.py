@@ -30,7 +30,6 @@ identical weights stay identical regardless of what else drew in between.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
 from configgle import Fig
@@ -40,6 +39,8 @@ import torch
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from priml.baselines.sudoku.model import SudokuNet
 
 
@@ -278,8 +279,10 @@ class ActPool:
             logits, halt = out.logits, out.halt
             if feedback is not None:
                 feedback = self.clamp_givens(out.logits.argmax(dim=-1), media=media)
-        assert logits is not None
-        assert halt is not None
+        if logits is None:
+            raise ValueError("Expected logits is not None.")
+        if halt is None:
+            raise ValueError("Expected halt is not None.")
         return logits, halt
 
     def halt_loss(

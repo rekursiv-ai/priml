@@ -15,8 +15,7 @@ choice not to redistribute is about package weight, not permission.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import hashlib
 import http.client
@@ -25,6 +24,10 @@ import urllib.error
 import urllib.request
 
 from priml.lib.userdirs import cache_dir
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def fetch(

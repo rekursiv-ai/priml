@@ -24,7 +24,6 @@ from torch import Tensor
 
 import torch
 
-from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import (
     evaluation_mode,
@@ -42,12 +41,14 @@ from priml.loss.policy_gradient import (
 from priml.math.advantage import explained_variance, generalized_advantage
 from priml.math.schedules import linear
 from priml.optimizers.lr import learning_rate
-from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from priml.baselines.craftax.data import EvaluationActor
+    from priml.train.custom_types import TrainStepOutput
 
 
 type _Callable = Callable[..., object]
@@ -485,7 +486,8 @@ class CraftaxRNNTrainStep(TrainStep):
           logits: Unnormalized action scores, computed with a fresh state.
 
         """
-        assert not args
+        if args:
+            raise ValueError("Expected not args.")
         observation = batch["observation"]
         assert isinstance(observation, Tensor)
         with evaluation_mode(self.model), torch.no_grad():
@@ -689,7 +691,8 @@ class _EvaluationActor:
         *,
         generator: torch.Generator,
     ) -> Tensor:
-        assert self._state is not None
+        if self._state is None:
+            raise ValueError("Expected self._state is not None.")
         self._state, logits, _ = self.model.step(
             self._state,
             observation,

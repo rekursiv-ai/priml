@@ -9,7 +9,7 @@ GitHub on the path of every test run.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import hashlib
 
@@ -23,6 +23,10 @@ from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.render import play, sprites
 from priml.baselines.craftax.game.render.pixels import Renderer
 from priml.baselines.craftax.model import ActorCritic
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture(scope="module")

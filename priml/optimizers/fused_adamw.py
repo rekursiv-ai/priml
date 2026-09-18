@@ -25,9 +25,8 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from functools import cache, partial
-from typing import cast, overload, override
+from typing import TYPE_CHECKING, cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -36,6 +35,10 @@ from torch.optim import Optimizer
 import torch
 
 from priml.lib.custom_json import FloatCodec
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 
 __all__ = ["FusedAdamW"]

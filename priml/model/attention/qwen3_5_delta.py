@@ -11,16 +11,15 @@ from torch import Tensor, nn
 import torch
 import torch.nn.functional
 
+from priml.cost import (
+    Cost,
+    elementwise_cost,
+)
 from priml.math.gated_delta_rule import (
     chunk_gated_delta_rule,
     recurrent_gated_delta_rule,
 )
 from priml.model.attention.gated_delta_net import GatedDeltaNet
-from priml.model.cost import (
-    Cost,
-    elementwise_cost,
-    shared_rows,
-)
 from priml.model.custom_types import TensorModule
 from priml.model.init import InitFn
 from priml.model.norm import RMSNorm
@@ -80,7 +79,7 @@ class Qwen35RMSNormGated(nn.Module):
                 adjoint_inputs=6,
                 adjoint_outputs=3,
                 dtype=dtype,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
             )
 
     def __init__(self, config: Config) -> None:
@@ -199,7 +198,8 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             use_qk_l2norm_in_kernel=True,
         )
         if cache is not None:
-            assert state is not None
+            if state is None:
+                raise ValueError("Expected state is not None.")
             cache["recurrent_state"] = state
         output = self.norm(
             output.reshape(-1, self.channels_v_head),

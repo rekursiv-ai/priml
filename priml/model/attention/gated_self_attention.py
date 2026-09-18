@@ -12,19 +12,17 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
-from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import rotation_cost
-from priml.model.attention.window import causal_chunk_mask, window_mask
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
     resolve_dtype,
-    shared_rows,
-    with_rows,
 )
+from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
+from priml.model.attention.kvcache import KVCache
+from priml.model.attention.rope import rotation_cost
+from priml.model.attention.window import causal_chunk_mask, window_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -114,7 +112,7 @@ class GatedSelfAttention(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = dtype
             inner = self.num_heads * self.channels_head
             kv = self.num_heads_kv * self.channels_head
@@ -144,10 +142,10 @@ class GatedSelfAttention(nn.Module):
             for heads in (self.num_heads, self.num_heads_kv):
                 total += cost(
                     self.norm_qk,
-                    seq_len=seq_len,
+                    seq_len=seq_len * heads,
                     batch_size=batch_size,
                     dtype=dtype,
-                    **with_rows(rows * heads, **kwargs),
+                    **kwargs,
                 ).tile(heads)
             if self.rope is not None:
                 total += cost(

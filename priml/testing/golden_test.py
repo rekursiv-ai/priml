@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from priml.testing.golden import assert_text_golden
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_assert_text_golden_reads_testdata(

@@ -9,7 +9,7 @@ the identifiers stops being a config discrepancy and becomes an ``IndexError``.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import json
 
@@ -20,6 +20,10 @@ import torch
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.data import ArcData
 from priml.baselines.sudoku.prefix import PrefixStack, SparsePuzzleEmbedding
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 TASKS = 3

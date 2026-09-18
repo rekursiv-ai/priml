@@ -149,8 +149,10 @@ def _sparse_embedding_step(
             async_op=True,
         )
         ids_work = dist.all_gather_into_tensor(all_ids, local_ids, async_op=True)
-        assert grad_work is not None
-        assert ids_work is not None
+        if grad_work is None:
+            raise ValueError("Expected grad_work is not None.")
+        if ids_work is None:
+            raise ValueError("Expected ids_work is not None.")
         grad_work.wait()
         ids_work.wait()
 

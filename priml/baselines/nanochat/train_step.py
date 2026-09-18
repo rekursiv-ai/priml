@@ -11,10 +11,10 @@ quantity the recipe is tuned against.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import field
-from typing import Protocol, Self, cast, override
+from typing import TYPE_CHECKING, Protocol, Self, cast, override
 
 import math
 import time
@@ -31,7 +31,6 @@ from priml.baselines.nanochat.model import (
     NanoChatLM,
     ScaledSoftCap,
 )
-from priml.baselines.nanochat.ngram import HashedNgramTables
 from priml.baselines.nanochat.optimizers import BiasCorrectedRMSProp
 from priml.lib.custom_json import FloatCodec
 from priml.loss.custom_types import LossOutput
@@ -45,8 +44,14 @@ from priml.optimizers import (
     apply_lr_scale,
 )
 from priml.optimizers.composite import Selector, excluding, matching
-from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
+
+    from priml.baselines.nanochat.ngram import HashedNgramTables
+    from priml.train.custom_types import TrainStepOutput
 
 
 class _Compile(Protocol):

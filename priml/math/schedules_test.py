@@ -7,8 +7,8 @@ where it lands, and what it does to the run in between.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import partial
+from typing import TYPE_CHECKING
 
 import itertools
 
@@ -28,6 +28,10 @@ from priml.math.schedules import (
     trapezoidal,
     warmup,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 DECAYS: list[tuple[str, Schedule[float]]] = [

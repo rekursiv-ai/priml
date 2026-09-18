@@ -8,9 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import field
 from datetime import timedelta
-from multiprocessing.process import BaseProcess
-from types import TracebackType
-from typing import Protocol, Self, cast
+from typing import TYPE_CHECKING, Protocol, Self, cast
 
 import math
 import os
@@ -27,6 +25,11 @@ from torch import (
 from torch.distributed.device_mesh import DeviceMesh
 
 import torch
+
+
+if TYPE_CHECKING:
+    from multiprocessing.process import BaseProcess
+    from types import TracebackType
 
 
 class PoolWorker(Protocol):
@@ -189,9 +192,12 @@ class WorkerPool:
         """
         last_exc: BaseException | None = None
         for attempt in range(self._DISPATCH_ATTEMPTS):
-            assert self.queue is not None
-            assert self.ack_queue is not None
-            assert self.processes is not None
+            if self.queue is None:
+                raise ValueError("Expected self.queue is not None.")
+            if self.ack_queue is None:
+                raise ValueError("Expected self.ack_queue is not None.")
+            if self.processes is None:
+                raise ValueError("Expected self.processes is not None.")
             self.queue.put(pickle.dumps(fn))
             try:
                 self._await_dispatch_ack(self.processes)
@@ -231,7 +237,8 @@ class WorkerPool:
 
     def _await_dispatch_ack(self, processes: Sequence[PoolWorker]) -> None:
         """Wait for rank 0's command ack; fail if the warm pool died."""
-        assert self.ack_queue is not None
+        if self.ack_queue is None:
+            raise ValueError("Expected self.ack_queue is not None.")
         deadline = time.monotonic() + self._RENDEZVOUS_TIMEOUT.total_seconds()
         while True:
             remaining = deadline - time.monotonic()
@@ -250,8 +257,10 @@ class WorkerPool:
 
     def terminate(self) -> None:
         """Terminate the workers."""
-        assert self.queue is not None
-        assert self.processes is not None
+        if self.queue is None:
+            raise ValueError("Expected self.queue is not None.")
+        if self.processes is None:
+            raise ValueError("Expected self.processes is not None.")
         self.queue.put(None)
         self._kill_all(self.processes)
 
@@ -330,9 +339,7 @@ class WorkerPool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             # getsockname() is `object`; AF_INET always yields (host, port).
-            port_raw = cast(tuple[str, int], s.getsockname())[1]
-            port = port_raw
-            return port
+            return cast(tuple[str, int], s.getsockname())[1]
 
     @classmethod
     def worker(
@@ -432,12 +439,18 @@ def do_something(mesh: DeviceMesh) -> None:
     """
     rank = td.get_rank()
 
-    assert td.get_rank() == mesh.get_rank()
-    assert mesh.ndim == 2
-    assert mesh.shape == (2, 3)
-    assert mesh.size() == 6
-    assert mesh.mesh_dim_names == ("dp", "tp")
-    assert mesh.device_type == "cpu"
+    if td.get_rank() != mesh.get_rank():
+        raise ValueError("Expected td.get_rank() == mesh.get_rank().")
+    if mesh.ndim != 2:
+        raise ValueError("Expected mesh.ndim == 2.")
+    if mesh.shape != (2, 3):
+        raise ValueError("Expected mesh.shape == (2, 3).")
+    if mesh.size() != 6:
+        raise ValueError("Expected mesh.size() == 6.")
+    if mesh.mesh_dim_names != ("dp", "tp"):
+        raise ValueError('Expected mesh.mesh_dim_names == ("dp", "tp").')
+    if mesh.device_type != "cpu":
+        raise ValueError('Expected mesh.device_type == "cpu".')
 
     tp_mesh: DeviceMesh = mesh["tp"]
     tp_group = tp_mesh.get_group()

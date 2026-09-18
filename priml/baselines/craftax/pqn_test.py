@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from priml.baselines.craftax.pqn import RecurrentQNetwork, epsilon_at
-from priml.model.cost import cost
+from priml.cost import cost
 from priml.model.norm import BatchRenorm, LayerNorm
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -194,6 +194,7 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
         ),
         seq_len=1,
         batch_size=3,
+        num_tokens=1 * 3,
         dtype=None,
         run=_stepped,
     )
@@ -238,8 +239,7 @@ def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
     assert wide.bytes_state == 16
     assert narrow["bytes", "primal", "selection"].sum() == 8
     assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+        wide["bytes", torch.float32].sum() == 2 * narrow["bytes", torch.bfloat16].sum()
     )
     assert wide["flops"].sum() == narrow["flops"].sum()
 

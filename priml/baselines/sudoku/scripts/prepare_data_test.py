@@ -5,7 +5,6 @@ Hermetic: every test feeds local CSV text, so nothing here touches the network.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import json
@@ -20,12 +19,13 @@ from priml.baselines.sudoku.scripts.prepare_data import (
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
 
 def _load_array(path: Path) -> NDArray[np.int64]:
-    result = cast("NDArray[np.int64]", np.load(path))
-    return result
+    return cast("NDArray[np.int64]", np.load(path))
 
 
 SOLUTION = (

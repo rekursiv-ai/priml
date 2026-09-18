@@ -132,7 +132,7 @@ def load_transformers_model(
     # process-global, and concurrent loads would interleave and clobber each
     # other's offline state.
     if force_redownload:
-        logger.info(f"Force redownloading {model_id}")
+        logger.info("Force redownloading %s", model_id)
         model = model_class_type.from_pretrained(
             model_id,
             revision=revision,
@@ -143,7 +143,7 @@ def load_transformers_model(
         )
     else:
         try:
-            logger.debug(f"Attempting to load {model_id} from cache (offline)")
+            logger.debug("Attempting to load %s from cache (offline)", model_id)
             model = model_class_type.from_pretrained(
                 model_id,
                 revision=revision,
@@ -152,15 +152,15 @@ def load_transformers_model(
                 force_download=False,
                 **kwargs,
             )
-            logger.debug(f"Loaded {model_id} from cache")
+            logger.debug("Loaded %s from cache", model_id)
         except OSError as e:
             # OSError only. ValueError here also caught malformed configs and
             # bad model code, so a genuinely broken checkpoint triggered a
             # network round-trip and surfaced the retry's traceback instead of
             # the real one. huggingface_hub raises LocalEntryNotFoundError --
             # a FileNotFoundError, hence OSError -- for an actual cache miss.
-            logger.info(f"Cache miss for {model_id}, downloading from HuggingFace")
-            logger.debug(f"Cache miss reason: {e}")
+            logger.info("Cache miss for %s, downloading from HuggingFace", model_id)
+            logger.debug("Cache miss reason: %s", e)
             model = model_class_type.from_pretrained(
                 model_id,
                 revision=revision,
@@ -212,11 +212,10 @@ def load_local_state_dict(path: Path) -> dict[str, Tensor]:
     pt = path / "pytorch_model.bin"
     if pt.exists():
         # torch.load is annotated `-> Any`; weights_only=True guarantees tensors.
-        loaded = cast(
+        return cast(
             dict[str, Tensor],
             torch.load(str(pt), map_location="cpu", weights_only=True),
         )
-        return loaded
     shards = sorted(path.glob("pytorch_model-*.bin"))
     if shards:
         pt_sd: dict[str, Tensor] = {}

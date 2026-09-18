@@ -7,14 +7,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast, override
 
 import functools
+import math
 import shutil
 import tempfile
 
-from configgle import Makeable
 from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 import pytest
 import torch
@@ -27,11 +27,14 @@ from priml.train.checkpointer import (
     Checkpointer,
     StateDictStorer,
     SyncLocalStateDictStorer,
+    _dir_size_mb,
+    _has_dtensor,
     _read_checkpoint,
 )
 
 
 if TYPE_CHECKING:
+    from configgle import Makeable
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
@@ -440,6 +443,249 @@ def test_rejects_invalid_keep_last_n(temp_checkpoint_dir: Path) -> None:
                     keep_last_n=keep_last_n,
                 ),
             )
+
+
+@pytest.mark.parametrize(
+    ("filename", "message"),
+    [
+        ("step_{step:08d", "invalid checkpoint filename template"),
+        ("step_{epoch}.pt", "invalid checkpoint filename template"),
+        ("step_{step!r}.pt", "exactly one decimal"),
+        ("step_{step}_{step}.pt", "exactly one decimal"),
+        ("step_{step:.2f}.pt", "exactly one decimal"),
+        ("latest.pt", "exactly one decimal"),
+        ("runs/step_{step}.pt", "must not contain a directory"),
+    ],
+)
+def test_rejects_a_filename_that_cannot_name_one_step(
+    temp_checkpoint_dir: Path,
+    filename: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Checkpointer(
+            Checkpointer.Config(working_dir=temp_checkpoint_dir, filename=filename),
+        )
+
+
+def test_rejects_an_unknown_best_mode(temp_checkpoint_dir: Path) -> None:
+    config = Checkpointer.Config(working_dir=temp_checkpoint_dir)
+    # The annotation rules this out statically; an ``--override`` does not.
+    object.__setattr__(config, "best_mode", "median")
+    with pytest.raises(ValueError, match="best_mode must be 'max' or 'min'"):
+        Checkpointer(config)
+
+
+def test_maybe_save_rejects_a_negative_step(temp_checkpoint_dir: Path) -> None:
+    ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
+    with pytest.raises(ValueError, match="non-negative"):
+        ckpt.maybe_save(_DictTarget({}), -5)
+
+
+def test_close_drains_the_storer(temp_checkpoint_dir: Path) -> None:
+    ckpt = Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir))
+    flushed: list[int] = []
+    ckpt.storage.flush = lambda: flushed.append(1)  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
+    ckpt.close()
+    assert flushed == [1]
+
+
+def test_has_dtensor_walks_nested_containers(single_rank_group: None) -> None:
+    del single_rank_group
+    sharded = distribute_tensor(
+        torch.zeros(4),
+        init_device_mesh("cpu", (1,)),
+        [Shard(0)],
+    )
+    assert _has_dtensor(sharded)
+    assert _has_dtensor({"model": {"w": sharded}})
+    assert _has_dtensor(["plain", (sharded,)])
+    assert not _has_dtensor({"model": {"w": torch.zeros(4)}})
+    assert not _has_dtensor([torch.zeros(4), 1.0])
+    assert not _has_dtensor("step")
+
+
+def test_dir_size_sums_every_file_beneath_a_shard_directory(tmp_path: Path) -> None:
+    shard = tmp_path / "step_0.pt"
+    (shard / "nested").mkdir(parents=True)
+    (shard / "a.distcp").write_bytes(b"x" * 1024)
+    (shard / "nested" / "b.distcp").write_bytes(b"y" * 1024)
+    plain = tmp_path / "plain.pt"
+    plain.write_bytes(b"z" * 512)
+    assert _dir_size_mb(shard) == pytest.approx(2048 / 1024**2)
+    assert _dir_size_mb(plain) == pytest.approx(512 / 1024**2)
+
+
+def test_prune_is_rank_zero_only(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off rank 0 nothing is deleted: retention is rank-0 file I/O."""
+    ckpt = Checkpointer(
+        Checkpointer.Config(
+            working_dir=temp_checkpoint_dir,
+            save_every=100,
+            keep_last_n=1,
+        ),
+    )
+    for step in (100, 200):
+        _save(ckpt, step, {"step": step})
+    assert ckpt.available_steps() == [200]
+    _save(ckpt, 300, {"step": 300})
+    monkeypatch.setattr(checkpointer, "is_rank_zero", lambda: False)
+    ckpt._prune()
+    ckpt.storage.write(ckpt._path(400), {"step": 400}, after_write=ckpt._prune)
+    assert ckpt.available_steps() == [300, 400]
+
+
+def test_prune_removes_a_shard_directory(temp_checkpoint_dir: Path) -> None:
+    ckpt = Checkpointer(
+        Checkpointer.Config(
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            keep_last_n=1,
+        ),
+    )
+    shard = temp_checkpoint_dir / "step_00000010.pt"
+    shard.mkdir(parents=True)
+    (shard / ".metadata").write_bytes(b"")
+    (shard / "0.distcp").write_bytes(b"x")
+    _save(ckpt, 20, {"step": 20})
+    assert not shard.exists()
+    assert ckpt.available_steps() == [20]
+
+
+def test_prune_logs_and_continues_when_a_delete_fails(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ckpt = Checkpointer(
+        Checkpointer.Config(
+            working_dir=temp_checkpoint_dir,
+            save_every=10,
+            keep_last_n=1,
+        ),
+    )
+    _save(ckpt, 10, {"step": 10})
+
+    def refuse(self: Path) -> None:
+        raise OSError(f"busy: {self.name}")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with caplog.at_level("WARNING", logger=checkpointer.__name__):
+        _save(ckpt, 20, {"step": 20})
+    assert any("Failed to delete checkpoint" in r.message for r in caplog.records)
+    assert ckpt.available_steps() == [10, 20]
+
+
+def test_best_record_is_written_by_rank_zero_only(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(checkpointer, "is_rank_zero", lambda: False)
+    ckpt = _best_checkpointer(temp_checkpoint_dir)
+    ckpt.best_step = 7
+    ckpt._write_best_record()
+    assert not (temp_checkpoint_dir / "best.json").exists()
+
+
+def test_a_best_record_is_ignored_when_no_metric_is_configured(
+    temp_checkpoint_dir: Path,
+) -> None:
+    first = _best_checkpointer(temp_checkpoint_dir)
+    assert first.on_eval(_DictTarget({}), 50, {"accuracy": 0.9})
+    plain = Checkpointer(
+        Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=100),
+    )
+    assert plain.load(_DictTarget({}), max_steps=1e9, guard=False)
+    assert plain.best_step is None
+
+
+def test_a_best_record_for_the_other_mode_is_ignored(
+    temp_checkpoint_dir: Path,
+) -> None:
+    first = _best_checkpointer(temp_checkpoint_dir, best_mode="max")
+    assert first.on_eval(_DictTarget({}), 50, {"accuracy": 0.9})
+    resumed = _best_checkpointer(temp_checkpoint_dir, best_mode="min")
+    assert resumed.load(_DictTarget({}), max_steps=1e9, guard=False)
+    assert resumed.best_step is None
+
+
+def test_resume_of_an_absent_explicit_step_names_what_exists(
+    temp_checkpoint_dir: Path,
+) -> None:
+    _save(
+        Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir)),
+        10,
+        {"step": 10},
+    )
+    ckpt = Checkpointer(
+        Checkpointer.Config(working_dir=temp_checkpoint_dir, resume_step=20),
+    )
+    with pytest.raises(RuntimeError, match=r"resume_step=20 .*\(available=\[10\]\)"):
+        ckpt.load(_DictTarget({}), max_steps=1e9, guard=False)
+
+
+def test_resume_without_a_best_record_keeps_the_sentinel(
+    temp_checkpoint_dir: Path,
+) -> None:
+    _save(
+        Checkpointer(Checkpointer.Config(working_dir=temp_checkpoint_dir)),
+        10,
+        {"step": 10},
+    )
+    ckpt = _best_checkpointer(temp_checkpoint_dir)
+    assert ckpt.load(_DictTarget({}), max_steps=1e9, guard=False)
+    assert ckpt.best_step is None
+    assert ckpt.best_value == -math.inf
+
+
+def test_listing_a_missing_directory_is_empty(tmp_path: Path) -> None:
+    ckpt = Checkpointer(Checkpointer.Config(working_dir=tmp_path / "absent"))
+    assert ckpt.available_steps() == []
+
+
+def test_a_plain_write_off_rank_zero_only_joins_the_barrier(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rank 1 writes no file; it meets rank 0 at the barrier and runs retention."""
+    barriers: list[int] = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: 1)
+    monkeypatch.setattr(dist, "barrier", lambda: barriers.append(1))
+    after: list[int] = []
+    path = temp_checkpoint_dir / "step_00000001.pt"
+
+    SyncLocalStateDictStorer().write(
+        path,
+        {"x": torch.zeros(1)},
+        after_write=lambda: after.append(1),
+    )
+
+    assert barriers == [1]
+    assert after == [1]
+    assert not path.exists()
+
+
+def test_a_plain_write_on_rank_zero_barriers_after_the_rename(
+    temp_checkpoint_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    path = temp_checkpoint_dir / "step_00000001.pt"
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(
+        dist,
+        "barrier",
+        lambda: events.append(f"barrier:{path.is_file()}"),
+    )
+
+    SyncLocalStateDictStorer().write(path, {"x": torch.zeros(1)})
+
+    assert events == ["barrier:True"]
 
 
 # -- best-metric saves -----------------------------------------------------

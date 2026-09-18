@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -23,6 +23,8 @@ from priml.paths import validated_output_path
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from numpy import array, save, zeros
     from pyarrow import Table, parquet
 
@@ -111,7 +113,8 @@ def usage_scores(pieces: list[bytes], counts: list[int]) -> list[float]:
       scores: Occurrence counts, one per piece.
 
     """
-    assert len(pieces) == len(counts)
+    if len(pieces) != len(counts):
+        raise ValueError("Expected len(pieces) == len(counts).")
     return [float(count) for count in counts]
 
 
@@ -413,7 +416,8 @@ class ByteLevelTokenizer:
         self.token_bytes_literal = zeros(self.vocab_size, dtype="int32")
         for index in range(self.bos_token_id):
             piece = self.backend.id_to_token(index)
-            assert piece is not None
+            if piece is None:
+                raise ValueError("Expected piece is not None.")
             self.token_bytes_literal[index] = len(piece)
             self.token_bytes[index] = len(
                 self.backend.decode([index], skip_special_tokens=False).encode(),

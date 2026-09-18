@@ -37,7 +37,6 @@ References:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from functools import cache, partial
 from typing import TYPE_CHECKING, cast, overload, override
 
@@ -51,6 +50,8 @@ from priml.lib.custom_json import FloatCodec
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch.nn import Parameter
 
 
@@ -156,7 +157,8 @@ def _by_shape(params: list[Tensor]) -> list[list[Tensor]]:
 def _gradient(parameter: Tensor) -> Tensor:
     """Return a parameter's gradient, which ``_by_shape`` guaranteed exists."""
     grad = parameter.grad
-    assert grad is not None
+    if grad is None:
+        raise ValueError("Expected grad is not None.")
     return grad
 
 

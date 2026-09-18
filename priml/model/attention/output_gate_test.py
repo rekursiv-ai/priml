@@ -10,11 +10,11 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
+from priml.cost import cost
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import cost
 from priml.model.norm import RMSNorm
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
@@ -151,6 +151,7 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
+        num_tokens=8,
         dtype=None,
     )
     inner = cost(
@@ -202,8 +203,7 @@ def test_output_gate_traffic_prices_projection_and_scalar_operands() -> None:
     )
     wide = config.cost(seq_len=4, batch_size=1, dtype=None)
     assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == actual["bytes", :, :, torch.bfloat16].sum() * 2
+        wide["bytes", torch.float32].sum() == actual["bytes", torch.bfloat16].sum() * 2
     )
 
 

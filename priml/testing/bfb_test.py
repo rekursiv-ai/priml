@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
@@ -18,10 +17,13 @@ import torch
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch._ops import OpOverload
 
+    from priml.math.custom_types import TensorFn
+
 from priml.lib.custom_json import DictCodec
-from priml.math.custom_types import TensorFn
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import (
@@ -29,12 +31,20 @@ from priml.testing.bfb import (
     _EXACT_F32_OPS,
     _assert_equal,
     _assert_portable_output_dtype,
+    _downcast_f64,
+    _downcast_result,
     _max_ulp_diff,
+    _module_device,
     _op_name,
+    _to_cpu,
+    _upcast,
+    _write_back,
     assert_bfb_against_golden,
     bfb_devices,
     first_tensor,
     host_agnostic_numerics,
+    move_to_device,
+    portable_half_precision,
     randomize_parameters,
     regenerate_golden,
     state_differs,
@@ -204,6 +214,151 @@ def test_bfb_devices_is_cpu_only() -> None:
     assert bfb_devices() == ["cpu"]
 
 
+@pytest.mark.parametrize("enabled_before", [True, False])
+def test_portable_half_precision_disables_onednn_then_restores_it(
+    enabled_before: bool,
+) -> None:
+    (original,) = torch.backends.mkldnn.set_flags(enabled_before)[:1]
+    try:
+        with portable_half_precision():
+            assert not torch.backends.mkldnn.is_available() or not _onednn_enabled()
+        assert _onednn_enabled() == enabled_before
+    finally:
+        torch.backends.mkldnn.set_flags(original)
+
+
+def _onednn_enabled() -> bool:
+    """Read the oneDNN enable bit through the same flags API the harness uses."""
+    (enabled,) = torch.backends.mkldnn.set_flags(True)[:1]
+    torch.backends.mkldnn.set_flags(enabled)
+    return enabled
+
+
+def test_move_to_device_recurses_into_containers_and_passes_scalars() -> None:
+    tensor = torch.zeros(1)
+    moved = move_to_device({"a": (tensor, 3), "b": [tensor, "x"]}, "cpu")
+    assert isinstance(moved, dict)
+    inner = moved["a"]
+    assert isinstance(inner, tuple)
+    assert inner[1] == 3
+    first = inner[0]
+    assert isinstance(first, Tensor)
+    assert torch.equal(first, tensor)
+    items = moved["b"]
+    assert isinstance(items, list)
+    assert items[1] == "x"
+    assert move_to_device(7, "cpu") == 7
+
+
+def test_to_cpu_clones_tensors_and_recurses_into_containers() -> None:
+    tensor = torch.zeros(1)
+    snapshot = cast(
+        dict[str, object],
+        _to_cpu({"a": (tensor, 3), "b": [tensor, "x"]}),
+    )
+    inner = cast(tuple[object, ...], snapshot["a"])
+    copy = inner[0]
+    assert isinstance(copy, Tensor)
+    tensor.fill_(1)
+    assert torch.equal(copy, torch.zeros(1))
+    assert inner[1] == 3
+    items = cast(list[object], snapshot["b"])
+    assert items[1] == "x"
+    assert _to_cpu(None) is None
+
+
+def test_state_differs_on_a_key_or_shape_change() -> None:
+    value = torch.zeros(2)
+    assert state_differs({"a": value}, {"a": value, "b": value})
+    assert state_differs({"a": value}, {"a": torch.zeros(3)})
+    assert state_differs({"a": value}, {"a": torch.zeros(2, dtype=torch.float64)})
+    assert not state_differs({"a": value}, {"a": value.clone()})
+
+
+class _OtherDevice(Tensor):
+    """A CPU tensor reporting a different device, to reach the cross-device path."""
+
+    device = torch.device("meta")
+
+
+def test_equality_checks_compare_across_devices_on_cpu() -> None:
+    elsewhere = _OtherDevice(torch.tensor([1.0, 2.0]))
+    local = torch.tensor([1.0, 2.0])
+    assert elsewhere.device != local.device
+    _assert_equal(elsewhere, local, label="output")
+    assert not state_differs({"a": elsewhere}, {"a": local})
+
+
+def test_assert_equal_reports_non_tensor_shape_and_dtype_mismatches() -> None:
+    _assert_equal(3, 3, label="seed")
+    with pytest.raises(AssertionError, match="seed: non-tensor mismatch 3 vs 4"):
+        _assert_equal(3, 4, label="seed")
+    with pytest.raises(AssertionError, match=r"shape mismatch \(2,\) vs \(3,\)"):
+        _assert_equal(torch.zeros(2), torch.zeros(3), label="output")
+    with pytest.raises(
+        AssertionError,
+        match=r"dtype mismatch torch\.float32 vs torch\.float64",
+    ):
+        _assert_equal(
+            torch.zeros(2),
+            torch.zeros(2, dtype=torch.float64),
+            label="output",
+        )
+
+
+def test_module_device_falls_back_to_buffers_then_cpu() -> None:
+    buffered = nn.Module()
+    buffered.register_buffer("scale", torch.ones(1))
+    assert _module_device(buffered) == "cpu"
+    assert _module_device(nn.Module()) == "cpu"
+
+
+def test_upcast_and_downcast_recurse_into_tuples_and_pass_scalars() -> None:
+    narrow = torch.zeros(1, dtype=torch.bfloat16)
+    wide = torch.zeros(1, dtype=torch.float64)
+    up = cast(tuple[object, ...], _upcast((narrow, 2)))
+    assert cast(Tensor, up[0]).dtype == torch.float64
+    assert up[1] == 2
+    down = cast(list[object], _downcast_f64([wide, (wide, "x")]))
+    assert cast(Tensor, down[0]).dtype == torch.float32
+    pair = cast(tuple[object, ...], down[1])
+    assert cast(Tensor, pair[0]).dtype == torch.float32
+    assert pair[1] == "x"
+
+
+def test_downcast_result_reads_dtypes_from_tuple_arguments() -> None:
+    wide = torch.zeros(1, dtype=torch.float64)
+    half = torch.zeros(1, dtype=torch.float16)
+    result = cast(
+        list[object],
+        _downcast_result([wide, wide], ((half, half),), {}, torch.float32),
+    )
+    assert [cast(Tensor, value).dtype for value in result] == [torch.float16] * 2
+    assert (
+        cast(Tensor, _downcast_result(wide, (), {}, torch.float32)).dtype
+        == torch.float32
+    )
+
+
+def test_write_back_maps_a_listed_result_onto_the_original() -> None:
+    original = torch.zeros(2, dtype=torch.float32)
+    other = torch.ones(2, dtype=torch.float32)
+    computed = torch.full((2,), 0.5, dtype=torch.float64)
+    add_ = cast(_AtenInPlaceAdd, torch.ops.aten.add_).Tensor
+    returned = _write_back(
+        add_,
+        (original, other),
+        {},
+        (computed, other.double()),
+        {},
+        result=[computed],
+        target=torch.float32,
+    )
+    assert isinstance(returned, list)
+    assert returned[0] is original
+    assert torch.equal(original, torch.full((2,), 0.5))
+
+
 def test_bfb_files_do_not_use_typing_any() -> None:
     paths = [
         _THIS,
@@ -283,6 +438,127 @@ def test_bfb_rejects_non_cpu_module(
             golden_name="cuda_is_not_hermetic",
             build_module=_build_min_linear,
             build_input=_build_min_input,
+        )
+
+
+def test_bfb_rejects_non_cpu_module_on_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A golden minted on CPU is not replayed against a module elsewhere."""
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="linear_min",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+    )
+    monkeypatch.setattr(
+        "priml.testing.bfb._module_device",
+        _fake_cuda_module_device,
+    )
+
+    with pytest.raises(ValueError, match="CPU-only"):
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="linear_min",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+        )
+
+
+def test_explicit_regeneration_of_an_existing_golden_returns_normally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a MISSING golden stays red after minting; a remint is reviewed by diff."""
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="linear_min",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+    )
+    path = tmp_path / "linear_min.pt"
+    before = _loaded_golden(path)["state_dict"]
+    monkeypatch.setenv(_ENV_REGENERATE, "1")
+
+    assert_bfb_against_golden(
+        golden_dir=tmp_path,
+        golden_name="linear_min",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+    )
+
+    # The archive's internal name changes with the temp file; the payload does not.
+    assert not state_differs(_loaded_golden(path)["state_dict"], before)
+
+
+def test_default_runner_splats_a_tuple_input_and_requires_a_tensor(
+    tmp_path: Path,
+) -> None:
+    class TwoArgModule(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(3, 2)
+
+        @override
+        def forward(self, a: Tensor, b: Tensor) -> Tensor:
+            return self.lin(a) + b
+
+    def build_input() -> tuple[Tensor, Tensor]:
+        return (
+            torch.linspace(-1.0, 1.0, 6).reshape(2, 3),
+            torch.linspace(0.0, 1.0, 4).reshape(2, 2),
+        )
+
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="two_arg_tuple",
+        build_module=TwoArgModule,
+        build_input=build_input,
+    )
+    assert_bfb_against_golden(
+        golden_dir=tmp_path,
+        golden_name="two_arg_tuple",
+        build_module=TwoArgModule,
+        build_input=build_input,
+    )
+
+    class ListModule(nn.Module):
+        @override
+        def forward(self, a: Tensor) -> list[Tensor]:
+            return [a]
+
+    with pytest.raises(TypeError, match="returns a Tensor"):
+        regenerate_golden(
+            golden_dir=tmp_path,
+            golden_name="list_output",
+            build_module=ListModule,
+            build_input=_build_min_input,
+        )
+
+
+def test_bfb_reports_state_keys_added_by_the_run(tmp_path: Path) -> None:
+    """A runner that grows the state dict fails on the KEY set, not a value."""
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="linear_min",
+        build_module=_build_min_linear,
+        build_input=_build_min_input,
+    )
+
+    def growing_runner(module: nn.Module, inp: Tensor) -> Tensor:
+        output = cast(object, module(inp))
+        assert isinstance(output, Tensor)
+        module.register_buffer("extra", torch.zeros(1))
+        return output
+
+    with pytest.raises(AssertionError, match=r"added=\['extra'\] removed=\[\]"):
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="linear_min",
+            build_module=_build_min_linear,
+            build_input=_build_min_input,
+            run=growing_runner,
         )
 
 
@@ -1362,6 +1638,12 @@ class _AtenPacket(Protocol):
     """The typed slice of an Aten packet used by the divergence scan."""
 
     default: Callable[[Tensor], object]
+
+
+class _AtenInPlaceAdd(Protocol):
+    """The ``add_`` packet's tensor overload, whose schema marks ``self`` written."""
+
+    Tensor: OpOverload[..., object]
 
 
 def _f64_output_runner(module: nn.Module, inp: Tensor) -> Tensor:

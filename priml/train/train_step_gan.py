@@ -6,9 +6,8 @@ Uses train_step() for alternating discriminator/generator training.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import field
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
@@ -20,6 +19,10 @@ from priml.math.schedules import staircase
 from priml.model.special import Identity
 from priml.train.custom_types import TrainStepOutput
 from priml.train.train_step import TrainStep
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class GANTrainStep:

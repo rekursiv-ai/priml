@@ -26,18 +26,16 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.math.custom_types import TensorFn
-from priml.math.stats import PcaDecompose, pca_eigh
-from priml.model.conv import conv_cost
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
-    shared_rows,
     traffic,
-    with_rows,
 )
+from priml.math.custom_types import TensorFn
+from priml.math.stats import PcaDecompose, pca_eigh
+from priml.model.conv import conv_cost
 from priml.model.custom_types import (
     ActivationFn,
     ChannelsIn,
@@ -120,18 +118,17 @@ class ResidualBlock(nn.Module):
             """
             c_in, c_out = self.channels_in, self.channels_out
             image_size, grid = _block_grids(self.image_size, self.grid, seq_len=seq_len)
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = dtype
             strided = _grid(grid, kernel_size=3, stride=self.stride, padding=1)
-            rows_grid = _rows(rows, image_size=image_size, grid=grid)
             rows_strided = _rows(rows, image_size=image_size, grid=strided)
             at_input = (
                 cost(
                     BatchNorm2d.Config(c_in, elementwise_affine=True),
-                    seq_len=seq_len,
+                    seq_len=math.prod(grid),
                     batch_size=batch_size,
                     dtype=dtype,
-                    **with_rows(rows_grid, **kwargs),
+                    **kwargs,
                 )
                 + _activation_cost(self.activation, channels=c_in, dtype=dt)
                 + elementwise_cost(
@@ -147,10 +144,10 @@ class ResidualBlock(nn.Module):
                 _conv2d_cost(c_in, c_out, kernel_size=3, rows=rows_strided, dtype=dt)
                 + cost(
                     BatchNorm2d.Config(c_out, elementwise_affine=True),
-                    seq_len=seq_len,
+                    seq_len=math.prod(strided),
                     batch_size=batch_size,
                     dtype=dtype,
-                    **with_rows(rows_strided, **kwargs),
+                    **kwargs,
                 )
                 + _activation_cost(self.activation, channels=c_out, dtype=dt)
                 + _conv2d_cost(c_out, c_out, kernel_size=3, rows=rows_strided, dtype=dt)
@@ -483,16 +480,16 @@ class ConvBlock(nn.Module):
             """
             c_in, c_out = self.channels_in, self.channels_out
             image_size, grid = _block_grids(self.image_size, self.grid, seq_len=seq_len)
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             pooled_grid = _grid(grid, kernel_size=2, stride=2, padding=0)
             rows_grid = _rows(rows, image_size=image_size, grid=grid)
             rows_pooled = _rows(rows, image_size=image_size, grid=pooled_grid)
             norm_act = cost(
                 BatchNorm2d.Config(c_out),
-                seq_len=seq_len,
+                seq_len=math.prod(pooled_grid),
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(rows_pooled, **kwargs),
+                **kwargs,
             ) + _activation_cost(
                 self.activation,
                 channels=c_out,
@@ -623,11 +620,12 @@ class ScaledLinear(nn.Linear):
               cost: Per-row cost of this module.
 
             """
+            del kwargs
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 bias=self.bias,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=dtype,
             ) + elementwise_cost(
                 primal=self.channels_out,
@@ -740,7 +738,6 @@ class ResNet(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
             **kwargs: object,
@@ -752,13 +749,10 @@ class ResNet(nn.Module):
             times that count is one step's work. Each block is handed the grid
             it reads and prices itself per image position; a stride-2 block
             leaves ``ceil(size / 2)`` for the next. The pool and head run once
-            per image. This is the model root: ``seq_len`` is the
-            image's positions, which ``image_size`` fixes, so only
-            ``batch_size`` and ``dtype`` are read.
+            per image.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              batch_size: Images per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
@@ -766,11 +760,9 @@ class ResNet(nn.Module):
               cost: Per-image-position cost of this module.
 
             """
-            del seq_len
             image_size = self.image_size
             seq_len = math.prod(image_size)
             rows = seq_len * batch_size
-            batch = with_rows(rows, **kwargs)
             priced = _conv2d_cost(
                 self.channels_in,
                 self.channels_hidden[0],
@@ -788,33 +780,32 @@ class ResNet(nn.Module):
                         seq_len=seq_len,
                         batch_size=batch_size,
                         dtype=dtype,
-                        **batch,
+                        **kwargs,
                     )
                     grid = _grid(grid, kernel_size=3, stride=stride, padding=1)
             c_last = self.channels_hidden[-1]
-            rows_image = _rows(rows, image_size=image_size, grid=(1, 1))
             at_output = cost(
                 BatchNorm2d.Config(c_last, elementwise_affine=True),
-                seq_len=seq_len,
+                seq_len=math.prod(grid),
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(_rows(rows, image_size=image_size, grid=grid), **kwargs),
+                **kwargs,
             ) + _activation_cost(self.activation, channels=c_last, dtype=dtype)
             head = (
                 matmul_cost(
                     channels_in=c_last,
                     channels_out=self.channels_out,
                     bias=True,
-                    rows=rows_image,
+                    rows=batch_size,
                     dtype=dtype,
                 )
                 if self.proj_out is None
                 else cost(
                     self.proj_out,
-                    seq_len=seq_len,
+                    seq_len=1,
                     batch_size=batch_size,
                     dtype=dtype,
-                    **with_rows(rows_image, **kwargs),
+                    **kwargs,
                 )
             )
             return (
@@ -959,7 +950,6 @@ class SpeedNet(nn.Module):
         def cost(
             self,
             *,
-            seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
             **kwargs: object,
@@ -967,10 +957,8 @@ class SpeedNet(nn.Module):
             """Price whitening, every block at its grid, the final pool, and the head.
 
             A token is one position of the input image, ``image_size``, so a
-            step holds ``batch_size * height * width`` of them. This is the
-            model root: ``seq_len`` is the image's positions, which
-            ``image_size`` fixes, so only ``batch_size`` and ``dtype`` are
-            read. The unpadded whitening convolution shrinks the grid by
+            step holds ``batch_size * height * width`` of them. The unpadded
+            whitening convolution shrinks the grid by
             ``whiten_kernel - 1``; each block pools it by two; the final pool
             by three. Every layer is priced at its own grid and spread back
             over the image's positions.
@@ -980,8 +968,7 @@ class SpeedNet(nn.Module):
             primal's size, not the two a trainable layer pays.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              batch_size: Images per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
@@ -989,11 +976,9 @@ class SpeedNet(nn.Module):
               cost: Per-image-position cost of this module.
 
             """
-            del seq_len
             image_size = self.image_size
             seq_len = math.prod(image_size)
             rows = seq_len * batch_size
-            batch = with_rows(rows, **kwargs)
             grid = _grid(
                 image_size,
                 kernel_size=self.whiten_kernel,
@@ -1022,7 +1007,7 @@ class SpeedNet(nn.Module):
                     seq_len=seq_len,
                     batch_size=batch_size,
                     dtype=dtype,
-                    **batch,
+                    **kwargs,
                 )
                 grid = _grid(grid, kernel_size=2, stride=2, padding=0)
             grid = _grid(grid, kernel_size=3, stride=3, padding=0)
@@ -1032,10 +1017,10 @@ class SpeedNet(nn.Module):
                 dtype=dtype,
             ) + cost(
                 self.proj_out,
-                seq_len=seq_len,
+                seq_len=math.prod(grid),
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(_rows(rows, image_size=image_size, grid=grid), **kwargs),
+                **kwargs,
             )
             return priced + _per_image_position(tail, grid=grid, image_size=image_size)
 

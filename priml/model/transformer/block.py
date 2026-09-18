@@ -12,12 +12,12 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 import torch
 
-from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
 )
+from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     CachedAttention,
     ChannelsHead,

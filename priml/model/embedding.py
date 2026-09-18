@@ -11,10 +11,9 @@ from torch import nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     resolve_dtype,
-    shared_rows,
 )
 from priml.model.custom_types import DepthIndex, ShardStyle
 from priml.model.init import InitFn, call_init, truncated_normal
@@ -88,7 +87,8 @@ class Embedding(nn.Embedding):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = self.dtype if self.dtype is not None else resolve_dtype(dtype)
             index = torch.int64
             row = self.channels_out

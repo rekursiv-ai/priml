@@ -17,16 +17,14 @@ from torch.nn import functional as f
 
 import torch
 
-from priml.math.basic import ceil_multiple
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
     reduction_cost,
-    shared_rows,
-    with_rows,
 )
+from priml.math.basic import ceil_multiple
 from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
@@ -137,7 +135,7 @@ class GatedDeltaNet(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = dtype
             h = self.channels_in
             k_dim = self.num_heads_k * self.channels_k_head
@@ -252,10 +250,10 @@ class GatedDeltaNet(nn.Module):
             # The norm runs once per value head; its parameters exist once.
             norm = cost(
                 self.norm,
-                seq_len=seq_len,
+                seq_len=seq_len * self.num_heads_v,
                 batch_size=batch_size,
                 dtype=dtype,
-                **with_rows(rows * self.num_heads_v, **kwargs),
+                **kwargs,
             ).tile(
                 self.num_heads_v,
             )

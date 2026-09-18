@@ -74,6 +74,7 @@ def test_hashed_tables_cost_is_one_gather_per_hash_and_matches_torch() -> None:
         build_input=lambda: torch.randint(0, 17, (2, 5)),
         seq_len=10,
         batch_size=1,
+        num_tokens=10,
         dtype=None,
     )
     assert priced.params == 2 * 17 * 2
@@ -122,7 +123,6 @@ def test_ngram_cost_counts_padding_and_masked_prefix_copy() -> None:
         seq_len=8,
         batch_size=1,
         dtype=torch.bfloat16,
-        rows=8,
     )
     gather = 2 * 2
     shifted = (2 + 1 / 8) + (2 + 2 / 8)

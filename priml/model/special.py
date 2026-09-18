@@ -12,12 +12,11 @@ from torch.nn import functional
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
-    shared_rows,
 )
 from priml.model.custom_types import (
     TensorModule,
@@ -209,12 +208,13 @@ class TiedLinear(nn.Module, LateBound):
               cost: Per-token cost of this module.
 
             """
+            del kwargs
             return replace(
                 matmul_cost(
                     channels_in=self.channels_in,
                     channels_out=self.channels_out,
                     bias=False,
-                    rows=shared_rows(seq_len, batch_size, **kwargs),
+                    rows=seq_len * batch_size,
                     dtype=dtype,
                 ),
                 params=0,

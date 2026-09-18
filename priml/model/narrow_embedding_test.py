@@ -16,7 +16,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import Cost, cost
+from priml.cost import Cost, cost
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.testing.bfb import assert_bfb_against_golden
@@ -101,6 +101,7 @@ def test_narrow_embedding_cost_is_the_inner_gather() -> None:
         build_input=lambda: torch.randint(0, 8, (3,)),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
         run=_embed_float,
     )

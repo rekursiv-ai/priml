@@ -12,11 +12,11 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.math.pixel import patchify, unpatchify
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     traffic,
 )
+from priml.math.pixel import patchify, unpatchify
 
 
 class Patchify(nn.Module):

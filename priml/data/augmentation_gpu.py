@@ -40,12 +40,14 @@ def random_crop(images: Tensor, crop_size: int) -> Tensor:
 
     """
     B, C, H, W = images.shape
-    assert crop_size <= H, (
-        f"crop_size={crop_size} exceeds input height H={H}; pad before cropping."
-    )
-    assert crop_size <= W, (
-        f"crop_size={crop_size} exceeds input width W={W}; pad before cropping."
-    )
+    if crop_size > H:
+        raise ValueError(
+            f"crop_size={crop_size} exceeds input height H={H}; pad before cropping.",
+        )
+    if crop_size > W:
+        raise ValueError(
+            f"crop_size={crop_size} exceeds input width W={W}; pad before cropping.",
+        )
     pad = (H - crop_size) // 2
     dy = torch.randint(0, 2 * pad + 1, (B, 1, 1, 1), device=images.device)
     dx = torch.randint(0, 2 * pad + 1, (B, 1, 1, 1), device=images.device)

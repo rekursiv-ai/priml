@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
 
 import torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class BinaryAccuracy:

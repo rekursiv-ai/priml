@@ -48,7 +48,7 @@ def test_random_crop_content():
 def test_random_crop_rejects_oversized_crop():
     """crop_size larger than the input asserts instead of cropping garbage (M1)."""
     images = torch.randn(2, 3, 16, 16)
-    with pytest.raises(AssertionError, match="exceeds input height"):
+    with pytest.raises(ValueError, match="exceeds input height"):
         random_crop(images, 32)
 
 

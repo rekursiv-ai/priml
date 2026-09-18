@@ -569,7 +569,8 @@ class EMA:
         if self._pending_state is None:
             return
         pending, self._pending_state = self._pending_state, None
-        assert self.shadow_model is not None
+        if self.shadow_model is None:
+            raise ValueError("Expected self.shadow_model is not None.")
         self.shadow_model.load_state_dict(pending)
 
     def _copy_buffers(self, model: nn.Module) -> None:

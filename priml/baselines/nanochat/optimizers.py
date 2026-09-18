@@ -720,10 +720,10 @@ def _jit_kernel(function: Callable[..., None]) -> "triton.JITFunction[..., None]
 
 @lru_cache(maxsize=1)
 def _compiled_inactive_moment() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_inactive_moment_rows_kernel)
+    return _jit_kernel(_inactive_moment_rows_triton)
 
 
-def _inactive_moment_rows_kernel(
+def _inactive_moment_rows_triton(
     buffers: "tuple[language.tensor[language.pointer_type], ...]",
     n_rows: int,
     block: "language.constexpr",
@@ -752,10 +752,10 @@ def _inactive_moment_rows_kernel(
 
 @lru_cache(maxsize=1)
 def _compiled_sparse_rmsprop() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_sparse_rmsprop_rows_kernel)
+    return _jit_kernel(_sparse_rmsprop_rows_triton)
 
 
-def _sparse_rmsprop_rows_kernel(
+def _sparse_rmsprop_rows_triton(
     buffers: "tuple[language.tensor[language.pointer_type], ...]",
     n_cols: "language.constexpr",
     programs: "language.constexpr",

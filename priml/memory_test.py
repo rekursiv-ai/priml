@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from torch import Tensor
@@ -9,13 +10,16 @@ import pytest
 import torch
 
 from priml import memory
-from priml.math.custom_types import Tensorable
 from priml.memory import (
     convert_to_tensor,
     is_private_conversion,
     shares_storage,
     shares_storage_for_compile,
 )
+
+
+if TYPE_CHECKING:
+    from priml.math.custom_types import Tensorable
 
 
 _TRACE_ONLY = "eager"

@@ -26,9 +26,8 @@ move with the input, which the train step never sees.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import NotRequired, Self, TypedDict, cast, override
+from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
 import functools
 import logging
@@ -46,6 +45,10 @@ from priml.math.seed import salt
 from priml.paths import resolve_working_dir
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
 
 
 logger = logging.getLogger(__name__)

@@ -12,6 +12,7 @@ Two kinds of assertion, and the distinction matters:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -128,6 +129,21 @@ def test_experiment_binds_the_cifar10_step_and_dataset() -> None:
 
 def test_experiment_makes_a_train_loop() -> None:
     assert Cifar10TrainLoop.parent_class is TrainLoop
+
+
+class _StubFactory:
+    """Borrows the protocol's stub body, which must build nothing."""
+
+    __name__ = "exp_stub"
+    # The bare class, not ``ExperimentFactory[None]``: a subscripted generic is
+    # a ``_GenericAlias`` whose ``__call__`` instantiates the protocol.
+    __call__ = cast(Callable[[object], object], ExperimentFactory.__call__)
+
+
+def test_experiment_factory_stub_builds_nothing() -> None:
+    factory = _StubFactory()
+    assert factory.__name__ == "exp_stub"
+    assert factory() is None
 
 
 @pytest.mark.parametrize(

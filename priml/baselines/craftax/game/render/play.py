@@ -11,7 +11,6 @@ Both drive a batch of one. Watching sixty-four worlds at once shows nothing.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import imageio_ffmpeg
@@ -26,6 +25,8 @@ from priml.baselines.craftax.game.render.pixels import Renderer
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from torch import Tensor
 
     from priml.baselines.craftax.game.state import EnvState

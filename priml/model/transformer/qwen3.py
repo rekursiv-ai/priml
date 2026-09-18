@@ -28,11 +28,9 @@ Only the dense Qwen3 family is handled here; Qwen3-MoE is a follow-up.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import KW_ONLY, field
 from functools import partial
-from pathlib import Path
-from typing import Self, override
+from typing import TYPE_CHECKING, Self, override
 
 from configgle import Makeable, Makes
 from torch import Tensor, nn
@@ -57,6 +55,11 @@ from priml.model.special import TiedLinear
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer, head_is_tied
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
 
 
 # Read off the BLOCK rather than a parent mirror of it: the geometry lives where the

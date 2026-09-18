@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest import mock
 
 from torch import Tensor
@@ -11,8 +12,11 @@ import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game import constants, observation, world_gen
-from priml.baselines.craftax.game.state import EnvState
 from priml.data.environment import BatchedEnvironmentProtocol
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 pytestmark = pytest.mark.compute_large_fixture
@@ -312,6 +316,13 @@ def test_an_empty_batch_is_refused() -> None:
     config = CraftaxEnv.Config()
     config.num_envs = 0
     with pytest.raises(ValueError, match="positive"):
+        config.make()
+
+
+def test_an_empty_view_is_refused() -> None:
+    config = CraftaxEnv.Config()
+    config.view = (0, 11)
+    with pytest.raises(ValueError, match="view"):
         config.make()
 
 

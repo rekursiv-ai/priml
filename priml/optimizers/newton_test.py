@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from configgle import Fig, PartialConfig
 from torch import Tensor, nn
@@ -11,11 +10,16 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.loss.custom_types import LossOutput
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.optimizers.newton import Newton
 from priml.train.parallelism import NoParallel
 from priml.train.train_step import TrainStep
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from priml.loss.custom_types import LossOutput
 
 
 def _binary_cross_entropy_with_logits(
@@ -106,6 +110,53 @@ def test_newton_logistic_regression():
     metrics = metric.compute()
     accuracy = metrics["accuracy"]
     assert accuracy > 0.98, f"Accuracy should be > 98%, got {accuracy}"
+
+
+def test_step_without_a_closure_is_a_caller_error() -> None:
+    optimizer = Newton([nn.Parameter(torch.zeros(2))])
+    with pytest.raises(ValueError, match="requires a loss-recomputing closure"):
+        optimizer.step()
+
+
+def test_step_rejects_a_closure_returning_a_bare_float() -> None:
+    optimizer = Newton([nn.Parameter(torch.zeros(2))])
+    with pytest.raises(TypeError, match="got float"):
+        optimizer.step(lambda: 1.0)
+
+
+def test_singular_hessian_falls_back_to_gradient_descent() -> None:
+    """``(p0 + p1)^2`` has the rank-1 Hessian ``[[2, 2], [2, 2]]``.
+
+    With no damping the solve is singular, so the step is plain descent.
+    """
+    param = nn.Parameter(torch.tensor([1.0, -2.0], dtype=torch.float64))
+    optimizer = Newton([param], lr=0.5, damping=0.0)
+
+    optimizer.step(lambda: param.sum() ** 2)
+
+    # ``grad = 2 (p0 + p1) [1, 1] = [-2, -2]``; ``delta = -grad``; ``p += lr delta``.
+    torch.testing.assert_close(
+        param.detach(),
+        torch.tensor([2.0, -1.0], dtype=torch.float64),
+    )
+
+
+def test_step_returns_the_loss_it_differentiated() -> None:
+    param = nn.Parameter(torch.tensor([2.0]))
+
+    def closure() -> Tensor:
+        return (param**2).sum()
+
+    loss = Newton([param], lr=1.0).step(closure)
+    assert isinstance(loss, Tensor)
+    assert loss.item() == pytest.approx(4.0)
+
+
+def test_step_with_no_parameter_groups_raises() -> None:
+    optimizer = Newton([nn.Parameter(torch.zeros(1))])
+    optimizer.param_groups.clear()
+    with pytest.raises(RuntimeError, match="at least one parameter group"):
+        optimizer.step(lambda: torch.zeros(()))
 
 
 def test_newton_rejects_dtensor_params(tmp_path: Path) -> None:

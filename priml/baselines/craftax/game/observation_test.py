@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from torch import Tensor
 
@@ -18,6 +17,10 @@ from priml.baselines.craftax.conftest import (
 from priml.baselines.craftax.game import constants, observation
 from priml.baselines.craftax.game.constants import Action, BlockType, ItemType
 from priml.baselines.craftax.game.state import EnvState, Mobs, empty_state
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 pytestmark = pytest.mark.usefixtures("warm_reference")

@@ -7,8 +7,7 @@ later, so each is compared elementwise against the reference package.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from torch import Tensor
 
@@ -21,6 +20,10 @@ from priml.baselines.craftax.conftest import (
     requires_craftax,
 )
 from priml.baselines.craftax.game import constants
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 pytestmark = pytest.mark.usefixtures("warm_reference")

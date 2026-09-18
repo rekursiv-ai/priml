@@ -8,13 +8,16 @@ it did before one -- which is what the global/local split below is for.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Self, TypedDict, cast
+from typing import TYPE_CHECKING, Self, TypedDict, cast
 
 import time
 
 from priml.lib.custom_json import FloatCodec, IntCodec
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 __all__ = [
@@ -87,7 +90,8 @@ class CheckpointableStepTimer:
         misreport the very step being debugged.
         """
         del exc_info
-        assert self._started is not None
+        if self._started is None:
+            raise ValueError("Expected self._started is not None.")
         elapsed = time.perf_counter() - self._started
         self._started = None
         self.global_count += 1

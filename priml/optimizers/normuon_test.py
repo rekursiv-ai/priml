@@ -10,6 +10,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.optimizers import normuon
 from priml.optimizers.normuon import NorMuon
 
 
@@ -206,6 +207,65 @@ def test_config_builds_a_constructor_awaiting_parameters() -> None:
     build = NorMuon.Config(lr=0.5, compile=False).make()
     optimizer = build(_parameters((4, 4)))
     assert optimizer.param_groups[0]["lr"] == 0.5
+
+
+def test_a_tall_matrix_orthogonalizes_over_its_shorter_side() -> None:
+    """A tall update is orthogonal along its columns, its only full-rank side.
+
+    Its singular values sit at ``sqrt(rows / cols)`` rather than one: the step
+    is scaled up so a tall matrix's per-element magnitude matches a square one.
+    """
+    params = _parameters((16, 8))
+    before = params[0].detach().clone()
+    NorMuon(params, lr=1.0, momentum=0.0, weight_decay=0.0, compile=False).step()
+    update = before - params[0].detach()
+    singular = torch.linalg.svdvals(update) / (16 / 8) ** 0.5
+    assert singular.shape == (8,)
+    assert float(singular.min()) > 0.7
+    assert float(singular.max()) < 1.4
+
+
+def test_step_evaluates_and_returns_the_closure() -> None:
+    params = _parameters((4, 4))
+    calls: list[int] = []
+
+    def closure() -> float:
+        calls.append(1)
+        return 2.5
+
+    loss = NorMuon(params, momentum=0.0, compile=False).step(closure)
+    assert loss == 2.5
+    assert calls == [1]
+
+
+def test_a_parameter_without_a_gradient_is_left_alone() -> None:
+    params = _parameters((4, 4), (4, 4))
+    params[1].grad = None
+    before = params[1].detach().clone()
+    NorMuon(params, lr=0.1, momentum=0.0, compile=False).step()
+    assert torch.equal(params[1].detach(), before)
+    assert not torch.equal(params[0].detach(), before)
+
+
+def test_compile_is_on_by_default_and_wraps_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reference compiles; matching its numerics means issuing that graph."""
+    compiled: list[object] = []
+
+    def fake_compile(fn: object, *, dynamic: bool) -> object:
+        compiled.append((fn, dynamic))
+        return fn
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    normuon._compiled_update.cache_clear()
+    try:
+        assert NorMuon.Config().compile is True
+        optimizer = NorMuon(_parameters((4, 4)))
+        assert compiled == [(normuon._normuon_update, False)]
+        assert optimizer._update is normuon._normuon_update
+    finally:
+        normuon._compiled_update.cache_clear()
 
 
 def test_a_prefix_of_the_coefficients_is_a_shorter_iteration() -> None:

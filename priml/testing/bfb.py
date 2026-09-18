@@ -106,7 +106,6 @@ Cross-implementation parity (loop vs HuggingFace, rewrite vs reference):
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,6 +132,8 @@ from priml.lib.custom_json import ListCodec
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Mapping, Sequence
+
     from torch._ops import OpOverload
 
 

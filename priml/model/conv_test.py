@@ -133,6 +133,7 @@ def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
         build_input=lambda: torch.randn(1, 2, 4, 6, requires_grad=True),
         seq_len=4 * 6,
         batch_size=1,
+        num_tokens=4 * 6,
         dtype=None,
     )
     weights = 3 * 2 * 15
@@ -155,6 +156,7 @@ def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
         build_input=lambda: torch.randn(1, 4, 7, requires_grad=True),
         seq_len=7,
         batch_size=1,
+        num_tokens=7,
         dtype=None,
         expected_ratio=0.75,
     )
@@ -172,6 +174,7 @@ def test_conv3d_cost_cubes_a_scalar_kernel() -> None:
         build_input=lambda: torch.randn(1, 2, 3, 4, 5, requires_grad=True),
         seq_len=3 * 4 * 5,
         batch_size=1,
+        num_tokens=3 * 4 * 5,
         dtype=None,
     )
     assert analytical["flops", "primal", "matmul"].sum() == 2 * 3 * 2 * 27

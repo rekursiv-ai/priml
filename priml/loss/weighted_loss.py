@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import field
 from typing import TYPE_CHECKING, cast, override
 
@@ -11,15 +11,17 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.loss.custom_types import LossOutput
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     traffic,
 )
+from priml.loss.custom_types import LossOutput
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     LossFn = Callable[..., LossOutput | Tensor]
 
 

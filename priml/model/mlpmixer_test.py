@@ -11,7 +11,7 @@ from configgle.testing import assert_pprint_golden
 import pytest
 import torch
 
-from priml.model.cost import cost
+from priml.cost import cost
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
@@ -85,15 +85,16 @@ def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
         build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
         seq_len=2,
         batch_size=1,
+        num_tokens=2,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
     over_tokens = cost(
         finalized.token_mixer,
-        seq_len=2,
+        seq_len=4,
         batch_size=1,
         dtype=None,
-    ) + cost(finalized.norm_token, seq_len=2, batch_size=1, dtype=None)
+    ) + cost(finalized.norm_token, seq_len=4, batch_size=1, dtype=None)
     over_channels = cost(
         finalized.channel_mixer,
         seq_len=2,
@@ -124,12 +125,12 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
     config.norm_token = RMSNorm.Config()
     config.norm_token.elementwise_affine = True
     finalized = config.finalize()
-    result = finalized.cost(seq_len=6, batch_size=1, dtype=torch.bfloat16)
-    token = cost(finalized.token_mixer, seq_len=12, batch_size=1, dtype=torch.bfloat16)
+    result = finalized.cost(seq_len=2, batch_size=3, dtype=torch.bfloat16)
+    token = cost(finalized.token_mixer, seq_len=4, batch_size=3, dtype=torch.bfloat16)
     channel = cost(
         finalized.channel_mixer,
-        seq_len=6,
-        batch_size=1,
+        seq_len=2,
+        batch_size=3,
         dtype=torch.bfloat16,
     )
     assert (
@@ -144,14 +145,14 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
     )
     norm_token = cost(
         finalized.norm_token,
-        seq_len=12,
-        batch_size=1,
+        seq_len=4,
+        batch_size=3,
         dtype=torch.bfloat16,
     )
     norm_channel = cost(
         finalized.norm_channel,
-        seq_len=6,
-        batch_size=1,
+        seq_len=2,
+        batch_size=3,
         dtype=torch.bfloat16,
     )
     assert (
@@ -159,6 +160,8 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
         == 2 * norm_token["flops", "adjoint", "reduction"].sum()
         + norm_channel["flops", "adjoint", "reduction"].sum()
     )
+    with pytest.raises(ValueError, match="mixes 2 tokens; priced at 3"):
+        finalized.cost(seq_len=3, batch_size=1, dtype=None)
 
 
 if __name__ == "__main__":

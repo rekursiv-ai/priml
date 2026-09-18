@@ -307,6 +307,7 @@ def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
         build_input=lambda: (torch.randn(3, 8, requires_grad=True), torch.randn(3, 8)),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
         run=lambda module, inputs: cast(Qwen35RMSNormGated, module)(
             inputs[0],
@@ -314,7 +315,7 @@ def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
         ),
     )
     assert model_cost.params == 8
-    assert model_cost["flops", :, "matmul"].sum() == 0
+    assert model_cost["flops", "matmul"].sum() == 0
     assert model_cost["flops", "primal", "elementwise"].sum() == 9 * 8 + 3
     assert model_cost["flops", "adjoint", "elementwise"].sum() == 13 * 8 + 4
     assert model_cost["flops", "primal", "reduction"].sum() == 8 - 1
@@ -331,8 +332,7 @@ def test_delta_norm_traffic_counts_row_reductions() -> None:
     assert small["bytes", "primal", "reduction"].sum() == 2 * (8 + 1)
     assert small["bytes", "adjoint", "reduction"].sum() == 2 * (8 + 1 + 8 + 8 / 4)
     assert (
-        large["bytes", :, :, torch.float32].sum()
-        == small["bytes", :, :, torch.bfloat16].sum() * 2
+        large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
     norm = RMSNorm.Config(8)
     norm.elementwise_affine = True
@@ -378,7 +378,7 @@ def test_qwen_delta_cost_does_not_repeat_the_norm_owned_output_gate() -> None:
         == 7 * 6
     )
     assert reference.params == actual.params
-    assert reference["flops", :, "matmul"].sum() == actual["flops", :, "matmul"].sum()
+    assert reference["flops", "matmul"].sum() == actual["flops", "matmul"].sum()
 
 
 def _is_tensor_cache(value: object) -> TypeGuard[dict[str, torch.Tensor]]:

@@ -13,9 +13,8 @@ policy must never read them.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -25,6 +24,10 @@ import torch
 from priml.baselines.craftax.game import constants, observation, step, world_gen
 from priml.baselines.craftax.game.state import EnvState
 from priml.runtime import get_device
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

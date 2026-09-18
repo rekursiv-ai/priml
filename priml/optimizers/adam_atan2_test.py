@@ -7,6 +7,7 @@ from typing import Final, TypedDict, cast
 
 from torch import Tensor
 
+import pytest
 import torch
 
 from priml.optimizers.adam_atan2 import AdamATan2
@@ -80,6 +81,51 @@ def test_adam_atan2_matches_external_package_golden() -> None:
         param.grad = grad.clone()
         opt.step()
     assert torch.equal(param, golden["expected_param"])
+
+
+def test_config_builds_a_constructor_awaiting_parameters() -> None:
+    build = AdamATan2.Config(lr=0.5, betas=(0.8, 0.9), weight_decay=0.0).make()
+    optimizer = build([torch.zeros(2)])
+    group = optimizer.param_groups[0]
+    assert group["lr"] == 0.5
+    assert group["betas"] == (0.8, 0.9)
+    assert group["weight_decay"] == 0.0
+
+
+def test_finalized_config_is_not_finalized_twice() -> None:
+    optimizer = AdamATan2.Config(lr=0.5).finalize().make()([torch.zeros(2)])
+    assert optimizer.param_groups[0]["lr"] == 0.5
+
+
+def test_invalid_hyperparameters_are_rejected() -> None:
+    p = torch.zeros(2)
+    with pytest.raises(ValueError, match="Invalid learning rate"):
+        AdamATan2([p], lr=-1.0)
+    with pytest.raises(ValueError, match="Invalid betas"):
+        AdamATan2([p], betas=(0.9, 1.0))
+    with pytest.raises(ValueError, match="Invalid weight_decay"):
+        AdamATan2([p], weight_decay=-1.0)
+
+
+def test_step_evaluates_and_returns_the_closure() -> None:
+    p = torch.nn.Parameter(torch.zeros(2))
+    p.grad = torch.ones(2)
+    calls: list[int] = []
+
+    def closure() -> float:
+        calls.append(1)
+        return 3.0
+
+    assert AdamATan2([p]).step(closure) == 3.0
+    assert calls == [1]
+
+
+def test_params_without_gradient_are_skipped() -> None:
+    p = torch.nn.Parameter(torch.ones(2))
+    optimizer = AdamATan2([p], weight_decay=0.5)
+    optimizer.step()
+    torch.testing.assert_close(p, torch.ones(2))
+    assert len(optimizer.state) == 0
 
 
 def _reference_step(

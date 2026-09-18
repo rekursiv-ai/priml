@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -38,6 +37,8 @@ from priml.timer import CheckpointableStepTimer
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
+
     from pyarrow import parquet
 
     import tiktoken
@@ -698,7 +699,8 @@ class PackedTokenStream:
                 training=self.max_batches is None,
             )
             return
-        assert self.tokenizer is not None
+        if self.tokenizer is None:
+            raise ValueError("Expected self.tokenizer is not None.")
         rows = self.max_seq_len + 1
         documents = _document_batches(self.paths)
         buffer: list[list[int]] = []

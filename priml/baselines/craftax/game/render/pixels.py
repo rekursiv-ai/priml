@@ -14,7 +14,6 @@ Darkness, night, and sleep dim it exactly as they dim the observation.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import os
@@ -28,6 +27,8 @@ from priml.baselines.craftax.game.render import assets, sprites
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from priml.baselines.craftax.game.state import EnvState, Mobs
 
 

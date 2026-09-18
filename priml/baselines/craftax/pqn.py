@@ -37,14 +37,13 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
     resolve_dtype,
     traffic,
-    with_rows,
 )
 from priml.model.norm import BatchRenorm, LayerNorm
 
@@ -114,7 +113,7 @@ class RecurrentQNetwork(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            batch = with_rows(seq_len * batch_size, **kwargs)
+            batch = kwargs
             rows = seq_len * batch_size
             dt = dtype
             width, actions = self.channels_in, self.num_actions

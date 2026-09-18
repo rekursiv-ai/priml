@@ -19,11 +19,12 @@ which is what lets a rollout keep a rectangular shape.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from torch import Tensor
 
 

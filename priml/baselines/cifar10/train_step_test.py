@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Final, Literal, cast, override
+from typing import TYPE_CHECKING, Final, Literal, cast, override
 
 import math
 
@@ -29,6 +28,10 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.timer import CheckpointableStepTimer
 from priml.train.custom_types import OptimizerProtocol
 from priml.train.parallelism import NoParallel
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent

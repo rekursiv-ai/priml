@@ -36,6 +36,81 @@ uv add priml
 - **data** -- the data pipeline and dataset utilities.
 - **inference** -- inference helpers.
 
+### Computational Cost
+
+Priml has rich support for understanding where compute is (theoretically) being
+spent.
+
+For example,
+
+```python
+from priml import cost as theoretical
+from priml.baselines.sudoku import experiments as sudoku
+
+sudoku.exp000().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16)
+#   Cost(params=6841858, params_active=6824450, bytes_state=8192)
+#                        flops flops  bytes bytes
+#                         bf16 int64   bf16 int64 intensity
+#   primal  matmul      27.94M     - 102.7K     -       272
+#   primal  elementwise 62.13K     -   175K     -    0.3551
+#   primal  reduction   9.208K     -  18.7K     -    0.4923
+#   primal  selection        -     - 2.144K 8.375         -
+#   adjoint matmul      55.88M     - 205.4K     -       272
+#   adjoint elementwise 75.94K     - 280.5K     -    0.2708
+#   adjoint reduction   7.152K     -  14.5K     -    0.4934
+#   adjoint selection      536     - 3.224K 8.375    0.1658
+#   total               83.97M     - 802.1K 16.75     104.7
+
+sudoku.exp001().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16)
+#   Cost(params=4869122, params_active=4851714, bytes_state=0)
+#                        flops flops  bytes bytes
+#                         bf16 int64   bf16 int64 intensity
+#   primal  matmul      22.03M     - 96.88K     -     227.4
+#   primal  elementwise   116K     - 375.4K     -    0.3089
+#   primal  reduction   16.65K     - 33.54K     -    0.4965
+#   primal  selection        -     - 2.144K 8.375         -
+#   adjoint matmul      44.06M     - 193.8K     -     227.4
+#   adjoint elementwise 161.6K     -   750K     -    0.2154
+#   adjoint reduction   17.16K     - 34.58K     -    0.4962
+#   adjoint selection      536     - 3.224K 8.375    0.1658
+#   total               66.41M     -  1.49M 16.75     44.58
+
+theoretical.peak()["rtx5090", torch.bfloat16]
+#   Cost(params=0, params_active=0, bytes_state=0)
+#                flops  bytes intensity
+#   matmul      209.5T 1.792T     116.9
+#   elementwise 104.8T 1.792T     58.48
+#   reduction   104.8T 1.792T     58.48
+#   selection   104.8T 1.792T     58.48
+#   sort        104.8T 1.792T     58.48
+
+theoretical.peak()["h100", torch.bfloat16]
+#   Cost(params=0, params_active=0, bytes_state=0)
+#               flops bytes intensity
+#   matmul       989T 3.35T     295.2
+#   elementwise   67T 3.35T        20
+#   reduction     67T 3.35T        20
+#   selection     67T 3.35T        20
+#   sort          67T 3.35T        20
+```
+
+Notice that `272/295.2-1=-.078591` i.e. `exp000` (Transformer) is within 8% of
+optimal arithmetic intensity for an H100 versus `exp001` (MLP Mixer) which is
+`227.4/295.2-1=-.229675` or 23% suboptimal.
+
+The reason for the different intensity: the MLP Mixer is about 28% smaller and
+therefore sees about this much fewer flops. However note that the bytes
+transferred is only 5% smaller for MLP mixer, ie, while its a smaller model it
+still places about the same load on the memory bus. This is why MLP mixers are
+not as "intensity efficient" as transformers. Ie, the params/bytes_moved shakes
+out as:
+- transformer: `6841858 / 205.4K = 33.309922`
+- mlpmixer:    `4869122 / 193.8K = 25.124468`
+
+Meaning: in terms of memory transfer the transformer is getting ~33% better
+deal on parameters per bus access.
+
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local validation and the public
@@ -58,7 +133,7 @@ If you find our work useful, please consider citing:
 
 ```bibtex
 @misc{rekursivai2026priml,
-      title={Priml - ML building blocks for training experiments.},
+      title={Priml - Strongly typed configurable building blocks for A/B testing ML research.}
       author={Joshua V. Dillon and Dan Kondratyuk},
       year={2026},
       howpublished={Github},

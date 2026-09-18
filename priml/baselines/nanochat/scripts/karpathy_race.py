@@ -87,9 +87,8 @@ See Also:
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import json
@@ -104,6 +103,10 @@ from torch import Tensor
 import torch
 
 from priml.model.attention.value_gated_attention import sdpa_attention
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def their_attention(
@@ -127,8 +130,10 @@ def their_attention(
       out: Attention output, same shape as ``q``.
 
     """
-    assert causal, "the recipe attends causally"
-    assert window_size[1] == 0, f"unexpected future window {window_size[1]}"
+    if not causal:
+        raise ValueError("the recipe attends causally")
+    if window_size[1] != 0:
+        raise ValueError(f"unexpected future window {window_size[1]}")
     return sdpa_attention(q, k, v, window=window_size[0])
 
 
@@ -311,7 +316,8 @@ def _kernels_stub() -> _KernelModule:
     module = cast(_KernelModule, types.ModuleType("kernels"))
 
     def get_kernel(name: str) -> _Kernel:
-        assert "flash-attention-3" in name, name
+        if "flash-attention-3" not in name:
+            raise ValueError(name)
         return cast(
             _Kernel,
             types.SimpleNamespace(

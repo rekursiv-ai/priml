@@ -11,18 +11,16 @@ from torch.distributed.tensor import DTensor
 
 import torch
 
-from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
-from priml.model.attention.kvcache import KVCache
-from priml.model.attention.rope import RoPE, rotation_cost
-from priml.model.attention.window import causal_chunk_mask
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     matmul_cost,
     resolve_dtype,
-    shared_rows,
-    with_rows,
 )
+from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
+from priml.model.attention.kvcache import KVCache
+from priml.model.attention.rope import RoPE, rotation_cost
+from priml.model.attention.window import causal_chunk_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -148,7 +146,7 @@ class AttentionProjections(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = dtype
             inner = self.num_heads * self.channels_head
             projection_heads = (
@@ -186,10 +184,10 @@ class AttentionProjections(nn.Module):
                 for head_rows in groups:
                     total += cost(
                         self.norm_qk,
-                        seq_len=seq_len,
+                        seq_len=seq_len * head_rows,
                         batch_size=batch_size,
                         dtype=dtype,
-                        **with_rows(rows * head_rows, **kwargs),
+                        **kwargs,
                     ).tile(head_rows)
             if self.norm_out is not None:
                 total += cost(
@@ -547,7 +545,8 @@ class SelfAttention(AttentionProjections):
             attn_mask=attn_mask,
             **kwargs,
         )
-        assert updated is not None
+        if updated is None:
+            raise ValueError("Expected updated is not None.")
         return out, updated
 
     def _forward(

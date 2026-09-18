@@ -12,13 +12,13 @@ from torch.utils.flop_counter import FlopCounterMode
 import pytest
 import torch
 
+from priml.cost import Cost
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
     attention_kernel_cost,
 )
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
-from priml.model.cost import Cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 
 
@@ -191,12 +191,12 @@ def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None
         window=window,
     )
     assert (
-        large["bytes", "primal", :, torch.float32].sum()
-        == small["bytes", "primal", :, torch.bfloat16].sum() * 2
+        large["bytes", "primal", torch.float32].sum()
+        == small["bytes", "primal", torch.bfloat16].sum() * 2
     )
     assert (
-        large["bytes", "adjoint", :, torch.float32].sum()
-        == small["bytes", "adjoint", :, torch.bfloat16].sum() * 2
+        large["bytes", "adjoint", torch.float32].sum()
+        == small["bytes", "adjoint", torch.bfloat16].sum() * 2
     )
     assert small["bytes", "primal", "matmul"].sum() == 2 * 2 * (
         4 * 4 + 2 * (4 if window == 4 else 8)
@@ -229,10 +229,9 @@ def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
     large = mixed.cost(seq_len=4, batch_size=1, dtype=None)
     # Positions stay int64 at either width; every payload cell doubles.
     assert (
-        large["bytes", :, :, torch.float32].sum()
-        == small["bytes", :, :, torch.bfloat16].sum() * 2
+        large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
-    assert large["bytes", :, :, torch.int64] == small["bytes", :, :, torch.int64]
+    assert large["bytes", torch.int64] == small["bytes", torch.int64]
 
 
 def test_naive_kernel_cost_matches_torch() -> None:
@@ -254,7 +253,7 @@ def test_naive_kernel_cost_matches_torch() -> None:
         num_heads=2,
         channels_head=4,
     )
-    assert analytical["flops", :, "matmul"].sum() * 8 == counter.get_total_flops()
+    assert analytical["flops", "matmul"].sum() * 8 == counter.get_total_flops()
     assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 4 * 8
 
 

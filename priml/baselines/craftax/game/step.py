@@ -12,6 +12,8 @@ what makes sleeping a real commitment.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 
 import torch
@@ -28,7 +30,10 @@ from priml.baselines.craftax.game import (
 )
 from priml.baselines.craftax.game.constants import Achievement, Action, ItemType
 from priml.baselines.craftax.game.indexing import gather_tiles
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 def step(

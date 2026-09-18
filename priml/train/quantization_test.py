@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from importlib.machinery import ModuleSpec
+
 import dataclasses
+import importlib.util
 
 from torch import Tensor, nn
 from torchao.float8.float8_linear import Float8Linear
@@ -79,6 +82,54 @@ def test_fsdp_all_gather_uses_dataclass_replace() -> None:
 
     assert dataclasses.is_dataclass(quant.float8_config)
     assert quant.float8_config.enable_fsdp_float8_all_gather is True
+
+
+def test_unknown_recipe_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
+    with pytest.raises(ValueError, match="Invalid recipe 'blockwise'"):
+        Float8ModelQuantization.Config(recipe="blockwise").make()
+
+
+def test_fsdp_all_gather_requires_tensorwise_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(quantization, "_check_float8_available", lambda: (True, ""))
+    with pytest.raises(ValueError, match="only works with recipe='tensorwise'"):
+        Float8ModelQuantization.Config(
+            recipe="rowwise",
+            enable_fsdp_float8_all_gather=True,
+        ).make()
+
+
+def test_availability_reports_missing_torchao(monkeypatch: pytest.MonkeyPatch) -> None:
+    def find_spec(name: str) -> ModuleSpec | None:
+        return None if name == "torchao" else ModuleSpec(name, None)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    assert _check_float8_available() == (False, "torchao not installed")
+
+
+def test_availability_reports_missing_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert _check_float8_available() == (False, "CUDA not available")
+
+
+def test_availability_reports_old_compute_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0))
+    available, reason = _check_float8_available()
+    assert available is False
+    assert reason == "Float8 requires SM89+ (H100, 5090). Found SM80"
+
+
+def test_availability_accepts_hopper_class_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+    assert _check_float8_available() == (True, "")
 
 
 def test_float8_linear_forward_keeps_autocast_enabled(

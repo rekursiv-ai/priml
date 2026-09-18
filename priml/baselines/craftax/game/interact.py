@@ -12,6 +12,8 @@ opens up.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 
 import torch
@@ -26,7 +28,10 @@ from priml.baselines.craftax.game.indexing import (
     gather_tiles,
     scatter_tiles_where,
 )
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 def interact(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -10,6 +9,8 @@ import copy
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
     from torch import nn
 
 

@@ -234,6 +234,17 @@ def test_view_mismatch_is_rejected_at_the_actor_boundary() -> None:
 
 
 @pytest.mark.compute_large_fixture
+def test_device_mismatch_is_rejected_at_the_actor_boundary() -> None:
+    # A device object needs no backend to construct, so the mismatch is
+    # checkable on a CPU-only host.
+    actor = _actor()
+    actor.device = torch.device("meta")
+
+    with pytest.raises(ValueError, match="device"):
+        _score(steps=1).update(torch.zeros(2, 43), actor=actor)
+
+
+@pytest.mark.compute_large_fixture
 def test_evaluation_switches_model_mode_once_per_rollout() -> None:
     score = _score(steps=5)
     actor = _actor()

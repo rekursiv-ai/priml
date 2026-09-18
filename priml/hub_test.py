@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
@@ -23,12 +22,16 @@ from priml import hub
 from priml.hub import (
     get_cache_dir,
     load_hf_checkpoint,
+    load_local_state_dict,
     load_transformers_model,
+    resolve_hf_dtype,
 )
 from priml.lib.userdirs import cache_dir
 
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from safetensors.torch import save_file
 else:
     from wrapt import lazy_import
@@ -261,6 +264,58 @@ def test_load_transformers_model_cache_miss_falls_back_online() -> None:
     second_kwargs = mock_auto_model.from_pretrained.call_args_list[1].kwargs
     assert first_kwargs["local_files_only"] is True
     assert second_kwargs["local_files_only"] is False
+
+
+def test_load_transformers_model_force_redownload_skips_the_cache() -> None:
+    mock_model = MagicMock()
+    mock_auto_model = MagicMock()
+    mock_auto_model.from_pretrained.return_value = mock_model
+
+    with _mock_transformers(mock_auto_model):
+        model = load_transformers_model(
+            "test/model",
+            "AutoModel",
+            force_redownload=True,
+        )
+
+    assert model == mock_model
+    mock_auto_model.from_pretrained.assert_called_once()
+    call_kwargs = mock_auto_model.from_pretrained.call_args.kwargs
+    assert call_kwargs["local_files_only"] is False
+    assert call_kwargs["force_download"] is True
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("bfloat16", torch.bfloat16),
+        ("float16", torch.float16),
+        ("float32", torch.float32),
+        ("int8", torch.float32),
+    ],
+)
+def test_resolve_hf_dtype_maps_names_and_defaults_to_float32(
+    name: str,
+    expected: torch.dtype,
+) -> None:
+    assert resolve_hf_dtype(name) == expected
+
+
+def test_load_local_state_dict_merges_pytorch_shards(tmp_path: Path) -> None:
+    torch.save({"a": torch.ones(1)}, tmp_path / "pytorch_model-00001-of-00002.bin")
+    torch.save({"b": torch.zeros(2)}, tmp_path / "pytorch_model-00002-of-00002.bin")
+
+    state_dict = load_local_state_dict(tmp_path)
+
+    assert set(state_dict) == {"a", "b"}
+    torch.testing.assert_close(state_dict["b"], torch.zeros(2))
+
+
+def test_load_local_state_dict_rejects_a_directory_without_weights(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FileNotFoundError, match="No safetensors or pytorch_model"):
+        load_local_state_dict(tmp_path)
 
 
 def test_load_hf_checkpoint_reads_a_local_safetensors_directory(

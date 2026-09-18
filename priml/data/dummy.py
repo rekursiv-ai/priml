@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 
 from configgle import Fig
 from torch import Tensor
@@ -13,6 +12,10 @@ import torch
 
 from priml.runtime import get_device
 from priml.timer import CheckpointableStepTimer
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class DummyDataset:

@@ -375,6 +375,7 @@ def test_the_cost_matches_torch_on_a_step() -> None:
         ),
         seq_len=1,
         batch_size=3,
+        num_tokens=1 * 3,
         dtype=None,
         run=_stepped,
     )
@@ -411,6 +412,7 @@ def test_the_cost_matches_torch_on_a_gradient_window() -> None:
         ),
         seq_len=4,
         batch_size=2,
+        num_tokens=4 * 2,
         dtype=None,
         run=_sequenced,
     )
@@ -423,8 +425,7 @@ def test_cost_accounts_for_attention_operand_bytes_and_dtype() -> None:
     assert narrow.bytes_state == 2 * 2 * 16
     assert wide.bytes_state == 4 * 2 * 16
     assert (
-        wide["bytes", :, :, torch.float32].sum()
-        == 2 * narrow["bytes", :, :, torch.bfloat16].sum()
+        wide["bytes", torch.float32].sum() == 2 * narrow["bytes", torch.bfloat16].sum()
     )
     assert wide["flops"].sum() == narrow["flops"].sum()
     assert narrow["bytes", "primal", "selection", torch.bfloat16] == 2 * 2 * 2 * 12

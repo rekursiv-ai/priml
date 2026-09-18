@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import functools
 
@@ -12,8 +11,13 @@ from torch import Tensor, nn
 import torch
 
 from priml.compile import lazy_torch_compile
-from priml.math.custom_types import Tensorable
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from priml.math.custom_types import Tensorable
 
 
 @functools.wraps(nn.functional.pad)
@@ -162,5 +166,4 @@ def as_batch_tensor(
     x = torch.as_tensor(x, dtype=dtype, device=device)
     d = max(0, min_ndim - x.ndim)
     c = max(1 - max_ndim + x.ndim, 1 - d)
-    x = x.reshape(-1, *[1] * max(0, -c), *x.shape[max(0, c) :])
-    return x
+    return x.reshape(-1, *[1] * max(0, -c), *x.shape[max(0, c) :])

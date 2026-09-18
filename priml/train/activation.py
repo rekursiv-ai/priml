@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast, override
 
 import logging
 
 from configgle import Fig
-from torch import Tensor
+from torch import Tensor, nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
     apply_activation_checkpointing,
@@ -21,7 +21,7 @@ import torch.nn.grad
 
 
 if TYPE_CHECKING:
-    from torch import nn
+    from collections.abc import Callable
 
 
 logger = logging.getLogger(__name__)
@@ -114,8 +114,10 @@ class LayerActivationCheckpointing:
         )
 
         logger.info(
-            f"Applied LayerActivationCheckpointing: checkpointed {checkpoint_count} "
-            f"of {layer_count} leaf modules (interval={self.interval})",
+            "Applied LayerActivationCheckpointing: checkpointed %s of %s leaf modules (interval=%s)",
+            checkpoint_count,
+            layer_count,
+            self.interval,
         )
 
 
@@ -201,9 +203,11 @@ class SelectiveActivationCheckpointing:
         )
 
         logger.info(
-            f"Applied SelectiveActivationCheckpointing: checkpointed {checkpoint_count} "
-            f"of {block_count} modules matching {[t.__name__ for t in self.module_types]} "
-            f"(checkpoint_fraction={self.checkpoint_fraction})",
+            "Applied SelectiveActivationCheckpointing: checkpointed %s of %s modules matching %s (checkpoint_fraction=%s)",
+            checkpoint_count,
+            block_count,
+            [t.__name__ for t in self.module_types],
+            self.checkpoint_fraction,
         )
 
 
@@ -278,8 +282,10 @@ class QuantizedActivationStorage:
         model.forward = wrapped_forward  # ty: ignore[invalid-assignment] -- PyTorch stores this replacement as a bound module method even though ty checks the unbound instance signature.
 
         logger.info(
-            f"Applied QuantizedActivationStorage: dtype_storage={self.dtype_storage}, "
-            f"dtype_compute={self.dtype_compute}, min_size={self.min_size}",
+            "Applied QuantizedActivationStorage: dtype_storage=%s, dtype_compute=%s, min_size=%s",
+            self.dtype_storage,
+            self.dtype_compute,
+            self.min_size,
         )
 
 
@@ -336,8 +342,9 @@ class QuantizedModuleActivationStorage:
                 quantized_count += 1
 
         logger.info(
-            f"Applied QuantizedModuleActivationStorage: quantized {quantized_count} modules "
-            f"of types {[t.__name__ for t in self.module_types]}",
+            "Applied QuantizedModuleActivationStorage: quantized %s modules of types %s",
+            quantized_count,
+            [t.__name__ for t in self.module_types],
         )
 
     def _wrap_module(self, module: torch.nn.Module) -> None:
@@ -464,7 +471,8 @@ def _quantized_conv2d_backward(
             (saved[2] if saved[2].numel() > 0 else None),
         )
 
-    assert not isinstance(ctx.padding, str)
+    if isinstance(ctx.padding, str):
+        raise TypeError("Expected not isinstance(ctx.padding, str).")
     grad_input = torch.nn.grad.conv2d_input(
         input.shape,
         weight,

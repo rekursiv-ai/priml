@@ -19,7 +19,7 @@ from torch.distributed.tensor.parallel import (
 import pytest
 import torch
 
-from priml.model.cost import Cost
+from priml.cost import Cost
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU, SwiGLUReluSquared, relu_squared
@@ -537,6 +537,7 @@ def test_swiglu_cost_is_both_projections() -> None:
         build_input=lambda: torch.randn(3, 16, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     up, down = 16 * 64, 32 * 16
@@ -608,6 +609,7 @@ def test_ungated_cost_has_a_single_width_up_proj() -> None:
         build_input=lambda: torch.randn(3, 16, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     assert cost.params == 16 * 32 + 32 * 16
@@ -623,6 +625,7 @@ def test_swiglu_cost_includes_a_gate_norm() -> None:
         build_input=lambda: torch.randn(3, 16, requires_grad=True),
         seq_len=3,
         batch_size=1,
+        num_tokens=3,
         dtype=None,
     )
     assert cost.params == 16 * 64 + 32 * 16 + 32

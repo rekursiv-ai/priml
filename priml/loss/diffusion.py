@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TypedDict, override
+from typing import TYPE_CHECKING, TypedDict, override
 
 from configgle import Fig
 from torch import Tensor, nn
 
 import torch
 
+from priml.cost import (
+    Cost,
+    reduction_cost,
+    traffic,
+)
 from priml.math.custom_types import TensorableFn
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
@@ -26,12 +30,10 @@ from priml.math.diffusion.target import (
     target_x,
 )
 from priml.math.numeric import safe_log
-from priml.model.cost import (
-    Cost,
-    reduction_cost,
-    shared_rows,
-    traffic,
-)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class DiffusionLoss(nn.Module):
@@ -120,7 +122,8 @@ class DiffusionLoss(nn.Module):
                 :mod:`priml.math.diffusion.target`.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            del kwargs
+            rows = seq_len * batch_size
             dt = dtype
             target_primal, target_adjoint = _target_fn_flops(self.target_fn)
             per_sample = 1 + 8 + 8 + 4 + 8
@@ -227,8 +230,10 @@ class DiffusionLoss(nn.Module):
             x_original=x0,
             eps_original=eps0,
         )
-        assert target is not None
-        assert predict is not None
+        if target is None:
+            raise ValueError("Expected target is not None.")
+        if predict is None:
+            raise ValueError("Expected predict is not None.")
 
         loss = ((target - predict) ** 2).mean(
             dim=list(range(-x0.ndim + 1, 0)),

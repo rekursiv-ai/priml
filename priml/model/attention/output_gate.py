@@ -10,15 +10,14 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.attention.kvcache import KVCache
-from priml.model.attention.self_attention import SelfAttention
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
     matmul_cost,
-    shared_rows,
 )
+from priml.model.attention.kvcache import KVCache
+from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     CachedAttention,
     ChannelsHead,
@@ -114,7 +113,7 @@ class OutputGate(nn.Module):
               cost: Per-token cost of this module.
 
             """
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             return (
                 cost(
                     self.inner,

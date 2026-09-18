@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from functools import partial
-from typing import ClassVar, cast, overload, override
+from typing import TYPE_CHECKING, ClassVar, cast, overload, override
 
 from configgle import Fig
 from torch import Tensor
@@ -13,6 +12,10 @@ from torch.optim.optimizer import Optimizer
 
 import torch
 import torch.linalg
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 
 def compute_hessian(

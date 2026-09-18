@@ -18,11 +18,10 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     reduction_cost,
     resolve_dtype,
-    shared_rows,
 )
 
 
@@ -79,11 +78,12 @@ class ResidualMix(nn.Module):
               ValueError: ``channels_in`` was never inherited.
 
             """
+            del kwargs
             if self.channels_in <= 0:
                 raise ValueError(
                     "ResidualMix.cost needs channels_in; the stack sets it.",
                 )
-            rows = shared_rows(seq_len, batch_size, **kwargs)
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             s = dt.itemsize
             width = self.channels_in * self.num_layers

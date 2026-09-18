@@ -7,8 +7,7 @@ Provides :class:`Timer` for scoped elapsed-time logging,
 
 from __future__ import annotations
 
-from types import TracebackType
-from typing import ClassVar, Protocol, Self, TextIO, cast, override
+from typing import TYPE_CHECKING, ClassVar, Protocol, Self, TextIO, cast, override
 
 import datetime
 import logging
@@ -17,6 +16,10 @@ import time
 
 from configgle import Fig
 from wrapt import lazy_import
+
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 
 class _Distributed(Protocol):
@@ -72,7 +75,9 @@ class Timer:
         self.elapsed = self.stop - self.start
         self.logger.log(
             self.level,
-            f"{self.description}: {self.elapsed:.4f} seconds",
+            "%s: %.4f seconds",
+            self.description,
+            self.elapsed,
         )
 
 
@@ -135,7 +140,10 @@ class CustomFormatter(logging.Formatter):
 
     @override
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        dt = datetime.datetime.fromtimestamp(record.created)
+        dt = datetime.datetime.fromtimestamp(
+            record.created,
+            tz=datetime.UTC,
+        ).astimezone()
         return dt.strftime(datefmt or self.datefmt or "")
 
 

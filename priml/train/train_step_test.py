@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, override
+from typing import TYPE_CHECKING, Protocol, cast, overload, override
 
 import functools
 import math
@@ -14,18 +14,26 @@ from torch import Tensor, nn
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml import runtime
-from priml.loss.custom_types import LossOutput
 from priml.metrics.binary_accuracy import BinaryAccuracy
+from priml.timer import CheckpointableStepTimer
 from priml.train.parallelism import NoParallel
-from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
+from priml.train.train_step import (
+    TrainStep,
+    _assert_uniform_microbatch_count,
+    _collective_device,
+)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch.distributed.device_mesh import DeviceMesh
 
     from priml.distributed.testing import WarmPoolGetter
+    from priml.loss.custom_types import LossOutput
 
 
 class _LogitsOutput(Protocol):
@@ -640,6 +648,329 @@ def test_nonfinite_grad_corrupts_parameters_when_disabled() -> None:
     assert all(p.isnan().all() for p in trainable.model.parameters())
     assert trainable.skipped_steps == 0
     assert "skipped_steps" not in result.get("metrics", {})
+
+
+def _linear_step(**overrides: object) -> TrainStep:
+    config = TrainStep.Config()
+    config.model = _LinearModel.Config(in_features=2, out_features=1)
+    config.loss = PartialConfig(_binary_cross_entropy_with_logits)
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return config.make()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("gradient_clip_norm", 0.0, "gradient_clip_norm must be positive"),
+        ("accumulate_grad_batches", 0, "accumulate_grad_batches must be positive"),
+        ("train_budget_steps", 0.0, "train_budget_steps must be positive"),
+        ("train_budget_sec", -1.0, "train_budget_sec must be positive"),
+        ("train_budget_epochs", math.nan, "train_budget_epochs must be positive"),
+    ],
+)
+def test_construction_rejects_a_non_positive_budget_or_clip(
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _linear_step(**{field: value})
+
+
+def test_local_step_counts_this_process_only() -> None:
+    step = _linear_step()
+    x = torch.randn(4, 2)
+    label = (x.sum(dim=1) > 0).float()
+    step.train_step(x=x, label=label)
+    state = step.state_dict()
+    resumed = _linear_step()
+    resumed.load_state_dict(state)
+    assert resumed.global_step == 1
+    assert resumed.local_step == 0
+    resumed.train_step(x=x, label=label)
+    assert resumed.global_step == 2
+    assert resumed.local_step == 1
+
+
+def test_bound_epoch_timer_drives_the_epoch_budget() -> None:
+    step = _linear_step(train_budget_epochs=4.0)
+    timer = CheckpointableStepTimer()
+    step.bind_epoch_timer(timer)
+    assert step.progress_complete == 0.0
+    timer.global_count = 3
+    assert step.progress_complete == pytest.approx(0.75)
+    assert step.progress_learning_schedule == pytest.approx(0.75)
+
+
+def test_preprocess_moves_tensors_and_leaves_other_values() -> None:
+    step = _linear_step()
+    batch = step.preprocess_batch({"x": torch.zeros(2), "name": "puzzle", "n": 3})
+    moved = batch["x"]
+    assert isinstance(moved, Tensor)
+    assert moved.device == torch.device("cpu")
+    assert batch["name"] == "puzzle"
+    assert batch["n"] == 3
+
+
+def test_compile_slot_wraps_the_model_once() -> None:
+    wrapped: list[object] = []
+
+    def compile_fn(model: object) -> object:
+        wrapped.append(model)
+        assert callable(model)
+        return model
+
+    step = _linear_step(compile=PartialConfig(compile_fn))
+    x = torch.randn(4, 2)
+    step(x=x)
+    step(x=x)
+    assert wrapped == [step.model]
+
+
+def test_closure_reaches_an_optimizer_that_requires_it() -> None:
+    closures: list[object] = []
+
+    class _ClosureOptimizer(torch.optim.SGD):
+        requires_closure = True
+
+        @overload
+        def step(self, closure: None = None) -> None: ...
+
+        @overload
+        def step(self, closure: Callable[[], Tensor | float]) -> Tensor | float: ...
+
+        @override
+        def step(
+            self,
+            closure: Callable[[], Tensor | float] | None = None,
+        ) -> Tensor | float | None:
+            closures.append(closure)
+            super().step()
+            return None
+
+    step = _linear_step(optimizer=PartialConfig(_ClosureOptimizer, lr=0.1))
+    step.train_step(x=torch.randn(4, 2), label=torch.zeros(4))
+    assert isinstance(step.optimizer, _ClosureOptimizer)
+    assert len(closures) == 1
+    closure = closures[0]
+    assert callable(closure)
+    recomputed = closure()
+    assert isinstance(recomputed, Tensor)
+    assert recomputed.requires_grad
+
+
+def test_a_scalar_loss_is_refused() -> None:
+    def reduced(output: object, **kwargs: object) -> LossOutput:
+        del kwargs
+        assert isinstance(output, Tensor)
+        return {"loss": output.mean()}
+
+    step = _linear_step(loss=PartialConfig(reduced))
+    with pytest.raises(ValueError, match="Loss must be unreduced"):
+        step.train_step(x=torch.randn(4, 2))
+
+
+def test_train_loss_computes_without_an_update() -> None:
+    step = _linear_step()
+    before = [p.detach().clone() for p in step.model.parameters()]
+    result = step.train_loss(x=torch.randn(4, 2), label=torch.zeros(4))
+    assert result["loss"].shape == (4,)
+    assert step.global_step == 0
+    for param, original in zip(step.model.parameters(), before, strict=True):
+        assert torch.equal(param, original)
+
+
+def test_eval_loss_leaves_train_mode_as_it_found_it() -> None:
+    step = _linear_step()
+    step.model.eval()
+    step.eval_loss(x=torch.randn(4, 2), label=torch.zeros(4))
+    assert not step.model.training
+    step.model.train()
+    step.eval_loss(x=torch.randn(4, 2), label=torch.zeros(4))
+    assert step.model.training
+
+
+def test_epoch_end_discards_a_partial_accumulation_by_default() -> None:
+    step = _linear_step(accumulate_grad_batches=3)
+    step.train_step(x=torch.randn(4, 2), label=torch.zeros(4))
+    assert step.accumulation_steps == 1
+    step.on_epoch_end()
+    assert step.accumulation_steps == 0
+    assert step.accumulated_samples == 0
+    assert all(p.grad is None for p in step.model.parameters())
+
+
+def test_epoch_end_keeps_a_partial_accumulation_when_opted_out() -> None:
+    step = _linear_step(
+        accumulate_grad_batches=3,
+        drop_partial_accumulation_on_epoch_end=False,
+    )
+    step.train_step(x=torch.randn(4, 2), label=torch.zeros(4))
+    step.on_epoch_end()
+    assert step.accumulation_steps == 1
+    assert step.accumulated_samples == 4
+
+
+def test_epoch_end_is_a_noop_with_nothing_pending() -> None:
+    step = _linear_step()
+    step.train_step(x=torch.randn(4, 2), label=torch.zeros(4))
+    step.on_epoch_end()
+    assert step.accumulation_steps == 0
+
+
+def test_load_state_dict_can_remap_keys_and_skip_the_optimizer() -> None:
+    torch.manual_seed(0)
+    source = _linear_step()
+    source.train_step(x=torch.randn(4, 2), label=torch.zeros(4))
+    state = source.state_dict()
+    renamed = {f"legacy.{key}": value for key, value in state["model"].items()}
+    state["model"] = renamed
+
+    target = _linear_step()
+    target.load_state_dict(
+        state,
+        load_optimizer=False,
+        remap=lambda model_state: {
+            key.removeprefix("legacy."): value for key, value in model_state.items()
+        },
+    )
+
+    for restored, original in zip(
+        target.model.parameters(),
+        source.model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(restored, original)
+    assert target.global_step == 1
+    optimizer_state = target.optimizer.state_dict()["state"]
+    assert isinstance(optimizer_state, dict)
+    assert len(cast(dict[object, object], optimizer_state)) == 0
+
+
+def test_load_state_dict_tolerates_a_checkpoint_without_timers() -> None:
+    source = _linear_step()
+    source.train_step(x=torch.randn(4, 2), label=torch.zeros(4))
+    state: dict[str, object] = dict(source.state_dict())
+    for key in ("timer_forward", "timer_eval", "timer_step", "ema"):
+        del state[key]
+    target = _linear_step()
+    target.load_state_dict(state)
+    assert target.global_step == 0
+
+
+_MESH_SEAM = "priml.train.train_step.global_device_mesh"
+"""Patched by dotted path: a local named ``step`` shadows a module import."""
+
+
+def _gloo_backend(group: object) -> str:
+    del group
+    return "gloo"
+
+
+def _nccl_backend(group: object) -> str:
+    del group
+    return "nccl"
+
+
+def _world_of_two(group: object = None) -> int:
+    del group
+    return 2
+
+
+def test_collective_device_follows_the_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dist, "get_backend", _gloo_backend)
+    assert _collective_device(None) == torch.device("cpu")
+    monkeypatch.setattr(dist, "get_backend", _nccl_backend)
+    # Scoped: the autouse ``cleanup_cuda`` teardown synchronizes the CURRENT
+    # device before monkeypatch unwinds, and index 2 is not a real ordinal.
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda, "current_device", lambda: 2)
+        assert _collective_device(None) == torch.device("cuda", 2)
+
+
+def test_uniform_count_guard_is_a_noop_on_a_single_rank_dp_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2-rank world whose ``dp`` axis is 1 wide has no peers to compare."""
+    dp_group = object()
+
+    class _Mesh:
+        mesh_dim_names = ("dp", "tp")
+
+        def get_group(self, name: str) -> object:
+            assert name == "dp"
+            return dp_group
+
+    def world_size(group: object = None) -> int:
+        return 1 if group is dp_group else 2
+
+    reduced: list[object] = []
+
+    def all_reduce(extremes: Tensor, op: object, group: object) -> None:
+        del extremes, op, group
+        reduced.append(1)
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", world_size)
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    monkeypatch.setattr(_MESH_SEAM, _Mesh)
+    _assert_uniform_microbatch_count(8)
+    assert reduced == []
+
+
+def test_uniform_count_guard_reduces_extremes_over_the_dp_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MIN and MAX ride one MAX-reduce; unequal extremes raise."""
+    dp_group = object()
+
+    class _Mesh:
+        mesh_dim_names = ("dp",)
+
+        def get_group(self, name: str) -> object:
+            assert name == "dp"
+            return dp_group
+
+    peer_count = 5
+
+    def all_reduce(extremes: Tensor, op: object, group: object) -> None:
+        assert group is dp_group
+        assert op is dist.ReduceOp.MAX
+        extremes[0] = max(int(extremes[0]), peer_count)
+        extremes[1] = max(int(extremes[1]), -peer_count)
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", _world_of_two)
+    monkeypatch.setattr(dist, "get_backend", _gloo_backend)
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    monkeypatch.setattr(_MESH_SEAM, _Mesh)
+
+    _assert_uniform_microbatch_count(5)
+    with pytest.raises(ValueError, match="between 3 and 5 elements"):
+        _assert_uniform_microbatch_count(3)
+
+
+def test_uniform_count_guard_falls_back_to_world_without_a_dp_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    groups: list[object] = []
+
+    def all_reduce(extremes: Tensor, op: object, group: object) -> None:
+        del extremes, op
+        groups.append(group)
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", _world_of_two)
+    monkeypatch.setattr(dist, "get_backend", _gloo_backend)
+    monkeypatch.setattr(dist, "all_reduce", all_reduce)
+    monkeypatch.setattr(_MESH_SEAM, lambda: None)
+    _assert_uniform_microbatch_count(4)
+    assert groups == [None]
 
 
 def test_assert_uniform_microbatch_count_single_process_noop() -> None:

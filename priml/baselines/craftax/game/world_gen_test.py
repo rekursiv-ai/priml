@@ -7,8 +7,7 @@ floors connect, and each floor uses its own materials.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 import pytest
@@ -21,13 +20,18 @@ from priml.baselines.craftax.conftest import (
 )
 from priml.baselines.craftax.game import constants, world_config
 from priml.baselines.craftax.game.constants import BlockType, ItemType
-from priml.baselines.craftax.game.state import EnvState
 from priml.baselines.craftax.game.world_gen import (
     daylight,
     generate_dungeon,
     generate_smooth_world,
 )
 from priml.lib.custom_json import ListCodec
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from priml.baselines.craftax.game.state import EnvState
 
 
 _DEVICE = torch.device("cpu")

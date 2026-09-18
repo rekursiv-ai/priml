@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Iterator, Mapping, Sized
 from dataclasses import field
-from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -45,6 +44,10 @@ from priml.lib.custom_json import IntCodec
 if TYPE_CHECKING:
     from typing import Self
 
+    from priml.timer import CheckpointableStepTimer
+
+from pathlib import Path
+
 from priml.custom_types import (
     HasNormalizedWorkingDirPattern,
 )
@@ -65,7 +68,6 @@ from priml.runtime import (
     is_rank_zero,
     runtime_initialized,
 )
-from priml.timer import CheckpointableStepTimer
 from priml.train.checkpointer import Checkpointer
 from priml.train.custom_types import (
     CheckpointerProtocol,
@@ -952,7 +954,6 @@ class TrainLoop:
                 self.step.global_step + 1,
                 self.current_epoch,
             )
-            assert self.train_loader is not None
             _set_loader_epoch(self.train_loader, self.current_epoch)
             self.train_iter = iter(self.train_loader)
         for _ in range(2):
@@ -966,7 +967,6 @@ class TrainLoop:
                     "TrainLoop step %d: fetching raw train batch.",
                     self.step.global_step + 1,
                 )
-                assert self.train_iter is not None
                 raw_batch = next(self.train_iter)
                 batch = {str(key): value for key, value in raw_batch.items()}
                 batch_time = time.perf_counter() - batch_start
@@ -1007,7 +1007,6 @@ class TrainLoop:
                     self.current_epoch,
                 )
                 _set_loader_epoch(self.train_loader, self.current_epoch)
-                assert self.train_loader is not None
                 self.train_iter = iter(self.train_loader)
         raise RuntimeError("Failed to get next batch after epoch reset")
 
@@ -1191,7 +1190,7 @@ class TrainLoop:
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
         gc_time = time.perf_counter() - gc_start
-        logger.info(f"GC at local_step {self.local_step} (gc_time={gc_time:.3f}s)")
+        logger.info("GC at local_step %s (gc_time=%.3fs)", self.local_step, gc_time)
 
     # The single eval-and-report path. In the training loop it fires on the step cadence
     # (``global_step % num_steps_eval == 0``, before the train step for online-learning

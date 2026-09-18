@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast, override
 
+import faulthandler
 import functools
+import gc
 import json
 import logging
 import math
 import shutil
 import tempfile
+import threading
 import time
 
 from torch import Tensor, nn
@@ -22,34 +24,39 @@ import torch
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping
+
     from torch.distributed.device_mesh import DeviceMesh
 
+    from priml.custom_types import CheckpointableProtocol
+    from priml.data.custom_types import DatasetProtocol
     from priml.distributed.testing import WarmPoolGetter
+    from priml.loss.custom_types import LossOutput
+    from priml.train.custom_types import TrainStepOutput
 
-from configgle import Fig, Makeable, PartialConfig
+from configgle import Fig, Makeable, Makes, PartialConfig
 
-from priml.custom_types import CheckpointableProtocol
-from priml.data.custom_types import DatasetProtocol
+from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
 from priml.lib.custom_json import ListCodec
-from priml.loss.custom_types import LossOutput
-from priml.math.seed import RngState, get_rng_state
+from priml.math.seed import RngState, get_rng_state, salt
 from priml.metrics.binary_accuracy import BinaryAccuracy
 from priml.metrics.topk import TopK
 from priml.metrics.utilization import Utilization
-from priml.model.cost import Cost, matmul_cost, shared_rows
 from priml.runtime import SingleProcess, runtime_initialized
 from priml.timer import CheckpointableStepTimer
 from priml.train import train_loop
 from priml.train.checkpointer import Checkpointer, _agreed_across_ranks
-from priml.train.custom_types import TrainStepOutput
 from priml.train.parallelism import NoParallel
 from priml.train.profiler import PhaseTimer, TorchProfiler
 from priml.train.tracker import FileTracker
 from priml.train.train_loop import (
     EvalTimeLimitError,
     TrainLoop,
+    _barrier_if_distributed,
+    _compile_heartbeat,
     _HasTimer,
+    _phase_heartbeat,
     _set_loader_epoch,
 )
 from priml.train.train_step import TrainStep
@@ -2489,11 +2496,12 @@ class _PricedLinearModel(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
+            del kwargs
             return matmul_cost(
                 channels_in=self.in_features,
                 channels_out=self.out_features,
                 bias=True,
-                rows=shared_rows(seq_len, batch_size, **kwargs),
+                rows=seq_len * batch_size,
                 dtype=dtype,
             )
 
@@ -3796,6 +3804,651 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
         x = 1 << bits
         _ = x * x  # Holds the GIL ~8 intervals; the watchdog fires at 2.
     assert "Timeout (" in capfd.readouterr().err
+
+
+class _PathedDataset(_WarmupDataset):
+    """A dataset that inherits its corpus root from the loop."""
+
+    class Config(Makes["_PathedDataset"], _WarmupDataset.Config):
+        base_dir: Path | str | None = None
+        working_dir: Path | str = "/datasets/corpus"
+
+
+class _PathedMetric(_ExtrasMetric):
+    """A metric whose location is decided by what its logical path names."""
+
+    class Config(Makes["_PathedMetric"], _ExtrasMetric.Config):
+        base_dir: Path | str | None = None
+        working_dir: Path | str = "/dump"
+
+
+def test_finalize_routes_each_path_owner_to_the_root_it_reads() -> None:
+    """The corpus and a ``/datasets`` metric read the bare root; dumps read the run."""
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_PathedDataset.Config(),
+    )
+    config.base_dir = "/opt/scratch"
+    config.working_dir = Path("/runs/study/exp000")
+    config.metrics_eval = {
+        "shared": _PathedMetric.Config(working_dir="/datasets/arc"),
+        "dump": _PathedMetric.Config(working_dir="/dump"),
+    }
+    config.metrics_train = {
+        "preset": _PathedMetric.Config(base_dir="/elsewhere", working_dir="/x"),
+    }
+
+    finalized = config.finalize()
+
+    assert finalized.working_dir == Path("/opt/scratch/runs/study/exp000")
+    assert isinstance(finalized.dataset, _PathedDataset.Config)
+    assert finalized.dataset.base_dir == "/opt/scratch"
+    shared = finalized.metrics_eval["shared"]
+    dump = finalized.metrics_eval["dump"]
+    preset = finalized.metrics_train["preset"]
+    assert isinstance(shared, _PathedMetric.Config)
+    assert isinstance(dump, _PathedMetric.Config)
+    assert isinstance(preset, _PathedMetric.Config)
+    assert shared.base_dir == "/opt/scratch"
+    assert dump.base_dir == Path("/opt/scratch/runs/study/exp000")
+    assert preset.base_dir == "/elsewhere"
+
+
+class _MeshAxis:
+    def __init__(self, local_rank: int) -> None:
+        self._local_rank = local_rank
+
+    def get_local_rank(self) -> int:
+        return self._local_rank
+
+
+class _SeedMesh:
+    """The two axes the loop salts seeds along: pipeline stage and data replica."""
+
+    def __getitem__(self, name: str) -> _MeshAxis:
+        return _MeshAxis({"pp": 1, "dp": 2}[name])
+
+
+def test_a_mesh_salts_the_model_seed_by_stage_and_the_data_seed_by_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One broadcast fixes the base seed; every later derivation is local."""
+    seeded: list[tuple[object, ...]] = []
+
+    def set_seed_distributed(
+        seed: int | None,
+        *,
+        mesh: _MeshAxis,
+        salt_by_rank: bool,
+    ) -> tuple[int, int]:
+        seeded.append(("distributed", seed, mesh.get_local_rank(), salt_by_rank))
+        return 7, 8
+
+    def set_seed_local(seed: int | None = None) -> int:
+        seeded.append(("local", seed))
+        assert seed is not None
+        return seed
+
+    monkeypatch.setattr(train_loop, "global_device_mesh", _SeedMesh)
+    monkeypatch.setattr(train_loop, "set_seed_distributed", set_seed_distributed)
+    monkeypatch.setattr(train_loop, "set_seed_local", set_seed_local)
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_WarmupDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 0
+    config.seed = 42
+
+    config.make()
+
+    assert seeded == [
+        ("distributed", 42, 1, True),
+        ("local", salt("rank", 2, salt("dp", 7))),
+    ]
+
+
+def test_a_finite_gc_cadence_disables_automatic_collection_while_training(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Manual passes run on the cadence with the automatic collector off."""
+    config = _make_step_logging_loop_config()
+    config.num_steps_garbage_collect = 1
+    config.max_steps = 3
+    collected: list[bool] = []
+
+    def collect(generation: int = 2) -> int:
+        del generation
+        collected.append(gc.isenabled())
+        return 0
+
+    monkeypatch.setattr(gc, "collect", collect)
+    loop = config.make()
+    # Every rank collects together, so the pass ends on a barrier when a
+    # group is live. Faked only around the GC call: a fake group seen by the
+    # loader would send it looking for a distributed sampler.
+    barriers: list[int] = []
+    inner_gc = loop._maybe_garbage_collect
+
+    def gc_under_a_live_group() -> None:
+        with pytest.MonkeyPatch.context() as scoped:
+            scoped.setattr(torch.distributed, "is_initialized", lambda: True)
+            scoped.setattr(torch.distributed, "barrier", lambda: barriers.append(1))
+            inner_gc()
+
+    monkeypatch.setattr(loop, "_maybe_garbage_collect", gc_under_a_live_group)
+    try:
+        with caplog.at_level(logging.INFO, logger="priml.train.train_loop"):
+            loop.train()
+    finally:
+        gc.enable()
+
+    assert collected == [False, False]
+    assert barriers == [1, 1]
+    assert gc.isenabled()
+    assert any("GC at local_step 1" in r.message for r in caplog.records)
+
+
+def test_an_eval_error_without_a_checkpointer_still_surfaces(tmp_path: Path) -> None:
+    config = _make_simple_loop_config(str(tmp_path))
+    config.checkpointer = None
+    config.max_steps = 1
+    config.num_steps_eval = -1
+    config.max_eval_time = 0.0
+    loop = config.make()
+    with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
+        loop.train()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_empty_loader_cannot_supply_a_batch_after_one_epoch_reset() -> None:
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_WarmupDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 1
+    config.eval_every_epoch = False
+    loop = config.make()
+    with pytest.raises(RuntimeError, match="after epoch reset"):
+        loop.train()
+    assert loop.current_epoch == 2
+
+
+def _distributed_flag_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rank_zero_verdict: float | None,
+) -> list[float]:
+    """Fake a live group whose rank-0 broadcast either records or overrides."""
+    broadcasts: list[float] = []
+
+    def broadcast(flag: Tensor, src: int) -> None:
+        assert src == 0
+        broadcasts.append(float(flag.item()))
+        if rank_zero_verdict is not None:
+            flag.fill_(rank_zero_verdict)
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+    return broadcasts
+
+
+def test_time_limit_is_synced_on_the_log_cadence_and_latched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rank 0 reads the clock; the verdict is broadcast, then sticks."""
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: True)
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    config = _make_max_time_loop_config()
+    config.num_steps_log = 5
+    loop = config.make()
+    broadcasts = _distributed_flag_broadcast(monkeypatch, rank_zero_verdict=None)
+    step = loop.step
+    assert isinstance(step, TrainStep)
+    try:
+        step.timer_step.global_count = 3  # Off the cadence: no collective.
+        clock.now = 11.0
+        assert not loop._time_limit_reached()
+        assert broadcasts == []
+        step.timer_step.global_count = 5
+        clock.now = 5.0
+        assert not loop._time_limit_reached()
+        clock.now = 11.0
+        assert loop._time_limit_reached()
+        clock.now = 0.0
+        assert loop._time_limit_reached()  # Latched.
+        assert broadcasts == [0.0, 1.0]
+    finally:
+        loop._destroy_runtime_once()
+
+
+def test_a_non_zero_rank_adopts_rank_zeros_time_limit_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: False)
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    config = _make_max_time_loop_config()
+    config.num_steps_log = 1
+    loop = config.make()
+    broadcasts = _distributed_flag_broadcast(monkeypatch, rank_zero_verdict=1.0)
+    step = loop.step
+    assert isinstance(step, TrainStep)
+    try:
+        step.timer_step.global_count = 1
+        clock.now = 999.0  # This rank's own clock never counts.
+        assert loop._time_limit_reached()
+        assert broadcasts == [0.0]
+    finally:
+        loop._destroy_runtime_once()
+
+
+def test_eval_time_limit_is_rank_agreed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: True)
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    config = _make_step_logging_loop_config()
+    config.max_eval_time = 1.0
+    loop = config.make()
+    broadcasts = _distributed_flag_broadcast(monkeypatch, rank_zero_verdict=None)
+    try:
+        clock.now = 0.5
+        assert not loop._eval_time_limit_reached(0.0)
+        clock.now = 2.0
+        assert loop._eval_time_limit_reached(0.0)
+        assert broadcasts == [0.0, 1.0]
+    finally:
+        loop._destroy_runtime_once()
+
+
+def test_a_non_zero_rank_adopts_rank_zeros_eval_time_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("priml.train.train_loop.is_rank_zero", lambda: False)
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "perf_counter", clock)
+    config = _make_step_logging_loop_config()
+    config.max_eval_time = 1.0
+    loop = config.make()
+    _distributed_flag_broadcast(monkeypatch, rank_zero_verdict=1.0)
+    try:
+        clock.now = 0.0
+        assert loop._eval_time_limit_reached(0.0)
+    finally:
+        loop._destroy_runtime_once()
+
+
+def test_eval_only_without_a_checkpoint_warns_and_scores_fresh_weights(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_WeightedEvalDataset.Config(),
+    )
+    config.metrics_eval = {}
+    config.checkpointer = None
+    config.tracker = _RecordingTracker.Config()
+    config.eval_only = True
+    loop = config.make()
+    tracker = loop.tracker
+    assert isinstance(tracker, _RecordingTracker)
+
+    with caplog.at_level(logging.WARNING, logger="priml.train.train_loop"):
+        loop.train()
+
+    assert any("eval_only at global_step=0" in r.message for r in caplog.records)
+    assert tracker.metrics_by_step[0][0]["eval/score"] == 0.8
+
+
+class _RecordingProfiler:
+    """Profiler fake that records which steps it bracketed."""
+
+    class Config(Fig["_RecordingProfiler"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        self.starts: list[int] = []
+        self.ends: list[int] = []
+        self.cleaned = False
+
+    def on_step_start(self, step: int) -> None:
+        self.starts.append(step)
+
+    def on_step_end(self, step: int) -> None:
+        self.ends.append(step)
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
+def test_the_profiler_brackets_every_step_and_is_cleaned_up() -> None:
+    config = _make_step_logging_loop_config()
+    config.profiler = _RecordingProfiler.Config()
+    loop = config.make()
+    profiler = loop.profiler
+    assert isinstance(profiler, _RecordingProfiler)
+
+    loop.train()
+
+    assert profiler.starts == [0, 1]
+    assert profiler.ends == [1, 2]
+    assert profiler.cleaned
+
+
+class _RecordingMetric:
+    """Metric that keeps every output it was handed."""
+
+    class Config(Fig["_RecordingMetric"]):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        del config
+        self.seen: list[Tensor] = []
+
+    def update(self, logits: Tensor, **batch: object) -> None:
+        del batch
+        self.seen.append(logits.detach().clone())
+
+    def compute(self) -> dict[str, object]:
+        return {"count": float(len(self.seen))}
+
+    def reset(self) -> None:
+        self.seen.clear()
+
+    class StateDict(TypedDict):
+        """Stateless."""
+
+    def state_dict(self) -> StateDict:
+        return {}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        del state_dict
+
+
+class _MetricOnlyEvalDataset(_WeightedEvalDataset):
+    """Eval batches whose first carries no model input, only metric material."""
+
+    class Config(Makes["_MetricOnlyEvalDataset"], _WeightedEvalDataset.Config):
+        pass
+
+    @override
+    def eval_dataloader(self) -> list[dict[str, object]]:
+        return [
+            {"media": torch.tensor([[1.0]]), "metric_only": True},
+            {"media": torch.tensor([[2.0]])},
+        ]
+
+
+def test_warm_eval_compile_skips_metric_only_batches() -> None:
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_MetricOnlyEvalDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 0
+    config.eval_warmup_batches = 2
+    loop = config.make()
+    step = loop.step
+    assert isinstance(step, _WarmupStep)
+    assert len(step.eval_calls) == 1
+    torch.testing.assert_close(step.eval_calls[0], torch.tensor([[2.0]]))
+
+
+def test_eval_feeds_metric_only_batches_to_metrics_without_a_forward() -> None:
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_MetricOnlyEvalDataset.Config(),
+    )
+    config.metrics_eval = {"seen": _RecordingMetric.Config()}
+    config.checkpointer = None
+    config.max_steps = 0
+    loop = config.make()
+    step = loop.step
+    metric = loop.metrics_eval["seen"]
+    assert isinstance(step, _WarmupStep)
+    assert isinstance(metric, _RecordingMetric)
+
+    results = loop.eval()
+
+    assert len(step.eval_calls) == 1
+    assert [t.numel() for t in metric.seen] == [0, 1]
+    assert results["seen_count"] == 2.0
+
+
+class _ZeroWeightEvalDataset(_WeightedEvalDataset):
+    """An eval batch with no valid examples beside one that has some."""
+
+    class Config(Makes["_ZeroWeightEvalDataset"], _WeightedEvalDataset.Config):
+        pass
+
+    @override
+    def eval_dataloader(self) -> list[dict[str, object]]:
+        return [
+            {"media": torch.tensor([[1.0]]), "valid_count": 0},
+            {"media": torch.tensor([[0.5]]), "valid_count": 2},
+        ]
+
+
+def test_eval_skips_a_batch_with_no_valid_examples() -> None:
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_ZeroWeightEvalDataset.Config(),
+    )
+    config.metrics_eval = {"seen": _RecordingMetric.Config()}
+    config.checkpointer = None
+    config.max_steps = 0
+    loop = config.make()
+    metric = loop.metrics_eval["seen"]
+    assert isinstance(metric, _RecordingMetric)
+
+    results = loop.eval()
+
+    assert results["score"] == 0.5
+    assert len(metric.seen) == 1
+
+
+class _VotingStep(_WeightedEvalStep):
+    """A step whose eval offers one extra candidate per batch."""
+
+    class Config(Makes["_VotingStep"], _WeightedEvalStep.Config):
+        pass
+
+    @override
+    def eval_loss(self, **preprocessed_batch: object) -> TrainStepOutput:
+        media = preprocessed_batch["media"]
+        assert isinstance(media, Tensor)
+        return {
+            "loss": media.flatten(),
+            "model": media,
+            "eval_extra_votes": [(media * 2, {"media": media})],
+        }
+
+
+def test_eval_feeds_extra_votes_to_every_metric() -> None:
+    config = TrainLoop.Config(
+        step=_VotingStep.Config(),
+        dataset=_WeightedEvalDataset.Config(),
+    )
+    config.metrics_eval = {"seen": _RecordingMetric.Config()}
+    config.checkpointer = None
+    config.max_steps = 0
+    loop = config.make()
+    metric = loop.metrics_eval["seen"]
+    assert isinstance(metric, _RecordingMetric)
+
+    loop.eval()
+
+    assert [float(t) for t in metric.seen] == [1.0, 2.0, 0.0, 0.0]
+
+
+def test_run_ignores_its_arguments_and_trains() -> None:
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_BindingDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 1
+    loop = config.make()
+    loop.run("--flag", "value")
+    assert loop.step.global_step == 1
+
+
+def test_load_state_dict_restores_the_metrics_it_knows_and_skips_the_rest() -> None:
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_WeightedEvalDataset.Config(),
+    )
+    config.metrics_train = {"acc": TopK.Config(k_values=[1])}
+    config.metrics_eval = {"acc": TopK.Config(k_values=[1])}
+    config.checkpointer = None
+    config.max_steps = 0
+    loop = config.make()
+
+    loop.load_state_dict(
+        {
+            "step": {"global_step": 1},
+            "dataset": {"timer_epoch": {"global_count": 0, "global_sec": 0.0}},
+            "metrics_eval": {
+                "acc": {"correct": {1: 3}, "total": 4},
+                "ghost": {"correct": {1: 9}, "total": 9},
+            },
+            "metrics_train": {
+                "acc": {"correct": {1: 1}, "total": 2},
+                "ghost": {"correct": {1: 9}, "total": 9},
+            },
+        },
+    )
+
+    eval_metric = loop.metrics_eval["acc"]
+    train_metric = loop.metrics_train["acc"]
+    assert isinstance(eval_metric, TopK)
+    assert isinstance(train_metric, TopK)
+    assert eval_metric.total == 4
+    assert train_metric.total == 2
+
+
+class _EpochAwareDataset:
+    def __init__(self) -> None:
+        self.epochs: list[int] = []
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epochs.append(epoch)
+
+
+class _EpochAwareLoader:
+    def __init__(self) -> None:
+        self.dataset = _EpochAwareDataset()
+
+
+def test_set_loader_epoch_informs_a_dataset_that_listens() -> None:
+    loader = _EpochAwareLoader()
+    _set_loader_epoch(loader, 3)
+    assert loader.dataset.epochs == [3]
+
+
+def test_startup_barrier_waits_when_a_group_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    barriers: list[int] = []
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: barriers.append(1))
+    with caplog.at_level(logging.INFO, logger="priml.train.train_loop"):
+        _barrier_if_distributed("tracker startup")
+    assert barriers == [1]
+    assert any("all ranks passed tracker startup" in r.message for r in caplog.records)
+
+
+def test_compile_heartbeat_reports_a_long_running_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger="priml.train.train_loop"),
+        _compile_heartbeat("train step 1", interval_s=0.02),
+    ):
+        time.sleep(0.06)
+    assert any("train step 1: still running after" in r.message for r in caplog.records)
+
+
+def test_phase_heartbeat_names_this_rank_when_a_group_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    with (
+        caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
+        _phase_heartbeat("eval batch 1 eval_loss", interval_s=0.02),
+    ):
+        time.sleep(0.06)
+    assert any("[rank 3] STILL IN PHASE" in r.message for r in caplog.records)
+
+
+def test_an_infinite_heartbeat_interval_arms_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed: list[float] = []
+
+    def arm(timeout: float, **kwargs: object) -> None:
+        del kwargs
+        armed.append(timeout)
+
+    monkeypatch.setattr(faulthandler, "dump_traceback_later", arm)
+    before = threading.active_count()
+    with _phase_heartbeat("single process", interval_s=math.inf):
+        assert threading.active_count() == before
+    assert armed == []
+
+
+class _FakeCudaEvent:
+    def __init__(self, *, enable_timing: bool) -> None:
+        self.enable_timing = enable_timing
+        self.recorded = 0
+
+    def record(self) -> None:
+        self.recorded += 1
+
+    def synchronize(self) -> None:
+        pass
+
+    def elapsed_time(self, end_event: _FakeCudaEvent) -> float:
+        del end_event
+        return 1.0
+
+
+def test_cuda_event_pairs_are_recorded_into_the_phase_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With event timing on, a metric phase is bracketed by two events."""
+    config = TrainLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_WarmupDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_steps = 0
+    config.phase_timer = PhaseTimer.Config(enabled=True, cuda_events=True)
+    loop = config.make()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "Event", _FakeCudaEvent)
+
+    events = loop._cuda_event_pair()
+
+    assert events is not None
+    start, end = events
+    assert isinstance(start, _FakeCudaEvent)
+    assert isinstance(end, _FakeCudaEvent)
+    assert start.recorded == 1
+    assert end.recorded == 0
+    loop._record_cuda_timing("eval_metric_acc_update", events)
+    assert end.recorded == 1
+    timer = loop.phase_timer
+    assert isinstance(timer, PhaseTimer)
+    assert timer._cuda_events == {"eval_metric_acc_update": [(start, end)]}
 
 
 class _ReplayDataset:

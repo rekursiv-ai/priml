@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Final, override
+from typing import TYPE_CHECKING, Final, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -22,13 +22,14 @@ from priml.baselines.nanochat.model import (
     SourceReuseTransformerBlock,
 )
 from priml.baselines.nanochat.ngram import HashedNgramTables
+from priml.cost import cost
+from priml.custom_types import HasCost
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.output_gate import OutputGate
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.cost import HasCost, cost
-from priml.model.custom_types import HasAttention, TensorModule
+from priml.model.custom_types import TensorModule
 from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.narrow_embedding import NarrowEmbedding
@@ -40,6 +41,10 @@ from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
 from priml.testing.cost import assert_cost_matches_torch
 from priml.train.parallelism import materialize_meta
+
+
+if TYPE_CHECKING:
+    from priml.model.custom_types import HasAttention
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -371,6 +376,7 @@ def test_cost_matches_torch_through_a_naive_kernel() -> None:
         build_input=lambda: torch.randint(0, VOCAB, (2, SEQ)),
         seq_len=SEQ,
         batch_size=2,
+        num_tokens=SEQ * 2,
         dtype=None,
     )
 
@@ -380,7 +386,7 @@ def test_cost_matmul_flops_agree_with_the_palm_estimate() -> None:
     finalized = _config(value_embedding_stride=1).copy_tree().finalize()
     priced = cost(finalized, seq_len=SEQ, batch_size=1, dtype=None)
     torch.manual_seed(0)
-    assert priced["flops", :, "matmul"].sum() == finalized.make().flops_per_token()
+    assert priced["flops", "matmul"].sum() == finalized.make().flops_per_token()
 
 
 def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
@@ -428,17 +434,17 @@ def test_cost_distinguishes_batch_reuse_from_attention_window() -> None:
         large["bytes", "primal", "matmul"].sum()
         < small["bytes", "primal", "matmul"].sum()
     )
-    assert large["flops", :, "matmul"].sum() / large["bytes", :, "matmul"].sum() > (
-        small["flops", :, "matmul"].sum() / small["bytes", :, "matmul"].sum()
+    assert large["flops", "matmul"].sum() / large["bytes", "matmul"].sum() > (
+        small["flops", "matmul"].sum() / small["bytes", "matmul"].sum()
     )
     # Activations halve; the tables are stored at torch's default and the
     # lookups' indices are int64, so the selection silo is unchanged.
     for kernel in ("matmul", "elementwise", "reduction"):
         assert (
-            narrow["bytes", :, kernel, torch.bfloat16].sum()
-            == large["bytes", :, kernel, torch.float32].sum() / 2
+            narrow["bytes", kernel, torch.bfloat16].sum()
+            == large["bytes", kernel, torch.float32].sum() / 2
         )
-    assert narrow["bytes", :, "selection"] == large["bytes", :, "selection"]
+    assert narrow["bytes", "selection"] == large["bytes", "selection"]
     # The method and the dispatcher agree: seq_len alone means seq_len rows.
     assert small == cost(config, seq_len=SEQ, batch_size=1, dtype=None)
     assert large == cost(config, seq_len=SEQ, batch_size=4, dtype=None)

@@ -10,9 +10,8 @@ ladder stays checkable on any machine.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import json
 import math
@@ -38,9 +37,9 @@ from priml.baselines.nanochat.train_step import (
     NanoChatTrainStep,
     nanochat_optimizer,
 )
+from priml.cost import cost
 from priml.metrics.bits_per_byte import BitsPerByte
 from priml.model.attention.value_gated_attention import ValueGatedAttention
-from priml.model.cost import cost
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
@@ -53,6 +52,10 @@ from priml.train.tracker import (
     TrackerList,
     WandbTracker,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent

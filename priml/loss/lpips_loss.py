@@ -14,17 +14,18 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.loss.custom_types import LossOutput
-from priml.model.conv import conv_cost
-from priml.model.cost import (
+from priml.cost import (
     Cost,
     elementwise_cost,
     traffic,
 )
+from priml.model.conv import conv_cost
 
 
 if TYPE_CHECKING:
     import lpips
+
+    from priml.loss.custom_types import LossOutput
 else:
     from wrapt import lazy_import
 
@@ -249,7 +250,8 @@ class LPIPSLoss(nn.Module):
 
         """
         del model_output, batch
-        assert x.ndim == 5, "Expected 5D tensor [B, C, T, H, W]"
+        if x.ndim != 5:
+            raise ValueError("Expected 5D tensor [B, C, T, H, W]")
 
         # Subsample unique random frames (at most max_num_random_frames or total frames)
         num_frames = x.shape[-3]

@@ -23,9 +23,9 @@ Counting policy:
 - Analytical training algorithm with saved primal values, not a fused
   kernel. The adjoint includes local derivatives and parameter-gradient
   reductions; not the optimizer.
-- ``rows`` is the rows sharing one parameter. Its gradient is summed
-  over them, (n-1)/n per row, in ``adjoint.flops.reduction``. Only the two
-  primitives write that term.
+- ``rows`` in a primitive is the rows sharing one parameter, ``seq_len *
+  batch_size`` for a leaf. Its gradient is summed over them, (n-1)/n per row,
+  in ``adjoint.flops.reduction``. Only the two primitives write that term.
 - Attention is counted over ``min(window, seq_len)`` keys with no causal
   discount (PaLM convention). Recompute excluded: MFU, not HFU.
 - ``bytes`` and ``bytes_state`` hold bytes, not element counts. Each leaf
@@ -38,12 +38,12 @@ Counting policy:
   Traffic geometry is explicit and never inferred from FLOP counts. Nonlinear
   tensor operators move operands once, not once per internal scalar operation.
 
-``cost(*, seq_len, batch_size, dtype, **kwargs)`` takes the batch shape and
-dtype as required keywords -- no defaults, so a caller that forgets one fails
-here rather than pricing a guessed batch -- and an open message bus. A leaf
-reads its own config for everything else and forwards the bus unchanged; a
-container that shares a child's weights over rows other than the batch's
-tokens sends ``rows=`` on the bus, which :func:`shared_rows` reads.
+``cost(**kwargs)`` takes named arguments only. A leaf declares the ones it
+reads -- typically ``seq_len``, ``batch_size``, ``dtype`` -- as required
+keywords, so a caller that forgets one fails there rather than pricing a
+guessed batch, and forwards the rest of the bus unchanged. A container that
+runs a child over other geometry passes the child its own ``seq_len`` and
+``batch_size``; the product is the rows sharing each of the child's parameters.
 
 :func:`matmul_cost` (``weight=False`` for ``QK^T``) and
 :func:`elementwise_cost` are the two primitives that own parameters. The other
@@ -61,14 +61,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import (
-    Final,
-    Literal,
-    Protocol,
-    overload,
-    override,
-    runtime_checkable,
-)
+from typing import Final, Literal, overload, override
 
 import math
 
@@ -81,52 +74,44 @@ __all__ = [
     "PHASES",
     "Cost",
     "Device",
-    "HasCost",
     "Index",
     "Kernel",
     "Key",
     "Measure",
     "Phase",
-    "bound",
     "cost",
     "elementwise_cost",
     "matmul_cost",
-    "mbu",
-    "mfu",
     "peak",
     "reduction_cost",
     "resolve_dtype",
-    "ridge",
-    "shared_rows",
     "traffic",
     "utilization",
-    "with_rows",
 ]
 
 
-type Measure = Literal["flops", "bytes"]
+type Measure = Literal["flops", "bytes", "intensity"]
 type Phase = Literal["primal", "adjoint"]
 type Kernel = Literal["matmul", "elementwise", "reduction", "selection", "sort"]
-type Key = tuple[Measure, Phase, Kernel, torch.dtype]
-
 type Axis = str | torch.dtype
-type _Part = Axis | slice
-# A sub-table index: fewer than four parts, or four with at least one ``:``. A
-# full ``Key`` is none of these, so the two ``__getitem__`` overloads are disjoint.
-type Index = (
-    Axis
-    | tuple[_Part]
-    | tuple[_Part, _Part]
-    | tuple[_Part, _Part, _Part]
-    | tuple[slice, _Part, _Part, _Part]
-    | tuple[_Part, slice, _Part, _Part]
-    | tuple[_Part, _Part, slice, _Part]
-    | tuple[_Part, _Part, _Part, slice]
-)
+type Key = tuple[Axis, Axis, Axis, Axis]
+"""Every axis of a four-axis table named, in any order: reads one float."""
+type Index = Axis | tuple[Axis] | tuple[Axis, Axis] | tuple[Axis, Axis, Axis]
+"""Fewer axes than the table has, in any order: reads the sub-table."""
 
-MEASURES: Final = ("flops", "bytes")
+MEASURES: Final = ("flops", "bytes", "intensity")
 PHASES: Final = ("primal", "adjoint")
 KERNELS: Final = ("matmul", "elementwise", "reduction", "selection", "sort")
+DTYPE_ALIASES: Final[Mapping[str, torch.dtype]] = {
+    "bf16": torch.bfloat16,
+    "f16": torch.float16,
+    "f32": torch.float32,
+    "f64": torch.float64,
+    "fp8e4m3": torch.float8_e4m3fn,
+    "fp8e5m2": torch.float8_e5m2,
+    "fp4": torch.float4_e2m1fn_x2,
+}
+"""Short dtype spellings an index accepts and a grid header prints."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -134,13 +119,18 @@ class Cost:
     """Per-token cost of one module: a sparse table plus what it owns.
 
     ``cells`` is a ``measure x phase x kernel x dtype`` grid of floats; a
-    cell never written is zero. Index with a full key for the float, or a
-    prefix -- leading axes, ``:`` to skip one -- for the sub-table, then
-    ``sum()`` it: ``cost["flops", "primal", "matmul"].sum()`` is the forward
-    matmul work, ``cost["bytes", :, :, torch.int64].sum()`` the index traffic.
-    Fixed leading axes are dropped from the sub-table's keys, so
-    ``cost["flops"] / cost["bytes"]`` lines up cell for cell; ``/`` follows
-    the IEEE conventions of :func:`_div`.
+    cell never written is zero. Index with axis values in any order -- each
+    value names its own axis, since measures, phases, kernels and dtypes never
+    collide -- and get the float when every axis is fixed, else the sub-table.
+    A combination no cell holds is an empty table, i.e. zero; only a value that
+    names no axis at all (``"gemm"``) is a ``KeyError``. ``"intensity"`` is
+    virtual on a model cost: ``cost["intensity", "matmul"]`` is
+    ``cost["flops", "matmul"] / cost["bytes", "matmul"]``. A dtype may be
+    spelled ``torch.bfloat16`` or ``"bfloat16"``:
+    ``cost["flops", "primal", "matmul"].sum()`` is the forward matmul work,
+    ``cost[torch.int64, "bytes"].sum()`` the index traffic. Fixed axes are
+    dropped from the sub-table's keys, so ``cost["flops"] / cost["bytes"]``
+    lines up cell for cell; ``/`` follows the IEEE conventions of :func:`_div`.
 
     The three integers are not per cell: a slice is cells alone and owns
     nothing; they add under ``+`` and scale only by ``copies`` in :meth:`tile`.
@@ -178,20 +168,31 @@ class Cost:
     @overload
     def __getitem__(self, index: Index) -> Cost: ...
     def __getitem__(self, index: Key | Index) -> float | Cost:
-        parts: tuple[_Part, ...] = index if isinstance(index, tuple) else (index,)
-        width = len(next(iter(self.cells))) if self.cells else 4
-        if len(parts) == width and not any(isinstance(p, slice) for p in parts):
-            return self.cells.get(parts, 0)
-        keep = [i for i, p in enumerate(parts) if isinstance(p, slice)]
-        keep += range(len(parts), width)
+        parts = index if isinstance(index, tuple) else (index,)
+        return self._select([_canonical(p) for p in parts])
+
+    def _select(self, wanted: list[object]) -> float | Cost:
+        if "intensity" in wanted and not any("intensity" in key for key in self.cells):
+            flops = self._select(["flops"])
+            moved = self._select(["bytes"])
+            assert isinstance(flops, Cost)
+            assert isinstance(moved, Cost)
+            ratio = flops / moved
+            return ratio._select([w for w in wanted if w != "intensity"])  # noqa: SLF001 -- Same class; the parts are already canonical, so the public index parse would be repeated for nothing.
+        if not wanted:
+            return self
+        if not self.cells:
+            return Cost() if len(wanted) < 4 else 0.0
+        sample = next(iter(self.cells))
+        fixed = {_axis_of(sample, want): want for want in wanted}
+        if len(fixed) == len(sample):
+            return self.cells.get(tuple(fixed[i] for i in range(len(sample))), 0)
+        keep = [i for i in range(len(sample)) if i not in fixed]
         return Cost(
             cells={
                 tuple(key[i] for i in keep): value
                 for key, value in self.cells.items()
-                if all(
-                    isinstance(want, slice) or want == have
-                    for want, have in zip(parts, key, strict=False)
-                )
+                if all(key[i] == want for i, want in fixed.items())
             },
         )
 
@@ -223,6 +224,10 @@ class Cost:
         return Cost(
             cells={key: _div(value, other) for key, value in self.cells.items()},
         )
+
+    def __sub__(self, other: float) -> Cost:
+        """Shift every cell by a number; a ratio table minus one is its excess."""
+        return Cost(cells={key: value - other for key, value in self.cells.items()})
 
     def tile(self, rows: float, *, copies: int = 1) -> Cost:
         """Run ``rows`` times per token, owned ``copies`` times.
@@ -302,93 +307,12 @@ def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
     return torch.get_default_dtype() if dtype is None else dtype
 
 
-def shared_rows(seq_len: int, batch_size: int, **kwargs: object) -> float:
-    """Rows sharing one parameter: ``rows`` on the bus, else the batch's tokens.
-
-    Args:
-      seq_len: Tokens per sequence.
-      batch_size: Sequences per step.
-      **kwargs: The bus; ``rows`` overrides when a container shares a child's
-        weights over something other than the batch's tokens.
-
-    Returns:
-      rows: Finite and at least one.
-
-    Raises:
-      TypeError: ``rows`` is on the bus but is not a number.
-
-    """
-    if seq_len < 1 or batch_size < 1:
-        raise ValueError("seq_len and batch_size must be at least one.")
-    rows = kwargs.get("rows")
-    if rows is None:
-        return seq_len * batch_size
-    if isinstance(rows, bool) or not isinstance(rows, (int, float)):
-        raise TypeError(f"rows must be a number; got {rows!r}.")
-    _validate_rows(rows)
-    return rows
-
-
-def with_rows(rows: float, /, **kwargs: object) -> dict[str, object]:
-    """Return the bus with ``rows`` replaced, for a child's own sharing rows.
-
-    ``rows`` is positional-only so a bus already carrying one passes through
-    ``**kwargs`` and is overwritten rather than colliding.
-
-    Args:
-      rows: The child's sharing rows.
-      **kwargs: The bus, with or without a ``rows`` of its own.
-
-    Returns:
-      bus: ``kwargs`` with ``rows`` set.
-
-    """
-    return {**kwargs, "rows": rows}
-
-
-@runtime_checkable
-class HasCost(Protocol):
-    """A config that prices the module it builds."""
-
-    def cost(
-        self,
-        *,
-        seq_len: int,
-        batch_size: int,
-        dtype: torch.dtype | None,
-        **kwargs: object,
-    ) -> Cost:
-        """Price one token through the module ``self`` builds.
-
-        Args:
-          seq_len: Tokens per sequence: attention's reach before any window.
-          batch_size: Sequences per step; amortizes weights only.
-          dtype: Activation dtype; ``None`` is torch's default.
-          **kwargs: The open bus, forwarded to every child.
-
-        Returns:
-          cost: Per-token cost.
-
-        """
-        ...
-
-
-def cost(
-    config: object,
-    *,
-    seq_len: int,
-    batch_size: int,
-    dtype: torch.dtype | None,
-    **kwargs: object,
-) -> Cost:
-    """Price a config per token for ``batch_size`` sequences of ``seq_len`` tokens.
+def cost(config: object, **kwargs: object) -> Cost:
+    """Price a config per token, forwarding the bus unchanged.
 
     Args:
       config: A config with ``cost``.
-      seq_len: Tokens per sequence.
-      batch_size: Sequences per step.
-      dtype: Activation dtype; ``None`` is torch's default.
-      **kwargs: The open bus, forwarded unchanged.
+      **kwargs: The open bus; the config names what it reads.
 
     Returns:
       cost: The config's per-token cost.
@@ -397,12 +321,18 @@ def cost(
       TypeError: ``config`` has no ``cost``.
 
     """
-    if not isinstance(config, HasCost):
+    # Duck-typed rather than ``isinstance(config, HasCost)``: the protocol
+    # lives in ``custom_types`` and names ``Cost`` in its signature, so
+    # importing it here would close an import cycle.
+    price = getattr(config, "cost", None)
+    if not callable(price):
         raise TypeError(
             f"{type(config).__qualname__} has no cost(); every config under a "
             "priced container must implement HasCost.",
         )
-    return config.cost(seq_len=seq_len, batch_size=batch_size, dtype=dtype, **kwargs)
+    priced: object = price(**kwargs)
+    assert isinstance(priced, Cost)
+    return priced
 
 
 def matmul_cost(
@@ -563,13 +493,14 @@ def reduction_cost(
 
 
 type Device = Literal[
-    "H100",
-    "H200",
-    "B200",
-    "RTX5050",
-    "RTX5070",
-    "RTX5090",
-    "RTXPRO6000",
+    "a100",
+    "h100",
+    "h200",
+    "b200",
+    "rtx5050",
+    "rtx5070",
+    "rtx5090",
+    "rtxpro6000",
 ]
 
 # Dense figures, one device, at FP32 accumulate (what training runs): TB/s, then
@@ -578,6 +509,9 @@ type Device = Literal[
 # ``float32`` tensor entry is TF32, what a matmul runs at under
 # ``torch.backends.cuda.matmul.allow_tf32``.
 #
+# A100 80GB SXM: https://www.nvidia.com/en-us/data-center/a100/ "Specifications";
+#   the starred SXM column is "with sparsity", so each is halved (TF32 312 -> 156,
+#   BF16 624 -> 312, INT8 1248 -> 624). No FP8. FP64 TC 19.5; FP32 CUDA 19.5.
 # H100 SXM5: NVIDIA H100 Tensor Core GPU datasheet, "no sparsity" column
 #   (FP64 TC 67 is not used; the vector rate is FP32 CUDA 67). Mirrored at
 #   https://www.spheron.network/blog/nvidia-h100-specs/ "Throughput by Precision".
@@ -605,7 +539,18 @@ type Device = Literal[
 #   is the published 421, so the scaling is consistent. FP32 is
 #   2 x 2560 x 2.57 GHz = 13.2.
 _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]]] = {
-    "H100": (
+    "a100": (
+        2.039,
+        {
+            torch.float64: 19.5,
+            torch.float32: 156,
+            torch.bfloat16: 312,
+            torch.float16: 312,
+            torch.int8: 624,
+        },
+        19.5,
+    ),
+    "h100": (
         3.35,
         {
             torch.float64: 34,
@@ -618,7 +563,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         67,
     ),
-    "H200": (
+    "h200": (
         4.8,
         {
             torch.float64: 34,
@@ -631,7 +576,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         67,
     ),
-    "B200": (
+    "b200": (
         8.0,
         {
             torch.float64: 37,
@@ -645,7 +590,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         75,
     ),
-    "RTX5050": (
+    "rtx5050": (
         0.320,
         {
             torch.float32: 13.2,
@@ -658,7 +603,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         13.2,
     ),
-    "RTX5070": (
+    "rtx5070": (
         0.672,
         {
             torch.float32: 30.9,
@@ -671,7 +616,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         30.9,
     ),
-    "RTX5090": (
+    "rtx5090": (
         1.792,
         {
             torch.float32: 104.8,
@@ -684,7 +629,7 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
         },
         104.8,
     ),
-    "RTXPRO6000": (
+    "rtxpro6000": (
         1.792,
         {
             torch.float32: 251.9,
@@ -701,137 +646,115 @@ _DEVICES: Final[Mapping[Device, tuple[float, Mapping[torch.dtype, float], float]
 """``(TB/s, {dtype: tensor-core TFLOP/s}, CUDA-core TFLOP/s)`` per device."""
 
 
-def peak(device: Device) -> Cost:
-    """Per-``(kernel, dtype)`` FLOP/s ceiling of one device, owning nothing.
+def peak() -> Cost:
+    """Per-second ceilings of every device, and the ridge each implies.
 
-    A ``matmul`` cell is the dense tensor-core peak for its dtype; every other
-    silo runs on the CUDA cores at the FP32 vector rate regardless of dtype.
+    Keyed ``(device, dtype, measure, kernel)`` with measures ``flops`` (FLOP/s),
+    ``bytes`` (B/s) and ``intensity`` (their ratio, FLOP/B: the ridge). A
+    ``matmul`` cell is the dense tensor-core peak for its dtype; every other
+    silo runs on the CUDA cores at the FP32 vector rate regardless of dtype,
+    index dtypes included, since a gather or a sort moves ``int64`` at the
+    same rate. Every ``bytes`` cell is the device's memory bandwidth.
 
-    Args:
-      device: Which datasheet to read.
-
-    Returns:
-      peak: FLOP/s per ``(kernel, dtype)``, shaped for :func:`ridge` and
-        :func:`utilization` (tile over phases first).
-
-    """
-    _, tensor, vector = _DEVICES[device]
-    return Cost(
-        cells={
-            **{("matmul", dtype): flops * 1e12 for dtype, flops in tensor.items()},
-            **{
-                (kernel, dtype): vector * 1e12
-                for kernel in KERNELS
-                if kernel != "matmul"
-                for dtype in tensor
-            },
-        },
-    )
-
-
-def ridge(device: Device) -> Cost:
-    """FLOP/byte at which each ``(kernel, dtype)`` cell turns compute-bound.
-
-    A cell whose model intensity ``cost["flops", p, k, d] / cost["bytes",
-    p, k, d]`` is below this is memory-bound on ``device``.
-
-    Args:
-      device: Which datasheet to read.
+    ``peak()["h100", torch.bfloat16]`` is one device at one dtype, measures by
+    kernel; ``peak()["h100", torch.bfloat16, "intensity", "matmul"]`` is the
+    one number a model's matmul intensity is compared to. Sums across
+    devices or dtypes rank alternatives and mean nothing.
 
     Returns:
-      ridge: ``peak(device) / bandwidth`` per ``(kernel, dtype)``.
+      peak: The datasheet table, owning nothing.
 
     """
-    bandwidth, _, _ = _DEVICES[device]
-    return peak(device) / (bandwidth * 1e12)
+    cells: dict[tuple[object, ...], float] = {}
+    for device, (bandwidth, tensor, vector) in _DEVICES.items():
+        for dtype in (*tensor, torch.int64, torch.int32, torch.bool):
+            for kernel in KERNELS:
+                rate = tensor.get(dtype) if kernel == "matmul" else vector
+                if rate is None:
+                    continue
+                cells[(device, dtype, "flops", kernel)] = rate * 1e12
+                cells[(device, dtype, "bytes", kernel)] = bandwidth * 1e12
+                cells[(device, dtype, "intensity", kernel)] = rate / bandwidth
+    return Cost(cells=cells)
 
 
-def bound(cost: Cost, device: Device) -> Cost:
-    """Model intensity over the device ridge, per cell: ``> 1`` is compute-bound.
-
-    Args:
-      cost: Per-token cost.
-      device: Which datasheet to read.
-
-    Returns:
-      ratio: ``(flops / bytes) / ridge`` at ``(phase, kernel, dtype)`` keys.
-
-    """
-    intensity = cost["flops"] / cost["bytes"]
-    line = ridge(device).cells
-    return Cost(
-        cells={
-            key: _div(value, line.get(key[1:], 0))
-            for key, value in intensity.cells.items()
-        },
-    )
-
-
-def utilization(cost: Cost, *, tokens_per_sec: float, peak: Cost) -> Cost:
-    """Achieved fraction of each cell's ceiling on a training step.
-
-    Args:
-      cost: Per-token cost at the batch's sequence length.
-      tokens_per_sec: Measured ``tokens_per_step / step_time``.
-      peak: Per-cell FLOP/s ceiling summed over every device the tokens
-        spanned, at ``(phase, kernel, dtype)`` keys and owning nothing; a
-        matmul cell is the dense tensor-core peak for its dtype.
-
-    Returns:
-      achieved: Fraction of peak per cell; the matmul cells are MFU.
-
-    """
-    return cost["flops"].tile(tokens_per_sec) / peak
-
-
-def mfu(cost: Cost, *, tokens_per_sec: float, peak_flops_per_sec: float) -> float:
-    """Model FLOPs utilization: the ``matmul`` silo of :func:`utilization`.
-
-    Args:
-      cost: Per-token cost at the batch's sequence length.
-      tokens_per_sec: Measured ``tokens_per_step / step_time``.
-      peak_flops_per_sec: Dense datasheet FLOP/s for the dtype, summed over
-        every device the tokens spanned.
-
-    Returns:
-      achieved: Fraction of peak; ``0.4`` is a well-tuned dense run.
-
-    """
-    return cost["flops", :, "matmul"].sum() * tokens_per_sec / peak_flops_per_sec
-
-
-def mbu(
+def utilization(
     cost: Cost,
     *,
-    batch: int,
-    context_len: int,
-    steps_per_sec: float,
-    dtype: torch.dtype | None,
-    peak_bytes_per_sec: float,
-) -> float:
-    """Model bandwidth utilization of a decode step.
+    device: Device,
+    seq_len: int,
+    batch_size: int,
+    duration_sec: float = math.inf,
+) -> Cost:
+    """How well each cell uses ``device``, with or without a step time.
 
-    Every active weight is read once per step; each sequence's state is read
-    up to its position. Prefill is compute-bound: use :func:`utilization`.
+    Without ``duration_sec`` the answer is the shape's own limit: model
+    intensity over the device ridge, so ``1`` is the roofline knee, below it
+    the tensor or vector units idle by that factor whatever the kernel does,
+    and above it only the compute peak remains. With ``duration_sec`` the
+    answer is the achieved FLOP/s over the roofline ceiling that applies --
+    the lower of the compute peak and ``intensity x bandwidth`` -- so ``1``
+    is saturation and a matmul cell is MFU.
 
     Args:
-      cost: Per-token cost; ``bytes_state`` is per token kept.
-      batch: Sequences decoded per step.
-      context_len: Positions each sequence's state holds.
-      steps_per_sec: Measured decode step rate.
-      dtype: Storage dtype of the weights; ``None`` is torch's default. State
-        is already counted in bytes.
-      peak_bytes_per_sec: Datasheet HBM bandwidth.
+      cost: Per-token cost, priced with the same ``seq_len`` and ``batch_size``.
+      device: Which datasheet to read.
+      seq_len: Tokens per sequence.
+      batch_size: Sequences per step.
+      duration_sec: Wall seconds the step took, accelerator work complete;
+        omit for the shape limit alone.
 
     Returns:
-      achieved: Fraction of peak bandwidth.
+      ratio: At ``(phase, kernel, dtype)`` keys, owning nothing; ``inf`` where
+        the device lists no peak for the cell.
 
     """
-    moved = (
-        cost.params_active * resolve_dtype(dtype).itemsize
-        + batch * context_len * cost.bytes_state
-    )
-    return moved * steps_per_sec / peak_bytes_per_sec
+    ceiling = peak()[device].cells
+    intensity = cost["intensity"].cells
+    cells: dict[tuple[object, ...], float] = {}
+    for key, flops in cost["flops"].cells.items():
+        _, kernel, dtype = key
+        compute = ceiling.get((dtype, "flops", kernel), 0)
+        bandwidth = ceiling.get((dtype, "bytes", kernel), 0)
+        if math.isinf(duration_sec):
+            ridge = ceiling.get((dtype, "intensity", kernel), 0)
+            cells[key] = _div(intensity.get(key, math.inf), ridge)
+            continue
+        memory = intensity.get(key, math.inf) * bandwidth
+        achieved = flops * seq_len * batch_size / duration_sec
+        cells[key] = _div(achieved, min(compute, memory))
+    return Cost(cells=cells)
+
+
+def _axis_of(key: tuple[object, ...], value: object) -> int:
+    """Return the position in ``key`` whose axis holds values like ``value``."""
+    for i, have in enumerate(key):
+        if _kind(have) == _kind(value):
+            return i
+    raise KeyError(f"{value!r} names no axis of a {len(key)}-axis table.")
+
+
+def _canonical(value: object) -> object:
+    """Spell a dtype given by name or alias as the ``torch.dtype`` the keys hold."""
+    if isinstance(value, str):
+        named: object = DTYPE_ALIASES.get(value, getattr(torch, value, None))
+        if isinstance(named, torch.dtype):
+            return named
+    return value
+
+
+def _kind(value: object) -> str:
+    if isinstance(value, torch.dtype):
+        return "dtype"
+    if value in MEASURES:
+        return "measure"
+    if value in PHASES:
+        return "phase"
+    if value in KERNELS:
+        return "kernel"
+    if value in _DEVICES:
+        return "device"
+    raise KeyError(f"{value!r} is not a measure, phase, kernel, dtype or device.")
 
 
 def _validate_rows(rows: float) -> None:
@@ -839,9 +762,9 @@ def _validate_rows(rows: float) -> None:
         raise ValueError("rows must be finite and at least one.")
 
 
-# Columns are the last key axis (``dtype`` unless it was sliced away), crossed with
-# ``measure`` when a table still holds one; rows are every axis between. A table
-# holding both measures ends each row with its flops/bytes.
+# The ``measure`` axis, wherever it sits, becomes the column group; the last other
+# axis joins it as columns (or, with only one other axis, labels the rows); every
+# axis between labels the rows. A model table ends each row with its intensity.
 def _grid(cells: Mapping[tuple[object, ...], float]) -> str:
     """Render a table as an aligned grid with a totals row."""
     if not cells:
@@ -849,37 +772,71 @@ def _grid(cells: Mapping[tuple[object, ...], float]) -> str:
     width = len(next(iter(cells)))
     if width == 0:
         return _si(next(iter(cells.values())))
-    measured = any(k[0] in MEASURES for k in cells) and width > 1
-    measures: list[str] = (
-        [m for m in MEASURES if any(k[0] == m for k in cells)] if measured else [""]
+    axis = next(
+        (i for i in range(width) if all(k[i] in MEASURES for k in cells)),
+        None,
     )
-    columns_axis = sorted({k[-1] for k in cells}, key=_column_order)
+    measures: list[object] = (
+        [m for m in MEASURES if any(k[axis] == m for k in cells)]
+        if axis is not None
+        else [""]
+    )
+    others = [i for i in range(width) if i != axis]
+    rows_only = axis is not None and len(others) == 1
+    column_axis = None if rows_only or not others else others[-1]
+    row_axes = others if rows_only else others[:-1]
+    columns_axis: list[object] = (
+        [()]
+        if column_axis is None
+        else sorted({k[column_axis] for k in cells}, key=_column_order)
+    )
     order = (*PHASES, *KERNELS)
     labels = sorted(
-        {tuple(str(x) for x in k[measured:-1]) for k in cells},
+        {tuple(str(k[i]) for i in row_axes) for k in cells},
         key=lambda label: tuple(order.index(x) if x in order else -1 for x in label),
     )
     depth = max(1, *(len(label) for label in labels))
-    columns = [
-        f"{m}[{_axis_name(d)}]" if m else _axis_name(d)
-        for m in measures
-        for d in columns_axis
-    ]
-    per_column = len(columns_axis) if measures == ["flops", "bytes"] else 0
-    if per_column:
-        columns.append("flops/bytes")
-    rows: list[list[str]] = [[*[""] * depth, *columns]]
+    # The measure and the column axis stack as two header lines rather than
+    # widening every column to ``flops[bfloat16]``.
+    if column_axis is None:
+        header = [[_axis_name(m) for m in measures]]
+    elif axis is None:
+        header = [[_axis_name(d) for d in columns_axis]]
+    else:
+        header = [
+            [str(m) for m in measures for _ in columns_axis],
+            [_axis_name(d) for _ in measures for d in columns_axis],
+        ]
+    derived = (
+        len(columns_axis)
+        if axis is not None
+        and measures == ["flops", "bytes"]
+        and (rows_only or _bytes_vary(cells, axis))
+        else 0
+    )
+    if derived:
+        header[-1].append("intensity")
+        for line in header[:-1]:
+            line.append("")
+
+    lookup = {
+        tuple(str(x) if i in row_axes else x for i, x in enumerate(k)): v
+        for k, v in cells.items()
+    }
+    rows: list[list[str]] = [[*[""] * depth, *line] for line in header]
     totals = [0.0] * (len(measures) * len(columns_axis))
     for label in labels:
+        fixed = dict(zip(row_axes, label, strict=True))
         values = [
-            cells.get(((m,) if measured else ()) + label + (d,), 0.0)
+            lookup.get(_key(width, fixed, (axis, m), (column_axis, d)), 0.0)
             for m in measures
             for d in columns_axis
         ]
         totals = [t + v for t, v in zip(totals, values, strict=True)]
-        rows.append(_line(label, values, depth=depth, per_column=per_column))
-    if len(labels) > 1:
-        rows.append(_line(("total",), totals, depth=depth, per_column=per_column))
+        rows.append(_line(label, values, depth=depth, per_column=derived))
+    # A ratio has no total: summing ridges or intensities ranks, it does not add.
+    if len(labels) > 1 and "intensity" not in measures:
+        rows.append(_line(("total",), totals, depth=depth, per_column=derived))
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     return "\n".join(
         " ".join(
@@ -888,6 +845,26 @@ def _grid(cells: Mapping[tuple[object, ...], float]) -> str:
         ).rstrip()
         for row in rows
     )
+
+
+def _key(
+    width: int,
+    fixed: Mapping[int, object],
+    *placed: tuple[int | None, object],
+) -> tuple[object, ...]:
+    """Assemble a cell key from row labels plus the measure and column axes."""
+    parts = {
+        **fixed,
+        **{index: value for index, value in placed if index is not None},
+    }
+    return tuple(parts[i] for i in range(width))
+
+
+# A device's bandwidth is one number stamped into every ``bytes`` cell; summing
+# such a row across dtypes and dividing would rank alternatives, not add parts.
+def _bytes_vary(cells: Mapping[tuple[object, ...], float], axis: int) -> bool:
+    moved = {value for key, value in cells.items() if key[axis] == "bytes"}
+    return len(moved) != 1
 
 
 def _column_order(axis: object) -> tuple[int, str]:
@@ -904,7 +881,7 @@ def _line(
     depth: int,
     per_column: int,
 ) -> list[str]:
-    """Format one grid row; ``per_column > 0`` appends the row's flops/bytes."""
+    """Format one grid row; ``per_column > 0`` appends the row's intensity."""
     out = [*label, *[""] * (depth - len(label)), *(_si(v) for v in values)]
     if per_column:
         out.append(
@@ -914,6 +891,9 @@ def _line(
 
 
 def _axis_name(axis: object) -> str:
+    for alias, dtype in DTYPE_ALIASES.items():
+        if axis == dtype:
+            return alias
     return str(axis).removeprefix("torch.")
 
 

@@ -15,8 +15,7 @@ thousands of 900-cell grids, and only equality between them matters.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import hashlib
 
@@ -27,6 +26,10 @@ import torch
 import torch.distributed as dist
 
 from priml.lib.custom_json import FloatCodec
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class PassK:

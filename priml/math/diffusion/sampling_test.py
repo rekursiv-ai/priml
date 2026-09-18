@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import math
 
@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 import torch
 
-from priml.math.custom_types import Tensorable
 from priml.math.diffusion import SampleOneStepResult
 from priml.math.diffusion.sampling import (
     SampleResult,
@@ -30,6 +29,12 @@ from priml.math.diffusion.target import (
     target_rectified_flow,
 )
 from priml.memory import convert_to_tensor
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from priml.math.custom_types import Tensorable
 
 
 # Direct implementation of Song et al. 2020 Eq 12 to validate the numerically stable

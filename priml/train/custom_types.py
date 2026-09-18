@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,6 +16,9 @@ from priml.custom_types import CheckpointableProtocol
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+    from contextlib import AbstractContextManager
+
     from torch import Tensor, nn
 
     import torch

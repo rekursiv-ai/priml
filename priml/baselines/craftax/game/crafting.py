@@ -15,7 +15,7 @@ the running inventory rather than the original.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from torch import Tensor
 
@@ -31,7 +31,10 @@ from priml.baselines.craftax.game.constants import (
 from priml.baselines.craftax.game.indexing import (
     scatter_tiles_where,
 )
-from priml.baselines.craftax.game.state import EnvState
+
+
+if TYPE_CHECKING:
+    from priml.baselines.craftax.game.state import EnvState
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

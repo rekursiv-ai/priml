@@ -9,15 +9,26 @@ measure-only path reports the same norm without mutating grads.
 
 from __future__ import annotations
 
-from torch import Tensor
+from typing import TYPE_CHECKING
 
+from torch import Tensor
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+
+import pytest
 import torch
+import torch.distributed as dist
 
 from priml.train.grad_clip import (
     clip_grad_norm_,
     total_grad_norm,
     total_param_norm,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
 
 
 def _test_device() -> torch.device:
@@ -142,6 +153,67 @@ def test_total_param_norm_inf_uses_max_abs_value() -> None:
     device = _test_device()
     param = torch.nn.Parameter(torch.tensor([-7.0, 4.0], device=device))
     _close(total_param_norm(param, norm_type=float("inf")), torch.tensor(7.0))
+
+
+def test_total_grad_norm_accepts_a_single_tensor() -> None:
+    p = torch.nn.Parameter(torch.zeros(2, device=_test_device()))
+    p.grad = torch.tensor([3.0, 4.0], device=_test_device())
+    _close(total_grad_norm(p, foreach=_FOREACH), torch.tensor(5.0))
+
+
+@pytest.fixture
+def single_rank_group(tmp_path: Path) -> Generator[None, None, None]:
+    """Open a 1-rank gloo group over a file rendezvous, enough to build a DTensor."""
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
+    try:
+        yield
+    finally:
+        dist.destroy_process_group()
+
+
+def _sharded_param(values: list[float], grad: list[float]) -> torch.nn.Parameter:
+    """Build a CPU DTensor parameter sharded over a 1-rank mesh with a DTensor grad."""
+    mesh = init_device_mesh("cpu", (1,))
+    p = torch.nn.Parameter(distribute_tensor(torch.tensor(values), mesh, [Shard(0)]))
+    p.grad = distribute_tensor(torch.tensor(grad), mesh, [Shard(0)])
+    return p
+
+
+def test_sharded_grads_reduce_to_a_plain_global_norm(single_rank_group: None) -> None:
+    """A DTensor total norm is gathered to a plain tensor callers can ``.item()``."""
+    del single_rank_group
+    p = _sharded_param([0.0, 0.0], [3.0, 4.0])
+    norm = total_grad_norm([p], foreach=True)
+    assert not isinstance(norm, DTensor)
+    _close(norm, torch.tensor(5.0))
+
+
+def test_sharded_grads_are_clipped_against_the_global_norm(
+    single_rank_group: None,
+) -> None:
+    del single_rank_group
+    p = _sharded_param([0.0, 0.0], [3.0, 4.0])
+    returned = clip_grad_norm_([p], max_norm=1.0, foreach=True)
+    assert not isinstance(returned, DTensor)
+    _close(returned, torch.tensor(5.0))
+    grad = p.grad
+    assert isinstance(grad, DTensor)
+    _close(grad.full_tensor(), torch.tensor([0.6, 0.8]))
+
+
+def test_sharded_param_norm_is_gathered_to_a_plain_tensor(
+    single_rank_group: None,
+) -> None:
+    del single_rank_group
+    p = _sharded_param([3.0, 4.0], [0.0, 0.0])
+    norm = total_param_norm([p])
+    assert not isinstance(norm, DTensor)
+    _close(norm, torch.tensor(5.0))
 
 
 if __name__ == "__main__":

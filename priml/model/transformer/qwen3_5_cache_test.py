@@ -103,6 +103,10 @@ def test_cache_state_rejects_invalid_native_metadata() -> None:
     """Reject incomplete delta state and impossible full-cache progress."""
     with pytest.raises(TypeError, match="KV or delta"):
         cache_state_dict([{"conv_state": torch.zeros(1)}])
+    with pytest.raises(TypeError, match="KV or delta"):
+        cache_state_dict([object()])
+    with pytest.raises(TypeError, match="KV or delta"):
+        cache_state_dict([{"conv_state": 1, "recurrent_state": torch.zeros(1)}])
     with pytest.raises(ValueError, match="progress metadata"):
         cache_from_state_dict(
             [
@@ -207,6 +211,14 @@ def test_frozen_view_serializes_as_independent_mutable_cache() -> None:
         ([object()], "Qwen3.5 cache layer must be a dictionary"),
         ([{1: "full_attention"}], "Qwen3.5 cache layer keys must be strings"),
         ([{"kind": 1}], "kind must be a str"),
+        (
+            [{"kind": "full_attention", "k": 1, "v": 1, "length": 0, "seen": 0}],
+            "k must be a Tensor",
+        ),
+        (
+            [{"kind": "linear_attention", "conv_state": 1}],
+            "delta-attention cache must map strings to tensors",
+        ),
     ],
 )
 def test_cache_restore_rejects_invalid_state_containers_and_metadata_types(
@@ -216,6 +228,32 @@ def test_cache_restore_rejects_invalid_state_containers_and_metadata_types(
     """Reject malformed persistence containers before interpreting their fields."""
     with pytest.raises(TypeError, match=message):
         cache_from_state_dict(state)
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ([{"kind": "full_attention", "k": torch.zeros(1)}], "invalid field set"),
+        (
+            [{"kind": "linear_attention", "conv_state": torch.zeros(1)}],
+            "invalid field set",
+        ),
+        ([{"kind": "sliding_attention"}], "unknown kind"),
+    ],
+)
+def test_cache_restore_rejects_invalid_layer_kinds_and_field_sets(
+    state: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        cache_from_state_dict(state)
+
+
+def test_an_empty_delta_cache_round_trips() -> None:
+    """A freshly allocated delta layer holds no tensors yet and still persists."""
+    state = cache_state_dict([{}])
+    assert state == [{"kind": "linear_attention"}]
+    assert cache_from_state_dict(state) == [{}]
 
 
 @pytest.mark.parametrize("name", ["length", "seen"])
@@ -253,6 +291,7 @@ def test_cache_state_rejects_bool_full_attention_metadata(name: str) -> None:
     ("k", "v"),
     [
         (torch.zeros(2, 4), torch.zeros(2, 4)),
+        (torch.zeros(1, 1, 2, 4), torch.zeros(1, 1, 3, 4)),
         (
             torch.zeros(1, 1, 2, 4, dtype=torch.float32),
             torch.zeros(1, 1, 2, 4, dtype=torch.float64),
