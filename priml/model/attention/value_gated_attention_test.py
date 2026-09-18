@@ -8,6 +8,7 @@ from typing import Final, cast
 from configgle import PartialConfig
 from configgle.testing import assert_pprint_golden
 from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import pytest
 import torch
@@ -257,6 +258,28 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
             value_embedding=x,
         ),
     )
+
+
+def test_sdpa_causal_cost_matches_torch_through_its_owner() -> None:
+    config = ValueGatedAttention.Config()
+    config.channels_in = 16
+    config.channels_head = 8
+    config.gate_channels = 4
+    # Math SDPA exposes both products without replacing the configured kernel.
+    with sdpa_kernel(SDPBackend.MATH):
+        assert_cost_matches_torch(
+            config,
+            build_input=lambda: torch.randn(2, 4, 16, requires_grad=True),
+            seq_len=4,
+            batch_size=2,
+            num_tokens=8,
+            dtype=None,
+            run=lambda module, x: cast(ValueGatedAttention, module)(
+                x,
+                cos_sin=RoPE.Config(8).make()(torch.arange(4)),
+                value_embedding=x,
+            ),
+        )
 
 
 def test_value_gated_attention_cost_without_a_gate_or_window() -> None:

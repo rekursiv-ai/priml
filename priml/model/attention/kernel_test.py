@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Final, cast, override
 from configgle import Fig
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
-from torch.utils.flop_counter import FlopCounterMode
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import pytest
 import torch
@@ -21,6 +21,7 @@ from priml.model.attention.kernel import (
 )
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.cost import assert_cost_matches_torch
 
 
 if TYPE_CHECKING:
@@ -95,19 +96,19 @@ def test_naive_matches_fused_causal():
     )
 
 
-def test_naive_causal_masking():
+def test_naive_causal_masking() -> None:
     """Verify future tokens don't influence past positions."""
     kernel = SdpaNaive()
-    q = torch.randn(1, 1, 4, 8)
-    k = torch.randn(1, 1, 4, 8)
-    v = torch.randn(1, 1, 4, 8)
+    q = torch.randn(1, 4, 1, 8)
+    k = torch.randn(1, 4, 1, 8)
+    v = torch.randn(1, 4, 1, 8)
     out_full = kernel(q, k, v, is_causal=True)
     # Changing k/v at position 3 shouldn't affect output at position 0.
     k2, v2 = k.clone(), v.clone()
-    k2[:, :, 3, :] = 999.0
-    v2[:, :, 3, :] = 999.0
+    k2[:, 3, :, :] = 999.0
+    v2[:, 3, :, :] = 999.0
     out_mod = kernel(q, k2, v2, is_causal=True)
-    assert torch.equal(out_full[:, :, 0, :], out_mod[:, :, 0, :])
+    assert torch.equal(out_full[:, 0, :, :], out_mod[:, 0, :, :])
 
 
 def test_naive_matches_fused_causal_non_square() -> None:
@@ -228,6 +229,15 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
 def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None:
     small = attention_kernel_cost(
         seq_len=8,
+        batch_size=1,
+        dtype=torch.bfloat16,
+        num_heads=2,
+        channels_head=4,
+        window=window,
+    )
+    assert small == attention_kernel_cost(
+        seq_len=8,
+        batch_size=4,
         dtype=torch.bfloat16,
         num_heads=2,
         channels_head=4,
@@ -308,26 +318,24 @@ def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
     assert large["bytes", torch.int64] == small["bytes", torch.int64]
 
 
-def test_naive_kernel_cost_matches_torch() -> None:
-    """The manual kernel is two bmms each way; torch counts exactly that.
-
-    Only the naive kernel is measurable here: the CPU SDPA op that
-    ``SdpaFused`` dispatches to has no ``FlopCounterMode`` registration and
-    measures zero, which is the silent-zero bug ``cost`` exists to prevent.
-    A kernel config holds no shapes, so its owner costs it; the owner's
-    call is reproduced here against torch's count.
-    """
-    torch.manual_seed(0)
-    q, k, v = (torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3))
-    with FlopCounterMode(display=False) as counter:
-        SdpaNaive()(q, k, v).sum().backward()
-    analytical = attention_kernel_cost(
-        seq_len=8,
-        dtype=None,
-        num_heads=2,
-        channels_head=4,
-    )
-    assert analytical["flops", "matmul"].sum() * 8 == counter.get_total_flops()
+@pytest.mark.parametrize("config", [SdpaNaive.Config(), SdpaFused.Config()])
+def test_kernel_cost_matches_torch(
+    config: SdpaNaive.Config | SdpaFused.Config,
+) -> None:
+    """Measure both kernels' logical products, traffic, and parameter count."""
+    # CPU flash SDPA lacks a FLOP counter; math dispatch exposes the products.
+    with sdpa_kernel(SDPBackend.MATH):
+        analytical = assert_cost_matches_torch(
+            config,
+            build_input=lambda: tuple(
+                torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3)
+            ),
+            num_tokens=8,
+            seq_len=8,
+            dtype=None,
+            num_heads=2,
+            channels_head=4,
+        )
     assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 4 * 8
 
 

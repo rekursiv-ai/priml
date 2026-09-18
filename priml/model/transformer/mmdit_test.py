@@ -489,6 +489,21 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
         )
 
 
+def test_adaln_zero_cost_matches_torch() -> None:
+    config = AdaLNZero.Config()
+    config.channels_in = 8
+    config.cond_dim = 4
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 4, 4, requires_grad=True),
+        run=_run_adaln,
+        seq_len=4,
+        batch_size=2,
+        num_tokens=8,
+        dtype=None,
+    )
+
+
 def test_adaln_zero_cost_is_one_biased_matmul() -> None:
     config = AdaLNZero.Config(channels_in=8, cond_dim=4)
     finalized = config.copy_tree().finalize()
