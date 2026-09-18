@@ -20,7 +20,7 @@ from priml.cost import (
 from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
-from priml.model.attention.window import causal_chunk_mask
+from priml.model.attention.window import causal_chunk_mask, window_mask
 from priml.model.custom_types import (
     AttentionKernel,
     ChannelsIn,
@@ -602,6 +602,17 @@ class SelfAttention(AttentionProjections):
             v = v.repeat_interleave(self.kv_groups, dim=-3)
         q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
 
+        # A multi-token chunk decoded against a longer cache must stay causal within the
+        # chunk and honor ``window``; ``window_mask`` does both when finite, else
+        # ``causal_chunk_mask`` gives the causal fallback. A single-token chunk needs
+        # only ``window``, applied by the kernel's own fallback.
+        if attn_mask is None and self.causal and S > 1:
+            window = kwargs.get("window", -1)
+            assert isinstance(window, int)
+            attn_mask = window_mask(q, k, window=window)
+            if attn_mask is None:
+                attn_mask = causal_chunk_mask(q, k)
+
         out = self.attn_kernel(
             q,
             k,
@@ -614,11 +625,7 @@ class SelfAttention(AttentionProjections):
             is_causal=(
                 self.causal and k.shape[-3] == S if is_causal is None else is_causal
             ),
-            attn_mask=(
-                causal_chunk_mask(q, k)
-                if attn_mask is None and self.causal
-                else attn_mask
-            ),
+            attn_mask=attn_mask,
             **kwargs,
         )
 

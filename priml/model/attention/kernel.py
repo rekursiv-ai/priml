@@ -17,7 +17,7 @@ from priml.cost import (
     reduction_cost,
     traffic,
 )
-from priml.model.attention.window import window_mask
+from priml.model.attention.window import causal_chunk_mask, window_mask
 
 
 def attention_kernel_cost(
@@ -180,6 +180,12 @@ class SdpaFused(nn.Module):
         del kwargs
         if attn_mask is None:
             attn_mask = window_mask(q, k, window=window)
+        if is_causal and attn_mask is None and q.shape[-3] != k.shape[-3]:
+            # SDPA's ``is_causal=True`` is top-left aligned when query and
+            # key lengths differ, which is wrong for cached decode (the
+            # query chunk sits at the end of the key cache), so an explicit
+            # bottom-right causal mask is built instead.
+            attn_mask = causal_chunk_mask(q, k)
         q, k, v = (t.movedim(-3, -2) for t in (q, k, v))
         out = f.scaled_dot_product_attention(
             q,
@@ -187,7 +193,7 @@ class SdpaFused(nn.Module):
             v,
             attn_mask=attn_mask,
             dropout_p=dropout_p,
-            # The window mask is already causal, and SDPA REFUSES both at once.
+            # SDPA refuses an explicit mask together with is_causal.
             is_causal=is_causal and attn_mask is None,
             scale=scale,
         )

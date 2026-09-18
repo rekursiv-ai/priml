@@ -110,6 +110,23 @@ def test_naive_causal_masking():
     assert torch.equal(out_full[:, :, 0, :], out_mod[:, :, 0, :])
 
 
+def test_naive_matches_fused_causal_non_square() -> None:
+    """Match SdpaFused's non-square causal masking against SdpaNaive's reference.
+
+    Asserts a 1-token query against a 5-token key cache produces numerically
+    close output for both kernels under ``is_causal=True``.
+    """
+    torch.manual_seed(0)
+    q = torch.randn(2, 1, 4, 16)  # One new query token...
+    k = torch.randn(2, 5, 4, 16)  # ...against a 5-token cache.
+    v = torch.randn(2, 5, 4, 16)
+    sdp = SdpaFused()(q, k, v, is_causal=True)
+    eager = SdpaNaive()(q, k, v, is_causal=True)
+    assert torch.allclose(sdp, eager, atol=1e-6), (
+        f"max diff: {(sdp - eager).abs().max().item():.3e}"
+    )
+
+
 def test_the_kernels_agree_on_a_windowed_forward() -> None:
     """The fused and manual kernels are one algorithm.
 

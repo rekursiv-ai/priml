@@ -13,7 +13,11 @@ import pytest
 import torch
 
 from priml.cost import cost, matmul_cost
-from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
+from priml.model.attention.kernel import (
+    SdpaFused,
+    SdpaNaive,
+    attention_kernel_cost,
+)
 from priml.model.attention.kvcache import (
     KVCache,  # Used in preallocated cache test.
 )
@@ -23,7 +27,18 @@ from priml.model.attention.self_attention import (
     AttentionProjections,
     SelfAttention,
 )
+from priml.model.attention.window import causal_chunk_mask, window_mask
+from priml.model.custom_types import (
+    HasForwardCached,
+    has_forward_cached,
+    is_cached_attention,
+)
+from priml.model.embedding import Embedding
+from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
+from priml.model.sequential import Sequential
+from priml.model.transformer.block import TransformerBlock
+from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -393,6 +408,174 @@ def test_self_attention_cached_chunk_rope_positions():
     )
 
 
+def test_self_attention_explicit_mask_combines_with_implicit_causal():
+    """A caller-supplied ``attn_mask`` must combine with ``causal``, not replace it.
+
+    Asserts an all-zero (no-op) mask under ``causal=True`` matches plain
+    ``causal=True`` and differs from ``causal=False``.
+    """
+    torch.manual_seed(0)
+    config = SelfAttention.Config(
+        channels_in=32,
+        num_heads=4,
+        channels_head=8,
+        causal=True,
+        attn_kernel=SdpaNaive.Config(),
+    )
+    module = config.make()
+    module.eval()
+    x = torch.randn(1, 4, 32)
+    permissive_mask = torch.zeros(1, 1, 4, 4)
+
+    with torch.inference_mode():
+        out_causal_no_mask = module(x)
+        out_causal_with_mask = module(x, attn_mask=permissive_mask)
+        module.causal = False
+        out_non_causal_with_mask = module(x, attn_mask=permissive_mask)
+
+    assert torch.equal(out_causal_with_mask, out_causal_no_mask)
+    assert not torch.equal(out_causal_with_mask, out_non_causal_with_mask)
+
+
+def test_self_attention_decode_matches_explicit_mask_reference() -> None:
+    """Cached decode's default masking matches an explicitly-forced mask.
+
+    Asserts greedy-argmax token ids stay identical across several decode
+    steps whether the mask is built by default or forced explicitly.
+    """
+    torch.manual_seed(0)
+    config = Transformer.Config(
+        proj_in=Embedding.Config(channels_in=32, shard="vocab"),
+        channels_in=16,
+        channels_out=32,
+        num_layers=2,
+        block=TransformerBlock.Config(
+            attn=SelfAttention.Config(
+                num_heads=4,
+                num_heads_kv=2,
+                channels_head=4,
+                causal=True,
+                rope=RoPE.Config(channels_head=4),
+            ),
+        ),
+        proj_out=Sequential.Config(
+            elements=[RMSNorm.Config(), Linear.Config(shard="vocab")],
+        ),
+    )
+    model = config.make()
+    model.eval()
+    prompt = torch.randint(0, 32, (1, 2))
+
+    fixed_tokens = _greedy_decode(model, prompt=prompt, num_steps=8, reference=False)
+    reference_tokens = _greedy_decode(model, prompt=prompt, num_steps=8, reference=True)
+
+    assert fixed_tokens == reference_tokens
+
+
+def test_self_attention_decode_respects_configured_window() -> None:
+    """Cached single-token decode must honor a configured attention window.
+
+    Asserts a windowed decode step's output differs from an unwindowed one
+    and matches a mask built by hand from ``window_mask``.
+    """
+    torch.manual_seed(0)
+    config = SelfAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        causal=True,
+        attn_kernel=SdpaFused.Config(),
+    )
+    module = config.make()
+    module.eval()
+    x = torch.randn(1, 6, 16)
+    window = 2
+
+    def decode(*, window: int) -> Tensor:
+        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
+        return module.forward_cached(x[:, 5:], cache=cache, window=window)[0]
+
+    with torch.inference_mode():
+        windowed = decode(window=window)
+        unbounded = decode(window=-1)
+
+    assert not torch.allclose(windowed, unbounded), (
+        "a configured window must change the decode step's output; equal "
+        "outputs mean `window` silently stopped applying at S == 1 -- the "
+        "latent bug this fix corrects"
+    )
+
+    with torch.inference_mode():
+        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
+        forced_mask = window_mask(
+            torch.empty(1, 1, 1, dtype=x.dtype),
+            torch.empty(cache.seen + 1, 1, 1, dtype=x.dtype),
+            window=window,
+        )
+        forced, _ = module.forward_cached(
+            x[:, 5:],
+            cache=cache,
+            is_causal=False,
+            attn_mask=forced_mask,
+        )
+
+    assert torch.equal(windowed, forced)
+
+
+def test_self_attention_cached_chunk_respects_configured_window() -> None:
+    """A multi-token cached chunk (S > 1) must honor a configured window too.
+
+    Asserts a windowed chunk's output differs from an unwindowed one and
+    matches a mask built by hand from ``window_mask``.
+    """
+    torch.manual_seed(0)
+    config = SelfAttention.Config(
+        channels_in=16,
+        num_heads=2,
+        channels_head=8,
+        causal=True,
+        attn_kernel=SdpaFused.Config(),
+    )
+    module = config.make()
+    module.eval()
+    x = torch.randn(1, 8, 16)
+    window = 2
+
+    def decode(*, window: int) -> Tensor:
+        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
+        return module.forward_cached(x[:, 5:], cache=cache, window=window)[0]
+
+    with torch.inference_mode():
+        windowed = decode(window=window)
+        unbounded = decode(window=-1)
+
+    assert not torch.allclose(windowed, unbounded), (
+        "a configured window must change a multi-token cached chunk's "
+        "output; equal outputs mean `window` silently stopped applying "
+        "at S > 1 -- the gap this fix corrects"
+    )
+
+    with torch.inference_mode():
+        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
+        forced_mask = window_mask(
+            torch.empty(3, 1, 1, dtype=x.dtype),
+            torch.empty(cache.seen + 3, 1, 1, dtype=x.dtype),
+            window=window,
+        )
+        forced, _ = module.forward_cached(
+            x[:, 5:],
+            cache=cache,
+            is_causal=False,
+            attn_mask=forced_mask,
+        )
+
+    assert torch.equal(windowed, forced)
+
+
 def test_self_attention_kv_heads_validation():
     with pytest.raises(ValueError, match="must be divisible"):
         SelfAttention.Config(
@@ -683,6 +866,58 @@ def test_qkv_traffic_reads_input_per_projection_not_per_head(split: bool) -> Non
     output = 8 + 8 + 8 * 8 / 4
     assert actual["bytes", "primal", "matmul"].sum() == 2 * (qkv + output)
     assert actual["bytes", "adjoint", "matmul"].sum() == 4 * (qkv + output)
+
+
+# ``reference=True`` forces the same mask the module would build on its own, by
+# explicitly passing ``is_causal=False`` and a ``causal_chunk_mask`` built from each
+# step's shapes on every decode call -- the mask depends only on shape/dtype/device
+# (never tensor values), so a correctly-shaped dummy tensor reproduces exactly what
+# ``_forward`` computes from the real q/k. The prefill step is square (S == T), where
+# ``causal_chunk_mask`` returns None and raw ``is_causal`` already applies correctly,
+# so both runs use the module's default (unforced) resolution there.
+def _greedy_decode(
+    model: Transformer,
+    prompt: Tensor,
+    *,
+    num_steps: int,
+    reference: bool,
+) -> list[int]:
+    """Greedy-decode ``num_steps`` tokens, optionally forcing the explicit mask."""
+    blocks: list[HasForwardCached[object]] = []
+    caches: list[object] = []
+    for block in model.blocks:
+        attn = getattr(block, "attn", None)
+        assert is_cached_attention(attn)
+        assert has_forward_cached(block)
+        caches.append(attn.alloc_kv_cache(batch=prompt.shape[0], max_seq=64))
+        blocks.append(block)
+
+    proj_in = model.proj_in
+    assert proj_in is not None
+    x = proj_in(prompt)
+    for i, block in enumerate(blocks):
+        x, caches[i] = block.forward_cached(x, cache=caches[i])
+    logits = model.project_to_logits(x[:, -1:, :])
+
+    tokens: list[int] = []
+    with torch.inference_mode():
+        for _ in range(num_steps):
+            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            tokens.append(int(next_token.item()))
+            x = proj_in(next_token)
+            for i, block in enumerate(blocks):
+                extra: dict[str, object] = {}
+                if reference:
+                    cache = caches[i]
+                    assert isinstance(cache, KVCache)
+                    mask = causal_chunk_mask(
+                        torch.empty(1, 1, 1, dtype=x.dtype),
+                        torch.empty(cache.seen + 1, 1, 1, dtype=x.dtype),
+                    )
+                    extra = {"is_causal": False, "attn_mask": mask}
+                x, caches[i] = block.forward_cached(x, cache=caches[i], **extra)
+            logits = model.project_to_logits(x)
+    return tokens
 
 
 if __name__ == "__main__":
