@@ -8,6 +8,7 @@ from torch import Tensor, nn
 
 import torch
 
+from priml.cost import map_cost, set_cost
 from priml.math.numeric import (
     log1mexp,
     log_arctan_exp,
@@ -61,6 +62,16 @@ def compute_log_alpha(log_snr: Tensor, log_sigma: Tensor) -> Tensor:
     return 0.5 * log_snr + log_sigma
 
 
+# Per sample, scalar: negate, logsigmoid (three), halve. No gradient reaches a drawn
+# time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=5,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_sigma_from_log_snr_per_variance_preserving(log_snr: Tensorable) -> Tensor:
     """Variance-preserving log σ from log SNR: α² + σ² = 1.
 
@@ -147,6 +158,16 @@ def log_snr_from_log_sigma_per_variance_preserving(
     return -2 * log_sigma + log1mexp(2 * log_sigma)
 
 
+# Per sample, scalar: halve-negate, logsigmoid (three). No gradient reaches a drawn
+# time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=4,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_sigma_from_log_snr_per_rectified_flow(log_snr: Tensorable) -> Tensor:
     """Rectified flow log σ from log SNR: α + σ = 1.
 
@@ -237,6 +258,16 @@ def log_snr_from_log_sigma_per_rectified_flow(
 # log_snr ∝ logit(exp(log_t)).
 
 
+# Per sample, scalar: log1mexp (three), subtract, times -2, then clamp (two compares).
+# No gradient reaches a drawn time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=7,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_snr_from_log_time_per_logit(
     log_t: Tensorable,
     *,
@@ -266,6 +297,16 @@ def log_snr_from_log_time_per_logit(
     return torch.clamp(log_snr, low, high)
 
 
+# Per sample, scalar: halve-negate, logsigmoid (three). No gradient reaches a drawn
+# time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=4,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_time_from_log_snr_per_logit(log_snr: Tensorable) -> Tensor:
     """Inverse of log_snr_from_log_time_per_logit.
 
@@ -285,6 +326,18 @@ def log_time_from_log_snr_per_logit(log_snr: Tensorable) -> Tensor:
     return nn.functional.logsigmoid(-0.5 * log_snr)
 
 
+# Regarding shift: rule of thumb for images ≥ 64×64: shift = log((64 × 64) / (H × W)).
+# Per sample, scalar: clamp (two), two shifted halves (two each), two log_arctan_exp
+# (three each), logsubexp (three), add, logaddexp (two), log_tan_exp (three), scale and
+# shift (two), clamp (two). No gradient reaches a drawn time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=21,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_snr_from_log_time_per_logtan(
     log_t: Tensorable,
     *,
@@ -334,6 +387,17 @@ def log_snr_from_log_time_per_logtan(
     return torch.clamp(log_snr, low, high)
 
 
+# Per sample, scalar: clamp (two), three shifted halves (two each), three log_arctan_exp
+# (three each), two logsubexp (three each), subtract. No gradient reaches a drawn time,
+# so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=20,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_time_from_log_snr_per_logtan(
     log_snr: Tensorable,
     *,
@@ -370,6 +434,18 @@ def log_time_from_log_snr_per_logtan(
     return logsubexp(log_angle, log_b) - log_a
 
 
+# Regarding shift: rule of thumb for images ≥ 64×64: shift = log((64 × 64) / (H × W)).
+# Per sample, scalar: clamp (two), exp, the truncated-normal quantile (nine: two
+# standardized bounds, two ndtr, a mix, an ndtri, a rescale), clamp (two). No gradient
+# reaches a drawn time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=14,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_snr_from_log_time_per_truncnormicdf(
     log_t: Tensorable,
     *,
@@ -428,6 +504,17 @@ def log_snr_from_log_time_per_truncnormicdf(
     return torch.clamp(log_snr, low, high)
 
 
+# Per sample, scalar: clamp (two), the truncated-normal log-CDF (nine: three
+# standardized points, two log-ndtr, a logsubexp, a difference). No gradient reaches a
+# drawn time, so the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=11,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
 def log_time_from_log_snr_per_truncnormicdf(
     log_snr: Tensorable,
     *,

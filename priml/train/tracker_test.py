@@ -32,6 +32,8 @@ import priml.train.tracker
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from wandb.sdk.wandb_run import Run
+
 
 class _FakeWriter:
     """Records add_scalar / close calls in place of a real SummaryWriter."""
@@ -165,7 +167,7 @@ def _wandb_tracker_with_fake_run() -> tuple[WandbTracker, _FakeRun]:
     """Build a WandbTracker on a recording fake run (rank-0 path, no wandb.init)."""
     tracker = WandbTracker.__new__(WandbTracker)
     run = _FakeRun()
-    tracker._run = cast("priml.train.tracker._WandbRun", run)
+    tracker._run = cast("Run", run)
     return tracker, run
 
 

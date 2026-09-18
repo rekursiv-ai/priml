@@ -54,7 +54,7 @@ class ActorCritic(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one observation through both towers.
+            """Cost one observation through both towers.
 
             A token is one environment step of one worker: the observation
             vector in, action logits and a value out. Nothing is carried
@@ -173,7 +173,7 @@ def _tower_cost(
     rows: int,
     dt: torch.dtype | None,
 ) -> Cost:
-    """Price one tower: ``num_layers`` biased tanh layers, then a biased readout."""
+    """Cost one tower: ``num_layers`` biased tanh layers, then a biased readout."""
     total = Cost()
     width = observation_size
     for _ in range(num_layers):

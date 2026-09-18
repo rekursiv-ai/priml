@@ -98,7 +98,7 @@ class SoftCap(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price projection and divide/tanh/multiply; the adjoint uses saved tanh.
+            """Cost projection and divide/tanh/multiply; the adjoint uses saved tanh.
 
             Args:
               seq_len: Tokens per sequence.

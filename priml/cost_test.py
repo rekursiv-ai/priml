@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import fields
 from typing import cast
 
+import functools
 import importlib
 import inspect
 import math
@@ -19,10 +20,12 @@ from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
+    map_cost,
     matmul_cost,
     peak,
     reduction_cost,
     resolve_dtype,
+    set_cost,
     utilization,
 )
 from priml.custom_types import HasCost
@@ -101,6 +104,30 @@ def test_intensity_is_a_virtual_measure_on_a_model_cost() -> None:
     assert c["intensity", "primal", "selection", I64] == 0
     assert (c["matmul", BF, "intensity"] / 15 - 1).cells == {("adjoint",): 1}
     assert c["intensity"].params == 0
+
+
+def test_only_keeps_one_axis_value_without_dropping_the_axis() -> None:
+    """Unlike indexing, ``only`` keeps the key shape so the result adds back."""
+    t = _t()
+    primal = t.only("primal")
+    assert primal.cells == {
+        ("flops", "primal", "matmul", BF): 60,
+        ("flops", "primal", "elementwise", F32): 4,
+    }
+    assert primal.params == 0
+    assert t.only("adjoint") + primal == Cost(cells=t.cells)
+    assert t.only("primal").only("adjoint") == Cost()
+    with pytest.raises(KeyError, match="'gemm' is not"):
+        t.only("gemm")
+
+
+def test_relabel_moves_cells_to_another_axis_value() -> None:
+    """A frozen layer's adjoint is its primal relabeled; the two then add."""
+    t = _t()
+    frozen = t.only("primal") + t.only("primal").relabel("adjoint")
+    assert frozen["flops", "adjoint", "matmul", BF] == 60
+    assert frozen["flops", "adjoint", "selection", I64] == 0
+    assert frozen.params == 0
 
 
 def test_sum_totals_every_remaining_cell() -> None:
@@ -413,8 +440,8 @@ def test_peak_intensity_is_the_ridge() -> None:
 # -- dispatch ----------------------------------------------------------------
 
 
-class _Priced:
-    class Config(Fig["_Priced"]):
+class _Costed:
+    class Config(Fig["_Costed"]):
         width: int = 4
 
         def cost(
@@ -432,8 +459,8 @@ class _Priced:
         del config
 
 
-class _Unpriced:
-    class Config(Fig["_Unpriced"]):
+class _Uncosted:
+    class Config(Fig["_Uncosted"]):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -441,12 +468,12 @@ class _Unpriced:
 
 
 def test_cost_calls_the_protocol() -> None:
-    assert isinstance(_Priced.Config(), HasCost)
-    assert cost(_Priced.Config(), seq_len=8, batch_size=1, dtype=None) == Cost(params=4)
+    assert isinstance(_Costed.Config(), HasCost)
+    assert cost(_Costed.Config(), seq_len=8, batch_size=1, dtype=None) == Cost(params=4)
 
 
 class _Rows:
-    """A priced config that reports the sharing rows it was handed."""
+    """A costed config that reports the sharing rows it was handed."""
 
     class Config(Fig["_Rows"]):
         def cost(
@@ -494,33 +521,66 @@ def test_a_linear_reads_its_rows_from_the_geometry() -> None:
     )
 
 
+def test_a_costed_function_is_a_cost_leaf() -> None:
+    """A plain callable carries its per-element cost the way a Config does."""
+
+    @set_cost(map_cost(primal=5, adjoint=5, adjoint_inputs=2))
+    def act(x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+    assert act(torch.zeros(2)).shape == (2,)
+    c = cost(act, channels=3, dtype=BF)
+    assert c["flops", "primal", "elementwise", BF] == 15
+    assert c["flops", "adjoint", "elementwise", BF] == 15
+    assert c["bytes", "primal", "elementwise", BF] == 2 * (3 + 3)
+    assert c["bytes", "adjoint", "elementwise", BF] == 2 * (2 * 3 + 3)
+    assert c.params == 0
+
+
+def test_a_partial_of_a_costed_function_keeps_its_cost() -> None:
+    @set_cost(map_cost(primal=3, adjoint=2))
+    def shifted(x: torch.Tensor, *, threshold: float) -> torch.Tensor:
+        return torch.relu(x - threshold).square()
+
+    bound = functools.partial(shifted, threshold=0.75)
+    assert cost(bound, channels=4, dtype=F32) == cost(shifted, channels=4, dtype=F32)
+
+
+def test_an_uncosted_function_is_rejected_by_name() -> None:
+    def gelu(x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.gelu(x)
+
+    with pytest.raises(TypeError, match="gelu has no cost"):
+        cost(gelu, channels=4, dtype=None)
+
+
 def test_cost_rejects_a_config_without_a_cost() -> None:
     """A silent zero is the CPU-SDPA bug; a missing arm must raise, naming itself."""
-    assert not isinstance(_Unpriced.Config(), HasCost)
-    with pytest.raises(TypeError, match=r"_Unpriced\.Config"):
-        cost(_Unpriced.Config(), seq_len=8, batch_size=1, dtype=None)
+    assert not isinstance(_Uncosted.Config(), HasCost)
+    with pytest.raises(TypeError, match=r"_Uncosted\.Config"):
+        cost(_Uncosted.Config(), seq_len=8, batch_size=1, dtype=None)
 
 
 def test_every_model_config_is_priced() -> None:
-    """A module Config that cannot price itself fails here, not at a run's MFU line.
+    """A module Config that cannot cost itself fails here, not at a run's MFU line.
 
     Walks every ``nn.Module`` with a ``Fig`` Config under ``priml.model``,
     ``priml.baselines``, and ``priml.loss`` -- everything a
     ``TrainStep.Config`` model or loss slot can hold -- and asserts the
     ``HasCost`` protocol. torchtitan makes its FLOP method abstract on the
     model Config; this is the same gate without an ABC. ``private`` and
-    ``scripts`` trees are one-off tooling, not modules a run prices.
+    ``scripts`` trees are one-off tooling, not modules a run costs.
 
     Attention kernels are the one exemption: a kernel config holds no shapes,
-    so the owner of the projections prices it with
-    :func:`attention_kernel_cost`; a kernel that priced itself would need
+    so the owner of the projections costs it with
+    :func:`attention_kernel_cost`; a kernel that costed itself would need
     the bus of shape arguments this design removed.
     """
     root = pathlib.Path(__file__).parent
     # The package prefix is read off this module's own name rather than
     # spelled out, so the walk resolves under either import root.
     package = __name__.rsplit(".", 1)[0]
-    unpriced: list[str] = []
+    uncosted: list[str] = []
     for path in sorted(
         [
             *root.glob("model/**/*.py"),
@@ -545,12 +605,12 @@ def test_every_model_config_is_priced() -> None:
             if not (inspect.isclass(config) and issubclass(config, Fig)):
                 continue
             if not hasattr(config, "cost"):
-                unpriced.append(f"{module_name}.{name}")
-    assert unpriced == []
+                uncosted.append(f"{module_name}.{name}")
+    assert uncosted == []
 
 
 def _is_attention_kernel(owner: type[torch.nn.Module]) -> bool:
-    """Whether ``owner`` is a kernel slot: called on ``(q, k, v)``, priced by its owner."""
+    """Whether ``owner`` is a kernel slot: called on ``(q, k, v)``, costed by its owner."""
     forward = inspect.signature(owner.forward)
     return [*forward.parameters][1:4] == ["q", "k", "v"]
 
@@ -559,13 +619,13 @@ def _is_attention_kernel(owner: type[torch.nn.Module]) -> bool:
 
 
 def test_unsupported_activation_fails_at_cost_not_at_forward() -> None:
-    """An injected activation without a cost is a TypeError when priced."""
+    """An injected activation without a cost is a TypeError when costed."""
     ffn = SwiGLU.Config(4, 4)
     ffn.channels_hidden = 8
     ffn.act = torch.sin
     model = ffn.copy_tree().finalize().make()
     assert model(torch.randn(2, 4)).shape == (2, 4)
-    with pytest.raises(TypeError, match="has no price"):
+    with pytest.raises(TypeError, match="sin has no cost"):
         cost(ffn.copy_tree().finalize(), seq_len=1, batch_size=1, dtype=None)
 
 

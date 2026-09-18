@@ -19,7 +19,7 @@ from priml.cost import (
     matmul_cost,
     resolve_dtype,
 )
-from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import rotation_cost
 from priml.model.attention.window import causal_chunk_mask, window_mask
@@ -28,7 +28,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
     HasResetParameters,
-    RotaryFactors,
+    RotaryConfig,
     TensorModule,
     infer_same_width,
 )
@@ -68,7 +68,7 @@ class GatedSelfAttention(nn.Module):
         norm_qk: Makeable[TensorModule] = field(default_factory=CenteredRMSNorm.Config)
         """Independent per-head query and key normalization."""
 
-        rope: Makeable[RotaryFactors] | None = None
+        rope: RotaryConfig | None = None
         """Rotary factors; their width determines the rotated prefix."""
 
         attn_kernel: Makeable[AttentionKernel] = field(default_factory=SdpaNaive.Config)
@@ -95,7 +95,7 @@ class GatedSelfAttention(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price four projections, two norms, rotary, the kernel, and the gate.
+            """Cost four projections, two norms, rotary, the kernel, and the gate.
 
             The query projection emits the gate beside the queries, so it is
             twice the query width. Each norm runs over its own head rows and
@@ -162,7 +162,8 @@ class GatedSelfAttention(nn.Module):
                     channels_head=self.channels_head,
                     heads=self.num_heads + self.num_heads_kv,
                 )
-            total += attention_kernel_cost(
+            total += cost(
+                self.attn_kernel,
                 seq_len=seq_len,
                 dtype=dtype,
                 num_heads=self.num_heads,

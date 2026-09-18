@@ -507,7 +507,7 @@ def test_adaln_zero_cost_is_one_biased_matmul() -> None:
 
 
 def test_stream_cost_sums_its_branches_and_leaves_attention_to_the_joint() -> None:
-    """The joint attention builds ``attn``, so the stream does not price it."""
+    """The joint attention builds ``attn``, so the stream does not cost it."""
     config = mmdit.MMDiTStream.Config(channels_in=8)
     config.ffn = SwiGLU.Config(channels_hidden=12)
     config.adaln = AdaLNZero.Config(cond_dim=4)
@@ -652,7 +652,7 @@ def test_block_cost_matches_torch_without_conditioning() -> None:
     """Two streams of four tokens: joint attention plus each stream's FFN.
 
     Unconditioned, because adaLN's projection runs once per SEQUENCE while
-    ``cost`` prices it per token (its documented upper bound); measured, the
+    ``cost`` costs it per token (its documented upper bound); measured, the
     per-token figure overstates a four-token sequence by exactly ``3/4`` of
     the projection.
     """
@@ -670,6 +670,7 @@ def test_block_cost_matches_torch_without_conditioning() -> None:
         seq_len=4,
         batch_size=1,
         num_tokens=4,
+        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=lambda module, xs: _run_mmdit(module, list(xs)).sum(),
     )

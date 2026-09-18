@@ -69,7 +69,7 @@ class Patchify(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one materialized payload permutation per patch, without FLOPs.
+            """Cost one materialized payload permutation per patch, without FLOPs.
 
             The geometry is patch positions in both directions. Nontrivial
             patches assume a copy; degenerate spatial shapes may permit views.
@@ -155,7 +155,7 @@ class Unpatchify(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one materialized payload permutation per patch, without FLOPs.
+            """Cost one materialized payload permutation per patch, without FLOPs.
 
             The geometry is patch positions in both directions. Nontrivial
             patches assume a copy; degenerate spatial shapes may permit views.

@@ -68,7 +68,7 @@ class Embedding(nn.Embedding):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price a gather and its dense scatter-add adjoint.
+            """Cost a gather and its dense scatter-add adjoint.
 
             Every gradient element is added to a zero-initialized table, so
             repeated indices do not change the count. Padding rows skip it, so

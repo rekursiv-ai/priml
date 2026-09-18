@@ -12,7 +12,13 @@ import torch
 
 from priml.cost import MEASURES, Cost, Kernel, Phase, cost
 from priml.loss.custom_types import SimpleLossFn
-from priml.loss.simple_loss import SimpleLoss
+from priml.loss.simple_loss import (
+    SimpleLoss,
+    bce_with_logits,
+    cross_entropy,
+    l1,
+    mse,
+)
 from priml.loss.weighted_loss import WeightedSum
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -182,9 +188,9 @@ def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
 
 
 def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
-    """Cross-entropy prices a log-softmax over ``channels_out`` and one gather per row."""
+    """Cross-entropy costs a log-softmax over ``channels_out`` and one gather per row."""
     config = SimpleLoss.Config(
-        loss_fn=functional.cross_entropy,
+        loss_fn=cross_entropy,
         kwargs={"reduction": "mean"},
         channels_out=5,
     )
@@ -232,12 +238,12 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
 
 
 def test_simple_loss_cost_cross_entropy_needs_channels_out() -> None:
-    config = SimpleLoss.Config(loss_fn=functional.cross_entropy)
+    config = SimpleLoss.Config(loss_fn=cross_entropy)
     with pytest.raises(ValueError, match="channels_out"):
         cost(config, seq_len=4, batch_size=1, dtype=None)
 
 
-@pytest.mark.parametrize("loss_fn", [functional.mse_loss, functional.l1_loss])
+@pytest.mark.parametrize("loss_fn", [mse, l1])
 def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -> None:
     """MSE and L1: subtract then square/abs; the adjoint scales the saved difference."""
     none = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "none"})
@@ -266,18 +272,37 @@ def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -
 
 def test_simple_loss_cost_rejects_unpriced_loss_fn() -> None:
     config = SimpleLoss.Config(loss_fn=functional.smooth_l1_loss)
-    with pytest.raises(TypeError, match="smooth_l1_loss"):
+    with pytest.raises(TypeError, match="smooth_l1_loss has no cost"):
         cost(config, seq_len=4, batch_size=1, dtype=None)
+
+
+def test_the_stock_losses_are_torch_functionals_that_cost_themselves() -> None:
+    x = torch.tensor([0.5, -1.5])
+    y = torch.tensor([1.0, 0.0])
+    torch.testing.assert_close(
+        bce_with_logits(x, y),
+        functional.binary_cross_entropy_with_logits(x, y),
+    )
+    torch.testing.assert_close(mse(x, y), functional.mse_loss(x, y))
+    torch.testing.assert_close(l1(x, y), functional.l1_loss(x, y))
+    logits = torch.tensor([[0.5, -1.5, 2.0]])
+    label = torch.tensor([2])
+    torch.testing.assert_close(
+        cross_entropy(logits, label),
+        functional.cross_entropy(logits, label),
+    )
+    costed = cost(mse, dtype=None, channels_out=-1, weighted=False, rescale=0)
+    assert costed["flops", "primal", "elementwise", torch.float32] == 2
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_simple_loss_operand_traffic(dtype: torch.dtype) -> None:
     config = SimpleLoss.Config()
-    config.loss_fn = functional.mse_loss
+    config.loss_fn = mse
     itemsize = dtype.itemsize
-    priced = cost(config, seq_len=6, batch_size=1, dtype=dtype)
-    assert priced["bytes", "primal", "elementwise"].sum() == 5 * itemsize
-    assert priced["bytes", "adjoint", "elementwise"].sum() == 5 * itemsize
+    costed = cost(config, seq_len=6, batch_size=1, dtype=dtype)
+    assert costed["bytes", "primal", "elementwise"].sum() == 5 * itemsize
+    assert costed["bytes", "adjoint", "elementwise"].sum() == 5 * itemsize
     config.kwargs = {"reduction": "sum"}
     reduced = cost(config, seq_len=6, batch_size=1, dtype=dtype)
     assert reduced["bytes", "primal", "reduction"].sum() == 7 * itemsize / 6
@@ -303,12 +328,12 @@ def test_simple_loss_bce_weight_prices_multiply() -> None:
 @pytest.mark.parametrize(
     ("loss_fn", "option", "value"),
     [
-        (functional.binary_cross_entropy_with_logits, "pos_weight", torch.ones(2)),
-        (functional.cross_entropy, "weight", torch.ones(2)),
-        (functional.cross_entropy, "label_smoothing", 0.1),
-        (functional.cross_entropy, "ignore_index", 0),
-        (functional.mse_loss, "size_average", True),
-        (functional.l1_loss, "reduce", False),
+        (bce_with_logits, "pos_weight", torch.ones(2)),
+        (cross_entropy, "weight", torch.ones(2)),
+        (cross_entropy, "label_smoothing", 0.1),
+        (cross_entropy, "ignore_index", 0),
+        (mse, "size_average", True),
+        (l1, "reduce", False),
     ],
 )
 def test_simple_loss_rejects_unpriced_options(
@@ -326,15 +351,9 @@ def test_simple_loss_rejects_unpriced_options(
 @pytest.mark.parametrize(
     ("loss_fn", "options"),
     [
-        (
-            functional.binary_cross_entropy_with_logits,
-            {"weight": None, "pos_weight": None},
-        ),
-        (
-            functional.cross_entropy,
-            {"weight": None, "label_smoothing": 0, "ignore_index": -100},
-        ),
-        (functional.mse_loss, {"size_average": None, "reduce": None}),
+        (bce_with_logits, {"weight": None, "pos_weight": None}),
+        (cross_entropy, {"weight": None, "label_smoothing": 0, "ignore_index": -100}),
+        (mse, {"size_average": None, "reduce": None}),
     ],
 )
 def test_simple_loss_explicit_noop_options(

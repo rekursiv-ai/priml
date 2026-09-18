@@ -117,10 +117,10 @@ class FactoredPositions(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price three table gathers, two adds, and a scale per cell.
+            """Cost three table gathers, two adds, and a scale per cell.
 
             Each table is a gather and a scatter-add back, as
-            :class:`~priml.model.embedding.Embedding` prices one; the adds
+            :class:`~priml.model.embedding.Embedding` costs one; the adds
             pass gradient through, so only the scale pulls one back. The
             ``[grid_len, C]`` sum runs once and broadcasts over puzzles; its
             adjoint first reduces the broadcast gradient across puzzles.
@@ -273,9 +273,9 @@ class PredictionFeedback(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one table gather and a scale per cell.
+            """Cost one table gather and a scale per cell.
 
-            Priced with a grid stashed, as every step under adaptive
+            Costed with a grid stashed, as every step under adaptive
             computation time is; a forward without one contributes nothing.
 
             Args:
@@ -406,7 +406,7 @@ class GridEmbedding(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the token table, its scale, and every channel plus one add each.
+            """Cost the token table, its scale, and every channel plus one add each.
 
             The stream before an add feeds a channel only for its dtype, so
             the add's adjoint is a pass-through with no accumulation and only

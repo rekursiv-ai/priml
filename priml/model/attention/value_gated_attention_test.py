@@ -187,7 +187,7 @@ def test_value_gated_attention_bfb(device: str) -> None:
 
 
 def test_value_gated_attention_cost_is_projections_gate_and_the_kernel() -> None:
-    """Four projections plus the gate follow the matrix rule; the kernel prices itself."""
+    """Four projections plus the gate follow the matrix rule; the kernel costs itself."""
     config = ValueGatedAttention.Config(
         channels_in=16,
         num_heads=2,

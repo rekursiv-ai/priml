@@ -7,6 +7,8 @@ from inspect import Parameter, signature
 from pathlib import Path
 from typing import Final, cast, override
 
+import functools
+
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -19,15 +21,39 @@ from torch.distributed.tensor.parallel import (
 import pytest
 import torch
 
-from priml.cost import Cost
+from priml.cost import map_cost, set_cost
+from priml.lib.custom_json import (
+    DecodeCapabilities,
+    decode_graph,
+    encode_graph,
+    resolve_import,
+)
 from priml.model.init import kaiming_uniform, unit_fan_in_uniform
 from priml.model.norm import RMSNorm
-from priml.model.swiglu import SwiGLU, SwiGLUReluSquared, relu_squared
+from priml.model.swiglu import (
+    SwiGLU,
+    SwiGLUReluSquared,
+    relu,
+    relu_squared,
+    shifted_relu_squared,
+    sigmoid,
+    silu,
+)
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+def test_costed_activation_round_trips_as_an_imported_function() -> None:
+    encoded = encode_graph(silu)
+    decoded = decode_graph(
+        encoded,
+        capabilities=DecodeCapabilities(resolve=resolve_import),
+    )
+
+    assert decoded is silu
 
 
 @pytest.mark.parametrize("config_type", [SwiGLU.Config, SwiGLUReluSquared.Config])
@@ -224,7 +250,7 @@ def test_ungated_silu_norm_uses_sigmoid_factor() -> None:
     config.init_weight_out = nn.init.ones_
     config.norm = RMSNorm.Config()
     ffn = config.make()
-    assert ffn.act is nn.functional.sigmoid
+    assert ffn.act is sigmoid
     assert ffn.norm is not None
     x = torch.tensor([[-2.0, 0.5, 1.0], [1.0, -1.0, 2.0]], requires_grad=True)
     hidden = ffn.up_proj(x)
@@ -241,7 +267,7 @@ def test_ungated_silu_norm_uses_sigmoid_factor() -> None:
 @pytest.mark.parametrize("gate", [False, True])
 def test_a_norm_is_refused_against_an_unsupported_activation(gate: bool) -> None:
     """An activation without a supported factorization cannot place the norm."""
-    with pytest.raises(ValueError, match="silu"):
+    with pytest.raises(KeyError, match="gelu"):
         SwiGLU.Config(
             channels_in=8,
             gate=gate,
@@ -265,7 +291,7 @@ def test_gate_norm_width_reset_and_forward_contract() -> None:
     ffn = config.make()
     assert isinstance(config.norm, RMSNorm.Config)
     assert config.norm.channels_in == -1
-    assert ffn.act is nn.functional.sigmoid
+    assert ffn.act is sigmoid
     assert isinstance(ffn.norm, RMSNorm)
     assert ffn.norm.normalized_shape == (6,)
     assert ffn.norm.weight is not None
@@ -296,7 +322,7 @@ def test_relu_squared_norm_forward_and_gradients(gate: bool, split: bool) -> Non
     config.norm.elementwise_affine = True
     config.init_weight_out = nn.init.ones_
     ffn = config.make()
-    assert ffn.act is nn.functional.relu
+    assert ffn.act is relu
     assert isinstance(ffn.norm, RMSNorm)
     assert ffn.norm.normalized_shape == (4,)
     assert ffn.norm.weight is not None
@@ -530,6 +556,35 @@ def test_the_gradient_is_a_rectifier() -> None:
     torch.testing.assert_close(x.grad, 2 * torch.relu(x.detach()), rtol=0, atol=0)
 
 
+def test_a_bare_function_activation_is_refused_by_cost() -> None:
+    config = SwiGLU.Config(channels_in=4, channels_hidden=3)
+    config.act = torch.nn.functional.gelu
+    with pytest.raises(TypeError, match="gelu has no cost"):
+        config.finalize().cost(seq_len=1, batch_size=1, dtype=None)
+
+
+def test_a_partial_of_a_priced_activation_prices_like_its_base() -> None:
+    config = SwiGLUReluSquared.Config(channels_in=4, channels_hidden=3)
+    plain = config.copy_tree().finalize().cost(seq_len=2, batch_size=1, dtype=None)
+    config.act = functools.partial(shifted_relu_squared, threshold=0.75)
+    shifted = config.finalize().cost(seq_len=2, batch_size=1, dtype=None)
+    # One subtract per hidden element forward; the shift is constant backward.
+    assert (
+        shifted["flops", "primal", "elementwise"].sum()
+        - plain["flops", "primal", "elementwise"].sum()
+        == 3
+    )
+    assert shifted["flops", "adjoint"] == plain["flops", "adjoint"]
+
+
+def test_a_gate_norm_needs_an_activation_that_factors() -> None:
+    config = SwiGLU.Config(channels_in=4, channels_hidden=3)
+    config.norm = RMSNorm.Config()
+    config.act = _costed_identity
+    with pytest.raises(KeyError, match="_costed_identity"):
+        config.finalize().make()
+
+
 def test_swiglu_cost_is_both_projections() -> None:
     """Gated: up_proj is twice the hidden width; the gate itself is elementwise."""
     cost = assert_cost_matches_torch(
@@ -552,32 +607,31 @@ def test_swiglu_cost_is_both_projections() -> None:
     assert cost["bytes", "adjoint", "elementwise"].sum() == 4 * (3 + 6) * 32
 
 
-class _PricedIdentityActivation:
-    def __call__(self, value: Tensor) -> Tensor:
-        return value
-
-    def cost(
-        self,
-        *,
-        seq_len: int,
-        batch_size: int,
-        dtype: torch.dtype | None,
-        **kwargs: object,
-    ) -> Cost:
-        del seq_len, batch_size, dtype, kwargs
-        return Cost()
+@set_cost(
+    map_cost(
+        primal=1,
+        adjoint=2,
+        inputs=1,
+        outputs=1,
+        adjoint_inputs=2,
+        adjoint_outputs=1,
+    ),
+)
+def _costed_identity(value: Tensor) -> Tensor:
+    return value
 
 
 def test_custom_activation_cost_keeps_the_gate_product() -> None:
     config = SwiGLU.Config()
     config.channels_in = 4
     config.channels_hidden = 3
-    config.act = _PricedIdentityActivation()
+    config.act = _costed_identity
     result = config.finalize().cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
-    assert result["flops", "primal", "elementwise"].sum() == 3
-    assert result["flops", "adjoint", "elementwise"].sum() == 2 * 3
-    assert result["bytes", "primal", "elementwise"].sum() == 2 * 3 * 3
-    assert result["bytes", "adjoint", "elementwise"].sum() == 2 * 6 * 3
+    assert result["flops", "primal", "elementwise"].sum() == (1 + 1) * 3
+    assert result["flops", "adjoint", "elementwise"].sum() == (2 + 2) * 3
+    # The activation reads and writes its row; the gate product reads two, writes one.
+    assert result["bytes", "primal", "elementwise"].sum() == 2 * (2 + 3) * 3
+    assert result["bytes", "adjoint", "elementwise"].sum() == 2 * (3 + 6) * 3
 
 
 def test_split_gate_cost_reads_input_for_each_projection() -> None:

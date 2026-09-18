@@ -20,12 +20,11 @@ from priml.cost import (
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     CachedAttention,
-    ChannelsHead,
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
-    NumHeads,
+    HeadGeometry,
     Shardable,
     TensorModule,
     infer_same_width,
@@ -75,14 +74,12 @@ class TransformerBlock(nn.Module):
         @property
         def num_heads(self) -> int:
             """Return the attention sublayer's head count."""
-            return self.attn.num_heads if isinstance(self.attn, NumHeads) else 1
+            return cast(HeadGeometry, self.attn).num_heads
 
         @property
         def channels_head(self) -> int:
             """Return the attention sublayer's per-head channel width."""
-            if isinstance(self.attn, ChannelsHead):
-                return self.attn.channels_head
-            return self.channels_in
+            return cast(HeadGeometry, self.attn).channels_head
 
         @override
         def finalize(self) -> Self:

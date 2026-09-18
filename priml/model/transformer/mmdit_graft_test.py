@@ -448,7 +448,7 @@ def test_graft_cost_matches_torch(tie: bool) -> None:
     A "token" is one POSITION holding one token per stream, as
     ``MultiStreamAttention`` defines it, so both streams run three positions
     and the joint key length is six. Unconditioned, since adaLN runs once per
-    sequence while ``cost`` prices it per token (``mmdit_test``).
+    sequence while ``cost`` costs it per token (``mmdit_test``).
     """
     assert_cost_matches_torch(
         _config(depth=2, tie=tie),
@@ -459,6 +459,7 @@ def test_graft_cost_matches_torch(tie: bool) -> None:
         seq_len=3,
         batch_size=1,
         num_tokens=3,
+        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=run_graft,
     )

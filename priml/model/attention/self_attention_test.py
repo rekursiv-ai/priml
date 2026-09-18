@@ -37,6 +37,10 @@ class _LearnedRotary(nn.Module):
     class Config(Fig["_LearnedRotary"]):
         channels_head: int = 8
 
+        def rotated_channels(self, channels_head: int) -> int:
+            del channels_head
+            return self.channels_head
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.scale = nn.Parameter(torch.ones(config.channels_head))

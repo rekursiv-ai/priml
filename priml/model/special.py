@@ -57,7 +57,7 @@ class Identity(nn.Identity):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price nothing: no parameters, no arithmetic, no copy.
+            """Cost nothing: no parameters, no arithmetic, no copy.
 
             Args:
               seq_len: Tokens per sequence.
@@ -107,7 +107,7 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the branch, residual add, and input-gradient accumulation.
+            """Cost the branch, residual add, and input-gradient accumulation.
 
             Args:
               seq_len: Tokens per sequence.
@@ -196,7 +196,7 @@ class TiedLinear(nn.Module, LateBound):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the matmul; the weight is counted where it is owned.
+            """Cost the matmul; the weight is counted where it is owned.
 
             Args:
               seq_len: Tokens per sequence.

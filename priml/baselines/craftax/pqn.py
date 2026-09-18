@@ -77,7 +77,7 @@ class RecurrentQNetwork(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one recurrent step of one worker.
+            """Cost one recurrent step of one worker.
 
             A token is one environment step: the observation and the previous
             action in, both carried tensors updated, a Q-value per action
@@ -86,7 +86,7 @@ class RecurrentQNetwork(nn.Module):
             next step, and both are differentiable (every step but a
             window's first), so the state gates' adjoint is counted in full.
 
-            The renormalization and the layer norm price themselves. The
+            The renormalization and the layer norm cost themselves. The
             one-hot previous action is written, not computed: one element
             moved per action, no gradient. The cell is a biased
             ``[width + actions] -> [4 width]`` matmul and a biased

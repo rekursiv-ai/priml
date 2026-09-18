@@ -135,7 +135,7 @@ class Router(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the gate matmul, the top-k pick, and the picked weights' gather.
+            """Cost the gate matmul, the top-k pick, and the picked weights' gather.
 
             The correction bias is a buffer, not a weight. Top-k traffic is
             its minimum operand I/O (input plus selected values and indices),
@@ -600,7 +600,7 @@ class MoE(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the router, ``top_k`` routed experts, and every shared expert.
+            """Cost the router, ``top_k`` routed experts, and every shared expert.
 
             ``params`` counts every routed expert; every other field counts what
             one token touches -- the ``top_k`` experts it is dispatched to and

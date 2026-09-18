@@ -46,7 +46,7 @@ def _tiny_transformer() -> Transformer.Config:
 
 
 class _Counted:
-    """A priced config that counts how often it was asked."""
+    """A costed config that counts how often it was asked."""
 
     class Config(Fig["_Counted"]):
         calls: int = 0
@@ -76,8 +76,8 @@ class _Counted:
         del config
 
 
-class _Unpriced:
-    class Config(Fig["_Unpriced"]):
+class _Uncosted:
+    class Config(Fig["_Uncosted"]):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -217,17 +217,17 @@ def test_compute_without_an_update_is_empty() -> None:
 
 
 def test_cost_is_priced_once_per_sequence_length_and_token_count() -> None:
-    priced = _Counted.Config()
+    costed = _Counted.Config()
     meter = Utilization(Utilization.Config())
-    meter.bind(_root(priced))
+    meter.bind(_root(costed))
 
     meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
     meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
-    assert priced.calls == 1
+    assert costed.calls == 1
     meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
-    assert priced.calls == 2
+    assert costed.calls == 2
     meter.update(torch.empty(0), input_ids=torch.zeros(1, 16), step_sec=1.0)
-    assert priced.calls == 3
+    assert costed.calls == 3
 
 
 def test_update_prices_the_batch_by_its_shape_and_the_steps_autocast_dtype() -> None:
@@ -305,8 +305,8 @@ def test_bind_rejects_evaluation_placement() -> None:
 
 def test_bind_rejects_a_model_config_without_cost() -> None:
     meter = Utilization(Utilization.Config())
-    with pytest.raises(TypeError, match=r"_Unpriced\.Config"):
-        meter.bind(_root(_Unpriced.Config()))
+    with pytest.raises(TypeError, match=r"_Uncosted\.Config"):
+        meter.bind(_root(_Uncosted.Config()))
 
 
 def test_bind_rejects_a_root_without_a_model_config() -> None:

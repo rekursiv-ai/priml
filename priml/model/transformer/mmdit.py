@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, field
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple, Protocol, Self, override
+from typing import TYPE_CHECKING, NamedTuple, Protocol, Self, cast, override
 from typing_extensions import ParamSpec
 
 from configgle import Fig, Makeable
@@ -37,13 +37,12 @@ from priml.model.attention.multi_stream import (
 from priml.model.attention.self_attention import AttentionProjections
 from priml.model.custom_types import (
     AttentionKernel,
-    ChannelsHead,
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
     HasResetParameters,
-    NumHeads,
+    HeadGeometry,
     TensorModule,
     infer_same_width,
     propagate_attr,
@@ -134,7 +133,7 @@ class AdaLNZero(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the projection; the SiLU is elementwise.
+            """Cost the projection; the SiLU is elementwise.
 
             Counted per token like every leaf, though ``c`` is often one vector
             per sequence: a per-sequence conditioning amortizes this over the
@@ -239,10 +238,10 @@ class MMDiTStream(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Sum the residual branches; ``attn`` is priced by the joint attention.
+            """Sum the residual branches; ``attn`` is costed by the joint attention.
 
             The joint attention registers ``attn`` as one of its own streams and
-            builds it, so it prices it too; counting it here would charge every
+            builds it, so it costs it too; counting it here would charge every
             stream's projections twice.
 
             Args:
@@ -355,14 +354,12 @@ class MMDiTBlock(nn.Module):
         @property
         def num_heads(self) -> int:
             """Return the joint attention's head count."""
-            return self.attn.num_heads if isinstance(self.attn, NumHeads) else 1
+            return cast(HeadGeometry, self.attn).num_heads
 
         @property
         def channels_head(self) -> int:
             """Return the joint attention's per-head channel width."""
-            if isinstance(self.attn, ChannelsHead):
-                return self.attn.channels_head
-            return self.channels_in
+            return cast(HeadGeometry, self.attn).channels_head
 
         @override
         def finalize(self) -> Self:
@@ -423,7 +420,7 @@ class MMDiTBlock(nn.Module):
             so a caller holding per-stream lengths passes their sum. Every
             stream's branches are summed, matching the joint attention's
             convention that each stream's token pays its own projections.
-            Implicit streams are priced from the same templates ``__init__``
+            Implicit streams are costed from the same templates ``__init__``
             builds.
 
             Args:

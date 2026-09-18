@@ -13,7 +13,7 @@ CraftaxTrainLoop(
                 │       ),
                 │       optimizer=PartialConfig(<class 'functools.partial'>, <class 'torch.optim.adamw.AdamW'>, lr=0.001, betas=(0.9, 0.999), weight_decay=0.01),
                 │       loss=SimpleLoss.Config(
-                │               loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
+                │               loss_fn=<function priml.loss.simple_loss.bce_with_logits at 0xdefacedeface>,
                 │               target_key='label',
                 │               kwargs={'reduction': 'none'},
                 │               channels_out=-1

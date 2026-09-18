@@ -45,12 +45,12 @@ class WeightedSum(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Sum every child's price plus one weight multiply and one add each.
+            """Sum every child's cost plus one weight multiply and one add each.
 
             A token is whatever the children call one: the geometry is handed
             on unchanged, so its rows mean the same thing at every level. A
             child may be an ``nn.Module`` config or a plain callable's; either
-            must price itself or :func:`cost` raises. The stack-and-sum costs
+            must cost itself or :func:`cost` raises. The stack-and-sum costs
             one add per child per token, the weight one multiply; the adjoint
             is the same two ops.
 

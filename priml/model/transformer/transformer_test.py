@@ -488,8 +488,8 @@ def test_transformer_cost_reads_every_block_of_a_list() -> None:
     )
 
 
-class _Unpriced(torch.nn.Module):
-    class Config(Fig["_Unpriced"]):
+class _Uncosted(torch.nn.Module):
+    class Config(Fig["_Uncosted"]):
         channels_in: int = -1
         channels_out: int = -1
 
@@ -508,8 +508,8 @@ class _Unpriced(torch.nn.Module):
 
 def test_transformer_cost_rejects_an_unpriced_slot() -> None:
     config = _tiny_config()
-    config.proj_out = _Unpriced.Config()
-    with pytest.raises(TypeError, match=r"_Unpriced\.Config has no cost"):
+    config.proj_out = _Uncosted.Config()
+    with pytest.raises(TypeError, match=r"_Uncosted\.Config has no cost"):
         config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
 
 

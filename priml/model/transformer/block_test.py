@@ -135,12 +135,21 @@ def test_transformer_block_config_reports_attention_dimensions() -> None:
     assert config.num_heads == 2
     assert config.channels_head == 8
 
-    fallback = TransformerBlock.Config(
+
+def test_transformer_block_config_refuses_to_invent_attention_dimensions() -> None:
+    """An attention that declares no heads has none to report.
+
+    A stack sizing shared rotary factors or value tables off one layer would
+    otherwise build them to a width the attention never stated.
+    """
+    unheaded = TransformerBlock.Config(
         channels_in=16,
         attn=Linear.Config(16, 16),
     )
-    assert fallback.num_heads == 1
-    assert fallback.channels_head == 16
+    with pytest.raises(AttributeError, match="num_heads"):
+        _ = unheaded.num_heads
+    with pytest.raises(AttributeError, match="channels_head"):
+        _ = unheaded.channels_head
 
 
 def test_transformer_block_infers_input_width_from_output() -> None:

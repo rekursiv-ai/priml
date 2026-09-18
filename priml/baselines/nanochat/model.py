@@ -50,13 +50,13 @@ from priml.model.attention.value_gated_attention import (
     ValueGatedAttention,
 )
 from priml.model.custom_types import (
-    ChannelsHead,
     ChannelsIn,
     ChannelsOut,
+    EmbeddingConfig,
     HasAttention,
     HasDepthIndex,
     HasResetParameters,
-    NumHeads,
+    HeadGeometry,
     TensorModule,
     propagate_attr,
 )
@@ -119,7 +119,7 @@ class NanoChatLM(nn.Module):
         against one depth go stale the moment a fork changes ``num_layers`` --
         the list is a snapshot, this is the rule that produced it."""
 
-        embedding: Makeable[TensorModule] = field(
+        embedding: EmbeddingConfig = field(
             default_factory=lambda: NarrowEmbedding.Config(
                 inner=Embedding.Config(init_weight=partial(normal, std=1.0)),
             ),
@@ -133,7 +133,8 @@ class NanoChatLM(nn.Module):
         Wrapped rather than bare, because the recipe holds its tables narrower
         than it draws them and that ordering belongs to whatever owns both
         steps. A rung wanting a full-precision table leaves the wrapper's
-        ``dtype`` at None or supplies the bare table."""
+        ``dtype`` at None or supplies the bare table. The value tables are
+        held at whatever ``dtype`` this declares."""
 
         norm: Makeable[TensorModule] = field(
             default_factory=lambda: RMSNorm.Config(eps=None),
@@ -253,6 +254,17 @@ class NanoChatLM(nn.Module):
                     if layer == last:
                         attention.window = self.max_seq_len
                     attention.gated = layer in gated
+                # Ahead of the cascade: an attention left at its ``num_heads``
+                # sentinel derives the count inside its own finalize, and the
+                # rotary factors and value tables below are sized from it.
+                if not getattr(block, "_finalized", False):
+                    block.finalize()
+            # The value-embedding tables and the rotary factors are built ONCE,
+            # to layer 0's geometry, and handed to every layer -- so a stack
+            # disagreeing on head shape is a contradiction settled here. Left to
+            # run time it surfaces as a reshape failure naming a tensor size
+            # rather than the layer.
+            _reject_ragged_heads(self.block)
             propagate_attr(self.embedding, "channels_out", self.channels_in)
             propagate_attr(self.embedding, "channels_in", self.vocab_size)
             propagate_attr(self.lm_head, "channels_in", self.channels_in)
@@ -265,21 +277,12 @@ class NanoChatLM(nn.Module):
             )
             self.mix.num_layers = self.num_layers
             self.mix.channels_in = self.channels_in
-            self.rope.channels_head = _head_shape(self.block[0], self.channels_in)[0]
+            self.rope.channels_head = cast(
+                HeadGeometry,
+                self.block[0].attn,
+            ).channels_head
             self._propagate_layer_table_widths()
-            finalized = super().finalize()
-            # AFTER the cascade: a block that left ``num_heads`` at its sentinel
-            # derives it in its own finalize, so checking earlier would compare
-            # a fallback rather than the width the layer will actually use.
-            #
-            # The value-embedding tables and the rotary factors are built ONCE,
-            # to layer 0's geometry, and handed to every layer -- so a stack
-            # disagreeing on head shape is a contradiction settled here. Left to
-            # run time it surfaces as a reshape failure naming a tensor size
-            # rather than the layer.
-            assert isinstance(finalized.block, list)
-            _reject_ragged_heads(finalized.block, channels_in=finalized.channels_in)
-            return finalized
+            return super().finalize()
 
         def cost(
             self,
@@ -291,10 +294,10 @@ class NanoChatLM(nn.Module):
         ) -> Cost:
             """Sum the tables, both norms, the mix, every block, and the head.
 
-            What the stack owns and no child can price: the value tables, one
+            What the stack owns and no child can cost: the value tables, one
             per gated layer and sized to the attention's inner width, and the
             residual mix at the model width. The gate that reads a value table
-            is the attention's own and is priced there.
+            is the attention's own and is costed there.
 
             This is the model root: every token of ``batch_size`` sequences of
             ``seq_len`` shares the weights, so a caller's own ``rows`` is
@@ -311,9 +314,8 @@ class NanoChatLM(nn.Module):
 
             """
             assert isinstance(self.block, list)
-            _, width = _head_shape(self.block[0], self.channels_in)
-            table = _value_table_config(self, width=width)
-            price = functools.partial(
+            table = _value_table_config(self, width=_inner_width(self.block[0]))
+            child_cost = functools.partial(
                 cost,
                 seq_len=seq_len,
                 batch_size=batch_size,
@@ -321,12 +323,12 @@ class NanoChatLM(nn.Module):
                 **kwargs,
             )
             return sum(
-                (price(child) for child in (*self.block, self.lm_head)),
-                price(self.embedding)
-                + price(self.norm).tile(2, copies=2)
-                + price(self.mix)
-                + price(self.rope)
-                + price(table).tile(
+                (child_cost(child) for child in (*self.block, self.lm_head)),
+                child_cost(self.embedding)
+                + child_cost(self.norm).tile(2, copies=2)
+                + child_cost(self.mix)
+                + child_cost(self.rope)
+                + child_cost(table).tile(
                     len(self.value_embedding_layers),
                     copies=len(self.value_embedding_layers),
                 ),
@@ -341,7 +343,7 @@ class NanoChatLM(nn.Module):
         assert isinstance(config.block, list)
         # The table is read as the attention's VALUES, so it spans every head,
         # not one: a per-head width would reshape to the wrong sequence length.
-        _, width = _head_shape(config.block[0], config.channels_in)
+        width = _inner_width(config.block[0])
         # Construction order fixes the global-RNG draw order, so a seeded init
         # is reproducible: tokens, head, blocks, value embeddings.
         embedding = config.embedding.make()
@@ -500,7 +502,7 @@ class NanoChatLM(nn.Module):
         # from the model width: the attention's inner width is decoupled from
         # the residual stream, so dividing would miscount every model where
         # they differ.
-        _, inner = _head_shape(config.block[0], config.channels_in)
+        inner = _inner_width(config.block[0])
         attention = sum(12 * inner * _window(block) for block in self.blocks)
         return 6 * matrix + attention
 
@@ -516,10 +518,9 @@ def _value_table_config(
     )
     table.channels_out = width
     table.channels_in = config.vocab_size
-    if isinstance(config.embedding, NarrowEmbedding.Config):
-        table.dtype = config.embedding.dtype
+    table.dtype = config.embedding.dtype
     # Finalized here because it is not in the model's tree: nothing else pushes
-    # the width into ``inner``, and an unfinalized table prices a -1 row.
+    # the width into ``inner``, and an unfinalized table costs a -1 row.
     return table.finalize()
 
 
@@ -545,38 +546,24 @@ def _window(block: nn.Module) -> int:
     return window
 
 
-def _head_shape(block: object, channels_in: int) -> tuple[int, int]:
-    """Return a block's per-head and total uniform-attention widths."""
-    if not isinstance(block, NumHeads) or not isinstance(block, ChannelsHead):
-        return channels_in, channels_in
-    num_heads = block.num_heads
-    if (
-        num_heads == -1
-        and block.channels_head > 0
-        and channels_in % block.channels_head == 0
-    ):
-        num_heads = channels_in // block.channels_head
-    return block.channels_head, num_heads * block.channels_head
+def _inner_width(block: HasAttention) -> int:
+    """Return a block's attention inner width, ``num_heads * channels_head``."""
+    geometry = cast(HeadGeometry, block.attn)
+    return geometry.num_heads * geometry.channels_head
 
 
-def _reject_ragged_heads(
-    blocks: Sequence[HasAttention],
-    *,
-    channels_in: int,
-) -> None:
+def _reject_ragged_heads(blocks: Sequence[HasAttention]) -> None:
     """Raise unless every block agrees on its attention's head geometry."""
-    shapes = {_head_shape(block, channels_in) for block in blocks}
+    shapes = {
+        (cast(HeadGeometry, block.attn).channels_head, _inner_width(block))
+        for block in blocks
+    }
     if len(shapes) > 1:
         raise ValueError(
             "every block must declare the same attention head geometry, since "
             "the value embeddings and rotary factors are shared across layers; "
             f"got (channels_head, num_heads * channels_head) of {sorted(shapes)}.",
         )
-
-
-def thresholded_relu_squared(x: Tensor, *, threshold: float) -> Tensor:
-    """Apply squared ReLU after subtracting the threshold."""
-    return torch.relu(x - threshold).square()
 
 
 class OutputNormFeedForward(SwiGLUReluSquared):
@@ -609,7 +596,7 @@ class OutputNormFeedForward(SwiGLUReluSquared):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the feed-forward and its output normalization.
+            """Cost the feed-forward and its output normalization.
 
             Args:
               seq_len: Tokens per sequence.
@@ -682,7 +669,7 @@ class GatedResidualMix(ResidualMix):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the mean gate and its scalar parameter at every layer.
+            """Cost the mean gate and its scalar parameter at every layer.
 
             Args:
               seq_len: Tokens per sequence.
@@ -850,7 +837,7 @@ class MemoryNanoChatLM(NanoChatLM):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price inherited decoding, additional lookup tables, and layer pooling.
+            """Cost inherited decoding, additional lookup tables, and layer pooling.
 
             Args:
               seq_len: Tokens per sequence.
@@ -918,10 +905,7 @@ class MemoryNanoChatLM(NanoChatLM):
                         f"Memory table layer {layer} is outside "
                         f"the {len(self.block)}-layer model.",
                     )
-                table.channels_out = _head_shape(
-                    self.block[layer],
-                    self.channels_in,
-                )[1]
+                table.channels_out = _inner_width(self.block[layer])
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)

@@ -35,7 +35,7 @@ class ResidualMix(nn.Module):
         channels_in: int = -1
         """Width of the rows being mixed; -1 inherits from the stack.
 
-        Workload geometry for pricing, not a parameter shape: each scalar
+        Workload geometry for costing, not a parameter shape: each scalar
         weight multiplies a whole row of this width."""
 
         running: float = 1.0

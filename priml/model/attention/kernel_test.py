@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
+from configgle import Fig
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
 from torch.utils.flop_counter import FlopCounterMode
@@ -12,7 +13,7 @@ from torch.utils.flop_counter import FlopCounterMode
 import pytest
 import torch
 
-from priml.cost import Cost
+from priml.cost import Cost, cost
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
@@ -20,6 +21,10 @@ from priml.model.attention.kernel import (
 )
 from priml.model.attention.rope import RoPE, RoPEMixed, rotation_cost
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+
+
+if TYPE_CHECKING:
+    from priml.model.custom_types import RotaryConfig
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -117,6 +122,34 @@ def test_the_kernels_agree_on_a_windowed_forward() -> None:
     torch.testing.assert_close(fused, naive, rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize("kernel", [SdpaFused.Config(), SdpaNaive.Config()])
+def test_a_kernel_config_prices_itself_from_the_shapes_its_owner_hands_it(
+    kernel: SdpaFused.Config | SdpaNaive.Config,
+) -> None:
+    """The owner passes head geometry the way it passes q/k/v; the kernel answers."""
+    costed = cost(kernel, seq_len=32, dtype=None, num_heads=2, channels_head=8)
+    assert costed == attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+    )
+    windowed = cost(
+        kernel,
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+        window=4,
+    )
+    assert windowed["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 4
+    # Unread bus entries pass through.
+    assert (
+        cost(kernel, seq_len=32, dtype=None, num_heads=2, channels_head=8, rows=7)
+        == costed
+    )
+
+
 def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
     """QK^T and PV, two FLOPs per MAC, per head; softmax is elementwise plus sums.
 
@@ -204,6 +237,30 @@ def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None
     assert small["flops", "primal"].sum() == large["flops", "primal"].sum()
 
 
+def test_rotation_cost_reads_the_rotated_width_from_the_rotary_config() -> None:
+    """A rotary that rotates a prefix declares it; a stranger cannot be costed."""
+    partial = RoPE.Config([4, 0])
+    whole = RoPE.Config(8)
+    assert partial.rotated_channels(8) == 4
+    assert whole.rotated_channels(8) == 8
+    assert RoPE.Config([4, 4], reduction_mode="sum").rotated_channels(8) == 4
+    narrow = rotation_cost(partial, rows=4, dtype=None, channels_head=8, heads=3)
+    wide = rotation_cost(whole, rows=4, dtype=None, channels_head=8, heads=3)
+    assert narrow["flops", "primal"].sum() * 2 == wide["flops", "primal"].sum()
+
+    class _Table(nn.Module):
+        class Config(Fig["_Table"]):
+            pass
+
+        def __init__(self, config: Config) -> None:
+            del config
+            super().__init__()
+
+    stranger = cast("RotaryConfig", _Table.Config())
+    with pytest.raises(AttributeError, match="rotated_channels"):
+        rotation_cost(stranger, rows=4, dtype=None, channels_head=8, heads=3)
+
+
 def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
     config = RoPE.Config(8)
     factors = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
@@ -240,7 +297,7 @@ def test_naive_kernel_cost_matches_torch() -> None:
     Only the naive kernel is measurable here: the CPU SDPA op that
     ``SdpaFused`` dispatches to has no ``FlopCounterMode`` registration and
     measures zero, which is the silent-zero bug ``cost`` exists to prevent.
-    A kernel config holds no shapes, so its owner prices it; the owner's
+    A kernel config holds no shapes, so its owner costs it; the owner's
     call is reproduced here against torch's count.
     """
     torch.manual_seed(0)

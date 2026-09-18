@@ -4,7 +4,7 @@ Float8 quantization converts nn.Linear → Float8Linear using torchao.
 Requires torchao>=0.9.0 and compute capability >= 8.9 (H100, 5090, etc.).
 """
 
-# ruff: noqa: PLC0415  # Lazy imports for optional torchao dependency
+# Lazy imports for optional torchao dependency.
 
 from __future__ import annotations
 
@@ -16,6 +16,13 @@ import logging
 
 from configgle import Fig
 from torch import nn
+from torchao.float8 import convert_to_float8_training
+from torchao.float8.config import (
+    Float8LinearConfig,
+    Float8LinearRecipeName,
+)
+
+import torch
 
 
 logger = logging.getLogger(__name__)
@@ -66,11 +73,6 @@ class Float8ModelQuantization:
         if not available:
             logger.warning("Float8 disabled: %s", reason)
             return
-
-        from torchao.float8.config import (
-            Float8LinearConfig,
-            Float8LinearRecipeName,
-        )
 
         recipe_map = {
             "tensorwise": Float8LinearRecipeName.TENSORWISE,
@@ -125,8 +127,6 @@ class Float8ModelQuantization:
         if not self.enabled:
             return model
 
-        from torchao.float8 import convert_to_float8_training
-
         filter_fn = self.module_filter or self._default_module_filter
         # Count conversions by applying the (pure) filter ourselves, so the
         # tally is correct regardless of how many times torchao invokes it.
@@ -156,8 +156,6 @@ def _check_float8_available() -> tuple[bool, str]:
     """Check if float8 training is available."""
     if importlib.util.find_spec("torchao") is None:
         return False, "torchao not installed"
-
-    import torch
 
     # Check compute capability (SM89+ required for float8)
     if not torch.cuda.is_available():

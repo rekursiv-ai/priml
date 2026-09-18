@@ -182,7 +182,7 @@ def test_sequential_reset():
 
 
 def test_sequential_cost_sums_every_expanded_element() -> None:
-    """``repeat`` is expanded by finalize, so each copy is priced once."""
+    """``repeat`` is expanded by finalize, so each copy is costed once."""
     config = Sequential.Config(
         channels_in=4,
         elements=[RMSNorm.Config(elementwise_affine=True), Linear.Config(4, 4)],

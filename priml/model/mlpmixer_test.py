@@ -160,7 +160,7 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
         == 2 * norm_token["flops", "adjoint", "reduction"].sum()
         + norm_channel["flops", "adjoint", "reduction"].sum()
     )
-    with pytest.raises(ValueError, match="mixes 2 tokens; priced at 3"):
+    with pytest.raises(ValueError, match="mixes 2 tokens; costed at 3"):
         finalized.cost(seq_len=3, batch_size=1, dtype=None)
 
 

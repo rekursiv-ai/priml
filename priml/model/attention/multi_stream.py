@@ -17,7 +17,7 @@ from priml.cost import (
     cost,
     resolve_dtype,
 )
-from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
+from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.self_attention import (
@@ -31,7 +31,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
     HasResetParameters,
-    RotaryFactors,
+    RotaryConfig,
     TensorModule,
     infer_same_width,
 )
@@ -87,8 +87,8 @@ class MultiStreamAttention(nn.Module):
         causal: bool = False
         """Apply causal (autoregressive) attention mask."""
 
-        rope: list[Makeable[RotaryFactors] | None] = field(
-            default_factory=list["Makeable[RotaryFactors] | None"],
+        rope: list[RotaryConfig | None] = field(
+            default_factory=list["RotaryConfig | None"],
         )
         """Per-stream rotary embeddings (empty = no internal RoPE)."""
 
@@ -154,7 +154,7 @@ class MultiStreamAttention(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one position: every stream's token, each attending jointly.
+            """Cost one position: every stream's token, each attending jointly.
 
             A position holds ``num_streams`` tokens. Each pays its own
             projections, runs the kernel as one query row against the
@@ -242,7 +242,8 @@ class MultiStreamAttention(nn.Module):
                         dtype=dtype,
                         **kwargs,
                     ).tile(self.num_streams)
-            kernel = attention_kernel_cost(
+            kernel = cost(
+                self.attn_kernel,
                 seq_len=seq_len * self.num_streams,
                 dtype=dtype,
                 num_heads=self.num_heads,

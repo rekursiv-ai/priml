@@ -1,6 +1,6 @@
 """Hardware utilization: the model's analytical cost against measured throughput.
 
-The model config prices one token (:mod:`priml.cost`); the train
+The model config costs one token (:mod:`priml.cost`); the train
 loop times each step and puts ``step_sec`` on the metric bus. This metric sums
 tokens and seconds between ``reset`` calls and reports each kernel silo's
 achieved fraction of its datasheet ceiling; the ``matmul`` silo is MFU.
@@ -76,7 +76,7 @@ class Utilization(LateBound):
 
     @override
     def bind(self, root: object) -> None:
-        """Adopt the built loop's model config, which is what prices a token.
+        """Adopt the built loop's model config, which is what costs a token.
 
         Args:
           root: The outermost built object; a ``TrainLoop`` exposes the model
@@ -84,7 +84,7 @@ class Utilization(LateBound):
 
         Raises:
           TypeError: ``root`` carries no model config there, or the config
-            cannot price itself; a silent zero would report every run as idle.
+            cannot cost itself; a silent zero would report every run as idle.
           ValueError: This training metric is placed in ``metrics_eval``.
 
         """
@@ -101,7 +101,7 @@ class Utilization(LateBound):
             if model_config is None:
                 raise TypeError(
                     f"{type(root).__qualname__} exposes no step.config.model; a "
-                    "utilization metric needs the model config to price a token.",
+                    "utilization metric needs the model config to cost a token.",
                 )
         if not isinstance(model_config, HasCost):
             raise TypeError(
@@ -109,8 +109,8 @@ class Utilization(LateBound):
                 "metric needs a model config implementing HasCost.",
             )
         self._model_config = model_config
-        # The step's autocast dtype is what the priced tensors are; ``None``
-        # is torch's default, which ``cost`` resolves at pricing time.
+        # The step's autocast dtype is what the costed tensors are; ``None``
+        # is torch's default, which ``cost`` resolves at costing time.
         step_config = getattr(getattr(root, "step", None), "config", None)
         autocast = getattr(step_config, "dtype_autocast", None)
         self._dtype = autocast if isinstance(autocast, torch.dtype) else None

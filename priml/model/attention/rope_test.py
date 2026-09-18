@@ -749,7 +749,7 @@ def test_frequency_table_cost_is_free(
 
 
 class _LearnedTable:
-    """A frequency table that owns parameters, so pricing it is not free."""
+    """A frequency table that owns parameters, so costing it is not free."""
 
     class Config(Fig["_LearnedTable"]):
         def cost(
@@ -778,7 +778,7 @@ class _LearnedTable:
 
 
 def test_yarn_cost_is_its_inner_table() -> None:
-    """The wrapper rescales constants; whatever the inner table owns is priced."""
+    """The wrapper rescales constants; whatever the inner table owns is costed."""
     yarn = YarnScaling.Config(inner=_LearnedTable.Config())
     assert cost(yarn, seq_len=1, batch_size=1, dtype=None) == cost(
         _LearnedTable.Config(),
@@ -789,7 +789,7 @@ def test_yarn_cost_is_its_inner_table() -> None:
 
 
 def test_rope_cost_is_factors_plus_one_table_per_axis() -> None:
-    """A template is copied per axis in ``__init__``, so it is priced per axis."""
+    """A template is copied per axis in ``__init__``, so it is costed per axis."""
     plain = (
         RoPE.Config([8, 8])
         .copy_tree()

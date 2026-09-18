@@ -101,10 +101,10 @@ class MMDiTGraft(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the host's projections and every joint block.
+            """Cost the host's projections and every joint block.
 
             A joint block's stream zero IS the host layer, so the host's blocks
-            are priced through ``block`` and never again from ``backbone``.
+            are costed through ``block`` and never again from ``backbone``.
 
             Args:
               seq_len: Tokens per sequence.

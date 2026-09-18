@@ -46,7 +46,7 @@ class AdversarialLoss:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one media element; per-sample scalar work is spread ``1 / n``.
+            """Cost one media element; per-sample scalar work is spread ``1 / n``.
 
             A token is one element of ``fake_media``; the geometry's rows are
             the elements one sample holds. Per element, the L1 term is a subtract
@@ -54,11 +54,11 @@ class AdversarialLoss:
             ``(n - 1) / n``; its adjoint scales the saved sign by the upstream
             gradient and by ``1 / n``, three ops. Per SAMPLE, and so divided by
             ``rows``: BCE with logits on the single ``[B, 1]`` logit
-            (eight forward, five back, as :class:`SimpleLoss` prices it; the
+            (eight forward, five back, as :class:`SimpleLoss` costs it; the
             mean over a width of one reduces nothing) and the two weights
             (two multiplies and an add forward, two multiplies back).
             ``model_output`` is unread, and the discriminator that produced
-            ``fake_logits`` is priced by its own config, not here.
+            ``fake_logits`` is costed by its own config, not here.
 
             Traffic includes the generated label, both mean scales, and all
             logical intermediate reads/writes, even for the width-one mean.

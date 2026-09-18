@@ -81,7 +81,7 @@ class Conv1d(nn.Conv1d):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one output position; the sharing rows are output positions.
+            """Cost one output position; the sharing rows are output positions.
 
             Args:
               seq_len: Tokens per sequence.
@@ -195,7 +195,7 @@ class Conv2d(nn.Conv2d):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one output position; the sharing rows are output positions.
+            """Cost one output position; the sharing rows are output positions.
 
             Args:
               seq_len: Tokens per sequence.
@@ -309,7 +309,7 @@ class Conv3d(nn.Conv3d):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one output position; the sharing rows are output positions.
+            """Cost one output position; the sharing rows are output positions.
 
             Args:
               seq_len: Tokens per sequence.
@@ -373,7 +373,7 @@ def conv_cost(
     rows: float = 1,
     dtype: torch.dtype | None = None,
 ) -> Cost:
-    """Price a convolution at one OUTPUT position.
+    """Cost a convolution at one OUTPUT position.
 
     Every output element is a dot product over its receptive field, so a
     convolution is the matmul ``[channels_in / groups * prod(kernel_size)] ->
@@ -396,7 +396,7 @@ def conv_cost(
       dtype: Element type of every operand; ``None`` is torch's default.
 
     Returns:
-      cost: The matmul's price; parameters equal the weight plus bias numel.
+      cost: The matmul's cost; parameters equal the weight plus bias numel.
 
     """
     taps = math.prod(

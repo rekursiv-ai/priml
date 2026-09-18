@@ -256,16 +256,16 @@ def test_the_reference_kernel_prices_like_the_portable_one() -> None:
 
     The pinned build needs SM90 to construct, so it cannot be run against
     torch's counter here; the portable rung's kernel is, and the two configs
-    must price identically for exp000 and exp001 to report comparable MFU.
+    must cost identically for exp000 and exp001 to report comparable MFU.
     """
     base, fork = experiments.exp000(), experiments.exp001()
     base_attn, fork_attn = base.step.model.template.attn, fork.step.model.template.attn
     assert isinstance(base_attn, ValueGatedAttention.Config)
     assert isinstance(fork_attn, ValueGatedAttention.Config)
     assert type(base_attn.kernel) is not type(fork_attn.kernel)
-    # A kernel config holds no shapes, so the models that own them are priced;
+    # A kernel config holds no shapes, so the models that own them are costed;
     # every other field of the two recipes is identical (the next test), so an
-    # equal price means the kernels price alike.
+    # equal cost means the kernels cost alike.
     assert cost(
         base.step.model.finalize(),
         seq_len=16,
@@ -329,7 +329,7 @@ def test_exp000_turns_both_mechanisms_on() -> None:
     """The baseline is the recipe to reproduce, not the plain control.
 
     Both mechanisms belong here because the forks REMOVE them one at a time;
-    if exp000 shipped either one off, the rung meant to price it would be
+    if exp000 shipped either one off, the rung meant to cost it would be
     measuring against an unstated recipe instead.
     """
     cfg = experiments.exp000()

@@ -24,13 +24,16 @@ __all__ = [
     "ChannelsOut",
     "DeepModelConfig",
     "DepthIndex",
+    "EmbeddingConfig",
     "HasAttention",
     "HasDepthIndex",
     "HasForwardCached",
     "HasResetParameters",
+    "HeadGeometry",
     "LatentAttentionKernel",
     "LookupTable",
     "NumHeads",
+    "RotaryConfig",
     "RotaryFactors",
     "ShardStyle",
     "Shardable",
@@ -118,6 +121,19 @@ class WeightedTensorModule(TensorModule[_Kwargs], Protocol[_Kwargs]):
     """
 
     weight: Tensor
+
+
+class RotaryConfig(Makeable["RotaryFactors"], Protocol):
+    """A config that builds :class:`RotaryFactors` and says how much it rotates.
+
+    The owner of the queries and keys applies the factors to each head row and
+    pays for it; it asks the config how many channels that touches rather than
+    guessing from the config's type.
+    """
+
+    def rotated_channels(self, channels_head: int) -> int:
+        """Return the rotated channels per head row of width ``channels_head``."""
+        ...
 
 
 @runtime_checkable
@@ -301,6 +317,27 @@ class ChannelsHead(Protocol):
     """Has a uniform per-head channel width."""
 
     channels_head: int
+
+
+class HeadGeometry(NumHeads, ChannelsHead, Protocol):
+    """Declares both the head count and the per-head width.
+
+    A wrapper or stack reads its attention slot through this type:
+    ``cast(HeadGeometry, self.attn).num_heads``. The read is a plain
+    attribute access, so an attention declaring neither raises
+    ``AttributeError`` naming it rather than being sized to a guess.
+    """
+
+
+class EmbeddingConfig(Makeable[TensorModule], Protocol):
+    """A lookup-table config that says which width its table is held at.
+
+    What a stack holding SIBLING tables reads beyond ``Makeable``: it narrows
+    them as this one is narrowed, and asks the config rather than guessing
+    from its class. ``None`` is torch's default width.
+    """
+
+    dtype: torch.dtype | None
 
 
 @runtime_checkable

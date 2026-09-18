@@ -45,7 +45,7 @@ ArcTrainLoop(
                 │       │       │               bias=False,
                 │       │       │               split_gate_projection=False,
                 │       │       │               norm=None,
-                │       │       │               act=<function torch.nn.functional.silu at 0xdefacedeface>,
+                │       │       │               act=<function priml.model.swiglu.silu at 0xdefacedeface>,
                 │       │       │               depth_index=(),
                 │       │       │               init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
                 │       │       │               init_weight_out=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
@@ -122,7 +122,7 @@ ArcTrainLoop(
                 │               drop_empty=False
                 │       ),
                 │       loss=SimpleLoss.Config(
-                │               loss_fn=<function torch.nn.functional.binary_cross_entropy_with_logits at 0xdefacedeface>,
+                │               loss_fn=<function priml.loss.simple_loss.bce_with_logits at 0xdefacedeface>,
                 │               target_key='label',
                 │               kwargs={'reduction': 'none'},
                 │               channels_out=-1

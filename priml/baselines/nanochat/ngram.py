@@ -81,7 +81,7 @@ class NgramEmbedding(NarrowEmbedding):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price every lookup, scalar scale, context add, and integer hash.
+            """Cost every lookup, scalar scale, context add, and integer hash.
 
             Shifted token ids and the hash are ``int64``; the gathered rows
             are at this table's dtype, and the scale and context adds run on
@@ -250,7 +250,7 @@ class HashedNgramTables(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one gather per table plus the integer hash that indexes it.
+            """Cost one gather per table plus the integer hash that indexes it.
 
             Each hash is ``order - 1`` multiply-XOR pairs and one multiply, then
             a modulo: ``2 * order`` integer ops per token per table, in the

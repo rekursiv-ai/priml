@@ -384,9 +384,9 @@ def test_cost_matches_torch_through_a_naive_kernel() -> None:
 def test_cost_matmul_flops_agree_with_the_palm_estimate() -> None:
     """Both count six FLOPs per matrix parameter plus the attention products."""
     finalized = _config(value_embedding_stride=1).copy_tree().finalize()
-    priced = cost(finalized, seq_len=SEQ, batch_size=1, dtype=None)
+    costed = cost(finalized, seq_len=SEQ, batch_size=1, dtype=None)
     torch.manual_seed(0)
-    assert priced["flops", "matmul"].sum() == finalized.make().flops_per_token()
+    assert costed["flops", "matmul"].sum() == finalized.make().flops_per_token()
 
 
 def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
@@ -558,7 +558,9 @@ class ResetlessBlock(nn.Module):
     """A parameterless injected block with no reset capability."""
 
     class Config(Fig["ResetlessBlock"]):
-        attn: Makeable[TensorModule] = field(default_factory=SelfAttention.Config)
+        attn: Makeable[TensorModule] = field(
+            default_factory=lambda: SelfAttention.Config(num_heads=2, channels_head=8),
+        )
         """Attention metadata consumed by the model config."""
 
     def __init__(self, config: Config) -> None:
@@ -578,6 +580,36 @@ def test_reset_accepts_a_resetless_injected_block() -> None:
     assert all(isinstance(block, ResetlessBlock) for block in model.blocks)
     model.reset_parameters()
     assert model(_tokens()).shape == (2, SEQ, VOCAB)
+
+
+def test_a_block_whose_attention_declares_no_heads_is_rejected() -> None:
+    """The rotary factors and value tables are sized off layer 0's heads.
+
+    A block that cannot say how many it has, or how wide, leaves nothing to
+    size them from; inventing a width would build tensors the attention never
+    asked for and fail later, in a reshape naming a tensor size.
+    """
+    config = _config()
+    config.block = ResetlessBlock.Config(attn=Linear.Config(16, 16))
+    with pytest.raises(AttributeError, match=r"Linear\.Config.*channels_head"):
+        config.copy_tree().finalize()
+
+
+def test_value_tables_are_held_at_the_token_tables_dtype() -> None:
+    """The value tables narrow exactly as the token table does.
+
+    Both are read as lookups into the same stream, so the recipe's decision to
+    hold one narrow applies to all; a bare table declaring a dtype is honored
+    the same as the wrapper that narrows after drawing.
+    """
+    config = _config(value_embedding_stride=1)
+    config.embedding = Embedding.Config(dtype=torch.bfloat16)
+    torch.manual_seed(0)
+    model = config.make()
+    for table in model.value_embeds.values():
+        assert isinstance(table, NarrowEmbedding)
+        assert table.dtype == torch.bfloat16
+        assert all(p.dtype == torch.bfloat16 for p in table.parameters())
 
 
 def test_forward_bfb() -> None:
@@ -829,10 +861,10 @@ def test_gated_residual_cost_counts_mean_and_gate_parameters() -> None:
     config = GatedResidualMix.Config()
     config.num_layers = 2
     config.channels_in = 4
-    priced = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
-    assert priced.params == 3 * 2
-    assert priced["flops", "primal", "reduction"].sum() == 2 * (4 - 1)
-    assert priced["bytes", "primal", "reduction"].sum() == 2 * 2 * (4 + 1)
+    costed = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    assert costed.params == 3 * 2
+    assert costed["flops", "primal", "reduction"].sum() == 2 * (4 - 1)
+    assert costed["bytes", "primal", "reduction"].sum() == 2 * 2 * (4 + 1)
 
 
 def test_gated_residual_prices_sigmoid_as_one_tensor_operator() -> None:
@@ -868,16 +900,16 @@ def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
     config.bigrams = {"0": HashedNgramTables.Config(num_embeddings=7)}
     config = config.finalize()
     base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
-    priced = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
+    costed = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
     plain = base.cost(seq_len=SEQ, batch_size=4, dtype=None)
-    assert priced.params - plain.params == 7 * 16 + 1
+    assert costed.params - plain.params == 7 * 16 + 1
     assert (
-        priced["flops", "primal", "elementwise"].sum()
+        costed["flops", "primal", "elementwise"].sum()
         - plain["flops", "primal", "elementwise"].sum()
         == 2 + 2 * 16
     )
     assert (
-        priced["bytes", "primal", "selection"].sum()
+        costed["bytes", "primal", "selection"].sum()
         - plain["bytes", "primal", "selection"].sum()
         > 0
     )

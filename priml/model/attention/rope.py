@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import KW_ONLY, field, replace
 from typing import (
+    TYPE_CHECKING,
     Literal,
     Protocol,
     Self,
@@ -32,6 +33,10 @@ from priml.cost import (
     traffic,
 )
 from priml.math.basic import broadcast_sequences, floor_multiple
+
+
+if TYPE_CHECKING:
+    from priml.model.custom_types import RotaryConfig
 
 
 @runtime_checkable
@@ -110,7 +115,7 @@ class GeometricFrequencies:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price nothing: a table of constants, no products and no parameters.
+            """Cost nothing: a table of constants, no products and no parameters.
 
             Args:
               seq_len: Tokens per sequence.
@@ -164,7 +169,7 @@ class HuggingFaceFrequencies:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price nothing: a table of constants, no products and no parameters.
+            """Cost nothing: a table of constants, no products and no parameters.
 
             Args:
               seq_len: Tokens per sequence.
@@ -258,7 +263,7 @@ class YarnScaling:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the table this rescales; the rescaling itself is constants.
+            """Cost the table this rescales; the rescaling itself is constants.
 
             Args:
               seq_len: Tokens per sequence.
@@ -417,6 +422,29 @@ class RoPE(nn.Module):
         reference held them.
         """
 
+        def rotated_channels(self, channels_head: int) -> int:
+            """Return how many of a head's ``channels_head`` this rotary rotates.
+
+            A scalar width rotates that many; per-axis widths rotate their sum
+            in ``cat`` mode (``[128, 0]`` leaves the second half untouched) and
+            their widest axis in ``sum`` mode, where every table spans the same
+            channels.
+
+            Args:
+              channels_head: Width of the head being rotated; unused, since
+                the config names its own width, but every rotary is asked the
+                same way.
+
+            Returns:
+              channels: Rotated channels per head row.
+
+            """
+            del channels_head
+            axes = self.channels_head
+            if isinstance(axes, int):
+                return axes
+            return max(axes) if self.reduction_mode == "sum" else sum(axes)
+
         def cost(
             self,
             *,
@@ -429,7 +457,7 @@ class RoPE(nn.Module):
 
             The attention owner counts applying factors to each query/key head;
             this config only emits them. Positions and fixed frequencies receive
-            no gradients. A table is priced by its own config -- one per axis,
+            no gradients. A table is costed by its own config -- one per axis,
             as ``__init__`` builds them -- so a learned table's parameters land
             here rather than reporting as free.
 
@@ -858,24 +886,23 @@ class RoPE(nn.Module):
 
 
 def rotation_cost(
-    rope: object,
+    rope: RotaryConfig,
     *,
     rows: float,
     dtype: torch.dtype | None,
     channels_head: int,
     heads: int,
 ) -> Cost:
-    """Price applying rotary factors to ``heads`` rows of ``channels_head``.
+    """Cost applying rotary factors to ``heads`` rows of ``channels_head``.
 
     The owner of the queries and keys pays this, not the rotary module: the
     module emits ``(cos, sin)`` once per position, and every head row is then
     rotated by them. Each rotated channel is two products and one add, both
-    ways. A :class:`RoPE.Config` may rotate fewer channels than the head holds
-    (``channels_head=[128, 0]``) or, in ``sum`` mode, as many as its widest
-    axis; any other rotary is assumed to rotate the whole head.
+    ways. How many channels that is, the rotary config declares through
+    ``rotated_channels(channels_head)``; one that does not cannot be costed.
 
     Args:
-      rope: The rotary slot's config.
+      rope: The rotary slot's config, with ``rotated_channels``.
       rows: Rows sharing the factors' reads.
       dtype: Activation dtype; ``None`` is torch's default.
       channels_head: Width of each rotated row.
@@ -885,13 +912,7 @@ def rotation_cost(
       cost: Scalar work only; the factors are the rotary module's.
 
     """
-    channels = channels_head
-    if isinstance(rope, RoPE.Config):
-        axes = rope.channels_head
-        if isinstance(axes, int):
-            channels = axes
-        else:
-            channels = max(axes) if rope.reduction_mode == "sum" else sum(axes)
+    channels = rope.rotated_channels(channels_head)
     rotations = 3 * channels * heads
     return elementwise_cost(
         primal=rotations,
@@ -1002,7 +1023,7 @@ class RoPEMixed(RoPE):
             derivative products, one merge, then a position product per
             frequency; the reduction over rows is the primitive's. Attention
             separately counts gradients into the factors. The tables seed the
-            per-head frequencies once, so they are priced once rather than per
+            per-head frequencies once, so they are costed once rather than per
             head.
 
             Args:
@@ -1052,11 +1073,7 @@ class RoPEMixed(RoPE):
                 )
                 + replace(
                     frequencies,
-                    cells={
-                        key: value
-                        for key, value in frequencies.cells.items()
-                        if self.learnable and key[1] == "adjoint"
-                    },
+                    cells=frequencies.only("adjoint").cells if self.learnable else {},
                 )
             )
 

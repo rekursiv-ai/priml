@@ -112,7 +112,7 @@ class GatedDeltaNet(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the projections, the depthwise conv, and the recurrent scan.
+            """Cost the projections, the depthwise conv, and the recurrent scan.
 
             Matrix scan counts retain the recurrent-model proxy of two MACs
             per state element, not the chunked implementation's actual products.
@@ -267,7 +267,7 @@ class GatedDeltaNet(nn.Module):
             )
 
         def _output_gate_cost(self, *, rows: float, dtype: torch.dtype | None) -> Cost:
-            """Price the separate post-norm SiLU and product."""
+            """Cost the separate post-norm SiLU and product."""
             width = self.num_heads_v * self.channels_v_head
             return elementwise_cost(
                 primal=6 * width,

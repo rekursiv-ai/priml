@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from torch import Tensor, nn
 
@@ -14,7 +14,12 @@ from priml.baselines.sudoku.prefix import (
     RegisterTokens,
     SparsePuzzleEmbedding,
 )
+
+
+if TYPE_CHECKING:
+    from priml.baselines.sudoku.prefix import PrefixConfig
 from priml.cost import cost
+from priml.model.norm import RMSNorm
 from priml.testing.cost import assert_cost_matches_torch
 
 
@@ -179,6 +184,7 @@ def test_stack_cost_sums_its_parts() -> None:
     registers = RegisterTokens.Config(num_tokens=3)
     registers.channels_out = 8
     config = PrefixStack.Config()
+    config.channels_out = 8
     config.parts = [puzzle, registers]
     analytical = assert_cost_matches_torch(
         config,
@@ -206,6 +212,31 @@ def test_stack_cost_sums_its_parts() -> None:
     )
 
 
+def test_a_stack_counts_its_tokens_from_its_parts() -> None:
+    """A stack is itself a prefix: its token count is the sum of its parts'.
+
+    Nested stacks compose the same way, so the model that reads
+    ``num_tokens`` never has to know a stack from a leaf.
+    """
+    inner = PrefixStack.Config()
+    inner.parts = [RegisterTokens.Config(num_tokens=3)]
+    outer = PrefixStack.Config()
+    outer.parts = [
+        SparsePuzzleEmbedding.Config(num_puzzles=8, num_tokens=2, batch_size=4),
+        inner,
+    ]
+    assert inner.num_tokens == 3
+    assert outer.num_tokens == 5
+
+
+def test_a_stack_part_without_a_token_count_cannot_be_priced() -> None:
+    """A stacked module that declares no tokens gives the concatenation no size."""
+    config = PrefixStack.Config()
+    config.parts = [cast("PrefixConfig", RMSNorm.Config(channels_in=8))]
+    with pytest.raises(AttributeError, match="num_tokens"):
+        cost(config, seq_len=1, batch_size=1, dtype=None)
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_sparse_prefix_traffic_counts_lookup_copy_padding_and_scale(
     dtype: torch.dtype,
@@ -213,13 +244,13 @@ def test_sparse_prefix_traffic_counts_lookup_copy_padding_and_scale(
     config = SparsePuzzleEmbedding.Config()
     config.channels_out = 8
     config.num_tokens = 2
-    priced = config.cost(seq_len=1, batch_size=1, dtype=dtype)
+    costed = config.cost(seq_len=1, batch_size=1, dtype=dtype)
     itemsize = dtype.itemsize
     # Three int64 bookkeeping reads; the row, pad, and prefix at ``dtype``.
-    assert priced["bytes", "primal", "selection", torch.int64] == 8 * 3
-    assert priced["bytes", "primal", "selection", dtype] == itemsize * (4 * 8 + 8 + 16)
-    assert priced["bytes", "primal", "elementwise"].sum() == itemsize * 2 * 16
-    assert priced["bytes", "adjoint", "elementwise"].sum() == itemsize * 2 * 16
+    assert costed["bytes", "primal", "selection", torch.int64] == 8 * 3
+    assert costed["bytes", "primal", "selection", dtype] == itemsize * (4 * 8 + 8 + 16)
+    assert costed["bytes", "primal", "elementwise"].sum() == itemsize * 2 * 16
+    assert costed["bytes", "adjoint", "elementwise"].sum() == itemsize * 2 * 16
 
 
 def _run_prefix(module: nn.Module, identifiers: Tensor) -> Tensor:

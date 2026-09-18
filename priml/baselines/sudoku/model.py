@@ -39,6 +39,7 @@ from torch import Tensor, nn
 import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.baselines.sudoku.prefix import PrefixConfig
 from priml.cost import (
     Cost,
     cost,
@@ -111,18 +112,22 @@ class ForwardOutput(NamedTuple):
     """Per-cycle logits when the caller asked for intermediates."""
 
 
-@runtime_checkable
-class HasNumTokens(Protocol):
-    """A prefix config declaring how many tokens it contributes."""
+class GridConfig(Makeable[GridEmbedding], Protocol):
+    """A config that builds a grid embedding and declares the grid it embeds.
 
-    num_tokens: int
+    The model reads the puzzle's cell count from here: the token head emits
+    one row per cell and the loss strips the prefix down to this many. A
+    replacement embedding must say its grid; the widths are the model's to
+    push down.
+    """
 
+    channels_in: int
+    channels_out: int
 
-@runtime_checkable
-class HasParts(Protocol):
-    """A prefix config composed of other prefix configs."""
-
-    parts: list[Makeable[nn.Module]]
+    @property
+    def grid_len(self) -> int:
+        """Grid tokens per puzzle."""
+        ...
 
 
 class CoreFn(Protocol):
@@ -175,6 +180,20 @@ class Recurrence(Protocol):
         ...
 
 
+class RecurrenceConfig(Makeable[Recurrence], Protocol):
+    """A config that builds a :class:`Recurrence` and declares its cycle counts.
+
+    The model costs and runs the core by these numbers, so a recurrence that
+    cannot say how often it runs the core cannot fill the slot.
+    """
+
+    slow_cycles: int
+    """Core applications per forward; the model costs every one."""
+
+    fast_cycles: int
+    """Inner block-stack passes per core application."""
+
+
 class DeepRecurrence(nn.Module):
     """Refine two latent states over ``slow_cycles`` x ``fast_cycles`` passes.
 
@@ -201,9 +220,9 @@ class DeepRecurrence(nn.Module):
         """Inner iterations refining the fast latent per slow cycle."""
 
         def cost(self, **kwargs: object) -> Cost:
-            """Price nothing: the schedule owns no weights and does no arithmetic.
+            """Cost nothing: the schedule owns no weights and does no arithmetic.
 
-            The core it repeats is the model's, which prices every cycle.
+            The core it repeats is the model's, which costs every cycle.
 
             Args:
               **kwargs: The open bus, unread.
@@ -280,9 +299,7 @@ class SudokuNet(nn.Module):
         num_layers: int = 2
         """Blocks in the reasoning stack, applied per core application."""
 
-        embedding: Makeable[GridEmbedding] = field(
-            default_factory=GridEmbedding.Config,
-        )
+        embedding: GridConfig = field(default_factory=GridEmbedding.Config)
         """Input embedding: tokens plus whatever additive channels_in apply."""
 
         block: Makeable[TensorModule] = field(
@@ -301,10 +318,10 @@ class SudokuNet(nn.Module):
         drove the carried latent to 413.6 and the loss to 4473, while post-norm
         held the latent at 2.9 and the loss fell monotonically."""
 
-        recurrence: Makeable[Recurrence] | None = None
+        recurrence: RecurrenceConfig | None = None
         """Latent-refinement schedule. ``None`` runs the stack exactly once."""
 
-        prefix: Makeable[nn.Module] | None = None
+        prefix: PrefixConfig | None = None
         """Optional module producing ``[B, P, C]`` tokens prepended to the grid.
 
         A per-puzzle embedding lives here. The halt readout reads position 0, so
@@ -313,7 +330,7 @@ class SudokuNet(nn.Module):
         num_prefix_tokens: int = -1
         """Tokens the prefix contributes; sizes the latent state.
 
-        ``-1`` counts them from the prefix module itself, so the two cannot
+        ``-1`` reads them from the prefix module itself, so the two cannot
         disagree -- a hand-set count that undercounts silently strips real grid
         logits, and one that overcounts strips nothing and shifts every
         position. No prefix means 0."""
@@ -332,9 +349,7 @@ class SudokuNet(nn.Module):
         @property
         def grid_len(self) -> int:
             """Grid tokens per puzzle, read from the embedding."""
-            embedding = self.embedding
-            assert isinstance(embedding, GridEmbedding.Config)
-            return embedding.grid_len
+            return self.embedding.grid_len
 
         @property
         def total_seq_len(self) -> int:
@@ -354,12 +369,10 @@ class SudokuNet(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            embedding = self.embedding
-            assert isinstance(embedding, GridEmbedding.Config)
-            if embedding.channels_out == -1:
-                embedding.channels_out = self.channels_in
-            if embedding.channels_in == -1:
-                embedding.channels_in = self.vocab_size
+            if self.embedding.channels_out == -1:
+                self.embedding.channels_out = self.channels_in
+            if self.embedding.channels_in == -1:
+                self.embedding.channels_in = self.vocab_size
             propagate = self.block
             if isinstance(propagate, ChannelsIn) and propagate.channels_in == -1:
                 propagate.channels_in = self.channels_in
@@ -370,7 +383,7 @@ class SudokuNet(nn.Module):
             return super().finalize()
 
         def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
-            """Price one forward per grid cell: embed, every core pass, both heads.
+            """Cost one forward per grid cell: embed, every core pass, both heads.
 
             The latent sequence is ``total_seq_len`` rows per puzzle -- prefix
             plus grid -- while a token is one grid CELL, so work over the
@@ -428,13 +441,7 @@ class SudokuNet(nn.Module):
                 _halt_head(self),
             ).tile(1 / grid_len)
             # Every slow cycle runs the core forward; only the last runs backward.
-            primal_only = Cost(
-                cells={
-                    key: value
-                    for key, value in core.cells.items()
-                    if key[1] == "primal"
-                },
-            )
+            primal_only = core.only("primal")
             total = (
                 cost(
                     self.embedding,
@@ -644,31 +651,21 @@ def _halt_head(config: SudokuNet.Config) -> Linear.Config:
 
 
 # Without a recurrence the core runs once, its inner loop once: the plain model is a
-# single pass over the block stack. A recurrence that declares its cycles overrides
-# both -- read from the config so the core stays a plain method the recurrence can
-# call, and so the same numbers price a forward before anything is built.
-def _cycles(recurrence: Makeable[Recurrence] | None) -> tuple[int, int]:
+# single pass over the block stack. A recurrence declares both -- read from the
+# config so the core stays a plain method the recurrence can call, and so the same
+# numbers cost a forward before anything is built.
+def _cycles(recurrence: RecurrenceConfig | None) -> tuple[int, int]:
     """Return ``(slow_cycles, fast_cycles)`` one forward runs."""
-    if isinstance(recurrence, DeepRecurrence.Config):
-        return recurrence.slow_cycles, recurrence.fast_cycles
-    return 1, 1
+    if recurrence is None:
+        return 1, 1
+    return recurrence.slow_cycles, recurrence.fast_cycles
 
 
 # Read from the config rather than by constructing the module: ``finalize`` runs during
 # ``pprint`` too, where building a large table would be both slow and surprising.
-def _count_prefix_tokens(prefix: Makeable[nn.Module] | None) -> int:
+def _count_prefix_tokens(prefix: PrefixConfig | None) -> int:
     """How many tokens a prefix config contributes, before it is built."""
-    if prefix is None:
-        return 0
-    if isinstance(prefix, HasParts):
-        return sum(_count_prefix_tokens(part) for part in prefix.parts)
-    if isinstance(prefix, HasNumTokens):
-        return prefix.num_tokens
-    raise ValueError(
-        f"{type(prefix).__name__} fills the prefix slot but declares no "
-        "rows, so the model cannot size its sequence; add the field or "
-        "set num_prefix_tokens explicitly.",
-    )
+    return 0 if prefix is None else prefix.num_tokens
 
 
 def _latent_init(channels_in: int) -> Tensor:

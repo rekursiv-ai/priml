@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import TYPE_CHECKING, Self, override
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Self, override
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
@@ -21,10 +22,11 @@ from priml.cost import (
     Cost,
     cost,
     elementwise_cost,
+    map_cost,
     matmul_cost,
     resolve_dtype,
+    set_cost,
 )
-from priml.custom_types import HasCost
 from priml.math.basic import ceil_multiple
 from priml.math.custom_types import TensorFn
 from priml.model.custom_types import (
@@ -39,9 +41,69 @@ from priml.model.linear import Linear
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from torch.distributed.device_mesh import DeviceMesh
 
 
+@set_cost(map_cost(primal=1, adjoint=1))
+def relu(x: Tensor) -> Tensor:
+    """Apply ``max(0, x)``: one compare forward, one mask multiply back.
+
+    Args:
+      x: Pre-activation values, any shape.
+
+    Returns:
+      activated: ``max(0, x)``, elementwise.
+
+    """
+    return nn.functional.relu(x)
+
+
+# The sigmoid alone: exp, add, divide, and the negate inside; three back from
+# the saved value.
+@set_cost(map_cost(primal=4, adjoint=3))
+def sigmoid(x: Tensor) -> Tensor:
+    """Apply ``1 / (1 + exp(-x))``.
+
+    Args:
+      x: Pre-activation values, any shape.
+
+    Returns:
+      activated: ``sigmoid(x)``, elementwise.
+
+    """
+    return nn.functional.sigmoid(x)
+
+
+# ``x * sigmoid(x)``: the sigmoid's four plus the multiply forward, five in its
+# derivative from the saved sigmoid.
+@set_cost(map_cost(primal=5, adjoint=5))
+def silu(x: Tensor) -> Tensor:
+    """Apply ``x * sigmoid(x)``; its gate-norm factor is the sigmoid.
+
+    Args:
+      x: Pre-activation values, any shape.
+
+    Returns:
+      activated: ``x * sigmoid(x)``, elementwise.
+
+    """
+    return nn.functional.silu(x)
+
+
+# A compare and a square forward; ``2 * relu(x)`` back is two multiplies. Two
+# tensor operators, so the primal reads and writes twice.
+@set_cost(
+    map_cost(
+        primal=1,
+        adjoint=2,
+        inputs=2,
+        outputs=2,
+        adjoint_inputs=4,
+        adjoint_outputs=2,
+    ),
+)
 def relu_squared(x: Tensor) -> Tensor:
     """Apply ``relu(x) ** 2``, with continuous derivative ``2 * relu(x)``.
 
@@ -58,6 +120,41 @@ def relu_squared(x: Tensor) -> Tensor:
 
     """
     return nn.functional.relu(x).square()
+
+
+@set_cost(
+    map_cost(
+        primal=2,
+        adjoint=2,
+        inputs=2,
+        outputs=2,
+        adjoint_inputs=4,
+        adjoint_outputs=2,
+    ),
+)
+def shifted_relu_squared(x: Tensor, *, threshold: float) -> Tensor:
+    """Apply ``relu(x - threshold) ** 2``; bind ``threshold`` with ``functools.partial``.
+
+    Args:
+      x: Pre-activation values, any shape.
+      threshold: Shift subtracted before the squared ReLU.
+
+    Returns:
+      activated: ``max(0, x - threshold) ** 2``, elementwise.
+
+    """
+    return nn.functional.relu(x - threshold).square()
+
+
+FACTORS: Final[Mapping[TensorFn, TensorFn]] = MappingProxyType(
+    {silu: sigmoid, relu_squared: relu},
+)
+"""The ``f`` of each activation ``act(x) = f(x) * x`` a gate norm can split.
+
+:class:`SwiGLU` with a ``norm`` computes ``f(g) * norm(g * x)``, so only an
+activation listed here can be normalized that way; ``FACTORS[act]`` raises
+``KeyError`` for any other, naming it.
+"""
 
 
 class SwiGLU(nn.Module):
@@ -107,16 +204,16 @@ class SwiGLU(nn.Module):
         """Optional norm inside the factored activation, for Muon compatibility.
 
         For act(x) = f(x) * x, normalize as f(g) * norm(g * x) when gated,
-        or f(x) * norm(x) when ungated. Known factors are sigmoid for silu
-        and relu for relu_squared.
+        or f(x) * norm(x) when ungated. ``act`` must have its ``f`` in
+        :data:`FACTORS`; :func:`silu` and :func:`relu_squared` do.
 
         References:
           https://arxiv.org/abs/2601.19085
             Dillon, Joshua V. Speed is Confidence. 2026.
         """
 
-        act: TensorFn = nn.functional.silu
-        """Nonlinearity; ``norm`` requires a known silu or relu_squared factorization."""
+        act: TensorFn = silu
+        """Nonlinearity, costed; ``norm`` needs one listed in :data:`FACTORS`."""
 
         depth_index: DepthIndex = ()
         """Block depth index for depth-scaled initializers; empty means no scaling."""
@@ -160,12 +257,11 @@ class SwiGLU(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price projections, activation, products, and optional normalization.
+            """Cost projections, activation, products, and optional normalization.
 
-            SiLU saves sigmoid for its five-operation derivative; squared ReLU
-            uses two backward multiplies. Nonlinear tensor operators read/write
-            one row; squared ReLU is two operators. Their scalar FLOPs do not
-            imply extra tensor I/O.
+            The activation costs itself; with a gate norm only its factor is
+            paid (the branch is ``factor(g) * norm(g * x)``). The products
+            and the projections are this module's own.
 
             Args:
               seq_len: Tokens per sequence.
@@ -177,9 +273,8 @@ class SwiGLU(nn.Module):
               cost: Per-token cost of this module.
 
             Raises:
-              TypeError: ``act`` is neither SiLU nor squared ReLU; an injected
-                activation has no analytical price, and a silent zero would
-                understate the model.
+              TypeError: ``act`` carries no cost (see :func:`set_cost`); a
+                silent zero would understate the model.
 
             """
             rows = seq_len * batch_size
@@ -201,49 +296,29 @@ class SwiGLU(nn.Module):
                 rows=rows,
                 dtype=dt,
             )
-            priced_act = Cost()
-            if self.act is nn.functional.silu:
-                fwd, bwd = (5, 5) if self.norm is None else (4, 3)
-                reads, writes = 1, 1
-                adj_reads, adj_writes = 2, 1
-            elif self.act is relu_squared:
-                fwd, bwd = (1, 2) if self.norm is None else (0, 1)
-                reads, writes = (2, 2) if self.norm is None else (1, 1)
-                adj_reads, adj_writes = (4, 2) if self.norm is None else (2, 1)
-            elif isinstance(self.act, HasCost):
-                # An injected activation that prices itself: its own ledger,
-                # then the gate product this module still owns.
-                priced_act = self.act.cost(
-                    seq_len=seq_len,
-                    batch_size=batch_size,
-                    dtype=dtype,
-                    **kwargs,
-                )
-                fwd = bwd = reads = writes = adj_reads = adj_writes = 0
-            else:
-                raise TypeError(
-                    f"SwiGLU.Config.cost has no price for act={self.act!r}; "
-                    "only silu and relu_squared are priced.",
-                )
+            # With a norm the branch is ``factor(g) * norm(g * x)``, so the
+            # nonlinearity paid for is the factor alone; without one, the act.
+            nonlinearity = FACTORS[self.act] if self.norm is not None else self.act
+            act = cost(nonlinearity, channels=self.channels_hidden, dtype=dt)
             # Each product is one multiply forward and two backward.
             products = int(self.gate) + int(self.norm is not None)
             scalar = elementwise_cost(
-                primal=(fwd + products) * self.channels_hidden,
-                adjoint=(bwd + 2 * products) * self.channels_hidden,
+                primal=products * self.channels_hidden,
+                adjoint=2 * products * self.channels_hidden,
                 channels=self.channels_hidden,
-                inputs=reads + 2 * products,
-                outputs=writes + products,
-                adjoint_inputs=adj_reads + 4 * products,
-                adjoint_outputs=adj_writes + 2 * products,
+                inputs=2 * products,
+                outputs=products,
+                adjoint_inputs=4 * products,
+                adjoint_outputs=2 * products,
                 dtype=dt,
             )
             if self.norm is None:
-                return up + down + scalar + priced_act
+                return up + down + scalar + act
             return (
                 up
                 + down
                 + scalar
-                + priced_act
+                + act
                 + cost(
                     self.norm,
                     seq_len=seq_len,
@@ -279,16 +354,11 @@ class SwiGLU(nn.Module):
             depth_index=config.depth_index,
             init_weight=config.init_weight_out,
         ).make()
-        self.act = config.act
+        self.act: TensorFn = config.act
         if config.norm is None:
             self.norm = None
         else:
-            if self.act is nn.functional.silu:
-                self.act = nn.functional.sigmoid
-            elif self.act is relu_squared:
-                self.act = nn.functional.relu
-            else:
-                raise ValueError("Norm requires act to be silu or relu_squared.")
+            self.act = FACTORS[config.act]
             self.norm = config.norm.make()
 
     def reset_parameters(self) -> None:

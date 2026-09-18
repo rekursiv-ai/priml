@@ -22,7 +22,7 @@ carries the gradient, and the optimizer scatters those few rows back.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, field
-from typing import TYPE_CHECKING, Self, override
+from typing import TYPE_CHECKING, Protocol, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
@@ -41,6 +41,20 @@ from priml.model.init import truncated_normal
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+class PrefixConfig(Makeable[nn.Module], Protocol):
+    """A config that builds a prefix module and declares its token count.
+
+    The solver sizes its latent sequence from this number before anything is
+    built, so a prefix that cannot say how many tokens it prepends cannot fill
+    the slot -- or be stacked.
+    """
+
+    @property
+    def num_tokens(self) -> int:
+        """Tokens this prefix prepends to every puzzle."""
+        ...
 
 
 class RegisterTokens(nn.Module):
@@ -81,7 +95,7 @@ class RegisterTokens(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one scale over every register token, per puzzle.
+            """Cost one scale over every register token, per puzzle.
 
             The expand is a view. A frozen basis owns nothing, so its gradient
             reduction over puzzles vanishes with its parameters.
@@ -201,7 +215,7 @@ class SparsePuzzleEmbedding(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one row gathered and the prefix scaled, per puzzle; nothing owned.
+            """Cost one row gathered and the prefix scaled, per puzzle; nothing owned.
 
             The table is a buffer, so there are no parameters, and the scatter
             back into it is the sparse optimizer's work, which the counting
@@ -343,9 +357,7 @@ class PrefixStack(nn.Module):
     class Config(Fig["PrefixStack"]):
         """The prefix modules, in sequence order."""
 
-        parts: list[Makeable[nn.Module]] = field(
-            default_factory=list["Makeable[nn.Module]"],
-        )
+        parts: list[PrefixConfig] = field(default_factory=list["PrefixConfig"])
         """Modules whose outputs are concatenated along the token axis."""
 
         channels_out: int = -1
@@ -354,6 +366,11 @@ class PrefixStack(nn.Module):
         Declared even though this module owns no weights: the model propagates
         the width to whatever fills its prefix slot, and without the field the
         stack is skipped and its parts are built at the sentinel."""
+
+        @property
+        def num_tokens(self) -> int:
+            """Tokens the stack prepends: every part's, in order."""
+            return sum(part.num_tokens for part in self.parts)
 
         @override
         def finalize(self) -> Self:
@@ -398,7 +415,7 @@ class PrefixStack(nn.Module):
             return children + traffic(
                 "primal",
                 "selection",
-                elements=2 * _prefix_elements(self),
+                elements=2 * self.num_tokens * self.channels_out,
                 dtype=dtype,
             )
 
@@ -416,13 +433,3 @@ class PrefixStack(nn.Module):
         """Concatenate every part's tokens along the sequence axis."""
         pieces = [part(batch_size, **kwargs) for part in self.parts]
         return torch.cat(pieces, dim=1)
-
-
-def _prefix_elements(config: object) -> int:
-    """Read the output shape of nested prefix configs without building tensors."""
-    if isinstance(config, PrefixStack.Config):
-        return sum(_prefix_elements(part) for part in config.parts)
-    tokens = getattr(config, "num_tokens", None)
-    if not isinstance(tokens, int) or not isinstance(config, ChannelsOut):
-        raise TypeError("Prefix cost needs num_tokens and channels_out.")
-    return tokens * config.channels_out

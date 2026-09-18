@@ -11,6 +11,6 @@ at this scale: rotary positions, parameter-free RMS norm on every sublayer
 input, a squared-ReLU feed-forward, windowed attention on three layers in four,
 and alternating value embeddings that let a layer read the token table
 directly. Each is a value in a slot, so removing one is a fork rather than an
-edit -- which is what ``exp001`` and ``exp002`` do, pricing the last two by
+edit -- which is what ``exp001`` and ``exp002`` do, costing the last two by
 switching them off one at a time.
 """

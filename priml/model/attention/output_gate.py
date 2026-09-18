@@ -20,12 +20,11 @@ from priml.model.attention.kvcache import KVCache
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.custom_types import (
     CachedAttention,
-    ChannelsHead,
     ChannelsIn,
     ChannelsOut,
     DepthIndex,
     HasDepthIndex,
-    NumHeads,
+    HeadGeometry,
     TensorModule,
     infer_same_width,
     propagate_attr,
@@ -61,14 +60,12 @@ class OutputGate(nn.Module):
         @property
         def num_heads(self) -> int:
             """Return the wrapped module's attention-head count."""
-            return self.inner.num_heads if isinstance(self.inner, NumHeads) else 1
+            return cast(HeadGeometry, self.inner).num_heads
 
         @property
         def channels_head(self) -> int:
             """Return the wrapped module's per-head channel width."""
-            if isinstance(self.inner, ChannelsHead):
-                return self.inner.channels_head
-            return self.channels_in
+            return cast(HeadGeometry, self.inner).channels_head
 
         @override
         def finalize(self) -> Self:

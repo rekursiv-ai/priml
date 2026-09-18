@@ -76,7 +76,7 @@ class NarrowEmbedding(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the table it narrows, at the narrowed dtype.
+            """Cost the table it narrows, at the narrowed dtype.
 
             Args:
               seq_len: Tokens per sequence.

@@ -33,42 +33,24 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from typing import Self
 
+    from wandb.sdk.wandb_run import Run
 
-class _WandbRun(Protocol):
-    notes: str | None
-
-    def define_metric(self, name: str, *, step_metric: str | None = None) -> None: ...
-
-    def finish(self) -> None: ...
-
-    def log(self, data: dict[str, float | list[object]], *, step: int) -> None: ...
-
-
-class _Wandb(Protocol):
-    Settings: Callable[..., object]
-    Image: Callable[[object], object]
-
-    def init(self, **kwargs: object) -> _WandbRun: ...
-
-
-wandb = cast(_Wandb, lazy_import("wandb"))
+    import wandb
+else:
+    wandb = lazy_import("wandb")
 
 
 logger = logging.getLogger(__name__)
 
 
 def scalar_metrics(metrics: Mapping[str, object]) -> dict[str, float]:
-    """Return tracker-safe scalar metrics, dropping non-scalar values.
-
-    A value is scalar when it is a real number or a single-element ``Tensor``;
-    everything else (dicts, payloads, multi-element tensors) is dropped so a
-    tracker never has to flatten or reject an opaque value.
+    """Return real numbers and one-element tensors as floats.
 
     Args:
-      metrics: Mapping of metric name to value (mixed types).
+      metrics: Mixed metric values.
 
     Returns:
-      scalars: Filtered dict with only Real or 1-element Tensor values.
+      scalars: Values accepted by external trackers.
 
     """
     scalars: dict[str, float] = {}
@@ -81,14 +63,10 @@ def scalar_metrics(metrics: Mapping[str, object]) -> dict[str, float]:
 
 
 class FileTracker:
-    """Write scalar metrics for ONE prefix to a JSON file, overwriting each call.
+    """Write the latest scalar metrics for one prefix to a JSON file on rank zero.
 
-    Rank-0 only. Captures only calls whose ``prefix`` matches ``capture_prefix``
-    (default ``"eval/"``), so the file holds eval scores -- not train-step
-    metrics that share the same tracker -- and converges to the final eval's
-    value (last write wins). Non-scalar values (e.g. an ``extras`` payload) are
-    ignored. A downstream remote-eval reconciler reads this as the
-    eval-results file, so it must contain ``eval/*`` keys only.
+    Only calls whose ``prefix`` equals ``capture_prefix`` are written; the
+    default ``"eval/"`` keeps training metrics out of the eval-results file.
     """
 
     class Config(Fig["FileTracker"]):
@@ -99,10 +77,7 @@ class FileTracker:
         """Logical JSON destination; an empty path disables file output."""
 
         capture_prefix: str = "eval/"
-        """Only ``log_metrics`` calls with this exact ``prefix`` are written.
-
-        Defaults to ``eval/`` so train-step logging (``prefix="train/"``) does
-        not clobber the eval-results file. Set to ``""`` to capture every call."""
+        """Exact prefix required by ``log_metrics``; empty captures every call."""
 
         @override
         def finalize(self) -> Self:
@@ -122,16 +97,12 @@ class FileTracker:
         *,
         prefix: str = "",
     ) -> None:
-        """Write scalar metrics as flat JSON, atomically replacing the file.
-
-        Only writes when ``prefix == capture_prefix`` (default ``eval/``), so
-        train-step metrics on the same tracker do not overwrite the eval file.
+        """Atomically replace the JSON file with scalar metrics for one prefix.
 
         Args:
-          metrics: Mapping of metric name to a value; ``prefix`` is prepended to
-            each key. Non-scalar values are skipped.
-          step: Global step number (unused; the file always holds the latest).
-          prefix: String prepended to every metric key.
+          metrics: Mixed metric values; non-scalars are skipped.
+          step: Ignored; the file stores the latest accepted values.
+          prefix: Must equal ``capture_prefix`` for the write to occur.
 
         """
         del step
@@ -152,31 +123,19 @@ class FileTracker:
         logger.info("Wrote metrics to %s", path)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
-        """No-op image logging; a metrics file holds scalars only.
-
-        Args:
-          key: Key.
-          images: Images.
-          step: Step.
-
-        """
+        """Ignore image logging."""
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
-        """No-op; a metrics file has no notes concept.
-
-        Args:
-          notes: Notes.
-
-        """
+        """Ignore run notes."""
         del notes
 
     def close(self) -> None:
-        """No resources to release."""
+        """Close the tracker; this implementation has no resources."""
 
 
 class _Writer(Protocol):
-    """Minimal scalar-logging writer interface (satisfied by SummaryWriter)."""
+    """Minimal scalar-logging writer interface."""
 
     def add_scalar(self, tag: str, scalar_value: float, global_step: int) -> None: ...
 
@@ -184,27 +143,19 @@ class _Writer(Protocol):
 
 
 class _WriterFactory(Protocol):
-    """Constructor for SummaryWriter-like optional writer classes."""
+    """Factory for optional SummaryWriter-like classes."""
 
     def __call__(self, log_dir: str) -> _Writer: ...
 
 
-_summary_writer_cls: _WriterFactory | None
-try:
-    from torch.utils.tensorboard import SummaryWriter
-
-    # ``SummaryWriter`` is unannotated upstream, so it only ASSIGNS to the
-    # protocol; the cast states the conformance the constructor call relies on.
-    _summary_writer_cls = cast(_WriterFactory, SummaryWriter)
-except ImportError:
-    _summary_writer_cls = None
+_summary_writer_cls: _WriterFactory | None = None
 
 
 class TensorBoardTracker:
-    """TensorBoard experiment tracker."""
+    """Log scalar metrics to optional TensorBoard event files."""
 
     class Config(Fig["TensorBoardTracker"]):
-        """TensorBoardTracker configuration."""
+        """TensorBoard tracker configuration."""
 
         base_dir: Path | str | None = None
         """Owner directory supplied during parent finalization."""
@@ -218,11 +169,21 @@ class TensorBoardTracker:
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        """Initialize TensorBoard tracker."""
-        if _summary_writer_cls is None:
-            msg = "tensorboard is not installed. Install with: pip install tensorboard"
-            raise ImportError(msg)
-        self.writer: _Writer | None = _summary_writer_cls(
+        """Initialize TensorBoard, raising if its optional dependency is unavailable."""
+        writer_cls = _summary_writer_cls
+        if writer_cls is None:
+            try:
+                from torch.utils.tensorboard import (  # noqa: PLC0415 -- TensorBoard is optional and loaded only when selected.
+                    SummaryWriter,
+                )
+            except ImportError as error:
+                msg = (
+                    "tensorboard is not installed. "
+                    "Install with: pip install tensorboard"
+                )
+                raise ImportError(msg) from error
+            writer_cls = cast(_WriterFactory, SummaryWriter)
+        self.writer: _Writer | None = writer_cls(
             str(validated_output_path(config.working_dir)),
         )
 
@@ -233,63 +194,35 @@ class TensorBoardTracker:
         *,
         prefix: str = "",
     ) -> None:
-        """Log scalar metrics at a given step.
-
-        Args:
-          metrics: Mapping of metric name to a value. ``prefix`` is prepended to
-            each key. Non-scalar values (dicts, payloads) are skipped.
-          step: Global step number.
-          prefix: String prepended to every metric key before logging.
-
-        """
+        """Log scalar metrics at ``step``, prepending ``prefix`` to each key."""
         if self.writer is None:
             raise ValueError("Expected self.writer is not None.")
         for name, value in scalar_metrics(metrics).items():
             self.writer.add_scalar(f"{prefix}{name}", value, step)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
-        """No-op image logging fallback for scalar-only TensorBoard tracker.
-
-        Args:
-          key: Key.
-          images: Images.
-          step: Step.
-
-        """
+        """Ignore image logging."""
         del key, images, step
 
     def log_notes(self, notes: str) -> None:
-        """No-op; TensorBoard has no run-notes concept.
-
-        Args:
-          notes: Notes.
-
-        """
+        """Ignore run notes."""
         del notes
 
     def close(self) -> None:
-        """Cleanup tracker resources (idempotent)."""
+        """Close the TensorBoard writer, if open."""
         if "writer" not in self.__dict__ or self.writer is None:
             return
         self.writer.close()
         self.writer = None
 
     def __del__(self) -> None:
-        """Best-effort close at GC; safe on partially-constructed instances."""
+        """Best-effort close during garbage collection."""
         self.close()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WandbIngestion:
-    """How much telemetry the W&B client sends, and how long it waits to start.
-
-    One node because these are a single concern with a single failure mode: the
-    dashboard lagging the live run. The client buffers history between
-    transmissions, and its built-in system metrics dominate the point volume, so
-    the interval and the sampling rate are tuned together or not at all. Every
-    value maps to a ``wandb.Settings`` field; ``0`` on a duration defers to
-    W&B's own default, while ``system_metrics=False`` disables them outright.
-    """
+    """Configure W&B startup, history flushing, and system-metric ingestion."""
 
     init_timeout_sec: float = 30.0
     """Seconds W&B may spend waiting for run initialization."""
@@ -298,47 +231,29 @@ class WandbIngestion:
     """Seconds W&B may wait for its local service."""
 
     flush_interval_sec: float = 15.0
-    """Seconds between history-stream transmissions.
-
-    A large or wedged buffer leaves dashboards empty ("no data") while the
-    summary still updates; a modest interval bounds both the lag and how much
-    history one stuck transmission holds back."""
+    """Seconds between history-stream transmissions; zero uses W&B's default."""
 
     system_metrics: bool = True
-    """Collect W&B's built-in system metrics (CPU/GPU/mem/...).
-
-    Off drops every one of them: W&B 0.27 has no per-metric allow-list."""
+    """Collect W&B's built-in system metrics."""
 
     system_metrics_interval_sec: float = 60.0
-    """Seconds between system-metric samples; 0 keeps W&B's default (15s)."""
+    """Seconds between system-metric samples; zero uses W&B's default."""
 
 
 class WandbTracker:
-    """Weights & Biases experiment tracker.
-
-    Logs scalars to a single W&B run per job. Rank-safe: only the global
-    rank-0 process opens a run; every other rank is a no-op, so an N-rank
-    distributed job produces one run, not N. Authentication is read from the
-    ``WANDB_API_KEY`` environment variable by ``wandb`` itself.
-    """
+    """Log one W&B run per job from global rank zero."""
 
     class Config(Fig["WandbTracker"]):
-        """WandbTracker configuration."""
+        """W&B tracker configuration."""
 
         project: str = "loop"
-        """W&B project the run is logged under."""
+        """W&B project for the run."""
 
         name: str = ""
         """Run name; empty lets W&B auto-generate one."""
 
         run_id: str = ""
-        """Existing W&B run id to resume; empty opens a fresh run.
-
-        Set this to log into a run that already exists (e.g. a standalone eval
-        job appending ``eval/*`` to the training run that produced the
-        checkpoint) instead of creating a separate run. Resumes with
-        ``resume="allow"``, so a non-existent id still starts a run under that
-        id rather than erroring."""
+        """Run id to resume; empty opens a fresh run. Uses ``resume="allow"``."""
 
         group: str = ""
         """Optional run group (e.g. an experiment family); empty disables it."""
@@ -353,20 +268,13 @@ class WandbTracker:
         """Logical directory for local W&B run files."""
 
         capture_console: bool = True
-        """Whether W&B captures rank-0 stdout/stderr into its console log.
-
-        Only global rank 0 initializes W&B, so distributed jobs produce one
-        W&B console stream instead of one stream per rank. Set false to keep
-        W&B on structured metrics only while job logs remain authoritative."""
+        """Capture global rank-zero stdout and stderr in the W&B console log."""
 
         replay_startup_logs: bool = False
-        """Replay buffered pre-init logs into W&B's wrapped stdout.
-
-        Only meaningful when ``capture_console`` is enabled. The default is off
-        to keep tracker setup off the critical path for distributed jobs."""
+        """Replay buffered startup logs when console capture is enabled."""
 
         allow_startup_failure: bool = True
-        """Continue with a no-op tracker if W&B startup raises an exception."""
+        """Continue with a no-op tracker when W&B startup fails."""
 
         ingestion: WandbIngestion = field(default_factory=WandbIngestion)
         """Startup timeouts and history-volume knobs; see :class:`WandbIngestion`."""
@@ -378,12 +286,7 @@ class WandbTracker:
         """Hyperparameters recorded on the run (shown in the W&B config tab)."""
 
         notes: str = ""
-        """Free-text run notes (shown in the W&B run overview).
-
-        Populated by the launcher with the experiment function's docstring --
-        hypothesis, changes, and outcome -- so the W&B run says WHAT the
-        experiment is and WHY, not just its metrics. Empty leaves the W&B
-        default (no notes)."""
+        """Free-text notes shown in the W&B run overview."""
 
         @override
         def finalize(self) -> Self:
@@ -395,8 +298,8 @@ class WandbTracker:
     _logged_nonscalar_skip = False
 
     def __init__(self, config: Config) -> None:
-        """Open a W&B run on rank 0; no-op on every other rank."""
-        self._run: _WandbRun | None = None
+        """Open the W&B run on rank zero; other ranks remain no-ops."""
+        self._run: Run | None = None
         if not is_rank_zero():
             return
         mode = cast(
@@ -431,7 +334,11 @@ class WandbTracker:
             settings_kwargs["x_stats_sampling_interval"] = (
                 ingestion.system_metrics_interval_sec
             )
-        settings = wandb.Settings(**settings_kwargs) if settings_kwargs else None
+        settings = (
+            cast("Callable[..., object]", wandb.Settings)(**settings_kwargs)
+            if settings_kwargs
+            else None
+        )
         working_dir = validated_output_path(config.working_dir)
         try:
             working_dir.mkdir(parents=True, exist_ok=True)
@@ -443,7 +350,7 @@ class WandbTracker:
                 mode,
                 config.capture_console,
             )
-            run = wandb.init(
+            run = cast("Callable[..., Run]", wandb.init)(
                 project=config.project,
                 name=run_name,
                 id=config.run_id or None,
@@ -480,15 +387,12 @@ class WandbTracker:
         *,
         prefix: str = "",
     ) -> None:
-        """Log scalar metrics at ``step``.
+        """Log scalar metrics at ``step``, prepending ``prefix`` to each key.
 
         Args:
-          metrics: Mapping of metric name to a value; ``prefix`` is prepended to
-            each key. Non-scalar values (dicts, payloads, multi-element tensors)
-            are skipped -- some callers pass an ``extras`` payload meant for
-            other trackers.
-          step: Global step number.
-          prefix: String prepended to every metric key.
+          metrics: Mixed metric values; non-scalars are skipped.
+          step: Global step associated with the metrics.
+          prefix: Prefix prepended to each metric name.
 
         """
         if self._run is None:
@@ -505,63 +409,40 @@ class WandbTracker:
         )
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
-        """Log images to W&B at ``step``.
-
-        Args:
-          key: Key.
-          images: Images.
-          step: Step.
-
-        """
+        """Log images to W&B at ``step`` under ``key``."""
         if self._run is None:
             return
-        self._run.log({key: [wandb.Image(image) for image in images]}, step=step)
+        image = cast("Callable[[object], object]", wandb.Image)
+        self._run.log({key: [image(item) for item in images]}, step=step)
 
     def log_notes(self, notes: str) -> None:
-        """Set the W&B run notes, unless an explicit note is already present.
-
-        Rank-0 only (no run elsewhere). An explicitly-configured note (set via
-        ``Config.notes`` and passed to ``wandb.init``) wins, so the launcher's
-        docstring only fills an otherwise-empty overview.
-
-        Args:
-          notes: Text to set as W&B run notes (docstring summary).
-
-        """
+        """Set notes only when the run has no configured notes."""
         if self._run is None or not notes:
             return
         if not self._run.notes:
             self._run.notes = notes
 
     def close(self) -> None:
-        """Finish the W&B run (idempotent)."""
+        """Finish the W&B run."""
         if "_run" not in self.__dict__ or self._run is None:
             return
         self._run.finish()
         self._run = None
 
     def __del__(self) -> None:
-        """Best-effort finish at GC; safe on partially-constructed instances."""
+        """Best-effort finish during garbage collection."""
         self.close()
 
 
 class AsyncTracker:
-    """Run one explicitly selected tracker on an ordered worker.
+    """Deliver one tracker asynchronously on a single ordered worker.
 
-    The wrapper owns the thread so transport trackers remain simple and other
-    children in a ``TrackerList`` stay synchronous. Metric/image containers are
-    copied on submission; their contained values must not be mutated until the
-    next ``flush`` or ``close``.
-
-    The measured motivation is an H100 Craftax run whose final training
-    interval reached 135,592.5 steps/s while complete pre-evaluation training
-    averaged 132,830.7 steps/s, a 2.1% gap. That is an opportunity ceiling that
-    includes compilation and other host work, not a tracker-only or async A/B
-    speedup; this wrapper isolates the tracker-delivery part for measurement.
+    Metric and image containers are shallow-copied on submission; do not mutate
+    their contained values until the next ``flush`` or ``close``.
     """
 
     class Config(Fig["AsyncTracker"]):
-        """Async tracker wrapper configuration."""
+        """Asynchronous tracker wrapper configuration."""
 
         tracker: Makeable[TrackerProtocol] | None = None
         """Child tracker driven by the worker."""
@@ -570,7 +451,7 @@ class AsyncTracker:
         """Use the worker; false preserves synchronous child delivery."""
 
     def __init__(self, config: Config) -> None:
-        """Build the child and, when enabled, its one-worker executor."""
+        """Build the child and optionally start its single worker."""
         if config.tracker is None:
             raise ValueError("AsyncTracker requires a child tracker config.")
         self.tracker = config.tracker.make()
@@ -589,48 +470,29 @@ class AsyncTracker:
         *,
         prefix: str = "",
     ) -> None:
-        """Queue a shallow call-time snapshot of one metric batch.
-
-        Args:
-          metrics: Metrics.
-          step: Step.
-          prefix: Prefix.
-
-        """
+        """Queue a shallow snapshot of one metric batch."""
         payload = dict(metrics) if self._executor is not None else metrics
         self._submit(self.tracker.log_metrics, payload, step, prefix=prefix)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
-        """Queue a shallow call-time snapshot of one image batch.
-
-        Args:
-          key: Key.
-          images: Images.
-          step: Step.
-
-        """
+        """Queue a shallow snapshot of one image batch."""
         payload = list(images) if self._executor is not None else images
         self._submit(self.tracker.log_images, key, payload, step)
 
     def log_notes(self, notes: str) -> None:
-        """Set run notes synchronously before training starts.
-
-        Args:
-          notes: Notes.
-
-        """
+        """Set run notes synchronously before training starts."""
         if self._closed:
             raise RuntimeError("AsyncTracker is closed.")
         self.tracker.log_notes(notes)
 
     def flush(self) -> None:
-        """Wait for every submitted call and surface delivery failures."""
+        """Wait for submitted calls in order and surface delivery failures."""
         pending, self._pending = self._pending, []
         for future in pending:
             future.result()
 
     def close(self) -> None:
-        """Drain delivery, stop the worker, and close the child."""
+        """Flush pending calls, stop the worker, and close the child."""
         if self._closed:
             return
         self._closed = True
@@ -658,16 +520,14 @@ class AsyncTracker:
 
 
 class TrackerList:
-    """Synchronously fan every call out to independent child trackers.
+    """Forward calls synchronously to child trackers in insertion order.
 
-    Children self-gate (e.g. ``WandbTracker`` no-ops off rank 0, ``FileTracker``
-    writes only on rank 0), so this composite forwards on all ranks. Wrap only
-    an explicitly thread-safe transport child in ``AsyncTracker``; distributed
-    or durable children retain caller-thread ordering.
+    Children handle rank gating themselves; ``close`` and ``flush`` follow the
+    same order. Use ``AsyncTracker`` only for a thread-safe transport child.
     """
 
     class Config(Fig["TrackerList"]):
-        """TrackerList configuration."""
+        """Tracker list configuration."""
 
         trackers: dict[str, Makeable[TrackerProtocol]] = field(
             default_factory=dict[str, Makeable[TrackerProtocol]],
@@ -693,7 +553,7 @@ class TrackerList:
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
-        """Build each child tracker."""
+        """Build children in configuration insertion order."""
         self.trackers = {name: cfg.make() for name, cfg in config.trackers.items()}
 
     def log_metrics(
@@ -703,46 +563,27 @@ class TrackerList:
         *,
         prefix: str = "",
     ) -> None:
-        """Forward metrics to every child tracker.
-
-        Args:
-          metrics: Metrics.
-          step: Step.
-          prefix: Prefix.
-
-        """
+        """Forward metrics to each child in insertion order."""
         for tracker in self.trackers.values():
             tracker.log_metrics(metrics, step, prefix=prefix)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
-        """Forward images to every child tracker.
-
-        Args:
-          key: Key.
-          images: Images.
-          step: Step.
-
-        """
+        """Forward images to each child in insertion order."""
         for tracker in self.trackers.values():
             tracker.log_images(key, images, step)
 
     def log_notes(self, notes: str) -> None:
-        """Forward run notes to every child tracker.
-
-        Args:
-          notes: Notes.
-
-        """
+        """Forward run notes to each child in insertion order."""
         for tracker in self.trackers.values():
             tracker.log_notes(notes)
 
     def flush(self) -> None:
-        """Flush deferred children."""
+        """Flush deferred children in insertion order."""
         for tracker in self.trackers.values():
             flush_tracker(tracker)
 
     def close(self) -> None:
-        """Close every child tracker."""
+        """Close children in insertion order."""
         for tracker in self.trackers.values():
             tracker.close()
 
@@ -756,7 +597,7 @@ def flush_tracker(tracker: TrackerProtocol) -> None:
 def unwrap_tracker_config(
     config: Makeable[TrackerProtocol],
 ) -> Makeable[TrackerProtocol]:
-    """Return the one child beneath an asynchronous tracker wrapper."""
+    """Return the child config beneath an asynchronous wrapper."""
     if not isinstance(config, AsyncTracker.Config):
         return config
     if config.tracker is None:
@@ -767,21 +608,13 @@ def unwrap_tracker_config(
 def default_metrics_tracker(
     working_dir: Path | str = "/metrics.json",
 ) -> TrackerList.Config:
-    """Return the standard eval-metrics sink: a FileTracker in a TrackerList.
-
-    The canonical scored-run wiring -- a ``FileTracker`` writes the ``eval/*``
-    scalars to ``working_dir`` (default ``/metrics.json``, resolved beneath the
-    owning project's directory), wrapped in a ``TrackerList`` so callers can add
-    more surfaces (W&B, TensorBoard).
-    Centralizes the wiring every scored task otherwise hand-copies. Deliberately
-    NOT the default of ``TrainLoop.Config.tracker`` -- generic training runs opt
-    in explicitly.
+    """Return a tracker list containing the standard eval-metrics file sink.
 
     Args:
-      working_dir: Destination JSON path for the ``FileTracker``.
+      working_dir: JSON destination for captured ``eval/`` metrics.
 
     Returns:
-      config: A ``TrackerList.Config`` holding one ``FileTracker`` under the key
+      tracker: A ``TrackerList.Config`` containing the file sink under
         ``"metrics"``.
 
     """

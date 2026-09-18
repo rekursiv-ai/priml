@@ -190,10 +190,10 @@ def test_grid_embedding_traffic_counts_scale_and_channel_add(
     config.channels_in = 11
     config.channels_out = 8
     config.channels = [PredictionFeedback.Config()]
-    priced = config.finalize().cost(seq_len=1, batch_size=1, dtype=dtype)
+    costed = config.finalize().cost(seq_len=1, batch_size=1, dtype=dtype)
     itemsize = dtype.itemsize
-    assert priced["bytes", "primal", "elementwise"].sum() == itemsize * 8 * (2 + 2 + 3)
-    assert priced["bytes", "adjoint", "elementwise"].sum() == itemsize * 8 * (2 + 2)
+    assert costed["bytes", "primal", "elementwise"].sum() == itemsize * 8 * (2 + 2 + 3)
+    assert costed["bytes", "adjoint", "elementwise"].sum() == itemsize * 8 * (2 + 2)
 
 
 def test_feedback_table_gradient_zeroing_amortizes_over_batch() -> None:

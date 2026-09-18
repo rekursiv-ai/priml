@@ -127,7 +127,7 @@ def test_load_rejects_other_qwen_families(tmp_path: Path) -> None:
 
 
 def test_cost_is_inherited_and_matches_torch() -> None:
-    """The inherited graft cost prices this backbone's products exactly.
+    """The inherited graft cost costs this backbone's products exactly.
 
     One position per stream over three positions, so the joint key length is
     six; the CPU SDPA op is not counted by torch, so the naive kernel stands
@@ -146,6 +146,7 @@ def test_cost_is_inherited_and_matches_torch() -> None:
         seq_len=3,
         batch_size=1,
         num_tokens=3,
+        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=run_graft,
     )

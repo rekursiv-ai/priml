@@ -75,7 +75,6 @@ from priml.baselines.nanochat.model import (
     OutputNormFeedForward,
     ScaledSoftCap,
     SourceReuseTransformerBlock,
-    thresholded_relu_squared,
 )
 from priml.baselines.nanochat.ngram import HashedNgramTables, NgramEmbedding
 from priml.baselines.nanochat.optimizers import (
@@ -102,7 +101,7 @@ from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.norm import RMSNorm
-from priml.model.swiglu import SwiGLUReluSquared
+from priml.model.swiglu import SwiGLUReluSquared, shifted_relu_squared
 from priml.optimizers.composite import CompositeOptimizer, matching
 from priml.optimizers.fused_adamw import FusedAdamW
 from priml.runtime import SingleProcess
@@ -713,7 +712,7 @@ def exp010() -> NgramTrainLoop.Config:
         block.attn = attention
         ffn = OutputNormFeedForward.Config().update(block.ffn)
         ffn.expansion = 4
-        ffn.act = partial(thresholded_relu_squared, threshold=0.75)
+        ffn.act = partial(shifted_relu_squared, threshold=0.75)
         ffn.norm_out = RMSNorm.Config(eps=None)
         block.ffn = ffn
         for norm in (block.norm1, block.norm2):

@@ -11,6 +11,7 @@ import torch
 
 from priml.cost import (
     Cost,
+    cost,
     reduction_cost,
     traffic,
 )
@@ -22,12 +23,7 @@ from priml.math.diffusion.schedule import (
 )
 from priml.math.diffusion.target import (
     TargetFn,
-    target_eps,
     target_rectified_flow,
-    target_v,
-    target_v_eps,
-    target_v_x,
-    target_x,
 )
 from priml.math.numeric import safe_log
 
@@ -81,32 +77,27 @@ class DiffusionLoss(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one element of ``x0``; per-sample scalar work is spread ``1 / n``.
+            """Cost one element of ``x0``; per-sample scalar work is spread ``1 / n``.
 
             A token is one element of ``x0``; the geometry's rows are the
             elements one sample holds. The ``denoiser`` is the model: it arrives at forward
-            time, no config here holds it, and ``TrainStep.Config.model`` prices
+            time, no config here holds it, and ``TrainStep.Config.model`` costs
             it, so it is excluded.
 
             Per element: the noise mix ``α x0 + σ ε`` is three ops (no adjoint;
-            ``x0`` and ``ε`` are data), the ``target_fn`` is priced by identity
-            (see :func:`_target_fn_flops`), the squared error is two, and the
-            mean over the sample is one reduction of ``(n - 1) / n``. The
-            adjoint scales the saved difference by the upstream gradient and by
-            ``1 / n``, three ops, plus whatever the ``target_fn`` adds through
-            ``predict``.
+            ``x0`` and ``ε`` are data), the ``target_fn`` costs itself, the
+            squared error is two, and the mean over the sample is one
+            reduction of ``(n - 1) / n``. The adjoint scales the saved
+            difference by the upstream gradient and by ``1 / n``, three ops,
+            plus whatever the ``target_fn`` adds through ``predict``.
 
             Per SAMPLE, so divided by ``rows``: ``log_t`` is one log;
             ``logsnr_fn``, ``corruption_fn``, and ``time_transform`` (when set)
-            are each counted as a fixed eight scalar ops -- they are injected
-            schedule transforms of a handful of ops, not priced by identity;
-            ``compute_log_alpha`` and the two exponentials are four; the
-            ``target_fn``'s own coefficient preparation is another fixed eight.
-            ``snr_gamma > 0`` adds five forward (log, clamp, subtract, exp,
-            multiply) and one back. Traffic counts unfused tensor operands;
-            injected schedules expose only their scalar input/output boundary.
+            each cost themselves over one scalar; ``compute_log_alpha`` and the
+            two exponentials are four. ``snr_gamma > 0`` adds five forward (log,
+            clamp, subtract, exp, multiply) and one back. Traffic counts unfused
+            tensor operands; the schedules expose only their scalar boundary.
             Random draws count their output writes, not RNG internal state.
-            The scalar ledger includes broadcast coefficients and mean scaling.
 
             Args:
               seq_len: Tokens per sequence.
@@ -118,49 +109,43 @@ class DiffusionLoss(nn.Module):
               cost: Per-element cost of this loss.
 
             Raises:
-              TypeError: ``target_fn`` is not one of the six in
-                :mod:`priml.math.diffusion.target`.
+              TypeError: ``target_fn`` or a schedule function carries no
+                ``cost`` (see :func:`priml.cost.costed`).
 
             """
             del kwargs
             rows = seq_len * batch_size
             dt = dtype
-            target_primal, target_adjoint = _target_fn_flops(self.target_fn)
-            per_sample = 1 + 8 + 8 + 4 + 8
-            per_sample_adjoint = 0
+            # Per sample, spread over its elements: the drawn time's log, the
+            # three schedule transforms (each costed by itself, over one
+            # scalar), ``compute_log_alpha`` and the two exponentials, and the
+            # min-SNR weight when on.
+            schedules = [self.logsnr_fn, self.corruption_fn]
             if self.time_transform is not None:
-                per_sample += 8
-            if self.snr_gamma > 0:
-                per_sample += 5
-                per_sample_adjoint += 1
-            target_elements, target_scalars = _target_fn_elements(self.target_fn)
-            scalar_elements = 22 + target_scalars
-            predict_scaled = (
-                self.target_fn is target_v_x or self.target_fn is target_v_eps
+                schedules.append(self.time_transform)
+            per_sample = sum(
+                (cost(fn, channels=1, dtype=dt) for fn in schedules),
+                traffic("primal", "elementwise", elements=6, flops=1 + 4, dtype=dt),
             )
-            if self.time_transform is not None:
-                scalar_elements += 2
             if self.snr_gamma > 0:
-                scalar_elements += 14
-            return (
-                traffic(
+                per_sample += traffic(
                     "primal",
                     "elementwise",
-                    elements=13 + target_elements + scalar_elements / rows,
-                    flops=3 + target_primal + 2 + per_sample / rows,
+                    elements=14,
+                    flops=5,
                     dtype=dt,
-                )
+                ) + traffic("adjoint", "elementwise", elements=3, flops=1, dtype=dt)
+            # Per element: the noise mix ``α x0 + σ ε`` (three ops, no adjoint),
+            # the squared error (two), the mean over the sample, and the
+            # adjoint that scales the saved difference by the upstream
+            # gradient and ``1 / n``.
+            return (
+                traffic("primal", "elementwise", elements=13, flops=3 + 2, dtype=dt)
+                + cost(self.target_fn, dtype=dt, rows=rows)
                 + reduction_cost(input_elements=rows, rows=rows, dtype=dt)
-                + traffic(
-                    "adjoint",
-                    "elementwise",
-                    elements=7
-                    + int(predict_scaled) * (2 + 1 / rows)
-                    + 3 * int(self.snr_gamma > 0) / rows,
-                    flops=3 + target_adjoint + per_sample_adjoint / rows,
-                    dtype=dt,
-                )
+                + traffic("adjoint", "elementwise", elements=7, flops=3, dtype=dt)
                 + traffic("adjoint", "reduction", elements=(rows + 1) / rows, dtype=dt)
+                + per_sample.tile(1 / rows)
             )
 
     class Output(TypedDict):
@@ -260,39 +245,3 @@ class DiffusionLoss(nn.Module):
             log_snr=log_snr,
             log_sigma=log_sigma,
         )
-
-
-# Every branch computes both ``x_clean`` and ``eps_clean`` even though the loss reads
-# neither, so they are charged. ``target_x``/``target_eps`` pass ``model`` through as
-# ``predict`` and build one reconstruction from it (multiply, subtract, multiply).
-# ``target_rectified_flow`` builds the target (one subtract) and two reconstructions of
-# three ops each; ``target_v``'s target is ``α ε - σ x``, three.
-# ``target_v_x``/``target_v_eps`` derive ``predict`` as a two-multiply-one-add
-# combination, so the adjoint through ``predict`` is one multiply by the saved
-# coefficient.
-def _target_fn_elements(target_fn: TargetFn) -> tuple[int, int]:
-    """Return vector and scalar operand IO, including coefficient construction."""
-    if target_fn is target_x or target_fn is target_eps:
-        return 7, 13
-    if target_fn is target_rectified_flow:
-        return 17, 26
-    if target_fn is target_v:
-        return 21, 32
-    return 14, 26
-
-
-def _target_fn_flops(target_fn: TargetFn) -> tuple[int, int]:
-    """Per-element (primal, adjoint) ops of a known target parameterization."""
-    if target_fn is target_x or target_fn is target_eps:
-        return 3, 0
-    if target_fn is target_rectified_flow:
-        return 7, 0
-    if target_fn is target_v:
-        return 9, 0
-    if target_fn is target_v_x or target_fn is target_v_eps:
-        return 6, 1
-    raise TypeError(
-        f"{getattr(target_fn, '__qualname__', target_fn)} has no price; "
-        "DiffusionLoss.cost knows the six target functions in "
-        "priml.math.diffusion.target.",
-    )

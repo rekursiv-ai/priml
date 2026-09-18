@@ -89,16 +89,56 @@ def sdpa_attention(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
 
 
 class SdpaCausal:
-    """:func:`sdpa_attention` as a slot value that prices itself.
+    """:func:`sdpa_attention` as a slot value that costs itself.
 
     Holds no state. It exists so the default kernel is a config with a
     ``cost`` -- the standard two products, bound the way every other priml
     kernel binds them -- rather than a bare function the owner would have to
-    price on its behalf.
+    cost on its behalf.
     """
 
     class Config(Fig["SdpaCausal"]):
-        pass
+        @classmethod
+        def cost(
+            cls,
+            *,
+            seq_len: int,
+            dtype: torch.dtype | None,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int = -1,
+            window: int = -1,
+            dropout_p: float = 0.0,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the kernel from the shapes its owner hands it.
+
+            See :func:`attention_kernel_cost` for every argument.
+
+            Args:
+              seq_len: Tokens per sequence.
+              dtype: Activation dtype; ``None`` is torch's default.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Value width; -1 uses the query/key width.
+              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              dropout_p: Attention dropout rate.
+              **kwargs: The rest of the owner's bus, unread.
+
+            Returns:
+              cost: Per-query-row cost of the kernel.
+
+            """
+            del kwargs
+            return attention_kernel_cost(
+                seq_len=seq_len,
+                dtype=dtype,
+                num_heads=num_heads,
+                channels_head=channels_head,
+                channels_v_head=channels_v_head,
+                window=window,
+                dropout_p=dropout_p,
+            )
 
     def __init__(self, config: Config) -> None:
         del config
@@ -256,7 +296,7 @@ class ValueGatedAttention(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price four projections, the gate, two norms, and the kernel.
+            """Cost four projections, the gate, two norms, and the kernel.
 
             The kernel counts its two products over ``min(window, seq_len)``
             keys for this layer's window; the rotation and the gate are
@@ -303,7 +343,8 @@ class ValueGatedAttention(nn.Module):
                 2 * self.num_heads,
                 copies=2,
             )
-            total += attention_kernel_cost(
+            total += cost(
+                self.kernel,
                 seq_len=seq_len,
                 dtype=dtype,
                 num_heads=self.num_heads,

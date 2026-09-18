@@ -72,7 +72,7 @@ class ActorCriticRNN(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one recurrent step of one worker.
+            """Cost one recurrent step of one worker.
 
             A token is one environment step: the observation in, the carried
             state updated, logits and a value out. The step runs the whole
@@ -317,7 +317,7 @@ def _head_cost(
     rows: int,
     dt: torch.dtype | None,
 ) -> Cost:
-    """Price one head: two biased ReLU layers, then a biased readout."""
+    """Cost one head: two biased ReLU layers, then a biased readout."""
     hidden = matmul_cost(
         channels_in=channels_in,
         channels_out=channels_in,

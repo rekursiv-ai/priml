@@ -103,12 +103,12 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_adversarial_loss_operand_traffic(dtype: torch.dtype) -> None:
-    priced = cost(AdversarialLoss.Config(), seq_len=12, batch_size=1, dtype=dtype)
+    costed = cost(AdversarialLoss.Config(), seq_len=12, batch_size=1, dtype=dtype)
     itemsize = dtype.itemsize
-    assert priced["bytes", "primal", "elementwise"].sum() == (5 + 33 / 12) * itemsize
-    assert priced["bytes", "primal", "reduction"].sum() == 15 * itemsize / 12
-    assert priced["bytes", "adjoint", "elementwise"].sum() == (7 + 16 / 12) * itemsize
-    assert priced["bytes", "adjoint", "reduction"].sum() == 15 * itemsize / 12
+    assert costed["bytes", "primal", "elementwise"].sum() == (5 + 33 / 12) * itemsize
+    assert costed["bytes", "primal", "reduction"].sum() == 15 * itemsize / 12
+    assert costed["bytes", "adjoint", "elementwise"].sum() == (7 + 16 / 12) * itemsize
+    assert costed["bytes", "adjoint", "reduction"].sum() == 15 * itemsize / 12
 
 
 def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:

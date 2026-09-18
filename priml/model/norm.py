@@ -468,7 +468,7 @@ class BatchRenorm(nn.Module):
         ) -> Cost:
             """Estimate warm training, including detached corrections and updates.
 
-            Warmup skips five scalar operations per channel; this prices the
+            Warmup skips five scalar operations per channel; this costs the
             post-warmup path. Detached correction coefficients do not receive
             gradients. The backward estimate includes differentiating the
             corrected mean and variance in addition to ordinary normalization.

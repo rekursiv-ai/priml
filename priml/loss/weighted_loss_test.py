@@ -6,13 +6,12 @@ from typing import TYPE_CHECKING, override
 
 from configgle import Fig
 from torch import Tensor, nn
-from torch.nn import functional
 
 import pytest
 import torch
 
 from priml.cost import Cost, cost
-from priml.loss.simple_loss import SimpleLoss
+from priml.loss.simple_loss import SimpleLoss, mse
 from priml.loss.weighted_loss import WeightedSum
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -132,10 +131,10 @@ def test_weighted_sum_accepts_plain_callable_loss() -> None:
 
 
 def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
-    """Children are priced through ``cost``; each adds a multiply and a stacked add."""
+    """Children are costed through ``cost``; each adds a multiply and a stacked add."""
     bce = SimpleLoss.Config()
-    mse = SimpleLoss.Config(loss_fn=functional.mse_loss)
-    config = WeightedSum.Config(fns=[bce, mse], weights=[0.5, 0.5])
+    regression = SimpleLoss.Config(loss_fn=mse)
+    config = WeightedSum.Config(fns=[bce, regression], weights=[0.5, 0.5])
     label = torch.rand(4, 3)
     measured = assert_cost_matches_torch(
         config,
@@ -148,7 +147,7 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
     )
     f32 = torch.float32
     assert measured == cost(bce, seq_len=12, batch_size=1, dtype=None) + cost(
-        mse,
+        regression,
         seq_len=12,
         batch_size=1,
         dtype=None,
@@ -167,7 +166,7 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
 
 
 def test_weighted_sum_cost_rejects_unpriced_child() -> None:
-    """A child without ``cost`` raises instead of pricing zero."""
+    """A child without ``cost`` raises instead of costing zero."""
     config = WeightedSum.Config(fns=[DummyLoss.Config()], weights=[1.0])
     with pytest.raises(TypeError, match=r"DummyLoss\.Config has no cost"):
         cost(config, seq_len=1, batch_size=1, dtype=None)
@@ -179,18 +178,18 @@ def test_weighted_sum_operand_traffic(dtype: torch.dtype) -> None:
     config.fns = [SimpleLoss.Config(), SimpleLoss.Config()]
     config.weights = [0.5, 0.5]
     itemsize = dtype.itemsize
-    priced = cost(config, seq_len=6, batch_size=1, dtype=dtype)
+    costed = cost(config, seq_len=6, batch_size=1, dtype=dtype)
     child = cost(config.fns[0], seq_len=6, batch_size=1, dtype=dtype)
     assert (
-        priced["bytes", "primal", "elementwise"].sum()
+        costed["bytes", "primal", "elementwise"].sum()
         == 2 * child["bytes", "primal", "elementwise"].sum() + 8 * itemsize
     )
-    assert priced["bytes", "primal", "reduction"].sum() == 3 * itemsize
+    assert costed["bytes", "primal", "reduction"].sum() == 3 * itemsize
     assert (
-        priced["bytes", "adjoint", "elementwise"].sum()
+        costed["bytes", "adjoint", "elementwise"].sum()
         == 2 * child["bytes", "adjoint", "elementwise"].sum() + 4 * itemsize
     )
-    assert priced["bytes", "adjoint", "reduction"].sum() == 3 * itemsize
+    assert costed["bytes", "adjoint", "reduction"].sum() == 3 * itemsize
 
 
 def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:

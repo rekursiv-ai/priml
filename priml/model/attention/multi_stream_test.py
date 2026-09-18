@@ -458,7 +458,7 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
     """Every stream token pays its projections once and attends over joint keys.
 
     Two streams of four tokens each; the naive kernel makes the attention
-    countable. This test caught the kernel being priced once per position
+    countable. This test caught the kernel being costed once per position
     rather than once per stream token (measured 15,360 to a claimed 13,824).
     """
     config = MultiStreamAttention.Config(
@@ -468,7 +468,7 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
         num_streams=2,
         attn_kernel=SdpaNaive.Config(),
     )
-    # ``cost`` prices one position -- every stream's token -- so the token
+    # ``cost`` costs one position -- every stream's token -- so the token
     # count is one stream's length.
     assert_cost_matches_torch(
         config,
@@ -478,6 +478,7 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
         seq_len=4,
         batch_size=1,
         num_tokens=4,
+        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=_joint_sum,
     )

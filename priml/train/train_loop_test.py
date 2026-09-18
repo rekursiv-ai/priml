@@ -2481,10 +2481,10 @@ def test_terminal_no_update_with_complete_accumulation_saves_prefix(
         assert loop.checkpointer.available_steps() == [1]
 
 
-class _PricedLinearModel(nn.Module):
-    """A linear model whose config can price itself, so an MFU meter binds."""
+class _CostedLinearModel(nn.Module):
+    """A linear model whose config can cost itself, so an MFU meter binds."""
 
-    class Config(Fig["_PricedLinearModel"], make_with_kwargs=True):
+    class Config(Fig["_CostedLinearModel"], make_with_kwargs=True):
         in_features: int = -1
         out_features: int = -1
 
@@ -2524,7 +2524,7 @@ def test_device_timing_metric_waits_for_every_microbatch(
         pytest.skip("Requires CUDA.")
     step = TrainStep.Config()
     config = _make_step_logging_loop_config(step_config=step)
-    step.model = _PricedLinearModel.Config(in_features=2, out_features=2)
+    step.model = _CostedLinearModel.Config(in_features=2, out_features=2)
     step.parallelism = NoParallel.Config(device="cuda")
     step.accumulate_grad_batches = accumulate_grad_batches
     config.runtime = SingleProcess.Config(device="cuda")
@@ -2579,7 +2579,7 @@ def test_cpu_timing_metric_does_not_synchronize_an_accelerator(
 ) -> None:
     step = TrainStep.Config()
     config = _make_step_logging_loop_config(step_config=step)
-    step.model = _PricedLinearModel.Config(in_features=2, out_features=2)
+    step.model = _CostedLinearModel.Config(in_features=2, out_features=2)
     config.runtime = SingleProcess.Config(device="cpu")
     metric = Utilization.Config()
     metric.tokens_key = "media"
@@ -2627,9 +2627,9 @@ def test_loop_without_device_timing_metric_does_not_synchronize(
 def test_a_train_metric_publishes_on_the_train_payload() -> None:
     """A metric in ``metrics_train`` sees every step's batch and its wall time."""
     # ``_make_simple_loop_config`` pins its model slot to ``_LinearModel``, so
-    # the priced model gets its own step; no checkpointer, so no directory.
-    step: TrainStep.Config[_PricedLinearModel.Config] = TrainStep.Config()
-    step.model = _PricedLinearModel.Config(in_features=2, out_features=2)
+    # the costed model gets its own step; no checkpointer, so no directory.
+    step: TrainStep.Config[_CostedLinearModel.Config] = TrainStep.Config()
+    step.model = _CostedLinearModel.Config(in_features=2, out_features=2)
     step.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
     step.loss = PartialConfig(_cross_entropy)
     step.parallelism = NoParallel.Config(device="cpu")

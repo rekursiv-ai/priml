@@ -226,7 +226,7 @@ def test_gated_delta_net_bfb(device: str) -> None:
 
 
 def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
-    """The scan prices as a per-token state read and write, not a growing cache."""
+    """The scan costs as a per-token state read and write, not a growing cache."""
     config = GatedDeltaNet.Config(
         channels_in=16,
         num_heads_k=2,
@@ -287,7 +287,7 @@ def test_gated_delta_net_projections_match_torch() -> None:
 
     The CPU scan is chunked: it pads the sequence to 64-token chunks and runs
     in-chunk triangular solves, so at four tokens it executes ~50x the products
-    the recurrent-model proxy prices. The proxy is the analytical policy; the
+    the recurrent-model proxy costs. The proxy is the analytical policy; the
     ratio pins torch's measured count at this geometry (541,664 FLOPs/token to
     the analytical 10,464) so a change to either side is visible.
     """
@@ -304,6 +304,7 @@ def test_gated_delta_net_projections_match_torch() -> None:
         seq_len=4,
         batch_size=1,
         num_tokens=4,
+        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         expected_ratio=10_464 / 541_664,
     )

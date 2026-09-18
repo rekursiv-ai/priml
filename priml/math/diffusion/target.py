@@ -32,18 +32,24 @@ loss = F.mse_loss(target, predict)
 
 from __future__ import annotations
 
-from typing import NamedTuple, Protocol
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 from torch import Tensor
 
 import torch
 
+from priml.cost import Cost, set_cost, traffic
 from priml.math.diffusion.schedule import compute_log_alpha
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 __all__ = [
     "TargetFn",
     "TargetResult",
+    "target_cost",
     "target_eps",
     "target_rectified_flow",
     "target_v",
@@ -79,6 +85,68 @@ class TargetFn(Protocol):
         ...
 
 
+def target_cost(
+    *,
+    primal: int,
+    adjoint: int,
+    vector_elements: int,
+    scalar_flops: int,
+    scalar_elements: int,
+) -> Callable[..., Cost]:
+    """Build the cost of a target parameterization per element of ``x0``.
+
+    ``vector`` counts are per element: operations and operand I/O of the
+    target, the prediction, and both reconstructions (every branch builds
+    ``x_clean`` and ``eps_clean`` even though the loss reads neither).
+    ``scalar`` counts are per sample -- the coefficient preparation from
+    ``log_snr`` and ``log_sigma`` -- and are spread over the ``rows`` one
+    sample holds. ``adjoint`` is the per-element gradient work through
+    ``predict``: zero when the model output passes straight through, one
+    multiply when ``predict`` is a scaled combination of it.
+
+    Args:
+      primal: Operations per element of ``x0``.
+      adjoint: Operations per element in the gradient through ``predict``.
+      vector_elements: Operands moved per element of ``x0``.
+      scalar_flops: Operations per sample preparing the coefficients.
+      scalar_elements: Operands moved per sample preparing the coefficients.
+
+    Returns:
+      cost_fn: ``cost_fn(*, dtype, rows)``, for :func:`set_cost`.
+
+    """
+
+    def per_element(*, dtype: torch.dtype | None, rows: float) -> Cost:
+        return traffic(
+            "primal",
+            "elementwise",
+            elements=vector_elements + scalar_elements / rows,
+            flops=primal + scalar_flops / rows,
+            dtype=dtype,
+        ) + traffic(
+            "adjoint",
+            "elementwise",
+            elements=adjoint * (2 + 1 / rows),
+            flops=adjoint,
+            dtype=dtype,
+        )
+
+    return per_element
+
+
+# ``target_x``/``target_eps`` pass ``model`` through as ``predict`` and build one
+# reconstruction from it (multiply, subtract, multiply); the other is ``model``.
+# Seven vector operands; coefficients are two exponentials over a log_alpha of
+# two ops: eight scalar ops, thirteen scalar operands.
+@set_cost(
+    target_cost(
+        primal=3,
+        adjoint=0,
+        vector_elements=7,
+        scalar_flops=8,
+        scalar_elements=13,
+    ),
+)
 def target_x(
     model: Tensor,
     x_noisy: Tensor,
@@ -115,6 +183,15 @@ def target_x(
     )
 
 
+@set_cost(
+    target_cost(
+        primal=3,
+        adjoint=0,
+        vector_elements=7,
+        scalar_flops=8,
+        scalar_elements=13,
+    ),
+)
 def target_eps(
     model: Tensor,
     x_noisy: Tensor,
@@ -155,6 +232,16 @@ def target_eps(
     )
 
 
+# The target ``α ε - σ x`` is three ops, each reconstruction three.
+@set_cost(
+    target_cost(
+        primal=9,
+        adjoint=0,
+        vector_elements=21,
+        scalar_flops=8,
+        scalar_elements=32,
+    ),
+)
 def target_v(
     model: Tensor,
     x_noisy: Tensor,
@@ -246,6 +333,16 @@ def target_v(
     )
 
 
+# The target is one subtract, each reconstruction three ops.
+@set_cost(
+    target_cost(
+        primal=7,
+        adjoint=0,
+        vector_elements=17,
+        scalar_flops=8,
+        scalar_elements=26,
+    ),
+)
 def target_rectified_flow(
     model: Tensor,
     x_noisy: Tensor,
@@ -334,6 +431,17 @@ def target_rectified_flow(
     )
 
 
+# ``predict`` is a two-multiply-one-add combination of ``model``, so the adjoint
+# through it is one multiply by the saved coefficient.
+@set_cost(
+    target_cost(
+        primal=6,
+        adjoint=1,
+        vector_elements=14,
+        scalar_flops=8,
+        scalar_elements=26,
+    ),
+)
 def target_v_x(
     model: Tensor,
     x_noisy: Tensor,
@@ -391,6 +499,15 @@ def target_v_x(
     )
 
 
+@set_cost(
+    target_cost(
+        primal=6,
+        adjoint=1,
+        vector_elements=14,
+        scalar_flops=8,
+        scalar_elements=26,
+    ),
+)
 def target_v_eps(
     model: Tensor,
     x_noisy: Tensor,

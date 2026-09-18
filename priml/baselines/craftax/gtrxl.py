@@ -103,7 +103,7 @@ class ActorCriticGTrXL(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one environment step of one worker.
+            """Cost one environment step of one worker.
 
             A token is one step: the observation in, logits and a value out,
             attending over the whole memory. ``seq_len`` is the steps scored
@@ -118,7 +118,7 @@ class ActorCriticGTrXL(nn.Module):
 
             ``bytes_state`` is what one step adds to the memory: one layer
             input per layer. Maintaining that memory -- the reset, the
-            append -- is cache bookkeeping, unpriced like a KV-cache update.
+            append -- is cache bookkeeping, uncosted like a KV-cache update.
 
             Args:
               seq_len: Tokens per sequence.
@@ -604,7 +604,7 @@ def _head_cost(
     rows: float,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price one head: two biased ReLU layers, then a biased readout."""
+    """Cost one head: two biased ReLU layers, then a biased readout."""
     dt = dtype
     relu = elementwise_cost(
         primal=channels_in,
@@ -654,7 +654,7 @@ def _layer_cost(
     dtype: torch.dtype | None,
     **kwargs: object,
 ) -> Cost:
-    """Price one layer for one token that attends over ``keys`` rows."""
+    """Cost one layer for one token that attends over ``keys`` rows."""
     rows = seq_len * batch_size
     dt = dtype
     per_token_key_rows = key_rows / rows
@@ -771,7 +771,7 @@ def _relative_scores_cost(
     seq_len: int,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price unfused relative attention, sharing K/V within each query sequence."""
+    """Cost unfused relative attention, sharing K/V within each query sequence."""
     dt = dtype
     channels_head = qkv_dim // num_heads
     scores = matmul_cost(
@@ -822,7 +822,7 @@ def _relative_table_cost(
     rows: float,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price one shared constant table's projection and weight gradient."""
+    """Cost one shared constant table's projection and weight gradient."""
     dt = dtype
     products = 2 * embed_dim * qkv_dim * (keys / rows)
     params = embed_dim * qkv_dim
@@ -840,7 +840,7 @@ def _relative_table_cost(
 # interpolation, three for each of the three nonlinearities, two through the reset
 # product, and three accumulating the residual's four gradient paths.
 def _gate_cost(*, embed_dim: int, rows: float, dtype: torch.dtype | None) -> Cost:
-    """Price one gated residual's projections and scalar-region tensor boundary."""
+    """Cost one gated residual's projections and scalar-region tensor boundary."""
     dt = dtype
     return matmul_cost(
         channels_in=embed_dim,

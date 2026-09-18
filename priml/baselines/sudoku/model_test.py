@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
 from torch import Tensor, nn
 
@@ -29,6 +29,11 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
+
+
+if TYPE_CHECKING:
+    from priml.baselines.sudoku.model import GridConfig
+    from priml.baselines.sudoku.prefix import PrefixConfig
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -166,9 +171,17 @@ def test_prefix_tokens_reach_the_sequence() -> None:
 def test_a_prefix_without_a_token_count_is_rejected() -> None:
     """Guessing 0 would silently shift every grid position."""
     config = _config()
-    config.prefix = RMSNorm.Config(channels_in=16)  # Not a prefix module.
-    with pytest.raises(ValueError, match="declares no"):
+    config.prefix = cast("PrefixConfig", RMSNorm.Config(channels_in=16))
+    with pytest.raises(AttributeError, match="num_tokens"):
         config.copy_tree().finalize()
+
+
+def test_an_embedding_without_a_grid_is_rejected() -> None:
+    """The model reads its grid from the embedding; one without a grid has none."""
+    config = _config()
+    config.embedding = cast("GridConfig", RMSNorm.Config(channels_in=16))
+    with pytest.raises(AttributeError, match="grid_len"):
+        _ = config.grid_len
 
 
 def test_cycle_counts_must_be_positive() -> None:
@@ -210,7 +223,7 @@ def test_recurrent_forward_bfb() -> None:
 
 
 def test_deep_recurrence_cost_is_zero() -> None:
-    """The recurrence schedules the core and owns nothing; the model prices its cycles."""
+    """The recurrence schedules the core and owns nothing; the model costs its cycles."""
     analytical = assert_cost_matches_torch(
         DeepRecurrence.Config(slow_cycles=2, fast_cycles=2),
         build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
@@ -294,8 +307,8 @@ def test_cost_halt_bias_reduction_uses_batch_not_grid_cells() -> None:
     config = _cost_config(prefix=False)
     config.block = Identity.Config()
     config = config.finalize()
-    priced = cost(config, batch_size=4, dtype=None)
-    assert priced["flops", "adjoint", "reduction"].sum() == 2 * (4 - 1) / 4 / 2
+    costed = cost(config, batch_size=4, dtype=None)
+    assert costed["flops", "adjoint", "reduction"].sum() == 2 * (4 - 1) / 4 / 2
 
 
 def _cost_config(*, prefix: bool) -> SudokuNet.Config:

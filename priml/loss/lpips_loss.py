@@ -55,7 +55,7 @@ class LPIPSLoss(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price both branches through the frozen trunk and the linear head.
+            """Cost both branches through the frozen trunk and the linear head.
 
             A token is one ``(h, w)`` position of one SCORED frame of one
             video, so a step holds ``batch_size * frames_scored * height *
@@ -68,8 +68,8 @@ class LPIPSLoss(nn.Module):
             cost nothing.
 
             The trunk is built with random weights on the meta device, so
-            pricing downloads nothing and allocates nothing. Its layers are
-            traced through one forward at ``image_size`` and each is priced at
+            costing downloads nothing and allocates nothing. Its layers are
+            traced through one forward at ``image_size`` and each is costed at
             its own output grid: a convolution as the matmul over its receptive
             field, a max pool as ``k * k - 1`` compares per pooled element with
             one gradient routed back to the argmax, a ReLU as one operation per
@@ -83,7 +83,7 @@ class LPIPSLoss(nn.Module):
             the trainable 1x1 ``NetLinLayer`` convolution, and the spatial mean
             run once; the stage sum and the mean over frames are one add each
             per frame. Work at every grid is spread over the image's positions in
-            one division. ``NetLinLayer``'s dropout is unpriced: ``lpips.LPIPS``
+            one division. ``NetLinLayer``'s dropout is uncosted: ``lpips.LPIPS``
             puts itself in eval mode at construction, where it is the identity.
 
             Each branch gathers a selected RGB frame: read/write its pixels
@@ -148,25 +148,25 @@ class LPIPSLoss(nn.Module):
             for module, shape in traced:
                 channels, grid = shape[1], math.prod(shape[2:])
                 if isinstance(module, nn.Conv2d):
-                    priced = _conv2d_cost(
+                    costed = _conv2d_cost(
                         module,
                         rows=_rows(rows, positions=positions, grid=grid),
                         dtype=dt,
                     )
                 elif isinstance(module, nn.MaxPool2d):
-                    priced = _max_pool_cost(
+                    costed = _max_pool_cost(
                         channels,
                         kernel_size=module.kernel_size,
                         dtype=dt,
                     )
                 else:
-                    priced = elementwise_cost(
+                    costed = elementwise_cost(
                         primal=channels,
                         adjoint=channels,
                         channels=channels,
                         dtype=dt,
                     )
-                branch += priced.tile(grid)
+                branch += costed.tile(grid)
 
             head = (
                 traffic(
@@ -307,8 +307,8 @@ def _record_output_shape(
 
 
 def _conv2d_cost(module: nn.Conv2d, *, rows: int, dtype: torch.dtype | None) -> Cost:
-    """Price one output position of ``module``; a frozen weight pays no weight gradient."""
-    priced = conv_cost(
+    """Cost one output position of ``module``; a frozen weight pays no weight gradient."""
+    costed = conv_cost(
         channels_in=module.in_channels,
         channels_out=module.out_channels,
         kernel_size=module.kernel_size,
@@ -319,16 +319,10 @@ def _conv2d_cost(module: nn.Conv2d, *, rows: int, dtype: torch.dtype | None) -> 
         dtype=dtype,
     )
     if module.weight.requires_grad:
-        return priced
+        return costed
     # Frozen: the adjoint is the input gradient alone, the primal's size.
-    primal = {key: value for key, value in priced.cells.items() if key[1] == "primal"}
-    return replace(
-        priced,
-        cells={
-            **primal,
-            **{(m, "adjoint", k, d): value for (m, _, k, d), value in primal.items()},
-        },
-    )
+    primal = costed.only("primal")
+    return replace(costed, cells=(primal + primal.relabel("adjoint")).cells)
 
 
 # The saved argmax is one ``int64`` per pooled channel each way.
@@ -338,7 +332,7 @@ def _max_pool_cost(
     kernel_size: int | tuple[int, ...],
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price one pooled position: compares forward, one gradient routed to the argmax."""
+    """Cost one pooled position: compares forward, one gradient routed to the argmax."""
     taps = math.prod(
         kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * 2,
     )
@@ -366,7 +360,7 @@ def _max_pool_cost(
 # ``g / d - x (g . x) / (d^2 ||x||)``: one dot product, three scalar ops, then
 # a divide, a multiply, and a subtract per channel.
 def _normalize_cost(channels: int, *, dtype: torch.dtype | None) -> Cost:
-    """Price ``lpips.normalize_tensor`` at one position over ``channels``."""
+    """Cost ``lpips.normalize_tensor`` at one position over ``channels``."""
     c = channels
     return (
         traffic(
@@ -389,7 +383,7 @@ def _normalize_cost(channels: int, *, dtype: torch.dtype | None) -> Cost:
 
 
 def _spatial_average_cost(positions: int, *, dtype: torch.dtype | None) -> Cost:
-    """Price the mean of one channel over ``positions``: a sum, a scale, a broadcast back."""
+    """Cost the mean of one channel over ``positions``: a sum, a scale, a broadcast back."""
     n = positions
     return (
         traffic("primal", "reduction", elements=n + 1, flops=n - 1, dtype=dtype)

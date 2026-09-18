@@ -17,7 +17,7 @@ from priml.cost import (
     matmul_cost,
     resolve_dtype,
 )
-from priml.model.attention.kernel import SdpaFused, attention_kernel_cost
+from priml.model.attention.kernel import SdpaFused
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
 from priml.model.attention.window import causal_chunk_mask
@@ -26,7 +26,7 @@ from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
     HasResetParameters,
-    RotaryFactors,
+    RotaryConfig,
     TensorModule,
     infer_same_width,
 )
@@ -73,7 +73,7 @@ class AttentionProjections(nn.Module):
         causal: bool = False
         """Apply causal (autoregressive) attention mask."""
 
-        rope: Makeable[RotaryFactors] | None = None
+        rope: RotaryConfig | None = None
         """Rotary position embedding (None = no positional encoding)."""
 
         norm_qk: Makeable[TensorModule] | None = None
@@ -134,7 +134,7 @@ class AttentionProjections(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the projections, norms, and rotary; no kernel here.
+            """Cost the projections, norms, and rotary; no kernel here.
 
             Args:
               seq_len: Tokens per sequence.
@@ -396,7 +396,7 @@ class SelfAttention(AttentionProjections):
         ) -> Cost:
             """Add the kernel's products and the per-token KV cache.
 
-            The kernel is priced at the configured ``dropout`` over the whole
+            The kernel is costed at the configured ``dropout`` over the whole
             sequence: a window is a ``forward`` argument, not a config field,
             so the analytical reach is ``seq_len``.
 
@@ -410,7 +410,8 @@ class SelfAttention(AttentionProjections):
               cost: Per-token cost of this module.
 
             """
-            kernel = attention_kernel_cost(
+            kernel = cost(
+                self.attn_kernel,
                 seq_len=seq_len,
                 dtype=dtype,
                 num_heads=self.num_heads,

@@ -463,7 +463,7 @@ def test_mla_cost_is_projections_plus_kernel_and_caches_the_latent() -> None:
 
 
 def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
-    """Every product torch counts is priced.
+    """Every product torch counts is costed.
 
     Projections, the ``W_KR``/``W_UV`` einsums, and the naive kernel's two
     bmms: the einsums are ``proj_kv_b``'s matmul applied one factor at a time,

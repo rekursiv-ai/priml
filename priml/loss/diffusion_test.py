@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, override
 
+import functools
+
 from torch import Tensor, nn
 
 import pytest
@@ -50,6 +52,35 @@ def _fp32(
             for kernel, value in (silos or {}).get(measure, {}).items():
                 cells[(measure, phase, kernel, torch.float32)] = value
     return Cost(cells=cells, **fields)
+
+
+def _per_sample(config: DiffusionLoss.Config) -> Cost:
+    """Sum the loss's per-sample scalar work and each schedule child's own cost."""
+    schedules = [config.logsnr_fn, config.corruption_fn]
+    if config.time_transform is not None:
+        schedules.append(config.time_transform)
+    own = Cost(
+        cells={
+            ("flops", "primal", "elementwise", torch.float32): 1 + 4,
+            ("bytes", "primal", "elementwise", torch.float32): 4 * 6,
+        },
+    )
+    return sum((cost(fn, channels=1, dtype=None) for fn in schedules), own)
+
+
+def _per_element(target_fn: TargetFn, *, rows: int) -> Cost:
+    """Sum the loss's per-element work and the target's own cost at ``rows``."""
+    own = _fp32(
+        primal={
+            "flops": {"elementwise": 3 + 2, "reduction": (rows - 1) / rows},
+            "bytes": {"elementwise": 4 * 13, "reduction": 4 * (rows + 1) / rows},
+        },
+        adjoint={
+            "flops": {"elementwise": 3},
+            "bytes": {"elementwise": 28, "reduction": 4 * (rows + 1) / rows},
+        },
+    )
+    return own + cost(target_fn, dtype=None, rows=rows)
 
 
 def test_diffusion_loss_default_config() -> None:
@@ -128,7 +159,7 @@ def test_diffusion_loss_forward_1d() -> None:
 def test_diffusion_loss_custom_logsnr() -> None:
     """Test with custom log SNR function."""
     cfg = DiffusionLoss.Config()
-    cfg.logsnr_fn = lambda log_t: log_snr_from_log_time_per_logtan(log_t, shift=0)
+    cfg.logsnr_fn = functools.partial(log_snr_from_log_time_per_logtan, shift=0)
 
     loss_fn = cfg.make()
 
@@ -400,16 +431,8 @@ def test_diffusion_loss_cost_default_prices_rectified_flow_per_element() -> None
         dtype=None,
         run=lambda module, x0: _loss(module, denoiser=denoiser, x0=x0),
     )
-    per_sample = 1 + 8 + 8 + 4 + 8
-    expected = _fp32(
-        primal={
-            "flops": {"elementwise": 3 + 7 + 2 + per_sample / 48, "reduction": 47 / 48},
-            "bytes": {"elementwise": 4 * (30 + 48 / 48), "reduction": 4 * 49 / 48},
-        },
-        adjoint={
-            "flops": {"elementwise": 3},
-            "bytes": {"elementwise": 28, "reduction": 4 * 49 / 48},
-        },
+    expected = _per_element(target_rectified_flow, rows=48) + _per_sample(config).tile(
+        1 / 48,
     )
     assert measured == expected
     assert measured.params == 0
@@ -427,38 +450,18 @@ def test_diffusion_loss_cost_default_prices_rectified_flow_per_element() -> None
         (target_v_eps, 6, 1),
     ],
 )
-def test_diffusion_loss_cost_prices_target_fn_by_identity(
+def test_diffusion_loss_cost_asks_the_target_fn_for_its_price(
     target_fn: TargetFn,
     primal: int,
     adjoint: int,
 ) -> None:
     """Passthrough targets add no adjoint; ``v_x``/``v_eps`` scale the gradient once."""
     config = DiffusionLoss.Config(target_fn=target_fn)
-    baseline = cost(
-        DiffusionLoss.Config(target_fn=target_x),
-        seq_len=48,
-        batch_size=1,
-        dtype=None,
-    )
-    priced = cost(config, seq_len=48, batch_size=1, dtype=None)
-    operand_counts: dict[TargetFn, tuple[int, int]] = {
-        target_x: (7, 13),
-        target_eps: (7, 13),
-        target_rectified_flow: (17, 26),
-        target_v: (21, 32),
-        target_v_x: (14, 26),
-        target_v_eps: (14, 26),
-    }
-    vector_io, scalar_io = operand_counts[target_fn]
-    assert priced["bytes", "primal", "elementwise"].sum() == 4 * (
-        13 + vector_io + (22 + scalar_io) / 48
-    )
-    assert priced["flops", "primal", "elementwise"].sum() == pytest.approx(
-        baseline["flops", "primal", "elementwise"].sum() + primal - 3,
-    )
-    assert priced["flops", "adjoint", "elementwise"].sum() == pytest.approx(
-        baseline["flops", "adjoint", "elementwise"].sum() + adjoint,
-    )
+    costed = cost(config, seq_len=48, batch_size=1, dtype=None)
+    assert costed == _per_element(target_fn, rows=48) + _per_sample(config).tile(1 / 48)
+    own = cost(target_fn, dtype=None, rows=48)
+    assert own["flops", "primal", "elementwise"].sum() == pytest.approx(primal + 8 / 48)
+    assert own["flops", "adjoint", "elementwise"].sum() == adjoint
 
 
 def test_diffusion_loss_cost_spreads_snr_weight_and_time_transform() -> None:
@@ -476,15 +479,6 @@ def test_diffusion_loss_cost_spreads_snr_weight_and_time_transform() -> None:
     assert weighted["flops", "adjoint", "elementwise"].sum() == pytest.approx(
         plain["flops", "adjoint", "elementwise"].sum() + 1 / 48,
     )
-    transformed = cost(
-        DiffusionLoss.Config(time_transform=log_time_from_log_snr_per_logit),
-        seq_len=48,
-        batch_size=1,
-        dtype=None,
-    )
-    assert transformed["flops", "primal", "elementwise"].sum() == pytest.approx(
-        plain["flops", "primal", "elementwise"].sum() + 8 / 48,
-    )
 
 
 def test_diffusion_loss_cost_rejects_unpriced_target_fn() -> None:
@@ -500,7 +494,7 @@ def test_diffusion_loss_cost_rejects_unpriced_target_fn() -> None:
         del x_noisy, log_snr, log_sigma, eps_original
         return TargetResult(x_original, model, model, model)
 
-    with pytest.raises(TypeError, match="target_custom"):
+    with pytest.raises(TypeError, match="target_custom has no cost"):
         cost(
             DiffusionLoss.Config(target_fn=target_custom),
             seq_len=48,
@@ -509,14 +503,39 @@ def test_diffusion_loss_cost_rejects_unpriced_target_fn() -> None:
         )
 
 
+def test_diffusion_loss_cost_rejects_an_unpriced_schedule_fn() -> None:
+    config = DiffusionLoss.Config()
+    config.logsnr_fn = lambda log_t: log_snr_from_log_time_per_logtan(log_t, shift=0)
+    with pytest.raises(TypeError, match="<lambda> has no cost"):
+        cost(config, seq_len=48, batch_size=1, dtype=None)
+
+
+def test_diffusion_loss_cost_spreads_each_schedule_fns_own_price() -> None:
+    """A schedule transform is per sample; its own per-element cost is spread 1/n."""
+    plain = cost(DiffusionLoss.Config(), seq_len=48, batch_size=1, dtype=None)
+    transformed = cost(
+        DiffusionLoss.Config(time_transform=log_time_from_log_snr_per_logit),
+        seq_len=48,
+        batch_size=1,
+        dtype=None,
+    )
+    own = cost(log_time_from_log_snr_per_logit, channels=1, dtype=None)
+    assert transformed["flops", "primal", "elementwise"].sum() == pytest.approx(
+        plain["flops", "primal", "elementwise"].sum()
+        + own["flops", "primal", "elementwise"].sum() / 48,
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_diffusion_loss_operand_traffic(dtype: torch.dtype) -> None:
-    priced = cost(DiffusionLoss.Config(), seq_len=48, batch_size=1, dtype=dtype)
-    itemsize = dtype.itemsize
-    assert priced["bytes", "primal", "elementwise"].sum() == (30 + 48 / 48) * itemsize
-    assert priced["bytes", "primal", "reduction"].sum() == 49 * itemsize / 48
-    assert priced["bytes", "adjoint", "elementwise"].sum() == 7 * itemsize
-    assert priced["bytes", "adjoint", "reduction"].sum() == 49 * itemsize / 48
+    """Every payload cell scales with the itemsize; nothing is an index."""
+    costed = cost(DiffusionLoss.Config(), seq_len=48, batch_size=1, dtype=dtype)
+    fp32 = cost(DiffusionLoss.Config(), seq_len=48, batch_size=1, dtype=None)
+    assert costed["flops"].sum() == pytest.approx(fp32["flops"].sum())
+    assert costed["bytes"].sum() == pytest.approx(
+        fp32["bytes"].sum() * dtype.itemsize / 4,
+    )
+    assert {key[-1] for key in costed.cells} == {dtype}
 
 
 def _loss(

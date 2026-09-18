@@ -29,14 +29,15 @@ def attention_kernel_cost(
     channels_v_head: int = -1,
     window: int = -1,
     dropout_p: float = 0.0,
+    **kwargs: object,
 ) -> Cost:
-    """Price ``softmax(QK^T)V`` for one query row across every head.
+    """Cost ``softmax(QK^T)V`` for one query row across every head.
 
-    A kernel config holds no fields, so the OWNER of the projections calls
-    this with the shapes it knows -- how many heads and how wide -- the way it
-    hands ``q``/``k``/``v`` to ``forward``. Every kernel whose products are the
-    standard two shares this accounting. Counted over the full window with no
-    causal discount, per the module policy.
+    A kernel config holds no shapes, so its ``cost`` takes them from the OWNER
+    of the projections -- how many heads and how wide -- the way ``forward``
+    takes ``q``/``k``/``v``. Every kernel whose products are the standard two
+    binds this as its ``cost``. Counted over the full window with no causal
+    discount, per the module policy.
 
     Args:
       seq_len: Tokens per sequence: the keys a query reaches before any window.
@@ -46,12 +47,14 @@ def attention_kernel_cost(
       channels_v_head: Value width; -1 uses the query/key width.
       window: Keys each query reaches, or ``-1`` for the whole sequence.
       dropout_p: Attention dropout rate; nonzero adds a mask and a rescale.
+      **kwargs: The rest of the owner's bus, unread.
 
     Returns:
       cost: Unfused logical tensor I/O and FLOPs, not measured HBM traffic.
         Fused and naive kernels share this algorithmic accounting convention.
 
     """
+    del kwargs
     dt = dtype
     keys = seq_len if window < 0 else min(window, seq_len)
     value_width = channels_head if channels_v_head < 0 else channels_v_head
@@ -114,7 +117,47 @@ class SdpaFused(nn.Module):
     """
 
     class Config(Fig["SdpaFused"]):
-        pass
+        @classmethod
+        def cost(
+            cls,
+            *,
+            seq_len: int,
+            dtype: torch.dtype | None,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int = -1,
+            window: int = -1,
+            dropout_p: float = 0.0,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the kernel from the shapes its owner hands it.
+
+            See :func:`attention_kernel_cost` for every argument.
+
+            Args:
+              seq_len: Tokens per sequence.
+              dtype: Activation dtype; ``None`` is torch's default.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Value width; -1 uses the query/key width.
+              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              dropout_p: Attention dropout rate.
+              **kwargs: The rest of the owner's bus, unread.
+
+            Returns:
+              cost: Per-query-row cost of the kernel.
+
+            """
+            del kwargs
+            return attention_kernel_cost(
+                seq_len=seq_len,
+                dtype=dtype,
+                num_heads=num_heads,
+                channels_head=channels_head,
+                channels_v_head=channels_v_head,
+                window=window,
+                dropout_p=dropout_p,
+            )
 
     def __init__(self, config: Config | None = None) -> None:
         del config
@@ -155,7 +198,47 @@ class SdpaNaive(nn.Module):
     """Manual matmul+softmax attention (matches HF eager_attention_forward)."""
 
     class Config(Fig["SdpaNaive"]):
-        pass
+        @classmethod
+        def cost(
+            cls,
+            *,
+            seq_len: int,
+            dtype: torch.dtype | None,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int = -1,
+            window: int = -1,
+            dropout_p: float = 0.0,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the kernel from the shapes its owner hands it.
+
+            See :func:`attention_kernel_cost` for every argument.
+
+            Args:
+              seq_len: Tokens per sequence.
+              dtype: Activation dtype; ``None`` is torch's default.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Value width; -1 uses the query/key width.
+              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              dropout_p: Attention dropout rate.
+              **kwargs: The rest of the owner's bus, unread.
+
+            Returns:
+              cost: Per-query-row cost of the kernel.
+
+            """
+            del kwargs
+            return attention_kernel_cost(
+                seq_len=seq_len,
+                dtype=dtype,
+                num_heads=num_heads,
+                channels_head=channels_head,
+                channels_v_head=channels_v_head,
+                window=window,
+                dropout_p=dropout_p,
+            )
 
     def __init__(self, config: Config | None = None) -> None:
         del config

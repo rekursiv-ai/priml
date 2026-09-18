@@ -29,7 +29,7 @@ Counting policy:
 - Attention is counted over ``min(window, seq_len)`` keys with no causal
   discount (PaLM convention). Recompute excluded: MFU, not HFU.
 - ``bytes`` and ``bytes_state`` hold bytes, not element counts. Each leaf
-  prices its tensors at its own storage dtype (``None`` is torch's default)
+  costs its tensors at its own storage dtype (``None`` is torch's default)
   and tags every cell with it, so traffic can be read per dtype.
 - Traffic is the analytical unfused algorithm's minimum tensor operand I/O:
   each primitive reads its inputs and writes its outputs once. Intermediates
@@ -40,7 +40,7 @@ Counting policy:
 
 ``cost(**kwargs)`` takes named arguments only. A leaf declares the ones it
 reads -- typically ``seq_len``, ``batch_size``, ``dtype`` -- as required
-keywords, so a caller that forgets one fails there rather than pricing a
+keywords, so a caller that forgets one fails there rather than costing a
 guessed batch, and forwards the rest of the bus unchanged. A container that
 runs a child over other geometry passes the child its own ``seq_len`` and
 ``batch_size``; the product is the rows sharing each of the child's parameters.
@@ -48,7 +48,10 @@ runs a child over other geometry passes the child its own ``seq_len`` and
 :func:`matmul_cost` (``weight=False`` for ``QK^T``) and
 :func:`elementwise_cost` are the two primitives that own parameters. The other
 silos are ``Cost`` literals. A module-level function assigned as a class
-attribute (``cost = attention_kernel_cost``) binds as the method.
+attribute (``cost = attention_kernel_cost``) binds as the method. A plain
+function receives cost metadata through :func:`set_cost`, and
+:func:`map_cost` builds the per-element cost function an activation or schedule
+transform needs.
 
 A :class:`Cost` is a sparse table over ``measure x phase x kernel x dtype``,
 the measures being ``flops`` and ``bytes``, plus three owned integers. The phases are ``primal`` and
@@ -58,11 +61,12 @@ phase and one line in each operator when a consumer needs it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final, Literal, overload, override
+from typing import Final, Literal, cast, overload, override
 
+import functools
 import math
 
 import torch
@@ -81,10 +85,12 @@ __all__ = [
     "Phase",
     "cost",
     "elementwise_cost",
+    "map_cost",
     "matmul_cost",
     "peak",
     "reduction_cost",
     "resolve_dtype",
+    "set_cost",
     "traffic",
     "utilization",
 ]
@@ -196,6 +202,60 @@ class Cost:
             },
         )
 
+    def only(self, value: Axis) -> Cost:
+        """Keep the cells at one axis value, the axis included, owning nothing.
+
+        Where ``cost["primal"]`` drops the phase axis, ``cost.only("primal")``
+        keeps it, so the result still adds to a full table: a layer whose
+        primal runs three times and adjoint once is
+        ``c + c.only("primal").tile(2)``.
+
+        Args:
+          value: A measure, phase, kernel, dtype or device the table's keys hold.
+
+        Returns:
+          kept: The matching cells at their original keys.
+
+        Raises:
+          KeyError: ``value`` names no axis.
+
+        """
+        want = _canonical(value)
+        if not self.cells:
+            _kind(want)
+            return Cost()
+        axis = _axis_of(next(iter(self.cells)), want)
+        return Cost(
+            cells={key: v for key, v in self.cells.items() if key[axis] == want},
+        )
+
+    def relabel(self, value: Axis) -> Cost:
+        """Move every cell to ``value`` on its axis, owning nothing.
+
+        A frozen layer's adjoint is its input gradient alone, the primal's
+        size: ``c.only("primal") + c.only("primal").relabel("adjoint")``.
+
+        Args:
+          value: A measure, phase, kernel, dtype or device.
+
+        Returns:
+          moved: The cells with that axis rewritten; colliding cells add.
+
+        Raises:
+          KeyError: ``value`` names no axis.
+
+        """
+        want = _canonical(value)
+        if not self.cells:
+            _kind(want)
+            return Cost()
+        axis = _axis_of(next(iter(self.cells)), want)
+        merged: dict[tuple[object, ...], float] = {}
+        for key, v in self.cells.items():
+            moved = (*key[:axis], want, *key[axis + 1 :])
+            merged[moved] = merged.get(moved, 0) + v
+        return Cost(cells=merged)
+
     def sum(self) -> float:
         """Total over every cell."""
         return math.fsum(self.cells.values())
@@ -234,7 +294,7 @@ class Cost:
 
         A norm over every head row of one shared weight runs ``rows`` times
         but is owned once; a stack of ``n`` blocks is ``tile(n, copies=n)``; a
-        child priced per its own row spread over a container's rows is
+        child costed per its own row spread over a container's rows is
         ``tile(child_rows / container_rows)``.
 
         Args:
@@ -307,8 +367,11 @@ def resolve_dtype(dtype: torch.dtype | None) -> torch.dtype:
     return torch.get_default_dtype() if dtype is None else dtype
 
 
+_FUNCTION_COSTS: dict[object, Callable[..., Cost]] = {}
+
+
 def cost(config: object, **kwargs: object) -> Cost:
-    """Price a config per token, forwarding the bus unchanged.
+    """Cost a config per token, forwarding the bus unchanged.
 
     Args:
       config: A config with ``cost``.
@@ -321,18 +384,98 @@ def cost(config: object, **kwargs: object) -> Cost:
       TypeError: ``config`` has no ``cost``.
 
     """
+    # A ``partial`` binds hyperparameters, not work; the cost is the function's.
     # Duck-typed rather than ``isinstance(config, HasCost)``: the protocol
     # lives in ``custom_types`` and names ``Cost`` in its signature, so
     # importing it here would close an import cycle.
-    price = getattr(config, "cost", None)
-    if not callable(price):
+    original: object = config
+    method = getattr(original, "cost", None)
+    name_target: object = original
+    if not callable(method):
+        try:
+            method = _FUNCTION_COSTS.get(original)
+        except TypeError:
+            method = None
+    if not callable(method) and isinstance(original, functools.partial):
+        method = _FUNCTION_COSTS.get(cast(object, original.func))
+    if not callable(method):
+        name = getattr(name_target, "__qualname__", type(name_target).__qualname__)
         raise TypeError(
-            f"{type(config).__qualname__} has no cost(); every config under a "
-            "priced container must implement HasCost.",
+            f"{name} has no cost(); every slot under a costed container must "
+            "implement HasCost, or be a function decorated with @set_cost.",
         )
-    priced: object = price(**kwargs)
-    assert isinstance(priced, Cost)
-    return priced
+    result: object = method(**kwargs)
+    assert isinstance(result, Cost)
+    return result
+
+
+def set_cost[**P, R](
+    cost_fn: Callable[..., Cost],
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Attach a cost to a plain function so a slot can hold it.
+
+    A module whose slot takes a bare function (an activation, a schedule, a
+    loss, a target parameterization) costs the slot by calling
+    ``cost(fn, ...)`` with whatever ``cost_fn`` reads. ``functools.partial``
+    of the result keeps the cost. A function without one is refused by
+    :func:`cost`, never costed as zero.
+
+    Args:
+      cost_fn: Answers ``cost`` for the function; see :func:`map_cost` for the
+        per-element case.
+
+    Returns:
+      decorator: Returns the original function unchanged.
+
+    """
+
+    def decorate(function: Callable[P, R]) -> Callable[P, R]:
+        _FUNCTION_COSTS[function] = cost_fn
+        return function
+
+    return decorate
+
+
+def map_cost(
+    *,
+    primal: float,
+    adjoint: float,
+    inputs: int = 1,
+    outputs: int = 1,
+    adjoint_inputs: int = 2,
+    adjoint_outputs: int = 1,
+) -> Callable[..., Cost]:
+    """Build the cost of an elementwise map as a function of ``channels`` and ``dtype``.
+
+    The counts are per element; the returned function scales them by the
+    ``channels`` it is asked about and answers with :func:`elementwise_cost`.
+
+    Args:
+      primal: Operations per element evaluating the map.
+      adjoint: Operations per element in its derivative.
+      inputs: Primal input operands.
+      outputs: Primal output operands.
+      adjoint_inputs: Adjoint input operands (saved values, incoming gradient).
+      adjoint_outputs: Adjoint output operands.
+
+    Returns:
+      cost_fn: ``cost_fn(*, channels, dtype)``, for :func:`set_cost`.
+
+    """
+
+    def per_channels(*, channels: float, dtype: torch.dtype | None) -> Cost:
+        return elementwise_cost(
+            primal=primal * channels,
+            adjoint=adjoint * channels,
+            channels=channels,
+            dtype=dtype,
+            inputs=inputs,
+            outputs=outputs,
+            adjoint_inputs=adjoint_inputs,
+            adjoint_outputs=adjoint_outputs,
+        )
+
+    return per_channels
 
 
 def matmul_cost(
@@ -344,7 +487,7 @@ def matmul_cost(
     rows: float = 1,
     dtype: torch.dtype | None = None,
 ) -> Cost:
-    """Price one row of ``[M, K] @ [K, N]`` and its two adjoint products.
+    """Cost one row of ``[M, K] @ [K, N]`` and its two adjoint products.
 
     Args:
       channels_in: Inner dimension K.
@@ -403,7 +546,7 @@ def elementwise_cost(
     adjoint_inputs: int = 2,
     adjoint_outputs: int = 1,
 ) -> Cost:
-    """Price explicit elementwise operands and owned parameter gradients.
+    """Cost explicit elementwise operands and owned parameter gradients.
 
     The default geometry is a unary map: primal input/output and adjoint
     saved value/incoming gradient/outgoing gradient. Compound maps specify
@@ -458,7 +601,7 @@ def reduction_cost(
     dtype: torch.dtype | None = None,
     phase: Phase = "primal",
 ) -> Cost:
-    """Price one reduction's explicit tensor geometry, amortized over tokens.
+    """Cost one reduction's explicit tensor geometry, amortized over tokens.
 
     Args:
       input_elements: Total elements read across all output groups.
@@ -697,7 +840,7 @@ def utilization(
     is saturation and a matmul cell is MFU.
 
     Args:
-      cost: Per-token cost, priced with the same ``seq_len`` and ``batch_size``.
+      cost: Per-token cost, computed at the same ``seq_len`` and ``batch_size``.
       device: Which datasheet to read.
       seq_len: Tokens per sequence.
       batch_size: Sequences per step.

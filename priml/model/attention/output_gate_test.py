@@ -110,12 +110,15 @@ def test_output_gate_finalize_propagates():
     assert cfg.inner.channels_in == 128
 
 
-def test_output_gate_geometry_falls_back_for_an_unheaded_inner() -> None:
+def test_output_gate_geometry_rejects_an_unheaded_inner() -> None:
+    """The gate mirrors its inner attention's geometry, never a stand-in."""
     cfg = OutputGate.Config(channels_in=8)
     cfg.inner = RMSNorm.Config(channels_in=8)
 
-    assert cfg.num_heads == 1
-    assert cfg.channels_head == 8
+    with pytest.raises(AttributeError, match="num_heads"):
+        _ = cfg.num_heads
+    with pytest.raises(AttributeError, match="channels_head"):
+        _ = cfg.channels_head
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

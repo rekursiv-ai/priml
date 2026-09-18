@@ -137,7 +137,7 @@ class MLPMixerBlock(nn.Module):
             """
             if seq_len != self.seq_len:
                 raise ValueError(
-                    f"MLPMixerBlock mixes {self.seq_len} tokens; priced at {seq_len}.",
+                    f"MLPMixerBlock mixes {self.seq_len} tokens; costed at {seq_len}.",
                 )
             rows_per_token = self.channels_in / self.seq_len
             over_tokens = sum(

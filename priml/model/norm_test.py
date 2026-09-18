@@ -540,7 +540,7 @@ def test_norm_cost_splits_elementwise_from_row_sums(
 ) -> None:
     """A norm is elementwise work plus sums over its group; never a matmul.
 
-    Priced at one token: a group spanning a whole row is ``groups_per_token =
+    Costed at one token: a group spanning a whole row is ``groups_per_token =
     1`` and holds two ``R - 1`` sums each way, while a group of one element
     (the batch norms at one token, eight groups of one) sums nothing. The
     expected pairs are ``(elementwise, reduction)``.

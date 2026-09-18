@@ -75,7 +75,6 @@ from priml.cost import (
 from priml.model.attention.kernel import (
     SdpaFused,
     SdpaNaive,
-    attention_kernel_cost,
 )
 from priml.model.attention.kvcache import KVCache
 from priml.model.attention.rope import RoPE, rotation_cost
@@ -88,7 +87,7 @@ from priml.model.custom_types import (
     DepthIndex,
     HasResetParameters,
     LatentAttentionKernel,
-    RotaryFactors,
+    RotaryConfig,
     TensorModule,
     WeightedTensorModule,
     infer_same_width,
@@ -155,17 +154,17 @@ class LatentAttention(nn.Module):
             channels_qk_rope_head: int,
             dropout_p: float,
         ) -> Cost:
-            """Price the kernel's two products at the widths this form hands it.
+            """Cost the kernel's two products at the widths this form hands it.
 
             Absorbed, K is the latent plus the rope key and V the latent alone;
             re-expanded, they are the per-head Q/K width and ``channels_v_head``.
-            The owner prices projection FLOPs and weights as ``proj_kv_b``.
+            The owner costs projection FLOPs and weights as ``proj_kv_b``.
             Absorption additionally moves two per-head latent rows where that
             dense projection moves one shared row; charge that operand delta
             here because this config owns the association choice.
 
             The kernel receives separate query/key and value widths so each
-            product's operands are priced directly, without scaling unrelated
+            product's operands are costed directly, without scaling unrelated
             score or softmax traffic. This is not ``HasCost``: a kernel config
             holds no shapes, so the owner states them, the way it hands the
             latent to ``forward``.
@@ -189,7 +188,8 @@ class LatentAttention(nn.Module):
                 channels_v = kv_lora_rank
             else:
                 channels_k, channels_v = channels_head, channels_v_head
-            kernel = attention_kernel_cost(
+            kernel = cost(
+                self.attn_kernel,
                 seq_len=seq_len,
                 dtype=dtype,
                 num_heads=num_heads,
@@ -296,7 +296,7 @@ class MultiHeadLatentAttention(nn.Module):
         softmax_scale: float | None = None
         """Override the SDPA scale. Default ``1/sqrt(qk_nope + qk_rope)``."""
 
-        rope: Makeable[RotaryFactors] | None = None
+        rope: RotaryConfig | None = None
         """Rotary embedding applied to the ``qk_rope`` slice. ``None`` ⇒ none.
 
         Typed by what MLA CALLS -- positions in, ``(cos, sin)`` out -- rather
@@ -411,7 +411,7 @@ class MultiHeadLatentAttention(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the projections, norms, rotary, kernel, and the latent cache.
+            """Cost the projections, norms, rotary, kernel, and the latent cache.
 
             ``bytes_state`` is what :meth:`alloc_kv_cache` stores per token: the
             ``kv_lora_rank`` latent and the head-shared rope key, not the K/V the
@@ -427,16 +427,9 @@ class MultiHeadLatentAttention(nn.Module):
               cost: Per-token cost of this module.
 
             Raises:
-              TypeError: The kernel slot holds something other than a
-                :class:`LatentAttention.Config`; a foreign kernel has no
-                analytical price, and a silent zero would understate the model.
+              TypeError: The kernel slot's config carries no ``cost``.
 
             """
-            if not isinstance(self.attn_kernel, LatentAttention.Config):
-                raise TypeError(
-                    f"{type(self.attn_kernel).__qualname__} has no analytical "
-                    "price; MultiheadLatentAttention prices LatentAttention.Config.",
-                )
             q_path = (
                 (self.proj_q,)
                 if self.q_lora_rank is None
@@ -478,7 +471,8 @@ class MultiHeadLatentAttention(nn.Module):
                     channels_head=self.channels_qk_rope_head,
                     heads=self.num_heads + 1,
                 )
-            total += self.attn_kernel.cost(
+            total += cost(
+                self.attn_kernel,
                 seq_len=seq_len,
                 dtype=dtype,
                 num_heads=self.num_heads,

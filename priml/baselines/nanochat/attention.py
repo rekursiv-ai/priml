@@ -116,7 +116,7 @@ class CausalAttention(ValueGatedAttention):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price base attention plus memory gates, output norm, and head gate.
+            """Cost base attention plus memory gates, output norm, and head gate.
 
             Ngram tables own their lookups; this module owns the gates and value
             mixing. Fused kernels retain the same logical unfused accounting.
@@ -470,7 +470,47 @@ class Flash3Attention:
         that reads its value from the library it is pinning would follow that
         library forward and silently stop pinning anything."""
 
-        cost = attention_kernel_cost
+        @classmethod
+        def cost(
+            cls,
+            *,
+            seq_len: int,
+            dtype: torch.dtype | None,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int = -1,
+            window: int = -1,
+            dropout_p: float = 0.0,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the kernel from the shapes its owner hands it.
+
+            See :func:`attention_kernel_cost` for every argument.
+
+            Args:
+              seq_len: Tokens per sequence.
+              dtype: Activation dtype; ``None`` is torch's default.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Value width; -1 uses the query/key width.
+              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              dropout_p: Attention dropout rate.
+              **kwargs: The rest of the owner's bus, unread.
+
+            Returns:
+              cost: Per-query-row cost of the kernel.
+
+            """
+            del kwargs
+            return attention_kernel_cost(
+                seq_len=seq_len,
+                dtype=dtype,
+                num_heads=num_heads,
+                channels_head=channels_head,
+                channels_v_head=channels_v_head,
+                window=window,
+                dropout_p=dropout_p,
+            )
 
     def __init__(self, config: Config) -> None:
         if config.revision != hf_reference_revision():
@@ -798,7 +838,47 @@ class Flash4Attention:
     class Config(Fig["Flash4Attention"]):
         """Select the native CuTe FA4 dispatcher."""
 
-        cost = attention_kernel_cost
+        @classmethod
+        def cost(
+            cls,
+            *,
+            seq_len: int,
+            dtype: torch.dtype | None,
+            num_heads: int,
+            channels_head: int,
+            channels_v_head: int = -1,
+            window: int = -1,
+            dropout_p: float = 0.0,
+            **kwargs: object,
+        ) -> Cost:
+            """Cost the kernel from the shapes its owner hands it.
+
+            See :func:`attention_kernel_cost` for every argument.
+
+            Args:
+              seq_len: Tokens per sequence.
+              dtype: Activation dtype; ``None`` is torch's default.
+              num_heads: Query heads.
+              channels_head: Width of each query/key head.
+              channels_v_head: Value width; -1 uses the query/key width.
+              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              dropout_p: Attention dropout rate.
+              **kwargs: The rest of the owner's bus, unread.
+
+            Returns:
+              cost: Per-query-row cost of the kernel.
+
+            """
+            del kwargs
+            return attention_kernel_cost(
+                seq_len=seq_len,
+                dtype=dtype,
+                num_heads=num_heads,
+                channels_head=channels_head,
+                channels_v_head=channels_v_head,
+                window=window,
+                dropout_p=dropout_p,
+            )
 
     def __init__(self, config: Config) -> None:
         del config
@@ -1282,7 +1362,7 @@ def _value_mix_cost(
     dtype: torch.dtype | None,
     add: bool,
 ) -> Cost:
-    """Price scaled sigmoid gates, broadcast products, and optional value additions."""
+    """Cost scaled sigmoid gates, broadcast products, and optional value additions."""
     inner = heads * channels_head
     dt = dtype
     return (

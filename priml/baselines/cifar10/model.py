@@ -45,6 +45,7 @@ from priml.model.custom_types import (
 )
 from priml.model.init import InitFn, call_init
 from priml.model.norm import BatchNorm2d
+from priml.model.swiglu import relu, silu
 from priml.model.whitening import PCAWhiteningConv2d
 
 
@@ -65,7 +66,7 @@ class ResidualBlock(nn.Module):
         stride: int = 1
         """Spatial stride of the first convolution; 2 halves resolution."""
 
-        activation: ActivationFn = torch.relu
+        activation: ActivationFn = relu
         """Activation applied after each normalization."""
 
         norm_momentum: float = 0.1
@@ -96,7 +97,7 @@ class ResidualBlock(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price norm-act-conv twice and the shortcut, per image position.
+            """Cost norm-act-conv twice and the shortcut, per image position.
 
             A token is one position of the network's input image; ``grid`` is
             this block's own input grid. ``norm1`` and its activation run on
@@ -130,7 +131,7 @@ class ResidualBlock(nn.Module):
                     dtype=dtype,
                     **kwargs,
                 )
-                + _activation_cost(self.activation, channels=c_in, dtype=dt)
+                + cost(self.activation, channels=c_in, dtype=dt)
                 + elementwise_cost(
                     primal=0,
                     adjoint=c_in,
@@ -149,7 +150,7 @@ class ResidualBlock(nn.Module):
                     dtype=dtype,
                     **kwargs,
                 )
-                + _activation_cost(self.activation, channels=c_out, dtype=dt)
+                + cost(self.activation, channels=c_out, dtype=dt)
                 + _conv2d_cost(c_out, c_out, kernel_size=3, rows=rows_strided, dtype=dt)
                 + elementwise_cost(
                     primal=c_out,
@@ -229,7 +230,7 @@ def _conv2d_cost(
     rows: float,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price one output position of a bias-free, ungrouped 2-d convolution."""
+    """Cost one output position of a bias-free, ungrouped 2-d convolution."""
     return conv_cost(
         channels_in=channels_in,
         channels_out=channels_out,
@@ -242,32 +243,6 @@ def _conv2d_cost(
     )
 
 
-# ReLU is one compare forward and one mask multiply back; SiLU saves its sigmoid
-# for a five-operation derivative, the constants ``SwiGLU.Config.cost`` uses.
-def _activation_cost(
-    activation: ActivationFn,
-    *,
-    channels: int,
-    dtype: torch.dtype | None,
-) -> Cost:
-    """Price an activation per element; a stranger raises rather than pricing zero."""
-    if activation in (torch.relu, nn.functional.relu):
-        primal = adjoint = 1
-    elif activation is nn.functional.silu:
-        primal = adjoint = 5
-    else:
-        raise TypeError(
-            f"No analytical price for activation {activation!r}; "
-            "only relu and silu are priced.",
-        )
-    return elementwise_cost(
-        primal=primal * channels,
-        adjoint=adjoint * channels,
-        channels=channels,
-        dtype=dtype,
-    )
-
-
 # The saved argmax is one ``int64`` per pooled channel each way; the values and
 # gradients are at the batch's dtype.
 def _max_pool_cost(
@@ -276,7 +251,7 @@ def _max_pool_cost(
     kernel_size: int,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price values and saved argmax forward; dense gradient writes backward."""
+    """Cost values and saved argmax forward; dense gradient writes backward."""
     dt = dtype
     index = torch.int64
     window = kernel_size * kernel_size
@@ -306,7 +281,7 @@ def _avg_pool_cost(
     positions: int,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Price a global average pool per image: a sum per channel, a scale per element back."""
+    """Cost a global average pool per image: a sum per channel, a scale per element back."""
     dt = dtype
     return (
         traffic(
@@ -372,7 +347,7 @@ def _block_grids(
         side = math.isqrt(seq_len)
         if side * side != seq_len:
             raise ValueError(
-                f"A block priced alone needs a square image; seq_len={seq_len} "
+                f"A block costed alone needs a square image; seq_len={seq_len} "
                 "is not a square. Set image_size on the block.",
             )
         image_size = (side, side)
@@ -382,30 +357,22 @@ def _block_grids(
 
 
 def _frozen(trainable: Cost) -> Cost:
-    """Price a frozen layer: its adjoint is the input gradient, the primal's size."""
-    primal = {
-        key: value for key, value in trainable.cells.items() if key[1] == "primal"
-    }
-    return replace(
-        trainable,
-        cells={
-            **primal,
-            **{(m, "adjoint", k, d): value for (m, _, k, d), value in primal.items()},
-        },
-    )
+    """Cost a frozen layer: its adjoint is the input gradient, the primal's size."""
+    primal = trainable.only("primal")
+    return replace(trainable, cells=(primal + primal.relabel("adjoint")).cells)
 
 
 # One division by the image's positions, never a chain of per-stage ratios: a
 # ``225 / 961`` followed by ``961 / 1024`` lands an ulp off ``225 / 1024``, and the
 # torch comparison is exact.
 def _per_image_position(
-    priced: Cost,
+    costed: Cost,
     *,
     grid: tuple[int, int],
     image_size: tuple[int, int],
 ) -> Cost:
     """Spread work done once per ``grid`` position over the image's positions."""
-    return priced.tile(math.prod(grid) / math.prod(image_size))
+    return costed.tile(math.prod(grid) / math.prod(image_size))
 
 
 class ConvBlock(nn.Module):
@@ -425,7 +392,7 @@ class ConvBlock(nn.Module):
         num_convs: int = 3
         """Convolutions in this block; 3 adds a residual connection."""
 
-        activation: ActivationFn = nn.functional.silu
+        activation: ActivationFn = silu
         """Activation applied after each normalization."""
 
         norm_momentum: float = 0.4
@@ -458,7 +425,7 @@ class ConvBlock(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the first convolution on the block's grid, the rest on the pooled one.
+            """Cost the first convolution on the block's grid, the rest on the pooled one.
 
             A token is one position of the network's input image; ``grid`` is
             this block's own input grid. The first convolution keeps that grid
@@ -490,7 +457,7 @@ class ConvBlock(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 **kwargs,
-            ) + _activation_cost(
+            ) + cost(
                 self.activation,
                 channels=c_out,
                 dtype=dtype,
@@ -605,7 +572,7 @@ class ScaledLinear(nn.Linear):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the projection plus one scale multiply per output each way.
+            """Cost the projection plus one scale multiply per output each way.
 
             The scale is a Python float, not a parameter, so it adds no
             gradient of its own.
@@ -699,7 +666,7 @@ class ResNet(nn.Module):
         blocks_per_stage: int = 2
         """Repeats of the template within each stage. Ignored for a list."""
 
-        activation: ActivationFn = torch.relu
+        activation: ActivationFn = relu
         """Activation used throughout the network.
 
         A ``Makeable`` when the activation carries state (``InlineConfig(nn.PReLU)``
@@ -742,12 +709,12 @@ class ResNet(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the stem, every block at its grid, then norm, pool, and head.
+            """Cost the stem, every block at its grid, then norm, pool, and head.
 
             A token is one position of the input image, ``image_size``, so a
             step holds ``batch_size * height * width`` of them and the cost
             times that count is one step's work. Each block is handed the grid
-            it reads and prices itself per image position; a stride-2 block
+            it reads and costs itself per image position; a stride-2 block
             leaves ``ceil(size / 2)`` for the next. The pool and head run once
             per image.
 
@@ -763,7 +730,7 @@ class ResNet(nn.Module):
             image_size = self.image_size
             seq_len = math.prod(image_size)
             rows = seq_len * batch_size
-            priced = _conv2d_cost(
+            costed = _conv2d_cost(
                 self.channels_in,
                 self.channels_hidden[0],
                 kernel_size=3,
@@ -775,7 +742,7 @@ class ResNet(nn.Module):
                 for block, stride in stage_blocks:
                     propagate_attr(block, "image_size", image_size)
                     propagate_attr(block, "grid", grid)
-                    priced += cost(
+                    costed += cost(
                         block,
                         seq_len=seq_len,
                         batch_size=batch_size,
@@ -790,7 +757,7 @@ class ResNet(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 **kwargs,
-            ) + _activation_cost(self.activation, channels=c_last, dtype=dtype)
+            ) + cost(self.activation, channels=c_last, dtype=dtype)
             head = (
                 matmul_cost(
                     channels_in=c_last,
@@ -809,7 +776,7 @@ class ResNet(nn.Module):
                 )
             )
             return (
-                priced
+                costed
                 + _per_image_position(at_output, grid=grid, image_size=image_size)
                 + _per_image_position(
                     _avg_pool_cost(c_last, positions=math.prod(grid), dtype=dtype)
@@ -903,7 +870,7 @@ class SpeedNet(nn.Module):
         norm_momentum: float = 0.4
         """BatchNorm momentum; high because runs are only a few epochs long."""
 
-        activation: ActivationFn = nn.functional.silu
+        activation: ActivationFn = silu
         """Activation used throughout the network.
 
         A ``Makeable`` when the activation carries state (``InlineConfig(nn.PReLU)``
@@ -954,13 +921,13 @@ class SpeedNet(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price whitening, every block at its grid, the final pool, and the head.
+            """Cost whitening, every block at its grid, the final pool, and the head.
 
             A token is one position of the input image, ``image_size``, so a
             step holds ``batch_size * height * width`` of them. The unpadded
             whitening convolution shrinks the grid by
             ``whiten_kernel - 1``; each block pools it by two; the final pool
-            by three. Every layer is priced at its own grid and spread back
+            by three. Every layer is costed at its own grid and spread back
             over the image's positions.
 
             The whitening weight is frozen but owned: it is in ``params``, and
@@ -993,16 +960,16 @@ class SpeedNet(nn.Module):
                 dtype=dtype,
             )
             # Frozen: the adjoint is the input gradient alone, the primal's size.
-            whitened = _frozen(trainable) + _activation_cost(
+            whitened = _frozen(trainable) + cost(
                 self.activation,
                 channels=self.whiten_width,
                 dtype=dtype,
             )
-            priced = _per_image_position(whitened, grid=grid, image_size=image_size)
+            costed = _per_image_position(whitened, grid=grid, image_size=image_size)
             for block in _speednet_blocks(self):
                 propagate_attr(block, "image_size", image_size)
                 propagate_attr(block, "grid", grid)
-                priced += cost(
+                costed += cost(
                     block,
                     seq_len=seq_len,
                     batch_size=batch_size,
@@ -1022,7 +989,7 @@ class SpeedNet(nn.Module):
                 dtype=dtype,
                 **kwargs,
             )
-            return priced + _per_image_position(tail, grid=grid, image_size=image_size)
+            return costed + _per_image_position(tail, grid=grid, image_size=image_size)
 
     def __init__(self, config: Config) -> None:
         super().__init__()

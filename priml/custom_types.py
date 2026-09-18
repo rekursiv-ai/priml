@@ -33,17 +33,17 @@ __all__ = [
 
 @runtime_checkable
 class HasCost(Protocol):
-    """A config that prices the module it builds.
+    """A config that costs the module it builds.
 
     Every argument is named: the protocol fixes no keyword, and each
     implementation declares the ones it reads (``seq_len``, ``batch_size``,
     ``dtype``, ...) as required keyword-only parameters, so a caller that
-    forgets one fails there rather than pricing a guessed batch. The rest of
+    forgets one fails there rather than costing a guessed batch. The rest of
     the bus passes through ``**kwargs`` so a container can forward it unread.
     """
 
     def cost(self, **kwargs: object) -> Cost:
-        """Price one token through the module ``self`` builds.
+        """Cost one token through the module ``self`` builds.
 
         Args:
           **kwargs: The open bus, named arguments only; each implementation

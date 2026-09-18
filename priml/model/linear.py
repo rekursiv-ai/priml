@@ -74,7 +74,7 @@ class Linear(nn.Linear):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price one row; this layer's own ``dtype`` wins over the batch's.
+            """Cost one row; this layer's own ``dtype`` wins over the batch's.
 
             Args:
               seq_len: Tokens per sequence.
@@ -167,7 +167,7 @@ class EnsembleLinear(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Price the flattened ensemble as one matrix, sharing its input row.
+            """Cost the flattened ensemble as one matrix, sharing its input row.
 
             Args:
               seq_len: Tokens per sequence.

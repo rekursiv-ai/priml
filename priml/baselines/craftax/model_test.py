@@ -122,7 +122,7 @@ def test_the_cost_matches_torch_and_prices_the_tanh_towers() -> None:
     """One token is one observation scored by both towers.
 
     The observation carries a gradient so torch runs the full adjoint of
-    the first layer, which is how the matmul primitive prices every input.
+    the first layer, which is how the matmul primitive costs every input.
     """
     config = ActorCritic.Config()
     config.observation_size = 12

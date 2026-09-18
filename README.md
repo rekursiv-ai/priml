@@ -96,19 +96,42 @@ theoretical.peak()["h100", torch.bfloat16]
 
 Notice that `272/295.2-1=-.078591` i.e. `exp000` (Transformer) is within 8% of
 optimal arithmetic intensity for an H100 versus `exp001` (MLP Mixer) which is
-`227.4/295.2-1=-.229675` or 23% suboptimal.
+`227.4/295.2-1=-.229675` or 23% suboptimal. `utilization` computes exactly this
+ratio per cell -- `1` is the roofline knee -- and, given the step's
+`duration_sec`, the achieved fraction of the roofline ceiling (MFU for a
+matmul cell):
 
-The reason for the different intensity: the MLP Mixer is about 28% smaller and
-therefore sees about this much fewer flops. However note that the bytes
-transferred is only 5% smaller for MLP mixer, ie, while its a smaller model it
-still places about the same load on the memory bus. This is why MLP mixers are
-not as "intensity efficient" as transformers. Ie, the params/bytes_moved shakes
-out as:
+```python
+theoretical.utilization(
+    sudoku.exp000().finalize().step.model.cost(batch_size=64, dtype=torch.bfloat16),
+    device="h100",
+    seq_len=81,
+    batch_size=64,
+)
+#   Cost(params=0, params_active=0, bytes_state=0)
+#                           bf16
+#   primal  matmul        0.9214
+#   primal  elementwise  0.01775
+#   primal  reduction    0.02462
+#   adjoint matmul        0.9214
+#   adjoint elementwise  0.01354
+#   adjoint reduction    0.02467
+#   adjoint selection   0.008314
+#   total                  1.932
+```
+
+The reason for the different intensity: the MLP Mixer has about 29% fewer
+parameters and does about 21% fewer matmul flops (`22.03M` vs `27.94M`), but
+its matmul bytes fall only 6% (`193.8K` vs `205.4K`): a smaller model that
+places about the same load on the memory bus. Ie, the params/bytes_moved
+shakes out as:
 - transformer: `6841858 / 205.4K = 33.309922`
 - mlpmixer:    `4869122 / 193.8K = 25.124468`
 
 Meaning: in terms of memory transfer the transformer is getting ~33% better
-deal on parameters per bus access.
+deal on parameters per bus access. Outside the matmul silo the mixer moves
+nearly twice the bytes (`1.49M` vs `802.1K` in total), so its whole-model
+intensity is `44.58` against the transformer's `104.7`.
 
 
 ## Development

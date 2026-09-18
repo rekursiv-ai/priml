@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from torch import Tensor, exp
 
@@ -104,13 +104,16 @@ def test_target_reconstruction(
     #   target_eps: model predicts eps
     #   target_v/v_x/v_eps: model predicts v = a*eps - s*x
     #   target_rectified_flow: model predicts eps - x.
-    if target_fn in (target_v, target_v_x, target_v_eps):
+    # Identity against a protocol-typed parameter: the checker sees no overlap
+    # between the protocol and the concrete wrapper, so widen first.
+    which = cast(object, target_fn)
+    if which in (target_v, target_v_x, target_v_eps):
         perfect_model = a * eps_original - s * x_original
-    elif target_fn is target_x:
+    elif which is target_x:
         perfect_model = x_original
-    elif target_fn is target_eps:
+    elif which is target_eps:
         perfect_model = eps_original
-    elif target_fn is target_rectified_flow:
+    elif which is target_rectified_flow:
         perfect_model = eps_original - x_original
     else:
         raise ValueError(f"Unknown target_fn: {target_fn}")
