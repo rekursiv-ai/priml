@@ -7,6 +7,7 @@ from torch import Tensor, exp
 import pytest
 import torch
 
+from priml.cost import cost
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
     log_sigma_from_log_snr_per_rectified_flow,
@@ -136,6 +137,26 @@ def test_target_reconstruction(
         atol=1e-5,
         rtol=1e-5,
     )
+
+
+@pytest.mark.parametrize(
+    ("target_fn", "primal", "adjoint"),
+    [
+        (target_x, 3, 0),
+        (target_rectified_flow, 7, 0),
+        (target_v_x, 6, 1),
+    ],
+)
+def test_target_cost_counts_elements_and_samples(
+    target_fn: TargetFn,
+    primal: int,
+    adjoint: int,
+) -> None:
+    one = cost(target_fn, dtype=None, elements=6, samples=2)
+    assert one["flops", "primal", "elementwise"].sum() == primal * 6 + 8 * 2
+    assert one["flops", "adjoint", "elementwise"].sum() == adjoint * 6
+    assert all(isinstance(value, int) for value in one.cells.values())
+    assert cost(target_fn, dtype=None, elements=12, samples=4) == one.tile(2)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,9 @@
-"""Attention windows and masks."""
+"""Attention windows and masks.
+
+These helpers exclude keys with ``-inf``. Qwen 3.5 instead uses a finite
+mask value to match Hugging Face. Its caller combines the padding and causal
+masks itself: adding ``-inf`` here would change fully masked rows.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ def layer_window(*, depth_index: DepthIndex, max_seq_len: int, pattern: str) -> 
       pattern: Cycled ``S`` (half context) and ``L`` (full context) symbols.
 
     Returns:
-      window: Keys this layer's queries may look back over, itself included.
+      window: Previous positions this layer may reach, in addition to itself.
 
     Raises:
       ValueError: The position is unspecified, or ``pattern`` is invalid.
@@ -66,14 +71,60 @@ def window_sizes(*, num_layers: int, max_seq_len: int, pattern: str) -> list[int
     return windows
 
 
-def window_mask(q: Tensor, k: Tensor, *, window: int) -> Tensor | None:
-    """Additive mask admitting the last ``window`` keys, causally.
+def combined_mask(
+    q: Tensor,
+    k: Tensor,
+    *,
+    is_causal: bool,
+    attn_mask: Tensor | None,
+    window: int,
+) -> tuple[Tensor | None, bool]:
+    """Resolve a kernel's three masking arguments into one mask and one flag.
+
+    The fill everywhere in this package is ``-inf``. A caller's mask may fill
+    only inside the causal cone and trust ``is_causal`` for the rest, so when
+    both arrive, causality is folded INTO the mask rather than dropped: SDPA
+    refuses ``is_causal`` beside ``attn_mask``, and silently preferring the
+    mask would make the fused and naive kernels two different models.
+
+    A row the combined mask fills entirely is a caller error under ``-inf``:
+    SDPA returns zeros for it, the naive softmax NaN. Callers needing HF's
+    uniform fallback own a finite mask and pass ``is_causal=False`` (see the
+    module docstring).
 
     Args:
       q: ``[..., S, num_heads, channels_head]`` queries.
       k: Keys, same layout.
-      window: Keys each query may look back over, ITSELF INCLUDED. -1, or a
-        value reaching the whole context, needs no mask.
+      is_causal: Whether each query may see only keys at or before it.
+      attn_mask: A caller's additive mask, or None.
+      window: Previous keys each query may reach, plus itself; -1 for all.
+
+    Returns:
+      mask: The additive mask to hand the kernel, or None.
+      is_causal: Whether the kernel should still apply its own causal fast
+        path; True only when ``mask`` is None.
+
+    """
+    if attn_mask is None:
+        attn_mask = window_mask(q, k, window=window)
+        if attn_mask is None:
+            return None, is_causal
+        # The window mask is already causal.
+        return attn_mask, False
+    # A window is causal by construction, so either flag folds the same bias.
+    if is_causal or window >= 0:
+        attn_mask = attn_mask + _causal_bias(q, k, window=window)
+    return attn_mask, False
+
+
+def window_mask(q: Tensor, k: Tensor, *, window: int) -> Tensor | None:
+    """Additive mask admitting ``window`` previous keys plus self, causally.
+
+    Args:
+      q: ``[..., S, num_heads, channels_head]`` queries.
+      k: Keys, same layout.
+      window: Previous keys each query may reach, in addition to itself.
+        Zero is self-only; negative or whole-context history needs no mask.
 
     Returns:
       mask: Additive ``[S, T]`` mask, or None when every key is admissible.
@@ -115,6 +166,20 @@ def causal_chunk_mask(q: Tensor, k: Tensor) -> Tensor | None:
     if s == t:
         return None
     allowed = torch.ones(s, t, dtype=torch.bool, device=q.device).tril(diagonal=t - s)
+    return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
+        ~allowed,
+        float("-inf"),
+    )
+
+
+def _causal_bias(q: Tensor, k: Tensor, *, window: int) -> Tensor:
+    """Full additive causal mask, optionally windowed, bottom-right aligned."""
+    s, t = q.shape[-3], k.shape[-3]
+    offset = torch.arange(t, device=q.device)
+    offset = offset[t - s :, None] - offset[None, :]
+    allowed = offset >= 0
+    if window >= 0:
+        allowed = allowed & (offset <= window)
     return torch.zeros(s, t, dtype=q.dtype, device=q.device).masked_fill(
         ~allowed,
         float("-inf"),

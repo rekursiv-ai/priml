@@ -229,7 +229,6 @@ def test_deep_recurrence_cost_is_zero() -> None:
         build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
         seq_len=2,
         batch_size=1,
-        num_tokens=2,
         dtype=None,
         run=_run_identity_core,
     )
@@ -240,15 +239,14 @@ def test_deep_recurrence_cost_is_zero() -> None:
 def test_plain_cost_matches_torch(prefix: bool) -> None:
     """One core application per forward; a prefix widens the latent sequence.
 
-    A two-cell grid with a two-token prefix keeps every per-cell fraction
-    dyadic, so the analytical count matches torch's exactly.
+    A two-cell grid with a two-token prefix exercises complete-batch totals,
+    so the analytical count matches torch's exactly.
     """
     config = _cost_config(prefix=prefix)
     assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randint(0, 11, (1, 2)),
         batch_size=1,
-        num_tokens=2,
         dtype=None,
         run=_logits_and_halt,
     )
@@ -262,7 +260,6 @@ def test_recurrent_cost_matches_torch() -> None:
         config,
         build_input=lambda: torch.randint(0, 11, (1, 2)),
         batch_size=1,
-        num_tokens=2,
         dtype=None,
         run=_logits_and_halt,
     )
@@ -285,12 +282,12 @@ def test_cost_uses_puzzles_for_halt_and_register_gradient_reductions() -> None:
     two = cost(config, batch_size=2, dtype=None)
     four = cost(config, batch_size=4, dtype=None)
     # Each puzzle owns one halt row and two register rows, not four latent rows.
-    assert two["flops", "adjoint", "reduction"].sum() == (2 + 2 * 16) * (2 - 1) / 2 / 2
-    assert four["flops", "adjoint", "reduction"].sum() == (2 + 2 * 16) * (4 - 1) / 4 / 2
+    assert two["flops", "adjoint", "reduction"].sum() == (2 + 2 * 16) * (2 - 1)
+    assert four["flops", "adjoint", "reduction"].sum() == (2 + 2 * 16) * (4 - 1)
     assert (
-        four["bytes", "primal", "matmul"].sum() < two["bytes", "primal", "matmul"].sum()
+        four["bytes", "primal", "matmul"].sum() > two["bytes", "primal", "matmul"].sum()
     )
-    assert four["flops", "primal"] == two["flops", "primal"]
+    assert four["flops", "primal"].sum() == 2 * two["flops", "primal"].sum()
 
 
 def test_cost_counts_grid_prefix_concatenation() -> None:
@@ -299,16 +296,16 @@ def test_cost_counts_grid_prefix_concatenation() -> None:
     assert (
         prefix["bytes", "primal", "selection"].sum()
         - plain["bytes", "primal", "selection"].sum()
-        == 4 * 2 * (2 + 2) * 16 / 2
+        == 4 * 2 * 2 * (2 + 2) * 16
     )
 
 
-def test_cost_halt_bias_reduction_uses_batch_not_grid_cells() -> None:
+def test_cost_halt_bias_reduction_uses_puzzle_batch_geometry() -> None:
     config = _cost_config(prefix=False)
     config.block = Identity.Config()
     config = config.finalize()
     costed = cost(config, batch_size=4, dtype=None)
-    assert costed["flops", "adjoint", "reduction"].sum() == 2 * (4 - 1) / 4 / 2
+    assert costed["flops", "adjoint", "reduction"].sum() == 2 * (4 - 1)
 
 
 def _cost_config(*, prefix: bool) -> SudokuNet.Config:

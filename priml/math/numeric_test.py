@@ -11,6 +11,7 @@ import torch
 from priml.math.numeric import (
     custom_grad,
     kahan_sum,
+    l2norm,
     log1mexp,
     log1psquare,
     log_arctan_exp,
@@ -316,6 +317,24 @@ def test_safe_log():
         rtol=1e-5,
         atol=1e-5,
     )
+
+
+def test_l2norm_matches_fla_operation_order() -> None:
+    x = torch.randn(2, 3, 5)
+    expected = x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + 1e-6)
+    assert torch.equal(l2norm(x), expected)
+
+
+def test_l2norm_places_epsilon_inside_the_square_root() -> None:
+    x = torch.tensor([[3e-4, 4e-4]])
+    expected = x * torch.rsqrt((x * x).sum(dim=1, keepdim=True) + 1e-6)
+    assert torch.equal(l2norm(x, dim=1), expected)
+    assert not torch.equal(l2norm(x, dim=1), torch.nn.functional.normalize(x, dim=1))
+
+
+def test_l2norm_zero_is_finite() -> None:
+    actual = l2norm(torch.zeros(2, 3))
+    assert torch.equal(actual, torch.zeros(2, 3))
 
 
 def test_safe_sqrt():

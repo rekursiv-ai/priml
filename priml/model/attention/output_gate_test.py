@@ -154,7 +154,6 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
-        num_tokens=8,
         dtype=None,
     )
     inner = cost(
@@ -171,7 +170,7 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
             "primal",
             "matmul",
         ].sum()
-        + 2 * gate
+        + 2 * 8 * gate
     )
     assert (
         model_cost["flops", "adjoint", "matmul"].sum()
@@ -180,7 +179,7 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
             "adjoint",
             "matmul",
         ].sum()
-        + 4 * gate
+        + 4 * 8 * gate
     )
     assert model_cost.params == inner.params + gate
     assert model_cost.bytes_state == inner.bytes_state
@@ -193,16 +192,16 @@ def test_output_gate_traffic_prices_projection_and_scalar_operands() -> None:
     config = config.copy_tree().finalize()
     inner = cost(config.inner, seq_len=4, batch_size=1, dtype=torch.bfloat16)
     actual = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
-    assert actual["bytes", "primal", "matmul"].sum() == 2 * (8 + 8 + 64 / 4)
+    assert actual["bytes", "primal", "matmul"].sum() == 2 * (4 * 8 + 4 * 8 + 64)
     assert (
         actual["bytes", "primal", "elementwise"].sum()
         - inner["bytes", "primal", "elementwise"].sum()
-        == 2 * 5 * 8
+        == 2 * 5 * 8 * 4
     )
     assert (
         actual["bytes", "adjoint", "elementwise"].sum()
         - inner["bytes", "adjoint", "elementwise"].sum()
-        == 2 * 12 * 8
+        == 2 * 12 * 8 * 4
     )
     wide = config.cost(seq_len=4, batch_size=1, dtype=None)
     assert (

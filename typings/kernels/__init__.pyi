@@ -1,0 +1,6 @@
+from typing import Any
+
+class LoadedKernel:
+    def __getattr__(self, name: str) -> Any: ...
+
+def get_kernel(repo_id: str, revision: str | None = ...) -> LoadedKernel: ...

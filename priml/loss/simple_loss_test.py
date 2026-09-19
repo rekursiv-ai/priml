@@ -29,13 +29,13 @@ if TYPE_CHECKING:
 
 def _fp32(
     *,
-    primal: Mapping[str, Mapping[Kernel, float]] | None = None,
-    adjoint: Mapping[str, Mapping[Kernel, float]] | None = None,
+    primal: Mapping[str, Mapping[Kernel, int]] | None = None,
+    adjoint: Mapping[str, Mapping[Kernel, int]] | None = None,
     **fields: int,
 ) -> Cost:
-    """Build a ``Cost`` from per-phase, per-kernel fp32 FLOPs and bytes."""
-    cells: dict[tuple[object, ...], float] = {}
-    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, float]] | None], ...] = (
+    """Build a ``Cost`` from whole-invocation fp32 FLOPs and bytes."""
+    cells: dict[tuple[object, ...], int] = {}
+    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, int]] | None], ...] = (
         ("primal", primal),
         ("adjoint", adjoint),
     )
@@ -151,7 +151,7 @@ def test_simple_loss_reduction_mean():
     assert result["loss"].ndim == 0  # Scalar.
 
 
-def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
+def test_simple_loss_cost_bce_with_logits_counts_the_complete_invocation() -> None:
     """Default BCE: eight primal and five adjoint ops per logit, no reduction.
 
     The harness needs an ``nn.Module``, so the loss rides inside a one-term
@@ -164,30 +164,29 @@ def test_simple_loss_cost_bce_with_logits_is_per_logit() -> None:
         build_input=lambda: torch.randn(4, 3, requires_grad=True),
         seq_len=12,
         batch_size=1,
-        num_tokens=12,
         dtype=None,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
     expected = _fp32(
-        primal={"flops": {"elementwise": 8}, "bytes": {"elementwise": 84}},
-        adjoint={"flops": {"elementwise": 5}, "bytes": {"elementwise": 40}},
+        primal={"flops": {"elementwise": 96}, "bytes": {"elementwise": 1008}},
+        adjoint={"flops": {"elementwise": 60}, "bytes": {"elementwise": 480}},
     )
     assert cost(config, seq_len=12, batch_size=1, dtype=None) == expected
     assert measured == expected + _fp32(
         primal={
-            "flops": {"elementwise": 2},
-            "bytes": {"elementwise": 16, "reduction": 8},
+            "flops": {"elementwise": 24},
+            "bytes": {"elementwise": 192, "reduction": 96},
         },
         adjoint={
-            "flops": {"elementwise": 2},
-            "bytes": {"elementwise": 8, "reduction": 8},
+            "flops": {"elementwise": 24},
+            "bytes": {"elementwise": 96, "reduction": 96},
         },
     )
     assert measured.params == 0
     assert measured["flops", "matmul"].sum() == 0
 
 
-def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
+def test_simple_loss_cost_cross_entropy_counts_complete_rows() -> None:
     """Cross-entropy costs a log-softmax over ``channels_out`` and one gather per row."""
     config = SimpleLoss.Config(
         loss_fn=cross_entropy,
@@ -200,7 +199,6 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
         build_input=lambda: torch.randn(4, 5, requires_grad=True),
         seq_len=4,
         batch_size=1,
-        num_tokens=4,
         dtype=None,
         run=lambda module, logits: _loss(module, logits, label=label),
     )
@@ -208,30 +206,30 @@ def test_simple_loss_cost_cross_entropy_is_per_row() -> None:
     # scattered ``-1`` are fp32 payload.
     label_bytes = Cost(
         cells={
-            ("bytes", "primal", "selection", torch.int64): 8,
-            ("bytes", "adjoint", "selection", torch.int64): 8,
+            ("bytes", "primal", "selection", torch.int64): 32,
+            ("bytes", "adjoint", "selection", torch.int64): 32,
         },
     )
     expected = _fp32(
         primal={
-            "flops": {"elementwise": 3 * 5 + 2, "reduction": 2 * (5 - 1) + (4 - 1) / 4},
-            "bytes": {"elementwise": 144 + 2, "reduction": 48 + 5, "selection": 8},
+            "flops": {"elementwise": 68, "reduction": 35},
+            "bytes": {"elementwise": 584, "reduction": 212, "selection": 32},
         },
         adjoint={
-            "flops": {"elementwise": 2 * 5 + 1, "selection": 1},
-            "bytes": {"elementwise": 92, "reduction": 5, "selection": 12},
+            "flops": {"elementwise": 44, "selection": 4},
+            "bytes": {"elementwise": 368, "reduction": 20, "selection": 48},
         },
     )
     expected = expected + label_bytes
     assert cost(config, seq_len=4, batch_size=1, dtype=None) == expected
     assert measured == expected + _fp32(
         primal={
-            "flops": {"elementwise": 2},
-            "bytes": {"elementwise": 16, "reduction": 8},
+            "flops": {"elementwise": 8},
+            "bytes": {"elementwise": 64, "reduction": 32},
         },
         adjoint={
-            "flops": {"elementwise": 2},
-            "bytes": {"elementwise": 8, "reduction": 8},
+            "flops": {"elementwise": 8},
+            "bytes": {"elementwise": 32, "reduction": 32},
         },
     )
     assert measured["flops", "matmul"].sum() == 0
@@ -248,13 +246,13 @@ def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -
     """MSE and L1: subtract then square/abs; the adjoint scales the saved difference."""
     none = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "none"})
     expected = _fp32(
-        primal={"flops": {"elementwise": 2}, "bytes": {"elementwise": 20}},
-        adjoint={"flops": {"elementwise": 2}, "bytes": {"elementwise": 20}},
+        primal={"flops": {"elementwise": 12}, "bytes": {"elementwise": 120}},
+        adjoint={"flops": {"elementwise": 12}, "bytes": {"elementwise": 120}},
     )
     assert cost(none, seq_len=6, batch_size=1, dtype=None) == expected
     reduced = _fp32(
-        primal={"flops": {"reduction": 5 / 6}, "bytes": {"reduction": 28 / 6}},
-        adjoint={"bytes": {"reduction": 28 / 6}},
+        primal={"flops": {"reduction": 5}, "bytes": {"reduction": 28}},
+        adjoint={"bytes": {"reduction": 28}},
     )
     mean = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "mean"})
     assert cost(
@@ -263,8 +261,8 @@ def test_simple_loss_cost_regression_losses_are_two_ops(loss_fn: SimpleLossFn) -
         batch_size=1,
         dtype=None,
     ) == expected + reduced + _fp32(
-        primal={"bytes": {"elementwise": 8 / 6}},
-        adjoint={"flops": {"elementwise": 1}, "bytes": {"elementwise": 8}},
+        primal={"bytes": {"elementwise": 8}},
+        adjoint={"flops": {"elementwise": 6}, "bytes": {"elementwise": 48}},
     )
     total = SimpleLoss.Config(loss_fn=loss_fn, kwargs={"reduction": "sum"})
     assert cost(total, seq_len=6, batch_size=1, dtype=None) == expected + reduced
@@ -301,17 +299,15 @@ def test_simple_loss_operand_traffic(dtype: torch.dtype) -> None:
     config.loss_fn = mse
     itemsize = dtype.itemsize
     costed = cost(config, seq_len=6, batch_size=1, dtype=dtype)
-    assert costed["bytes", "primal", "elementwise"].sum() == 5 * itemsize
-    assert costed["bytes", "adjoint", "elementwise"].sum() == 5 * itemsize
+    assert costed["bytes", "primal", "elementwise"].sum() == 30 * itemsize
+    assert costed["bytes", "adjoint", "elementwise"].sum() == 30 * itemsize
     config.kwargs = {"reduction": "sum"}
     reduced = cost(config, seq_len=6, batch_size=1, dtype=dtype)
-    assert reduced["bytes", "primal", "reduction"].sum() == 7 * itemsize / 6
-    assert reduced["bytes", "adjoint", "reduction"].sum() == 7 * itemsize / 6
+    assert reduced["bytes", "primal", "reduction"].sum() == 7 * itemsize
+    assert reduced["bytes", "adjoint", "reduction"].sum() == 7 * itemsize
     config.kwargs = {"reduction": "mean"}
     mean = cost(config, seq_len=6, batch_size=1, dtype=dtype)
-    assert (
-        mean["bytes", "primal", "elementwise"].sum() == 5 * itemsize + 2 * itemsize / 6
-    )
+    assert mean["bytes", "primal", "elementwise"].sum() == 32 * itemsize
 
 
 def test_simple_loss_bce_weight_prices_multiply() -> None:
@@ -320,8 +316,8 @@ def test_simple_loss_bce_weight_prices_multiply() -> None:
     config.kwargs["weight"] = torch.ones(6)
     weighted = cost(config, seq_len=6, batch_size=1, dtype=None)
     assert weighted == plain + _fp32(
-        primal={"flops": {"elementwise": 1}, "bytes": {"elementwise": 3 * 4}},
-        adjoint={"flops": {"elementwise": 1}, "bytes": {"elementwise": 3 * 4}},
+        primal={"flops": {"elementwise": 6}, "bytes": {"elementwise": 72}},
+        adjoint={"flops": {"elementwise": 6}, "bytes": {"elementwise": 72}},
     )
 
 

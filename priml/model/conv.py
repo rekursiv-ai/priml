@@ -12,10 +12,7 @@ from torch import Tensor, nn
 
 import torch
 
-from priml.cost import (
-    Cost,
-    matmul_cost,
-)
+from priml.cost import Cost, resolve_dtype
 from priml.model.custom_types import DepthIndex
 from priml.model.init import InitFn, call_init, kaiming_uniform
 
@@ -76,21 +73,21 @@ class Conv1d(nn.Conv1d):
         def cost(
             self,
             *,
-            seq_len: int,
+            input_grid: int | tuple[int, ...],
             batch_size: int,
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one output position; the sharing rows are output positions.
+            """Cost one invocation; the output grid follows from the input grid.
 
             Args:
-              seq_len: Tokens per sequence.
+              input_grid: Spatial input extents; a scalar is the single axis.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -101,7 +98,11 @@ class Conv1d(nn.Conv1d):
                 ndim=1,
                 groups=self.groups,
                 bias=self.bias,
-                rows=seq_len * batch_size,
+                input_grid=(input_grid,) if isinstance(input_grid, int) else input_grid,
+                batch_size=batch_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 
@@ -190,21 +191,21 @@ class Conv2d(nn.Conv2d):
         def cost(
             self,
             *,
-            seq_len: int,
+            input_grid: int | tuple[int, ...],
             batch_size: int,
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one output position; the sharing rows are output positions.
+            """Cost one invocation; the output grid follows from the input grid.
 
             Args:
-              seq_len: Tokens per sequence.
+              input_grid: Spatial input extents; a scalar broadcasts to both axes.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -215,7 +216,13 @@ class Conv2d(nn.Conv2d):
                 ndim=2,
                 groups=self.groups,
                 bias=self.bias,
-                rows=seq_len * batch_size,
+                input_grid=(input_grid,) * 2
+                if isinstance(input_grid, int)
+                else input_grid,
+                batch_size=batch_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 
@@ -304,21 +311,21 @@ class Conv3d(nn.Conv3d):
         def cost(
             self,
             *,
-            seq_len: int,
+            input_grid: int | tuple[int, ...],
             batch_size: int,
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one output position; the sharing rows are output positions.
+            """Cost one invocation; the output grid follows from the input grid.
 
             Args:
-              seq_len: Tokens per sequence.
+              input_grid: Spatial input extents; a scalar broadcasts to all axes.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -329,7 +336,13 @@ class Conv3d(nn.Conv3d):
                 ndim=3,
                 groups=self.groups,
                 bias=self.bias,
-                rows=seq_len * batch_size,
+                input_grid=(input_grid,) * 3
+                if isinstance(input_grid, int)
+                else input_grid,
+                batch_size=batch_size,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
                 dtype=self.dtype if self.dtype is not None else dtype,
             )
 
@@ -362,6 +375,53 @@ class Conv3d(nn.Conv3d):
         return super().forward(input)
 
 
+def conv_output_grid(
+    input_grid: tuple[int, ...],
+    *,
+    kernel_size: int | tuple[int, ...],
+    stride: int | tuple[int, ...],
+    padding: int | str | tuple[int, ...],
+    dilation: int | tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return the per-axis output grid torch's convolution writes.
+
+    ``padding="same"`` keeps every input position as an output position, and
+    ``"valid"`` is zero padding. Any other string is rejected.
+
+    Args:
+      input_grid: Per-axis spatial input extents, without batch or channels.
+      kernel_size: One extent for every axis, or one per axis.
+      stride: Window step, scalar or per axis.
+      padding: ``"same"``, ``"valid"``, an int, or one per axis.
+      dilation: Kernel spacing, scalar or per axis.
+
+    Returns:
+      grid: Per-axis output extents.
+
+    """
+    ndim = len(input_grid)
+    if padding == "same":
+        return input_grid
+    pad_value = 0 if padding == "valid" else padding
+    if isinstance(pad_value, str):
+        raise TypeError(f"Unsupported convolution padding: {pad_value!r}.")
+    taps = kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * ndim
+    steps = stride if isinstance(stride, tuple) else (stride,) * ndim
+    spacings = dilation if isinstance(dilation, tuple) else (dilation,) * ndim
+    pads = pad_value if isinstance(pad_value, tuple) else (pad_value,) * ndim
+    return tuple(
+        (size + 2 * pad - spacing * (tap - 1) - 1) // step + 1
+        for size, pad, spacing, tap, step in zip(
+            input_grid,
+            pads,
+            spacings,
+            taps,
+            steps,
+            strict=True,
+        )
+    )
+
+
 def conv_cost(
     *,
     channels_in: int,
@@ -370,20 +430,26 @@ def conv_cost(
     ndim: int,
     groups: int,
     bias: bool,
-    rows: float = 1,
+    input_grid: tuple[int, ...],
+    batch_size: int,
+    stride: int | tuple[int, ...] = 1,
+    padding: int | str | tuple[int, ...] = "same",
+    dilation: int | tuple[int, ...] = 1,
     dtype: torch.dtype | None = None,
+    input_grad: bool = True,
+    weight_grad: bool = True,
+    bias_grad: bool = True,
 ) -> Cost:
-    """Cost a convolution at one OUTPUT position.
+    """Cost one complete convolution invocation and its dense dot products.
 
-    Every output element is a dot product over its receptive field, so a
-    convolution is the matmul ``[channels_in / groups * prod(kernel_size)] ->
-    [channels_out]`` applied once per output position. The bus carries no
-    spatial extent, so the "token" here is one output position; a caller with
-    a grid multiplies by its size. Stride, padding, and dilation move where the
-    products land, not how many there are per position. Traffic counts each
-    group's receptive-field operand independently at every output position;
-    overlapping patches are reread, with no im2col workspace or cache model.
-    This is logical operand I/O, not a lower bound on whole-convolution HBM.
+    The output grid is derived from ``input_grid`` and the window geometry, so
+    stride, padding, and dilation enter only through the positions they leave;
+    a caller never pre-divides. The primal reads input and weight tensors once
+    and writes the output once. The joint backward reads the incoming gradient
+    once, the input only for a weight gradient, and the weight only for an input
+    gradient. Each requested gradient is written once. Bias operands belong to
+    elementwise/reduction. These are logical tensor bytes, not measured cache or
+    HBM transactions.
 
     Args:
       channels_in: Input channels, before grouping.
@@ -392,20 +458,68 @@ def conv_cost(
       ndim: Spatial rank, which a scalar ``kernel_size`` is raised to.
       groups: Blocked connections; each output sees ``channels_in / groups``.
       bias: Whether a bias vector is owned.
-      rows: Output positions sharing the weights and bias.
-      dtype: Element type of every operand; ``None`` is torch's default.
+      input_grid: Per-axis spatial input extents, without batch or channels.
+      batch_size: Sequences in this invocation.
+      stride: Window step, scalar or per axis.
+      padding: ``"same"``, ``"valid"``, an int, or one per axis.
+      dilation: Kernel spacing, scalar or per axis.
+      dtype: Operand dtype; ``None`` is torch's default.
+      input_grad: Compute the input gradient.
+      weight_grad: Compute the weight gradient.
+      bias_grad: Compute a gradient for an owned bias.
 
     Returns:
-      cost: The matmul's cost; parameters equal the weight plus bias numel.
+      cost: Integer FLOPs and operand bytes for the invocation, plus parameters.
 
     """
+    if len(input_grid) != ndim:
+        raise ValueError(
+            f"input_grid has {len(input_grid)} axes; ndim is {ndim}.",
+        )
+    output_grid = conv_output_grid(
+        input_grid,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+    )
+    rows = batch_size * math.prod(output_grid)
+    input_rows = batch_size * math.prod(input_grid)
+    _validate_row_count(rows)
+    _validate_row_count(input_rows)
     taps = math.prod(
         kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * ndim,
     )
-    return matmul_cost(
-        channels_in=channels_in // groups * taps,
-        channels_out=channels_out // groups,
-        bias=bias,
-        rows=rows,
-        dtype=dtype,
-    ).tile(groups, copies=groups)
+    weights = channels_out * (channels_in // groups) * taps
+    biases = channels_out if bias else 0
+    dt = resolve_dtype(dtype)
+    inputs = channels_in * input_rows
+    gradients = int(input_grad) + int(weight_grad)
+    backward = channels_out * rows + gradients * (inputs + weights) if gradients else 0
+    return Cost(
+        cells={
+            ("flops", "primal", "matmul", dt): 2 * rows * weights,
+            ("flops", "adjoint", "matmul", dt): 2 * rows * weights * gradients,
+            ("bytes", "primal", "matmul", dt): dt.itemsize
+            * (inputs + weights + rows * channels_out),
+            ("bytes", "adjoint", "matmul", dt): dt.itemsize * backward,
+            ("flops", "primal", "elementwise", dt): rows * biases,
+            ("bytes", "primal", "elementwise", dt): dt.itemsize * biases,
+            ("flops", "adjoint", "reduction", dt): biases * (rows - 1)
+            if bias_grad
+            else 0,
+            ("bytes", "adjoint", "reduction", dt): dt.itemsize
+            * (rows * biases + biases)
+            if bias_grad
+            else 0,
+        },
+        params=weights + biases,
+        params_active=weights + biases,
+    )
+
+
+def _validate_row_count(rows: object) -> None:
+    if not isinstance(rows, int) or isinstance(rows, bool):
+        raise TypeError("Convolution row counts must be integers.")
+    if rows < 1:
+        raise ValueError("Convolution input and output rows must be positive.")

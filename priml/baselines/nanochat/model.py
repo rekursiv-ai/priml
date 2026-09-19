@@ -299,10 +299,6 @@ class NanoChatLM(nn.Module):
             residual mix at the model width. The gate that reads a value table
             is the attention's own and is costed there.
 
-            This is the model root: every token of ``batch_size`` sequences of
-            ``seq_len`` shares the weights, so a caller's own ``rows`` is
-            replaced by the batch's tokens.
-
             Args:
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
@@ -310,7 +306,7 @@ class NanoChatLM(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             assert isinstance(self.block, list)
@@ -472,39 +468,22 @@ class NanoChatLM(nn.Module):
         cos, sin = self._rotation
         return cos[:length], sin[:length]
 
-    def flops_per_token(self) -> int:
-        """Estimated forward-plus-backward FLOPs for one token.
+    def flops_per_token(self) -> float:
+        """Report matmul FLOPs per token at the configured context.
 
-        Counts each matrix parameter's multiply-accumulate three times (once
-        forward, twice backward) and adds the attention scores, which scale
-        with the window rather than with any parameter count. Lookup tables are
-        excluded: a gather does no arithmetic.
+        Derives this rate from one complete invocation and excludes non-matmul
+        arithmetic.
 
         Returns:
-          flops: FLOPs attributable to one token of one sequence.
+          flops: Whole-invocation matmul FLOPs divided by its token count.
 
         """
-        embed = self.embed
-        assert isinstance(embed, nn.Module)
-        gathered = {
-            id(parameter)
-            for module in (embed, *self.value_embeds.values(), self.mix)
-            for parameter in module.parameters()
-        }
-        matrix = sum(
-            parameter.numel()
-            for parameter in self.parameters()
-            if id(parameter) not in gathered
-        )
-        config = self.config
-        assert isinstance(config.block, list)
-        # ``num_heads * channels_head``, read from the block rather than derived
-        # from the model width: the attention's inner width is decoupled from
-        # the residual stream, so dividing would miscount every model where
-        # they differ.
-        inner = _inner_width(config.block[0])
-        attention = sum(12 * inner * _window(block) for block in self.blocks)
-        return 6 * matrix + attention
+        whole = self.config.cost(
+            seq_len=self.config.max_seq_len,
+            batch_size=1,
+            dtype=None,
+        )["flops", "matmul"].sum()
+        return whole / self.config.max_seq_len
 
 
 def _value_table_config(
@@ -534,16 +513,6 @@ class _BlockCallable(Protocol):
         cos_sin: tuple[Tensor, Tensor],
         value_embedding: Tensor | None,
     ) -> Tensor: ...
-
-
-def _window(block: nn.Module) -> int:
-    """How far back a built block attends."""
-    attention = getattr(block, "attn", None)
-    config = getattr(attention, "config", None)
-    window = getattr(config, "window", None)
-    if not isinstance(window, int):
-        raise TypeError(f"{type(block).__name__} declares no attention window.")
-    return window
 
 
 def _inner_width(block: HasAttention) -> int:
@@ -605,7 +574,7 @@ class OutputNormFeedForward(SwiGLUReluSquared):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             return super().cost(
@@ -678,7 +647,7 @@ class GatedResidualMix(ResidualMix):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             base = super().cost(
@@ -690,8 +659,8 @@ class GatedResidualMix(ResidualMix):
             dt = dtype
             gate = (
                 elementwise_cost(
-                    primal=8,
-                    adjoint=8,
+                    primal=8 * seq_len * batch_size,
+                    adjoint=8 * seq_len * batch_size,
                     channels=1,
                     inputs=6,
                     outputs=5,
@@ -703,15 +672,20 @@ class GatedResidualMix(ResidualMix):
                 )
                 + elementwise_cost(
                     primal=0,
-                    adjoint=2 * self.channels_in,
+                    adjoint=2 * self.channels_in * seq_len * batch_size,
                     channels=self.channels_in,
                     inputs=0,
                     outputs=0,
                     adjoint_inputs=2,
                     adjoint_outputs=2,
+                    rows=seq_len * batch_size,
                     dtype=dt,
                 )
-                + reduction_cost(input_elements=self.channels_in, dtype=dt)
+                + reduction_cost(
+                    input_elements=self.channels_in * seq_len * batch_size,
+                    output_groups=seq_len * batch_size,
+                    dtype=dt,
+                )
             )
             return base + gate.tile(self.num_layers, copies=self.num_layers)
 
@@ -846,7 +820,7 @@ class MemoryNanoChatLM(NanoChatLM):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             batch = kwargs
@@ -873,21 +847,26 @@ class MemoryNanoChatLM(NanoChatLM):
                     traffic(
                         "primal",
                         "elementwise",
-                        elements=5 * c + 1 / rows,
-                        flops=2 * c,
+                        elements=5 * c * rows + 1,
+                        flops=2 * c * rows,
                         dtype=dt,
                     )
                     + traffic(
                         "adjoint",
                         "elementwise",
-                        elements=6 * c + 1 / rows,
-                        flops=2 * c,
+                        elements=6 * c * rows + 1,
+                        flops=2 * c * rows,
                         dtype=dt,
                     )
-                    + reduction_cost(input_elements=c, dtype=dt, phase="adjoint")
+                    + reduction_cost(
+                        input_elements=c * rows,
+                        output_groups=rows,
+                        dtype=dt,
+                        phase="adjoint",
+                    )
                     + reduction_cost(
                         input_elements=rows,
-                        rows=rows,
+                        output_groups=1,
                         dtype=dt,
                         phase="adjoint",
                     )
@@ -949,15 +928,6 @@ class MemoryNanoChatLM(NanoChatLM):
         if self.fused_ngram:
             for table in self._tables():
                 table.prepare_gradient_sinks(dirty_bitmaps=self.ngram_dirty_clear)
-
-    @override
-    def flops_per_token(self) -> int:
-        table_parameters = sum(
-            parameter.numel()
-            for table in self._tables()
-            for parameter in table.parameters()
-        )
-        return super().flops_per_token() - 6 * table_parameters
 
     def _tables(self) -> list[HashedNgramTables]:
         """Every n-gram table, bigrams then trigrams; ``ModuleDict`` erases the type."""

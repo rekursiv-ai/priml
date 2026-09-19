@@ -29,7 +29,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
-import functools
 import logging
 
 from configgle import Fig
@@ -39,6 +38,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.baselines.arcagi1.augmentation import ColorDihedral
 from priml.lib.custom_json import DictCodec, IntCodec, loads
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
@@ -96,25 +96,16 @@ def augment_sudoku(
       labels: ``[B, 81]`` solutions under the same transformation.
 
     """
-    n = 9
-    batch = inputs.shape[0]
-    device = inputs.device
-    # Digits occupy tokens 2..10; 0 (pad) and 1 (empty) are fixed points, so a
-    # padded row passes through unchanged and stays padded.
-    permutations = (
-        torch.arange(vocab_size, device=device, dtype=torch.long)
-        .expand(batch, -1)
-        .clone()
+    config = ColorDihedral.Config()
+    # Preserve the original rotation/flip ordering so seeded batches stay identical.
+    config.transforms = (0, 4, 1, 7, 2, 5, 3, 6)
+    return config.make().augment_tokens(
+        inputs,
+        labels,
+        vocab_size=vocab_size,
+        token_offset=1,
+        generator=generator,
     )
-    draws = torch.rand(batch, n, device=device, generator=generator)
-    permutations[:, 2 : n + 2] = draws.argsort(dim=1) + 2
-    inputs = torch.gather(permutations, 1, inputs.long()).to(inputs.dtype)
-    labels = torch.gather(permutations, 1, labels.long()).to(labels.dtype)
-
-    symmetries = _square_symmetries(n, device)
-    choice = torch.randint(0, 8, (batch,), device=device, generator=generator)
-    selected = symmetries[choice]
-    return torch.gather(inputs, 1, selected), torch.gather(labels, 1, selected)
 
 
 class _SudokuBatches:
@@ -302,18 +293,6 @@ def _load_split(dataset_dir: Path, split: str) -> _SudokuSplit:
         "group_indices": bounds,
         "vocab_size": IntCodec.coerce(metadata["vocab_size"]),
     }
-
-
-@functools.cache
-def _square_symmetries(n: int, device: torch.device) -> Tensor:
-    """Return the 8 symmetries of an ``n x n`` grid, as flat index permutations."""
-    base = torch.arange(n * n, device=device).reshape(n, n)
-    out: list[Tensor] = []
-    for k in range(4):
-        rotated = torch.rot90(base, k)
-        out.append(rotated.reshape(-1))
-        out.append(rotated.flip(1).reshape(-1))
-    return torch.stack(out)
 
 
 class SudokuData:

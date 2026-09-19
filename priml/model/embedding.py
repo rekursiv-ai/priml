@@ -84,7 +84,7 @@ class Embedding(nn.Embedding):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -94,12 +94,12 @@ class Embedding(nn.Embedding):
             row = self.channels_out
             return Cost(
                 cells={
-                    ("flops", "adjoint", "selection", dt): row,
-                    ("bytes", "primal", "selection", index): index.itemsize,
-                    ("bytes", "primal", "selection", dt): dt.itemsize * 2 * row,
-                    ("bytes", "adjoint", "selection", index): index.itemsize,
+                    ("flops", "adjoint", "selection", dt): rows * row,
+                    ("bytes", "primal", "selection", index): rows * index.itemsize,
+                    ("bytes", "primal", "selection", dt): dt.itemsize * 2 * rows * row,
+                    ("bytes", "adjoint", "selection", index): rows * index.itemsize,
                     ("bytes", "adjoint", "selection", dt): dt.itemsize
-                    * (3 * row + self.channels_in * row / rows),
+                    * (3 * rows * row + self.channels_in * row),
                 },
                 params=self.channels_in * row,
                 params_active=row,

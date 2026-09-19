@@ -405,20 +405,19 @@ def test_router_cost_is_the_gate_matmul(config: Router.Config) -> None:
         build_input=lambda: torch.randn(3, 8, requires_grad=True),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
         dtype=None,
         run=_first_tensor,
     )
-    assert model_cost["flops", "primal", "matmul"].sum() == 2 * 8 * 4
-    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * 8 * 4
+    assert model_cost["flops", "primal", "matmul"].sum() == 2 * 3 * 8 * 4
+    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * 3 * 8 * 4
     assert model_cost.params == 8 * 4
     # Scores in and the top-k values out at fp32; the top-k indices are int64.
-    assert model_cost["bytes", "primal", "sort", torch.float32] == 4 * (4 + 2)
-    assert model_cost["bytes", "primal", "sort", torch.int64] == 8 * 2
+    assert model_cost["bytes", "primal", "sort", torch.float32] == 3 * 4 * (4 + 2)
+    assert model_cost["bytes", "primal", "sort", torch.int64] == 3 * 8 * 2
     # Gather each chosen weight: index read (int64), value read and write (fp32).
-    assert model_cost["bytes", "primal", "selection", torch.int64] == 8 * 2
-    assert model_cost["bytes", "primal", "selection", torch.float32] == 4 * 2 * 2
-    assert model_cost["flops", "adjoint", "selection"].sum() == 2
+    assert model_cost["bytes", "primal", "selection", torch.int64] == 3 * 8 * 2
+    assert model_cost["bytes", "primal", "selection", torch.float32] == 3 * 4 * 2 * 2
+    assert model_cost["flops", "adjoint", "selection"].sum() == 3 * 2
 
 
 def test_softmax_router_counts_the_softmax_reductions() -> None:
@@ -461,15 +460,13 @@ def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
         num_shared_experts=1,
         shared_expert=expert.copy_tree(),
     )
-    model_cost = assert_cost_matches_torch(
-        config,
-        build_input=lambda: torch.randn(2, 3, 8, requires_grad=True),
+    finalized = config.copy_tree().finalize()
+    model_cost = finalized.cost(
         seq_len=6,
         batch_size=1,
-        num_tokens=6,
         dtype=None,
+        expert_rows=(6, 6, 0, 0),
     )
-    finalized = config.copy_tree().finalize()
     router = cost(finalized.router, seq_len=6, batch_size=1, dtype=None)
     one_expert = cost(finalized.expert, seq_len=6, batch_size=1, dtype=None)
     assert router.params == 8 * 4
@@ -487,12 +484,12 @@ def test_moe_cost_owns_every_expert_but_activates_top_k() -> None:
     # Dispatch: sort the top-k assignments into expert order, int64 in and out.
     assert (
         model_cost["bytes", "primal", "sort"].sum()
-        == router["bytes", "primal", "sort"].sum() + 8 * 2 * 2
+        == router["bytes", "primal", "sort"].sum() + 6 * 8 * 2 * 2
     )
-    assert model_cost["flops", "primal", "selection"].sum() == (2 + 1) * 8
+    assert model_cost["flops", "primal", "selection"].sum() == 6 * (2 + 1) * 8
     assert (
         model_cost["flops", "adjoint", "selection"].sum()
-        == (2 + 1) * 8 + router["flops", "adjoint", "selection"].sum()
+        == 6 * (2 + 1) * 8 + router["flops", "adjoint", "selection"].sum()
     )
 
 
@@ -502,10 +499,26 @@ def test_moe_cost_does_not_price_an_unused_shared_expert() -> None:
     config.shared_expert = SwiGLU.Config()
     config.shared_expert.act = torch.nn.functional.gelu
     config.make()
-    assert config.finalize().cost(seq_len=1, batch_size=1, dtype=None).params > 0
+    assert (
+        config.finalize()
+        .cost(
+            seq_len=1,
+            batch_size=1,
+            dtype=None,
+            expert_rows=(1, 1, 0, 0, 0, 0, 0, 0),
+        )
+        .params
+        > 0
+    )
 
 
-def test_moe_cost_shares_weights_over_balanced_expert_rows() -> None:
+def test_moe_cost_requires_realized_expert_rows() -> None:
+    config = MoE.Config(channels_in=4).finalize()
+    with pytest.raises(ValueError, match="expert_rows"):
+        config.cost(seq_len=8, batch_size=1, dtype=None)
+
+
+def test_moe_cost_sums_realized_expert_rows() -> None:
     config = MoE.Config()
     config.channels_in = 4
     config.router.num_experts = 4
@@ -513,24 +526,29 @@ def test_moe_cost_shares_weights_over_balanced_expert_rows() -> None:
     config.expert.channels_hidden = 3
     config.expert.bias = True
     finalized = config.finalize()
-    result = finalized.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
+    result = finalized.cost(
+        seq_len=8,
+        batch_size=1,
+        dtype=torch.bfloat16,
+        expert_rows=(4, 4, 4, 4),
+    )
     router = cost(finalized.router, seq_len=8, batch_size=1, dtype=torch.bfloat16)
     expert = cost(finalized.expert, seq_len=4, batch_size=1, dtype=torch.bfloat16)
     assert (
         result["bytes", "primal", "matmul"].sum()
         == router["bytes", "primal", "matmul"].sum()
-        + 2 * expert["bytes", "primal", "matmul"].sum()
+        + 4 * expert["bytes", "primal", "matmul"].sum()
     )
     assert (
         result["bytes", "adjoint", "matmul"].sum()
         == router["bytes", "adjoint", "matmul"].sum()
-        + 2 * expert["bytes", "adjoint", "matmul"].sum()
+        + 4 * expert["bytes", "adjoint", "matmul"].sum()
     )
     assert result["flops", "adjoint", "reduction"].sum() == router[
         "flops",
         "adjoint",
         "reduction",
-    ].sum() + 2 * expert["flops", "adjoint", "reduction"].sum() + 2 * (4 - 1)
+    ].sum() + 4 * expert["flops", "adjoint", "reduction"].sum() + 8 * 2 * (4 - 1)
 
 
 def _first_tensor(module: torch.nn.Module, value: object) -> torch.Tensor:

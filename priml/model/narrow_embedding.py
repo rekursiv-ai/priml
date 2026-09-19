@@ -85,7 +85,7 @@ class NarrowEmbedding(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del dtype

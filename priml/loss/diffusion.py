@@ -77,36 +77,20 @@ class DiffusionLoss(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one element of ``x0``; per-sample scalar work is spread ``1 / n``.
+            """Cost the complete diffusion loss invocation.
 
-            A token is one element of ``x0``; the geometry's rows are the
-            elements one sample holds. The ``denoiser`` is the model: it arrives at forward
-            time, no config here holds it, and ``TrainStep.Config.model`` costs
-            it, so it is excluded.
-
-            Per element: the noise mix ``α x0 + σ ε`` is three ops (no adjoint;
-            ``x0`` and ``ε`` are data), the ``target_fn`` costs itself, the
-            squared error is two, and the mean over the sample is one
-            reduction of ``(n - 1) / n``. The adjoint scales the saved
-            difference by the upstream gradient and by ``1 / n``, three ops,
-            plus whatever the ``target_fn`` adds through ``predict``.
-
-            Per SAMPLE, so divided by ``rows``: ``log_t`` is one log;
-            ``logsnr_fn``, ``corruption_fn``, and ``time_transform`` (when set)
-            each cost themselves over one scalar; ``compute_log_alpha`` and the
-            two exponentials are four. ``snr_gamma > 0`` adds five forward (log,
-            clamp, subtract, exp, multiply) and one back. Traffic counts unfused
-            tensor operands; the schedules expose only their scalar boundary.
-            Random draws count their output writes, not RNG internal state.
+            Vector work runs for every element of ``x0``. Schedules and target
+            coefficient preparation run once for every sample. The denoiser is
+            supplied at forward time and priced by its owning training step.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Elements per sample.
+              batch_size: Samples per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-element cost of this loss.
+              cost: Integer FLOPs and logical bytes for the complete batch.
 
             Raises:
               TypeError: ``target_fn`` or a schedule function carries no
@@ -114,18 +98,14 @@ class DiffusionLoss(nn.Module):
 
             """
             del kwargs
-            rows = seq_len * batch_size
+            elements = seq_len * batch_size
             dt = dtype
-            # Per sample, spread over its elements: the drawn time's log, the
-            # three schedule transforms (each costed by itself, over one
-            # scalar), ``compute_log_alpha`` and the two exponentials, and the
-            # min-SNR weight when on.
             schedules = [self.logsnr_fn, self.corruption_fn]
             if self.time_transform is not None:
                 schedules.append(self.time_transform)
             per_sample = sum(
                 (cost(fn, channels=1, dtype=dt) for fn in schedules),
-                traffic("primal", "elementwise", elements=6, flops=1 + 4, dtype=dt),
+                traffic("primal", "elementwise", elements=6, flops=5, dtype=dt),
             )
             if self.snr_gamma > 0:
                 per_sample += traffic(
@@ -135,17 +115,39 @@ class DiffusionLoss(nn.Module):
                     flops=5,
                     dtype=dt,
                 ) + traffic("adjoint", "elementwise", elements=3, flops=1, dtype=dt)
-            # Per element: the noise mix ``α x0 + σ ε`` (three ops, no adjoint),
-            # the squared error (two), the mean over the sample, and the
-            # adjoint that scales the saved difference by the upstream
-            # gradient and ``1 / n``.
             return (
-                traffic("primal", "elementwise", elements=13, flops=3 + 2, dtype=dt)
-                + cost(self.target_fn, dtype=dt, rows=rows)
-                + reduction_cost(input_elements=rows, rows=rows, dtype=dt)
-                + traffic("adjoint", "elementwise", elements=7, flops=3, dtype=dt)
-                + traffic("adjoint", "reduction", elements=(rows + 1) / rows, dtype=dt)
-                + per_sample.tile(1 / rows)
+                traffic(
+                    "primal",
+                    "elementwise",
+                    elements=13 * elements,
+                    flops=5 * elements,
+                    dtype=dt,
+                )
+                + cost(
+                    self.target_fn,
+                    dtype=dt,
+                    elements=elements,
+                    samples=batch_size,
+                )
+                + reduction_cost(
+                    input_elements=elements,
+                    output_groups=batch_size,
+                    dtype=dt,
+                )
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=7 * elements,
+                    flops=3 * elements,
+                    dtype=dt,
+                )
+                + traffic(
+                    "adjoint",
+                    "reduction",
+                    elements=elements + batch_size,
+                    dtype=dt,
+                )
+                + per_sample.tile(batch_size)
             )
 
     class Output(TypedDict):

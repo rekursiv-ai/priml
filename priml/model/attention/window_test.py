@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, override
 
+import math
+
 from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
@@ -88,6 +90,37 @@ def test_a_window_admits_its_own_position_and_w_before_it() -> None:
     assert mask is not None
     admitted = torch.isfinite(mask)
     assert admitted[5].tolist() == [False, False, False, True, True, True, False, False]
+
+
+def test_the_package_fill_is_negative_infinity() -> None:
+    """Every mask this module builds fills with ``-inf``, never ``finfo.min``.
+
+    The two are not interchangeable once a row is fully masked: finite fills
+    leave a uniform average, ``-inf`` beside a finite fill makes the finite
+    entry win outright. One fill per package, or the combination is a bug.
+    """
+    q = torch.zeros(4, 1, 2)
+    k = torch.zeros(8, 1, 2)
+    windowed = window_mask(q, k, window=1)
+    chunked = causal_chunk_mask(q, k)
+    assert windowed is not None
+    assert chunked is not None
+    for mask in (windowed, chunked):
+        assert set(mask.unique().tolist()) == {0.0, float("-inf")}
+
+
+def test_fully_masked_row_semantics_differ_by_fill() -> None:
+    """Pin the softmax behaviour the fill convention rests on.
+
+    A row filled entirely with ``finfo.min`` averages uniformly; one finite
+    fill among ``-inf`` takes all the weight. Any caller mixing the two gets
+    the second, which is why the package uses one fill.
+    """
+    finite = torch.finfo(torch.float32).min
+    uniform = torch.tensor([finite] * 4).softmax(-1)
+    torch.testing.assert_close(uniform, torch.full((4,), 0.25))
+    mixed = torch.tensor([finite, -math.inf, -math.inf, -math.inf]).softmax(-1)
+    torch.testing.assert_close(mixed, torch.tensor([1.0, 0.0, 0.0, 0.0]))
 
 
 def test_a_window_reaching_the_context_needs_no_mask() -> None:

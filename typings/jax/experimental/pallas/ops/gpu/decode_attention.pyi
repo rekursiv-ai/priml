@@ -1,0 +1,92 @@
+from typing import Any
+
+from jax import lax as lax
+
+def attn_forward_kernel(
+    q_ref,
+    k_ref,
+    v_ref,
+    start_idx_ref,
+    kv_seq_len_ref,
+    o_ref: Any,
+    *residual_refs: Any,
+    sm_scale: float,
+    block_k: int,
+    block_h: int,
+    num_heads: int,
+): ...
+def decode_attn_unbatched(
+    q,
+    k,
+    v,
+    start_idx,
+    kv_seq_len,
+    sm_scale: float,
+    block_h: int,
+    block_k: int,
+    k_splits: int,
+    num_warps: int | None,
+    num_stages: int,
+    grid: tuple[int, ...] | None,
+    interpret: bool,
+    debug: bool,
+    return_residuals: bool,
+    normalize_output: bool,
+): ...
+def mqa(
+    q,
+    k,
+    v,
+    start_idx=None,
+    kv_seq_len=None,
+    sm_scale: float | None = None,
+    block_h: int = 16,
+    block_k: int = 256,
+    k_splits: int = 16,
+    num_warps: int | None = None,
+    num_stages: int = 2,
+    grid: tuple[int, ...] | None = None,
+    interpret: bool = False,
+    debug: bool = False,
+    return_residuals: bool = False,
+    normalize_output: bool = True,
+): ...
+def gqa(
+    q,
+    k,
+    v,
+    start_idx=None,
+    kv_seq_len=None,
+    sm_scale: float | None = None,
+    block_h: int = 16,
+    block_k: int = 128,
+    k_splits: int = 16,
+    num_warps: int | None = None,
+    num_stages: int = 2,
+    grid: tuple[int, ...] | None = None,
+    interpret: bool = False,
+    debug: bool = False,
+    return_residuals: bool = False,
+    normalize_output: bool = True,
+): ...
+def mqa_reference(
+    q,
+    k,
+    v,
+    start_idx=None,
+    kv_seq_len=None,
+    sm_scale=None,
+    return_residuals: bool = False,
+    normalize_output: bool = True,
+): ...
+def mha_reference(q, k, v, start_idx=None, kv_seq_len=None, sm_scale=None): ...
+def gqa_reference(
+    q,
+    k,
+    v,
+    start_idx=None,
+    kv_seq_len=None,
+    sm_scale=None,
+    return_residuals: bool = False,
+    normalize_output: bool = True,
+): ...

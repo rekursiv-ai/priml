@@ -5,14 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import math
+
 from configgle.testing import assert_pprint_golden
+from torch.utils.flop_counter import FlopCounterMode
 
 import pytest
 import torch
 
-from priml.model.conv import Conv1d, Conv2d, Conv3d
+from priml.model.conv import Conv1d, Conv2d, Conv3d, conv_cost
 from priml.testing.bfb import assert_bfb_against_golden
-from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.cost import (
+    _convolution_backward_flops,
+    _TrafficMode,
+    assert_cost_matches_torch,
+)
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -123,7 +130,7 @@ def test_conv_reset():
 
 
 def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
-    """Per output position: ``channels_in * prod(kernel_size)`` -> ``channels_out``.
+    """Count every output position: ``channels_in * prod(kernel_size)`` -> ``channels_out``.
 
     ``padding="same"`` keeps every input position as an output position, so
     a ``4 x 6`` image is 24 tokens.
@@ -131,42 +138,31 @@ def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
     analytical = assert_cost_matches_torch(
         Conv2d.Config(2, 3, kernel_size=(3, 5), bias=True),
         build_input=lambda: torch.randn(1, 2, 4, 6, requires_grad=True),
-        seq_len=4 * 6,
+        input_grid=(4, 6),
         batch_size=1,
-        num_tokens=4 * 6,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
     weights = 3 * 2 * 15
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
-    assert analytical["flops", "adjoint", "matmul"].sum() == 4 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 24 * weights
+    assert analytical["flops", "adjoint", "matmul"].sum() == 4 * 24 * weights
     assert analytical.params == weights + 3
-    assert analytical["bytes", "primal", "elementwise"].sum() == 4 * (2 * 3 + 3 / 24)
+    assert analytical["bytes", "primal", "elementwise"].sum() == 4 * 3
 
 
 def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
-    """Grouped: each output sees ``channels_in / groups`` inputs, forward and back.
-
-    torch's ``convolution_backward`` formula ignores ``groups`` (it reads the
-    full ``c_in`` off the weight shape), so it over-counts the backward by the
-    group factor: measured 504 forward, 1512 backward for a 2-group conv whose
-    true backward is 1008. Forward agrees; the total is held to 3/4 of torch's.
-    """
+    """Grouped convolution counts only its connected input channels in both passes."""
     analytical = assert_cost_matches_torch(
         Conv1d.Config(4, 6, kernel_size=3, groups=2),
         build_input=lambda: torch.randn(1, 4, 7, requires_grad=True),
-        seq_len=7,
+        input_grid=(7,),
         batch_size=1,
-        num_tokens=7,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
-        expected_ratio=0.75,
     )
     weights = 6 * (4 // 2) * 3
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 7 * weights
     assert analytical.params == weights
     assert analytical["bytes", "primal", "matmul"].sum() == 4 * (
-        4 * 3 + 6 + weights / 7
+        7 * 4 + 7 * 6 + weights
     )
 
 
@@ -174,13 +170,104 @@ def test_conv3d_cost_cubes_a_scalar_kernel() -> None:
     analytical = assert_cost_matches_torch(
         Conv3d.Config(2, 3, kernel_size=3),
         build_input=lambda: torch.randn(1, 2, 3, 4, 5, requires_grad=True),
-        seq_len=3 * 4 * 5,
+        input_grid=(3, 4, 5),
         batch_size=1,
-        num_tokens=3 * 4 * 5,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * 3 * 2 * 27
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * (3 * 4 * 5) * (
+        3 * 2 * 27
+    )
+
+
+@pytest.mark.parametrize(
+    ("config_type", "ndim"),
+    [(Conv1d.Config, 1), (Conv2d.Config, 2), (Conv3d.Config, 3)],
+)
+@pytest.mark.parametrize("groups", [1, 2])
+@pytest.mark.parametrize("geometry", [(1, 0, 1), (2, 1, 2)])
+def test_convolution_cost_tracks_input_and_output_grids(
+    config_type: type[Conv1d.Config | Conv2d.Config | Conv3d.Config],
+    ndim: int,
+    groups: int,
+    geometry: tuple[int, int, int],
+) -> None:
+    config = config_type()
+    config.channels_in = 4
+    config.channels_out = 6
+    config.groups = groups
+    config.stride, config.padding, config.dilation = geometry
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 4, *((7,) * ndim), requires_grad=True),
+        input_grid=(7,) * ndim,
+        batch_size=2,
+        dtype=None,
+    )
+
+
+@pytest.mark.parametrize("gradient_mask", range(8))
+@pytest.mark.parametrize("groups", [1, 2])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_convolution_cost_counts_only_requested_gradients(
+    gradient_mask: int,
+    groups: int,
+    dtype: torch.dtype,
+) -> None:
+    input_grad, weight_grad, bias_grad = (
+        bool(gradient_mask & (1 << index)) for index in range(3)
+    )
+    config = Conv2d.Config()
+    config.channels_in = 4
+    config.channels_out = 6
+    config.groups = groups
+    config.bias = True
+    config.dtype = dtype
+    config.padding = 1
+    config.stride = 2
+    module = config.make()
+    module.weight.requires_grad_(weight_grad)
+    assert module.bias is not None
+    module.bias.requires_grad_(bias_grad)
+    x = torch.randn(2, 4, 5, 7, dtype=dtype, requires_grad=input_grad)
+    traffic = _TrafficMode()
+    with (
+        FlopCounterMode(
+            display=False,
+            custom_mapping={
+                torch.ops.aten.convolution_backward: _convolution_backward_flops,
+            },
+        ) as counter,
+        traffic,
+    ):
+        output = module(x)
+        if output.requires_grad:
+            output.sum().backward()
+    rows = output.shape[0] * math.prod(output.shape[2:])
+    analytical = conv_cost(
+        channels_in=4,
+        channels_out=6,
+        kernel_size=3,
+        ndim=2,
+        groups=groups,
+        bias=True,
+        input_grid=(5, 7),
+        batch_size=2,
+        stride=2,
+        padding=1,
+        dtype=dtype,
+        input_grad=input_grad,
+        weight_grad=weight_grad,
+        bias_grad=bias_grad,
+    )
+    weights = 6 * (4 // groups) * 9
+    assert counter.get_total_flops() == 2 * weights * rows * (
+        1 + int(input_grad) + int(weight_grad)
+    )
+    assert analytical["flops", "matmul"].sum() == counter.get_total_flops()
+    assert analytical["bytes", "matmul"].sum() == traffic.bytes["matmul"]
+    assert (x.grad is not None) == input_grad
+    assert (module.weight.grad is not None) == weight_grad
+    assert (module.bias.grad is not None) == bias_grad
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ All notable priml changes are documented here. This project follows
   `priml.loss.policy_gradient`, and the `priml.data.environment`
   protocols.
 - `priml.timer.CheckpointableStepTimer` for training-time accounting, and
-  a `phase_heartbeat_sec` setting for long-phase progress logging.
+  explicit PhaseTimer intervals for progress reports and fault dumps.
 - GPU data augmentation (`priml.data.augmentation_gpu`) and
   `priml.math.activations.relu_squared`.
 - Gradient clipping (`priml.train.grad_clip`).

@@ -125,9 +125,13 @@ def test_lpips_loss_fewer_frames(lpips_loss: LPIPSLoss) -> None:
     assert result["loss"].shape == (1,)
 
 
-def test_lpips_cost_matches_torch_for_tiny_trunk() -> None:
+@pytest.mark.parametrize("shape", [(1, 2, 4, 4), (2, 1, 5, 7), (2, 3, 8, 6)])
+def test_lpips_cost_matches_torch_for_tiny_trunk(
+    shape: tuple[int, int, int, int],
+) -> None:
     """Count both frozen-trunk input gradients and the trainable head's gradients."""
-    b, t, h, w = 1, 2, 4, 4
+    b, t, h, w = shape
+    scored = min(t, LPIPSLoss.Config().max_num_random_frames)
     with (
         patch("torch.hub.get_dir", side_effect=AssertionError("Weight cache accessed")),
         patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips),
@@ -138,10 +142,8 @@ def test_lpips_cost_matches_torch_for_tiny_trunk() -> None:
                 torch.randn(b, 3, t, h, w, requires_grad=True),
                 torch.randn(b, 3, t, h, w, requires_grad=True),
             ),
-            seq_len=t,
+            seq_len=scored,
             batch_size=b,
-            num_tokens=b * t * h * w,
-            check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
             dtype=None,
             run=lambda module, inputs: _loss(
                 module,
@@ -161,14 +163,15 @@ def test_lpips_cost_prices_the_frozen_trunk_twice_and_the_head_once() -> None:
             batch_size=1,
             dtype=None,
         )
-    trunk = 3 * 9 * 2 * 16
-    head = 2 * 4
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * (2 * trunk + head) / 16
-    assert (
-        analytical["flops", "adjoint", "matmul"].sum()
-        == 2 * (2 * trunk + 2 * head) / 16
+    trunk_products = 3 * 9 * 2 * 16
+    head_products = 2 * 1 * 1 * 4
+    assert analytical["flops", "primal", "matmul"].sum() == (
+        2 * 2 * trunk_products + 2 * head_products
     )
-    assert analytical["flops", "adjoint", "selection"].sum() == 2 * (2 * 4) / 16
+    assert analytical["flops", "adjoint", "matmul"].sum() == (
+        2 * 2 * trunk_products + 4 * head_products
+    )
+    assert analytical["flops", "adjoint", "selection"].sum() == 2 * 2 * 4
     assert analytical.bytes_state == 0
 
 
@@ -205,19 +208,19 @@ def test_lpips_frame_selection_traffic(dtype: torch.dtype) -> None:
     itemsize = dtype.itemsize
     positions = 16
     # Two frame gathers of the RGB pixels at ``dtype``; the shared frame index
-    # is one int64 read per branch, spread over the frame's positions.
-    assert costed["bytes", "primal", "selection", dtype] == itemsize * 2 * 3 * 2
-    assert costed["bytes", "primal", "selection", torch.int64] == 8 * 2 / positions
+    # is one int64 read per branch.
+    assert costed["bytes", "primal", "selection", dtype] == (
+        itemsize * 2 * 3 * 2 * positions
+    )
+    assert costed["bytes", "primal", "selection", torch.int64] == 8 * 2
     # Back: the pool's dense routing (values at dtype, argmax int64) and the
     # two branches' pixel scatters.
-    pool_values = 2 * 2 * (4 + 1) * 4 / positions
-    pool_index = 2 * 2 * 4 / positions
+    pool_values = 2 * 2 * (4 + 1) * 4
+    pool_index = 2 * 2 * 4
     assert costed["bytes", "adjoint", "selection", dtype] == itemsize * (
-        pool_values + 2 * 3 * 3
+        pool_values + 2 * 3 * 3 * positions
     )
-    assert costed["bytes", "adjoint", "selection", torch.int64] == 8 * (
-        pool_index + 2 / positions
-    )
+    assert costed["bytes", "adjoint", "selection", torch.int64] == 8 * (pool_index + 2)
 
 
 class _TinyTrunk(nn.Module):

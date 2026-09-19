@@ -134,20 +134,21 @@ def test_the_cost_matches_torch_and_prices_the_tanh_towers() -> None:
         build_input=lambda: torch.randn(3, 12, requires_grad=True),
         seq_len=1,
         batch_size=3,
-        num_tokens=1 * 3,
         dtype=None,
         run=_scored,
     )
     weights = 2 * (12 * 16 + 16 * 16) + 16 * 5 + 16 * 1
     biases = 2 * (16 + 16) + 5 + 1
     assert analytical.params == weights + biases
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 3 * 2 * weights
     # Every bias add, then one tanh per hidden unit of both towers; the
     # adjoint is ``g * (1 - t**2)`` on the saved output.
     hidden_units = 2 * 2 * 16
-    assert analytical["flops", "primal", "elementwise"].sum() == biases + hidden_units
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 3 * hidden_units
-    assert analytical["flops", "adjoint", "reduction"].sum() == biases * 2 / 3
+    assert analytical["flops", "primal", "elementwise"].sum() == 3 * (
+        biases + hidden_units
+    )
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 3 * 3 * hidden_units
+    assert analytical["flops", "adjoint", "reduction"].sum() == biases * 2
     assert analytical.bytes_state == 0
 
 
@@ -159,7 +160,7 @@ def test_cost_accounts_for_operand_bytes_and_dtype() -> None:
     config.num_layers = 1
     counted = config.cost(seq_len=1, batch_size=4, dtype=torch.bfloat16)
     assert counted["bytes", "primal", "matmul"].sum() == 2 * (
-        2 * (3 + 2 + 6 / 4) + (2 + 4 + 8 / 4) + (2 + 1 + 2 / 4)
+        2 * (4 * 3 + 4 * 2 + 6) + (4 * 2 + 4 * 4 + 8) + (4 * 2 + 4 + 2)
     )
     wide = config.cost(seq_len=1, batch_size=4, dtype=None)
     assert (

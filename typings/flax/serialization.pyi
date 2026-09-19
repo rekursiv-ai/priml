@@ -1,0 +1,36 @@
+from typing import Any
+
+import enum
+import threading
+
+from _typeshed import Incomplete
+
+class _ErrorContext(threading.local):
+    path: Incomplete
+    def __init__(self) -> None: ...
+
+def current_path(): ...
+
+class _NamedTuple: ...
+
+def from_state_dict(target, state: dict[str, Any], name: str = "."): ...
+def to_state_dict(target) -> dict[str, Any]: ...
+def is_serializable(target): ...
+def register_serialization_state(
+    ty,
+    ty_to_state_dict,
+    ty_from_state_dict,
+    override: bool = False,
+) -> None: ...
+
+class _MsgpackExtType(enum.IntEnum):
+    ndarray = 1
+    native_complex = 2
+    npscalar = 3
+
+MAX_CHUNK_SIZE: Incomplete
+
+def msgpack_serialize(pytree, in_place: bool = False) -> bytes: ...
+def msgpack_restore(encoded_pytree: bytes): ...
+def from_bytes(target, encoded_bytes: bytes): ...
+def to_bytes(target) -> bytes: ...

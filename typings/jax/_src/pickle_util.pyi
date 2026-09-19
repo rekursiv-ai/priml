@@ -1,0 +1,6 @@
+from typing import Any
+
+from jax._src import profiler as profiler
+
+def dumps(obj: Any) -> bytes: ...
+def loads(data: bytes) -> Any: ...

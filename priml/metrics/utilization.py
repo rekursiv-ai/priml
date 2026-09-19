@@ -1,8 +1,8 @@
 """Hardware utilization: the model's analytical cost against measured throughput.
 
-The model config costs one token (:mod:`priml.cost`); the train
-loop times each step and puts ``step_sec`` on the metric bus. This metric sums
-tokens and seconds between ``reset`` calls and reports each kernel silo's
+The model config costs one whole invocation (:mod:`priml.cost`); the
+train loop times each step and puts ``step_sec`` on the metric bus. This metric
+sums tokens and seconds between ``reset`` calls and reports each kernel silo's
 achieved fraction of its datasheet ceiling; the ``matmul`` silo is MFU.
 """
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 class Utilization(LateBound):
-    """Tokens per second and per-silo utilization, averaged since the last reset.
+    """Tokens per second and whole-step utilization since the last reset.
 
     Belongs in ``TrainLoop.Config.metrics_train``: it reads the wall time the
     train step puts on the bus. Binds to the model config through the built
@@ -119,7 +119,7 @@ class Utilization(LateBound):
         """Zero the token and second sums."""
         self.tokens = 0
         self.seconds = 0.0
-        self.flops: dict[Kernel, float] = dict.fromkeys(KERNELS, 0.0)
+        self.flops: dict[Kernel, int] = dict.fromkeys(KERNELS, 0)
 
     def update(self, logits: Tensor, **batch: object) -> None:
         """Accumulate one train step.
@@ -151,19 +151,20 @@ class Utilization(LateBound):
             )
         seq_len = tokens.shape[-1]
         num_tokens = tokens.numel()
-        shape = (seq_len, num_tokens)
-        per_token = self._cost_by_shape.get(shape)
-        if per_token is None:
-            per_token = self._cost_by_shape[shape] = cost(
+        batch_size = num_tokens // seq_len
+        shape = (seq_len, batch_size)
+        whole_step = self._cost_by_shape.get(shape)
+        if whole_step is None:
+            whole_step = self._cost_by_shape[shape] = cost(
                 self._model_config,
                 seq_len=seq_len,
-                batch_size=num_tokens // seq_len,
+                batch_size=batch_size,
                 dtype=self._dtype,
             )
         self.tokens += num_tokens
         self.seconds += step_sec
         for kernel in KERNELS:
-            self.flops[kernel] += per_token["flops", kernel].sum() * num_tokens
+            self.flops[kernel] += whole_step["flops", kernel].sum()
 
     def compute(self) -> dict[str, float]:
         """Report throughput and utilization over the updates since ``reset``.

@@ -115,7 +115,7 @@ def test_channels_must_be_inherited_or_set() -> None:
 
 
 def test_factored_positions_cost_is_three_gathers_two_adds_and_a_scale() -> None:
-    """Per cell: one row read from each table, summed, then scaled; no products."""
+    """Cost the complete grid: one row read from each table, then scaled."""
     analytical = assert_cost_matches_torch(
         FactoredPositions.Config(grid_shape=(4, 4), box_shape=(2, 2), channels_out=8),
         build_input=lambda: (
@@ -124,37 +124,37 @@ def test_factored_positions_cost_is_three_gathers_two_adds_and_a_scale() -> None
         ),
         seq_len=16,
         batch_size=1,
-        num_tokens=16,
         dtype=None,
     )
     assert analytical.params == (4 + 4 + 4) * 8
     assert analytical.params_active == 3 * 8
     # Three gathers: an int64 index each, a row read and written at fp32.
-    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * 3
-    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 3 * 2 * 8
-    assert analytical["flops", "adjoint", "selection"].sum() == 3 * 8
-    assert analytical["flops", "primal", "elementwise"].sum() == 3 * 8
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 8
+    assert analytical["bytes", "primal", "selection", torch.int64] == 16 * 3 * 8
+    assert (
+        analytical["bytes", "primal", "selection", torch.float32] == 4 * 3 * 2 * 16 * 8
+    )
+    assert analytical["flops", "adjoint", "selection"].sum() == 3 * 16 * 8
+    assert analytical["flops", "primal", "elementwise"].sum() == 3 * 16 * 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 16 * 8
 
 
 def test_prediction_feedback_cost_is_a_gather_and_a_scale() -> None:
-    """Per cell with a grid stashed: one table row read, scaled; the whole table owned."""
+    """Cost the complete grid with a stashed feedback tensor."""
     analytical = assert_cost_matches_torch(
         PredictionFeedback.Config(channels_in=11, channels_out=8),
         build_input=lambda: (torch.randint(0, 11, (1, 16)), torch.zeros(1, 16, 8)),
         seq_len=16,
         batch_size=1,
-        num_tokens=16,
         dtype=None,
         run=_run_feedback,
     )
     assert analytical.params == 11 * 8
     assert analytical.params_active == 8
-    assert analytical["bytes", "primal", "selection", torch.int64] == 8
-    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 2 * 8
-    assert analytical["flops", "adjoint", "selection"].sum() == 8
-    assert analytical["flops", "primal", "elementwise"].sum() == 8
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 8
+    assert analytical["bytes", "primal", "selection", torch.int64] == 16 * 8
+    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 2 * 16 * 8
+    assert analytical["flops", "adjoint", "selection"].sum() == 16 * 8
+    assert analytical["flops", "primal", "elementwise"].sum() == 16 * 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 16 * 8
 
 
 def test_grid_embedding_cost_sums_the_token_table_and_every_channel() -> None:
@@ -166,20 +166,23 @@ def test_grid_embedding_cost_sums_the_token_table_and_every_channel() -> None:
         build_input=lambda: torch.randint(0, 11, (1, 81)),
         seq_len=81,
         batch_size=1,
-        num_tokens=81,
         dtype=None,
         run=_run_with_feedback,
     )
     assert analytical.params == 11 * 8 + (9 + 9 + 9) * 8 + 11 * 8
     assert analytical.params_active == 8 + 3 * 8 + 8
     # Token row, three position rows, one feedback row.
-    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * 5
-    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 5 * 2 * 8
-    assert analytical["flops", "adjoint", "selection"].sum() == 8 + 3 * 8 + 8
+    assert analytical["bytes", "primal", "selection", torch.int64] == 81 * 5 * 8
+    assert (
+        analytical["bytes", "primal", "selection", torch.float32] == 4 * 5 * 2 * 81 * 8
+    )
+    assert analytical["flops", "adjoint", "selection"].sum() == 81 * (8 + 3 * 8 + 8)
     # Token scale; positions' two adds and scale; feedback scale; two channel adds.
-    assert analytical["flops", "primal", "elementwise"].sum() == 8 + 3 * 8 + 8 + 2 * 8
+    assert analytical["flops", "primal", "elementwise"].sum() == 81 * (
+        8 + 3 * 8 + 8 + 2 * 8
+    )
     # The channel adds accumulate no gradient, so only the three scales pull back.
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 8 + 8 + 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 81 * (8 + 8 + 8)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
@@ -196,30 +199,30 @@ def test_grid_embedding_traffic_counts_scale_and_channel_add(
     assert costed["bytes", "adjoint", "elementwise"].sum() == itemsize * 8 * (2 + 2)
 
 
-def test_feedback_table_gradient_zeroing_amortizes_over_batch() -> None:
+def test_feedback_cost_scales_with_grid_rows() -> None:
     config = PredictionFeedback.Config()
     config.channels_in = 11
     config.channels_out = 8
-    small = config.cost(seq_len=4, batch_size=1, dtype=None)
-    large = config.cost(seq_len=8, batch_size=1, dtype=None)
-    assert small["bytes", "adjoint", "selection"].sum() - large[
+    single = config.cost(seq_len=4, batch_size=1, dtype=None)
+    batch = config.cost(seq_len=4, batch_size=2, dtype=None)
+    assert batch["bytes", "adjoint", "selection"].sum() - single[
         "bytes",
         "adjoint",
         "selection",
-    ].sum() == 4 * 11 * 8 * (1 / 4 - 1 / 8)
+    ].sum() == 4 * (8 + 3 * 8 * 4)
 
 
-def test_factored_position_cost_amortizes_broadcast_over_puzzles() -> None:
+def test_factored_position_cost_broadcasts_the_complete_batch() -> None:
     config = FactoredPositions.Config()
     config.channels_out = 8
     config.grid_shape = (4, 4)
     config.box_shape = (2, 2)
-    single = config.cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
-    batch = config.cost(seq_len=1, batch_size=2, dtype=torch.bfloat16)
-    assert batch["flops", "primal"] == single["flops", "primal"] / 2
-    assert batch["bytes", "primal"] == single["bytes", "primal"] / 2
-    assert batch["flops", "adjoint", "reduction"].sum() == 8 / 2
-    assert batch["bytes", "adjoint", "reduction"].sum() == 2 * (8 + 8 / 2)
+    single = config.cost(seq_len=16, batch_size=1, dtype=torch.bfloat16)
+    batch = config.cost(seq_len=16, batch_size=2, dtype=torch.bfloat16)
+    assert batch["flops", "primal"] == single["flops", "primal"]
+    assert batch["bytes", "primal"] == single["bytes", "primal"]
+    assert batch["flops", "adjoint", "reduction"].sum() == 16 * 8 * (2 - 1)
+    assert batch["bytes", "adjoint", "reduction"].sum() == 2 * (2 * 16 * 8 + 16 * 8)
     assert batch.params == single.params
 
 

@@ -146,6 +146,7 @@ class LatentAttention(nn.Module):
             self,
             *,
             seq_len: int,
+            batch_size: int = 1,
             dtype: torch.dtype | None,
             num_heads: int,
             channels_head: int,
@@ -171,6 +172,7 @@ class LatentAttention(nn.Module):
 
             Args:
               seq_len: Tokens per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
               channels_head: Width of each query/key head.
@@ -180,7 +182,7 @@ class LatentAttention(nn.Module):
               dropout_p: Attention dropout rate.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             if self.absorb:
@@ -191,13 +193,18 @@ class LatentAttention(nn.Module):
             kernel = cost(
                 self.attn_kernel,
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
                 channels_head=channels_k,
                 channels_v_head=channels_v,
                 dropout_p=dropout_p,
             )
-            moved = (2 * num_heads - 1) * kv_lora_rank if self.absorb else 0
+            moved = (
+                (2 * num_heads - 1) * kv_lora_rank * seq_len * batch_size
+                if self.absorb
+                else 0
+            )
             dt = dtype
             return (
                 kernel
@@ -424,7 +431,7 @@ class MultiHeadLatentAttention(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             Raises:
               TypeError: The kernel slot's config carries no ``cost``.
@@ -459,7 +466,7 @@ class MultiHeadLatentAttention(nn.Module):
                 total += cost(
                     self.rope,
                     seq_len=seq_len,
-                    batch_size=batch_size,
+                    batch_size=1,
                     dtype=dtype,
                     **kwargs,
                 )
@@ -474,6 +481,7 @@ class MultiHeadLatentAttention(nn.Module):
             total += cost(
                 self.attn_kernel,
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_qk_head,

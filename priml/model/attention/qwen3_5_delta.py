@@ -1,7 +1,7 @@
 """Qwen3.5 gated delta attention with serializable convolution and recurrent state."""
 
 from dataclasses import field
-from typing import TypeGuard, override
+from typing import Protocol, TypeGuard, override, runtime_checkable
 
 import math
 
@@ -35,6 +35,10 @@ class Qwen35RMSNormGated(nn.Module):
         eps: float = 1e-6
         """Epsilon added to the fp32 mean square."""
 
+        def requires_gate(self) -> bool:
+            """Return whether the transform consumes an output gate."""
+            return True
+
         def cost(
             self,
             *,
@@ -58,7 +62,7 @@ class Qwen35RMSNormGated(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             width = self.channels_in
@@ -71,8 +75,8 @@ class Qwen35RMSNormGated(nn.Module):
                 dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
-                primal=6 * width,
-                adjoint=7 * width,
+                primal=6 * width * seq_len * batch_size,
+                adjoint=7 * width * seq_len * batch_size,
                 channels=width,
                 inputs=3,
                 outputs=2,
@@ -94,22 +98,25 @@ class Qwen35RMSNormGated(nn.Module):
         nn.init.ones_(self.weight)
 
     @override
-    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+    def forward(self, x: Tensor, *, gate: Tensor, **kwargs: object) -> Tensor:
         """Apply normalization and gating with reference rounding boundaries.
 
         Args:
           x: Per-head values whose final axis is the configured head width.
-          **kwargs: Required ``gate`` tensor with x's shape.
+          gate: Output gate tensor with x's shape.
+          **kwargs: Unused messages from the open bus.
 
         Returns:
           output: Gated normalized values with x's shape and dtype.
 
         """
-        gate = kwargs["gate"]
-        assert isinstance(gate, Tensor)
+        del kwargs
         dtype = x.dtype
-        x = x.float()
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        x = torch.nn.functional.rms_norm(
+            x.float(),
+            self.weight.shape,
+            eps=self.eps,
+        )
         x = self.weight * x.to(dtype)
         return (x * torch.nn.functional.silu(gate.float())).to(dtype)
 
@@ -130,7 +137,12 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
         """Initialize log decay rates from the public Qwen3.5 reference range."""
 
         @override
-        def _output_gate_cost(self, *, rows: float, dtype: torch.dtype | None) -> Cost:
+        def uses_output_gate(self) -> bool:
+            """Return whether the configured post-transform consumes a gate."""
+            return isinstance(self.norm, _GateRequired) and self.norm.requires_gate()
+
+        @override
+        def _output_gate_cost(self, *, rows: int, dtype: torch.dtype | None) -> Cost:
             """Leave the complete post-delta transform to the injected norm."""
             del rows, dtype
             return Cost()
@@ -161,7 +173,11 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             x = (x * mask).to(x.dtype)
         batch = x.shape[0]
         qkv = self.proj_qkv(x).transpose(1, 2)
-        z = self.proj_z(x).reshape(batch, sequence, -1, self.channels_v_head)
+        z = (
+            None
+            if self.proj_z is None
+            else self.proj_z(x).reshape(batch, sequence, -1, self.channels_v_head)
+        )
         beta = self.proj_b(x).sigmoid()
         a = self.proj_a(x)
         warm = cache is not None and "recurrent_state" in cache
@@ -201,10 +217,14 @@ class Qwen35GatedDeltaNet(GatedDeltaNet):
             if state is None:
                 raise ValueError("Expected state is not None.")
             cache["recurrent_state"] = state
-        output = self.norm(
-            output.reshape(-1, self.channels_v_head),
-            gate=z.reshape(-1, self.channels_v_head),
-        )
+        output = output.reshape(-1, self.channels_v_head)
+        if z is None:
+            output = self.norm(output)
+        else:
+            output = self.norm(
+                output,
+                gate=z.reshape(-1, self.channels_v_head),
+            )
         return self.proj_out(output.reshape(batch, sequence, value_width)).reshape(
             shape,
         )
@@ -340,3 +360,10 @@ def _is_complete_cache(value: object) -> TypeGuard[dict[str, Tensor]]:
         and isinstance(value["conv_state"], Tensor)
         and isinstance(value["recurrent_state"], Tensor)
     )
+
+
+@runtime_checkable
+class _GateRequired(Protocol):
+    def requires_gate(self) -> bool:
+        """Return whether the transform consumes an output gate."""
+        ...

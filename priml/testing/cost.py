@@ -3,7 +3,8 @@
 Builds the module, runs one forward and backward under
 :class:`torch.utils.flop_counter.FlopCounterMode` and a dispatch-mode byte
 tally, and compares ``training.flops.matmul`` and ``training.bytes.matmul``
-per token to what torch counted, and ``params`` to ``sum(p.numel())``.
+for the complete invocation to what torch counted, and ``params`` to
+``sum(p.numel())``.
 
 The FLOP counter's registry is exactly the matmul silo (mm, bmm, addmm,
 convolution, sdpa). The byte tally weighs every operand an aten op read or
@@ -15,8 +16,9 @@ from the analytical count by torch's own copies -- ``ones_like`` seeding the
 backward, ``clone``/``cat`` around a fused kernel -- that the unfused
 algorithm does not have.
 
-A documented estimate passes ``expected_ratio``; the harness then holds the
-estimate to exactly that factor of the measurement, for FLOPs and bytes alike.
+Counts must agree without rescaling. Convolution backward uses a group-aware
+FLOP formula and reads saved tensor values only for requested derivatives.
+These are logical operand bytes, not measured hardware memory traffic.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from priml.cost import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from configgle import Makeable
     from torch._ops import OpOverload
@@ -53,27 +55,17 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
     config: Makeable[nn.Module],
     *,
     build_input: Callable[[], I],
-    num_tokens: int,
     run: Callable[[nn.Module, I], Tensor] | None = None,
-    expected_ratio: float = 1.0,
-    check_bytes: bool = True,
     seed: int = 0,
     **bus: object,
 ) -> Cost:
-    """Build ``config``, measure one forward+backward, compare to its ``cost``.
+    """Build ``config`` and compare whole-invocation cost with Torch.
 
     Args:
       config: Finalized on a copy; the caller's is untouched.
       build_input: Produces the forward input, a tensor or a tuple of them.
-      num_tokens: Tokens the built input holds, so torch's step total becomes
-        a per-token figure comparable to ``cost``.
       run: Applies the module to the built input; defaults to
         ``module(*inputs)``. Must return a tensor to reduce for backward.
-      expected_ratio: ``analytical / measured`` to hold for matmul FLOPs and
-        matmul bytes alike; ``1.0`` is exact.
-      check_bytes: Also gate matmul bytes. ``False`` only where the analytical
-        traffic convention is known to differ from the dispatched operands
-        (convolution, attention kernels); see Issue#20739.
       seed: For ``build_input`` and any random init.
       **bus: Named arguments ``cost`` takes (``seq_len``, ``batch_size``,
         ``dtype``, ...), forwarded unchanged.
@@ -82,10 +74,12 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
       analytical: The config's own cost, for further assertions.
 
     Raises:
-      ValueError: Matmul FLOPs per token, matmul bytes per token, or the
-        parameter count disagree.
+      ValueError: Matmul FLOPs, matmul bytes, or the parameter count disagree.
 
     """
+    forbidden = {"num_tokens", "expected_ratio", "expected_bytes_ratio"}
+    if forbidden & bus.keys():
+        raise TypeError("Cost validation does not accept per-token rescaling.")
     finalized = config.copy_tree().finalize()
     analytical = cost(finalized, **bus)
 
@@ -101,27 +95,27 @@ def assert_cost_matches_torch[I: (Tensor, tuple[Tensor, ...])](
     torch.manual_seed(seed)
     inputs = build_input()
     traffic = _TrafficMode()
-    with FlopCounterMode(display=False) as counter, traffic:
+    with (
+        FlopCounterMode(
+            display=False,
+            custom_mapping={
+                torch.ops.aten.convolution_backward: _convolution_backward_flops,
+            },
+        ) as counter,
+        traffic,
+    ):
         _forward_backward(module, inputs, run)
-    measured = counter.get_total_flops() / num_tokens
+    measured = counter.get_total_flops()
     matmul = analytical["flops", "matmul"].sum()
-    if matmul != expected_ratio * measured:
+    if matmul != measured:
         raise ValueError(
-            f"cost reports {matmul} matmul FLOPs/token; torch measured {measured} "
-            f"(ratio {matmul / measured if measured else float('inf'):.4f}, "
-            f"expected {expected_ratio})",
+            f"cost reports {matmul} matmul FLOPs; torch measured {measured}",
         )
-    if not check_bytes:
-        return analytical
-    moved = traffic.bytes["matmul"] / num_tokens
+    moved = traffic.bytes["matmul"]
     matmul_bytes = analytical["bytes", "matmul"].sum()
-    # Bytes are sums of amortized fractions (``K*N/rows``), so the two sides
-    # meet only to rounding; FLOPs above are integers and compare exactly.
-    if not math.isclose(matmul_bytes, expected_ratio * moved, rel_tol=1e-9):
+    if matmul_bytes != moved:
         raise ValueError(
-            f"cost reports {matmul_bytes} matmul bytes/token; torch moved {moved} "
-            f"(ratio {matmul_bytes / moved if moved else float('inf'):.4f}, "
-            f"expected {expected_ratio})",
+            f"cost reports {matmul_bytes} matmul bytes; torch counted {moved}",
         )
     return analytical
 
@@ -130,11 +124,10 @@ def measured_traffic[I: (Tensor, tuple[Tensor, ...])](
     config: Makeable[nn.Module],
     *,
     build_input: Callable[[], I],
-    num_tokens: int,
     run: Callable[[nn.Module, I], Tensor] | None = None,
     seed: int = 0,
-) -> Mapping[Kernel, float]:
-    """Tally the bytes every aten op moved in one forward+backward, per silo.
+) -> Mapping[Kernel, int]:
+    """Tally the bytes every aten op moved in one whole invocation, per silo.
 
     An op's traffic is the size of every tensor it read plus every tensor it
     wrote; views and allocations move nothing. The silo is the op's name
@@ -143,13 +136,12 @@ def measured_traffic[I: (Tensor, tuple[Tensor, ...])](
     Args:
       config: Finalized on a copy; the caller's is untouched.
       build_input: Produces the forward input, a tensor or a tuple of them.
-      num_tokens: Tokens the built input holds; the tally is divided by it.
       run: Applies the module to the built input; defaults to
         ``module(*inputs)``.
       seed: For ``build_input`` and any random init.
 
     Returns:
-      traffic: Bytes per token, one entry per silo in :data:`KERNELS`.
+      traffic: Whole-invocation bytes, one entry per silo in :data:`KERNELS`.
 
     """
     finalized = config.copy_tree().finalize()
@@ -161,7 +153,7 @@ def measured_traffic[I: (Tensor, tuple[Tensor, ...])](
     traffic = _TrafficMode()
     with traffic:
         _forward_backward(module, inputs, run)
-    return {kernel: traffic.bytes[kernel] / num_tokens for kernel in KERNELS}
+    return {kernel: traffic.bytes[kernel] for kernel in KERNELS}
 
 
 def _forward_backward[I: (Tensor, tuple[Tensor, ...])](
@@ -279,7 +271,7 @@ class _TrafficMode(TorchDispatchMode):
 
     def __init__(self) -> None:
         super().__init__()
-        self.bytes: defaultdict[Kernel, float] = defaultdict(float)
+        self.bytes: defaultdict[Kernel, int] = defaultdict(int)
 
     @override
     def __torch_dispatch__(
@@ -313,16 +305,45 @@ class _TrafficMode(TorchDispatchMode):
             bias = _tensor_bytes(args[0])
             moved -= bias
             self.bytes["elementwise"] += bias
+        elif name in {"convolution", "_convolution"}:
+            bias = _tensor_bytes(args[2])
+            moved -= bias
+            self.bytes["elementwise"] += bias
+        elif name == "convolution_backward":
+            gradients = cast(tuple[Tensor | None, Tensor | None, Tensor | None], out)
+            requested = cast("Sequence[bool]", args[10])
+            # Some backends return unrequested buffers; only requested derivatives count.
+            moved = _tensor_bytes(args[0]) if requested[0] or requested[1] else 0
+            if requested[0]:
+                moved += _tensor_bytes((args[2], gradients[0]))
+            if requested[1]:
+                moved += _tensor_bytes((args[1], gradients[1]))
+            if requested[2]:
+                self.bytes["reduction"] += _tensor_bytes((args[0], gradients[2]))
         self.bytes[_SILO_OPS.get(name, "elementwise")] += moved
         return out
 
 
-def _tensor_bytes(tree: object) -> float:
+def _convolution_backward_flops(
+    grad_out_shape: tuple[int, ...],
+    x_shape: tuple[int, ...],
+    w_shape: tuple[int, ...],
+    *args: object,
+    **kwargs: object,
+) -> int:
+    # Torch's weight-gradient formula drops groups; the weight shape retains them.
+    del kwargs
+    transposed = args[4]
+    output_mask = cast("Sequence[bool]", args[7])
+    shape = x_shape if transposed else grad_out_shape
+    products = shape[0] * math.prod(shape[2:]) * math.prod(w_shape)
+    return 2 * products * (int(output_mask[0]) + int(output_mask[1]))
+
+
+def _tensor_bytes(tree: object) -> int:
     """Total bytes of every tensor leaf in ``tree``."""
-    return float(
-        sum(
-            leaf.numel() * leaf.element_size()
-            for leaf in cast(list[object], tree_leaves(tree))
-            if isinstance(leaf, Tensor)
-        ),
+    return sum(
+        leaf.numel() * leaf.element_size()
+        for leaf in cast(list[object], tree_leaves(tree))
+        if isinstance(leaf, Tensor)
     )

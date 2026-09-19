@@ -113,7 +113,7 @@ class MMDiTGraft(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             source = self.backbone

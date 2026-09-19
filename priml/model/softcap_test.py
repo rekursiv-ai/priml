@@ -93,7 +93,6 @@ def test_softcap_cost_separates_projection_and_squash() -> None:
         build_input=lambda: torch.randn(3, 4, requires_grad=True),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
         dtype=None,
     )
     inner = cost(
@@ -106,10 +105,10 @@ def test_softcap_cost_separates_projection_and_squash() -> None:
     f32 = torch.float32
     assert model_cost == inner + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 3 * 6,
-            ("flops", "adjoint", "elementwise", f32): 5 * 6,
-            ("bytes", "primal", "elementwise", f32): 4 * 6 * 6,
-            ("bytes", "adjoint", "elementwise", f32): 4 * 7 * 6,
+            ("flops", "primal", "elementwise", f32): 3 * 6 * 3,
+            ("flops", "adjoint", "elementwise", f32): 5 * 6 * 3,
+            ("bytes", "primal", "elementwise", f32): 4 * 6 * 6 * 3,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 7 * 6 * 3,
         },
     )
 

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from priml.data.custom_types import DatasetProtocol
     from priml.distributed.testing import WarmPoolGetter
     from priml.loss.custom_types import LossOutput
-    from priml.train.custom_types import TrainStepOutput
+    from priml.train.custom_types import TrackerProtocol, TrainStepOutput
 
 from configgle import Fig, Makeable, Makes, PartialConfig
 
@@ -375,6 +375,39 @@ class _RecordingTracker:
     def close(self) -> None:
         """Record tracker cleanup."""
         self.closed = True
+
+
+class _UnreachableTracker(_RecordingTracker):
+    class Config(Makes["_UnreachableTracker"], _RecordingTracker.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        raise AssertionError("tracker constructed before checkpoint guard")
+
+
+@pytest.mark.parametrize("occupied_step", [1, 100])
+def test_occupied_run_rejected_before_tracker(
+    tmp_path: Path,
+    occupied_step: int,
+) -> None:
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_ScopedEvalDataset.Config(),
+    )
+    config.max_steps = 1
+    config.working_dir = tmp_path
+    config.base_dir = "/"
+    config.tracker = _UnreachableTracker.Config()
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    config.checkpointer.resume = False
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint = checkpoint_dir / f"step_{occupied_step:08d}.pt"
+    checkpoint.write_bytes(b"prior run")
+    with pytest.raises(RuntimeError, match="overwrite"):
+        config.make()
+    assert checkpoint.read_bytes() == b"prior run"
 
 
 class _ExtrasMetric:
@@ -1007,8 +1040,8 @@ def test_resume_latest_does_not_trip_overwrite_guard(seeded_checkpoints: Path):
         assert loop.step.global_step == 20
 
 
-def test_fresh_run_into_off_cadence_dir_is_allowed():
-    """A populated dir whose steps this run never re-mints does not trip."""
+def test_fresh_run_into_off_cadence_dir_is_rejected():
+    """An occupied run cannot mix checkpoints with a fresh run's artifacts."""
     with tempfile.TemporaryDirectory() as temp_dir:
         checkpoint_dir = Path(temp_dir) / "ck"
         checkpoint_dir.mkdir(parents=True)
@@ -1018,8 +1051,8 @@ def test_fresh_run_into_off_cadence_dir_is_allowed():
         assert isinstance(cfg.checkpointer, Checkpointer.Config)
         cfg.checkpointer.resume = False
         cfg.checkpointer.allow_checkpoint_overwrite = False
-        loop = cfg.make()  # 5 is never a save step -> no collision.
-        assert loop.step.global_step == 0
+        with pytest.raises(RuntimeError, match="overwrite"):
+            cfg.make()
 
 
 def test_allow_checkpoint_overwrite_permits_clobber(seeded_checkpoints: Path):
@@ -1148,6 +1181,81 @@ def test_eval_fails_when_exceeding_max_eval_time() -> None:
 
     with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
         loop.eval()
+
+
+class _SlowTerminalMetric(_ExtrasMetric):
+    class Config(Makes["_SlowTerminalMetric"], _ExtrasMetric.Config):
+        delay_update: bool = False
+        """Delay update instead of compute."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.delay_update = config.delay_update
+
+    @override
+    def update(self, logits: Tensor, **batch: object) -> None:
+        if self.delay_update:
+            time.sleep(0.05)
+        super().update(logits, **batch)
+
+    @override
+    def compute(self) -> dict[str, object]:
+        if not self.delay_update:
+            time.sleep(0.05)
+        return super().compute()
+
+
+@pytest.mark.parametrize("delay_update", [False, True])
+def test_terminal_metric_deadline_prevents_publication(delay_update: bool) -> None:
+    config = TrainLoop.Config(
+        step=_WeightedEvalStep.Config(),
+        dataset=_ScopedEvalDataset.Config(),
+    )
+    config.checkpointer = None
+    config.eval_only = True
+    config.max_eval_time = 0.01
+    phase_timer = PhaseTimer.Config()
+    phase_timer.heartbeat_interval_sec = 0.0
+    config.phase_timer = phase_timer
+    metric = _SlowTerminalMetric.Config()
+    metric.delay_update = delay_update
+    config.metrics_eval = {"": metric}
+    config.tracker = _RecordingTracker.Config()
+    loop = config.make()
+    with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
+        loop.train()
+    assert isinstance(loop.tracker, _RecordingTracker)
+    assert not loop.tracker.metrics_by_step
+
+
+@pytest.mark.parametrize("accumulate", [1, 2, 8])
+@pytest.mark.parametrize("save_every", [1, 10_000])
+def test_epoch_limit_saves_exact_consumed_prefix(
+    tmp_path: Path,
+    accumulate: int,
+    save_every: int,
+) -> None:
+    config = _make_accum_epoch_loop_config(
+        drop_partial=True,
+        samples=3,
+        batch_size=1,
+        accumulate=accumulate,
+    )
+    config.checkpointer = Checkpointer.Config()
+    config.checkpointer.base_dir = "/"
+    config.checkpointer.working_dir = tmp_path
+    config.checkpointer.save_every = save_every
+    loop = config.make()
+    loop.train()
+    assert loop.local_step == 3
+    assert loop.current_epoch == 1
+    assert isinstance(loop.step, TrainStep)
+    assert loop.step.accumulation_steps == 0
+    assert loop.step.global_step == 3 // accumulate
+    resumed = config.make()
+    assert resumed.current_epoch == 1
+    resumed.train()
+    assert resumed.local_step == 0
 
 
 def test_eval_stop_on_time_limit_publishes_partial_results() -> None:
@@ -2995,6 +3103,34 @@ def test_train_tracker_logs_every_startup_step_then_cadence() -> None:
     assert train_steps == [1, 2, 3, 5, 10]
 
 
+class _LegacyFetchingLoop(TrainLoop):
+    class Config(Makes["_LegacyFetchingLoop"], TrainLoop.Config):
+        pass
+
+    @override
+    def _get_next_batch(self) -> dict[str, object]:
+        self._training = False
+        try:
+            return super()._get_next_batch()
+        finally:
+            self._training = True
+
+
+def test_legacy_epoch_fetch_override_cannot_train_past_cap() -> None:
+    config = _LegacyFetchingLoop.Config(
+        step=_WarmupStep.Config(),
+        dataset=_ScopedEvalDataset.Config(),
+    )
+    config.checkpointer = None
+    config.max_epochs = 1
+    config.num_steps_eval = 0
+    config.eval_every_epoch = False
+    loop = config.make()
+    loop.train()
+    assert loop.step.global_step == 2
+    assert loop.local_step == 2
+
+
 def test_epoch_eval_logs_eval_time_to_tracker() -> None:
     """Epoch-triggered eval logs duration with epoch eval metrics."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -3011,7 +3147,11 @@ def test_epoch_eval_logs_eval_time_to_tracker() -> None:
 
         loop.train()
 
-    epoch_logs = [metrics for metrics, step in tracker.metrics_by_step if step == 1]
+    epoch_logs = [
+        metrics
+        for metrics, step in tracker.metrics_by_step
+        if step == loop.step.global_step
+    ]
     assert any("eval/total_loss" in metrics for metrics in epoch_logs)
     assert any(_metric_float(metrics, "eval/time") >= 0.0 for metrics in epoch_logs)
     assert tracker.closed
@@ -3269,6 +3409,7 @@ def test_eval_improvement_saves_off_cadence_checkpoint() -> None:
         config = _make_simple_loop_config(tmp)
         config.max_steps = 6
         config.num_steps_eval = 3
+        config.eval_every_epoch = False
         assert isinstance(config.checkpointer, Checkpointer.Config)
         config.checkpointer.save_every = 100
         config.checkpointer.best_metric = "total_loss"
@@ -3281,12 +3422,13 @@ def test_eval_improvement_saves_off_cadence_checkpoint() -> None:
         assert loop.checkpointer.available_steps() == [3, 6]
 
 
-def test_final_eval_improvement_keeps_the_end_of_run_save() -> None:
-    """The final eval saves the best at the last step; the end-of-run save adds nothing."""
+def test_final_eval_improvement_refreshes_the_end_of_run_save() -> None:
+    """The terminal save refreshes its own best checkpoint after final eval work."""
     with tempfile.TemporaryDirectory() as tmp:
         config = _make_simple_loop_config(tmp)
         config.max_steps = 3
         config.num_steps_eval = -1
+        config.eval_every_epoch = False
         assert isinstance(config.checkpointer, Checkpointer.Config)
         config.checkpointer.save_every = 100
         config.checkpointer.best_metric = "total_loss"
@@ -3296,14 +3438,19 @@ def test_final_eval_improvement_keeps_the_end_of_run_save() -> None:
         assert isinstance(loop.checkpointer, Checkpointer)
         original_write = loop.checkpointer._write
 
-        def spy_write(target: CheckpointableProtocol, step: int) -> None:
+        def spy_write(
+            target: CheckpointableProtocol,
+            step: int,
+            *,
+            after_write: Callable[[], None] | None = None,
+        ) -> None:
             writes.append(step)
-            original_write(target, step)
+            original_write(target, step, after_write=after_write)
 
         loop.checkpointer._write = spy_write  # ty: ignore[invalid-assignment] -- The test spies on a bound method.
         loop.train()
 
-        assert writes == [3]
+        assert writes == [3, 3]
         assert loop.checkpointer.best_step == 3
 
 
@@ -3391,10 +3538,8 @@ def _make_accum_epoch_loop_config(
 def test_partial_accumulation_dropped_at_epoch_end_by_default() -> None:
     """T-021: default flushes+discards partial accumulation at epoch boundary.
 
-    Epoch 0 yields 3 micro-batches; with accumulate_grad_batches=8 none reach
-    an optimizer step. At the boundary the 3 pending micro-batches must be
-    discarded, so the new epoch's first micro-batch starts a *fresh*
-    accumulation (count == 1), proving no cross-epoch mixing.
+    Epoch 0 yields three micro-batches, fewer than one accumulation. The
+    terminal epoch boundary discards them without fetching a successor.
     """
     config = _make_accum_epoch_loop_config(
         drop_partial=True,
@@ -3407,18 +3552,17 @@ def test_partial_accumulation_dropped_at_epoch_end_by_default() -> None:
 
     assert loop.current_epoch == 1
     assert loop.step.global_step == 0
-    # Boundary dropped epoch-0's 3 pending; only epoch-1's first micro-batch
-    # remains accumulated.
+    assert loop.local_step == 3
     step = loop.step
     assert isinstance(step, TrainStep)
-    assert step.accumulation_steps == 1
+    assert step.accumulation_steps == 0
 
 
 def test_partial_accumulation_carries_across_epoch_when_opted_out() -> None:
     """T-021: flag=False carries the partial accumulation across the boundary.
 
-    Epoch 0's 3 pending micro-batches survive the boundary and the new epoch's
-    first micro-batch adds to them (count == 4), proving cross-epoch carry.
+    Epoch 0's three pending micro-batches survive the terminal boundary.
+    The next epoch is not fetched merely to complete the accumulation.
     """
     config = _make_accum_epoch_loop_config(
         drop_partial=False,
@@ -3432,7 +3576,8 @@ def test_partial_accumulation_carries_across_epoch_when_opted_out() -> None:
     assert loop.current_epoch == 1
     step = loop.step
     assert isinstance(step, TrainStep)
-    assert step.accumulation_steps == 4
+    assert loop.local_step == 3
+    assert step.accumulation_steps == 3
     assert step.global_step == 0
 
 
@@ -3717,7 +3862,7 @@ def test_phase_heartbeat_fires_on_stall_and_names_phase(
 
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
-        _phase_heartbeat("eval batch 5 eval_loss", interval_s=0.02),
+        _phase_heartbeat("eval batch 5 eval_loss", interval_sec=0.02),
     ):
         time.sleep(0.06)
     messages = [r.getMessage() for r in caplog.records]
@@ -3736,7 +3881,7 @@ def test_phase_heartbeat_silent_when_block_is_fast(
 
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
-        _phase_heartbeat("fast phase", interval_s=5.0),
+        _phase_heartbeat("fast phase", interval_sec=5.0),
     ):
         time.sleep(0.02)
     assert not any("STILL IN PHASE" in r.getMessage() for r in caplog.records)
@@ -3760,7 +3905,11 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
         _phase_heartbeat,
     )
 
-    with _phase_heartbeat("eval batch 12 eval_loss", interval_s=0.01):
+    with _phase_heartbeat(
+        "eval batch 12 eval_loss",
+        interval_sec=0.01,
+        fault_dump_interval_sec=0.04,
+    ):
         deadline = time.perf_counter() + 0.08  # >3 watchdog periods.
         while time.perf_counter() < deadline:
             time.sleep(0.002)  # Healthy: the GIL is released constantly.
@@ -3791,18 +3940,18 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
 
     bits = 1 << 22
     while True:  # Calibrate one GIL-holding op to >=0.15s on this machine.
-        # Best-of-5, not one sample: a single timing inflated by scheduler
-        # preemption (seen 5x on a loaded box) sets interval_s so high the
-        # real wedge below finishes before 2*interval_s and never arms the
-        # dump. The minimum is the preemption-free cost, which the wedge
-        # cannot undershoot.
+        # Use the minimum to exclude scheduler preemption from calibration.
         duration = min(_timed(bits) for _ in range(5))
         if duration >= 0.15:
             break
         bits *= 2
-    with _phase_heartbeat("wedged phase", interval_s=duration / 8.0):
+    with _phase_heartbeat(
+        "wedged phase",
+        interval_sec=duration / 8.0,
+        fault_dump_interval_sec=duration / 4.0,
+    ):
         x = 1 << bits
-        _ = x * x  # Holds the GIL ~8 intervals; the watchdog fires at 2.
+        _ = x * x  # Holds the GIL long enough for the watchdog.
     assert "Timeout (" in capfd.readouterr().err
 
 
@@ -4140,6 +4289,135 @@ def test_the_profiler_brackets_every_step_and_is_cleaned_up() -> None:
     assert profiler.cleaned
 
 
+class _FailingSummaryTimer(PhaseTimer):
+    class Config(Makes["_FailingSummaryTimer"], PhaseTimer.Config):
+        pass
+
+    @override
+    def publish_summary(
+        self,
+        tracker: TrackerProtocol | None,
+        *,
+        step: int,
+    ) -> dict[str, float]:
+        del tracker, step
+        raise RuntimeError("injected summary failure")
+
+
+class _FailingProfilerInit(_RecordingProfiler):
+    class Config(Makes["_FailingProfilerInit"], _RecordingProfiler.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        raise ValueError("injected profiler construction failure")
+
+
+def test_partial_startup_closes_acquired_tracker_preserving_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = _make_simple_loop_config(str(tmp_path))
+    config.tracker = _FailingCloseTracker.Config()
+    config.profiler = _FailingProfilerInit.Config()
+    with pytest.raises(ValueError, match="profiler construction"):
+        config.make()
+    assert any(
+        record.exc_info is not None
+        and "tracker close failure" in str(record.exc_info[1])
+        for record in caplog.records
+    )
+
+
+class _FailingCloseTracker(_RecordingTracker):
+    class Config(Makes["_FailingCloseTracker"], _RecordingTracker.Config):
+        pass
+
+    @override
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("injected tracker close failure")
+
+
+class _FailingCloseCheckpointer(Checkpointer):
+    class Config(Makes["_FailingCloseCheckpointer"], Checkpointer.Config):
+        pass
+
+    @override
+    def close(self) -> None:
+        super().close()
+        raise RuntimeError("injected checkpoint close failure")
+
+
+@pytest.mark.parametrize("failure", ["summary", "tracker", "checkpointer"])
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_cleanup_attempts_every_resource_preserving_primary_error(
+    tmp_path: Path,
+    failure: str,
+    eval_fails: bool,
+) -> None:
+    config = _make_simple_loop_config(str(tmp_path))
+    config.max_steps = 1
+    config.profiler = _RecordingProfiler.Config()
+    config.tracker = _RecordingTracker.Config()
+    if failure == "summary":
+        config.phase_timer = _FailingSummaryTimer.Config()
+    elif failure == "tracker":
+        config.tracker = _FailingCloseTracker.Config()
+    else:
+        checkpoint = _FailingCloseCheckpointer.Config()
+        checkpoint.base_dir = "/"
+        checkpoint.working_dir = tmp_path
+        config.checkpointer = checkpoint
+    if eval_fails:
+        config.max_eval_time = 0
+    loop = config.make()
+    with pytest.raises(
+        EvalTimeLimitError if eval_fails else RuntimeError,
+        match="max_eval_time" if eval_fails else "injected",
+    ):
+        loop.train()
+    assert isinstance(loop.profiler, _RecordingProfiler)
+    assert loop.profiler.cleaned
+    assert isinstance(loop.tracker, _RecordingTracker)
+    assert loop.tracker.closed
+    assert loop._runtime_destroyed
+
+
+@pytest.mark.parametrize("eval_fails", [False, True])
+def test_epoch_only_eval_uses_best_save_and_error_recovery(
+    tmp_path: Path,
+    eval_fails: bool,
+) -> None:
+    config = _make_accum_epoch_loop_config(
+        drop_partial=True,
+        samples=3,
+        batch_size=1,
+        accumulate=1,
+    )
+    config.eval_every_epoch = True
+    config.checkpointer = Checkpointer.Config()
+    config.checkpointer.base_dir = "/"
+    config.checkpointer.working_dir = tmp_path
+    config.checkpointer.best_metric = "total_loss"
+    config.checkpointer.best_mode = "min"
+    if eval_fails:
+        config.max_eval_time = 0
+    loop = config.make()
+    if eval_fails:
+        with pytest.raises(EvalTimeLimitError, match="max_eval_time"):
+            loop.train()
+    else:
+        loop.train()
+    assert isinstance(loop.checkpointer, Checkpointer)
+    assert loop.checkpointer.available_steps() == [3]
+    assert loop.checkpointer.best_step == (None if eval_fails else 3)
+    saved = _load_loop_checkpoint(tmp_path / "step_00000003.pt")
+    dataset_state = cast(DummyDataset.StateDict, saved["dataset"])
+    assert "timer_epoch" in dataset_state
+    assert dataset_state["timer_epoch"]["global_count"] == 1
+
+
 class _RecordingMetric:
     """Metric that keeps every output it was handed."""
 
@@ -4369,7 +4647,7 @@ def test_compile_heartbeat_reports_a_long_running_block(
 ) -> None:
     with (
         caplog.at_level(logging.INFO, logger="priml.train.train_loop"),
-        _compile_heartbeat("train step 1", interval_s=0.02),
+        _compile_heartbeat("train step 1", interval_sec=0.02),
     ):
         time.sleep(0.06)
     assert any("train step 1: still running after" in r.message for r in caplog.records)
@@ -4383,7 +4661,7 @@ def test_phase_heartbeat_names_this_rank_when_a_group_is_live(
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
-        _phase_heartbeat("eval batch 1 eval_loss", interval_s=0.02),
+        _phase_heartbeat("eval batch 1 eval_loss", interval_sec=0.02),
     ):
         time.sleep(0.06)
     assert any("[rank 3] STILL IN PHASE" in r.message for r in caplog.records)
@@ -4400,9 +4678,28 @@ def test_an_infinite_heartbeat_interval_arms_nothing(
 
     monkeypatch.setattr(faulthandler, "dump_traceback_later", arm)
     before = threading.active_count()
-    with _phase_heartbeat("single process", interval_s=math.inf):
+    with _phase_heartbeat("single process", interval_sec=math.inf):
         assert threading.active_count() == before
     assert armed == []
+
+
+def test_phase_heartbeat_uses_fault_dump_interval_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    armed: list[float] = []
+
+    def arm(timeout: float, **kwargs: object) -> None:
+        del kwargs
+        armed.append(timeout)
+
+    monkeypatch.setattr(faulthandler, "dump_traceback_later", arm)
+    with _phase_heartbeat(
+        "single process",
+        interval_sec=17.0,
+        fault_dump_interval_sec=23.0,
+    ):
+        pass
+    assert armed == [23.0]
 
 
 class _FakeCudaEvent:

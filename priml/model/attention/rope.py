@@ -124,7 +124,7 @@ class GeometricFrequencies:
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             del seq_len, batch_size, dtype, kwargs
@@ -178,7 +178,7 @@ class HuggingFaceFrequencies:
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             del seq_len, batch_size, dtype, kwargs
@@ -272,7 +272,7 @@ class YarnScaling:
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             return cost(
@@ -468,7 +468,7 @@ class RoPE(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             return self._factor_cost(
@@ -483,7 +483,7 @@ class RoPE(nn.Module):
 
         # The position is one ``int64`` read per axis; the frequencies and the factors
         # are at the batch's dtype.
-        def _factor_cost(self, *, rows: float, dtype: torch.dtype) -> Cost:
+        def _factor_cost(self, *, rows: int, dtype: torch.dtype) -> Cost:
             """Count position products, trigonometric factors, and their scaling."""
             dt = dtype
             axes = _axis_channels(
@@ -502,21 +502,21 @@ class RoPE(nn.Module):
                     output_groups=outputs,
                     dtype=dt,
                 )
-            )
-            # Position products read one scalar per axis and shared frequencies;
-            # cos/sin and their scale maps each read and write one output row.
+            ).tile(rows)
+            # Frequencies are shared once; every position performs its own products,
+            # trigonometric maps, and factor scaling.
             return (
                 traffic(
                     "primal",
                     "elementwise",
-                    elements=sum(axis > 0 for axis in axes),
+                    elements=rows * sum(axis > 0 for axis in axes),
                     dtype=torch.int64,
                 )
                 + traffic(
                     "primal",
                     "elementwise",
-                    elements=frequencies / rows + frequencies + 8 * outputs,
-                    flops=frequencies + 4 * outputs,
+                    elements=frequencies + rows * (frequencies + 8 * outputs),
+                    flops=rows * (frequencies + 4 * outputs),
                     dtype=dt,
                 )
                 + reduction
@@ -888,7 +888,7 @@ class RoPE(nn.Module):
 def rotation_cost(
     rope: RotaryConfig,
     *,
-    rows: float,
+    rows: int,
     dtype: torch.dtype | None,
     channels_head: int,
     heads: int,
@@ -915,8 +915,8 @@ def rotation_cost(
     channels = rope.rotated_channels(channels_head)
     rotations = 3 * channels * heads
     return elementwise_cost(
-        primal=rotations,
-        adjoint=rotations,
+        primal=rotations * rows,
+        adjoint=rotations * rows,
         channels=channels * heads,
         inputs=6,
         outputs=3,
@@ -1033,7 +1033,7 @@ class RoPEMixed(RoPE):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -1048,15 +1048,15 @@ class RoPEMixed(RoPE):
                 if self.reduction_mode == "cat"
                 else (self.num_heads * max(axes) // 2)
             )
-            frequencies = elementwise_cost(
-                primal=0,
-                adjoint=5 * outputs + params if self.learnable else 0,
-                params=params,
-                channels=outputs if self.learnable else 0,
-                adjoint_inputs=6,
-                adjoint_outputs=4,
-                dtype=dtype,
-                rows=rows if self.learnable else 1,
+            frequencies = (
+                _learned_frequency_cost(
+                    rows=rows,
+                    outputs=outputs,
+                    params=params,
+                    dtype=dtype,
+                )
+                if self.learnable
+                else Cost(params=params, params_active=params)
             )
             # The frequencies' primal work is the factors', counted per head
             # above; only the parameters and, when learned, the adjoint remain.
@@ -1225,3 +1225,26 @@ def _yarn_apply(
     else:
         m = _yarn_mscale(yarn.factor, yarn.mscale)
     return inv_freq_yarn, m
+
+
+def _learned_frequency_cost(
+    *,
+    rows: int,
+    outputs: int,
+    params: int,
+    dtype: torch.dtype | None,
+) -> Cost:
+    """Count learned frequency gradients over every position without averaging."""
+    dt = resolve_dtype(dtype)
+    itemsize = dt.itemsize
+    return Cost(
+        cells={
+            ("flops", "adjoint", "elementwise", dt): rows * (5 * outputs + params),
+            ("flops", "adjoint", "reduction", dt): params * (rows - 1),
+            ("bytes", "adjoint", "elementwise", dt): itemsize
+            * (10 * outputs * rows + params * rows + params),
+            ("bytes", "adjoint", "reduction", dt): itemsize * (params * rows + params),
+        },
+        params=params,
+        params_active=params,
+    )

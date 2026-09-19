@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 # Every loss here answers ``cost`` with what :class:`SimpleLoss.Config.cost`
 # knows -- the dtype, the class width, whether BCE carries a ``weight``, and
-# whether a ``mean`` reduction scales the adjoint -- per token, before reduction.
+# whether a ``mean`` reduction scales the adjoint -- for the complete invocation.
 #
 # Torch's stable ``(1 - y) x - logsigmoid(x)`` with ``logsigmoid(x) = min(x, 0) -
 # log1p(exp(-|x|))``: eight ops forward; the adjoint ``(1 - y) - sigmoid(x)`` times
@@ -283,28 +283,21 @@ class SimpleLoss:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost the reduction this wrapper owns, then ask ``loss_fn`` for its own.
+            """Cost the complete loss invocation and its owned reduction.
 
-            A token is one element of the prediction -- one logit for
-            :func:`bce_with_logits`, one value for :func:`mse` and :func:`l1`
-            -- except :func:`cross_entropy`, where it is one ROW of
-            ``channels_out`` class logits. The loss function costs that token
-            itself (see each one's docstring).
-
-            ``reduction="none"`` stops there. ``"mean"`` and ``"sum"`` add one
-            reduction over the batch's tokens, ``(n - 1) / n`` per token;
-            ``"mean"`` also scales the adjoint by ``1 / n``, one more op. The
-            loss owns no parameters and issues no matmul. Labels are
-            ``int64``; predictions and losses are at the batch's dtype.
+            The child loss function is costed once per prediction element. A
+            ``mean`` or ``sum`` reduction then owns one whole-tensor reduction;
+            ``mean`` also owns the two scalar operands of its scale. Labels are
+            ``int64`` and predictions use the requested activation dtype.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Prediction elements per sample.
+              batch_size: Samples per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this loss.
+              cost: Integer FLOPs and logical bytes for the complete batch.
 
             Raises:
               TypeError: ``loss_fn`` carries no ``cost``.
@@ -347,26 +340,22 @@ class SimpleLoss:
             reduction = self.kwargs.get("reduction", "mean")
             reduced = Cost()
             if reduction != "none":
-                reduced = reduction_cost(
-                    input_elements=rows,
-                    rows=rows,
-                    dtype=dt,
-                ) + traffic(
+                reduced = reduction_cost(input_elements=rows, dtype=dt) + traffic(
                     "adjoint",
                     "reduction",
-                    elements=(rows + 1) / rows,
+                    elements=rows + 1,
                     dtype=dt,
                 )
             rescale = int(reduction == "mean")
             if rescale:
-                reduced += traffic("primal", "elementwise", elements=2 / rows, dtype=dt)
+                reduced += traffic("primal", "elementwise", elements=2, dtype=dt)
             return reduced + cost(
                 self.loss_fn,
                 dtype=dt,
                 channels_out=channels_out,
                 weighted=weighted,
                 rescale=rescale,
-            )
+            ).tile(rows)
 
     def __init__(self, config: Config) -> None:
         self.target_key = config.target_key

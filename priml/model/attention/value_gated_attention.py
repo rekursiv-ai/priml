@@ -3,7 +3,7 @@
 Two departures from :class:`~priml.model.attention.self_attention.SelfAttention`, both
 from the speedrun recipes rather than from taste:
 
-* **A window.** A layer attends only to the last ``window`` positions.
+* **A window.** A layer attends to ``window`` previous positions plus itself.
   Restricting most layers and leaving a few global keeps attention affordable
   at long context while preserving a path to any position.
 * **A value gate.** When the caller supplies a value embedding, each head
@@ -68,7 +68,7 @@ def sdpa_attention(q: Tensor, k: Tensor, v: Tensor, *, window: int) -> Tensor:
       q: ``[B, S, num_heads, channels_head]`` queries.
       k: Keys, same shape.
       v: Values, same shape.
-      window: Positions each query may look back over, itself included.
+      window: Previous positions each query may reach, in addition to itself.
 
     Returns:
       out: Attention output, same shape as ``q``.
@@ -103,12 +103,14 @@ class SdpaCausal:
             cls,
             *,
             seq_len: int,
+            batch_size: int = 1,
             dtype: torch.dtype | None,
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
+            rows: int = -1,
             **kwargs: object,
         ) -> Cost:
             """Cost the kernel from the shapes its owner hands it.
@@ -117,27 +119,31 @@ class SdpaCausal:
 
             Args:
               seq_len: Tokens per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
-              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              window: Previous keys each query reaches, plus itself; negative is unbounded.
               dropout_p: Attention dropout rate.
+              rows: Query rows sharing K/V; negative uses the modeled key count.
               **kwargs: The rest of the owner's bus, unread.
 
             Returns:
-              cost: Per-query-row cost of the kernel.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
-            del kwargs
+            del kwargs, window
             return attention_kernel_cost(
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
-                window=window,
+                window=-1,
                 dropout_p=dropout_p,
+                rows=rows,
             )
 
     def __init__(self, config: Config) -> None:
@@ -152,7 +158,7 @@ class SdpaCausal:
         window: int = -1,
         **kwargs: object,
     ) -> Tensor:
-        """Attend over the last ``window`` positions, causally.
+        """Attend over ``window`` previous positions plus self, causally.
 
         Remaining keyword arguments belong to the open model message bus; this
         kernel reads only the window it understands.
@@ -167,7 +173,7 @@ class ValueGatedAttention(nn.Module):
     Two departures from priml's
     :class:`~priml.model.attention.self_attention.SelfAttention`, both load-bearing here:
 
-    * **A window.** A layer attends only to the last ``window`` positions.
+    * **A window.** A layer attends to ``window`` previous positions plus itself.
       Restricting most layers and leaving a few global keeps attention
       affordable at long context while preserving a path to any position.
     * **A value gate.** When the caller supplies a value embedding, each head
@@ -229,10 +235,10 @@ class ValueGatedAttention(nn.Module):
         with, and inherits its hardware requirement along with it."""
 
         window: int = -1
-        """Keys each query attends back over, itself included.
+        """Previous positions each query reaches, in addition to itself.
 
-        -1 derives it from ``window_pattern`` at this layer's ``depth``; set it
-        to fix one layer's reach regardless of the pattern."""
+        Zero is self-only. -1 derives history from ``window_pattern`` when
+        depth and context are known, otherwise leaves it unbounded."""
 
         window_pattern: str = "SSSL"
         """Cycled reach per layer: L is the full context, S half of it.
@@ -292,15 +298,15 @@ class ValueGatedAttention(nn.Module):
             self,
             *,
             seq_len: int,
-            batch_size: int,
+            batch_size: int = 1,
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
             """Cost four projections, the gate, two norms, and the kernel.
 
-            The kernel counts its two products over ``min(window, seq_len)``
-            keys for this layer's window; the rotation and the gate are
-            counted here, since no child owns them.
+            The injected kernel owns its product geometry: masked SDPA is dense,
+            while a local-window kernel can use fewer keys. Rotation and the
+            value gate are counted here, since no child owns them.
 
             Args:
               seq_len: Tokens per sequence.
@@ -309,7 +315,7 @@ class ValueGatedAttention(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -335,25 +341,30 @@ class ValueGatedAttention(nn.Module):
                 )
             total += cost(
                 self.norm_qk,
-                seq_len=seq_len * self.num_heads,
-                batch_size=batch_size,
+                seq_len=seq_len,
+                batch_size=batch_size * self.num_heads,
                 dtype=dtype,
                 **kwargs,
-            ).tile(
-                2 * self.num_heads,
-                copies=2,
+            )
+            total += cost(
+                self.norm_qk,
+                seq_len=seq_len,
+                batch_size=batch_size * self.num_heads,
+                dtype=dtype,
+                **kwargs,
             )
             total += cost(
                 self.kernel,
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
-                window=self.window if self.window > 0 else -1,
+                window=self.window,
             )
             total += elementwise_cost(
-                primal=6 * inner,
-                adjoint=6 * inner,
+                primal=6 * inner * rows,
+                adjoint=6 * inner * rows,
                 channels=2 * inner,
                 inputs=6,
                 outputs=3,
@@ -386,7 +397,7 @@ class ValueGatedAttention(nn.Module):
                         dtype=dt,
                         phase="adjoint",
                     )
-                )
+                ).tile(rows)
             return replace(total, bytes_state=resolve_dtype(dtype).itemsize * 2 * inner)
 
     def __init__(self, config: Config) -> None:
@@ -496,6 +507,6 @@ class ValueGatedAttention(nn.Module):
         k = rotate_conjugate(k, cos=cos, sin=sin)
         q, k = self.norm_q(q), self.norm_k(k)
         if window is None:
-            window = config.window if config.window > 0 else q.shape[-3]
+            window = config.window if config.window >= 0 else q.shape[-3]
         out = self.attention(q, k, v, window=window, **kwargs)
         return self.proj_out(out.contiguous().flatten(-2))

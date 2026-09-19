@@ -1,0 +1,70 @@
+from typing import Any, Literal, overload
+
+from matplotlib.axes import Axes
+from matplotlib.collections import PolyCollection, TriMesh
+from matplotlib.colors import Colormap, Normalize
+from matplotlib.tri._triangulation import Triangulation
+from numpy.typing import ArrayLike
+
+@overload
+def tripcolor(
+    ax: Axes,
+    triangulation: Triangulation,
+    c: ArrayLike = ...,
+    *,
+    alpha: float = ...,
+    norm: str | Normalize | None = ...,
+    cmap: str | Colormap | None = ...,
+    vmin: float | None = ...,
+    vmax: float | None = ...,
+    shading: Literal["flat"] = ...,
+    facecolors: ArrayLike | None = ...,
+    **kwargs: Any,
+) -> PolyCollection: ...
+@overload
+def tripcolor(
+    ax: Axes,
+    x: ArrayLike,
+    y: ArrayLike,
+    c: ArrayLike = ...,
+    *,
+    alpha: float = ...,
+    norm: str | Normalize | None = ...,
+    cmap: str | Colormap | None = ...,
+    vmin: float | None = ...,
+    vmax: float | None = ...,
+    shading: Literal["flat"] = ...,
+    facecolors: ArrayLike | None = ...,
+    **kwargs: Any,
+) -> PolyCollection: ...
+@overload
+def tripcolor(
+    ax: Axes,
+    triangulation: Triangulation,
+    c: ArrayLike = ...,
+    *,
+    alpha: float = ...,
+    norm: str | Normalize | None = ...,
+    cmap: str | Colormap | None = ...,
+    vmin: float | None = ...,
+    vmax: float | None = ...,
+    shading: Literal["gouraud"],
+    facecolors: ArrayLike | None = ...,
+    **kwargs: Any,
+) -> TriMesh: ...
+@overload
+def tripcolor(
+    ax: Axes,
+    x: ArrayLike,
+    y: ArrayLike,
+    c: ArrayLike = ...,
+    *,
+    alpha: float = ...,
+    norm: str | Normalize | None = ...,
+    cmap: str | Colormap | None = ...,
+    vmin: float | None = ...,
+    vmax: float | None = ...,
+    shading: Literal["gouraud"],
+    facecolors: ArrayLike | None = ...,
+    **kwargs: Any,
+) -> TriMesh: ...

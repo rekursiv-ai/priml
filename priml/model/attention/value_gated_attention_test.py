@@ -17,6 +17,7 @@ from priml.cost import cost
 from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_gated_attention import (
+    SdpaCausal,
     ValueGatedAttention,
 )
 from priml.model.norm import RMSNorm
@@ -71,6 +72,59 @@ def test_value_gated_attention_forwards_the_open_message_bus() -> None:
     attention(torch.randn(1, 4, 16), cos_sin=cos_sin, message=message)
 
     assert messages == [message]
+
+
+def test_value_gated_attention_preserves_zero_window() -> None:
+    windows: list[int] = []
+
+    def kernel(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        window: int,
+        **kwargs: object,
+    ) -> Tensor:
+        del k, v, kwargs
+        windows.append(window)
+        return q
+
+    config = ValueGatedAttention.Config()
+    config.channels_in = 16
+    config.channels_head = 8
+    config.gate_channels = 4
+    config.window = 0
+    config.kernel = PartialConfig(kernel)
+    config.make()(torch.randn(1, 4, 16), cos_sin=RoPE.Config(8).make()(torch.arange(4)))
+    assert windows == [0]
+
+
+def test_value_gated_attention_zero_window_output_is_its_own_value() -> None:
+    config = ValueGatedAttention.Config()
+    config.channels_in = 16
+    config.channels_head = 8
+    config.gate_channels = 4
+    config.window = 0
+    attention = config.make()
+    with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
+        attention.proj_out.weight.copy_(torch.eye(16))
+        x = torch.randn(1, 4, 16)
+        expected = attention.proj_v(x)
+        actual = attention(x, cos_sin=RoPE.Config(8).make()(torch.arange(4)))
+    assert torch.equal(actual, expected)
+
+
+def test_value_gated_attention_self_only_mask_still_costs_dense_products() -> None:
+    config = ValueGatedAttention.Config()
+    config.channels_in = 16
+    config.channels_head = 8
+    config.gate_channels = 4
+    config.window = 0
+    actual = config.finalize().cost(seq_len=8, batch_size=1, dtype=None)
+    projection_weights = 4 * 16 * 16 + 4 * 2
+    assert actual["flops", "matmul"].sum() == (
+        6 * 8 * projection_weights + 12 * 2 * 8 * 8 * 8
+    )
 
 
 def test_value_gated_attention_uses_the_value_embedding() -> None:
@@ -203,20 +257,17 @@ def test_value_gated_attention_cost_is_projections_gate_and_the_kernel() -> None
         dtype=None,
         num_heads=2,
         channels_head=8,
-        window=4,
     )
     projections = 3 * 16 * 16 + 16 * 16
     gate = 4 * 2
-    assert (
-        kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 4
-    )  # Scores stop at the window.
+    assert kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 32 * 8 * 32
     assert model_cost.params == projections + gate
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost["flops", "primal", "matmul"].sum() == (
-        2 * (projections + gate) + kernel["flops", "primal", "matmul"].sum()
+        2 * 32 * (projections + gate) + kernel["flops", "primal", "matmul"].sum()
     )
     assert model_cost["flops", "adjoint", "matmul"].sum() == (
-        4 * (projections + gate) + kernel["flops", "adjoint", "matmul"].sum()
+        4 * 32 * (projections + gate) + kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * 2 * 2 * 8
     # The gate's gradient reduces over each head's channels; the norm runs on
@@ -228,7 +279,7 @@ def test_value_gated_attention_cost_is_projections_gate_and_the_kernel() -> None
     assert model_cost["flops", "adjoint", "reduction"].sum() == (
         kernel["flops", "adjoint", "reduction"].sum()
         + norm["flops", "adjoint", "reduction"].sum()
-        + 2 * (8 - 1)
+        + 32 * (2 * 8 - 2)
     )
 
 
@@ -250,7 +301,6 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
-        num_tokens=8,
         dtype=None,
         run=lambda module, x: cast(ValueGatedAttention, module)(
             x,
@@ -260,11 +310,28 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
     )
 
 
-def test_sdpa_causal_cost_matches_torch_through_its_owner() -> None:
+def test_sdpa_causal_cost_preserves_explicit_query_rows() -> None:
+    config = SdpaCausal.Config()
+    small = cost(config, seq_len=8, dtype=None, num_heads=2, channels_head=4, rows=2)
+    large = cost(config, seq_len=8, dtype=None, num_heads=2, channels_head=4, rows=8)
+    assert large["flops", "matmul"].sum() == 4 * small["flops", "matmul"].sum()
+    assert small["bytes", "matmul"].sum() < large["bytes", "matmul"].sum()
+    assert small == attention_kernel_cost(
+        seq_len=8,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+        rows=2,
+    )
+
+
+@pytest.mark.parametrize("window", [-1, 0, 1, 4])
+def test_sdpa_causal_cost_matches_torch_through_its_owner(window: int) -> None:
     config = ValueGatedAttention.Config()
     config.channels_in = 16
     config.channels_head = 8
     config.gate_channels = 4
+    config.window = window
     # Math SDPA exposes both products without replacing the configured kernel.
     with sdpa_kernel(SDPBackend.MATH):
         assert_cost_matches_torch(
@@ -272,7 +339,6 @@ def test_sdpa_causal_cost_matches_torch_through_its_owner() -> None:
             build_input=lambda: torch.randn(2, 4, 16, requires_grad=True),
             seq_len=4,
             batch_size=2,
-            num_tokens=8,
             dtype=None,
             run=lambda module, x: cast(ValueGatedAttention, module)(
                 x,
@@ -298,11 +364,11 @@ def test_value_gated_attention_cost_without_a_gate_or_window() -> None:
     assert model_cost.params == 4 * 16 * 16 + 2 * norm.params  # norm_q and norm_k.
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost["flops", "primal", "matmul"].sum() == (
-        2 * 4 * 16 * 16 + kernel["flops", "primal", "matmul"].sum()
+        2 * 32 * 4 * 16 * 16 + kernel["flops", "primal", "matmul"].sum()
     )
 
 
-def test_value_attention_traffic_amortizes_weights_and_preserves_window() -> None:
+def test_value_attention_counts_weights_once_and_preserves_window() -> None:
     config = ValueGatedAttention.Config()
     config.channels_in = 8
     config.num_heads = 2
@@ -312,20 +378,21 @@ def test_value_attention_traffic_amortizes_weights_and_preserves_window() -> Non
     config = config.copy_tree().finalize()
     one = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
     batch = config.cost(seq_len=8, batch_size=4, dtype=torch.bfloat16)
-    assert one["bytes", "primal", "matmul"].sum() - batch[
-        "bytes",
-        "primal",
-        "matmul",
-    ].sum() == 2 * one.params * (1 / 8 - 1 / 32)
+    assert (
+        4 * one["bytes", "primal", "matmul"].sum()
+        - batch[
+            "bytes",
+            "primal",
+            "matmul",
+        ].sum()
+        == 3 * torch.bfloat16.itemsize * one.params
+    )
     wide = config.cost(seq_len=8, batch_size=4, dtype=None)
     assert (
         wide["bytes", torch.float32].sum() == batch["bytes", torch.bfloat16].sum() * 2
     )
-    assert config.cost(seq_len=32, batch_size=1, dtype=torch.bfloat16) == config.cost(
-        seq_len=8,
-        batch_size=4,
-        dtype=torch.bfloat16,
-    )
+    longer = config.cost(seq_len=32, batch_size=1, dtype=torch.bfloat16)
+    assert longer["flops", "matmul"].sum() > one["flops", "matmul"].sum()
     assert batch.bytes_state == 2 * 2 * 8
 
 

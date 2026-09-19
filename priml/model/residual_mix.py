@@ -72,7 +72,7 @@ class ResidualMix(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             Raises:
               ValueError: ``channels_in`` was never inherited.
@@ -91,26 +91,25 @@ class ResidualMix(nn.Module):
             return (
                 Cost(
                     cells={
-                        ("flops", "primal", "elementwise", dt): 3 * width,
-                        ("flops", "adjoint", "elementwise", dt): 4 * width,
+                        ("flops", "primal", "elementwise", dt): 3 * width * rows,
+                        ("flops", "adjoint", "elementwise", dt): 4 * width * rows,
                         ("bytes", "primal", "elementwise", dt): s
-                        * (7 * width + params / rows),
+                        * (7 * width * rows + params),
                         ("bytes", "adjoint", "elementwise", dt): s
-                        * (10 * width + params / rows),
+                        * (10 * width * rows + params),
                     },
                     params=params,
                     params_active=params,
                 )
                 + reduction_cost(
-                    input_elements=params * self.channels_in,
-                    output_groups=params,
+                    input_elements=params * self.channels_in * rows,
+                    output_groups=params * rows,
                     dtype=dt,
                     phase="adjoint",
                 )
                 + reduction_cost(
                     input_elements=params * rows,
                     output_groups=params,
-                    rows=rows,
                     dtype=dt,
                     phase="adjoint",
                 )

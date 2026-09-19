@@ -114,12 +114,11 @@ class MLPMixerBlock(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Sum the four children per token and two residual additions.
+            """Sum the four children and two residual additions.
 
-            The token mixer and its norm map rows of ``seq_len``, and there are
-            ``channels_in`` such rows per ``seq_len`` tokens, so their work is
-            amortized by ``channels_in / seq_len``; their parameters exist once.
-            Transposes are views.
+            The token children receive one row for each channel, while the
+            channel children receive one row for each token. Transposes are
+            views and add no cost.
 
             Args:
               seq_len: Tokens per sequence; must equal this block's ``seq_len``,
@@ -129,7 +128,7 @@ class MLPMixerBlock(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             Raises:
               ValueError: ``seq_len`` differs from the block's own.
@@ -139,7 +138,6 @@ class MLPMixerBlock(nn.Module):
                 raise ValueError(
                     f"MLPMixerBlock mixes {self.seq_len} tokens; costed at {seq_len}.",
                 )
-            rows_per_token = self.channels_in / self.seq_len
             over_tokens = sum(
                 (
                     cost(
@@ -167,13 +165,14 @@ class MLPMixerBlock(nn.Module):
                 Cost(),
             )
             residual_adds = elementwise_cost(
-                primal=2 * self.channels_in,
-                adjoint=2 * self.channels_in,
+                primal=2 * self.channels_in * self.seq_len * batch_size,
+                adjoint=2 * self.channels_in * self.seq_len * batch_size,
                 channels=2 * self.channels_in,
+                rows=self.seq_len * batch_size,
                 inputs=2,
                 dtype=dtype,
             )
-            return over_tokens.tile(rows_per_token) + over_channels + residual_adds
+            return over_tokens + over_channels + residual_adds
 
     def __init__(self, config: Config) -> None:
         super().__init__()

@@ -203,7 +203,7 @@ class CheckpointerProtocol(Protocol):
         ...
 
     def save(self, target: CheckpointableProtocol, step: int) -> None:
-        """Force-save ``target`` at ``step`` (end-of-run) unless it already exists.
+        """Refresh this process's checkpoint or reject a foreign occupied path.
 
         Args:
           target: Target.
@@ -387,6 +387,16 @@ class PhaseTimerProtocol(Protocol):
     @property
     def cuda_events_enabled(self) -> bool:
         """Cuda events enabled."""
+        ...
+
+    @property
+    def heartbeat_interval_sec(self) -> float:
+        """Seconds between phase liveness reports."""
+        ...
+
+    @property
+    def fault_dump_interval_sec(self) -> float:
+        """Seconds without a liveness report before dumping stacks."""
         ...
 
     def phase(self, name: str) -> AbstractContextManager[None]:

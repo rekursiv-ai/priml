@@ -107,9 +107,10 @@ class SoftCap(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
+            rows = seq_len * batch_size
             return cost(
                 self.inner,
                 seq_len=seq_len,
@@ -117,9 +118,10 @@ class SoftCap(nn.Module):
                 dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
-                primal=3 * self.channels_out,
-                adjoint=5 * self.channels_out,
+                primal=3 * self.channels_out * rows,
+                adjoint=5 * self.channels_out * rows,
                 channels=self.channels_out,
+                rows=rows,
                 inputs=3,
                 outputs=3,
                 adjoint_inputs=4,

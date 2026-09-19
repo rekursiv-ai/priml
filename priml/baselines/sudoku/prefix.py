@@ -95,7 +95,7 @@ class RegisterTokens(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one scale over every register token, per puzzle.
+            """Cost one scale over every register token in the complete batch.
 
             The expand is a view. A frozen basis owns nothing, so its gradient
             reduction over puzzles vanishes with its parameters.
@@ -107,17 +107,18 @@ class RegisterTokens(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-puzzle cost of this module.
+              cost: Whole-batch cost of this module.
 
             """
-            del kwargs
+            del seq_len, kwargs
             width = self.num_tokens * self.channels_out
+            rows = batch_size
             return elementwise_cost(
-                primal=width,
-                adjoint=width,
+                primal=width * rows,
+                adjoint=width * rows,
                 channels=width,
                 params=width if self.learnable else 0,
-                rows=seq_len * batch_size,
+                rows=rows,
                 inputs=0 if self.learnable else 1,
                 adjoint_inputs=1,
                 dtype=dtype,
@@ -215,7 +216,7 @@ class SparsePuzzleEmbedding(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one row gathered and the prefix scaled, per puzzle; nothing owned.
+            """Cost one row gathered and the prefix scaled for the batch; nothing owned.
 
             The table is a buffer, so there are no parameters, and the scatter
             back into it is the sparse optimizer's work, which the counting
@@ -230,22 +231,34 @@ class SparsePuzzleEmbedding(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-puzzle cost of this module.
+              cost: Whole-batch cost of this module.
 
             """
-            del seq_len, batch_size, kwargs
+            del seq_len, kwargs
             width = self.num_tokens * self.channels_out
             copied = 4 * self.channels_out
             if width > self.channels_out:
                 copied += self.channels_out + width
+            rows = batch_size
             return (
-                traffic("primal", "selection", elements=3, dtype=torch.int64)
-                + traffic("primal", "selection", elements=copied, dtype=dtype)
+                traffic(
+                    "primal",
+                    "selection",
+                    elements=3 * rows,
+                    dtype=torch.int64,
+                )
+                + traffic(
+                    "primal",
+                    "selection",
+                    elements=copied * rows,
+                    dtype=dtype,
+                )
                 + elementwise_cost(
-                    primal=width,
-                    adjoint=width,
+                    primal=width * rows,
+                    adjoint=width * rows,
                     channels=width,
                     adjoint_inputs=1,
+                    rows=rows,
                     dtype=dtype,
                 )
             )
@@ -396,7 +409,7 @@ class PrefixStack(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-puzzle cost of this module.
+              cost: Whole-batch cost of this module.
 
             """
             children = sum(
@@ -415,7 +428,7 @@ class PrefixStack(nn.Module):
             return children + traffic(
                 "primal",
                 "selection",
-                elements=2 * self.num_tokens * self.channels_out,
+                elements=2 * batch_size * self.num_tokens * self.channels_out,
                 dtype=dtype,
             )
 

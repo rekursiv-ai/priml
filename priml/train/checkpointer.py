@@ -21,9 +21,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from string import Formatter
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast, override
+from typing import TYPE_CHECKING, Literal, Protocol, Self, cast, override
 
 import json
 import logging
@@ -72,7 +73,7 @@ from priml.runtime import is_rank_zero
 
 logger = logging.getLogger(__name__)
 
-type StateDict = dict[str, Any]  # pyright: ignore[reportExplicitAny] -- Opaque payload owned by each CheckpointableProtocol implementation.
+type StateDict = dict[str, object]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -104,13 +105,12 @@ class StateDictStorer(Protocol):
       be landing on a background thread. ``after_write`` runs once they are
       durable; ``flush`` blocks until all pending writes (and their
       ``after_write``) finish.
-    - **``is_complete`` is a pure, non-blocking disk read.** It reports an
-      in-flight write as incomplete on its own (a partial checkpoint has no
-      completeness marker), and never blocks or joins. This lets retention and
-      collision scans inspect the whole inventory without stalling the hot path
-      on a background write. ``Checkpointer`` only ever counts, loads, prunes, or
-      guards checkpoints ``is_complete`` reports true, so a still-writing or
-      crashed-partial checkpoint is never trusted or deleted.
+    - **``is_complete`` never blocks, joins, or barriers.** Known pending
+      writes report incomplete; other paths are judged by their disk markers.
+      Distributed overwrites invalidate the old marker before payload writes,
+      so a failed overwrite cannot certify partial data to a fresh reader.
+      Invalidation does not preserve the previous snapshot or provide atomic
+      replacement to readers that already began loading it.
     - **Synchronization happens only in ``flush`` (and a backend's own
       ``write``/``read``), collectively.** ``Checkpointer`` calls ``write`` /
       ``read`` / ``flush`` on every rank in lockstep, so a backend's barriers are
@@ -228,6 +228,7 @@ class SyncLocalStateDictStorer:
         start = time.perf_counter()
         if _has_dtensor(state_dict):
             path.mkdir(parents=True, exist_ok=True)
+            _invalidate_distributed_checkpoint(path)
             state_dict_saver.save(state_dict, checkpoint_id=str(path))
             if dist.is_initialized():
                 dist.barrier()
@@ -295,11 +296,9 @@ class AsyncLocalStateDictStorer:
     The synchronization model keeps async genuinely asynchronous AND
     multi-rank-safe:
 
-    - ``is_complete`` is a **pure disk read** -- no join, no barrier. DCP writes
-      the ``.metadata`` marker last, so an in-flight write's directory reports
-      incomplete on its own; retention/collision scans (which call
-      ``is_complete`` over the whole inventory) therefore never block on the
-      background write, preserving overlap with subsequent training.
+    - ``is_complete`` never joins or barriers. The pending destination stays
+      incomplete until joined; other paths use their on-disk marker. Every
+      overwrite collectively invalidates the old marker before payload writes.
     - The join is performed only at explicit, **all-rank** call sites: the start
       of the next ``write`` (one save in flight at a time), ``read`` (a resume
       must see a just-issued write), and ``flush``. Because none is reached on a
@@ -344,6 +343,7 @@ class AsyncLocalStateDictStorer:
         """
         self._join()
         path.mkdir(parents=True, exist_ok=True)
+        _invalidate_distributed_checkpoint(path)
         # async_save returns either a bare Future or an AsyncSaveResponse; join on
         # the upload (disk-write) future either way.
         self._pending_start = time.perf_counter()
@@ -372,10 +372,10 @@ class AsyncLocalStateDictStorer:
         return _read_checkpoint(path, into)
 
     def is_complete(self, path: Path) -> bool:
-        """Pure disk check -- ``.metadata`` (dir) or file existence. Never joins.
+        """Check completion without joining an in-flight write.
 
-        An in-flight write reports incomplete because DCP writes ``.metadata``
-        last; no special-casing or blocking is needed.
+        A completed disk marker may precede the explicit join and its callback;
+        the owning instance stays incomplete until that join finishes.
 
         Args:
           path: Checkpoint path (dir for distributed, file for local).
@@ -385,7 +385,7 @@ class AsyncLocalStateDictStorer:
             on pending async writes).
 
         """
-        return _is_complete(path)
+        return path != self._pending_path and _is_complete(path)
 
     def flush(self) -> None:
         """Block until the in-flight write is durable, then run its retention."""
@@ -447,6 +447,21 @@ def _read_checkpoint(path: Path, into: StateDict) -> StateDict:
         StateDict,
         torch.load(path, weights_only=True, map_location=torch.device("cpu")),
     )
+
+
+def _invalidate_distributed_checkpoint(path: Path) -> None:
+    """Agree that the old completion marker is gone before any payload write."""
+    error: list[str | None] = [None]
+    if is_rank_zero():
+        try:
+            (path / ".metadata").unlink(missing_ok=True)
+        except OSError as exc:
+            error[0] = str(exc)
+    if dist.is_initialized():
+        dist.broadcast_object_list(error, src=0)
+    message = error[0]
+    if message is not None:
+        raise OSError(f"Cannot invalidate checkpoint completion marker: {message}")
 
 
 # A plain file is complete by existence (atomic rename). A DCP directory is complete
@@ -527,11 +542,12 @@ class Checkpointer:
         """Which checkpoint ``load`` restores: -1 = latest, >=0 = that exact step."""
 
         allow_checkpoint_overwrite: bool = False
-        """Permit saves that would overwrite an existing checkpoint. Off by
-        default: ``load`` halts the run at startup if a future save on the
-        cadence would land on a checkpoint already on disk (a fresh run reusing a
-        name, or a rewind-resume clobbering newer checkpoints). Set True to
-        deliberately re-mint, e.g. re-running a training section."""
+        """Permit writes into a prior run's checkpoint destination.
+
+        Off by default: startup rejects any complete checkpoint for a fresh
+        run, or any reachable newer checkpoint after a rewind. Terminal and
+        best saves need not follow the cadence. This process may refresh its
+        own checkpoints without opting into foreign overwrites."""
 
         best_metric: str = ""
         """Eval metric name whose improvement forces a save; empty keeps
@@ -609,7 +625,7 @@ class Checkpointer:
         self.checkpoint_dir = Path(config.working_dir)
         self.filename = config.filename
         self._filename_pattern = re.compile(
-            rf"{re.escape(''.join(prefix))}(?P<step>\d+){re.escape(''.join(suffix))}",
+            rf"{re.escape(''.join(prefix))}(?P<step> *\d+){re.escape(''.join(suffix))}",
         )
         self.save_every = config.save_every
         self.keep_last_n = config.keep_last_n
@@ -629,6 +645,7 @@ class Checkpointer:
         """Step of the checkpoint holding ``best_value``; exempt from pruning."""
         self._eval_saved_step: int | None = None
         """Step ``on_eval`` wrote; the cadence at that step then has nothing to add."""
+        self._written_steps: set[int] = set()
         self.storage: StateDictStorer = config.storer.make()
 
     def maybe_save(self, target: CheckpointableProtocol, step: int) -> bool:
@@ -662,10 +679,9 @@ class Checkpointer:
         collective (rank 0's verdict broadcast) so ranks never disagree and
         strand each other at the save barrier.
 
-        A checkpoint ``on_eval`` wrote at this step is this run's own and is
-        kept: the loop evaluates before it saves, so both would serialize the
-        same state. The overwrite guard is for a checkpoint another process
-        left behind.
+        Refresh this process's own checkpoint: equal optimizer steps can have
+        different dataset cursors, completed epochs, or evaluation RNG state.
+        The overwrite guard protects checkpoints another process left behind.
 
         Drains any pending async write first: its background barrier must
         complete before this method's collective broadcast, or the two
@@ -678,10 +694,8 @@ class Checkpointer:
         """
         if step < 0:
             raise ValueError(f"checkpoint step must be non-negative, got {step}")
-        if step == self._eval_saved_step:
-            return
         self.storage.flush()
-        exists = step in self.available_steps()
+        exists = step in self.available_steps() and step not in self._written_steps
         if _agreed_across_ranks(exists) and not self.allow_checkpoint_overwrite:
             raise RuntimeError(
                 f"a forced save would overwrite existing checkpoint at step "
@@ -707,7 +721,7 @@ class Checkpointer:
         so a checkpoint just written is never clobbered nor, for an async
         storer, raced by its own in-flight write. The converse holds too: the
         loop evaluates before it saves, so a step this method wrote is one the
-        cadence and end-of-run saves then skip.
+        cadence skips. The terminal save refreshes it after final epoch/RNG work.
 
         Args:
           target: The object whose state is saved.
@@ -721,8 +735,11 @@ class Checkpointer:
           KeyError: ``best_metric`` is set but absent from ``metrics``.
 
         """
+        if step < 0:
+            raise ValueError(f"checkpoint step must be non-negative, got {step}")
         if not self.best_metric:
             return False
+        self.storage.flush()
         if self.best_metric not in metrics:
             raise KeyError(
                 f"best_metric {self.best_metric!r} is not an eval metric; "
@@ -736,13 +753,10 @@ class Checkpointer:
         )
         if not _agreed_across_ranks(improved):
             return False
-        self.best_value = value
-        self.best_step = step
-        self._write_best_record()
-        self.storage.flush()
         if _agreed_across_ranks(step in self.available_steps()):
+            self._commit_best(step, value)
             return False
-        self._write(target, step)
+        self._write(target, step, after_write=partial(self._commit_best, step, value))
         self._eval_saved_step = step
         return True
 
@@ -762,20 +776,18 @@ class Checkpointer:
           (-1 = latest, with fallback past a crashed-latest; >=0 = that exact
           step, or raise if absent). ``resume=False`` or an empty dir starts
           fresh.
-        - Then, unless ``allow_checkpoint_overwrite`` (or ``guard=False``, e.g.
-          an eval-only run that writes nothing), halt if a future save on the
-          cadence in ``(start_step, max_steps]`` would overwrite a checkpoint
-          already on disk -- caught up front, not thousands of steps in.
+        - Unless ``allow_checkpoint_overwrite`` or ``guard=False``, reject an
+          occupied destination when starting fresh. After resume, reject every
+          complete checkpoint in ``(start_step, max_steps]``: final and best
+          saves can land off cadence.
 
         Returns True iff a checkpoint was restored (so the loop's start step is
         the resumed one, already set inside ``target``).
 
         Args:
           target: Checkpointable object (typically TrainLoop) to restore state.
-          max_steps: Upper bound on training steps used to detect collision with
-            future cadence saves.
-          guard: When True, raise if a save on the cadence would overwrite an
-            existing checkpoint.
+          max_steps: Upper bound on training steps for rewind collision checks.
+          guard: Reject occupied fresh destinations and reachable rewind collisions.
 
         Returns:
           resumed: True if a checkpoint was loaded; False if starting fresh.
@@ -787,7 +799,7 @@ class Checkpointer:
         if self.resume:
             self._restore_best_record(inventory)
         if guard and not self.allow_checkpoint_overwrite:
-            self._guard_overwrite(inventory, resumed_step or 0, max_steps)
+            self._guard_overwrite(inventory, resumed_step, max_steps)
         return resumed_step is not None
 
     def close(self) -> None:
@@ -836,14 +848,14 @@ class Checkpointer:
     def _guard_overwrite(
         self,
         inventory: list[_Checkpoint],
-        start_step: int,
+        start_step: int | None,
         max_steps: float,
     ) -> None:
-        """Halt if a future save in ``(start_step, max_steps]`` would overwrite."""
+        """Reject a fresh run in an occupied destination or a rewind collision."""
         collisions = [
             c.step
             for c in inventory
-            if start_step < c.step <= max_steps and c.step % self.save_every == 0
+            if start_step is None or start_step < c.step <= max_steps
         ]
         if not collisions:
             return
@@ -904,14 +916,28 @@ class Checkpointer:
             path,
         )
 
-    def _write(self, target: CheckpointableProtocol, step: int) -> None:
+    def _commit_best(self, step: int, value: float) -> None:
+        """Publish a durable best checkpoint before retention considers pruning."""
+        self.best_step = step
+        self.best_value = value
+        self._write_best_record()
+        self._prune()
+
+    def _write(
+        self,
+        target: CheckpointableProtocol,
+        step: int,
+        *,
+        after_write: Callable[[], None] | None = None,
+    ) -> None:
         """Serialize ``target`` and write it at ``step``; retention rides the write."""
         path = validated_output_path(self._path(step))
         self.storage.write(
             path,
             dict(target.state_dict()),
-            after_write=self._prune,
+            after_write=self._prune if after_write is None else after_write,
         )
+        self._written_steps.add(step)
 
     def available_steps(self) -> list[int]:
         """Ascending steps of all complete checkpoints on disk (for diagnostics).

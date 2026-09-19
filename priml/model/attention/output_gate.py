@@ -107,7 +107,7 @@ class OutputGate(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -127,8 +127,8 @@ class OutputGate(nn.Module):
                     rows=rows,
                 )
                 + elementwise_cost(
-                    primal=5 * self.channels_in,
-                    adjoint=6 * self.channels_in,
+                    primal=5 * self.channels_in * rows,
+                    adjoint=6 * self.channels_in * rows,
                     channels=self.channels_in,
                     inputs=4,
                     outputs=1,

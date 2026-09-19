@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Literal, Protocol, override
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import math
 
@@ -11,8 +11,6 @@ from configgle import Fig
 
 
 if TYPE_CHECKING:
-    from typing import Self
-
     from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
     import torch
@@ -262,13 +260,6 @@ class MultiProcess:
             default_factory=lambda: {"dp": -1, "pp": 1, "tp": 1},
         )
         """Device mesh dimensions (-1 = auto-infer from world size)."""
-
-        @override
-        def finalize(self) -> Self:
-            self.device = get_device(self.device)
-            # Backend is resolved once, in ``MultiProcess.__init__`` -- do not
-            # duplicate that logic here (the two copies silently drift).
-            return super().finalize()
 
     def __init__(self, config: Config):
         self.device = get_device(config.device)

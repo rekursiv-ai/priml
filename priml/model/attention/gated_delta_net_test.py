@@ -19,10 +19,7 @@ import pytest
 import torch
 
 from priml.cost import cost
-from priml.model.attention.gated_delta_net import (
-    GatedDeltaNet,
-    _torch_chunk_gated_delta_rule,
-)
+from priml.model.attention.gated_delta_net import GatedDeltaNet
 from priml.model.special import Identity
 from priml.testing.bfb import (
     assert_bfb_against_golden,
@@ -100,45 +97,6 @@ def test_gated_delta_net_single_token():
     x = torch.randn(1, 1, 32)
     out = m(x)
     assert out.shape == (1, 1, 32)
-
-
-def test_torch_chunk_fallback_shapes():
-    B, S, H, dk, dv = 1, 16, 2, 8, 8
-    q = torch.randn(B, S, H, dk)
-    k = torch.randn(B, S, H, dk)
-    v = torch.randn(B, S, H, dv)
-    g = torch.randn(B, S, H)
-    beta = torch.rand(B, S, H)
-    out, state = _torch_chunk_gated_delta_rule(
-        q,
-        k,
-        v,
-        g=g,
-        beta=beta,
-        chunk_size=8,
-    )
-    assert out.shape == (B, S, H, dv)
-    assert state is None
-
-
-def test_torch_chunk_fallback_with_final_state():
-    B, S, H, dk, dv = 1, 8, 2, 8, 8
-    q = torch.randn(B, S, H, dk)
-    k = torch.randn(B, S, H, dk)
-    v = torch.randn(B, S, H, dv)
-    g = torch.randn(B, S, H)
-    beta = torch.rand(B, S, H)
-    out, state = _torch_chunk_gated_delta_rule(
-        q,
-        k,
-        v,
-        g=g,
-        beta=beta,
-        output_final_state=True,
-    )
-    assert out.shape == (B, S, H, dv)
-    assert state is not None
-    assert state.shape == (B, H, dk, dv)
 
 
 def test_gated_delta_net_arbitrary_leading_dims():
@@ -226,7 +184,7 @@ def test_gated_delta_net_bfb(device: str) -> None:
 
 
 def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
-    """The scan costs as a per-token state read and write, not a growing cache."""
+    """The padded chunk executes its full products even for a one-token input."""
     config = GatedDeltaNet.Config(
         channels_in=16,
         num_heads_k=2,
@@ -246,15 +204,15 @@ def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
     assert norm == 4
     assert model_cost.params == projections + conv + gates + norm
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
-    state = 4 * 8 * 4  # num_heads_v x channels_k_head x channels_v_head.
-    assert (
-        model_cost["flops", "primal", "matmul"].sum()
-        == 2 * (projections + conv) + 4 * state
-    )
-    assert (
-        model_cost["flops", "adjoint", "matmul"].sum()
-        == 4 * (projections + conv) + 8 * state
-    )
+    chunk_products = 64 * 64 * (3 * 8 + 2 * 4)
+    chunk_adjoint_products = 64 * 64 * (2 * 8 + 4)
+    state_products = 64 * 8 * 4
+    assert model_cost["flops", "primal", "matmul"].sum() == 2 * (
+        projections + 3 * conv
+    ) + 2 * 4 * (chunk_products + 3 * state_products)
+    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * (
+        projections + 3 * conv
+    ) + 2 * 4 * (2 * chunk_adjoint_products + 2 * state_products)
     assert model_cost.bytes_state == 0
     # The q/k L2 norms sum each key row once each way, per value head.
     assert model_cost["flops", "primal", "reduction"].sum() == 2 * 4 * (
@@ -262,7 +220,12 @@ def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
     ) + norm_reduction(
         finalized,
     )
-    norm_cost = cost(finalized.norm, seq_len=4, batch_size=1, dtype=None).tile(4)
+    norm_cost = cost(
+        finalized.norm,
+        seq_len=1,
+        batch_size=finalized.num_heads_v,
+        dtype=None,
+    )
     assert (
         model_cost["flops", "adjoint", "reduction"].sum()
         == 2 * 4 * (8 - 1) + norm_cost["flops", "adjoint", "reduction"].sum()
@@ -273,59 +236,51 @@ def test_gated_delta_net_cost_is_projections_conv_and_state_update() -> None:
     )
 
 
-def norm_reduction(finalized: GatedDeltaNet.Config) -> float:
-    """Reduction FLOPs the injected norm contributes, tiled over the value heads."""
-    return (
-        cost(finalized.norm, seq_len=1, batch_size=1, dtype=None)
-        .tile(finalized.num_heads_v)["flops", "primal", "reduction"]
-        .sum()
-    )
+def norm_reduction(finalized: GatedDeltaNet.Config) -> int:
+    """Reduction FLOPs for one norm invocation over all value-head rows."""
+    return cost(
+        finalized.norm,
+        seq_len=1,
+        batch_size=finalized.num_heads_v,
+        dtype=None,
+    )["flops", "primal", "reduction"].sum()
 
 
-def test_gated_delta_net_projections_match_torch() -> None:
-    """The projections and the depthwise conv are torch's whole matmul count.
-
-    The CPU scan is chunked: it pads the sequence to 64-token chunks and runs
-    in-chunk triangular solves, so at four tokens it executes ~50x the products
-    the recurrent-model proxy costs. The proxy is the analytical policy; the
-    ratio pins torch's measured count at this geometry (541,664 FLOPs/token to
-    the analytical 10,464) so a change to either side is visible.
-    """
+@pytest.mark.parametrize("seq_len", [1, 4, 64, 65, 129])
+@pytest.mark.parametrize("geometry", [(1, 2, 8, 8), (2, 4, 4, 3)])
+def test_gated_delta_net_chunk_cost_matches_torch(
+    seq_len: int,
+    geometry: tuple[int, int, int, int],
+) -> None:
+    """Count padded chunks, initial constant state, and the unused final update."""
+    batch_size, value_heads, key_width, value_width = geometry
     assert_cost_matches_torch(
         GatedDeltaNet.Config(
             channels_in=16,
             num_heads_k=2,
-            num_heads_v=2,
-            channels_k_head=8,
-            channels_v_head=8,
+            num_heads_v=value_heads,
+            channels_k_head=key_width,
+            channels_v_head=value_width,
             conv_kernel_size=3,
         ),
-        build_input=lambda: torch.randn(1, 4, 16, requires_grad=True),
-        seq_len=4,
-        batch_size=1,
-        num_tokens=4,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
+        build_input=lambda: torch.randn(batch_size, seq_len, 16, requires_grad=True),
+        seq_len=seq_len,
+        batch_size=batch_size,
         dtype=None,
-        expected_ratio=10_464 / 541_664,
     )
 
 
-def test_gated_delta_net_cost_ignores_seq_len() -> None:
+def test_gated_delta_net_flops_scale_with_batch_size() -> None:
     config = GatedDeltaNet.Config(channels_in=8, num_heads_k=1, num_heads_v=1)
     finalized = config.copy_tree().finalize()
-    # Same rows sharing the weights: the recurrence has no attention reach.
-    assert finalized.cost(
-        seq_len=8,
-        batch_size=1,
-        dtype=None,
-    ) == finalized.cost(
-        seq_len=8,
-        batch_size=1,
-        dtype=None,
-    )
+    one = finalized.cost(seq_len=8, batch_size=1, dtype=None)
+    batch = finalized.cost(seq_len=8, batch_size=4, dtype=None)
+    assert batch["flops", "matmul"].sum() == 4 * one["flops", "matmul"].sum()
+    assert batch["bytes", "matmul"].sum() > one["bytes", "matmul"].sum()
+    assert one.params == batch.params
 
 
-def test_delta_traffic_amortizes_projection_and_convolution_weights() -> None:
+def test_delta_traffic_counts_shared_weights_once_per_invocation() -> None:
     config = GatedDeltaNet.Config()
     config.channels_in = 8
     config.num_heads_k = 1
@@ -333,19 +288,38 @@ def test_delta_traffic_amortizes_projection_and_convolution_weights() -> None:
     config.channels_k_head = 4
     config.channels_v_head = 3
     config = config.copy_tree().finalize()
-    one = config.cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
-    batch = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    one = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    batch = config.cost(seq_len=4, batch_size=4, dtype=torch.bfloat16)
     weights = 8 * 14 + 8 * 6 + 2 * 8 * 2 + 6 * 8 + 14 * 4
     assert (
-        one["bytes", "primal", "matmul"].sum()
-        - batch["bytes", "primal", "matmul"].sum()
-        == 2 * weights * 3 / 4
+        4 * one["bytes", "primal", "matmul"].sum()
+        - batch[
+            "bytes",
+            "primal",
+            "matmul",
+        ].sum()
+        == 3 * torch.bfloat16.itemsize * weights
     )
-    wide = config.cost(seq_len=4, batch_size=1, dtype=None)
+    assert batch["matmul", torch.float32] == one["matmul", torch.float32].tile(4)
+    wide = config.cost(seq_len=4, batch_size=4, dtype=torch.float32)
     assert (
-        wide["bytes", torch.float32].sum() == batch["bytes", torch.bfloat16].sum() * 2
+        wide["bytes", "matmul", torch.float32].sum()
+        == batch["bytes", "matmul", torch.bfloat16].sum() * 2
+        + batch["bytes", "matmul", torch.float32].sum()
     )
     assert batch["bytes", "primal", "reduction"].sum() > 0
+    full = config.cost(seq_len=64, batch_size=1, dtype=torch.bfloat16)
+    padded = config.cost(seq_len=65, batch_size=1, dtype=torch.bfloat16)
+    assert full["flops", "matmul"].sum() > one["flops", "matmul"].sum()
+    assert padded["flops", "matmul"].sum() > full["flops", "matmul"].sum()
+    assert (
+        padded["bytes", "primal", "matmul"].sum()
+        > full[
+            "bytes",
+            "primal",
+            "matmul",
+        ].sum()
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])

@@ -9,6 +9,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.cost import cost
 from priml.math.diffusion.schedule import (
     compute_log_alpha,
     input_conditioning_identity,
@@ -172,6 +173,29 @@ def test_log_time_from_log_snr_per_truncnormicdf_roundtrip() -> None:
         high=100,
     )
     torch.testing.assert_close(log_t_recovered, log_t, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize(
+    ("schedule", "flops"),
+    [
+        (log_sigma_from_log_snr_per_variance_preserving, 5),
+        (log_sigma_from_log_snr_per_rectified_flow, 4),
+        (log_snr_from_log_time_per_logit, 7),
+        (log_time_from_log_snr_per_logit, 4),
+        (log_snr_from_log_time_per_logtan, 21),
+        (log_time_from_log_snr_per_logtan, 20),
+        (log_snr_from_log_time_per_truncnormicdf, 14),
+        (log_time_from_log_snr_per_truncnormicdf, 11),
+    ],
+)
+def test_schedule_cost_is_integer_and_scales_by_channels(
+    schedule: Callable[..., Tensor],
+    flops: int,
+) -> None:
+    one = cost(schedule, channels=1, dtype=None)
+    assert one["flops", "primal", "elementwise"].sum() == flops
+    assert all(isinstance(value, int) for value in one.cells.values())
+    assert cost(schedule, channels=3, dtype=None) == one.tile(3)
 
 
 if __name__ == "__main__":

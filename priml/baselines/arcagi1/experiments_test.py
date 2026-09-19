@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import inspect
+
 from configgle.pprinting import pformat
 
 import pytest
@@ -52,10 +54,22 @@ def test_every_experiment_finalizes(
     name: str,
     factory: Callable[[], ArcTrainLoop],
 ) -> None:
-    """A config must build without a dataset or a GPU."""
-    config = factory().copy_tree().finalize()
+    """Factories take no arguments; callers mutate configs before finalization."""
+    assert not inspect.signature(factory).parameters
+    config = factory()
+    prefix = config.step.model.prefix
+    assert isinstance(prefix, PrefixStack.Config)
+    table = prefix.parts[0]
+    assert isinstance(table, SparsePuzzleEmbedding.Config)
+    table.num_puzzles = 7
+    config = config.copy_tree().finalize()
     assert config.experiment_name == name
     assert config.study_name == "arcagi1"
+    prefix = config.step.model.prefix
+    assert isinstance(prefix, PrefixStack.Config)
+    table = prefix.parts[0]
+    assert isinstance(table, SparsePuzzleEmbedding.Config)
+    assert table.num_puzzles == 7
 
 
 def test_the_ladder_reuses_the_sudoku_solver() -> None:

@@ -127,21 +127,20 @@ def test_channels_must_be_inherited() -> None:
 
 
 def test_register_tokens_cost_is_one_scale_over_the_owned_tokens() -> None:
-    """Per puzzle: every register token scaled; the expand is a view."""
+    """Cost one scale over every register token in the complete batch."""
     analytical = assert_cost_matches_torch(
         RegisterTokens.Config(num_tokens=2, channels_out=8),
         build_input=lambda: torch.arange(4, dtype=torch.int32),
-        seq_len=4,
-        batch_size=1,
-        num_tokens=4,
+        seq_len=1,
+        batch_size=4,
         dtype=None,
         run=_run_prefix,
     )
     assert analytical.params == analytical.params_active == 2 * 8
-    assert analytical["flops", "primal", "elementwise"].sum() == 2 * 8
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 2 * 8
+    assert analytical["flops", "primal", "elementwise"].sum() == 4 * 2 * 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 4 * 2 * 8
     # The gradient is summed back over the four puzzles sharing the tokens.
-    assert analytical["flops", "adjoint", "reduction"].sum() == 2 * 8 * 3 / 4
+    assert analytical["flops", "adjoint", "reduction"].sum() == 2 * 8 * (4 - 1)
     frozen = cost(
         RegisterTokens.Config(num_tokens=2, channels_out=8, learnable=False),
         seq_len=1,
@@ -162,20 +161,19 @@ def test_sparse_embedding_cost_owns_no_parameters() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.arange(4, dtype=torch.int32),
-        seq_len=4,
-        batch_size=1,
-        num_tokens=4,
+        seq_len=1,
+        batch_size=4,
         dtype=None,
         run=_run_prefix,
     )
     assert analytical.params == analytical.params_active == 0
-    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * 3
-    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * (
+    assert analytical["bytes", "primal", "selection", torch.int64] == 4 * 3 * 8
+    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 4 * (
         4 * 8 + 8 + 16
     )
     assert analytical["flops", "adjoint", "selection"].sum() == 0
-    assert analytical["flops", "primal", "elementwise"].sum() == 2 * 8
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 2 * 8
+    assert analytical["flops", "primal", "elementwise"].sum() == 4 * 2 * 8
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 4 * 2 * 8
 
 
 def test_stack_cost_sums_its_parts() -> None:
@@ -189,16 +187,15 @@ def test_stack_cost_sums_its_parts() -> None:
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.arange(4, dtype=torch.int32),
-        seq_len=4,
-        batch_size=1,
-        num_tokens=4,
+        seq_len=1,
+        batch_size=4,
         dtype=None,
         run=_run_prefix,
     )
-    children = cost(puzzle, seq_len=4, batch_size=1, dtype=None) + cost(
+    children = cost(puzzle, seq_len=1, batch_size=4, dtype=None) + cost(
         registers,
-        seq_len=4,
-        batch_size=1,
+        seq_len=1,
+        batch_size=4,
         dtype=None,
     )
     assert analytical["flops", "primal"] == children["flops", "primal"]
@@ -208,7 +205,7 @@ def test_stack_cost_sums_its_parts() -> None:
     assert (
         analytical["bytes", "primal", "selection"].sum()
         - children["bytes", "primal", "selection"].sum()
-        == 4 * 2 * 5 * 8
+        == 4 * 4 * 2 * 5 * 8
     )
 
 

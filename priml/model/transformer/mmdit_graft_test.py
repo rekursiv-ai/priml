@@ -445,10 +445,8 @@ def test_graft_cost_prices_host_projections_and_joint_blocks_once(
 def test_graft_cost_matches_torch(tie: bool) -> None:
     """Embedding, joint blocks over both streams, and the head are torch's count.
 
-    A "token" is one POSITION holding one token per stream, as
-    ``MultiStreamAttention`` defines it, so both streams run three positions
-    and the joint key length is six. Unconditioned, since adaLN runs once per
-    sequence while ``cost`` costs it per token (``mmdit_test``).
+    Both streams run three positions and the joint key length is six.
+    This path is unconditioned, so adaLN does not run.
     """
     assert_cost_matches_torch(
         _config(depth=2, tie=tie),
@@ -458,8 +456,6 @@ def test_graft_cost_matches_torch(tie: bool) -> None:
         ),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=run_graft,
     )

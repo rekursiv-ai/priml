@@ -145,8 +145,6 @@ def test_cost_is_inherited_and_matches_torch() -> None:
         ),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=run_graft,
     )

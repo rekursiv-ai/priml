@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping
+from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast, override
 
@@ -11,7 +12,9 @@ import math
 import shutil
 import tempfile
 
+from configgle import Makes
 from torch import Tensor, nn
+from torch.distributed.checkpoint import state_dict_saver
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
@@ -19,12 +22,14 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 import pytest
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 
 from priml.lib.custom_json import DictCodec
 from priml.train import checkpointer
 from priml.train.checkpointer import (
     AsyncLocalStateDictStorer,
     Checkpointer,
+    StateDict,
     StateDictStorer,
     SyncLocalStateDictStorer,
     _dir_size_mb,
@@ -86,7 +91,7 @@ class _DictTarget:
     class StateDict(TypedDict):
         """No declared keys: the payload is whatever the test handed in."""
 
-    def state_dict(self) -> StateDict:
+    def state_dict(self) -> _DictTarget.StateDict:
         return cast(_DictTarget.StateDict, self._state)
 
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
@@ -209,9 +214,34 @@ def test_force_save_refuses_stale_off_cadence_destination(
         Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=10),
     )
     _save(ckpt, 5, {"value": "stale"})
-
+    foreign = Checkpointer(
+        Checkpointer.Config(working_dir=temp_checkpoint_dir, save_every=10),
+    )
     with pytest.raises(RuntimeError, match="would overwrite existing"):
-        ckpt.save(_DictTarget({"value": "new"}), 5)
+        foreign.save(_DictTarget({"value": "new"}), 5)
+
+
+@pytest.mark.parametrize("step", [0, 1, 5, 100])
+def test_startup_guards_every_reachable_save(tmp_path: Path, step: int) -> None:
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.save_every = 10_000
+    config.resume = False
+    config.make().save(_DictTarget({"value": "old"}), step)
+    with pytest.raises(RuntimeError, match="overwrite"):
+        config.make().load(_DictTarget({}), max_steps=5)
+
+
+def test_final_save_refreshes_own_cadence_prefix(tmp_path: Path) -> None:
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.save_every = 1
+    checkpointer = config.make()
+    checkpointer.maybe_save(_DictTarget({"epoch": 0}), 1)
+    checkpointer.save(_DictTarget({"epoch": 1}), 1)
+    assert _load(tmp_path) == {"epoch": 1}
+    with pytest.raises(RuntimeError, match="overwrite"):
+        config.make().save(_DictTarget({"epoch": 2}), 1)
 
 
 def test_force_save_rejects_negative_step_before_write(
@@ -707,6 +737,51 @@ def _best_checkpointer(
     return cfg.make()
 
 
+class _FailingStorer(SyncLocalStateDictStorer):
+    class Config(Makes["_FailingStorer"], SyncLocalStateDictStorer.Config):
+        pass
+
+    @override
+    def write(
+        self,
+        path: Path,
+        state_dict: StateDict,
+        after_write: Callable[[], None] = lambda: None,
+    ) -> None:
+        del path, state_dict, after_write
+        raise OSError("injected write failure")
+
+
+def test_failed_best_save_preserves_durable_best(tmp_path: Path) -> None:
+    prior = _best_checkpointer(tmp_path)
+    prior.on_eval(_DictTarget({}), 1, {"accuracy": 0.5})
+    record = (tmp_path / "best.json").read_bytes()
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.best_metric = "accuracy"
+    config.storer = _FailingStorer.Config()
+    checkpointer = config.make()
+    checkpointer.load(_DictTarget({}), max_steps=2)
+    with pytest.raises(OSError, match="injected write failure"):
+        checkpointer.on_eval(_DictTarget({}), 2, {"accuracy": 0.9})
+    assert (tmp_path / "best.json").read_bytes() == record
+    assert checkpointer.best_step == 1
+    assert checkpointer.best_value == 0.5
+
+
+@pytest.mark.parametrize("filename", ["step_{step:8d}.pt", "step_{step:8}.pt"])
+def test_space_padded_filename_roundtrips(tmp_path: Path, filename: str) -> None:
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.filename = filename
+    checkpointer = config.make()
+    checkpointer.save(_DictTarget({"value": 1}), 1)
+    assert checkpointer.available_steps() == [1]
+    target = _DictTarget({})
+    assert config.make().load(target, max_steps=1)
+    assert target.loaded == {"value": 1}
+
+
 def test_on_eval_saves_on_improvement_only(temp_checkpoint_dir: Path) -> None:
     ckpt = _best_checkpointer(temp_checkpoint_dir)
     t = _DictTarget({"step": 0})
@@ -732,6 +807,14 @@ def test_on_eval_missing_metric_names_available_keys(
     ckpt = _best_checkpointer(temp_checkpoint_dir)
     with pytest.raises(KeyError, match=r"accuracy.*total_loss"):
         ckpt.on_eval(_DictTarget({}), 7, {"total_loss": 1.0})
+
+
+def test_on_eval_rejects_negative_step_before_side_effects(tmp_path: Path) -> None:
+    checkpointer = _best_checkpointer(tmp_path)
+    with pytest.raises(ValueError, match="non-negative"):
+        checkpointer.on_eval(_DictTarget({}), -1, {"accuracy": 0.9})
+    assert list(tmp_path.iterdir()) == []
+    assert checkpointer.best_step is None
 
 
 def test_on_eval_without_best_metric_never_saves(temp_checkpoint_dir: Path) -> None:
@@ -798,7 +881,6 @@ def test_a_step_the_eval_just_saved_is_not_rewritten_by_the_cadence(
     written_before = (temp_checkpoint_dir / "step_00000100.pt").stat().st_mtime_ns
 
     assert ckpt.maybe_save(t, 100)
-    ckpt.save(t, 100)
 
     written_after = (temp_checkpoint_dir / "step_00000100.pt").stat().st_mtime_ns
     assert written_after == written_before
@@ -1136,7 +1218,7 @@ def test_async_reads_a_sync_written_plain_file(
         path,
         {"x": torch.zeros(3, dtype=torch.long)},
     )
-    assert torch.equal(_tensor(cast(object, loaded["x"])), torch.tensor([7, 8, 9]))
+    assert torch.equal(_tensor(loaded["x"]), torch.tensor([7, 8, 9]))
 
 
 def test_plain_file_read_stages_before_destination_restore(
@@ -1148,7 +1230,7 @@ def test_plain_file_read_stages_before_destination_restore(
 
     loaded = SyncLocalStateDictStorer().read(path, {"x": torch.zeros(4)})
 
-    assert _tensor(cast(object, loaded["x"])).device.type == "cpu"
+    assert _tensor(loaded["x"]).device.type == "cpu"
 
 
 @pytest.mark.gpu_torch_cuda
@@ -1318,6 +1400,260 @@ def test_async_retention_enforced_after_flush_no_close(
         ckpt.save(_DictTarget({"step": torch.tensor([step])}), step)
     ckpt.close()
     assert ckpt.available_steps() == [30, 40]
+
+
+class _DeferredStorer(SyncLocalStateDictStorer):
+    class Config(Makes["_DeferredStorer"], SyncLocalStateDictStorer.Config):
+        fail_flush: bool = False
+        """Fail the deferred write instead of making it durable."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.fail_flush = config.fail_flush
+        self.pending: tuple[Path, StateDict, Callable[[], None]] | None = None
+
+    @override
+    def write(
+        self,
+        path: Path,
+        state_dict: StateDict,
+        after_write: Callable[[], None] = lambda: None,
+    ) -> None:
+        self.flush()
+        self.pending = path, state_dict, after_write
+
+    @override
+    def flush(self) -> None:
+        if self.pending is None:
+            return
+        if self.fail_flush:
+            raise OSError("injected deferred failure")
+        path, state, after_write = self.pending
+        super().write(path, state, after_write=after_write)
+        self.pending = None
+
+
+@pytest.mark.parametrize("fail_flush", [False, True])
+def test_deferred_best_publication_waits_for_durability(
+    tmp_path: Path,
+    fail_flush: bool,
+) -> None:
+    _best_checkpointer(tmp_path).on_eval(_DictTarget({}), 1, {"accuracy": 0.5})
+    record = (tmp_path / "best.json").read_bytes()
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.best_metric = "accuracy"
+    config.keep_last_n = 1
+    storer = _DeferredStorer.Config()
+    storer.fail_flush = fail_flush
+    config.storer = storer
+    checkpoint = config.make()
+    checkpoint.load(_DictTarget({}), max_steps=2)
+    assert checkpoint.on_eval(_DictTarget({}), 2, {"accuracy": 0.9})
+    assert checkpoint.best_step == 1
+    assert (tmp_path / "best.json").read_bytes() == record
+    if fail_flush:
+        with pytest.raises(OSError, match="deferred failure"):
+            checkpoint.close()
+        assert checkpoint.best_step == 1
+        assert (tmp_path / "best.json").read_bytes() == record
+        assert checkpoint.available_steps() == [1]
+    else:
+        checkpoint.close()
+        assert checkpoint.best_step == 2
+        assert checkpoint.available_steps() == [2]
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_final_save_refreshes_own_best_state(tmp_path: Path, deferred: bool) -> None:
+    config = Checkpointer.Config()
+    config.working_dir = tmp_path
+    config.best_metric = "accuracy"
+    if deferred:
+        config.storer = _DeferredStorer.Config()
+    checkpoint = config.make()
+    checkpoint.on_eval(_DictTarget({"epoch": 0}), 1, {"accuracy": 0.9})
+    checkpoint.save(_DictTarget({"epoch": 1}), 1)
+    checkpoint.close()
+    assert _load(tmp_path) == {"epoch": 1}
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("fail_write", [False, True])
+def test_distributed_overwrite_invalidates_old_marker_for_fresh_readers(
+    tmp_path: Path,
+    single_rank_group: None,
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+    fail_write: bool,
+) -> None:
+    del single_rank_group
+    path = tmp_path / "step_00000001.pt"
+    path.mkdir()
+    marker = path / ".metadata"
+    marker.write_bytes(b"prior snapshot")
+    state: StateDict = {
+        "x": distribute_tensor(
+            torch.ones(2),
+            init_device_mesh("cpu", (1,)),
+            [Shard(0)],
+        ),
+    }
+    future: Future[object] = Future()
+    complete_during_write: list[bool] = []
+    callbacks: list[str] = []
+    agreed: list[bool] = []
+    original_broadcast = dist.broadcast_object_list
+
+    def broadcast(errors: list[object], src: int) -> None:
+        original_broadcast(errors, src=src)
+        agreed.append(not marker.exists())
+
+    monkeypatch.setattr(dist, "broadcast_object_list", broadcast)
+
+    start_payloads = functools.partial(
+        _start_replacement_payloads,
+        path=path,
+        agreed=agreed,
+        complete_during_write=complete_during_write,
+    )
+
+    def async_save(state_dict: StateDict, *, checkpoint_id: str) -> Future[object]:
+        start_payloads(state_dict, checkpoint_id=checkpoint_id)
+        return future
+
+    monkeypatch.setattr(
+        state_dict_saver,
+        "save",
+        functools.partial(
+            _finish_replacement_payloads,
+            start_payloads=start_payloads,
+            marker=marker,
+            fail_write=fail_write,
+        ),
+    )
+    monkeypatch.setattr(dcp, "async_save", async_save)
+    storage: StateDictStorer = (
+        AsyncLocalStateDictStorer() if asynchronous else SyncLocalStateDictStorer()
+    )
+    if fail_write and not asynchronous:
+        with pytest.raises(OSError, match="payload failure"):
+            storage.write(path, state, after_write=lambda: callbacks.append("done"))
+    else:
+        storage.write(path, state, after_write=lambda: callbacks.append("done"))
+    if asynchronous:
+        assert not SyncLocalStateDictStorer().is_complete(path)
+        assert not AsyncLocalStateDictStorer().is_complete(path)
+        if fail_write:
+            future.set_exception(OSError("injected payload failure"))
+            with pytest.raises(OSError, match="payload failure"):
+                storage.flush()
+        else:
+            marker.write_bytes(b"replacement complete")
+            future.set_result(None)
+            storage.flush()
+    assert complete_during_write == [False]
+    assert SyncLocalStateDictStorer().is_complete(path) is not fail_write
+    assert callbacks == ([] if fail_write else ["done"])
+    if fail_write:
+        config = Checkpointer.Config()
+        config.working_dir = tmp_path
+        resumed = config.make()
+        assert resumed.available_steps() == []
+        assert not resumed.load(_DictTarget({}), max_steps=2)
+
+
+def _start_replacement_payloads(
+    state_dict: StateDict,
+    *,
+    checkpoint_id: str,
+    path: Path,
+    agreed: list[bool],
+    complete_during_write: list[bool],
+) -> None:
+    del state_dict
+    assert Path(checkpoint_id) == path
+    assert agreed == [True]
+    complete_during_write.append(SyncLocalStateDictStorer().is_complete(path))
+    (path / "0.distcp").write_bytes(b"partial replacement")
+
+
+def _finish_replacement_payloads(
+    state_dict: StateDict,
+    *,
+    checkpoint_id: str,
+    start_payloads: functools.partial[None],
+    marker: Path,
+    fail_write: bool,
+) -> None:
+    start_payloads(state_dict, checkpoint_id=checkpoint_id)
+    if fail_write:
+        raise OSError("injected payload failure")
+    marker.write_bytes(b"replacement complete")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_marker_invalidation_error_reaches_every_rank_before_payloads(
+    tmp_path: Path,
+    single_rank_group: None,
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+    rank: int,
+) -> None:
+    del single_rank_group
+    path = tmp_path / "step_1.pt"
+    path.mkdir()
+    marker = path / ".metadata"
+    marker.write_bytes(b"prior snapshot")
+    state: StateDict = {
+        "x": distribute_tensor(
+            torch.ones(2),
+            init_device_mesh("cpu", (1,)),
+            [Shard(0)],
+        ),
+    }
+    unlinks: list[Path] = []
+    broadcasts: list[str | None] = []
+
+    def fail_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        assert missing_ok
+        unlinks.append(path)
+        raise OSError("injected invalidation failure")
+
+    def broadcast(errors: list[str | None], src: int) -> None:
+        assert src == 0
+        broadcasts.append(errors[0])
+        errors[0] = "injected invalidation failure"
+
+    def no_payloads(state_dict: StateDict, *, checkpoint_id: str) -> None:
+        del state_dict, checkpoint_id
+        pytest.fail("DCP started before marker invalidation succeeded")
+
+    monkeypatch.setattr(checkpointer, "is_rank_zero", lambda: rank == 0)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+    monkeypatch.setattr(dist, "broadcast_object_list", broadcast)
+    monkeypatch.setattr(state_dict_saver, "save", no_payloads)
+    monkeypatch.setattr(dcp, "async_save", no_payloads)
+    storage: StateDictStorer = (
+        AsyncLocalStateDictStorer() if asynchronous else SyncLocalStateDictStorer()
+    )
+    with pytest.raises(OSError, match="invalidation failure"):
+        storage.write(path, state)
+    assert unlinks == ([marker] if rank == 0 else [])
+    assert broadcasts == (["injected invalidation failure"] if rank == 0 else [None])
+    assert marker.read_bytes() == b"prior snapshot"
+
+
+def test_async_pending_overwrite_is_incomplete_without_join(tmp_path: Path) -> None:
+    path = tmp_path / "step_1.pt"
+    path.mkdir()
+    (path / ".metadata").write_bytes(b"old completion marker")
+    storage = AsyncLocalStateDictStorer()
+    storage._pending = Future()
+    storage._pending_path = path
+    assert not storage.is_complete(path)
+    assert not storage._pending.done()
 
 
 def test_storer_defaults_to_sync() -> None:

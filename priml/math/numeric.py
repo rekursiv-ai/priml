@@ -984,6 +984,21 @@ def safe_xlogy(
     return torch.xlogy(input, torch.where(input == 0.0, 1.0, other))
 
 
+def l2norm(x: Tensor, dim: int = -1, eps: float = 1e-6) -> Tensor:
+    """Normalize with epsilon inside the Euclidean norm's square root.
+
+    Args:
+      x: Input tensor.
+      dim: Dimension reduced to compute each norm.
+      eps: Value added to the sum of squares.
+
+    Returns:
+      normalized: Tensor shaped like ``x``.
+
+    """
+    return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+
+
 def safe_sqrt(input: Tensorable) -> Tensor:
     """Square root that returns 0 instead of NaN for non-positive inputs.
 

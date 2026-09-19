@@ -66,12 +66,11 @@ def test_mlp_mixer_block_bfb() -> None:
     )
 
 
-def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
-    """The token mixer maps ``seq_len`` rows, ``channels_in`` of them per image.
+def test_mlp_mixer_block_cost_uses_each_childs_concrete_rows() -> None:
+    """The token mixer maps one row per channel; the channel mixer per token.
 
-    A ``[seq_len=2, channels=4]`` input holds two tokens and four token-mixer
-    rows, so per token the token mixer runs ``4 / 2 = 2`` times while the
-    channel mixer runs once; torch's count agrees exactly.
+    A ``[seq_len=2, channels=4]`` input invokes the token children with four
+    rows and the channel children with two rows; torch's count agrees exactly.
     """
     config = MLPMixerBlock.Config(
         channels_in=4,
@@ -85,7 +84,6 @@ def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
         build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
         seq_len=2,
         batch_size=1,
-        num_tokens=2,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
@@ -108,12 +106,16 @@ def test_mlp_mixer_block_cost_amortizes_the_token_mixer_over_tokens() -> None:
     )
     token = 2 * (2 * 3) + 3 * 2  # up_proj is twice the hidden width when gated.
     channel = 4 * (2 * 5) + 5 * 4
-    assert model_cost["flops", "primal", "matmul"].sum() == 2 * (2 * token + channel)
-    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * (2 * token + channel)
+    assert model_cost["flops", "primal", "matmul"].sum() == 2 * (
+        4 * token + 2 * channel
+    )
+    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * (
+        4 * token + 2 * channel
+    )
     assert model_cost["flops", "primal", "elementwise"].sum() == (
-        2 * over_tokens["flops", "primal", "elementwise"].sum()
+        over_tokens["flops", "primal", "elementwise"].sum()
         + over_channels["flops", "primal", "elementwise"].sum()
-        + 2 * 4
+        + 2 * 2 * 4
     )
     assert model_cost.params == token + channel + 2
 
@@ -135,12 +137,12 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
     )
     assert (
         result["bytes", "primal", "matmul"].sum()
-        == 2 * token["bytes", "primal", "matmul"].sum()
+        == token["bytes", "primal", "matmul"].sum()
         + channel["bytes", "primal", "matmul"].sum()
     )
     assert (
         result["bytes", "adjoint", "matmul"].sum()
-        == 2 * token["bytes", "adjoint", "matmul"].sum()
+        == token["bytes", "adjoint", "matmul"].sum()
         + channel["bytes", "adjoint", "matmul"].sum()
     )
     norm_token = cost(
@@ -157,7 +159,7 @@ def test_mixer_cost_uses_transposed_row_sharing_for_traffic() -> None:
     )
     assert (
         result["flops", "adjoint", "reduction"].sum()
-        == 2 * norm_token["flops", "adjoint", "reduction"].sum()
+        == norm_token["flops", "adjoint", "reduction"].sum()
         + norm_channel["flops", "adjoint", "reduction"].sum()
     )
     with pytest.raises(ValueError, match="mixes 2 tokens; costed at 3"):

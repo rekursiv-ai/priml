@@ -213,7 +213,6 @@ def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
         ),
         seq_len=1,
         batch_size=3,
-        num_tokens=1 * 3,
         dtype=None,
         run=_stepped,
     )
@@ -222,17 +221,16 @@ def test_the_cost_matches_torch_and_prices_the_gru_step() -> None:
     weights = 12 * 16 + gates + heads
     biases = 16 + 2 * 3 * 16 + 2 * (16 + 16) + 5 + 1
     assert analytical.params == weights + biases
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 3 * 2 * weights
     # Biases, the embedding's ReLU, the episode reset, eleven operations per
     # GRU unit, and a ReLU after each hidden head layer.
-    assert analytical["flops", "primal", "elementwise"].sum() == (
+    assert analytical["flops", "primal", "elementwise"].sum() == 3 * (
         biases + 16 + 16 + 11 * 16 + 2 * 2 * 16
     )
-    assert (
-        analytical["flops", "adjoint", "elementwise"].sum()
-        == 16 + 16 + 17 * 16 + 2 * 2 * 16
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 3 * (
+        16 + 16 + 17 * 16 + 2 * 2 * 16
     )
-    assert analytical.bytes_state == 4 * 16
+    assert analytical.bytes_state == 4 * 3 * 16
 
 
 def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
@@ -242,15 +240,15 @@ def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
     config.num_actions = 4
     narrow = config.cost(seq_len=1, batch_size=4, dtype=torch.bfloat16)
     wide = config.cost(seq_len=1, batch_size=4, dtype=None)
-    assert narrow.bytes_state == 4
-    assert wide.bytes_state == 8
+    assert narrow.bytes_state == 16
+    assert wide.bytes_state == 32
     assert (
         wide["bytes", torch.float32].sum() == 2 * narrow["bytes", torch.bfloat16].sum()
     )
     assert wide["flops"].sum() == narrow["flops"].sum()
     biases = 2 + 2 * 6 + 4 * 2 + 4 + 1
-    bias_io = 2 * biases + biases / 4
-    activation_io = 2 * 2 + 3 * 2 + 8 * 2 + 4 * 2 * 2
+    bias_io = (2 * 4 + 1) * biases
+    activation_io = 4 * (2 * 2 + 3 * 2 + 8 * 2 + 4 * 2 * 2)
     assert narrow["bytes", "primal", "elementwise"].sum() == 2 * (
         bias_io + activation_io
     )

@@ -451,7 +451,6 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
-        num_tokens=8,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
@@ -460,27 +459,26 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     projections = 16 * 2 * inner + 2 * 16 * 8 + inner * 16
     norms = 2 * 8  # norm_q and norm_k each own one head-width scale.
     assert model_cost.params == projections + norms
-    assert (
-        model_cost["flops", "primal", "matmul"].sum()
-        == 2 * projections + kernel["flops", "primal", "matmul"].sum()
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        2 * 8 * projections + kernel["flops", "primal", "matmul"].sum()
     )
     assert model_cost["flops", "adjoint", "matmul"].sum() == (
-        4 * projections + kernel["flops", "adjoint", "matmul"].sum()
+        4 * 8 * projections + kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * 2 * 1 * 8
     assert finalized.rope is not None
     scalar = (
         kernel
-        + cost(finalized.norm_qk, seq_len=8 * 2, batch_size=1, dtype=None).tile(2)
-        + cost(finalized.norm_qk, seq_len=8 * 1, batch_size=1, dtype=None).tile(1)
+        + cost(finalized.norm_qk, seq_len=8, batch_size=2, dtype=None)
+        + cost(finalized.norm_qk, seq_len=8, batch_size=1, dtype=None)
         + cost(finalized.rope, seq_len=8, batch_size=1, dtype=None)
         + rotation_cost(finalized.rope, rows=8, dtype=None, channels_head=8, heads=3)
     )
     assert model_cost["flops", "primal", "elementwise"].sum() == (
-        scalar["flops", "primal", "elementwise"].sum() + 5 * inner
+        scalar["flops", "primal", "elementwise"].sum() + 5 * inner * 8
     )
     assert model_cost["flops", "adjoint", "elementwise"].sum() == (
-        scalar["flops", "adjoint", "elementwise"].sum() + 6 * inner
+        scalar["flops", "adjoint", "elementwise"].sum() + 6 * inner * 8
     )
 
 
@@ -494,9 +492,22 @@ def test_gated_attention_cost_hands_dropout_to_the_kernel() -> None:
     dry = config.copy_tree().finalize().cost(seq_len=32, batch_size=1, dtype=None)
     config.dropout = 0.1
     wet = config.copy_tree().finalize().cost(seq_len=32, batch_size=1, dtype=None)
+    dropped = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+        dropout_p=0.1,
+    )
+    plain = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+    )
     assert (
         wet["flops", "elementwise"].sum() - dry["flops", "elementwise"].sum()
-        == 2 * 4 * 32
+        == dropped["flops", "elementwise"].sum() - plain["flops", "elementwise"].sum()
     )
     assert wet["flops", "matmul"].sum() == dry["flops", "matmul"].sum()
 

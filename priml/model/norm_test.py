@@ -487,6 +487,15 @@ def _image() -> torch.Tensor:
     return torch.randn(2, 8, 3, 1, requires_grad=True)
 
 
+def _norm_flops(model_cost: Cost) -> tuple[int, int, int, int]:
+    return (
+        model_cost["flops", "primal", "elementwise"].sum(),
+        model_cost["flops", "adjoint", "elementwise"].sum(),
+        model_cost["flops", "primal", "reduction"].sum(),
+        model_cost["flops", "adjoint", "reduction"].sum(),
+    )
+
+
 @pytest.mark.parametrize(
     ("config", "params", "primal", "adjoint"),
     [
@@ -496,8 +505,8 @@ def _image() -> torch.Tensor:
         (
             LayerNorm.Config(8, elementwise_affine=True),
             16,
-            (3 * 8 + 4 + 16, 14),
-            (5 * 8 + 2 + 16, 14),
+            (3 * 8 + 4 + 16, 7),
+            (5 * 8 + 2 + 16, 7),
         ),
         (
             BatchNorm.Config(8, elementwise_affine=True),
@@ -535,8 +544,8 @@ def _image() -> torch.Tensor:
 def test_norm_cost_splits_elementwise_from_row_sums(
     config: Makeable[nn.Module],
     params: int,
-    primal: tuple[float, float],
-    adjoint: tuple[float, float],
+    primal: tuple[int, int],
+    adjoint: tuple[int, int],
 ) -> None:
     """A norm is elementwise work plus sums over its group; never a matmul.
 
@@ -551,34 +560,34 @@ def test_norm_cost_splits_elementwise_from_row_sums(
         batch_size=1,
         dtype=None,
     )
-    traffic: dict[type[Makeable[nn.Module]], tuple[float, float, float]] = {
+    traffic: dict[type[Makeable[nn.Module]], tuple[int, int, int]] = {
         RMSNorm.Config: (4 * 8 + 7 + 3 * params, 10 * 8 + 12 + 6 * params, 9),
         CenteredRMSNorm.Config: (9 * 8 + 7, 16 * 8 + 12, 9),
-        LayerNorm.Config: (6 * 8 + 10 + 3 * params, 12 * 8 + 7 + 3 * params, 18),
+        LayerNorm.Config: (6 * 8 + 10 + 3 * params, 12 * 8 + 7 + 3 * params, 9),
         BatchNorm.Config: (
             6 * 8 + 10 * 8 + 3 * params + 18 * 8,
             12 * 8 + 7 * 8 + 3 * params,
-            32,
+            16,
         ),
         BatchNorm2d.Config: (
             6 * 8 + 10 * 8 + 3 * params + 18 * 8,
             12 * 8 + 7 * 8 + 3 * params,
-            32,
+            16,
         ),
         BatchRenorm.Config: (
             6 * 8 + 10 * 8 + 3 * params + 46 * 8,
             12 * 8 + 7 * 8 + 3 * params + 13 * 8,
-            32,
+            16,
         ),
         GroupNorm.Config: (
             6 * 8 + 10 * 8 + 3 * params,
             12 * 8 + 7 * 8 + 3 * params,
-            32,
+            16,
         ),
         GroupNorm2d.Config: (
             6 * 8 + 10 * 8 + 3 * params,
             12 * 8 + 7 * 8 + 3 * params,
-            32,
+            16,
         ),
     }
     primal_io, adjoint_io, reduction_io = traffic[type(config)]
@@ -623,7 +632,6 @@ def test_norm_cost_is_matmul_free(
         build_input=build_input,
         seq_len=6,
         batch_size=1,
-        num_tokens=6,
         dtype=None,
     )
     assert model_cost["flops", "matmul"].sum() == 0
@@ -631,40 +639,44 @@ def test_norm_cost_is_matmul_free(
 
 
 @pytest.mark.parametrize(
-    "config",
+    ("config", "params", "one", "four"),
     [
-        RMSNorm.Config(8, elementwise_affine=True),
-        CenteredRMSNorm.Config(8),
-        LayerNorm.Config(8, elementwise_affine=True),
-        GroupNorm.Config(8, elementwise_affine=True),
+        (
+            RMSNorm.Config(8, elementwise_affine=True),
+            8,
+            (27, 52, 7, 7),
+            (108, 208, 28, 52),
+        ),
+        (CenteredRMSNorm.Config(8), 8, (35, 52, 7, 7), (116, 208, 28, 52)),
+        (
+            LayerNorm.Config(8, elementwise_affine=True),
+            16,
+            (44, 58, 7, 7),
+            (176, 232, 28, 76),
+        ),
+        (
+            GroupNorm.Config(8, elementwise_affine=True),
+            16,
+            (72, 72, 0, 0),
+            (288, 288, 0, 48),
+        ),
     ],
     ids=_config_id,
 )
-def test_affine_gradients_reduce_over_the_rows(config: Makeable[nn.Module]) -> None:
-    """Every owned parameter's gradient is summed over ``rows`` rows.
-
-    Forward work per row is unchanged (the ``1 + weight`` fold aside); backward
-    gains exactly ``(N - 1) / N`` additions per parameter, the primitive's rule.
-    """
-    # Rows come from the batch so a group norm's per-sample span stays fixed.
+def test_affine_norm_costs_are_concrete_row_totals(
+    config: Makeable[nn.Module],
+    params: int,
+    one: tuple[int, int, int, int],
+    four: tuple[int, int, int, int],
+) -> None:
+    """Every cost cell reports the complete invocation at its concrete rows."""
     finalized = config.copy_tree().finalize()
-    one = cost(finalized, seq_len=1, batch_size=1, dtype=None)
-    four = cost(finalized, seq_len=1, batch_size=4, dtype=None)
-    assert four.params == one.params > 0
-    fold = (
-        one["flops", "primal", "elementwise"].sum()
-        - four["flops", "primal", "elementwise"].sum()
-    )
-    assert fold in (0, 8 * (1 - 1 / 4))
-    assert (
-        four["flops", "adjoint", "elementwise"].sum()
-        == one["flops", "adjoint", "elementwise"].sum()
-    )
-    assert four["flops", "adjoint", "reduction"].sum() - one[
-        "flops",
-        "adjoint",
-        "reduction",
-    ].sum() == (one.params * 3 / 4)
+    one_row = cost(finalized, seq_len=1, batch_size=1, dtype=None)
+    four_rows = cost(finalized, seq_len=1, batch_size=4, dtype=None)
+
+    assert one_row.params == four_rows.params == params
+    assert _norm_flops(one_row) == one
+    assert _norm_flops(four_rows) == four
 
 
 def test_affine_norm_pullback_reads_only_scale_not_shift() -> None:
@@ -676,7 +688,7 @@ def test_affine_norm_pullback_reads_only_scale_not_shift() -> None:
         "bytes",
         "adjoint",
         "elementwise",
-    ].sum() == 2 * (5 * 8 + 8 / 4)
+    ].sum() == 2 * (5 * 8 * 4 + 8)
 
 
 def test_rms_norm_cost_counts_unfused_tensor_operands() -> None:

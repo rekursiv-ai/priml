@@ -74,7 +74,7 @@ class Linear(nn.Linear):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one row; this layer's own ``dtype`` wins over the batch's.
+            """Cost the complete linear invocation at the supplied batch geometry.
 
             Args:
               seq_len: Tokens per sequence.
@@ -83,7 +83,7 @@ class Linear(nn.Linear):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for every input row.
 
             """
             del kwargs
@@ -176,7 +176,7 @@ class EnsembleLinear(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for every input row.
 
             """
             del kwargs

@@ -117,17 +117,16 @@ class FactoredPositions(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost three table gathers, two adds, and a scale per cell.
+            """Cost three table gathers, two adds, and a scale for the batch.
 
             Each table is a gather and a scatter-add back, as
             :class:`~priml.model.embedding.Embedding` costs one; the adds
             pass gradient through, so only the scale pulls one back. The
-            ``[grid_len, C]`` sum runs once and broadcasts over puzzles; its
-            adjoint first reduces the broadcast gradient across puzzles.
+            ``[grid_len, C]`` sum runs once and broadcasts over the batch; its
+            adjoint reduces the broadcast gradient across puzzles.
 
-            A cell is the token and the grid is fixed by ``grid_shape``, so
-            ``seq_len`` and its rows are ignored: the batch is
-            ``batch_size`` whole grids.
+            The positions are computed once per batch, with grid geometry fixed
+            by ``grid_shape``; ``seq_len`` identifies that grid geometry.
 
             Args:
               seq_len: Tokens per sequence.
@@ -136,7 +135,7 @@ class FactoredPositions(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-cell cost of this module.
+              cost: Whole-batch cost of this module.
 
             """
             puzzles = batch_size
@@ -165,26 +164,26 @@ class FactoredPositions(nn.Module):
                 Cost(),
             )
             shared = gathers + elementwise_cost(
-                primal=3 * width,
-                adjoint=width,
+                primal=3 * width * cells,
+                adjoint=width * cells,
                 channels=width,
                 inputs=5,
                 outputs=3,
                 adjoint_inputs=1,
+                rows=cells,
                 dtype=dt,
             )
             broadcast = (
                 reduction_cost(
-                    input_elements=puzzles * width,
-                    output_groups=width,
-                    rows=puzzles,
+                    input_elements=puzzles * cells * width,
+                    output_groups=cells * width,
                     dtype=dt,
                     phase="adjoint",
                 )
                 if puzzles > 1
                 else Cost()
             )
-            return shared.tile(1 / puzzles) + broadcast
+            return shared + broadcast
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -273,7 +272,7 @@ class PredictionFeedback(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one table gather and a scale per cell.
+            """Cost one table gather and a scale for the complete batch.
 
             Costed with a grid stashed, as every step under adaptive
             computation time is; a forward without one contributes nothing.
@@ -285,7 +284,7 @@ class PredictionFeedback(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-cell cost of this module.
+              cost: Whole-batch cost of this module.
 
             """
             width = self.channels_out
@@ -297,10 +296,11 @@ class PredictionFeedback(nn.Module):
                 dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
-                primal=width,
-                adjoint=width,
+                primal=width * seq_len * batch_size,
+                adjoint=width * seq_len * batch_size,
                 channels=width,
                 adjoint_inputs=1,
+                rows=seq_len * batch_size,
                 dtype=dtype,
             )
 
@@ -419,7 +419,7 @@ class GridEmbedding(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-cell cost of this module.
+              cost: Whole-batch cost of this module.
 
             """
             width = self.channels_out
@@ -430,17 +430,18 @@ class GridEmbedding(nn.Module):
                 dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
-                primal=width,
-                adjoint=width,
+                primal=width * seq_len * batch_size,
+                adjoint=width * seq_len * batch_size,
                 channels=width,
                 adjoint_inputs=1,
+                rows=seq_len * batch_size,
                 dtype=dtype,
             )
             add = traffic(
                 "primal",
                 "elementwise",
-                elements=3 * width,
-                flops=width,
+                elements=3 * width * seq_len * batch_size,
+                flops=width * seq_len * batch_size,
                 dtype=dtype,
             )
             for channel in self.channels:

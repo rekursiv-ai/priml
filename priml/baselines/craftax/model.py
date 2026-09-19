@@ -62,18 +62,17 @@ class ActorCritic(nn.Module):
             biased matmul and a tanh; the tanh's adjoint is ``g * (1 - t**2)``
             on the saved output, three operations per unit.
 
-            This is the model root: every parameter is shared by
-            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
-            replaced by the batch's tokens.
+            This is the model root: every parameter is shared by the concrete
+            ``batch_size * seq_len`` rows in this invocation.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             del kwargs
@@ -185,10 +184,11 @@ def _tower_cost(
             dtype=dt,
         )
         total += elementwise_cost(
-            primal=channels_in,
-            adjoint=3 * channels_in,
+            primal=rows * channels_in,
+            adjoint=rows * 3 * channels_in,
             channels=channels_in,
             dtype=dt,
+            rows=rows,
         )
         width = channels_in
     return total + matmul_cost(

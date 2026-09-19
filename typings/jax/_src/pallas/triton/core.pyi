@@ -1,0 +1,6 @@
+import dataclasses
+
+@dataclasses.dataclass(frozen=True)
+class CompilerParams:
+    num_warps: int | None = ...
+    num_stages: int | None = ...

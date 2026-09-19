@@ -15,34 +15,7 @@ import torch
 from priml.cost import Cost
 from priml.metrics.custom_types import MetricProtocol, RequiresDeviceTiming
 from priml.metrics.utilization import Utilization
-from priml.model.attention.rope import RoPE
-from priml.model.attention.self_attention import SelfAttention
-from priml.model.embedding import Embedding
 from priml.model.linear import Linear
-from priml.model.norm import RMSNorm
-from priml.model.sequential import Sequential
-from priml.model.transformer.block import TransformerBlock
-from priml.model.transformer.transformer import Transformer
-
-
-def _tiny_transformer() -> Transformer.Config:
-    return Transformer.Config(
-        proj_in=Embedding.Config(channels_in=128, shard="vocab"),
-        channels_in=32,
-        channels_out=128,
-        num_layers=2,
-        block=TransformerBlock.Config(
-            attn=SelfAttention.Config(
-                num_heads=4,
-                channels_head=8,
-                causal=True,
-                rope=RoPE.Config(channels_head=8),
-            ),
-        ),
-        proj_out=Sequential.Config(
-            elements=[RMSNorm.Config(), Linear.Config(shard="vocab")],
-        ),
-    )
 
 
 class _Counted:
@@ -60,15 +33,16 @@ class _Counted:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            del seq_len, batch_size, dtype, kwargs
+            del dtype, kwargs
             self.calls += 1
             f32 = torch.float32
+            rows = seq_len * batch_size
             return Cost(
                 cells={
-                    ("flops", "primal", "matmul", f32): 2,
-                    ("flops", "primal", "elementwise", f32): 3_000_000,
-                    ("flops", "adjoint", "matmul", f32): 4,
-                    ("flops", "adjoint", "elementwise", f32): 5_000_000,
+                    ("flops", "primal", "matmul", f32): 2 * rows,
+                    ("flops", "primal", "elementwise", f32): 3_000_000 * rows,
+                    ("flops", "adjoint", "matmul", f32): 4 * rows,
+                    ("flops", "adjoint", "elementwise", f32): 5_000_000 * rows,
                 },
             )
 
@@ -149,13 +123,12 @@ def test_built_alone_it_is_unbound() -> None:
         Utilization.Config().make()
 
 
-def test_mfu_is_the_palm_flops_times_token_rate_over_peak() -> None:
-    """``6N`` matrix FLOPs plus attention, times tokens/sec, over one device."""
-    config = _tiny_transformer()
+def test_mfu_uses_whole_step_flops_over_elapsed_seconds() -> None:
+    config = _Counted.Config()
     meter_config = Utilization.Config()
     meter_config.peak_flops_per_sec = 1e9
     meter = Utilization(meter_config)
-    meter.bind(_root(config.copy_tree().finalize()))
+    meter.bind(_root(config))
 
     meter.update(
         torch.empty(0),
@@ -164,11 +137,8 @@ def test_mfu_is_the_palm_flops_times_token_rate_over_peak() -> None:
     )
     measured = meter.compute()
 
-    params = sum(p.numel() for p in config.make().parameters())
-    matrix = params - 128 * 32
-    flops_per_token = 6 * matrix + 12 * 2 * (4 * 8) * 16
     assert measured["tokens_per_sec"] == 64.0
-    assert measured["mfu"] == flops_per_token * 64.0 / 1e9
+    assert measured["mfu"] == (6 * 32) / 0.5 / 1e9
 
 
 def test_compute_reports_every_silo_against_its_own_ceiling() -> None:
@@ -216,7 +186,7 @@ def test_compute_without_an_update_is_empty() -> None:
     assert meter.compute() == {}
 
 
-def test_cost_is_priced_once_per_sequence_length_and_token_count() -> None:
+def test_cost_is_priced_once_per_sequence_length_and_batch_size() -> None:
     costed = _Counted.Config()
     meter = Utilization(Utilization.Config())
     meter.bind(_root(costed))

@@ -81,13 +81,21 @@ class Patchify(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
-            del seq_len, batch_size, kwargs
+            del kwargs
             if math.prod(self.patch_size) == 1:
                 return Cost()
-            moved = 2 * max(self.channels_in, self.channels_out)
+            moved = (
+                2
+                * seq_len
+                * batch_size
+                * max(
+                    self.channels_in,
+                    self.channels_out,
+                )
+            )
             dt = dtype
             return traffic("primal", "selection", elements=moved, dtype=dt) + traffic(
                 "adjoint",
@@ -167,13 +175,21 @@ class Unpatchify(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
-            del seq_len, batch_size, kwargs
+            del kwargs
             if math.prod(self.patch_size) == 1:
                 return Cost()
-            moved = 2 * max(self.channels_in, self.channels_out)
+            moved = (
+                2
+                * seq_len
+                * batch_size
+                * max(
+                    self.channels_in,
+                    self.channels_out,
+                )
+            )
             dt = dtype
             return traffic("primal", "selection", elements=moved, dtype=dt) + traffic(
                 "adjoint",

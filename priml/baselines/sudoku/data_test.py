@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import hashlib
 import json
 
 from torch import Tensor
@@ -140,6 +141,28 @@ def test_seed_and_epoch_are_distinct_named_stream_inputs(dataset_dir: Path) -> N
         not torch.equal(later_batch, first_batch)
         for later_batch, first_batch in zip(later, first, strict=True)
     )
+
+
+@pytest.mark.parametrize(
+    ("seed", "expected"),
+    [
+        (0, "846bc363e691de304fd95723895e393a7d25a8cc3f0d1baa1765e641c153587a"),
+        (3, "ba140011e7add6ed1cf7da5a859dca94e537c61f7aa8d07821aeacfb71a00b00"),
+        (42, "1524afa19fa2574bc96d1c43dca02d6e1c0e1dabdde89fe6a291230712897f35"),
+    ],
+)
+def test_augmentation_preserves_original_outputs_and_rng(
+    seed: int,
+    expected: str,
+) -> None:
+    # Captured from the original Sudoku implementation before sharing ARC transforms.
+    grid = torch.arange(5 * 81).reshape(5, 81) % 11
+    generator = torch.Generator().manual_seed(seed)
+    inputs, labels = augment_sudoku(grid, grid.flip(0), generator=generator)
+    payload = b"".join(
+        value.numpy().tobytes() for value in (inputs, labels, generator.get_state())
+    )
+    assert hashlib.sha256(payload).hexdigest() == expected
 
 
 def test_augmentation_moves_the_label_with_the_input() -> None:

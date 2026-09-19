@@ -301,7 +301,6 @@ def test_block_cost_sums_its_four_children() -> None:
         build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
         seq_len=8,
         batch_size=1,
-        num_tokens=8,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
@@ -312,10 +311,10 @@ def test_block_cost_sums_its_four_children() -> None:
         Cost(),
     ) + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 2 * 16,
-            ("flops", "adjoint", "elementwise", f32): 2 * 16,
-            ("bytes", "primal", "elementwise", f32): 4 * 2 * 3 * 16,
-            ("bytes", "adjoint", "elementwise", f32): 4 * 2 * 3 * 16,
+            ("flops", "primal", "elementwise", f32): 8 * 2 * 16,
+            ("flops", "adjoint", "elementwise", f32): 8 * 2 * 16,
+            ("bytes", "primal", "elementwise", f32): 4 * 8 * 2 * 3 * 16,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 8 * 2 * 3 * 16,
         },
     )
     assert model_cost == expected

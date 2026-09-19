@@ -862,18 +862,25 @@ def test_rope_mixed_cost_scales_factors_per_head_and_tables_once() -> None:
         == heads * plain["flops", "primal", "elementwise"].sum()
     )
     assert fixed["flops", "adjoint", "elementwise"].sum() == 0
-    # Per-head frequencies are owned once each, plus the seed table once.
+    # Fixed per-head frequency tensors remain owned parameters, plus the seed table.
     assert fixed.params == heads * 4 + 7
     mixed.learnable = True
     learned = mixed.copy_tree().finalize().cost(seq_len=4, batch_size=1, dtype=None)
-    assert (
-        learned["flops", "adjoint", "elementwise"].sum() == 5 * (heads * 4) + heads * 4
+    assert learned["flops", "adjoint", "elementwise"].sum() == 4 * (
+        5 * (heads * 4) + heads * 4
     )
-    assert learned["flops", "adjoint", "reduction"].sum() == heads * 4 * 3 / 4
+    assert learned["flops", "adjoint", "reduction"].sum() == heads * 4 * (4 - 1)
     assert (
         learned.params
         == sum(
-            p.numel() for p in RoPEMixed.Config(8, num_heads=heads).make().parameters()
+            p.numel()
+            for p in RoPEMixed.Config(
+                8,
+                num_heads=heads,
+                learnable=True,
+            )
+            .make()
+            .parameters()
         )
         + 7
     )
@@ -914,7 +921,6 @@ def test_rope_cost_matches_torch(config: RoPE.Config) -> None:
         build_input=lambda: positions,
         seq_len=4,
         batch_size=1,
-        num_tokens=4,
         dtype=None,
         run=lambda module, pos: torch.cat(cast(RoPE, module)(pos), dim=-1),
     )

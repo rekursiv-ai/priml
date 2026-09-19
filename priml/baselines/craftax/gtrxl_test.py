@@ -358,13 +358,12 @@ def _sequenced(model: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
 
 
 def test_the_cost_matches_torch_on_a_step() -> None:
-    """One token is one step of one worker attending over its whole memory.
+    """One step of each worker attends over its complete memory.
 
     Every key row -- eight remembered plus the step's own -- is normalized
-    and projected per token, while the relative-position projection reads
-    one constant table shared by the three workers, so its forward and its
-    weight gradient are amortized over ``rows`` and it has no input
-    gradient to count.
+    and projected once in this invocation. The relative-position projection
+    reads one constant table shared by the three workers; its concrete forward
+    and weight-gradient rows are counted directly, with no input gradient.
     """
     config = _config()
     analytical = assert_cost_matches_torch(
@@ -375,33 +374,33 @@ def test_the_cost_matches_torch_on_a_step() -> None:
         ),
         seq_len=1,
         batch_size=3,
-        num_tokens=1 * 3,
         dtype=None,
         run=_stepped,
     )
     keys = 8 + 1
-    # Per layer: the table projection's forward, spread over the workers.
-    table = 2 * 16 * 16 * keys / 3
+    # Per layer: the table projection's complete forward rows.
+    table = 2 * 16 * 16 * keys
     assert analytical["flops", "adjoint", "matmul"].sum() == (
         2 * analytical["flops", "primal", "matmul"].sum() - 2 * table
     )
+    assert isinstance(table, int)
     # The relative scores are gathered into place: elements moved forward,
     # one scatter-add per element back.
     assert analytical["flops", "primal", "selection"].sum() == 0
-    # Per layer and head: the score moved (fp32) and its index read (int64).
-    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * 2 * 2 * keys
-    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * 2 * 2 * keys
-    assert analytical["flops", "adjoint", "selection"].sum() == 2 * 2 * keys
-    # One remembered layer input per layer per step.
-    assert analytical.bytes_state == 4 * 2 * 16
+    # Per layer, worker, and head: score bytes plus the int64 index.
+    selected = 2 * 3 * 2 * keys
+    assert analytical["bytes", "primal", "selection", torch.float32] == 4 * selected
+    assert analytical["bytes", "primal", "selection", torch.int64] == 8 * selected
+    assert analytical["flops", "adjoint", "selection"].sum() == selected
+    # One remembered layer input per layer and worker per step.
+    assert analytical.bytes_state == 4 * 2 * 3 * 16
 
 
 def test_the_cost_matches_torch_on_a_gradient_window() -> None:
-    """A window's queries share its keys, so a token costs less than a step.
+    """A window's queries share its keys, so rows are counted once.
 
-    Four steps over an eight-row memory: each query sees twelve keys, each
-    token normalizes and projects three key rows, and the twelve-row table
-    is shared by eight tokens.
+    Four steps over an eight-row memory: each query sees twelve keys, and the
+    concrete twelve-row table is shared by the two workers in this invocation.
     """
     config = _config()
     assert_cost_matches_torch(
@@ -412,7 +411,6 @@ def test_the_cost_matches_torch_on_a_gradient_window() -> None:
         ),
         seq_len=4,
         batch_size=2,
-        num_tokens=4 * 2,
         dtype=None,
         run=_sequenced,
     )
@@ -422,16 +420,19 @@ def test_cost_accounts_for_attention_operand_bytes_and_dtype() -> None:
     config = _config()
     narrow = config.cost(seq_len=4, batch_size=2, dtype=torch.bfloat16)
     wide = config.cost(seq_len=4, batch_size=2, dtype=None)
-    assert narrow.bytes_state == 2 * 2 * 16
-    assert wide.bytes_state == 4 * 2 * 16
+    assert narrow.bytes_state == 2 * 2 * 2 * 16
+    assert wide.bytes_state == 4 * 2 * 2 * 16
     assert (
         wide["bytes", torch.float32].sum() == 2 * narrow["bytes", torch.bfloat16].sum()
     )
     assert wide["flops"].sum() == narrow["flops"].sum()
-    assert narrow["bytes", "primal", "selection", torch.bfloat16] == 2 * 2 * 2 * 12
-    assert narrow["bytes", "primal", "selection", torch.int64] == 8 * 2 * 2 * 12
-    assert narrow["bytes", "adjoint", "selection", torch.bfloat16] == 2 * 2 * 2 * 2 * 12
-    assert narrow["bytes", "adjoint", "selection", torch.int64] == 8 * 2 * 2 * 12
+    selected = 2 * 4 * 2 * 12
+    assert narrow["bytes", "primal", "selection", torch.bfloat16] == 2 * 2 * selected
+    assert narrow["bytes", "primal", "selection", torch.int64] == 8 * 2 * selected
+    assert (
+        narrow["bytes", "adjoint", "selection", torch.bfloat16] == 2 * 2 * 2 * selected
+    )
+    assert narrow["bytes", "adjoint", "selection", torch.int64] == 8 * 2 * selected
     assert narrow["bytes", "primal", "reduction"].sum() > 0
 
 

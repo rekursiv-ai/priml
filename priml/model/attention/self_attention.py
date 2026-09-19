@@ -143,7 +143,7 @@ class AttentionProjections(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -184,11 +184,11 @@ class AttentionProjections(nn.Module):
                 for head_rows in groups:
                     total += cost(
                         self.norm_qk,
-                        seq_len=seq_len * head_rows,
-                        batch_size=batch_size,
+                        seq_len=seq_len,
+                        batch_size=batch_size * head_rows,
                         dtype=dtype,
                         **kwargs,
-                    ).tile(head_rows)
+                    )
             if self.norm_out is not None:
                 total += cost(
                     self.norm_out,
@@ -201,7 +201,7 @@ class AttentionProjections(nn.Module):
                 total += cost(
                     self.rope,
                     seq_len=seq_len,
-                    batch_size=batch_size,
+                    batch_size=1,
                     dtype=dtype,
                     **kwargs,
                 )
@@ -407,12 +407,13 @@ class SelfAttention(AttentionProjections):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             kernel = cost(
                 self.attn_kernel,
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,

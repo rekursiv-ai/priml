@@ -150,7 +150,7 @@ class Router(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             del kwargs
@@ -167,32 +167,52 @@ class Router(nn.Module):
                 dtype=dt,
             ) + Cost(
                 cells={
-                    ("flops", "adjoint", "selection", dt): k,
-                    ("bytes", "primal", "sort", dt): s * (e + k),
-                    ("bytes", "primal", "sort", index): index.itemsize * k,
-                    ("bytes", "primal", "selection", dt): s * 2 * k,
-                    ("bytes", "primal", "selection", index): index.itemsize * k,
-                    ("bytes", "adjoint", "selection", dt): s * (3 * k + e),
-                    ("bytes", "adjoint", "selection", index): index.itemsize * k,
+                    ("flops", "adjoint", "selection", dt): rows * k,
+                    ("bytes", "primal", "sort", dt): rows * s * (e + k),
+                    ("bytes", "primal", "sort", index): rows * index.itemsize * k,
+                    ("bytes", "primal", "selection", dt): rows * s * 2 * k,
+                    ("bytes", "primal", "selection", index): rows * index.itemsize * k,
+                    ("bytes", "adjoint", "selection", dt): rows * s * (3 * k + e),
+                    ("bytes", "adjoint", "selection", index): rows * index.itemsize * k,
                 },
             )
             if self.norm_topk_prob:
                 # Sum the picked weights, then divide each by the sum.
                 total += (
                     elementwise_cost(
-                        primal=k,
-                        adjoint=4 * k,
+                        primal=rows * k,
+                        adjoint=rows * 4 * k,
                         channels=k,
+                        rows=rows,
                         inputs=1,
                         outputs=1,
                         adjoint_inputs=5,
                         adjoint_outputs=4,
                         dtype=dt,
                     )
-                    + reduction_cost(input_elements=k, dtype=dt)
-                    + traffic("primal", "elementwise", elements=1, dtype=dt)
-                    + traffic("adjoint", "elementwise", elements=3, dtype=dt)
-                    + traffic("adjoint", "reduction", elements=k + 1, dtype=dt)
+                    + reduction_cost(
+                        input_elements=rows * k,
+                        output_groups=rows,
+                        dtype=dt,
+                    )
+                    + traffic(
+                        "primal",
+                        "elementwise",
+                        elements=rows,
+                        dtype=dt,
+                    )
+                    + traffic(
+                        "adjoint",
+                        "elementwise",
+                        elements=rows * 3,
+                        dtype=dt,
+                    )
+                    + traffic(
+                        "adjoint",
+                        "reduction",
+                        elements=rows * (k + 1),
+                        dtype=dt,
+                    )
                 )
             return total
 
@@ -276,9 +296,10 @@ class SoftmaxRouter(Router):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
+            rows = seq_len * batch_size
             dt = resolve_dtype(dtype)
             jitter = self.channels_in if self.jitter_noise > 0 else 0
             width = self.num_experts
@@ -290,19 +311,39 @@ class SoftmaxRouter(Router):
                     **kwargs,
                 )
                 + elementwise_cost(
-                    primal=3 * width + jitter,
-                    adjoint=3 * width + jitter,
+                    primal=rows * (3 * width + jitter),
+                    adjoint=rows * (3 * width + jitter),
                     channels=width,
+                    rows=rows,
                     inputs=3,
                     outputs=3,
                     adjoint_inputs=5,
                     adjoint_outputs=3,
                     dtype=dt,
                 )
-                + reduction_cost(input_elements=width, dtype=dt).tile(2, copies=2)
-                + traffic("primal", "elementwise", elements=2 + 4 * jitter, dtype=dt)
-                + reduction_cost(input_elements=width, dtype=dt, phase="adjoint")
-                + traffic("adjoint", "elementwise", elements=1 + 3 * jitter, dtype=dt)
+                + reduction_cost(
+                    input_elements=rows * width,
+                    output_groups=rows,
+                    dtype=dt,
+                ).tile(2)
+                + traffic(
+                    "primal",
+                    "elementwise",
+                    elements=rows * (2 + 4 * jitter),
+                    dtype=dt,
+                )
+                + reduction_cost(
+                    input_elements=rows * width,
+                    output_groups=rows,
+                    dtype=dt,
+                    phase="adjoint",
+                )
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=rows * (1 + 3 * jitter),
+                    dtype=dt,
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -394,7 +435,7 @@ class SigmoidRouter(Router):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             rows = seq_len * batch_size
@@ -408,23 +449,29 @@ class SigmoidRouter(Router):
                 picks = min(2, width // self.n_group)
                 groups = Cost(
                     cells={
-                        ("flops", "primal", "reduction", dt): self.n_group
+                        ("flops", "primal", "reduction", dt): rows
+                        * self.n_group
                         * (picks - 1),
-                        ("bytes", "primal", "sort", dt): s
+                        ("bytes", "primal", "sort", dt): rows
+                        * s
                         * (
                             width
                             + self.n_group * picks
                             + self.n_group
                             + self.topk_group
                         ),
-                        ("bytes", "primal", "sort", index): index.itemsize
+                        ("bytes", "primal", "sort", index): rows
+                        * index.itemsize
                         * (self.n_group * picks + self.topk_group),
-                        ("bytes", "primal", "reduction", dt): s
+                        ("bytes", "primal", "reduction", dt): rows
+                        * s
                         * self.n_group
                         * (picks + 1),
-                        ("bytes", "primal", "selection", dt): s
+                        ("bytes", "primal", "selection", dt): rows
+                        * s
                         * (self.topk_group + 5 * width),
-                        ("bytes", "primal", "selection", index): index.itemsize
+                        ("bytes", "primal", "selection", index): rows
+                        * index.itemsize
                         * (self.n_group + self.topk_group),
                     },
                 )
@@ -436,18 +483,24 @@ class SigmoidRouter(Router):
                     **kwargs,
                 )
                 + elementwise_cost(
-                    primal=4 * width + bias + self.top_k,
-                    adjoint=3 * width + self.top_k,
+                    primal=rows * (4 * width + bias + self.top_k),
+                    adjoint=rows * (3 * width + self.top_k),
                     channels=width,
+                    rows=rows,
                     dtype=dt,
                 )
                 + traffic(
                     "primal",
                     "elementwise",
-                    elements=2 * bias + bias / rows + 2 * self.top_k,
+                    elements=rows * (2 * bias + 2 * self.top_k) + bias,
                     dtype=dt,
                 )
-                + traffic("adjoint", "elementwise", elements=2 * self.top_k, dtype=dt)
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=rows * 2 * self.top_k,
+                    dtype=dt,
+                )
                 + groups
             )
 
@@ -598,53 +651,79 @@ class MoE(nn.Module):
             seq_len: int,
             batch_size: int,
             dtype: torch.dtype | None,
+            expert_rows: tuple[int, ...] | None = None,
             **kwargs: object,
         ) -> Cost:
-            """Cost the router, ``top_k`` routed experts, and every shared expert.
+            """Cost one routed invocation at its realized expert occupancy.
 
-            ``params`` counts every routed expert; every other field counts what
-            one token touches -- the ``top_k`` experts it is dispatched to and
-            the shared experts, which are always active. Dispatch sorts the
-            ``top_k`` assignments, gathers the token's row into each expert,
-            and scatter-adds the gated outputs back; the adjoint's gate gradient
-            is a dot product per routed expert. Expert batch reductions use the
-            balanced occupancy ``max(1, rows * top_k / num_experts)``.
-            This fractional average is an estimate; actual occupancy depends on
-            routing. The assignment permutation and the ``top_k`` routing
-            indices a token carries through dispatch are ``int64``; gate
-            weights and payloads are at the batch's dtype. Dispatch counts
-            assignment permutation and payload gather/scatter, excluding
-            sorting workspace and the external auxiliary loss.
+            ``expert_rows[i]`` is the number of dispatched rows executed by
+            expert ``i``. The tuple is required because expert activation bytes
+            depend on the realized routing distribution; balanced occupancy is
+            only an estimate and is never represented as exact ``Cost``.
 
             Args:
               seq_len: Tokens per sequence.
               batch_size: Sequences per step.
               dtype: Activation dtype; ``None`` is torch's default.
+              expert_rows: Realized dispatched rows for every routed expert.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
+
+            Raises:
+              ValueError: Realized routing occupancy is absent or inconsistent.
 
             """
             rows = seq_len * batch_size
+            if expert_rows is None:
+                raise ValueError(
+                    "MoE cost requires expert_rows for exact realized routing occupancy.",
+                )
+            if len(expert_rows) != self.router.num_experts:
+                raise ValueError(
+                    f"expert_rows has length {len(expert_rows)}; expected "
+                    f"{self.router.num_experts}.",
+                )
+            if any(type(count) is not int or count < 0 for count in expert_rows):
+                raise ValueError("expert_rows must contain nonnegative integers.")
+            top_k = self.router.top_k
+            expected_rows = rows * top_k
+            if sum(expert_rows) != expected_rows:
+                raise ValueError(
+                    f"expert_rows sums to {sum(expert_rows)}; expected "
+                    f"{expected_rows} for {rows} rows and top_k={top_k}.",
+                )
             dt = resolve_dtype(dtype)
             s = dt.itemsize
             index = torch.int64
-            top_k = self.router.top_k
-            # Every expert exists, but one token runs ``top_k`` of them, so only
-            # ``params`` follows the module count; ``tile`` would scale
-            # ``params_active`` and the weight bytes by it too. An expert sees
-            # its balanced share of the step's tokens, at least one.
-            expert = cost(
+            one_expert = cost(
                 self.expert,
-                seq_len=max(1, -(-rows * top_k // self.router.num_experts)),
+                seq_len=1,
                 batch_size=1,
                 dtype=dtype,
                 **kwargs,
             )
+            routed = sum(
+                (
+                    cost(
+                        self.expert,
+                        seq_len=count,
+                        batch_size=1,
+                        dtype=dtype,
+                        **kwargs,
+                    )
+                    for count in expert_rows
+                    if count
+                ),
+                Cost(),
+            )
             routed = replace(
-                expert.tile(top_k, copies=top_k),
-                params=self.router.num_experts * expert.params,
+                routed,
+                params=self.router.num_experts * one_expert.params,
+                params_active=sum(
+                    one_expert.params_active for count in expert_rows if count
+                ),
             )
             shared = Cost()
             if self.num_shared_experts:
@@ -663,34 +742,51 @@ class MoE(nn.Module):
             # a row out and back. Those are the indices; the rest is payload.
             dispatch = Cost(
                 cells={
-                    ("flops", "primal", "elementwise", dt): top_k * width,
-                    ("flops", "primal", "selection", dt): (top_k + n_shared) * width,
-                    ("flops", "adjoint", "elementwise", dt): 2 * top_k * width,
-                    ("flops", "adjoint", "reduction", dt): top_k * (width - 1),
-                    ("flops", "adjoint", "selection", dt): (top_k + n_shared)
+                    ("flops", "primal", "elementwise", dt): rows * top_k * width,
+                    ("flops", "primal", "selection", dt): rows
+                    * (top_k + n_shared)
+                    * width,
+                    ("flops", "adjoint", "elementwise", dt): rows * 2 * top_k * width,
+                    ("flops", "adjoint", "reduction", dt): rows * top_k * (width - 1),
+                    ("flops", "adjoint", "selection", dt): rows
+                    * (top_k + n_shared)
                     * width_in,
-                    ("bytes", "primal", "sort", index): index.itemsize * 2 * top_k,
-                    ("bytes", "primal", "elementwise", dt): s * top_k * (2 * width + 1),
-                    ("bytes", "primal", "selection", dt): s
+                    ("bytes", "primal", "sort", index): rows
+                    * index.itemsize
+                    * 2
+                    * top_k,
+                    ("bytes", "primal", "elementwise", dt): rows
+                    * s
+                    * top_k
+                    * (2 * width + 1),
+                    ("bytes", "primal", "selection", dt): rows
+                    * s
                     * (
                         top_k * (2 * width_in + 3 * width)
                         + width
                         + 3 * n_shared * width
                     ),
-                    ("bytes", "primal", "selection", index): index.itemsize
+                    ("bytes", "primal", "selection", index): rows
+                    * index.itemsize
                     * top_k
                     * 11,
-                    ("bytes", "adjoint", "elementwise", dt): s
+                    ("bytes", "adjoint", "elementwise", dt): rows
+                    * s
                     * top_k
                     * (5 * width + 1),
-                    ("bytes", "adjoint", "reduction", dt): s * top_k * (width + 1),
-                    ("bytes", "adjoint", "selection", dt): s
+                    ("bytes", "adjoint", "reduction", dt): rows
+                    * s
+                    * top_k
+                    * (width + 1),
+                    ("bytes", "adjoint", "selection", dt): rows
+                    * s
                     * (
                         top_k * (3 * width_in + 2 * width)
                         + width_in
                         + 3 * n_shared * width_in
                     ),
-                    ("bytes", "adjoint", "selection", index): index.itemsize
+                    ("bytes", "adjoint", "selection", index): rows
+                    * index.itemsize
                     * top_k
                     * 11,
                 },

@@ -141,7 +141,6 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
         build_input=lambda: torch.randn(4, 3, requires_grad=True),
         seq_len=12,
         batch_size=1,
-        num_tokens=12,
         dtype=None,
         run=lambda module, prediction: _loss(module, prediction, label=label),
     )
@@ -153,12 +152,12 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
         dtype=None,
     ) + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 4,
-            ("flops", "adjoint", "elementwise", f32): 4,
-            ("bytes", "primal", "elementwise", f32): 32,
-            ("bytes", "primal", "reduction", f32): 12,
-            ("bytes", "adjoint", "elementwise", f32): 16,
-            ("bytes", "adjoint", "reduction", f32): 12,
+            ("flops", "primal", "elementwise", f32): 48,
+            ("flops", "adjoint", "elementwise", f32): 48,
+            ("bytes", "primal", "elementwise", f32): 384,
+            ("bytes", "primal", "reduction", f32): 144,
+            ("bytes", "adjoint", "elementwise", f32): 192,
+            ("bytes", "adjoint", "reduction", f32): 144,
         },
     )
     assert measured.params == 0
@@ -182,14 +181,14 @@ def test_weighted_sum_operand_traffic(dtype: torch.dtype) -> None:
     child = cost(config.fns[0], seq_len=6, batch_size=1, dtype=dtype)
     assert (
         costed["bytes", "primal", "elementwise"].sum()
-        == 2 * child["bytes", "primal", "elementwise"].sum() + 8 * itemsize
+        == 2 * child["bytes", "primal", "elementwise"].sum() + 48 * itemsize
     )
-    assert costed["bytes", "primal", "reduction"].sum() == 3 * itemsize
+    assert costed["bytes", "primal", "reduction"].sum() == 18 * itemsize
     assert (
         costed["bytes", "adjoint", "elementwise"].sum()
-        == 2 * child["bytes", "adjoint", "elementwise"].sum() + 4 * itemsize
+        == 2 * child["bytes", "adjoint", "elementwise"].sum() + 24 * itemsize
     )
-    assert costed["bytes", "adjoint", "reduction"].sum() == 3 * itemsize
+    assert costed["bytes", "adjoint", "reduction"].sum() == 18 * itemsize
 
 
 def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:

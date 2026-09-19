@@ -15,7 +15,7 @@ an explicit list whose length IS the block count.
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, field, replace
+from dataclasses import KW_ONLY, field
 from typing import Self, cast, override
 
 import math
@@ -97,32 +97,30 @@ class ResidualBlock(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost norm-act-conv twice and the shortcut, per image position.
+            """Cost norm-act-conv twice and the shortcut for one invocation.
 
-            A token is one position of the network's input image; ``grid`` is
-            this block's own input grid. ``norm1`` and its activation run on
-            ``grid``; ``conv1`` and the shortcut read it and write the strided
-            grid, where everything else runs. Work at either grid is spread
-            over the image's positions in one division, so a stack of blocks
-            sums exactly. The adjoint accumulates the shortcut's and the
-            branch's gradients into the activated input, one add per element.
+            ``grid`` is this block's concrete input grid. ``norm1`` and its
+            activation run there; ``conv1`` and the shortcut read it and write
+            the strided grid, where everything else runs. The adjoint
+            accumulates the shortcut's and branch's gradients into the
+            activated input, one add per element.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-image-position cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             c_in, c_out = self.channels_in, self.channels_out
-            image_size, grid = _block_grids(self.image_size, self.grid, seq_len=seq_len)
-            rows = seq_len * batch_size
+            grid = _block_grids(self.image_size, self.grid, seq_len=seq_len)[1]
             dt = dtype
             strided = _grid(grid, kernel_size=3, stride=self.stride, padding=1)
-            rows_strided = _rows(rows, image_size=image_size, grid=strided)
+            rows_input = batch_size * math.prod(grid)
+            rows_strided = batch_size * math.prod(strided)
             at_input = (
                 cost(
                     BatchNorm2d.Config(c_in, elementwise_affine=True),
@@ -131,18 +129,28 @@ class ResidualBlock(nn.Module):
                     dtype=dtype,
                     **kwargs,
                 )
-                + cost(self.activation, channels=c_in, dtype=dt)
+                + cost(self.activation, channels=c_in * rows_input, dtype=dt)
                 + elementwise_cost(
                     primal=0,
-                    adjoint=c_in,
+                    adjoint=c_in * rows_input,
                     channels=c_in,
                     inputs=0,
                     outputs=0,
+                    rows=rows_input,
                     dtype=dt,
                 )
             )
             at_output = (
-                _conv2d_cost(c_in, c_out, kernel_size=3, rows=rows_strided, dtype=dt)
+                _conv2d_cost(
+                    c_in,
+                    c_out,
+                    kernel_size=3,
+                    input_grid=grid,
+                    batch_size=batch_size,
+                    stride=self.stride,
+                    padding=1,
+                    dtype=dt,
+                )
                 + cost(
                     BatchNorm2d.Config(c_out, elementwise_affine=True),
                     seq_len=math.prod(strided),
@@ -150,15 +158,25 @@ class ResidualBlock(nn.Module):
                     dtype=dtype,
                     **kwargs,
                 )
-                + cost(self.activation, channels=c_out, dtype=dt)
-                + _conv2d_cost(c_out, c_out, kernel_size=3, rows=rows_strided, dtype=dt)
+                + cost(self.activation, channels=c_out * rows_strided, dtype=dt)
+                + _conv2d_cost(
+                    c_out,
+                    c_out,
+                    kernel_size=3,
+                    input_grid=strided,
+                    batch_size=batch_size,
+                    stride=1,
+                    padding=1,
+                    dtype=dt,
+                )
                 + elementwise_cost(
-                    primal=c_out,
+                    primal=c_out * rows_strided,
                     adjoint=0,
                     channels=c_out,
                     inputs=2,
                     adjoint_inputs=0,
                     adjoint_outputs=0,
+                    rows=rows_strided,
                     dtype=dt,
                 )
             )
@@ -167,14 +185,13 @@ class ResidualBlock(nn.Module):
                     c_in,
                     c_out,
                     kernel_size=1,
-                    rows=rows_strided,
+                    input_grid=grid,
+                    batch_size=batch_size,
+                    stride=self.stride,
+                    padding=0,
                     dtype=dt,
                 )
-            return _per_image_position(
-                at_input,
-                grid=grid,
-                image_size=image_size,
-            ) + _per_image_position(at_output, grid=strided, image_size=image_size)
+            return at_input + at_output
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -227,10 +244,14 @@ def _conv2d_cost(
     channels_out: int,
     *,
     kernel_size: int,
-    rows: float,
+    input_grid: tuple[int, int],
+    batch_size: int,
+    stride: int = 1,
+    padding: int | str = 1,
     dtype: torch.dtype | None,
+    weight_grad: bool = True,
 ) -> Cost:
-    """Cost one output position of a bias-free, ungrouped 2-d convolution."""
+    """Cost one complete bias-free, ungrouped 2-d convolution invocation."""
     return conv_cost(
         channels_in=channels_in,
         channels_out=channels_out,
@@ -238,8 +259,12 @@ def _conv2d_cost(
         ndim=2,
         groups=1,
         bias=False,
-        rows=rows,
+        input_grid=input_grid,
+        batch_size=batch_size,
+        stride=stride,
+        padding=padding,
         dtype=dtype,
+        weight_grad=weight_grad,
     )
 
 
@@ -249,29 +274,32 @@ def _max_pool_cost(
     channels: int,
     *,
     kernel_size: int,
+    positions: int,
+    batch_size: int,
     dtype: torch.dtype | None,
 ) -> Cost:
     """Cost values and saved argmax forward; dense gradient writes backward."""
     dt = dtype
     index = torch.int64
     window = kernel_size * kernel_size
+    rows = batch_size * positions
     return (
         traffic(
             "primal",
             "reduction",
-            elements=channels * (window + 1),
-            flops=channels * (window - 1),
+            elements=rows * channels * (window + 1),
+            flops=rows * channels * (window - 1),
             dtype=dt,
         )
-        + traffic("primal", "reduction", elements=channels, dtype=index)
+        + traffic("primal", "reduction", elements=rows * channels, dtype=index)
         + traffic(
             "adjoint",
             "selection",
-            elements=channels * (window + 1),
-            flops=channels,
+            elements=rows * channels * (window + 1),
+            flops=rows * channels,
             dtype=dt,
         )
-        + traffic("adjoint", "selection", elements=channels, dtype=index)
+        + traffic("adjoint", "selection", elements=rows * channels, dtype=index)
     )
 
 
@@ -279,30 +307,32 @@ def _avg_pool_cost(
     channels: int,
     *,
     positions: int,
+    batch_size: int,
     dtype: torch.dtype | None,
 ) -> Cost:
-    """Cost a global average pool per image: a sum per channel, a scale per element back."""
+    """Cost global-average-pool work for the supplied image batch."""
     dt = dtype
+    rows = batch_size * positions
     return (
         traffic(
             "primal",
             "reduction",
-            elements=channels * (positions + 1),
-            flops=channels * (positions - 1),
+            elements=channels * (rows + batch_size),
+            flops=channels * batch_size * (positions - 1),
             dtype=dt,
         )
         + traffic(
             "primal",
             "elementwise",
-            elements=2 * channels,
-            flops=channels,
+            elements=2 * channels * batch_size,
+            flops=channels * batch_size,
             dtype=dt,
         )
         + traffic(
             "adjoint",
             "elementwise",
-            elements=channels * (positions + 1),
-            flops=channels * positions,
+            elements=channels * (rows + batch_size),
+            flops=channels * rows,
             dtype=dt,
         )
     )
@@ -318,19 +348,6 @@ def _grid(
     """Return the grid a window sweep writes, as torch's conv and pool shape it."""
     height, width = ((s + 2 * padding - kernel_size) // stride + 1 for s in size)
     return height, width
-
-
-# Rounded up, so the one-row shape estimate stays one row through a downsampling layer
-# instead of dividing by zero.
-def _rows(
-    rows: float,
-    *,
-    image_size: tuple[int, int],
-    grid: tuple[int, int],
-) -> int:
-    """Return the rows a layer on ``grid`` sees when the image holds ``rows``."""
-    total = math.prod(image_size)
-    return (int(rows) * math.prod(grid) + total - 1) // total
 
 
 # A block inside a network has both set by the network's finalize. A block standing
@@ -354,25 +371,6 @@ def _block_grids(
     if grid == (0, 0):
         grid = image_size
     return image_size, grid
-
-
-def _frozen(trainable: Cost) -> Cost:
-    """Cost a frozen layer: its adjoint is the input gradient, the primal's size."""
-    primal = trainable.only("primal")
-    return replace(trainable, cells=(primal + primal.relabel("adjoint")).cells)
-
-
-# One division by the image's positions, never a chain of per-stage ratios: a
-# ``225 / 961`` followed by ``961 / 1024`` lands an ulp off ``225 / 1024``, and the
-# torch comparison is exact.
-def _per_image_position(
-    costed: Cost,
-    *,
-    grid: tuple[int, int],
-    image_size: tuple[int, int],
-) -> Cost:
-    """Spread work done once per ``grid`` position over the image's positions."""
-    return costed.tile(math.prod(grid) / math.prod(image_size))
 
 
 class ConvBlock(nn.Module):
@@ -427,30 +425,25 @@ class ConvBlock(nn.Module):
         ) -> Cost:
             """Cost the first convolution on the block's grid, the rest on the pooled one.
 
-            A token is one position of the network's input image; ``grid`` is
-            this block's own input grid. The first convolution keeps that grid
-            (``padding="same"``); the pool halves it, and every norm,
-            activation, and later convolution runs there. Work at either grid
-            is spread over the image's positions in one division. Three
-            convolutions add a residual: one add forward and one gradient
-            accumulation into the skip.
+            The first convolution keeps ``grid`` (``padding="same"``); the
+            pool halves it, and every norm, activation, and later convolution
+            runs there. Three convolutions add a residual: one add forward and
+            one gradient accumulation into the skip.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-image-position cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             c_in, c_out = self.channels_in, self.channels_out
-            image_size, grid = _block_grids(self.image_size, self.grid, seq_len=seq_len)
-            rows = seq_len * batch_size
+            grid = _block_grids(self.image_size, self.grid, seq_len=seq_len)[1]
             pooled_grid = _grid(grid, kernel_size=2, stride=2, padding=0)
-            rows_grid = _rows(rows, image_size=image_size, grid=grid)
-            rows_pooled = _rows(rows, image_size=image_size, grid=pooled_grid)
+            rows_pooled = batch_size * math.prod(pooled_grid)
             norm_act = cost(
                 BatchNorm2d.Config(c_out),
                 seq_len=math.prod(pooled_grid),
@@ -459,32 +452,53 @@ class ConvBlock(nn.Module):
                 **kwargs,
             ) + cost(
                 self.activation,
-                channels=c_out,
+                channels=c_out * rows_pooled,
                 dtype=dtype,
             )
-            pooled = _max_pool_cost(c_out, kernel_size=2, dtype=dtype) + norm_act
+            pooled = (
+                _max_pool_cost(
+                    c_out,
+                    kernel_size=2,
+                    positions=math.prod(pooled_grid),
+                    batch_size=batch_size,
+                    dtype=dtype,
+                )
+                + norm_act
+            )
             for _ in range(self.num_convs - 1):
                 pooled += _conv2d_cost(
                     c_out,
                     c_out,
                     kernel_size=3,
-                    rows=rows_pooled,
+                    input_grid=pooled_grid,
+                    batch_size=batch_size,
+                    stride=1,
+                    padding=1,
                     dtype=dtype,
                 )
                 pooled += norm_act
             if self.num_convs == 3:
                 pooled += elementwise_cost(
-                    primal=c_out,
-                    adjoint=c_out,
+                    primal=c_out * rows_pooled,
+                    adjoint=c_out * rows_pooled,
                     channels=c_out,
                     inputs=2,
+                    rows=rows_pooled,
                     dtype=dtype,
                 )
-            return _per_image_position(
-                _conv2d_cost(c_in, c_out, kernel_size=3, rows=rows_grid, dtype=dtype),
-                grid=grid,
-                image_size=image_size,
-            ) + _per_image_position(pooled, grid=pooled_grid, image_size=image_size)
+            return (
+                _conv2d_cost(
+                    c_in,
+                    c_out,
+                    kernel_size=3,
+                    input_grid=grid,
+                    batch_size=batch_size,
+                    stride=1,
+                    padding=1,
+                    dtype=dtype,
+                )
+                + pooled
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -578,27 +592,29 @@ class ScaledLinear(nn.Linear):
             gradient of its own.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-row cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             del kwargs
+            rows = seq_len * batch_size
             return matmul_cost(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 bias=self.bias,
-                rows=seq_len * batch_size,
+                rows=rows,
                 dtype=dtype,
             ) + elementwise_cost(
-                primal=self.channels_out,
-                adjoint=self.channels_out,
+                primal=self.channels_out * rows,
+                adjoint=self.channels_out * rows,
                 channels=self.channels_out,
                 adjoint_inputs=1,
+                rows=rows,
                 dtype=dtype,
             )
 
@@ -709,32 +725,31 @@ class ResNet(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost the stem, every block at its grid, then norm, pool, and head.
+            """Cost the stem, every block, final norm, pool, and head.
 
-            A token is one position of the input image, ``image_size``, so a
-            step holds ``batch_size * height * width`` of them and the cost
-            times that count is one step's work. Each block is handed the grid
-            it reads and costs itself per image position; a stride-2 block
+            Each block receives the concrete grid it reads; a stride-2 block
             leaves ``ceil(size / 2)`` for the next. The pool and head run once
-            per image.
+            per image, and every operation is counted for this invocation.
 
             Args:
-              batch_size: Images per step.
+              batch_size: Images in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-image-position cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             image_size = self.image_size
             seq_len = math.prod(image_size)
-            rows = seq_len * batch_size
             costed = _conv2d_cost(
                 self.channels_in,
                 self.channels_hidden[0],
                 kernel_size=3,
-                rows=rows,
+                input_grid=image_size,
+                batch_size=batch_size,
+                stride=1,
+                padding=1,
                 dtype=dtype,
             )
             grid = image_size
@@ -757,7 +772,11 @@ class ResNet(nn.Module):
                 batch_size=batch_size,
                 dtype=dtype,
                 **kwargs,
-            ) + cost(self.activation, channels=c_last, dtype=dtype)
+            ) + cost(
+                self.activation,
+                channels=c_last * batch_size * math.prod(grid),
+                dtype=dtype,
+            )
             head = (
                 matmul_cost(
                     channels_in=c_last,
@@ -777,13 +796,14 @@ class ResNet(nn.Module):
             )
             return (
                 costed
-                + _per_image_position(at_output, grid=grid, image_size=image_size)
-                + _per_image_position(
-                    _avg_pool_cost(c_last, positions=math.prod(grid), dtype=dtype)
-                    + head,
-                    grid=(1, 1),
-                    image_size=image_size,
+                + at_output
+                + _avg_pool_cost(
+                    c_last,
+                    positions=math.prod(grid),
+                    batch_size=batch_size,
+                    dtype=dtype,
                 )
+                + head
             )
 
     def __init__(self, config: Config) -> None:
@@ -921,51 +941,50 @@ class SpeedNet(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost whitening, every block at its grid, the final pool, and the head.
+            """Cost whitening, every block, final pool, and head.
 
-            A token is one position of the input image, ``image_size``, so a
-            step holds ``batch_size * height * width`` of them. The unpadded
-            whitening convolution shrinks the grid by
+            The unpadded whitening convolution shrinks the grid by
             ``whiten_kernel - 1``; each block pools it by two; the final pool
-            by three. Every layer is costed at its own grid and spread back
-            over the image's positions.
+            by three. Every layer is costed at its own concrete grid.
 
             The whitening weight is frozen but owned: it is in ``params``, and
             its adjoint is the input gradient alone -- one convolution of the
             primal's size, not the two a trainable layer pays.
 
             Args:
-              batch_size: Images per step.
+              batch_size: Images in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-image-position cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             image_size = self.image_size
             seq_len = math.prod(image_size)
-            rows = seq_len * batch_size
             grid = _grid(
                 image_size,
                 kernel_size=self.whiten_kernel,
                 stride=1,
                 padding=0,
             )
-            trainable = _conv2d_cost(
+            output_rows = batch_size * math.prod(grid)
+            whitening = _conv2d_cost(
                 self.channels_in,
                 self.whiten_width,
                 kernel_size=self.whiten_kernel,
-                rows=_rows(rows, image_size=image_size, grid=grid),
+                input_grid=image_size,
+                batch_size=batch_size,
+                stride=1,
+                padding=0,
                 dtype=dtype,
+                weight_grad=False,
             )
-            # Frozen: the adjoint is the input gradient alone, the primal's size.
-            whitened = _frozen(trainable) + cost(
+            costed = whitening + cost(
                 self.activation,
-                channels=self.whiten_width,
+                channels=self.whiten_width * output_rows,
                 dtype=dtype,
             )
-            costed = _per_image_position(whitened, grid=grid, image_size=image_size)
             for block in _speednet_blocks(self):
                 propagate_attr(block, "image_size", image_size)
                 propagate_attr(block, "grid", grid)
@@ -981,6 +1000,8 @@ class SpeedNet(nn.Module):
             tail = _max_pool_cost(
                 self.channels_hidden[-1],
                 kernel_size=3,
+                positions=math.prod(grid),
+                batch_size=batch_size,
                 dtype=dtype,
             ) + cost(
                 self.proj_out,
@@ -989,7 +1010,7 @@ class SpeedNet(nn.Module):
                 dtype=dtype,
                 **kwargs,
             )
-            return costed + _per_image_position(tail, grid=grid, image_size=image_size)
+            return costed + tail
 
     def __init__(self, config: Config) -> None:
         super().__init__()

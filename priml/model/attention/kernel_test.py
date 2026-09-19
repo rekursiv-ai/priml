@@ -128,6 +128,60 @@ def test_naive_matches_fused_causal_non_square() -> None:
     )
 
 
+@pytest.mark.parametrize("config", [SdpaFused.Config(), SdpaNaive.Config()])
+@pytest.mark.parametrize(
+    ("query_length", "window", "expected"),
+    [
+        (1, -1, (8.0,)),
+        (1, 0, (20.0,)),
+        (1, 1, (16.0,)),
+        (2, -1, (4.0, 8.0)),
+        (2, 0, (12.0, 20.0)),
+        (2, 1, (6.0, 16.0)),
+    ],
+)
+def test_cached_kernel_matches_independent_prefix_means(
+    config: SdpaFused.Config | SdpaNaive.Config,
+    query_length: int,
+    window: int,
+    expected: tuple[float, ...],
+) -> None:
+    # Zero scores give uniform weights over the permitted cached suffix/prefix.
+    values = torch.tensor([0.0, 0.0, 12.0, 20.0]).reshape(1, 4, 1, 1)
+    queries = torch.zeros(1, query_length, 1, 1)
+    keys = torch.zeros_like(values)
+    with sdpa_kernel(SDPBackend.MATH):
+        actual = config.make()(queries, keys, values, is_causal=True, window=window)
+    assert torch.equal(actual, torch.tensor(expected).reshape(1, query_length, 1, 1))
+
+
+def test_the_kernels_agree_when_causality_and_a_mask_are_both_supplied() -> None:
+    """A caller's mask must not silently switch causality off in one kernel.
+
+    SDPA refuses ``is_causal`` beside ``attn_mask``, so the fused kernel used to
+    drop causality whenever a mask arrived while the naive kernel kept it. The
+    two are one algorithm: both fold causality into the mask.
+    """
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(2, 6, 2, 8) for _ in range(3))
+    # A padding mask that fills only INSIDE the causal cone and trusts
+    # ``is_causal`` for the rest -- the Qwen 3.5 shape. Key 1, not key 0, so
+    # every query keeps at least one admissible key.
+    mask = torch.zeros(6, 6)
+    mask[:, 1] = float("-inf")
+    fused = SdpaFused()(q, k, v, is_causal=True, attn_mask=mask)
+    naive = SdpaNaive()(q, k, v, is_causal=True, attn_mask=mask)
+    torch.testing.assert_close(fused, naive, rtol=1e-5, atol=1e-5)
+    # And causality actually held: the future must not reach a past query.
+    k2, v2 = k.clone(), v.clone()
+    k2[:, -1] = 999.0
+    v2[:, -1] = 999.0
+    assert torch.equal(
+        SdpaFused()(q, k, v, is_causal=True, attn_mask=mask)[:, :-1],
+        SdpaFused()(q, k2, v2, is_causal=True, attn_mask=mask)[:, :-1],
+    )
+
+
 def test_the_kernels_agree_on_a_windowed_forward() -> None:
     """The fused and manual kernels are one algorithm.
 
@@ -160,12 +214,20 @@ def test_a_kernel_config_prices_itself_from_the_shapes_its_owner_hands_it(
         channels_head=8,
         window=4,
     )
-    assert windowed["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 4
-    # Unread bus entries pass through.
-    assert (
-        cost(kernel, seq_len=32, dtype=None, num_heads=2, channels_head=8, rows=7)
-        == costed
+    assert windowed == costed
+    # ``rows`` is the concrete query-row count for this invocation.
+    fewer_rows = cost(
+        kernel,
+        seq_len=32,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+        rows=7,
     )
+    assert fewer_rows["flops", "matmul"].sum() == (
+        7 * costed["flops", "matmul"].sum() // 32
+    )
+    assert fewer_rows["bytes", "matmul"].sum() < costed["bytes", "matmul"].sum()
 
 
 def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
@@ -178,18 +240,22 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
     full = attention_kernel_cost(seq_len=32, dtype=None, num_heads=2, channels_head=8)
     assert full == Cost(
         cells={
-            ("flops", "primal", "matmul", f32): 4 * 2 * 8 * 32,
-            ("flops", "primal", "elementwise", f32): 2 * 4 * 32,
-            ("flops", "primal", "reduction", f32): 2 * 62,
-            ("flops", "adjoint", "matmul", f32): 2 * 4 * 2 * 8 * 32,
-            ("flops", "adjoint", "elementwise", f32): 2 * 4 * 32,
-            ("flops", "adjoint", "reduction", f32): 2 * 31,
-            ("bytes", "primal", "matmul", f32): 4 * 2 * (4 * 8 + 2 * 32),
-            ("bytes", "primal", "elementwise", f32): 4 * 2 * (8 * 32 + 2),
-            ("bytes", "primal", "reduction", f32): 4 * 2 * 2 * (32 + 1),
-            ("bytes", "adjoint", "matmul", f32): 4 * 2 * 2 * (4 * 8 + 2 * 32),
-            ("bytes", "adjoint", "elementwise", f32): 4 * 2 * (10 * 32 + 1),
-            ("bytes", "adjoint", "reduction", f32): 4 * 2 * (32 + 1),
+            ("flops", "primal", "matmul", f32): 4 * 2 * 32 * 8 * 32,
+            ("flops", "primal", "elementwise", f32): 2 * 4 * 32 * 32,
+            ("flops", "primal", "reduction", f32): 2 * 2 * 32 * 31,
+            ("flops", "adjoint", "matmul", f32): 2 * 4 * 2 * 32 * 8 * 32,
+            ("flops", "adjoint", "elementwise", f32): 2 * 4 * 32 * 32,
+            ("flops", "adjoint", "reduction", f32): 2 * 32 * 31,
+            ("bytes", "primal", "matmul", f32): 4 * 2 * 2 * (32 * (8 + 32) + 8 * 32),
+            ("bytes", "primal", "elementwise", f32): 4 * 2 * 32 * (8 * 32 + 2),
+            ("bytes", "primal", "reduction", f32): 4 * 2 * 32 * 2 * (32 + 1),
+            ("bytes", "adjoint", "matmul", f32): 4
+            * 2
+            * 2
+            * 2
+            * (32 * (8 + 32) + 8 * 32),
+            ("bytes", "adjoint", "elementwise", f32): 4 * 2 * 32 * (10 * 32 + 1),
+            ("bytes", "adjoint", "reduction", f32): 4 * 2 * 32 * (32 + 1),
         },
     )
     windowed = attention_kernel_cost(
@@ -199,8 +265,8 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
         channels_head=8,
         window=4,
     )
-    assert windowed["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 4
-    assert windowed["flops", "primal", "elementwise"].sum() == 2 * 4 * 4
+    assert windowed["flops", "primal", "matmul"].sum() == 4 * 2 * 32 * 8 * 5
+    assert windowed["flops", "primal", "elementwise"].sum() == 2 * 4 * 32 * 5
     # A window past the sequence reaches every key and nothing more.
     assert (
         attention_kernel_cost(
@@ -221,8 +287,27 @@ def test_kernel_cost_is_two_products_over_the_reachable_keys() -> None:
     )
     assert (
         dropped["flops", "primal", "elementwise"].sum()
-        == full["flops", "primal", "elementwise"].sum() + 2 * 2 * 32
+        == full["flops", "primal", "elementwise"].sum() + 2 * 2 * 32 * 32
     )
+
+
+def test_kernel_cost_scales_with_batch_size() -> None:
+    single = attention_kernel_cost(
+        seq_len=8,
+        batch_size=1,
+        dtype=torch.bfloat16,
+        num_heads=2,
+        channels_head=4,
+    )
+    batched = attention_kernel_cost(
+        seq_len=8,
+        batch_size=2,
+        dtype=torch.bfloat16,
+        num_heads=2,
+        channels_head=4,
+    )
+    assert batched["flops"].sum() == 2 * single["flops"].sum()
+    assert batched["bytes"].sum() == 2 * single["bytes"].sum()
 
 
 @pytest.mark.parametrize("window", [-1, 4])
@@ -235,7 +320,7 @@ def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None
         channels_head=4,
         window=window,
     )
-    assert small == attention_kernel_cost(
+    batched = attention_kernel_cost(
         seq_len=8,
         batch_size=4,
         dtype=torch.bfloat16,
@@ -243,6 +328,8 @@ def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None
         channels_head=4,
         window=window,
     )
+    assert batched["flops"].sum() == 4 * small["flops"].sum()
+    assert batched["bytes"].sum() == 4 * small["bytes"].sum()
     large = attention_kernel_cost(
         seq_len=8,
         dtype=None,
@@ -258,8 +345,9 @@ def test_kernel_traffic_uses_sequence_reuse_not_batch_reuse(window: int) -> None
         large["bytes", "adjoint", torch.float32].sum()
         == small["bytes", "adjoint", torch.bfloat16].sum() * 2
     )
-    assert small["bytes", "primal", "matmul"].sum() == 2 * 2 * (
-        4 * 4 + 2 * (4 if window == 4 else 8)
+    keys = 5 if window == 4 else 8
+    assert small["bytes", "primal", "matmul"].sum() == 2 * 2 * 2 * (
+        8 * (4 + keys) + 4 * keys
     )
     assert small["flops", "primal"].sum() == large["flops", "primal"].sum()
 
@@ -292,9 +380,9 @@ def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
     config = RoPE.Config(8)
     factors = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     # Positions are read as int64; the angle table and factors are bf16.
-    assert factors["bytes", "primal", "elementwise", torch.int64] == 8
+    assert factors["bytes", "primal", "elementwise", torch.int64] == 8 * 4
     assert factors["bytes", "primal", "elementwise", torch.bfloat16] == 2 * (
-        4 / 4 + 4 + 8 * 4
+        4 + 4 * (4 + 8 * 4)
     )
     assert factors["bytes", "adjoint"].sum() == 0
     rotation = rotation_cost(
@@ -304,8 +392,8 @@ def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
         channels_head=8,
         heads=3,
     )
-    assert rotation["bytes", "primal", "elementwise"].sum() == 2 * 9 * 8 * 3
-    assert rotation["bytes", "adjoint", "elementwise"].sum() == 2 * 9 * 8 * 3
+    assert rotation["bytes", "primal", "elementwise"].sum() == 4 * 2 * 9 * 8 * 3
+    assert rotation["bytes", "adjoint", "elementwise"].sum() == 4 * 2 * 9 * 8 * 3
     mixed = RoPEMixed.Config(8)
     mixed.num_heads = 2
     mixed.learnable = True
@@ -319,8 +407,10 @@ def test_rotary_traffic_counts_factors_and_rotated_operands() -> None:
 
 
 @pytest.mark.parametrize("config", [SdpaNaive.Config(), SdpaFused.Config()])
+@pytest.mark.parametrize("window", [-1, 0, 1, 4, 8, 12])
 def test_kernel_cost_matches_torch(
     config: SdpaNaive.Config | SdpaFused.Config,
+    window: int,
 ) -> None:
     """Measure both kernels' logical products, traffic, and parameter count."""
     # CPU flash SDPA lacks a FLOP counter; math dispatch exposes the products.
@@ -330,13 +420,18 @@ def test_kernel_cost_matches_torch(
             build_input=lambda: tuple(
                 torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3)
             ),
-            num_tokens=8,
+            batch_size=1,
             seq_len=8,
             dtype=None,
             num_heads=2,
             channels_head=4,
+            window=window,
+            run=lambda module, inputs: cast(
+                Tensor,
+                module(*inputs, is_causal=True, window=window),
+            ),
         )
-    assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 4 * 8
+    assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 4 * 8 * 8
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)

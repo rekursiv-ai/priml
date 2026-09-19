@@ -439,16 +439,24 @@ def test_multi_stream_cost_sums_projections_and_scores_per_stream() -> None:
     finalized = config.copy_tree().finalize()
     model_cost = finalized.cost(seq_len=8, batch_size=1, dtype=None)
     # One query row against both streams' keys.
-    kernel = attention_kernel_cost(seq_len=16, dtype=None, num_heads=2, channels_head=8)
+    kernel = attention_kernel_cost(
+        seq_len=16,
+        rows=8,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+    )
     stream = (2 + 2 + 2) * 16 * 8 + 16 * 16
-    assert kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 16 * 8
+    stream_primal = 2 * 8 * stream
+    stream_adjoint = 4 * 8 * stream
+    assert kernel["flops", "primal", "matmul"].sum() == 4 * 2 * 8 * 16 * 8
     assert model_cost.params == 2 * stream
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost["flops", "primal", "matmul"].sum() == 2 * (
-        2 * stream + kernel["flops", "primal", "matmul"].sum()
+        stream_primal + kernel["flops", "primal", "matmul"].sum()
     )
     assert model_cost["flops", "adjoint", "matmul"].sum() == 2 * (
-        2 * 2 * stream + kernel["flops", "adjoint", "matmul"].sum()
+        stream_adjoint + kernel["flops", "adjoint", "matmul"].sum()
     )
     # A position holds one token per stream, each caching its own K and V.
     assert model_cost.bytes_state == 4 * 2 * 2 * 2 * 8
@@ -477,8 +485,6 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
         ),
         seq_len=4,
         batch_size=1,
-        num_tokens=4,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=_joint_sum,
     )
@@ -517,7 +523,13 @@ def test_multi_stream_cost_prices_explicit_streams_by_their_own_config() -> None
         (cost(s, seq_len=8, batch_size=1, dtype=None) for s in finalized.streams),
         Cost(),
     )
-    kernel = attention_kernel_cost(seq_len=16, dtype=None, num_heads=2, channels_head=8)
+    kernel = attention_kernel_cost(
+        seq_len=16,
+        rows=8,
+        dtype=None,
+        num_heads=2,
+        channels_head=8,
+    )
     assert model_cost.params == owned.params
     assert model_cost.params == sum(p.numel() for p in config.make().parameters())
     assert model_cost["flops", "primal", "matmul"].sum() == (
@@ -561,7 +573,7 @@ def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
     assert (
         separate["bytes", "primal", "elementwise"].sum()
         - shared["bytes", "primal", "elementwise"].sum()
-        == 2 * 4 / 4
+        == torch.bfloat16.itemsize * 4
     )
 
 

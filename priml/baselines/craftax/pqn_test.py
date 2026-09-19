@@ -194,7 +194,6 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
         ),
         seq_len=1,
         batch_size=3,
-        num_tokens=1 * 3,
         dtype=None,
         run=_stepped,
     )
@@ -210,22 +209,22 @@ def test_the_cost_matches_torch_and_prices_the_lstm_step() -> None:
         dtype=None,
     )
     assert analytical.params == weights + biases + norms.params
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 3 * 2 * weights
     # Beyond the norms: biases, the encoder's ReLU, the reset of both carried
     # tensors, and thirteen operations per LSTM unit.
     assert analytical["flops", "primal", "elementwise"].sum() - norms[
         "flops",
         "primal",
         "elementwise",
-    ].sum() == (biases + 16 + 2 * 16 + 13 * 16)
+    ].sum() == 3 * (biases + 16 + 2 * 16 + 13 * 16)
     assert analytical["flops", "adjoint", "elementwise"].sum() - norms[
         "flops",
         "adjoint",
         "elementwise",
-    ].sum() == (16 + 2 * 16 + 22 * 16)
+    ].sum() == 3 * (16 + 2 * 16 + 22 * 16)
     # The one-hot previous action is written, not computed.
-    assert analytical["bytes", "primal", "selection"].sum() == 4 * 5
-    assert analytical.bytes_state == 4 * 2 * 16
+    assert analytical["bytes", "primal", "selection"].sum() == 4 * 3 * 5
+    assert analytical.bytes_state == 4 * 3 * 2 * 16
 
 
 def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
@@ -235,9 +234,9 @@ def test_cost_accounts_for_recurrent_operand_bytes_and_dtype() -> None:
     config.num_actions = 4
     narrow = config.cost(seq_len=1, batch_size=4, dtype=torch.bfloat16)
     wide = config.cost(seq_len=1, batch_size=4, dtype=None)
-    assert narrow.bytes_state == 8
-    assert wide.bytes_state == 16
-    assert narrow["bytes", "primal", "selection"].sum() == 8
+    assert narrow.bytes_state == 32
+    assert wide.bytes_state == 64
+    assert narrow["bytes", "primal", "selection"].sum() == 4 * 8
     assert (
         wide["bytes", torch.float32].sum() == 2 * narrow["bytes", torch.bfloat16].sum()
     )

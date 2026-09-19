@@ -112,7 +112,7 @@ class CausalAttention(ValueGatedAttention):
             self,
             *,
             seq_len: int,
-            batch_size: int,
+            batch_size: int = 1,
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
@@ -128,7 +128,7 @@ class CausalAttention(ValueGatedAttention):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              total: Per-token work, traffic, and owned parameters.
+              total: Whole-invocation work, traffic, and owned parameters.
 
             """
             rows = seq_len * batch_size
@@ -139,11 +139,11 @@ class CausalAttention(ValueGatedAttention):
                 **kwargs,
             ) + cost(
                 self.norm_out,
-                seq_len=seq_len * self.num_heads,
-                batch_size=batch_size,
+                seq_len=seq_len,
+                batch_size=batch_size * self.num_heads,
                 dtype=dtype,
                 **kwargs,
-            ).tile(self.num_heads)
+            )
             memory = int(self.bigram) + int(self.trigram)
             total += (
                 matmul_cost(
@@ -156,6 +156,7 @@ class CausalAttention(ValueGatedAttention):
                     heads=self.num_heads,
                     channels_head=self.channels_head,
                     channels_in=self.channels_in,
+                    rows=rows,
                     dtype=dtype,
                     add=True,
                 )
@@ -171,6 +172,7 @@ class CausalAttention(ValueGatedAttention):
                     heads=self.num_heads,
                     channels_head=self.channels_head,
                     channels_in=self.channels_in,
+                    rows=rows,
                     dtype=dtype,
                     add=False,
                 )
@@ -475,12 +477,14 @@ class Flash3Attention:
             cls,
             *,
             seq_len: int,
+            batch_size: int = 1,
             dtype: torch.dtype | None,
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
+            rows: int = -1,
             **kwargs: object,
         ) -> Cost:
             """Cost the kernel from the shapes its owner hands it.
@@ -489,27 +493,31 @@ class Flash3Attention:
 
             Args:
               seq_len: Tokens per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
-              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              window: Previous keys each query reaches, plus itself; negative is unbounded.
               dropout_p: Attention dropout rate.
+              rows: Query rows sharing K/V; negative uses the modeled key count.
               **kwargs: The rest of the owner's bus, unread.
 
             Returns:
-              cost: Per-query-row cost of the kernel.
+              cost: Whole-invocation cost of the kernel.
 
             """
             del kwargs
             return attention_kernel_cost(
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=window,
                 dropout_p=dropout_p,
+                rows=rows,
             )
 
     def __init__(self, config: Config) -> None:
@@ -536,7 +544,7 @@ class Flash3Attention:
         window: int = -1,
         **kwargs: object,
     ) -> Tensor:
-        """Attend over the last ``window`` positions, causally.
+        """Attend over ``window`` previous positions plus self, causally.
 
         ``window`` defaults to ``-1``: unbounded over the causal prefix.
         Remaining keyword arguments belong to the open model message bus; this
@@ -843,12 +851,14 @@ class Flash4Attention:
             cls,
             *,
             seq_len: int,
+            batch_size: int = 1,
             dtype: torch.dtype | None,
             num_heads: int,
             channels_head: int,
             channels_v_head: int = -1,
             window: int = -1,
             dropout_p: float = 0.0,
+            rows: int = -1,
             **kwargs: object,
         ) -> Cost:
             """Cost the kernel from the shapes its owner hands it.
@@ -857,27 +867,31 @@ class Flash4Attention:
 
             Args:
               seq_len: Tokens per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               num_heads: Query heads.
               channels_head: Width of each query/key head.
               channels_v_head: Value width; -1 uses the query/key width.
-              window: Keys each query reaches, or ``-1`` for the whole sequence.
+              window: Previous keys each query reaches, plus itself; negative is unbounded.
               dropout_p: Attention dropout rate.
+              rows: Query rows sharing K/V; negative uses the modeled key count.
               **kwargs: The rest of the owner's bus, unread.
 
             Returns:
-              cost: Per-query-row cost of the kernel.
+              cost: Whole-invocation cost of the kernel.
 
             """
             del kwargs
             return attention_kernel_cost(
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=num_heads,
                 channels_head=channels_head,
                 channels_v_head=channels_v_head,
                 window=window,
                 dropout_p=dropout_p,
+                rows=rows,
             )
 
     def __init__(self, config: Config) -> None:
@@ -1001,7 +1015,7 @@ def _flash4_backward_kernel(
     window: int,
 ) -> tuple[Tensor, Tensor, Tensor]:
     q, k, v, out, lse = saved
-    return module._flash_attn_bwd(  # noqa: SLF001 -- FA4 exposes backward only through this entry point.
+    dq, dk, dv = module._flash_attn_bwd(  # noqa: SLF001 -- FA4 exposes backward only through this entry point.
         q,
         k,
         v,
@@ -1012,6 +1026,8 @@ def _flash4_backward_kernel(
         window_size_left=None if window < 0 else window,
         window_size_right=0,
     )
+    # Backend normalization can change strides; own the layout declared to AOT.
+    return dq.contiguous(), dk.contiguous(), dv.contiguous()
 
 
 def _flash4_backward_fake(
@@ -1021,7 +1037,11 @@ def _flash4_backward_fake(
 ) -> tuple[Tensor, Tensor, Tensor]:
     del grad_out, window
     q, k, v, _, _ = saved
-    return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+    return (
+        torch.empty_like(q, memory_format=torch.contiguous_format),
+        torch.empty_like(k, memory_format=torch.contiguous_format),
+        torch.empty_like(v, memory_format=torch.contiguous_format),
+    )
 
 
 @fused_qk_norm_rope.register_fake
@@ -1359,6 +1379,7 @@ def _value_mix_cost(
     heads: int,
     channels_head: int,
     channels_in: int,
+    rows: int,
     dtype: torch.dtype | None,
     add: bool,
 ) -> Cost:
@@ -1369,20 +1390,20 @@ def _value_mix_cost(
         traffic(
             "primal",
             "elementwise",
-            elements=5 * heads + (5 if add else 3) * inner,
-            flops=5 * heads + (2 if add else 1) * inner,
+            elements=rows * (5 * heads + (5 if add else 3) * inner),
+            flops=rows * (5 * heads + (2 if add else 1) * inner),
             dtype=dt,
         )
         + traffic(
             "adjoint",
             "elementwise",
-            elements=6 * heads + 5 * inner + 3 * channels_in,
-            flops=5 * heads + 2 * inner + channels_in,
+            elements=rows * (6 * heads + 5 * inner + 3 * channels_in),
+            flops=rows * (5 * heads + 2 * inner + channels_in),
             dtype=dt,
         )
         + reduction_cost(
-            input_elements=inner,
-            output_groups=heads,
+            input_elements=rows * inner,
+            output_groups=rows * heads,
             dtype=dt,
             phase="adjoint",
         )

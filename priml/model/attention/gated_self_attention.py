@@ -109,7 +109,7 @@ class GatedSelfAttention(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -142,16 +142,16 @@ class GatedSelfAttention(nn.Module):
             for heads in (self.num_heads, self.num_heads_kv):
                 total += cost(
                     self.norm_qk,
-                    seq_len=seq_len * heads,
-                    batch_size=batch_size,
+                    seq_len=seq_len,
+                    batch_size=batch_size * heads,
                     dtype=dtype,
                     **kwargs,
-                ).tile(heads)
+                )
             if self.rope is not None:
                 total += cost(
                     self.rope,
                     seq_len=seq_len,
-                    batch_size=batch_size,
+                    batch_size=1,
                     dtype=dtype,
                     **kwargs,
                 )
@@ -165,14 +165,15 @@ class GatedSelfAttention(nn.Module):
             total += cost(
                 self.attn_kernel,
                 seq_len=seq_len,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
             )
             total += elementwise_cost(
-                primal=5 * inner,
-                adjoint=6 * inner,
+                primal=5 * inner * rows,
+                adjoint=6 * inner * rows,
                 channels=inner,
                 inputs=4,
                 outputs=1,
@@ -388,32 +389,8 @@ class GatedSelfAttention(nn.Module):
             if mask is None:
                 mask = causal_chunk_mask(q, k)
         else:
-            # A caller's mask (e.g. Qwen 3.5's padding mask) fills only WITHIN
-            # the causal cone and leaves the rest at 0, trusting causality to
-            # be enforced separately -- so it must still be combined with a
-            # full causal mask here, not just passed through. It cannot lean
-            # on `is_causal` for that: the kernels' fast path fills with a
-            # literal -inf (this module's own convention -- see window_mask,
-            # causal_chunk_mask, and SdpaNaive's own is_causal branch), but
-            # Qwen 3.5's caller-supplied mask is `finfo.min`-filled to match
-            # its HF reference bit-exactly. Mixing the two changes which value
-            # wins a fully-masked row's softmax -- measured against the Qwen
-            # 3.5 HF reference, a query whose only causally valid key is
-            # itself masked-out collapses to 100% weight on that (masked) key
-            # instead of HF's uniform fallback. That guarantee holds for a
-            # 2-D padding mask (`_full_attention_mask` fills only within the
-            # causal cone, so nothing double-fills); a caller-supplied 4-D
-            # prepared mask already carries its own causal fill, so this
-            # double-fills its non-causal cells -- confirmed confined to
-            # padding-query rows, with zero leakage into live-row logits, but
-            # the uniform-fallback guarantee above does not extend to it. So
-            # this branch deliberately diverges from the module's usual -inf
-            # and matches the caller's finfo.min instead.
-            #
-            # `window` must be read out of kwargs and applied here too: the
-            # kernels only ever build their own window_mask when attn_mask is
-            # None, so once a caller supplies one, window would otherwise be
-            # silently ignored a second way.
+            # Mixing -inf into Qwen's finite mask changes fully masked rows,
+            # breaking exact Hugging Face parity. Apply its finite causal bias here.
             is_causal = False
             window = kwargs.get("window", -1)
             assert isinstance(window, int)
@@ -485,11 +462,9 @@ def _rotate(x: Tensor, *, cos: Tensor, sin: Tensor) -> Tensor:
     return torch.cat((rotated, passthrough), dim=-1).movedim(-3, -2)
 
 
-# Unlike causal_chunk_mask/window_mask, this always materializes and never
-# uses a literal -inf: it exists only to add onto a caller-supplied mask,
-# and that mask is finite-filled (see the `forward` comment on why the two
-# fills cannot mix). Takes `window` too, since a caller-supplied mask stops
-# the kernel from ever reaching its own window_mask.
+# The finite twin of window._causal_bias: it exists only to add onto a
+# caller-supplied finite mask (see the `forward` comment on why the two fills
+# cannot mix).
 def _causal_bias(
     q: Tensor,
     k: Tensor,

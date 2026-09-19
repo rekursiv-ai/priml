@@ -112,12 +112,11 @@ def test_kimi_k2_bfb() -> None:
 
 
 @pytest.mark.parametrize("q_lora_rank", [None, 6])
-def test_kimi_k2_cost_matches_torch(q_lora_rank: int | None) -> None:
-    """The dense prefix, every MLA product, the routed experts, and the head.
+def test_kimi_k2_cost_requires_realized_routing(q_lora_rank: int | None) -> None:
+    """Exact MoE bytes require the realized per-layer routing occupancy.
 
-    MLA's kernel defaults to the naive latent kernel, whose bmms torch counts,
-    so no swap is needed. The routed count holds however the router assigns
-    tokens: each runs exactly ``top_k`` experts (``moe_test``).
+    The whole-invocation harness rejects this model without that geometry;
+    top-k alone does not identify which routed experts executed.
     """
     config = KimiK2.Config.from_hf(
         _hf_config(
@@ -136,15 +135,14 @@ def test_kimi_k2_cost_matches_torch(q_lora_rank: int | None) -> None:
             num_experts_per_tok=2,
         ),
     )
-    analytical = assert_cost_matches_torch(
-        config,
-        build_input=lambda: torch.randint(0, 32, (2, 5)),
-        seq_len=5,
-        batch_size=2,
-        num_tokens=5 * 2,
-        dtype=None,
-    )
-    assert analytical.params_active < analytical.params
+    with pytest.raises(ValueError, match="expert_rows"):
+        assert_cost_matches_torch(
+            config,
+            build_input=lambda: torch.randint(0, 32, (2, 5)),
+            seq_len=5,
+            batch_size=2,
+            dtype=None,
+        )
 
 
 def _router(cfg: KimiK2.Config, layer: int = -1) -> Router.Config:

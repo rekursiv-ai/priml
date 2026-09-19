@@ -91,18 +91,17 @@ class ActorCriticRNN(nn.Module):
             six projected-gate gradients and the state gradient.
             The episode reset is one select per state unit each way.
 
-            This is the model root: every parameter is shared by
-            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
-            replaced by the batch's tokens.
+            This is the model root: every parameter is shared by the concrete
+            ``batch_size * seq_len`` rows in this invocation.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             del kwargs
@@ -116,16 +115,18 @@ class ActorCriticRNN(nn.Module):
                 rows=rows,
                 dtype=dt,
             ) + elementwise_cost(
-                primal=width,
-                adjoint=width,
+                primal=rows * width,
+                adjoint=rows * width,
                 channels=width,
+                rows=rows,
                 dtype=dt,
             )
             reset = elementwise_cost(
-                primal=width,
-                adjoint=width,
+                primal=rows * width,
+                adjoint=rows * width,
                 channels=width,
                 inputs=2,
+                rows=rows,
                 dtype=dt,
             )
             gates = matmul_cost(
@@ -136,12 +137,13 @@ class ActorCriticRNN(nn.Module):
                 dtype=dt,
             ).tile(2, copies=2)
             cell = elementwise_cost(
-                primal=11 * width,
-                adjoint=17 * width,
+                primal=rows * 11 * width,
+                adjoint=rows * 17 * width,
                 channels=width,
                 inputs=7,
                 adjoint_inputs=6,
                 adjoint_outputs=7,
+                rows=rows,
                 dtype=dt,
             )
             heads = sum(
@@ -158,7 +160,7 @@ class ActorCriticRNN(nn.Module):
             )
             return replace(
                 embed + reset + gates + cell + heads,
-                bytes_state=resolve_dtype(dtype).itemsize * width,
+                bytes_state=resolve_dtype(dtype).itemsize * batch_size * width,
             )
 
     def __init__(self, config: Config) -> None:
@@ -325,9 +327,10 @@ def _head_cost(
         rows=rows,
         dtype=dt,
     ) + elementwise_cost(
-        primal=channels_in,
-        adjoint=channels_in,
+        primal=rows * channels_in,
+        adjoint=rows * channels_in,
         channels=channels_in,
+        rows=rows,
         dtype=dt,
     )
     return hidden.tile(2, copies=2) + matmul_cost(

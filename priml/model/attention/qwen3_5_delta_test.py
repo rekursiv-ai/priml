@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, TypeGuard, cast
 
+import inspect
+
 from torch import nn
 
 import pytest
@@ -277,6 +279,8 @@ def test_delta_norm_slot_defaults_to_gated_transform_and_accepts_ordinary_norm()
     gated_config = Qwen35RMSNormGated.Config()
     gated_config.channels_in = x.shape[-1]
     gated = gated_config.make()
+    with pytest.raises(TypeError, match="gate"):
+        inspect.signature(gated.forward).bind(x)
     assert not torch.equal(gated(x, gate=torch.zeros_like(gate)), gated(x, gate=gate))
 
     ordinary_config = Qwen35GatedDeltaNet.Config()
@@ -289,6 +293,61 @@ def test_delta_norm_slot_defaults_to_gated_transform_and_accepts_ordinary_norm()
     ordinary = ordinary_config.make()
     assert isinstance(ordinary.norm, CenteredRMSNorm)
     assert torch.equal(ordinary.norm(x), ordinary.norm(x, gate=gate))
+
+
+def test_delta_ordinary_norm_omits_gate_projection() -> None:
+    gated_config = Qwen35GatedDeltaNet.Config()
+    gated_config.channels_in = 8
+    gated_config.num_heads_k = 1
+    gated_config.num_heads_v = 2
+    gated_config.channels_k_head = 4
+    gated_config.channels_v_head = 3
+    ordinary_config = gated_config.copy_tree()
+    ordinary_config.norm = CenteredRMSNorm.Config()
+    gated = gated_config.make()
+    ordinary = ordinary_config.make()
+
+    assert gated.proj_z is not None
+    assert ordinary.proj_z is None
+    assert "proj_z.weight" in gated.state_dict()
+    assert "proj_z.weight" not in ordinary.state_dict()
+    projection_params = 8 * 2 * 3
+    assert (
+        sum(parameter.numel() for parameter in gated.parameters())
+        - sum(parameter.numel() for parameter in ordinary.parameters())
+        == projection_params
+    )
+    gated_cost = (
+        gated_config.copy_tree()
+        .finalize()
+        .cost(
+            seq_len=2,
+            batch_size=1,
+            dtype=None,
+        )
+    )
+    ordinary_cost = (
+        ordinary_config.copy_tree()
+        .finalize()
+        .cost(
+            seq_len=2,
+            batch_size=1,
+            dtype=None,
+        )
+    )
+    projection_products = 2 * projection_params
+    assert gated_cost.params - ordinary_cost.params == projection_params
+    assert (
+        gated_cost["flops", "primal", "matmul"].sum()
+        - ordinary_cost["flops", "primal", "matmul"].sum()
+        == 2 * projection_products
+    )
+    assert (
+        gated_cost["flops", "adjoint", "matmul"].sum()
+        - ordinary_cost["flops", "adjoint", "matmul"].sum()
+        == 4 * projection_products
+    )
+    assert ordinary(torch.randn(1, 2, 8)).shape == (1, 2, 8)
 
 
 def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
@@ -307,7 +366,6 @@ def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
         build_input=lambda: (torch.randn(3, 8, requires_grad=True), torch.randn(3, 8)),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
         dtype=None,
         run=lambda module, inputs: cast(Qwen35RMSNormGated, module)(
             inputs[0],
@@ -316,11 +374,11 @@ def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
     )
     assert model_cost.params == 8
     assert model_cost["flops", "matmul"].sum() == 0
-    assert model_cost["flops", "primal", "elementwise"].sum() == 9 * 8 + 3
-    assert model_cost["flops", "adjoint", "elementwise"].sum() == 13 * 8 + 4
-    assert model_cost["flops", "primal", "reduction"].sum() == 8 - 1
-    assert (
-        model_cost["flops", "adjoint", "reduction"].sum() == (8 - 1) + 8 * (3 - 1) / 3
+    assert model_cost["flops", "primal", "elementwise"].sum() == 3 * (9 * 8 + 3)
+    assert model_cost["flops", "adjoint", "elementwise"].sum() == 3 * (13 * 8 + 4)
+    assert model_cost["flops", "primal", "reduction"].sum() == 3 * (8 - 1)
+    assert model_cost["flops", "adjoint", "reduction"].sum() == (
+        3 * (8 - 1) + 8 * (3 - 1)
     )
 
 
@@ -329,8 +387,8 @@ def test_delta_norm_traffic_counts_row_reductions() -> None:
     config.channels_in = 8
     small = config.cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
     large = config.cost(seq_len=4, batch_size=1, dtype=None)
-    assert small["bytes", "primal", "reduction"].sum() == 2 * (8 + 1)
-    assert small["bytes", "adjoint", "reduction"].sum() == 2 * (8 + 1 + 8 + 8 / 4)
+    assert small["bytes", "primal", "reduction"].sum() == 2 * (4 * 8 + 4)
+    assert small["bytes", "adjoint", "reduction"].sum() == 2 * (4 * 8 + 4 + 4 * 8 + 8)
     assert (
         large["bytes", torch.float32].sum() == small["bytes", torch.bfloat16].sum() * 2
     )
@@ -340,12 +398,12 @@ def test_delta_norm_traffic_counts_row_reductions() -> None:
     assert (
         small["bytes", "primal", "elementwise"].sum()
         - base["bytes", "primal", "elementwise"].sum()
-        == 2 * 5 * 8
+        == 2 * 5 * 8 * 4
     )
     assert (
         small["bytes", "adjoint", "elementwise"].sum()
         - base["bytes", "adjoint", "elementwise"].sum()
-        == 2 * 9 * 8
+        == 2 * 9 * 8 * 4
     )
 
 
@@ -370,12 +428,12 @@ def test_qwen_delta_cost_does_not_repeat_the_norm_owned_output_gate() -> None:
     assert (
         reference["flops", "primal", "elementwise"].sum()
         - actual["flops", "primal", "elementwise"].sum()
-        == 6 * 6
+        == 6 * 6 * 4
     )
     assert (
         reference["flops", "adjoint", "elementwise"].sum()
         - actual["flops", "adjoint", "elementwise"].sum()
-        == 7 * 6
+        == 7 * 6 * 4
     )
     assert reference.params == actual.params
     assert reference["flops", "matmul"].sum() == actual["flops", "matmul"].sum()

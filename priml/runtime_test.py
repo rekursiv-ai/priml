@@ -221,9 +221,13 @@ def test_multiprocess_rejects_a_zero_or_doubly_automatic_mesh(
         MultiProcess.Config(device="cpu", mesh_topology=mesh_topology).make()
 
 
-def test_multiprocess_finalize_resolves_the_device() -> None:
-    config = MultiProcess.Config(device="cpu").finalize()
-    assert config.device == torch.device("cpu")
+def test_multiprocess_finalize_leaves_device_unresolved() -> None:
+    # Finalize stays hermetic: it must not probe hardware, so a pprint golden
+    # is identical on a CUDA box and a CPU CI runner. Resolution happens in
+    # ``__init__``.
+    config = MultiProcess.Config(device="auto").finalize()
+    assert config.device == "auto"
+    assert config.make().device == get_device("auto")
 
 
 def test_multiprocess_initialize_and_destroy_drive_the_global_mesh(

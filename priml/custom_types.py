@@ -43,14 +43,14 @@ class HasCost(Protocol):
     """
 
     def cost(self, **kwargs: object) -> Cost:
-        """Cost one token through the module ``self`` builds.
+        """Cost one complete invocation of the module ``self`` builds.
 
         Args:
           **kwargs: The open bus, named arguments only; each implementation
             declares what it reads.
 
         Returns:
-          cost: Per-token cost.
+          cost: Whole-invocation integer FLOP and byte counts.
 
         """
         ...

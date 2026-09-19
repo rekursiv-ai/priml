@@ -101,7 +101,6 @@ def test_narrow_embedding_cost_is_the_inner_gather() -> None:
         build_input=lambda: torch.randint(0, 8, (3,)),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
         dtype=None,
         run=_embed_float,
     )
@@ -114,11 +113,11 @@ def test_narrow_embedding_cost_is_the_inner_gather() -> None:
     bf16, i64 = torch.bfloat16, torch.int64
     assert model_cost == Cost(
         cells={
-            ("flops", "adjoint", "selection", bf16): 4,
-            ("bytes", "primal", "selection", i64): 8,
-            ("bytes", "primal", "selection", bf16): 2 * 2 * 4,
-            ("bytes", "adjoint", "selection", i64): 8,
-            ("bytes", "adjoint", "selection", bf16): 2 * (3 * 4 + 32 / 3),
+            ("flops", "adjoint", "selection", bf16): 3 * 4,
+            ("bytes", "primal", "selection", i64): 3 * 8,
+            ("bytes", "primal", "selection", bf16): 2 * 2 * 3 * 4,
+            ("bytes", "adjoint", "selection", i64): 3 * 8,
+            ("bytes", "adjoint", "selection", bf16): 2 * (3 * 3 * 4 + 32),
         },
         params=32,
         params_active=4,

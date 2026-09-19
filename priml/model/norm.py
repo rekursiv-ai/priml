@@ -7,9 +7,9 @@ from typing import Self, override
 
 from configgle import Fig
 from torch import Tensor, nn
-from torch.nn import functional as f
 
 import torch
+import torch.nn.functional
 
 from priml.cost import (
     Cost,
@@ -76,7 +76,7 @@ class RMSNorm(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -86,8 +86,8 @@ class RMSNorm(nn.Module):
             params = width if self.elementwise_affine else 0
             return (
                 elementwise_cost(
-                    primal=2 * width + 3 + params,
-                    adjoint=4 * width + 4 + 2 * params,
+                    primal=rows * (2 * width + 3 + params),
+                    adjoint=rows * (4 * width + 4 + 2 * params),
                     channels=width,
                     inputs=2,
                     outputs=2,
@@ -97,10 +97,29 @@ class RMSNorm(nn.Module):
                     rows=rows,
                     dtype=dt,
                 )
-                + traffic("primal", "elementwise", elements=7 + 2 * params, dtype=dt)
-                + traffic("adjoint", "elementwise", elements=12 + 4 * params, dtype=dt)
-                + reduction_cost(input_elements=width, dtype=dt)
-                + reduction_cost(input_elements=width, dtype=dt, phase="adjoint")
+                + traffic(
+                    "primal",
+                    "elementwise",
+                    elements=rows * (7 + 2 * params),
+                    dtype=dt,
+                )
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=rows * (12 + 4 * params),
+                    dtype=dt,
+                )
+                + reduction_cost(
+                    input_elements=rows * width,
+                    output_groups=rows,
+                    dtype=dt,
+                )
+                + reduction_cost(
+                    input_elements=rows * width,
+                    output_groups=rows,
+                    dtype=dt,
+                    phase="adjoint",
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -129,7 +148,12 @@ class RMSNorm(nn.Module):
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
-        return f.rms_norm(input, self.normalized_shape, self.weight, self.eps)
+        return torch.nn.functional.rms_norm(
+            input,
+            self.normalized_shape,
+            self.weight,
+            self.eps,
+        )
 
 
 class CenteredRMSNorm(nn.Module):
@@ -176,7 +200,7 @@ class CenteredRMSNorm(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -185,8 +209,8 @@ class CenteredRMSNorm(nn.Module):
             width = self.channels_in
             return (
                 elementwise_cost(
-                    primal=3 * width + 3 + width / rows,
-                    adjoint=6 * width + 4,
+                    primal=rows * (3 * width + 3) + width,
+                    adjoint=rows * (6 * width + 4),
                     channels=width,
                     inputs=3,
                     outputs=3,
@@ -199,12 +223,26 @@ class CenteredRMSNorm(nn.Module):
                 + traffic(
                     "primal",
                     "elementwise",
-                    elements=7 + 2 * width / rows,
+                    elements=7 * rows + 2 * width,
                     dtype=dt,
                 )
-                + traffic("adjoint", "elementwise", elements=12, dtype=dt)
-                + reduction_cost(input_elements=width, dtype=dt)
-                + reduction_cost(input_elements=width, dtype=dt, phase="adjoint")
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=12 * rows,
+                    dtype=dt,
+                )
+                + reduction_cost(
+                    input_elements=rows * width,
+                    output_groups=rows,
+                    dtype=dt,
+                )
+                + reduction_cost(
+                    input_elements=rows * width,
+                    output_groups=rows,
+                    dtype=dt,
+                    phase="adjoint",
+                )
             )
 
     def __init__(self, config: Config) -> None:
@@ -220,8 +258,11 @@ class CenteredRMSNorm(nn.Module):
     @override
     def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
-        x_f32 = input.float()
-        normed = x_f32 * torch.rsqrt(x_f32.pow(2).mean(-1, keepdim=True) + self.eps)
+        normed = torch.nn.functional.rms_norm(
+            input.float(),
+            self.weight.shape,
+            eps=self.eps,
+        )
         return ((1.0 + self.weight.float()) * normed).type_as(input)
 
 
@@ -271,13 +312,13 @@ class LayerNorm(nn.LayerNorm):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=1,
+                groups=seq_len * batch_size,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=seq_len * batch_size,
                 dtype=_dtype(self.dtype, dtype),
@@ -353,7 +394,7 @@ class BatchNorm(nn.BatchNorm1d):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -361,14 +402,15 @@ class BatchNorm(nn.BatchNorm1d):
             dt = _dtype(self.dtype, dtype)
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=self.channels_in / rows,
+                groups=self.channels_in,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=rows,
                 dtype=dt,
             ) + elementwise_cost(
-                primal=8 * self.channels_in / rows,
+                primal=8 * self.channels_in,
                 adjoint=0,
-                channels=self.channels_in / rows,
+                channels=self.channels_in,
+                rows=1,
                 inputs=10,
                 outputs=8,
                 adjoint_inputs=0,
@@ -480,7 +522,7 @@ class BatchRenorm(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -489,14 +531,15 @@ class BatchRenorm(nn.Module):
             width = self.channels_in
             return _normalization_cost(
                 channels=width,
-                groups_per_token=width / rows,
+                groups=width,
                 params=2 * width,
                 rows=rows,
                 dtype=dt,
             ) + elementwise_cost(
-                primal=18 * width / rows,
-                adjoint=5 * width / rows,
-                channels=width / rows,
+                primal=18 * width,
+                adjoint=5 * width,
+                channels=width,
+                rows=1,
                 inputs=26,
                 outputs=20,
                 adjoint_inputs=8,
@@ -677,7 +720,7 @@ class BatchNorm2d(nn.BatchNorm2d):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
@@ -685,14 +728,15 @@ class BatchNorm2d(nn.BatchNorm2d):
             dt = _dtype(self.dtype, dtype)
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=self.channels_in / rows,
+                groups=self.channels_in,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=rows,
                 dtype=dt,
             ) + elementwise_cost(
-                primal=8 * self.channels_in / rows,
+                primal=8 * self.channels_in,
                 adjoint=0,
-                channels=self.channels_in / rows,
+                channels=self.channels_in,
+                rows=1,
                 inputs=10,
                 outputs=8,
                 adjoint_inputs=0,
@@ -775,13 +819,13 @@ class GroupNorm2d(nn.GroupNorm):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=self.num_groups / seq_len,
+                groups=self.num_groups * batch_size,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=seq_len * batch_size,
                 dtype=_dtype(self.dtype, dtype),
@@ -856,13 +900,13 @@ class GroupNorm(nn.GroupNorm):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
             return _normalization_cost(
                 channels=self.channels_in,
-                groups_per_token=self.num_groups / seq_len,
+                groups=self.num_groups * batch_size,
                 params=2 * self.channels_in if self.elementwise_affine else 0,
                 rows=seq_len * batch_size,
                 dtype=_dtype(self.dtype, dtype),
@@ -894,17 +938,20 @@ class GroupNorm(nn.GroupNorm):
 def _normalization_cost(
     *,
     channels: int,
-    groups_per_token: float,
+    groups: int,
     params: int,
-    rows: float,
+    rows: int,
     dtype: torch.dtype,
 ) -> Cost:
-    """Count unfused centered statistics, scalar broadcasts, and affine maps."""
-    sums = 2 * (channels - groups_per_token)
+    """Count centered statistics, scalar broadcasts, and affine maps."""
+    elements = channels * rows
+    sums = 2 * (elements - groups)
+    if params % 2:
+        raise ValueError("Normalization parameter count must be even.")
     return (
         elementwise_cost(
-            primal=5 * channels + 2 * groups_per_token + params - sums,
-            adjoint=7 * channels + params - sums,
+            primal=5 * elements + 2 * groups + params * rows - sums,
+            adjoint=7 * elements + params * rows - sums,
             channels=channels,
             inputs=3,
             outputs=3,
@@ -917,26 +964,26 @@ def _normalization_cost(
         + traffic(
             "primal",
             "elementwise",
-            elements=10 * groups_per_token + 2 * params,
+            elements=10 * groups + 2 * params * rows,
             dtype=dtype,
         )
         + traffic(
             "adjoint",
             "elementwise",
-            elements=7 * groups_per_token + 1.5 * params - params / (2 * rows),
+            elements=7 * groups + (3 * params * rows - params) // 2,
             dtype=dtype,
         )
         + reduction_cost(
-            input_elements=channels,
-            output_groups=groups_per_token,
+            input_elements=elements,
+            output_groups=groups,
             dtype=dtype,
-        ).tile(2, copies=2)
+        )
         + reduction_cost(
-            input_elements=channels,
-            output_groups=groups_per_token,
+            input_elements=elements,
+            output_groups=groups,
             dtype=dtype,
             phase="adjoint",
-        ).tile(2, copies=2)
+        )
     )
 
 

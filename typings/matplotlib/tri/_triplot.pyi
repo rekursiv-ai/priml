@@ -1,0 +1,23 @@
+from typing import Any, overload
+
+from matplotlib.axes import Axes
+from matplotlib.lines import Line2D
+from matplotlib.tri._triangulation import Triangulation
+from numpy.typing import ArrayLike
+
+@overload
+def triplot(
+    ax: Axes,
+    triangulation: Triangulation,
+    *args,
+    **kwargs: Any,
+) -> tuple[Line2D, Line2D]: ...
+@overload
+def triplot(
+    ax: Axes,
+    x: ArrayLike,
+    y: ArrayLike,
+    triangles: ArrayLike = ...,
+    *args,
+    **kwargs: Any,
+) -> tuple[Line2D, Line2D]: ...

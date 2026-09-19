@@ -174,7 +174,8 @@ SudokuTrainLoop(
                         torch_profile=False,
                         base_dir=PosixPath('/opt/scratch/runs/sudoku/exp000'),
                         working_dir=PosixPath('/opt/scratch/runs/sudoku/exp000/profiling'),
-                        heartbeat_interval_sec=30.0,
+                        heartbeat_interval_sec=20.0,
+                        fault_dump_interval_sec=40.0,
                         cuda_events=False
                 ),
                 tracker=None,
@@ -187,7 +188,6 @@ SudokuTrainLoop(
                 num_steps_eval=1_000,
                 num_steps_log=10,
                 early_train_log_steps=100,
-                phase_heartbeat_sec=20.0,
                 eval_every_epoch=True,
                 eval_extras_every_eval=False,
                 eval_warmup_batches=0,

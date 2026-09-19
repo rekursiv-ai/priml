@@ -125,13 +125,15 @@ class TransformerBlock(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
+            rows = seq_len * batch_size
             residual_adds = elementwise_cost(
-                primal=2 * self.channels_in,
-                adjoint=2 * self.channels_in,
+                primal=rows * 2 * self.channels_in,
+                adjoint=rows * 2 * self.channels_in,
                 channels=2 * self.channels_in,
+                rows=rows,
                 inputs=2,
                 dtype=dtype,
             )

@@ -94,7 +94,7 @@ class NgramEmbedding(NarrowEmbedding):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             total = super().cost(
@@ -106,11 +106,13 @@ class NgramEmbedding(NarrowEmbedding):
             width = self.channels_out
             dt = dtype
             if self.scale != 1.0:
+                rows = seq_len * batch_size
                 total += elementwise_cost(
-                    primal=width,
-                    adjoint=width,
+                    primal=width * rows,
+                    adjoint=width * rows,
                     channels=width,
                     adjoint_inputs=1,
+                    rows=rows,
                     dtype=dt,
                 )
             for context in self.contexts.values():
@@ -121,39 +123,43 @@ class NgramEmbedding(NarrowEmbedding):
                     dtype=dtype,
                     **kwargs,
                 )
+                rows = seq_len * batch_size
                 total += elementwise_cost(
-                    primal=width,
+                    primal=width * rows,
                     adjoint=0,
                     channels=width,
                     inputs=2,
                     adjoint_inputs=0,
                     adjoint_outputs=0,
+                    rows=rows,
                     dtype=dt,
                 )
             if self.multipliers:
                 order = len(self.multipliers)
-                shifted = sum(2 + lag / seq_len for lag in range(1, order))
+                shifted = sum(2 * seq_len + lag for lag in range(1, order))
                 prefix = min(order - 1, seq_len)
                 total += traffic(
                     "primal",
                     "selection",
-                    elements=shifted,
+                    elements=batch_size * shifted,
                     dtype=torch.int64,
                 )
                 total += traffic(
                     "primal",
                     "selection",
-                    elements=2 * width + prefix * width / seq_len,
+                    elements=batch_size * (2 * width * seq_len + prefix * width),
                     dtype=dt,
                 )
+                rows = seq_len * batch_size
                 total += elementwise_cost(
-                    primal=2 * order,
+                    primal=2 * order * rows,
                     adjoint=0,
                     channels=1,
                     inputs=order + 2 * (order - 1) + 1,
                     outputs=2 * order,
                     adjoint_inputs=0,
                     adjoint_outputs=0,
+                    rows=rows,
                     dtype=torch.int64,
                 )
             return total
@@ -253,32 +259,33 @@ class HashedNgramTables(nn.Module):
             """Cost one gather per table plus the integer hash that indexes it.
 
             Each hash is ``order - 1`` multiply-XOR pairs and one multiply, then
-            a modulo: ``2 * order`` integer ops per token per table, in the
+            a modulo: ``2 * order`` integer ops per input row per table, in the
             elementwise silo since they are one output per input, at
             ``int64``. The tables themselves are the template's gather, once
             per hash.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             order = len(self.hash_multipliers[0])
             hashes = len(self.hash_multipliers)
+            rows = seq_len * batch_size
             copies = traffic(
                 "primal",
                 "selection",
-                elements=2 * self.channels_out,
+                elements=2 * rows * self.channels_out,
                 dtype=dtype,
             ) + traffic(
                 "primal",
                 "selection",
-                elements=2 * (order - 1),
+                elements=2 * rows * (order - 1),
                 dtype=torch.int64,
             )
             return (
@@ -291,13 +298,14 @@ class HashedNgramTables(nn.Module):
                     **kwargs,
                 ).tile(hashes, copies=hashes)
                 + elementwise_cost(
-                    primal=2 * order * hashes,
+                    primal=2 * order * hashes * rows,
                     adjoint=0,
                     channels=hashes,
                     inputs=order + 2 * (order - 1) + 1,
                     outputs=order + (order - 1) + 1,
                     adjoint_inputs=0,
                     adjoint_outputs=0,
+                    rows=rows,
                     dtype=torch.int64,
                 )
             )

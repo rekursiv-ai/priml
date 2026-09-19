@@ -46,58 +46,52 @@ class AdversarialLoss:
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost one media element; per-sample scalar work is spread ``1 / n``.
+            """Cost the complete adversarial and content loss invocation.
 
-            A token is one element of ``fake_media``; the geometry's rows are
-            the elements one sample holds. Per element, the L1 term is a subtract
-            and a magnitude, then the mean over the sample is one reduction of
-            ``(n - 1) / n``; its adjoint scales the saved sign by the upstream
-            gradient and by ``1 / n``, three ops. Per SAMPLE, and so divided by
-            ``rows``: BCE with logits on the single ``[B, 1]`` logit
-            (eight forward, five back, as :class:`SimpleLoss` costs it; the
-            mean over a width of one reduces nothing) and the two weights
-            (two multiplies and an add forward, two multiplies back).
-            ``model_output`` is unread, and the discriminator that produced
-            ``fake_logits`` is costed by its own config, not here.
-
-            Traffic includes the generated label, both mean scales, and all
-            logical intermediate reads/writes, even for the width-one mean.
+            The L1 content path runs per media element. BCE and the weighting
+            operations run once per sample; each sample's mean is one reduction.
+            The discriminator and ``model_output`` are costed elsewhere.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Media elements per sample.
+              batch_size: Samples per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-element cost of this loss.
+              cost: Integer FLOPs and logical bytes for the complete batch.
 
             """
             del kwargs
-            rows = seq_len * batch_size
+            elements = seq_len * batch_size
+            samples = batch_size
             dt = dtype
             return (
                 traffic(
                     "primal",
                     "elementwise",
-                    elements=5 + 33 / rows,
-                    flops=2 + (8 + 3) / rows,
+                    elements=5 * elements + 33 * samples,
+                    flops=2 * elements + 11 * samples,
                     dtype=dt,
                 )
                 + reduction_cost(
-                    input_elements=rows + 1,
-                    output_groups=2,
-                    rows=rows,
+                    input_elements=elements + samples,
+                    output_groups=2 * samples,
                     dtype=dt,
                 )
                 + traffic(
                     "adjoint",
                     "elementwise",
-                    elements=7 + 16 / rows,
-                    flops=3 + (5 + 2) / rows,
+                    elements=7 * elements + 16 * samples,
+                    flops=3 * elements + 7 * samples,
                     dtype=dt,
                 )
-                + traffic("adjoint", "reduction", elements=(rows + 3) / rows, dtype=dt)
+                + traffic(
+                    "adjoint",
+                    "reduction",
+                    elements=elements + 3 * samples,
+                    dtype=dt,
+                )
             )
 
     def __init__(self, config: Config) -> None:

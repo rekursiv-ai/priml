@@ -194,8 +194,6 @@ def test_speednet_bfb() -> None:
 # Cost tests feed an input that REQUIRES grad, as ``conv_test.py`` does: priml
 # costs every layer's full adjoint, whereas a real image carries no gradient
 # and torch then skips the gradient into the first trainable layer's input.
-# Grids are powers of two so every ``channels / rows`` term inside a
-# BatchNorm estimate is dyadic and the equalities below stay exact.
 
 
 def test_scaled_linear_cost_is_a_matmul_plus_one_scale_per_logit() -> None:
@@ -204,14 +202,13 @@ def test_scaled_linear_cost_is_a_matmul_plus_one_scale_per_logit() -> None:
         build_input=lambda: torch.randn(3, 6, requires_grad=True),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
         dtype=None,
     )
     assert analytical.params == 6 * 4
     # ``1 / fan_in`` is a Python float, so the scale is one multiply per logit
     # each way and no parameter.
-    assert analytical["flops", "primal", "elementwise"].sum() == 4
-    assert analytical["flops", "adjoint", "elementwise"].sum() == 4
+    assert analytical["flops", "primal", "elementwise"].sum() == 3 * 4
+    assert analytical["flops", "adjoint", "elementwise"].sum() == 3 * 4
 
 
 def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> None:
@@ -226,14 +223,11 @@ def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> No
         build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
         seq_len=8 * 8,
         batch_size=2,
-        num_tokens=8 * 8 * 2,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
     conv1, conv2, shortcut = 6 * 4 * 9, 6 * 6 * 9, 6 * 4
-    assert (
-        analytical["flops", "primal", "matmul"].sum()
-        == 2 * (conv1 + conv2 + shortcut) / 4
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * 4 * 4 * (
+        conv1 + conv2 + shortcut
     )
     assert analytical.params == conv1 + conv2 + shortcut + 2 * 4 + 2 * 6
     # Elementwise: norm1 and one ReLU compare per input channel at the input
@@ -252,14 +246,17 @@ def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> No
     )
     assert analytical["flops", "primal", "elementwise"].sum() == (
         norm1["flops", "primal", "elementwise"].sum()
-        + 4
-        + (norm2["flops", "primal", "elementwise"].sum() + 6 + 6) / 4
+        + 4 * 128
+        + norm2["flops", "primal", "elementwise"].sum()
+        + 6 * 32
+        + 6 * 32
     )
     assert analytical["flops", "adjoint", "elementwise"].sum() == (
         norm1["flops", "adjoint", "elementwise"].sum()
-        + 4
-        + 4
-        + (norm2["flops", "adjoint", "elementwise"].sum() + 6) / 4
+        + 4 * 128
+        + 4 * 128
+        + norm2["flops", "adjoint", "elementwise"].sum()
+        + 6 * 32
     )
 
 
@@ -269,8 +266,6 @@ def test_residual_block_cost_omits_the_shortcut_when_shape_is_preserved() -> Non
         build_input=lambda: torch.randn(2, 4, 4, 4, requires_grad=True),
         seq_len=4 * 4,
         batch_size=2,
-        num_tokens=4 * 4 * 2,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
     assert analytical.params == 2 * (4 * 4 * 9) + 2 * (2 * 4)
@@ -285,26 +280,25 @@ def test_conv_block_cost_pools_after_the_first_convolution() -> None:
         build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
         seq_len=8 * 8,
         batch_size=2,
-        num_tokens=8 * 8 * 2,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
     first, later = 6 * 4 * 9, 6 * 6 * 9
     assert (
-        analytical["flops", "primal", "matmul"].sum() == 2 * first + 2 * 2 * later / 4
+        analytical["flops", "primal", "matmul"].sum()
+        == 2 * first * 128 + 2 * 2 * later * 32
     )
     # ``affine=False`` norms own nothing.
     assert analytical.params == first + 2 * later
     # The 2x2 max pool is three compares per pooled channel forward and one
     # gradient element routed back to the argmax; the norms add their own sums.
-    norm = BatchNorm2d.Config(6).cost(seq_len=32, batch_size=1, dtype=None)
+    norm = BatchNorm2d.Config(6).cost(seq_len=16, batch_size=2, dtype=None)
     assert analytical["flops", "primal", "reduction"].sum() == (
-        (6 * 3 + 3 * norm["flops", "primal", "reduction"].sum()) / 4
+        6 * 3 * 32 + 3 * norm["flops", "primal", "reduction"].sum()
     )
-    assert analytical["flops", "adjoint", "selection"].sum() == 6 / 4
+    assert analytical["flops", "adjoint", "selection"].sum() == 6 * 32
 
 
-def test_resnet_cost_amortizes_each_stage_over_the_input_positions() -> None:
+def test_resnet_cost_counts_each_stage_for_the_complete_batch() -> None:
     """Every matmul the forward issues is in the cost, and every parameter."""
     config = tiny_resnet()
     config.image_size = (8, 8)
@@ -312,15 +306,13 @@ def test_resnet_cost_amortizes_each_stage_over_the_input_positions() -> None:
         config,
         build_input=lambda: torch.randn(2, 3, 8, 8, requires_grad=True),
         batch_size=2,
-        num_tokens=8 * 8 * 2,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
     stem, stage0 = 8 * 3 * 9, 2 * (8 * 8 * 9)
     stage1 = 16 * 8 * 9 + 16 * 16 * 9 + 16 * 8
     head = 16 * 10
     assert analytical["flops", "primal", "matmul"].sum() == 2 * (
-        stem + stage0 + stage1 / 4 + head / 64
+        stem * 128 + stage0 * 128 + stage1 * 32 + head * 2
     )
     # Five affine norms: three of width 8, two of width 16; the head owns a bias.
     assert analytical.params == (
@@ -329,19 +321,19 @@ def test_resnet_cost_amortizes_each_stage_over_the_input_positions() -> None:
     # Global average pooling sums 4x4 positions per channel once per image; the
     # four norms sum at their own grids.
     norm8 = BatchNorm2d.Config(8, elementwise_affine=True).cost(
-        seq_len=128,
-        batch_size=1,
+        seq_len=64,
+        batch_size=2,
         dtype=None,
     )
     norm16 = BatchNorm2d.Config(16, elementwise_affine=True).cost(
-        seq_len=32,
-        batch_size=1,
+        seq_len=16,
+        batch_size=2,
         dtype=None,
     )
     assert analytical["flops", "primal", "reduction"].sum() == (
         3 * norm8["flops", "primal", "reduction"].sum()
-        + 2 * norm16["flops", "primal", "reduction"].sum() / 4
-        + 16 * (16 - 1) / 64
+        + 2 * norm16["flops", "primal", "reduction"].sum()
+        + 16 * 2 * (16 - 1)
     )
 
 
@@ -355,8 +347,6 @@ def test_speednet_cost_prices_the_frozen_whitening_and_every_pool() -> None:
         tiny_speednet(),
         build_input=lambda: torch.randn(1, 3, 32, 32, requires_grad=True),
         batch_size=1,
-        num_tokens=32 * 32,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
     )
     whiten = 24 * 3 * 4
@@ -364,26 +354,17 @@ def test_speednet_cost_prices_the_frozen_whitening_and_every_pool() -> None:
     head = 10 * 24
     assert analytical.params == whiten + sum(blocks) + head
     # 32 -> 31 (whiten) -> 15 -> 7 -> 3 (block pools) -> 1 (final pool).
-    assert (
-        analytical["flops", "primal", "matmul"].sum()
-        == 2
-        * (whiten * 961 + blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head)
-        / 1024
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * (
+        whiten * 961 + blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head
     )
-    assert (
-        analytical["flops", "adjoint", "matmul"].sum()
-        == 2
-        * (
-            whiten * 961
-            + 2 * (blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head)
-        )
-        / 1024
+    assert analytical["flops", "adjoint", "matmul"].sum() == 2 * (
+        whiten * 961 + 2 * (blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head)
     )
     # One gradient element routed back per pooled channel: three block pools
     # and the final 3x3 pool.
     assert (
         analytical["flops", "adjoint", "selection"].sum()
-        == (8 * 225 + 16 * 49 + 24 * 9 + 24 * 1) / 1024
+        == 8 * 225 + 16 * 49 + 24 * 9 + 24 * 1
     )
 
 
@@ -410,6 +391,8 @@ def test_max_pool_traffic_includes_argmax_and_dense_gradient(
     costed = _max_pool_cost(
         3,
         kernel_size=kernel_size,
+        positions=1,
+        batch_size=1,
         dtype=dtype,
     )
     elements = kernel_size**2
@@ -432,8 +415,8 @@ def test_scaled_linear_traffic_counts_scale_input_and_output() -> None:
     config.channels_in = 6
     config.channels_out = 4
     costed = config.cost(seq_len=3, batch_size=1, dtype=torch.bfloat16)
-    assert costed["bytes", "primal", "elementwise"].sum() == 2 * (4 + 4)
-    assert costed["bytes", "adjoint", "elementwise"].sum() == 2 * (4 + 4)
+    assert costed["bytes", "primal", "elementwise"].sum() == 3 * 2 * (4 + 4)
+    assert costed["bytes", "adjoint", "elementwise"].sum() == 3 * 2 * (4 + 4)
 
 
 if __name__ == "__main__":

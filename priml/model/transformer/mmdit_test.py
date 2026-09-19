@@ -499,7 +499,6 @@ def test_adaln_zero_cost_matches_torch() -> None:
         run=_run_adaln,
         seq_len=4,
         batch_size=2,
-        num_tokens=8,
         dtype=None,
     )
 
@@ -512,10 +511,10 @@ def test_adaln_zero_cost_is_one_biased_matmul() -> None:
     f32 = torch.float32
     assert finalized.cost(seq_len=8, batch_size=1, dtype=None) == proj + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 5 * 4,
-            ("flops", "adjoint", "elementwise", f32): 5 * 4,
-            ("bytes", "primal", "elementwise", f32): 4 * 2 * 4,
-            ("bytes", "adjoint", "elementwise", f32): 4 * 3 * 4,
+            ("flops", "primal", "elementwise", f32): 8 * 5 * 4,
+            ("flops", "adjoint", "elementwise", f32): 8 * 5 * 4,
+            ("bytes", "primal", "elementwise", f32): 4 * 8 * 2 * 4,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 8 * 3 * 4,
         },
     )
     assert proj.params == sum(p.numel() for p in config.make().parameters())
@@ -535,10 +534,10 @@ def test_stream_cost_sums_its_branches_and_leaves_attention_to_the_joint() -> No
         Cost(),
     ) + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 10 * 8,
-            ("flops", "adjoint", "elementwise", f32): 10 * 8,
-            ("bytes", "primal", "elementwise", f32): 4 * 28 * 8,
-            ("bytes", "adjoint", "elementwise", f32): 4 * 40 * 8,
+            ("flops", "primal", "elementwise", f32): 8 * 10 * 8,
+            ("flops", "adjoint", "elementwise", f32): 8 * 10 * 8,
+            ("bytes", "primal", "elementwise", f32): 4 * 8 * 28 * 8,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 8 * 40 * 8,
         },
     )
     assert finalized.cost(seq_len=8, batch_size=1, dtype=None) == expected
@@ -664,13 +663,7 @@ def test_block_cost_with_explicit_streams_prices_each_once() -> None:
 
 
 def test_block_cost_matches_torch_without_conditioning() -> None:
-    """Two streams of four tokens: joint attention plus each stream's FFN.
-
-    Unconditioned, because adaLN's projection runs once per SEQUENCE while
-    ``cost`` costs it per token (its documented upper bound); measured, the
-    per-token figure overstates a four-token sequence by exactly ``3/4`` of
-    the projection.
-    """
+    """Two streams of four tokens: joint attention plus each stream's FFN."""
     config = _cfg(channels_in=8, num_streams=2, num_heads=2)
     config.attn = MultiStreamAttention.Config(
         num_heads=2,
@@ -684,8 +677,6 @@ def test_block_cost_matches_torch_without_conditioning() -> None:
         ),
         seq_len=4,
         batch_size=1,
-        num_tokens=4,
-        check_bytes=False,  # TODO(Issue#20739): conv/attention traffic convention.
         dtype=None,
         run=lambda module, xs: _run_mmdit(module, list(xs)).sum(),
     )

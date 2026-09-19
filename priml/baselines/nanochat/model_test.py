@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Final, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 import pytest
 import torch
@@ -37,6 +38,7 @@ from priml.model.norm import RMSNorm
 from priml.model.residual_mix import ResidualMix
 from priml.model.softcap import SoftCap
 from priml.model.special import Identity
+from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
 from priml.testing.cost import assert_cost_matches_torch
@@ -324,27 +326,19 @@ def test_flops_read_the_blocks_real_head_count() -> None:
     estimate most.
     """
 
-    # Widening the num_heads moves BOTH terms -- bigger projections and a bigger
-    # attention span. They are separated by changing ONLY the span: halving
-    # every window leaves every parameter untouched, so the drop is purely
-    # attention, and its ABSOLUTE size is pinned against the closed form
-    # ``12 * inner * span`` rather than against a mirror of the source.
-    def span_drop(*, num_heads: int) -> int:
-        """FLOPs lost when layer 0's window halves; layer 1 is always full."""
-        built: list[int] = []
-        for pattern in ("L", "SL"):
+    def context_growth(*, num_heads: int) -> float:
+        built: list[float] = []
+        for length in (SEQ, 2 * SEQ):
             variant = _config()
+            variant.max_seq_len = length
             variant_attention = variant.template.attn
             assert isinstance(variant_attention, ValueGatedAttention.Config)
-            variant_attention.window_pattern = pattern
             variant_attention.num_heads = num_heads
-            torch.manual_seed(0)
             built.append(variant.make().flops_per_token())
-        return built[0] - built[1]
+        return built[1] - built[0]
 
-    # One layer drops from SEQ to SEQ // 2 positions, at 12 * inner each.
-    assert span_drop(num_heads=2) == 12 * (2 * 8) * (SEQ - SEQ // 2)
-    assert span_drop(num_heads=4) == 12 * (4 * 8) * (SEQ - SEQ // 2)
+    assert context_growth(num_heads=2) == 2 * 12 * (2 * 8) * SEQ
+    assert context_growth(num_heads=4) == 2 * 12 * (4 * 8) * SEQ
 
 
 def test_flops_exclude_lookup_tables() -> None:
@@ -376,17 +370,21 @@ def test_cost_matches_torch_through_a_naive_kernel() -> None:
         build_input=lambda: torch.randint(0, VOCAB, (2, SEQ)),
         seq_len=SEQ,
         batch_size=2,
-        num_tokens=SEQ * 2,
         dtype=None,
     )
 
 
-def test_cost_matmul_flops_agree_with_the_palm_estimate() -> None:
-    """Both count six FLOPs per matrix parameter plus the attention products."""
-    finalized = _config(value_embedding_stride=1).copy_tree().finalize()
+@pytest.mark.parametrize("pattern", ["L", "SL"])
+def test_cost_matmul_flops_agree_with_runtime_reporting(pattern: str) -> None:
+    """Runtime reporting uses the injected kernel's cost, including dense masks."""
+    config = _config(value_embedding_stride=1)
+    attention = config.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.window_pattern = pattern
+    finalized = config.copy_tree().finalize()
     costed = cost(finalized, seq_len=SEQ, batch_size=1, dtype=None)
     torch.manual_seed(0)
-    assert costed["flops", "matmul"].sum() == finalized.make().flops_per_token()
+    assert costed["flops", "matmul"].sum() == finalized.make().flops_per_token() * SEQ
 
 
 def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
@@ -415,24 +413,25 @@ def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
     assert (
         gated["bytes", "primal", "selection", torch.int64]
         - plain["bytes", "primal", "selection", torch.int64]
-        == 8 * 2
+        == 8 * 2 * SEQ
     )
     assert (
         gated["bytes", "primal", "selection", torch.float32]
         - plain["bytes", "primal", "selection", torch.float32]
-        == 4 * 2 * 2 * 16
+        == 4 * 2 * 2 * SEQ * 16
     )
 
 
 def test_cost_distinguishes_batch_reuse_from_attention_window() -> None:
     config = _config().finalize()
+    assert isinstance(config.block, list)
     small = config.cost(seq_len=SEQ, batch_size=1, dtype=None)
     large = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
     narrow = config.cost(seq_len=SEQ, batch_size=4, dtype=torch.bfloat16)
-    assert large["flops", "primal"] == small["flops", "primal"]
+    assert large["flops", "primal"] == small["flops", "primal"].tile(4)
     assert (
         large["bytes", "primal", "matmul"].sum()
-        < small["bytes", "primal", "matmul"].sum()
+        > small["bytes", "primal", "matmul"].sum()
     )
     assert large["flops", "matmul"].sum() / large["bytes", "matmul"].sum() > (
         small["flops", "matmul"].sum() / small["bytes", "matmul"].sum()
@@ -445,21 +444,45 @@ def test_cost_distinguishes_batch_reuse_from_attention_window() -> None:
             == large["bytes", kernel, torch.float32].sum() / 2
         )
     assert narrow["bytes", "selection"] == large["bytes", "selection"]
-    # The method and the dispatcher agree: seq_len alone means seq_len rows.
+    # Both calls describe complete invocations at their concrete batch sizes.
     assert small == cost(config, seq_len=SEQ, batch_size=1, dtype=None)
     assert large == cost(config, seq_len=SEQ, batch_size=4, dtype=None)
-    # Past the window a longer sequence changes only weight amortization:
-    # attention work is identical and matmul traffic only shrinks.
     long = config.cost(seq_len=8192, batch_size=1, dtype=None)
     longer = config.cost(seq_len=32_768, batch_size=1, dtype=None)
-    assert longer["flops", "primal"] == long["flops", "primal"]
+
+    def matmul_delta(child: object) -> int:
+        return (
+            cost(child, seq_len=32_768, batch_size=1, dtype=None)[
+                "flops",
+                "primal",
+                "matmul",
+            ].sum()
+            - cost(child, seq_len=8192, batch_size=1, dtype=None)[
+                "flops",
+                "primal",
+                "matmul",
+            ].sum()
+        )
+
+    expected_delta = sum(
+        matmul_delta(child) for child in (*config.block, config.lm_head)
+    )
+    assert (
+        longer["flops", "primal", "matmul"].sum()
+        - long[
+            "flops",
+            "primal",
+            "matmul",
+        ].sum()
+        == expected_delta
+    )
     assert (
         longer["bytes", "primal", "matmul"].sum()
-        < long["bytes", "primal", "matmul"].sum()
+        > long["bytes", "primal", "matmul"].sum()
     )
     assert (
         longer["bytes", "primal", "reduction"].sum()
-        == long["bytes", "primal", "reduction"].sum()
+        > long["bytes", "primal", "reduction"].sum()
     )
 
 
@@ -841,6 +864,59 @@ def test_output_norm_feed_forward_config_builds_the_specialized_class() -> None:
     assert isinstance(config.make(), OutputNormFeedForward)
 
 
+def test_output_norm_feed_forward_cost_matches_torch() -> None:
+    config = OutputNormFeedForward.Config()
+    config.channels_in = 4
+    config.channels_hidden = 8
+    config.norm_out = RMSNorm.Config(elementwise_affine=True)
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randn(2, 4, 4, requires_grad=True),
+        seq_len=4,
+        batch_size=2,
+        dtype=None,
+    )
+
+
+def test_gated_residual_cost_matches_torch() -> None:
+    config = GatedResidualMix.Config()
+    config.num_layers = 1
+    config.channels_in = 4
+
+    def run(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+        assert isinstance(module, GatedResidualMix)
+        return module(inputs[0], original=inputs[1], layer=0)
+
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: tuple(
+            torch.randn(2, 4, 4, requires_grad=True) for _ in range(2)
+        ),
+        run=run,
+        seq_len=4,
+        batch_size=2,
+        dtype=None,
+    )
+
+
+def test_memory_cost_matches_torch_with_tables_and_pooling() -> None:
+    config = _memory_config()
+    config.num_layers = 2
+    config.num_pool_layers = 2
+    config.bigrams["1"] = config.bigrams["0"].copy_tree()
+    ffn = SwiGLU.Config()
+    ffn.channels_hidden = 24
+    config.template.ffn = ffn
+    with sdpa_kernel(SDPBackend.MATH):
+        assert_cost_matches_torch(
+            config,
+            build_input=lambda: torch.randint(0, VOCAB, (2, 4)),
+            seq_len=4,
+            batch_size=2,
+            dtype=None,
+        )
+
+
 def test_output_norm_feed_forward_cost_includes_output_norm() -> None:
     config = OutputNormFeedForward.Config()
     config.channels_in = 4
@@ -863,8 +939,11 @@ def test_gated_residual_cost_counts_mean_and_gate_parameters() -> None:
     config.channels_in = 4
     costed = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
     assert costed.params == 3 * 2
-    assert costed["flops", "primal", "reduction"].sum() == 2 * (4 - 1)
-    assert costed["bytes", "primal", "reduction"].sum() == 2 * 2 * (4 + 1)
+    rows = 8
+    assert costed["flops", "primal", "reduction"].sum() == 2 * rows * (4 - 1)
+    assert costed["bytes", "primal", "reduction"].sum() == (
+        2 * torch.bfloat16.itemsize * (rows * 4 + rows)
+    )
 
 
 def test_gated_residual_prices_sigmoid_as_one_tensor_operator() -> None:
@@ -876,21 +955,30 @@ def test_gated_residual_prices_sigmoid_as_one_tensor_operator() -> None:
     base.channels_in = 4
     gated = config.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
     plain = base.cost(seq_len=8, batch_size=1, dtype=torch.bfloat16)
-    assert gated["bytes", "primal", "elementwise"].sum() - plain[
-        "bytes",
-        "primal",
-        "elementwise",
-    ].sum() == 2 * 2 * (11 + 1 / 8)
+    rows = 8
+    itemsize = torch.bfloat16.itemsize
+    primal_gate = itemsize * (rows * 11 + 1)
+    adjoint_gate = itemsize * (rows * (11 + 5) + rows + 1)
+    adjoint_input = itemsize * (rows * 4 * (2 + 2))
+    assert (
+        gated["bytes", "primal", "elementwise"].sum()
+        - plain[
+            "bytes",
+            "primal",
+            "elementwise",
+        ].sum()
+        == 2 * primal_gate
+    )
     assert gated["bytes", "adjoint", "elementwise"].sum() - plain[
         "bytes",
         "adjoint",
         "elementwise",
-    ].sum() == 2 * 2 * (4 * 4 + 17 + 1 / 8)
+    ].sum() == 2 * (adjoint_gate + adjoint_input)
     assert gated["flops", "adjoint", "elementwise"].sum() - plain[
         "flops",
         "adjoint",
         "elementwise",
-    ].sum() == 2 * (8 + 2 * 4)
+    ].sum() == 2 * rows * (8 + 2 * 4)
 
 
 def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
@@ -903,11 +991,11 @@ def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
     costed = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
     plain = base.cost(seq_len=SEQ, batch_size=4, dtype=None)
     assert costed.params - plain.params == 7 * 16 + 1
-    assert (
-        costed["flops", "primal", "elementwise"].sum()
-        - plain["flops", "primal", "elementwise"].sum()
-        == 2 + 2 * 16
-    )
+    assert costed["flops", "primal", "elementwise"].sum() - plain[
+        "flops",
+        "primal",
+        "elementwise",
+    ].sum() == 2 * (SEQ * 4) * (1 + 16)
     assert (
         costed["bytes", "primal", "selection"].sum()
         - plain["bytes", "primal", "selection"].sum()
@@ -935,21 +1023,21 @@ def test_pooling_gradient_temporary_is_written_only_by_width_reduction(
         "bytes",
         "primal",
         "elementwise",
-    ].sum() == itemsize * (5 * width + 1 / rows)
+    ].sum() == itemsize * (5 * width * rows + 1)
     assert pooled["bytes", "adjoint", "elementwise"].sum() - plain[
         "bytes",
         "adjoint",
         "elementwise",
-    ].sum() == itemsize * (6 * width + 1 / rows)
+    ].sum() == itemsize * (6 * width * rows + 1)
     assert pooled["bytes", "adjoint", "reduction"].sum() - plain[
         "bytes",
         "adjoint",
         "reduction",
-    ].sum() == itemsize * (width + 1 + 1 + 1 / rows)
+    ].sum() == itemsize * (width * rows + 2 * rows + 1)
     assert (
         pooled["flops", "adjoint", "reduction"].sum()
         - plain["flops", "adjoint", "reduction"].sum()
-        == width - 1 + (rows - 1) / rows
+        == rows * (width - 1) + rows - 1
     )
 
 

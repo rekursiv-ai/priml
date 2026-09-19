@@ -315,8 +315,11 @@ class PhaseTimer:
         working_dir: Path | str = "/profiling"
         """Logical directory for the phase-trace Chrome trace."""
 
-        heartbeat_interval_sec: float = 30.0
-        """Seconds between ``still in <phase>`` liveness logs. 0 disables."""
+        heartbeat_interval_sec: float = 20.0
+        """Seconds between phase liveness reports; 0 disables."""
+
+        fault_dump_interval_sec: float = 40.0
+        """Seconds without a report before dumping thread stacks."""
 
         cuda_events: bool = False
         """Accumulate CUDA event timings and report them at summary time."""
@@ -331,6 +334,7 @@ class PhaseTimer:
         self._torch_profile = config.torch_profile
         self._torch_profile_path = Path(config.working_dir) / "phase_trace.json.gz"
         self._heartbeat_interval_sec = config.heartbeat_interval_sec
+        self._fault_dump_interval_sec = config.fault_dump_interval_sec
         self._cuda_events_enabled = config.cuda_events
         self._phases: dict[str, float] = {}
         self._self_phases: dict[str, float] = {}
@@ -361,6 +365,16 @@ class PhaseTimer:
             )
             profiler.start()
             self._profiler = profiler
+
+    @property
+    def heartbeat_interval_sec(self) -> float:
+        """Seconds between phase liveness reports."""
+        return self._heartbeat_interval_sec
+
+    @property
+    def fault_dump_interval_sec(self) -> float:
+        """Seconds without a liveness report before dumping stacks."""
+        return self._fault_dump_interval_sec
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Generator[None, None, None]:

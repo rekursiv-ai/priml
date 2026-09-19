@@ -323,7 +323,6 @@ def test_identity_cost_is_free() -> None:
         build_input=lambda: torch.randn(2, 8, requires_grad=True),
         seq_len=2,
         batch_size=1,
-        num_tokens=2,
         dtype=None,
     )
     assert free == Cost()
@@ -336,7 +335,6 @@ def test_skip_cost_is_the_inner_cost_plus_residual_additions() -> None:
         build_input=lambda: torch.randn(2, 4, requires_grad=True),
         seq_len=2,
         batch_size=1,
-        num_tokens=2,
         dtype=None,
     )
     f32 = torch.float32
@@ -346,10 +344,10 @@ def test_skip_cost_is_the_inner_cost_plus_residual_additions() -> None:
         dtype=None,
     ) + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 4,
-            ("flops", "adjoint", "elementwise", f32): 4,
-            ("bytes", "primal", "elementwise", f32): 4 * 3 * 4,
-            ("bytes", "adjoint", "elementwise", f32): 4 * 3 * 4,
+            ("flops", "primal", "elementwise", f32): 4 * 2,
+            ("flops", "adjoint", "elementwise", f32): 4 * 2,
+            ("bytes", "primal", "elementwise", f32): 4 * 3 * 4 * 2,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 3 * 4 * 2,
         },
     )
 

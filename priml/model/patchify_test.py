@@ -154,17 +154,17 @@ def test_patchify_cost_counts_payload_reordering(
     analytical = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(*shape, requires_grad=True),
-        seq_len=2 * 2 * 2,
-        batch_size=1,
-        num_tokens=2 * 2 * 2,
+        seq_len=2 * 2,
+        batch_size=2,
         dtype=None,
     )
-    moved = 4 * 2 * 48
+    moved_elements = 2 * 4 * 2 * 48
     f32 = torch.float32
+    moved_bytes = moved_elements * f32.itemsize
     assert analytical == Cost(
         cells={
-            ("bytes", "primal", "selection", f32): moved,
-            ("bytes", "adjoint", "selection", f32): moved,
+            ("bytes", "primal", "selection", f32): moved_bytes,
+            ("bytes", "adjoint", "selection", f32): moved_bytes,
         },
     )
     source = torch.randn(*shape)

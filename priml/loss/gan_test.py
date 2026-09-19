@@ -21,13 +21,13 @@ if TYPE_CHECKING:
 
 def _fp32(
     *,
-    primal: Mapping[str, Mapping[Kernel, float]] | None = None,
-    adjoint: Mapping[str, Mapping[Kernel, float]] | None = None,
+    primal: Mapping[str, Mapping[Kernel, int]] | None = None,
+    adjoint: Mapping[str, Mapping[Kernel, int]] | None = None,
     **fields: int,
 ) -> Cost:
-    """Build a ``Cost`` from per-phase, per-kernel fp32 FLOPs and bytes."""
-    cells: dict[tuple[object, ...], float] = {}
-    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, float]] | None], ...] = (
+    """Build a ``Cost`` from whole-invocation fp32 FLOPs and bytes."""
+    cells: dict[tuple[object, ...], int] = {}
+    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, int]] | None], ...] = (
         ("primal", primal),
         ("adjoint", adjoint),
     )
@@ -65,8 +65,7 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
             torch.randn(2, 3, 4, requires_grad=True),
         ),
         seq_len=12,
-        batch_size=1,
-        num_tokens=12,
+        batch_size=2,
         dtype=None,
         run=lambda module, inputs: _loss(
             module,
@@ -78,23 +77,23 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
     )
     expected = _fp32(
         primal={
-            "flops": {"elementwise": 2 + 11 / 12, "reduction": 11 / 12},
-            "bytes": {"elementwise": 4 * (5 + 33 / 12), "reduction": 5},
+            "flops": {"elementwise": 70, "reduction": 22},
+            "bytes": {"elementwise": 744, "reduction": 120},
         },
         adjoint={
-            "flops": {"elementwise": 3 + 7 / 12},
-            "bytes": {"elementwise": 4 * (7 + 16 / 12), "reduction": 5},
+            "flops": {"elementwise": 86},
+            "bytes": {"elementwise": 800, "reduction": 120},
         },
     )
-    assert cost(config, seq_len=12, batch_size=1, dtype=None) == expected
+    assert cost(config, seq_len=12, batch_size=2, dtype=None) == expected
     assert measured == expected + _fp32(
         primal={
-            "flops": {"elementwise": 2},
-            "bytes": {"elementwise": 16, "reduction": 8},
+            "flops": {"elementwise": 48},
+            "bytes": {"elementwise": 384, "reduction": 192},
         },
         adjoint={
-            "flops": {"elementwise": 2},
-            "bytes": {"elementwise": 8, "reduction": 8},
+            "flops": {"elementwise": 48},
+            "bytes": {"elementwise": 192, "reduction": 192},
         },
     )
     assert measured.params == 0
@@ -103,12 +102,12 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_adversarial_loss_operand_traffic(dtype: torch.dtype) -> None:
-    costed = cost(AdversarialLoss.Config(), seq_len=12, batch_size=1, dtype=dtype)
+    costed = cost(AdversarialLoss.Config(), seq_len=12, batch_size=2, dtype=dtype)
     itemsize = dtype.itemsize
-    assert costed["bytes", "primal", "elementwise"].sum() == (5 + 33 / 12) * itemsize
-    assert costed["bytes", "primal", "reduction"].sum() == 15 * itemsize / 12
-    assert costed["bytes", "adjoint", "elementwise"].sum() == (7 + 16 / 12) * itemsize
-    assert costed["bytes", "adjoint", "reduction"].sum() == 15 * itemsize / 12
+    assert costed["bytes", "primal", "elementwise"].sum() == 186 * itemsize
+    assert costed["bytes", "primal", "reduction"].sum() == 30 * itemsize
+    assert costed["bytes", "adjoint", "elementwise"].sum() == 200 * itemsize
+    assert costed["bytes", "adjoint", "reduction"].sum() == 30 * itemsize
 
 
 def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:

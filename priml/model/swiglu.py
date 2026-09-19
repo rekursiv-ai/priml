@@ -270,7 +270,7 @@ class SwiGLU(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             Raises:
               TypeError: ``act`` carries no cost (see :func:`set_cost`); a
@@ -299,13 +299,18 @@ class SwiGLU(nn.Module):
             # With a norm the branch is ``factor(g) * norm(g * x)``, so the
             # nonlinearity paid for is the factor alone; without one, the act.
             nonlinearity = FACTORS[self.act] if self.norm is not None else self.act
-            act = cost(nonlinearity, channels=self.channels_hidden, dtype=dt)
+            act = cost(
+                nonlinearity,
+                channels=self.channels_hidden * rows,
+                dtype=dt,
+            )
             # Each product is one multiply forward and two backward.
             products = int(self.gate) + int(self.norm is not None)
             scalar = elementwise_cost(
-                primal=products * self.channels_hidden,
-                adjoint=2 * products * self.channels_hidden,
+                primal=products * self.channels_hidden * rows,
+                adjoint=2 * products * self.channels_hidden * rows,
                 channels=self.channels_hidden,
+                rows=rows,
                 inputs=2 * products,
                 outputs=products,
                 adjoint_inputs=4 * products,

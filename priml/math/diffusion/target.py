@@ -93,16 +93,11 @@ def target_cost(
     scalar_flops: int,
     scalar_elements: int,
 ) -> Callable[..., Cost]:
-    """Build the cost of a target parameterization per element of ``x0``.
+    """Build a target's exact cost for concrete element and sample counts.
 
-    ``vector`` counts are per element: operations and operand I/O of the
-    target, the prediction, and both reconstructions (every branch builds
-    ``x_clean`` and ``eps_clean`` even though the loss reads neither).
-    ``scalar`` counts are per sample -- the coefficient preparation from
-    ``log_snr`` and ``log_sigma`` -- and are spread over the ``rows`` one
-    sample holds. ``adjoint`` is the per-element gradient work through
-    ``predict``: zero when the model output passes straight through, one
-    multiply when ``predict`` is a scaled combination of it.
+    Vector work runs once per element of ``x0``. Coefficient preparation runs
+    once per sample. The adjoint includes the saved values, incoming gradient,
+    and one sample coefficient for every scaled prediction.
 
     Args:
       primal: Operations per element of ``x0``.
@@ -112,26 +107,26 @@ def target_cost(
       scalar_elements: Operands moved per sample preparing the coefficients.
 
     Returns:
-      cost_fn: ``cost_fn(*, dtype, rows)``, for :func:`set_cost`.
+      cost_fn: ``cost_fn(*, dtype, elements, samples)``, for :func:`set_cost`.
 
     """
 
-    def per_element(*, dtype: torch.dtype | None, rows: float) -> Cost:
+    def complete(*, dtype: torch.dtype | None, elements: int, samples: int) -> Cost:
         return traffic(
             "primal",
             "elementwise",
-            elements=vector_elements + scalar_elements / rows,
-            flops=primal + scalar_flops / rows,
+            elements=vector_elements * elements + scalar_elements * samples,
+            flops=primal * elements + scalar_flops * samples,
             dtype=dtype,
         ) + traffic(
             "adjoint",
             "elementwise",
-            elements=adjoint * (2 + 1 / rows),
-            flops=adjoint,
+            elements=adjoint * (2 * elements + samples),
+            flops=adjoint * elements,
             dtype=dtype,
         )
 
-    return per_element
+    return complete
 
 
 # ``target_x``/``target_eps`` pass ``model`` through as ``predict`` and build one

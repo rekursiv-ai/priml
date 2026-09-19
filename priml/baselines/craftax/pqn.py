@@ -99,18 +99,17 @@ class RecurrentQNetwork(nn.Module):
             writing eight projected-gate gradients and the old-cell gradient.
             The episode reset is one product per carried unit each way.
 
-            This is the model root: every parameter is shared by
-            ``batch_size * seq_len`` tokens, so a caller's own ``rows`` is
-            replaced by the batch's tokens.
+            This is the model root: every parameter is shared by the concrete
+            ``batch_size * seq_len`` rows in this invocation.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Rows per sequence.
+              batch_size: Sequences in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             batch = kwargs
@@ -138,23 +137,25 @@ class RecurrentQNetwork(nn.Module):
                 dtype=dtype,
                 **batch,
             ) + elementwise_cost(
-                primal=width,
-                adjoint=width,
+                primal=rows * width,
+                adjoint=rows * width,
                 channels=width,
+                rows=rows,
                 dtype=dt,
             )
-            one_hot = traffic("primal", "selection", elements=actions, dtype=dt)
+            one_hot = traffic("primal", "selection", elements=rows * actions, dtype=dt)
             concatenate = traffic(
                 "primal",
                 "elementwise",
-                elements=2 * (width + actions),
+                elements=2 * rows * (width + actions),
                 dtype=dt,
             )
             reset = elementwise_cost(
-                primal=2 * width,
-                adjoint=2 * width,
+                primal=2 * rows * width,
+                adjoint=2 * rows * width,
                 channels=2 * width,
                 inputs=2,
+                rows=rows,
                 dtype=dt,
             )
             gates = matmul_cost(
@@ -171,13 +172,14 @@ class RecurrentQNetwork(nn.Module):
                 dtype=dt,
             )
             cell = elementwise_cost(
-                primal=13 * width,
-                adjoint=22 * width,
+                primal=13 * rows * width,
+                adjoint=22 * rows * width,
                 channels=width,
                 inputs=9,
                 outputs=2,
                 adjoint_inputs=8,
                 adjoint_outputs=9,
+                rows=rows,
                 dtype=dt,
             )
             head = matmul_cost(
@@ -197,7 +199,7 @@ class RecurrentQNetwork(nn.Module):
                 + gates
                 + cell
                 + head,
-                bytes_state=resolve_dtype(dtype).itemsize * 2 * width,
+                bytes_state=resolve_dtype(dtype).itemsize * batch_size * 2 * width,
             )
 
     def __init__(self, config: Config) -> None:

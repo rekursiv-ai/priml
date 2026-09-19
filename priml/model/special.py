@@ -66,7 +66,7 @@ class Identity(nn.Identity):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del seq_len, batch_size, dtype, kwargs
@@ -116,7 +116,7 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             Raises:
               ValueError: No ``inner`` to wrap.
@@ -131,9 +131,10 @@ class Skip(ReadPassthroughMixin, nn.Module, passthrough="inner"):
                 dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
-                primal=self.channels_out,
-                adjoint=self.channels_in,
+                primal=self.channels_out * seq_len * batch_size,
+                adjoint=self.channels_in * seq_len * batch_size,
                 channels=self.channels_out,
+                rows=seq_len * batch_size,
                 inputs=2,
                 dtype=dtype,
             )
@@ -205,7 +206,7 @@ class TiedLinear(nn.Module, LateBound):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs

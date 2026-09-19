@@ -157,9 +157,9 @@ class MultiStreamAttention(nn.Module):
             """Cost one position: every stream's token, each attending jointly.
 
             A position holds ``num_streams`` tokens. Each pays its own
-            projections, runs the kernel as one query row against the
-            ``num_streams * seq_len`` concatenated keys -- counted once per
-            stream -- and caches its own keys and values. A shared norm runs
+            projections, runs the kernel over the
+            ``num_streams * seq_len`` concatenated keys, and shares those keys
+            only across its own ``seq_len`` query rows. A shared norm runs
             on every stream's rows but is owned once.
 
             Args:
@@ -169,7 +169,7 @@ class MultiStreamAttention(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -208,7 +208,7 @@ class MultiStreamAttention(nn.Module):
                     total += cost(
                         rope,
                         seq_len=seq_len,
-                        batch_size=batch_size,
+                        batch_size=1,
                         dtype=dtype,
                         **kwargs,
                     )
@@ -226,29 +226,30 @@ class MultiStreamAttention(nn.Module):
                         else (self.num_heads, self.num_heads_kv)
                     )
                     for heads in groups:
-                        head_rows = self.num_streams * heads
                         total += cost(
                             self.norm_qk,
-                            seq_len=seq_len * head_rows,
-                            batch_size=batch_size,
+                            seq_len=seq_len,
+                            batch_size=batch_size * self.num_streams * heads,
                             dtype=dtype,
                             **kwargs,
-                        ).tile(head_rows)
+                        )
                 if self.norm_out is not None:
                     total += cost(
                         self.norm_out,
-                        seq_len=seq_len * self.num_streams,
-                        batch_size=batch_size,
+                        seq_len=seq_len,
+                        batch_size=batch_size * self.num_streams,
                         dtype=dtype,
                         **kwargs,
-                    ).tile(self.num_streams)
+                    )
             kernel = cost(
                 self.attn_kernel,
                 seq_len=seq_len * self.num_streams,
+                batch_size=batch_size,
                 dtype=dtype,
                 num_heads=self.num_heads,
                 channels_head=self.channels_head,
                 dropout_p=self.dropout,
+                rows=seq_len,
             )
             return replace(
                 total + kernel.tile(self.num_streams, copies=self.num_streams),

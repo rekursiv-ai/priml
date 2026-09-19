@@ -372,15 +372,24 @@ def test_latent_attention_cost_attends_over_the_latent_when_absorbed() -> None:
         model_cost["flops", "adjoint", "matmul"].sum()
         == inner["flops", "adjoint", "matmul"].sum() / 2
     )
-    assert model_cost["flops", "primal", "matmul"].sum() == 2 * 4 * 32 * ((6 + 4) + 6)
+    assert model_cost["flops", "primal", "matmul"].sum() == (
+        2 * 32 * 4 * 32 * ((6 + 4) + 6)
+    )
     assert (
         model_cost["flops", "primal", "elementwise"].sum()
         == inner["flops", "primal", "elementwise"].sum()
     )
     assert model_cost.params == 0
-    assert (
-        model_cost["bytes", "primal", "matmul"].sum()
-        == 4 * 4 * (2 * 10 + 2 * 6 + 2 * 32) + 4 * (2 * 4 - 1) * 6
+    kernel_geometry = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=4,
+        channels_head=10,
+        channels_v_head=6,
+    )
+    moved = (2 * 4 - 1) * 6 * 32
+    assert model_cost["bytes", "primal", "matmul"].sum() == (
+        kernel_geometry["bytes", "primal", "matmul"].sum() + 4 * moved
     )
     assert (
         model_cost["bytes", "primal", "elementwise"].sum()
@@ -410,8 +419,20 @@ def test_latent_attention_cost_attends_over_expanded_heads_when_not() -> None:
         model_cost["flops", "primal", "matmul"].sum()
         == inner["flops", "primal", "matmul"].sum() / 2
     )
-    assert model_cost["bytes", "primal", "matmul"].sum() == 4 * 4 * (
-        2 * 12 + 2 * 16 + 2 * 32
+    expected_kernel = attention_kernel_cost(
+        seq_len=32,
+        dtype=None,
+        num_heads=4,
+        channels_head=12,
+        channels_v_head=16,
+    )
+    assert (
+        model_cost["bytes", "primal", "matmul"].sum()
+        == expected_kernel[
+            "bytes",
+            "primal",
+            "matmul",
+        ].sum()
     )
     assert (
         model_cost["bytes", "primal", "elementwise"].sum()
@@ -475,7 +496,6 @@ def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
         build_input=lambda: torch.randn(1, 8, 32, requires_grad=True),
         seq_len=8,
         batch_size=1,
-        num_tokens=8,
         dtype=None,
     )
 
@@ -531,7 +551,7 @@ def test_mla_cost_prices_absorbed_projection_intermediates(
         channels_v_head=12 if absorb else 16,
     )
     actual = config.cost(seq_len=8, batch_size=1, dtype=dtype)
-    extra = itemsize * (2 * 4 - 1) * 12 if absorb else 0
+    extra = itemsize * (2 * 4 - 1) * 12 * 8 if absorb else 0
     assert (
         actual["bytes", "primal", "matmul"].sum()
         == projections["bytes", "primal", "matmul"].sum()
@@ -564,22 +584,22 @@ def test_mla_cost_prices_configured_dropout() -> None:
     assert (
         wet["flops", "primal", "elementwise"].sum()
         - dry["flops", "primal", "elementwise"].sum()
-        == 2 * 4 * 8
+        == 2 * 4 * 8 * 8
     )
     assert (
         wet["flops", "adjoint", "elementwise"].sum()
         - dry["flops", "adjoint", "elementwise"].sum()
-        == 2 * 4 * 8
+        == 2 * 4 * 8 * 8
     )
     assert (
         wet["bytes", "primal", "elementwise"].sum()
         - dry["bytes", "primal", "elementwise"].sum()
-        == 2 * 5 * 4 * 8
+        == 2 * 5 * 4 * 8 * 8
     )
     assert (
         wet["bytes", "adjoint", "elementwise"].sum()
         - dry["bytes", "adjoint", "elementwise"].sum()
-        == 2 * 3 * 4 * 8
+        == 2 * 3 * 4 * 8 * 8
     )
 
 

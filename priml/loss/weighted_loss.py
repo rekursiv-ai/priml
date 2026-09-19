@@ -45,27 +45,20 @@ class WeightedSum(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Sum every child's cost plus one weight multiply and one add each.
+            """Sum exact child costs and this combiner's whole-tensor work.
 
-            A token is whatever the children call one: the geometry is handed
-            on unchanged, so its rows mean the same thing at every level. A
-            child may be an ``nn.Module`` config or a plain callable's; either
-            must cost itself or :func:`cost` raises. The stack-and-sum costs
-            one add per child per token, the weight one multiply; the adjoint
-            is the same two ops.
-
-            Traffic is per child-output element: weight reads/writes, stack
-            reads/writes, then reduction and its adjoint broadcast. The
-            geometry does not describe a child's output reduction shape.
+            Each child receives the caller's concrete geometry. The stack,
+            weighting, reduction, and adjoint broadcast run for every output
+            element in the complete batch.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Output elements per sample.
+              batch_size: Samples per step.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this combiner.
+              cost: Integer FLOPs and logical bytes for the complete batch.
 
             """
             children = sum(
@@ -82,10 +75,10 @@ class WeightedSum(nn.Module):
                 Cost(),
             )
             count = len(self.fns)
+            rows = seq_len * batch_size
             dt = dtype
-            return (
-                children
-                + traffic(
+            return children + (
+                traffic(
                     "primal",
                     "elementwise",
                     elements=4 * count,
@@ -101,7 +94,7 @@ class WeightedSum(nn.Module):
                     dtype=dt,
                 )
                 + traffic("adjoint", "reduction", elements=count + 1, dtype=dt)
-            )
+            ).tile(rows)
 
     def __init__(self, config: Config):
         super().__init__()

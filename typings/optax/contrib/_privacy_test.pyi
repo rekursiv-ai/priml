@@ -1,0 +1,16 @@
+from _typeshed import Incomplete
+
+import chex
+
+class DifferentiallyPrivateAggregateTest(chex.TestCase):
+    batch_size: int
+    params: Incomplete
+    per_eg_grads: Incomplete
+    def setUp(self): ...
+    @chex.all_variants
+    def test_no_privacy(self): ...
+    @chex.all_variants
+    def test_clipping_norm(self, l2_norm_clip): ...
+    @chex.all_variants
+    def test_noise_multiplier(self, l2_norm_clip, noise_multiplier) -> None: ...
+    def test_aggregated_updates_as_input_fails(self): ...

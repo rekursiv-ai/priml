@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Self, override
 
 from configgle import Fig, Makeable
 from torch import Tensor, nn
-from torch.nn import functional as f
 
 import torch
+import torch.nn.functional
 
 from priml.cost import (
     Cost,
@@ -23,8 +23,11 @@ from priml.cost import (
     elementwise_cost,
     matmul_cost,
     reduction_cost,
+    resolve_dtype,
 )
+from priml.math import gated_delta_rule
 from priml.math.basic import ceil_multiple
+from priml.model.conv import conv_cost
 from priml.model.custom_types import (
     ChannelsIn,
     DepthIndex,
@@ -104,6 +107,10 @@ class GatedDeltaNet(nn.Module):
                 self.norm.channels_in = self.channels_v_head
             return super().finalize()
 
+        def uses_output_gate(self) -> bool:
+            """Return whether this attention projects a post-delta gate."""
+            return True
+
         def cost(
             self,
             *,
@@ -114,11 +121,11 @@ class GatedDeltaNet(nn.Module):
         ) -> Cost:
             """Cost the projections, the depthwise conv, and the recurrent scan.
 
-            Matrix scan counts retain the recurrent-model proxy of two MACs
-            per state element, not the chunked implementation's actual products.
+            Matrix counts follow the 64-token PyTorch chunk implementation,
+            including padding, constant initial state, and the final state update
+            whose output is discarded. They do not qualify the fused CUDA kernel.
             Scalar scan counts estimate a decay, delta and weighted state update
-            with its analytical derivative. Chunking, triangular solves and
-            padding change executed work and are not represented by this model.
+            with its analytical derivative.
             Nonlinearities and q/k normalization are included separately.
             Scalar scan I/O uses two binary-map passes over the state, values
             and two key rows, with a three-output VJP over that working set.
@@ -132,7 +139,7 @@ class GatedDeltaNet(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost over ``seq_len`` and ``batch_size``.
 
             """
             rows = seq_len * batch_size
@@ -141,6 +148,14 @@ class GatedDeltaNet(nn.Module):
             k_dim = self.num_heads_k * self.channels_k_head
             v_dim = self.num_heads_v * self.channels_v_head
             conv_dim = 2 * k_dim + v_dim
+            projection_shapes = [
+                (h, conv_dim),
+                (h, self.num_heads_v),
+                (h, self.num_heads_v),
+                (v_dim, h),
+            ]
+            if self.uses_output_gate():
+                projection_shapes.append((h, v_dim))
             projections = sum(
                 (
                     matmul_cost(
@@ -149,78 +164,69 @@ class GatedDeltaNet(nn.Module):
                         rows=rows,
                         dtype=dt,
                     )
-                    for c_in, c_out in (
-                        (h, conv_dim),
-                        (h, v_dim),
-                        (h, self.num_heads_v),
-                        (h, self.num_heads_v),
-                        (v_dim, h),
-                    )
+                    for c_in, c_out in projection_shapes
                 ),
                 Cost(),
             )
-            # Depthwise: each channel is its own ``[taps] -> [1]`` map, followed
-            # by a SiLU.
-            conv = matmul_cost(
-                channels_in=self.conv_kernel_size,
-                channels_out=1,
+            conv = conv_cost(
+                channels_in=conv_dim,
+                channels_out=conv_dim,
+                kernel_size=self.conv_kernel_size,
+                ndim=1,
+                groups=conv_dim,
                 bias=False,
-                rows=rows,
+                input_grid=(seq_len,),
+                batch_size=batch_size,
+                stride=1,
+                padding=self.conv_kernel_size - 1,
                 dtype=dt,
-            ).tile(conv_dim, copies=conv_dim) + elementwise_cost(
-                primal=5 * conv_dim,
-                adjoint=5 * conv_dim,
+            ) + elementwise_cost(
+                primal=5 * conv_dim * rows,
+                adjoint=5 * conv_dim * rows,
                 channels=conv_dim,
                 rows=rows,
-                dtype=dt,
-            )
-            # The recurrence: per value head, ``k^T v`` writes the state and
-            # ``S q`` reads it -- two activation products of ``k_head x v_head``
-            # per token. That is the recurrent-model proxy; the chunked kernel
-            # executes a different (larger) product count. Logical state I/O is
-            # counted even when the implementation keeps the state on chip.
-            state_write = matmul_cost(
-                channels_in=self.channels_k_head,
-                channels_out=self.channels_v_head,
-                weight=False,
-                rows=1,
-                dtype=dt,
-            )
-            state_read = matmul_cost(
-                channels_in=self.channels_k_head,
-                channels_out=self.channels_v_head,
-                weight=False,
-                rows=1,
                 dtype=dt,
             )
             # Decay, delta, and weighted update over the state; the q/k L2 norms
             # each reduce their own row once in both primal and adjoint.
             state = self.num_heads_v * self.channels_k_head * self.channels_v_head
             norms = (
-                reduction_cost(
-                    input_elements=self.num_heads_v * self.channels_k_head,
-                    output_groups=self.num_heads_v,
-                    dtype=dt,
+                (
+                    reduction_cost(
+                        input_elements=self.num_heads_v * self.channels_k_head,
+                        output_groups=self.num_heads_v,
+                        dtype=dt,
+                    )
+                    + reduction_cost(
+                        input_elements=self.num_heads_v * self.channels_k_head,
+                        output_groups=self.num_heads_v,
+                        dtype=dt,
+                        phase="adjoint",
+                    )
                 )
-                + reduction_cost(
-                    input_elements=self.num_heads_v * self.channels_k_head,
-                    output_groups=self.num_heads_v,
-                    dtype=dt,
-                    phase="adjoint",
-                )
-            ).tile(2, copies=2)
+                .tile(2, copies=2)
+                .tile(rows)
+            )
             scan = (
-                (state_write + state_read).tile(
-                    self.num_heads_v,
-                    copies=self.num_heads_v,
-                )
+                _chunk_matmul_cost(
+                    seq_len=seq_len,
+                    heads=self.num_heads_v,
+                    key_width=self.channels_k_head,
+                    value_width=self.channels_v_head,
+                ).tile(batch_size)
                 + elementwise_cost(
-                    primal=2 * state
-                    + 2 * v_dim
-                    + self.num_heads_v * (6 * self.channels_k_head + 4),
-                    adjoint=4 * state
-                    + 4 * v_dim
-                    + self.num_heads_v * (10 * self.channels_k_head + 7),
+                    primal=rows
+                    * (
+                        2 * state
+                        + 2 * v_dim
+                        + self.num_heads_v * (6 * self.channels_k_head + 4)
+                    ),
+                    adjoint=rows
+                    * (
+                        4 * state
+                        + 4 * v_dim
+                        + self.num_heads_v * (10 * self.channels_k_head + 7)
+                    ),
                     channels=state
                     + v_dim
                     + 2 * self.num_heads_v * self.channels_k_head,
@@ -234,28 +240,19 @@ class GatedDeltaNet(nn.Module):
                 + norms
             )
             # ``dt_bias`` and ``A_log``: one gate parameter per value head each.
-            # ``A_log`` is exponentiated once per batch, so that is shared.
-            gates = elementwise_cost(
-                primal=(9 + 2 / rows) * self.num_heads_v,
-                adjoint=9 * self.num_heads_v,
-                channels=self.num_heads_v,
-                inputs=4,
-                outputs=2,
-                adjoint_inputs=6,
-                adjoint_outputs=3,
-                params=2 * self.num_heads_v,
-                dtype=dt,
+            # ``A_log`` is exponentiated once per invocation, so that work is shared.
+            gates = _delta_gate_cost(
                 rows=rows,
+                heads=self.num_heads_v,
+                dtype=dt,
             )
-            # The norm runs once per value head; its parameters exist once.
+            # The norm runs once per value-head row; its parameters exist once.
             norm = cost(
                 self.norm,
-                seq_len=seq_len * self.num_heads_v,
-                batch_size=batch_size,
+                seq_len=seq_len,
+                batch_size=batch_size * self.num_heads_v,
                 dtype=dtype,
                 **kwargs,
-            ).tile(
-                self.num_heads_v,
             )
             return (
                 projections
@@ -266,12 +263,12 @@ class GatedDeltaNet(nn.Module):
                 + self._output_gate_cost(rows=rows, dtype=dt)
             )
 
-        def _output_gate_cost(self, *, rows: float, dtype: torch.dtype | None) -> Cost:
+        def _output_gate_cost(self, *, rows: int, dtype: torch.dtype | None) -> Cost:
             """Cost the separate post-norm SiLU and product."""
             width = self.num_heads_v * self.channels_v_head
             return elementwise_cost(
-                primal=6 * width,
-                adjoint=7 * width,
+                primal=6 * width * rows,
+                adjoint=7 * width * rows,
                 channels=width,
                 inputs=3,
                 outputs=2,
@@ -319,12 +316,14 @@ class GatedDeltaNet(nn.Module):
             bias=False,
             init_weight=config.init_weight,
         ).make()
-        self.proj_z = Linear.Config(
-            channels_in=h,
-            channels_out=v_dim,
-            bias=False,
-            init_weight=config.init_weight,
-        ).make()
+        self.proj_z: Linear | None = None
+        if config.uses_output_gate():
+            self.proj_z = Linear.Config(
+                channels_in=h,
+                channels_out=v_dim,
+                bias=False,
+                init_weight=config.init_weight,
+            ).make()
         self.proj_b = Linear.Config(
             channels_in=h,
             channels_out=config.num_heads_v,
@@ -379,7 +378,8 @@ class GatedDeltaNet(nn.Module):
         # (and its own raw params). dt_bias and A_log carry deliberate
         # Mamba-style inits that meta materialization must reproduce.
         self.proj_qkv.reset_parameters()
-        self.proj_z.reset_parameters()
+        if self.proj_z is not None:
+            self.proj_z.reset_parameters()
         self.proj_b.reset_parameters()
         self.proj_a.reset_parameters()
         call_init(self._init_conv_weight, self.conv1d.weight)
@@ -399,13 +399,19 @@ class GatedDeltaNet(nn.Module):
         v_dim = self.num_heads_v * self.channels_v_head
 
         qkv = self.proj_qkv(x)
-        qkv = f.silu(self.conv1d(qkv.transpose(1, 2))[:, :, :S]).transpose(1, 2)
+        qkv = torch.nn.functional.silu(
+            self.conv1d(qkv.transpose(1, 2))[:, :, :S],
+        ).transpose(1, 2)
         q, k, v = qkv.split([k_dim, k_dim, v_dim], dim=-1)
 
+        if self.proj_z is None:
+            raise ValueError("GatedDeltaNet requires an output gate projection.")
         z = self.proj_z(x).reshape(-1, S, self.num_heads_v, self.channels_v_head)
         beta = self.proj_b(x).sigmoid()
         a = self.proj_a(x)
-        g = -self.A_log.float().exp() * f.softplus(a.float() + self.dt_bias)
+        g = -self.A_log.float().exp() * torch.nn.functional.softplus(
+            a.float() + self.dt_bias,
+        )
 
         q = q.reshape(-1, S, self.num_heads_k, self.channels_k_head)
         k = k.reshape(-1, S, self.num_heads_k, self.channels_k_head)
@@ -429,7 +435,7 @@ class GatedDeltaNet(nn.Module):
                 use_qk_l2norm_in_kernel=True,
             )
         else:
-            out, _ = _torch_chunk_gated_delta_rule(
+            out, _ = gated_delta_rule.chunk_gated_delta_rule(
                 q,
                 k,
                 v,
@@ -440,89 +446,69 @@ class GatedDeltaNet(nn.Module):
                 use_qk_l2norm_in_kernel=True,
             )
 
-        out = self.norm(out.reshape(-1, self.channels_v_head)) * f.silu(
+        out = self.norm(
+            out.reshape(-1, self.channels_v_head),
+        ) * torch.nn.functional.silu(
             z.reshape(-1, self.channels_v_head).float(),
         ).type_as(out)
         return self.proj_out(out.reshape(-1, S, v_dim)).reshape(*shape[:-1], -1)
 
 
-def _l2norm(x: Tensor, dim: int = -1, eps: float = 1e-6) -> Tensor:
-    return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-
-
-def _torch_chunk_gated_delta_rule(
-    query: Tensor,
-    key: Tensor,
-    value: Tensor,
-    g: Tensor,
-    beta: Tensor,
+def _chunk_matmul_cost(
     *,
-    chunk_size: int = 64,
-    initial_state: Tensor | None = None,
-    output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
-) -> tuple[Tensor, Tensor | None]:
-    """Pure-torch chunk_gated_delta_rule (from HF transformers, MIT-licensed)."""
-    dtype = query.dtype
-    if use_qk_l2norm_in_kernel:
-        query = _l2norm(query)
-        key = _l2norm(key)
-    query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().float() for x in (query, key, value, beta, g)
-    ]
-    B, H, S, dk = key.shape
-    dv = value.shape[-1]
-    pad = int(ceil_multiple(S, chunk_size)) - S
-    query = f.pad(query, (0, 0, 0, pad))
-    key = f.pad(key, (0, 0, 0, pad))
-    value = f.pad(value, (0, 0, 0, pad))
-    beta = f.pad(beta, (0, pad))
-    g = f.pad(g, (0, pad))
-    S_total = S + pad
-    scale = 1.0 / float(dk**0.5)
-    query = query * scale
-    v_beta = value * beta.unsqueeze(-1)
-    k_beta = key * beta.unsqueeze(-1)
-    query, key, value, k_beta, v_beta = [
-        x.reshape(B, H, -1, chunk_size, x.shape[-1])
-        for x in (query, key, value, k_beta, v_beta)
-    ]
-    g = g.reshape(B, H, -1, chunk_size)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device),
-    )
-    g = g.cumsum(dim=-1)
-    decay_mask = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().tril()
-    attn = -(k_beta @ key.transpose(-1, -2) * decay_mask).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        row = attn[..., i, :i].clone()
-        sub = attn[..., :i, :i].clone()
-        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
-    value = attn @ v_beta
-    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
-    state = (
-        torch.zeros(B, H, dk, dv, device=value.device, dtype=value.dtype)
-        if initial_state is None
-        else initial_state.to(value)
-    )
-    out = torch.zeros_like(value)
-    for ci in range(S_total // chunk_size):
-        q_i, k_i, v_i = query[:, :, ci], key[:, :, ci], value[:, :, ci]
-        a = q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, ci]
-        v_prime = k_cumdecay[:, :, ci] @ state
-        v_new = v_i - v_prime
-        attn_inter = (q_i * g[:, :, ci, :, None].exp()) @ state
-        out[:, :, ci] = attn_inter + a @ v_new
-        state = (
-            state * g[:, :, ci, -1, None, None].exp()
-            + (k_i * (g[:, :, ci, -1, None] - g[:, :, ci]).exp()[..., None]).transpose(
-                -1,
-                -2,
-            )
-            @ v_new
+    seq_len: int,
+    heads: int,
+    key_width: int,
+    value_width: int,
+) -> Cost:
+    chunk = 64
+    chunks = int(ceil_multiple(seq_len, chunk)) // chunk
+    # solve_triangular contributes primal products but dispatches no backward matmuls.
+    shapes = [
+        (chunk, key_width, chunk, 2),
+        (chunk, chunk, value_width, 0),
+        (chunk, chunk, key_width, 0),
+    ] * chunks
+    for index in range(chunks):
+        state_gradients = 1 if index == 0 else 2
+        shapes.extend(
+            [
+                (chunk, key_width, chunk, 2),
+                (chunk, key_width, value_width, state_gradients),
+                (chunk, key_width, value_width, state_gradients),
+                (chunk, chunk, value_width, 2),
+                (key_width, chunk, value_width, 0 if index == chunks - 1 else 2),
+            ],
         )
-    if not output_final_state:
-        state = None
-    out = out.reshape(B, H, -1, out.shape[-1])[:, :, :S]
-    return out.transpose(1, 2).contiguous().to(dtype), state
+    total = Cost()
+    for rows, inner, columns, adjoints in shapes:
+        primal = matmul_cost(
+            channels_in=inner,
+            channels_out=columns,
+            weight=False,
+            rows=rows,
+            dtype=torch.float32,
+        ).only("primal")
+        total += primal + primal.relabel("adjoint").tile(adjoints)
+    return total.tile(heads)
+
+
+def _delta_gate_cost(*, rows: int, heads: int, dtype: torch.dtype | None) -> Cost:
+    """Count the gate map and its two parameter-gradient reductions exactly."""
+    dt = resolve_dtype(dtype)
+    itemsize = dt.itemsize
+    params = 2 * heads
+    return Cost(
+        cells={
+            ("flops", "primal", "elementwise", dt): (9 * rows + 2) * heads,
+            ("flops", "adjoint", "elementwise", dt): 9 * rows * heads,
+            ("flops", "adjoint", "reduction", dt): params * (rows - 1),
+            ("bytes", "primal", "elementwise", dt): itemsize
+            * (6 * rows * heads + params),
+            ("bytes", "adjoint", "elementwise", dt): itemsize
+            * (9 * rows * heads + params * rows + params),
+            ("bytes", "adjoint", "reduction", dt): itemsize * (params * rows + params),
+        },
+        params=params,
+        params_active=params,
+    )

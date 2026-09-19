@@ -89,7 +89,9 @@ def exp000() -> ArcTrainLoop:
 
     The baseline every other experiment forks, and the only one stating a
     recipe rather than a change. Frozen: improvements belong in a fork, so a
-    result measured against it stays comparable.
+    result measured against it stays comparable. The reference band is the
+    ``arc1concept-aug-1000`` build from the pinned ARC preparer: 1,000
+    color/dihedral augmentations per puzzle, with train-only spatial translation.
 
     Hypothesis:
       A plain transformer with a learned per-task vector is the strongest

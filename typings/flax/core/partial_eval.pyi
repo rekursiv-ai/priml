@@ -1,0 +1,3 @@
+from flax import errors as errors
+
+def lazy_init(fn): ...

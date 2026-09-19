@@ -74,19 +74,24 @@ def test_hashed_tables_cost_is_one_gather_per_hash_and_matches_torch() -> None:
         build_input=lambda: torch.randint(0, 17, (2, 5)),
         seq_len=10,
         batch_size=1,
-        num_tokens=10,
         dtype=None,
     )
     assert costed.params == 2 * 17 * 2
-    # Per hash: an int64 index read and a half-width row read and written;
-    # then the output copy at fp32 and the two shifted ids at int64.
-    assert costed["bytes", "primal", "selection", torch.int64] == 8 * (2 + 2 * 2)
-    assert costed["bytes", "primal", "selection", torch.float32] == 4 * (
-        2 * 2 * 2 + 2 * 4
+    rows = 10
+    hashes = len(config.hash_multipliers)
+    width_per_hash = config.channels_out // hashes
+    # Each concrete invocation reads every hash index and shifted token ID.
+    assert costed["bytes", "primal", "selection", torch.int64] == 8 * (
+        hashes * rows + 2 * rows * (3 - 1)
     )
-    assert costed["flops", "adjoint", "selection"].sum() == 4
-    # Three multiplies, two XORs, one modulo per hash.
-    assert costed["flops", "primal", "elementwise"].sum() == 2 * 2 * 3
+    assert costed["bytes", "primal", "selection", torch.float32] == 4 * (
+        hashes * 2 * rows * width_per_hash + 2 * rows * config.channels_out
+    )
+    assert costed["flops", "adjoint", "selection"].sum() == (
+        hashes * rows * width_per_hash
+    )
+    # Three multiplies, two XORs, one modulo per hash and row.
+    assert costed["flops", "primal", "elementwise"].sum() == (2 * 3 * hashes * rows)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
@@ -114,6 +119,24 @@ def test_hashed_tables_cost_counts_shift_and_output_copies() -> None:
     )
 
 
+def test_ngram_embedding_cost_matches_torch_with_hash_scale_and_context() -> None:
+    config = NgramEmbedding.Config()
+    config.channels_in = 13
+    config.channels_out = 4
+    config.multipliers = (1, 3, 5)
+    config.scale = 0.25
+    context = NgramEmbedding.Config()
+    context.channels_in = 7
+    config.contexts = {"context": context}
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.randint(0, 7, (2, 4)),
+        seq_len=4,
+        batch_size=2,
+        dtype=None,
+    )
+
+
 def test_ngram_cost_counts_padding_and_masked_prefix_copy() -> None:
     config = NgramEmbedding.Config()
     config.channels_in = 13
@@ -124,15 +147,19 @@ def test_ngram_cost_counts_padding_and_masked_prefix_copy() -> None:
         batch_size=1,
         dtype=torch.bfloat16,
     )
-    gather = 2 * 2
-    shifted = (2 + 1 / 8) + (2 + 2 / 8)
-    output = 2 * 2 + 2 * 2 / 8
+    rows = 8
+    order = len(config.multipliers)
+    shifted = sum(2 * rows + lag for lag in range(1, order))
+    prefix = min(order - 1, rows)
+    output = 2 * config.channels_out * rows + prefix * config.channels_out
     # The gathered row moves at the table's dtype (torch's default, fp32); the
     # padded output is the batch's activation, bf16; the lookup index and the
     # shifted ids are int64.
-    assert costed["bytes", "primal", "selection", torch.int64] == 8 * (1 + shifted)
-    assert costed["bytes", "primal", "selection", torch.float32] == 4 * gather
-    assert costed["bytes", "primal", "selection", torch.bfloat16] == 2 * output
+    assert costed["bytes", "primal", "selection", torch.int64] == 8 * (rows + shifted)
+    assert costed["bytes", "primal", "selection", torch.float32] == 4 * (
+        2 * rows * config.channels_out
+    )
+    assert costed["bytes", "primal", "selection", torch.bfloat16] == (2 * output)
 
 
 def test_ngram_cost_includes_context_table_and_scale() -> None:
@@ -144,9 +171,14 @@ def test_ngram_cost_includes_context_table_and_scale() -> None:
     context.channels_in = 7
     config.contexts = {"previous": context}
     costed = config.finalize().cost(seq_len=4, batch_size=1, dtype=torch.bfloat16)
+    rows = 4
+    width = config.channels_out
+    itemsize = torch.bfloat16.itemsize
     assert costed.params == (13 + 7) * 2
-    assert costed["flops", "primal", "elementwise"].sum() == 2 + 2
-    assert costed["bytes", "primal", "elementwise"].sum() == 2 * 2 * (2 + 3)
+    assert costed["flops", "primal", "elementwise"].sum() == 2 * width * rows
+    assert costed["bytes", "primal", "elementwise"].sum() == (
+        itemsize * width * rows * (2 + 3)
+    )
 
 
 def test_table_initialization_transform_preserves_rng_draws() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import functools
 import importlib
@@ -11,21 +11,29 @@ import inspect
 import math
 import pathlib
 
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from configgle import Fig
 
 import pytest
 import torch
 
 from priml.cost import (
+    MEASURES,
     Cost,
+    Report,
     cost,
     elementwise_cost,
+    intensity,
     map_cost,
     matmul_cost,
     peak,
     reduction_cost,
     resolve_dtype,
     set_cost,
+    traffic,
     utilization,
 )
 from priml.custom_types import HasCost
@@ -42,6 +50,15 @@ from priml.model.swiglu import SwiGLU
 BF = torch.bfloat16
 F32 = torch.float32
 I64 = torch.int64
+_FRACTIONAL: object = 1.5
+
+
+def _cost_with_owned_count(field: str, value: int) -> Cost:
+    if field == "params":
+        return Cost(params=value)
+    if field == "params_active":
+        return Cost(params_active=value)
+    return Cost(bytes_state=value)
 
 
 def _t() -> Cost:
@@ -56,10 +73,23 @@ def _t() -> Cost:
     )
 
 
-def test_full_key_reads_a_float_and_a_missing_cell_is_zero() -> None:
+def test_full_key_reads_an_integer_and_a_missing_cell_is_zero() -> None:
     t = _t()
     assert t["flops", "primal", "matmul", BF] == 60
     assert t["flops", "primal", "sort", F32] == 0
+
+
+@pytest.mark.parametrize("value", [_FRACTIONAL, True, -1])
+def test_cost_rejects_invalid_cells(value: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="cell"):
+        Cost(cells={("flops", "primal", "matmul", BF): cast(int, value)})
+
+
+@pytest.mark.parametrize("field", ["params", "params_active", "bytes_state"])
+@pytest.mark.parametrize("value", [_FRACTIONAL, True, -1])
+def test_cost_rejects_invalid_owned_counts(field: str, value: object) -> None:
+    with pytest.raises((TypeError, ValueError), match=field):
+        _cost_with_owned_count(field, cast(int, value))
 
 
 def test_partial_keys_slice_and_drop_the_fixed_leading_axes() -> None:
@@ -89,7 +119,16 @@ def test_a_dtype_may_be_named_by_string_or_alias() -> None:
     assert t["f32", "flops"].cells == t[F32, "flops"].cells
 
 
-def test_intensity_is_a_virtual_measure_on_a_model_cost() -> None:
+def test_cost_has_only_execution_measures() -> None:
+    c = Cost(cells={("flops", "primal", "matmul", BF): 60})
+    assert MEASURES == ("flops", "bytes")
+    with pytest.raises(KeyError, match="intensity"):
+        _ = c["intensity"]
+    with pytest.raises(ValueError, match="reporting intensity"):
+        Cost(cells={("intensity", "primal", "matmul", BF): 1})
+
+
+def test_intensity_is_a_separate_float_reporting_table() -> None:
     c = Cost(
         cells={
             ("flops", "primal", "matmul", BF): 60,
@@ -99,11 +138,13 @@ def test_intensity_is_a_virtual_measure_on_a_model_cost() -> None:
             ("bytes", "primal", "selection", I64): 2,
         },
     )
-    assert c["intensity", "primal", "matmul", BF] == 15
-    assert c["matmul", BF, "intensity"].cells == {("primal",): 15, ("adjoint",): 30}
-    assert c["intensity", "primal", "selection", I64] == 0
-    assert (c["matmul", BF, "intensity"] / 15 - 1).cells == {("adjoint",): 1}
-    assert c["intensity"].params == 0
+    ratio = intensity(c)
+    assert isinstance(ratio, Report)
+    assert ratio["primal", "matmul", BF] == 15
+    assert ratio["matmul", BF].cells == {("primal",): 15.0, ("adjoint",): 30.0}
+    assert ratio["primal", "selection", I64] == 0.0
+    assert all(isinstance(value, float) for value in ratio.cells.values())
+    assert intensity(Cost())["primal", "matmul", BF] == 0.0
 
 
 def test_only_keeps_one_axis_value_without_dropping_the_axis() -> None:
@@ -152,24 +193,9 @@ def test_add_is_cell_wise_and_keeps_sparse_zeros_out() -> None:
     )
 
 
-def test_cell_wise_division_over_the_written_cells() -> None:
-    """Sparse: a cell neither side wrote is zero, not ``0 / 0``."""
-    t = Cost(
-        cells={
-            ("flops", "primal", "matmul", BF): 6,
-            ("flops", "primal", "reduction", F32): 1,
-            ("bytes", "primal", "matmul", BF): 2,
-            ("bytes", "primal", "sort", F32): 5,
-        },
-        params=3,
-    )
-    ratio = t["flops"] / t["bytes"]
-    assert ratio["primal", "matmul", BF] == 3
-    assert ratio["primal", "reduction", F32] == math.inf
-    assert ratio["primal", "sort", F32] == 0
-    assert ratio["adjoint", "sort", F32] == 0
-    assert ratio.params == 0
-    assert (t / 2)["flops", "primal", "matmul", BF] == 3
+def test_cost_has_no_division_operator() -> None:
+    assert "__truediv__" not in Cost.__dict__
+    assert "__sub__" not in Cost.__dict__
 
 
 def test_equality_ignores_explicit_zero_cells() -> None:
@@ -201,19 +227,28 @@ def test_tile_scales_work_by_rows_and_ownership_by_copies() -> None:
     assert tiled["bytes", "adjoint", "reduction", F32] == 6
     assert tiled.params == tiled.params_active == 10
 
+    stateful = Cost(bytes_state=3).tile(2)
+    assert stateful.bytes_state == 6
 
-def test_matmul_cost_is_tagged_with_its_dtype() -> None:
+
+def test_matmul_cost_counts_the_whole_invocation_in_integers() -> None:
     c = matmul_cost(channels_in=2, channels_out=3, bias=True, rows=4, dtype=BF)
-    assert c["flops", "primal", "matmul", BF] == 12
-    assert c["flops", "adjoint", "matmul", BF] == 24
-    assert c["flops", "primal", "elementwise", BF] == 3
-    assert c["flops", "adjoint", "reduction", BF] == 2.25
-    assert c["bytes", "primal", "matmul", BF] == 2 * (2 + 3 + 6 / 4)
-    assert c["bytes", "adjoint", "matmul", BF] == 2 * 2 * (2 + 3 + 6 / 4)
-    assert c["bytes", "primal", "elementwise", BF] == 2 * (6 + 3 / 4)
-    assert c["bytes", "adjoint", "reduction", BF] == 2 * (3 + 3 / 4)
+    assert c["flops", "primal", "matmul", BF] == 48
+    assert c["flops", "adjoint", "matmul", BF] == 96
+    assert c["flops", "primal", "elementwise", BF] == 12
+    assert c["flops", "adjoint", "reduction", BF] == 9
+    assert c["bytes", "primal", "matmul", BF] == 2 * (4 * 2 + 4 * 3 + 6)
+    assert c["bytes", "adjoint", "matmul", BF] == 2 * 2 * (4 * 2 + 4 * 3 + 6)
+    assert c["bytes", "primal", "elementwise", BF] == 2 * (2 * 4 * 3 + 3)
+    assert c["bytes", "adjoint", "reduction", BF] == 2 * (4 * 3 + 3)
+    assert all(isinstance(value, int) for value in c.cells.values())
     assert c["bytes", F32] == Cost()
     assert c.params == c.params_active == 9
+
+
+def test_matmul_cost_rejects_fractional_execution_rows() -> None:
+    with pytest.raises(TypeError, match="integer"):
+        matmul_cost(channels_in=2, channels_out=3, rows=cast(int, _FRACTIONAL))
 
 
 def test_dtype_defaults_to_the_torch_default() -> None:
@@ -223,24 +258,31 @@ def test_dtype_defaults_to_the_torch_default() -> None:
 
 
 def test_elementwise_and_reduction_costs_carry_the_dtype() -> None:
-    ew = elementwise_cost(primal=7, adjoint=11, channels=5, params=3, rows=4, dtype=BF)
-    assert ew["bytes", "primal", "elementwise", BF] == 2 * (10 + 3 / 4)
-    assert ew["bytes", "adjoint", "elementwise", BF] == 2 * (15 + 3 / 4 + 3)
-    assert ew["bytes", "adjoint", "reduction", BF] == 2 * (3 + 3 / 4)
-    red = reduction_cost(input_elements=12, output_groups=3, rows=4, dtype=I64)
-    assert red["flops", "primal", "reduction", I64] == 9 / 4
-    assert red["bytes", "primal", "reduction", I64] == 8 * 15 / 4
+    ew = elementwise_cost(
+        primal=28,
+        adjoint=44,
+        channels=5,
+        params=3,
+        rows=4,
+        dtype=BF,
+    )
+    assert ew["flops", "primal", "elementwise", BF] == 28
+    assert ew["flops", "adjoint", "elementwise", BF] == 44
+    assert ew["flops", "adjoint", "reduction", BF] == 9
+    assert ew["bytes", "primal", "elementwise", BF] == 2 * (4 * 10 + 3)
+    assert ew["bytes", "adjoint", "elementwise", BF] == 2 * (4 * 15 + 4 * 3 + 3)
+    assert ew["bytes", "adjoint", "reduction", BF] == 2 * (4 * 3 + 3)
+    red = reduction_cost(input_elements=12, output_groups=3, dtype=I64)
+    assert red["flops", "primal", "reduction", I64] == 9
+    assert red["bytes", "primal", "reduction", I64] == 8 * 15
     assert red["flops", "adjoint"] == Cost()
 
 
 def test_intensity_reads_as_a_ratio_of_slices() -> None:
     c = matmul_cost(channels_in=2, channels_out=3, rows=4, dtype=BF)
-    assert c["flops", "primal", "matmul"].sum() / c[
-        "bytes",
-        "primal",
-        "matmul",
-    ].sum() == (12 / (2 * (2 + 3 + 6 / 4)))
-    assert c["flops"].sum() / c["bytes"].sum() == 36 / (3 * 2 * (2 + 3 + 6 / 4))
+    report = intensity(c)
+    assert report["primal", "matmul", BF] == 48 / 52
+    assert report["adjoint", "matmul", BF] == 96 / 104
 
 
 # -- primitives --------------------------------------------------------------
@@ -249,8 +291,8 @@ def test_intensity_reads_as_a_ratio_of_slices() -> None:
 def test_matmul_cost_without_a_weight_owns_nothing_but_reads_both_operands() -> None:
     c = matmul_cost(channels_in=2, channels_out=3, weight=False, rows=4)
     assert c.params == c.params_active == 0
-    assert c["flops", "primal", "matmul"].sum() == 12
-    assert c["bytes", "primal", "matmul"].sum() == 4 * (2 + 3 + 6 / 4)
+    assert c["flops", "primal", "matmul"].sum() == 48
+    assert c["bytes", "primal", "matmul"].sum() == 4 * (4 * 2 + 4 * 3 + 6)
 
 
 def test_matmul_cost_adjoint_is_twice_primal_in_the_matmul_cells() -> None:
@@ -293,28 +335,26 @@ def test_reduction_in_the_adjoint_phase() -> None:
     assert c["flops", "primal", "reduction", F32] == 0
 
 
-def test_fractional_sharing_rows_remain_at_least_one() -> None:
-    counted = matmul_cost(channels_in=2, channels_out=3, rows=1.5)
-    assert counted["bytes", "primal", "matmul", F32] == 4 * (2 + 3 + 6 / 1.5)
-    with pytest.raises(ValueError, match="rows"):
-        elementwise_cost(primal=1, adjoint=1, params=1, rows=0.5)
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: matmul_cost(channels_in=2, channels_out=3, rows=cast(int, _FRACTIONAL)),
+        lambda: elementwise_cost(primal=cast(int, _FRACTIONAL), adjoint=1),
+        lambda: reduction_cost(input_elements=cast(int, _FRACTIONAL)),
+        lambda: traffic("primal", "elementwise", elements=cast(int, _FRACTIONAL)),
+        lambda: Cost().tile(cast(int, _FRACTIONAL)),
+        lambda: Cost().tile(1, copies=cast(int, _FRACTIONAL)),
+    ],
+)
+def test_primitives_reject_fractional_geometry(call: Callable[[], object]) -> None:
+    with pytest.raises(TypeError, match="integer"):
+        call()
 
 
 @pytest.mark.parametrize("rows", [0, -1, math.nan, math.inf])
-def test_primitives_reject_invalid_row_count(rows: float) -> None:
-    with pytest.raises(ValueError, match="rows"):
-        matmul_cost(channels_in=2, channels_out=3, rows=rows)
-    with pytest.raises(ValueError, match="rows"):
-        elementwise_cost(primal=1, adjoint=1, rows=rows)
-    with pytest.raises(ValueError, match="rows"):
-        reduction_cost(input_elements=3, rows=rows)
-
-
-def test_scalar_division_does_not_overflow_a_reciprocal() -> None:
-    key = ("flops", "primal", "matmul", F32)
-    tiny = Cost(cells={key: 1e-320})
-    assert tiny / 1e-320 == Cost(cells={key: 1})
-    assert (Cost(cells={key: 2}) / 0.0)[key] == math.inf
+def test_matmul_rejects_invalid_row_count(rows: object) -> None:
+    with pytest.raises((TypeError, ValueError), match=r"rows|integer"):
+        matmul_cost(channels_in=2, channels_out=3, rows=cast(int, rows))
 
 
 def test_equal_costs_hash_alike_and_zero_cells_do_not_change_the_hash() -> None:
@@ -330,20 +370,13 @@ def test_equal_costs_hash_alike_and_zero_cells_do_not_change_the_hash() -> None:
     assert hash(a) != hash(Cost(cells={("flops", "primal", "matmul", BF): 2}))
 
 
-def test_division_by_zero_follows_ieee() -> None:
-    key = ("flops", "primal", "matmul", F32)
-    assert math.isnan((Cost(cells={key: math.nan}) / 0.0)[key])
-    assert (Cost(cells={key: -2}) / 0.0)[key] == -math.inf
-    assert (Cost(cells={key: 2}) / -0.0)[key] == -math.inf
-
-
-def test_repr_is_a_grid_with_totals_and_intensity() -> None:
+def test_repr_is_a_grid_with_totals() -> None:
     c = Cost(
         cells={
             ("flops", "primal", "matmul", BF): 64_000,
             ("bytes", "primal", "matmul", BF): 32,
             ("bytes", "primal", "selection", I64): 8,
-            ("flops", "adjoint", "matmul", BF): 1.5e9,
+            ("flops", "adjoint", "matmul", BF): 1_500_000_000,
         },
         params=7,
     )
@@ -352,11 +385,19 @@ def test_repr_is_a_grid_with_totals_and_intensity() -> None:
     assert lines[0] == "Cost(params=7, params_active=0, bytes_state=0)"
     measure, dtype, primal, selection, adjoint, total = lines[1:]
     assert measure.split() == ["flops", "flops", "bytes", "bytes"]
-    assert dtype.split() == ["bf16", "int64", "bf16", "int64", "intensity"]
-    assert primal.split() == ["primal", "matmul", "64K", "-", "32", "-", "2K"]
-    assert selection.split() == ["primal", "selection", "-", "-", "-", "8", "-"]
-    assert adjoint.split() == ["adjoint", "matmul", "1.5G", "-", "-", "-", "inf"]
-    assert total.split() == ["total", "1.5G", "-", "32", "8", "37.5M"]
+    assert dtype.split() == ["bf16", "int64", "bf16", "int64"]
+    assert primal.split() == ["primal", "matmul", "64K", "-", "32", "-"]
+    assert selection.split() == ["primal", "selection", "-", "-", "-", "8"]
+    assert adjoint.split() == ["adjoint", "matmul", "1.5G", "-", "-", "-"]
+    assert total.split() == ["total", "1.5G", "-", "32", "8"]
+
+
+def test_report_repr_renders_float_reporting_cells() -> None:
+    text = repr(
+        Report(cells={("h100", BF, "intensity", "matmul"): 989 / 3.35}),
+    )
+    assert "intensity" in text
+    assert "295.2" in text
 
 
 def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> None:
@@ -385,42 +426,43 @@ def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> N
 
 
 def test_utilization_without_a_duration_is_intensity_over_the_ridge() -> None:
-    ridge = 989 / 3.35
     c = Cost(
         cells={
-            ("flops", "primal", "matmul", BF): 2 * ridge,
-            ("bytes", "primal", "matmul", BF): 1,
+            ("flops", "primal", "matmul", BF): 2 * 989_000_000_000_000,
+            ("bytes", "primal", "matmul", BF): 3_350_000_000_000,
             ("flops", "adjoint", "sort", F32): 1,
             ("bytes", "adjoint", "sort", F32): 1,
             ("flops", "primal", "matmul", torch.int32): 1,
             ("bytes", "primal", "matmul", torch.int32): 1,
         },
     )
-    ratio = utilization(c, device="h100", seq_len=4, batch_size=2)
+    ratio = utilization(c, device="h100")
+    assert isinstance(ratio, Report)
     assert ratio["primal", "matmul", BF] == pytest.approx(2)
     assert ratio["adjoint", "sort", F32] == pytest.approx(3.35 / 67)
     assert ratio["primal", "matmul", torch.int32] == math.inf
-    assert ratio.params == 0
 
 
 def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling() -> None:
     # 8 tokens a step: one compute-bound matmul, one memory-bound sort.
     c = Cost(
         cells={
-            ("flops", "primal", "matmul", BF): 989e12 / 8,
+            ("flops", "primal", "matmul", BF): 989_000_000_000_000,
             ("bytes", "primal", "matmul", BF): 1,
             ("flops", "adjoint", "sort", F32): 1,
             ("bytes", "adjoint", "sort", F32): 1,
         },
     )
-    achieved = utilization(c, device="h100", seq_len=4, batch_size=2, duration_sec=2)
+    achieved = utilization(c, device="h100", duration_sec=2)
+    assert isinstance(achieved, Report)
     assert achieved["primal", "matmul", BF] == pytest.approx(0.5)
     # Sort at intensity 1 is capped at bandwidth, 3.35e12 FLOP/s, not 67e12.
-    assert achieved["adjoint", "sort", F32] == pytest.approx(8 / 2 / 3.35e12)
+    assert achieved["adjoint", "sort", F32] == pytest.approx(1 / 2 / 3.35e12)
 
 
 def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() -> None:
     h100 = peak()["h100"]
+    assert isinstance(h100, Report)
     assert h100[BF, "flops", "matmul"] == 989e12
     assert h100[F32, "flops", "matmul"] == 494e12
     assert h100[BF, "flops", "elementwise"] == h100[F32, "flops", "reduction"] == 67e12
@@ -429,7 +471,6 @@ def test_peak_prices_matmul_per_dtype_and_every_other_silo_at_the_vector_rate() 
     assert h100[I64, "flops", "matmul"] == 0
     assert h100[BF, "bytes", "matmul"] == h100[F32, "bytes", "sort"] == 3.35e12
     assert h100[BF, "intensity", "matmul"] == 989 / 3.35
-    assert h100.params == 0
 
 
 def test_peak_intensity_is_the_ridge() -> None:
@@ -517,7 +558,7 @@ def test_a_linear_reads_its_rows_from_the_geometry() -> None:
             "adjoint",
             "reduction",
         ].sum()
-        == 2.25
+        == 9
     )
 
 
@@ -633,8 +674,8 @@ def test_scalar_leaf_formulas_and_composition() -> None:
     linear = Linear.Config(2, 3)
     linear.bias = True
     counted = cost(linear, seq_len=4, batch_size=1, dtype=None)
-    assert counted["flops", "primal", "elementwise"].sum() == 3
-    assert counted["flops", "adjoint", "reduction"].sum() == 2.25
+    assert counted["flops", "primal", "elementwise"].sum() == 12
+    assert counted["flops", "adjoint", "reduction"].sum() == 9
     norm = cost(RMSNorm.Config(4).finalize(), seq_len=1, batch_size=1, dtype=None)
     assert (
         norm["flops", "primal", "elementwise"].sum()

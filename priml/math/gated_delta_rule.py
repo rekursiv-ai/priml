@@ -9,6 +9,8 @@ from torch import Tensor
 import torch
 import torch.nn.functional
 
+from priml.math.numeric import l2norm
+
 
 def chunk_gated_delta_rule(
     query: Tensor,
@@ -54,8 +56,8 @@ def chunk_gated_delta_rule(
         for tensor in (query, key, value, beta, g)
     ]
     if use_qk_l2norm_in_kernel:
-        query, key = _norm_l2(query), _norm_l2(key)
-    query = query * float(query.shape[-1] ** -0.5)
+        query, key = l2norm(query), l2norm(key)
+    query = query * query.shape[-1] ** -0.5
     padding = (chunk_size - sequence % chunk_size) % chunk_size
     query, key, value = (
         torch.nn.functional.pad(tensor, (0, 0, 0, padding))
@@ -160,8 +162,8 @@ def recurrent_gated_delta_rule(
         for tensor in (query, key, value, beta, g)
     ]
     if use_qk_l2norm_in_kernel:
-        query, key = _norm_l2(query), _norm_l2(key)
-    query = query / float(query.shape[-1] ** 0.5)
+        query, key = l2norm(query), l2norm(key)
+    query = query / query.shape[-1] ** 0.5
     state = (
         torch.zeros(
             batch,
@@ -184,7 +186,3 @@ def recurrent_gated_delta_rule(
         output[:, :, index] = (state * q.unsqueeze(-1)).sum(dim=-2)
     output = output.transpose(1, 2).contiguous().to(dtype)
     return output, state if output_final_state else None
-
-
-def _norm_l2(tensor: Tensor) -> Tensor:
-    return tensor * torch.rsqrt((tensor * tensor).sum(dim=-1, keepdim=True) + 1e-6)

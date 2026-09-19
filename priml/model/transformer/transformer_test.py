@@ -426,8 +426,8 @@ def test_transformer_cost_is_the_palm_formula() -> None:
     assert cost.params == params
     embedding = 128 * 32
     matrix = params - embedding
-    attention = 12 * 2 * (4 * 8) * 16
-    assert cost["flops", "matmul"].sum() == 6 * matrix + attention
+    attention = 12 * 2 * (4 * 8) * 16 * 16
+    assert cost["flops", "matmul"].sum() == 6 * matrix * 16 + attention
     assert cost.bytes_state == 4 * 2 * 2 * 4 * 8
 
 
@@ -446,7 +446,6 @@ def test_transformer_cost_matches_torch_through_a_naive_kernel() -> None:
         build_input=lambda: torch.randint(0, 128, (1, 8)),
         seq_len=8,
         batch_size=1,
-        num_tokens=8,
         dtype=None,
         run=_logits_float,
     )

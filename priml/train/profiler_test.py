@@ -26,7 +26,7 @@ def _phase_timer_config(
     enabled: bool = False,
     torch_profile: bool = False,
     working_dir: Path | str = "/scratch/profiling",
-    heartbeat_interval_sec: float = 30.0,
+    heartbeat_interval_sec: float = 20.0,
     cuda_events: bool = False,
 ) -> PhaseTimer.Config:
     return PhaseTimer.Config(
@@ -39,6 +39,13 @@ def _phase_timer_config(
 
 
 class TestPhaseTimerDisabled:
+    def test_heartbeat_intervals_come_from_config(self) -> None:
+        config = _phase_timer_config(heartbeat_interval_sec=17.0)
+        config.fault_dump_interval_sec = 23.0
+        timer = config.make()
+        assert timer.heartbeat_interval_sec == 17.0
+        assert timer.fault_dump_interval_sec == 23.0
+
     def test_noop_phase(self):
         timer = _phase_timer_config(enabled=False).make()
         with timer.phase("test"):

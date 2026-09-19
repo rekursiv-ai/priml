@@ -104,17 +104,16 @@ def test_embedding_cost_is_a_gather() -> None:
         build_input=lambda: torch.randint(0, 8, (3,)),
         seq_len=3,
         batch_size=1,
-        num_tokens=3,
         dtype=None,
     )
     f32, i64 = torch.float32, torch.int64
     assert analytical == Cost(
         cells={
-            ("flops", "adjoint", "selection", f32): 4,
-            ("bytes", "primal", "selection", i64): 8,
-            ("bytes", "primal", "selection", f32): 4 * 2 * 4,
-            ("bytes", "adjoint", "selection", i64): 8,
-            ("bytes", "adjoint", "selection", f32): 4 * (3 * 4 + 32 / 3),
+            ("flops", "adjoint", "selection", f32): 3 * 4,
+            ("bytes", "primal", "selection", i64): 3 * 8,
+            ("bytes", "primal", "selection", f32): 4 * 2 * 3 * 4,
+            ("bytes", "adjoint", "selection", i64): 3 * 8,
+            ("bytes", "adjoint", "selection", f32): 4 * (3 * 3 * 4 + 32),
         },
         params=32,
         params_active=4,

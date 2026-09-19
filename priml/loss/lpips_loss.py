@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, cast, override
 
 import functools
@@ -43,9 +42,8 @@ class LPIPSLoss(nn.Module):
         """Backbone network for LPIPS ("vgg", "alex", "squeeze")."""
 
         image_size: tuple[int, int] = (-1, -1)
-        """``(height, width)`` of one frame: the token grid the cost is spread
-        over. The data fixes it, so the experiment sets it; ``cost`` refuses
-        the sentinel."""
+        """``(height, width)`` of each frame. The data fixes it, so the
+        experiment sets it; ``cost`` refuses the sentinel."""
 
         def cost(
             self,
@@ -57,51 +55,50 @@ class LPIPSLoss(nn.Module):
         ) -> Cost:
             """Cost both branches through the frozen trunk and the linear head.
 
-            A token is one ``(h, w)`` position of one SCORED frame of one
-            video, so a step holds ``batch_size * frames_scored * height *
-            width`` of them and every parameter is shared by that many. This
-            is a root: ``seq_len`` is the frames each video has
-            scored, ``min(max_num_random_frames, T)`` of its ``T``, and
-            ``batch_size`` is videos; a caller's own ``rows`` is replaced. A
-            caller holding ``T`` frames of which ``k`` are scored spreads the
-            cost over ``k / T`` of its frame positions; the unscored frames
-            cost nothing.
+            A complete invocation scores ``batch_size * seq_len`` frames, each
+            with ``height * width`` positions. ``seq_len`` is the number of
+            sampled frames per video, bounded at runtime by
+            ``min(max_num_random_frames, T)``; ``batch_size`` is the number of
+            videos. The returned ledger contains the complete FLOP and logical
+            byte totals for both branches, the trainable heads, and frame
+            selection. Shared trunk parameters are counted once even though
+            the frozen trunk executes in both branches.
 
             The trunk is built with random weights on the meta device, so
             costing downloads nothing and allocates nothing. Its layers are
             traced through one forward at ``image_size`` and each is costed at
             its own output grid: a convolution as the matmul over its receptive
             field, a max pool as ``k * k - 1`` compares per pooled element with
-            one gradient routed back to the argmax, a ReLU as one operation per
-            element each way. Every trunk parameter is frozen but owned: it is
-            in ``params``, and its adjoint is the input gradient alone -- one
-            convolution of the primal's size, not the two a trainable layer
+            one gradient routed back to the argmax, and a ReLU as one operation
+            per element each way. Every trunk parameter is frozen but owned:
+            it is in ``params``, and its adjoint is the input gradient alone --
+            one convolution of the primal's size, not the two a trainable layer
             pays. The trunk, the ``ScalingLayer`` (shift and scale per input
             element), and the per-stage channel normalization run once per
-            branch, ``x`` and ``xhat``, so their work is doubled and their
-            parameters counted once. Per stage, the squared feature difference,
-            the trainable 1x1 ``NetLinLayer`` convolution, and the spatial mean
-            run once; the stage sum and the mean over frames are one add each
-            per frame. Work at every grid is spread over the image's positions in
-            one division. ``NetLinLayer``'s dropout is uncosted: ``lpips.LPIPS``
-            puts itself in eval mode at construction, where it is the identity.
+            branch, ``x`` and ``xhat``. Per stage, the squared feature
+            difference, trainable 1x1 ``NetLinLayer`` convolution, and spatial
+            mean run once; stage and frame reductions use their complete
+            concrete tensors. ``NetLinLayer``'s dropout is uncosted:
+            ``lpips.LPIPS`` puts itself in eval mode at construction, where it
+            is the identity.
 
             Each branch gathers a selected RGB frame: read/write its pixels
             and read the shared frame index once. Both input adjoints scatter
             to those selected pixels, reading the gradient and destination
             before writing it. Unique frame indices need no collision adds.
             Permutation generation and unsampled gradient initialization are
-            excluded: their original frame count is not on this scored-frame bus.
-            No sort is assumed for ``randperm`` and no layout-copy is guessed.
+            excluded: their original frame count is not on this scored-frame
+            bus. No sort is assumed for ``randperm`` and no layout-copy is
+            guessed.
 
             Args:
-              seq_len: Tokens per sequence.
-              batch_size: Sequences per step.
+              seq_len: Sampled frames per video.
+              batch_size: Videos per invocation.
               dtype: Activation dtype; ``None`` is torch's default.
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-frame-position cost of this loss; ``bytes_state`` is zero.
+              cost: Complete invocation cost; ``bytes_state`` is zero.
 
             Raises:
               ValueError: ``image_size`` was never set.
@@ -116,10 +113,10 @@ class LPIPSLoss(nn.Module):
             image_size = self.image_size
             dt = dtype
             positions = math.prod(image_size)
-            rows = batch_size * seq_len * positions
+            frames = batch_size * seq_len
             with torch.device("meta"):
                 model = _lpips(self.net, pretrained=False)
-            traced: list[tuple[nn.Module, tuple[int, ...]]] = []
+            traced: list[tuple[nn.Module, tuple[int, ...], tuple[int, ...]]] = []
             for module in model.net.modules():
                 if isinstance(module, (nn.Conv2d, nn.MaxPool2d, nn.ReLU)):
                     module.register_forward_hook(
@@ -132,25 +129,30 @@ class LPIPSLoss(nn.Module):
                 model.net(torch.empty(1, 3, *image_size, device="meta")),
             )
 
-            branch = traffic(
-                "primal",
-                "elementwise",
-                elements=2 * 3 * 3,
-                flops=2 * 3,
-                dtype=dt,
-            ) + traffic(
-                "adjoint",
-                "elementwise",
-                elements=3 * 3,
-                flops=3,
-                dtype=dt,
-            ).tile(positions)
-            for module, shape in traced:
+            branch = (
+                traffic(
+                    "primal",
+                    "elementwise",
+                    elements=2 * 3 * 3,
+                    flops=2 * 3,
+                    dtype=dt,
+                )
+                + traffic(
+                    "adjoint",
+                    "elementwise",
+                    elements=3 * 3,
+                    flops=3,
+                    dtype=dt,
+                )
+            ).tile(frames * positions)
+            for module, input_shape, shape in traced:
                 channels, grid = shape[1], math.prod(shape[2:])
+                output_rows = frames * grid
                 if isinstance(module, nn.Conv2d):
                     costed = _conv2d_cost(
                         module,
-                        rows=_rows(rows, positions=positions, grid=grid),
+                        input_grid=input_shape[2:],
+                        batch_size=frames,
                         dtype=dt,
                     )
                 elif isinstance(module, nn.MaxPool2d):
@@ -158,15 +160,15 @@ class LPIPSLoss(nn.Module):
                         channels,
                         kernel_size=module.kernel_size,
                         dtype=dt,
-                    )
+                    ).tile(output_rows)
                 else:
                     costed = elementwise_cost(
                         primal=channels,
                         adjoint=channels,
                         channels=channels,
                         dtype=dt,
-                    )
-                branch += costed.tile(grid)
+                    ).tile(output_rows)
+                branch += costed
 
             head = (
                 traffic(
@@ -179,12 +181,12 @@ class LPIPSLoss(nn.Module):
                 + traffic("primal", "reduction", elements=2, dtype=dt)
                 + traffic("adjoint", "elementwise", elements=2, flops=1, dtype=dt)
                 + traffic("adjoint", "reduction", elements=2, dtype=dt)
-            )
+            ).tile(frames)
             heads = model.lins  # codespell:ignore lins
             for lin, out in zip(heads, stages, strict=True):
                 assert isinstance(out, Tensor)
                 channels, grid = out.shape[1], math.prod(out.shape[2:])
-                branch += _normalize_cost(channels, dtype=dt).tile(grid)
+                branch += _normalize_cost(channels, dtype=dt).tile(frames * grid)
                 conv = next(m for m in lin.modules() if isinstance(m, nn.Conv2d))
                 head += (
                     traffic(
@@ -201,27 +203,33 @@ class LPIPSLoss(nn.Module):
                         flops=3 * channels,
                         dtype=dt,
                     )
-                    + _conv2d_cost(
-                        conv,
-                        rows=_rows(rows, positions=positions, grid=grid),
-                        dtype=dt,
-                    ).tile(grid)
+                ).tile(frames)
+                head += _conv2d_cost(
+                    conv,
+                    input_grid=out.shape[2:],
+                    batch_size=frames,
+                    dtype=dt,
                 )
-                head += _spatial_average_cost(grid, dtype=dt)
+                head += _spatial_average_cost(grid, dtype=dt).tile(frames)
             # Both branches gather a frame's pixels and read the shared frame
             # index, one ``int64`` each; the adjoints scatter to those pixels.
             selected = (
-                traffic("primal", "selection", elements=2 * 3 * 2 * positions, dtype=dt)
+                traffic(
+                    "primal",
+                    "selection",
+                    elements=2 * 3 * 2 * frames * positions,
+                    dtype=dt,
+                )
                 + traffic("primal", "selection", elements=2, dtype=torch.int64)
                 + traffic(
                     "adjoint",
                     "selection",
-                    elements=2 * 3 * 3 * positions,
+                    elements=2 * 3 * 3 * frames * positions,
                     dtype=dt,
                 )
                 + traffic("adjoint", "selection", elements=2, dtype=torch.int64)
             )
-            return (branch.tile(2) + head + selected).tile(1 / positions)
+            return branch.tile(2, copies=1) + head + selected
 
     def __init__(self, config: Config):
         super().__init__()
@@ -295,34 +303,42 @@ def _lpips(net: str, *, pretrained: bool) -> lpips.LPIPS:
 
 
 def _record_output_shape(
-    traced: list[tuple[nn.Module, tuple[int, ...]]],
+    traced: list[tuple[nn.Module, tuple[int, ...], tuple[int, ...]]],
     module: nn.Module,
     args: tuple[object, ...],
     output: object,
 ) -> None:
-    """Forward hook: append the module and its output shape in execution order."""
-    del args
+    """Record both operand grids; strided convolutions change their sizes."""
+    input_tensor = args[0]
+    assert isinstance(input_tensor, Tensor)
     assert isinstance(output, Tensor)
-    traced.append((module, tuple(output.shape)))
+    traced.append((module, tuple(input_tensor.shape), tuple(output.shape)))
 
 
-def _conv2d_cost(module: nn.Conv2d, *, rows: int, dtype: torch.dtype | None) -> Cost:
-    """Cost one output position of ``module``; a frozen weight pays no weight gradient."""
-    costed = conv_cost(
+def _conv2d_cost(
+    module: nn.Conv2d,
+    *,
+    input_grid: tuple[int, ...],
+    batch_size: int,
+    dtype: torch.dtype | None,
+) -> Cost:
+    """Cost a convolution over its measured input grid and module geometry."""
+    return conv_cost(
         channels_in=module.in_channels,
         channels_out=module.out_channels,
         kernel_size=module.kernel_size,
         ndim=2,
         groups=module.groups,
         bias=module.bias is not None,
-        rows=rows,
+        input_grid=input_grid,
+        batch_size=batch_size,
+        stride=module.stride,
+        padding=module.padding,
+        dilation=module.dilation,
         dtype=dtype,
+        weight_grad=module.weight.requires_grad,
+        bias_grad=module.bias is not None and module.bias.requires_grad,
     )
-    if module.weight.requires_grad:
-        return costed
-    # Frozen: the adjoint is the input gradient alone, the primal's size.
-    primal = costed.only("primal")
-    return replace(costed, cells=(primal + primal.relabel("adjoint")).cells)
 
 
 # The saved argmax is one ``int64`` per pooled channel each way.
@@ -390,10 +406,3 @@ def _spatial_average_cost(positions: int, *, dtype: torch.dtype | None) -> Cost:
         + traffic("primal", "elementwise", elements=2, flops=1, dtype=dtype)
         + traffic("adjoint", "elementwise", elements=n + 1, flops=n, dtype=dtype)
     )
-
-
-# Rounded up, so the one-row shape estimate stays one row through a downsampling
-# layer instead of dividing by zero.
-def _rows(rows: int, *, positions: int, grid: int) -> int:
-    """Return the rows a layer on ``grid`` sees when a frame holds ``rows``."""
-    return (rows * grid + positions - 1) // positions

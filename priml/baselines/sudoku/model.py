@@ -383,25 +383,21 @@ class SudokuNet(nn.Module):
             return super().finalize()
 
         def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
-            """Cost one forward per grid cell: embed, every core pass, both heads.
+            """Cost one complete invocation over the supplied puzzles.
 
-            The latent sequence is ``total_seq_len`` rows per puzzle -- prefix
-            plus grid -- while a token is one grid CELL, so work over the
-            sequence (the block stack, the adds, the token head) is spread by
-            ``total_seq_len / grid_len`` and work done once per puzzle (the
-            prefix, the halt head) by ``1 / grid_len``.
-
-            One core pass runs the stack ``fast_cycles + 1`` times over
-            parameters owned once. Every slow cycle runs the core forward and
-            only the last runs backward, so the primal is repeated
-            ``slow_cycles`` times and the adjoint once.
+            The concrete ledger includes the latent sequence, every core pass,
+            both heads, and the embedding for each puzzle. One core pass runs
+            the stack ``fast_cycles + 1`` times over parameters owned once.
+            Every slow cycle runs the core forward and only the last runs
+            backward, so the primal is repeated ``slow_cycles`` times and the
+            adjoint once.
 
             Args:
-              batch_size: Puzzles per step.
+              batch_size: Puzzles in this invocation.
               dtype: Activation dtype; ``None`` is torch's default.
 
             Returns:
-              cost: Per-cell cost of this module.
+              cost: Whole-invocation FLOPs, logical bytes, and ownership.
 
             """
             puzzles = batch_size
@@ -427,19 +423,19 @@ class SudokuNet(nn.Module):
                 self.num_layers,
                 copies=self.num_layers,
             )
+            rows = latent * puzzles
             # ``z_slow + input_emb``, one add per fast cycle, and the slow
             # update: each an add forward and an accumulation back.
             adds = elementwise_cost(
-                primal=(fast_cycles + 2) * width,
-                adjoint=(fast_cycles + 2) * width,
+                primal=(fast_cycles + 2) * width * rows,
+                adjoint=(fast_cycles + 2) * width * rows,
                 channels=(fast_cycles + 2) * width,
                 inputs=2,
+                rows=rows,
                 dtype=dt,
             )
             per_row = stack.tile(fast_cycles + 1) + adds + over_rows(_head(self))
-            core = per_row.tile(latent / grid_len) + over_puzzles(
-                _halt_head(self),
-            ).tile(1 / grid_len)
+            core = per_row + over_puzzles(_halt_head(self))
             # Every slow cycle runs the core forward; only the last runs backward.
             primal_only = core.only("primal")
             total = (
@@ -453,11 +449,11 @@ class SudokuNet(nn.Module):
                 + primal_only.tile(slow_cycles - 1)
             )
             if self.prefix is not None:
-                total += over_puzzles(self.prefix).tile(1 / grid_len)
+                total += over_puzzles(self.prefix)
                 total += traffic(
                     "primal",
                     "selection",
-                    elements=2 * latent * width / grid_len,
+                    elements=2 * latent * width * puzzles,
                     dtype=dt,
                 )
             if self.recurrence is not None:

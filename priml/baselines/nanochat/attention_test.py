@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import field
 from importlib.metadata import version
 from types import ModuleType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 
 import sys
 
-from configgle import PartialConfig
+from configgle import Fig, PartialConfig
 from torch import Tensor, nn
 
 import pytest
@@ -16,7 +17,10 @@ import torch
 
 from priml.baselines.nanochat.attention import (
     CausalAttention,
+    Flash3Attention,
     Flash4Attention,
+    _flash4_backward_fake,
+    _flash4_backward_kernel,
     _qk_backward,
     _qk_backward_fake,
     _qk_backward_reference,
@@ -24,8 +28,8 @@ from priml.baselines.nanochat.attention import (
     _qk_reference,
     fused_qk_norm_rope,
 )
-from priml.cost import cost
-from priml.model.attention.kernel import SdpaNaive
+from priml.cost import Cost, cost
+from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
 from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.special import Identity
@@ -36,6 +40,90 @@ import priml.baselines.nanochat.attention
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+
+class _FlashCostReference(nn.Module):
+    """Qualify Flash analytical configs with PyTorch, never native execution."""
+
+    class Config(Fig["_FlashCostReference"]):
+        estimate: Flash3Attention.Config | Flash4Attention.Config = field(
+            default_factory=Flash3Attention.Config,
+        )
+        """Native configuration whose analytical method is under test."""
+
+        window: int = -1
+        """Previous keys admitted in addition to the current position."""
+
+        def cost(self, **kwargs: object) -> Cost:
+            """Delegate accounting without constructing the native backend."""
+            return cost(self.estimate, window=self.window, **kwargs)
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.window = config.window
+        self.reference = SdpaNaive.Config().make()
+
+    @override
+    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+        return self.reference(q, k, v, is_causal=True, window=self.window)
+
+
+@pytest.mark.parametrize(
+    "estimate",
+    [Flash3Attention.Config(), Flash4Attention.Config()],
+)
+@pytest.mark.parametrize("window", [-1, 0, 1, 4, 8, 12])
+def test_flash_analytical_cost_matches_torch_reference(
+    estimate: Flash3Attention.Config | Flash4Attention.Config,
+    window: int,
+) -> None:
+    """Exercise real cost bodies; native availability and I/O remain unqualified."""
+    config = _FlashCostReference.Config()
+    config.estimate = estimate
+    config.window = window
+    seq_len = 8 if window < 0 else min(window + 1, 8)
+    # Execute one complete invocation at the concrete local-window shape.
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: tuple(
+            torch.randn(2, seq_len, 2, 4, requires_grad=True) for _ in range(3)
+        ),
+        seq_len=seq_len,
+        batch_size=2,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+    )
+
+
+@pytest.mark.parametrize("config", [Flash3Attention.Config(), Flash4Attention.Config()])
+def test_flash_cost_scales_complete_invocations_by_batch(
+    config: Flash3Attention.Config | Flash4Attention.Config,
+) -> None:
+    single = cost(
+        config,
+        seq_len=8,
+        batch_size=1,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+    )
+    batched = cost(
+        config,
+        seq_len=8,
+        batch_size=2,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+    )
+    assert batched == single.tile(2)
+    assert batched == attention_kernel_cost(
+        seq_len=8,
+        batch_size=2,
+        dtype=None,
+        num_heads=2,
+        channels_head=4,
+    )
 
 
 def test_flash_backends_belong_to_attention() -> None:
@@ -296,6 +384,98 @@ def test_layout_window_tuple_and_gradients(
     ]
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "layout",
+    ["contiguous", "transposed", "aligned", "misaligned"],
+)
+def test_flash4_backward_owns_contiguous_layout(
+    dtype: torch.dtype,
+    layout: str,
+) -> None:
+    """Check the real adapter against pinned allocation, without native execution."""
+    value = torch.arange(128, dtype=dtype).reshape(2, 4, 2, 8)
+    if layout == "transposed":
+        value = value.reshape(2, 4, 8, 2).transpose(-1, -2)
+    elif layout == "aligned":
+        value = value.reshape(2, 2, 4, 8).transpose(1, 2)
+    elif layout == "misaligned":
+        value = torch.arange(129, dtype=dtype)[1:].reshape(2, 2, 4, 8).transpose(1, 2)
+    gradient = torch.randn(value.shape, dtype=dtype)
+    saved = [value, value, value, torch.empty_like(gradient), torch.empty(2, 2, 4)]
+    backend = _LayoutInterface()
+    actual = _flash4_backward_kernel(backend, saved, gradient, -1)
+    declared = _flash4_backward_fake(saved, gradient, -1)
+    for result, fake, reference in zip(
+        actual,
+        declared,
+        backend.gradients,
+        strict=True,
+    ):
+        assert result.stride() == fake.stride()
+        assert result.is_contiguous()
+        assert fake.is_contiguous()
+        assert result.dtype == fake.dtype == dtype
+        assert result.shape == fake.shape == value.shape
+        assert torch.equal(
+            result.view(torch.int16),
+            reference.contiguous().view(torch.int16),
+        )
+        if reference.is_contiguous():
+            assert result is reference
+    assert all(received is value for received in backend.inputs)
+
+
+class _LayoutInterface(ModuleType):
+    """Emulate only FA4 4.0.0b29's input normalization and gradient allocation."""
+
+    def __init__(self) -> None:
+        super().__init__("flash_attn.cute.interface")
+        self.gradients: list[Tensor] = []
+        self.inputs: tuple[Tensor, ...] = ()
+
+    def flash_attn_func(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *,
+        causal: bool,
+        window_size: tuple[int | None, int | None],
+        return_lse: bool,
+    ) -> tuple[Tensor, Tensor]:
+        del q, k, v, causal, window_size, return_lse
+        raise NotImplementedError
+
+    def _flash_attn_bwd(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        *saved: Tensor,
+        causal: bool,
+        window_size_left: int | None,
+        window_size_right: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        del causal, window_size_left, window_size_right
+        self.inputs = (q, k, v)
+        # CuTe 4.0.0b29: cute_dsl_utils.py:70-99; interface.py:1980,2108-2119.
+        for scale, value in enumerate(self.inputs, start=1):
+            aligned = value.data_ptr() % 16 == 0
+            strides_aligned = value.stride(-1) == 1 and all(
+                stride % (16 // value.element_size()) == 0
+                for stride in value.stride()[:-1]
+            )
+            if not aligned:
+                normalized = value.clone(memory_format=torch.contiguous_format)
+            elif value.is_contiguous() or strides_aligned:
+                normalized = value
+            else:
+                normalized = value.contiguous()
+            self.gradients.append(torch.empty_like(normalized).copy_(saved[1] * scale))
+        return self.gradients[0], self.gradients[1], self.gradients[2]
+
+
 @pytest.mark.gpu_flash_attention
 @pytest.mark.gpu_torch_cuda
 def test_cuda_matches_official_autograd() -> None:
@@ -400,45 +580,47 @@ def test_cost_prices_each_causal_attention_extension(feature: str) -> None:
     if feature == "norm_out":
         extra = cost(
             config.norm_out,
-            seq_len=24,
-            batch_size=1,
+            seq_len=8,
+            batch_size=config.num_heads,
             dtype=torch.bfloat16,
-        ).tile(
-            3,
         )
         assert counted == baseline + extra
     else:
+        rows = 8
+        heads = config.num_heads
+        inner = heads * config.channels_head
+        itemsize = torch.bfloat16.itemsize
         assert counted.params - baseline.params == 12
         assert (
             counted["flops", "primal", "matmul"].sum()
             - baseline["flops", "primal", "matmul"].sum()
-            == 24
+            == 2 * rows * config.gate_channels * heads
         )
         assert (
             counted["flops", "adjoint", "matmul"].sum()
             - baseline["flops", "adjoint", "matmul"].sum()
-            == 48
+            == 4 * rows * config.gate_channels * heads
         )
         assert counted["bytes", "primal", "matmul"].sum() - baseline[
             "bytes",
             "primal",
             "matmul",
-        ].sum() == 2 * (4 + 3 + 12 / 8)
-        assert (
-            counted["flops", "adjoint", "reduction"].sum()
-            - baseline["flops", "adjoint", "reduction"].sum()
-            == 9
-        )
-        assert (
-            counted["bytes", "adjoint", "reduction"].sum()
-            - baseline["bytes", "adjoint", "reduction"].sum()
-            == 30
-        )
+        ].sum() == itemsize * (rows * config.gate_channels + rows * heads + 12)
+        assert counted["flops", "adjoint", "reduction"].sum() - baseline[
+            "flops",
+            "adjoint",
+            "reduction",
+        ].sum() == rows * (inner - heads)
+        assert counted["bytes", "adjoint", "reduction"].sum() - baseline[
+            "bytes",
+            "adjoint",
+            "reduction",
+        ].sum() == itemsize * (rows * inner + rows * heads)
         assert counted["flops", "primal", "elementwise"].sum() - baseline[
             "flops",
             "primal",
             "elementwise",
-        ].sum() == (15 + (12 if feature == "head_gate" else 24))
+        ].sum() == rows * (5 * heads + (12 if feature == "head_gate" else 24))
 
 
 def test_cost_extension_dtype_and_fusion_preserve_the_analytical_algorithm() -> None:
@@ -475,7 +657,6 @@ def test_cost_extension_matmuls_match_executed_forward_and_backward() -> None:
         build_input=lambda: torch.randn(2, 4, 12, requires_grad=True),
         seq_len=4,
         batch_size=2,
-        num_tokens=4 * 2,
         dtype=None,
         run=_run_all_attention_gates,
     )

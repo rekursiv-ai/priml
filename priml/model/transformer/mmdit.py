@@ -135,9 +135,8 @@ class AdaLNZero(nn.Module):
         ) -> Cost:
             """Cost the projection; the SiLU is elementwise.
 
-            Counted per token like every leaf, though ``c`` is often one vector
-            per sequence: a per-sequence conditioning amortizes this over the
-            sequence, so the per-token figure is an upper bound.
+            The caller supplies the conditioning tensor's concrete invocation
+            geometry through ``seq_len`` and ``batch_size``.
 
             Args:
               seq_len: Tokens per sequence.
@@ -146,9 +145,10 @@ class AdaLNZero(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
+            rows = seq_len * batch_size
             return cost(
                 self.proj,
                 seq_len=seq_len,
@@ -156,9 +156,10 @@ class AdaLNZero(nn.Module):
                 dtype=dtype,
                 **kwargs,
             ) + elementwise_cost(
-                primal=5 * self.cond_dim,
-                adjoint=5 * self.cond_dim,
+                primal=rows * 5 * self.cond_dim,
+                adjoint=rows * 5 * self.cond_dim,
                 channels=self.cond_dim,
+                rows=rows,
                 dtype=dtype,
             )
 
@@ -251,9 +252,10 @@ class MMDiTStream(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
+            rows = seq_len * batch_size
             children = (self.norm1, self.norm2, self.ffn)
             total = sum(
                 (
@@ -280,9 +282,10 @@ class MMDiTStream(nn.Module):
             modulated = self.adaln is not None
             adds = (10 if modulated else 2) * self.channels_in
             return total + elementwise_cost(
-                primal=adds,
-                adjoint=adds,
+                primal=rows * adds,
+                adjoint=rows * adds,
                 channels=2 * self.channels_in,
+                rows=rows,
                 inputs=9 if modulated else 2,
                 outputs=5 if modulated else 1,
                 adjoint_inputs=13 if modulated else 2,
@@ -430,7 +433,7 @@ class MMDiTBlock(nn.Module):
               **kwargs: The open bus, forwarded to every child.
 
             Returns:
-              cost: Per-token cost of this module.
+              cost: Whole-invocation cost of this module.
 
             """
             total = cost(

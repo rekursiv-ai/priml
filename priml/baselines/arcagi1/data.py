@@ -31,6 +31,7 @@ constructing a config never touches the network.
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
@@ -43,6 +44,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.baselines.arcagi1.augmentation import ArcAugmentation
 from priml.lib.custom_json import DictCodec, IntCodec, loads
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
@@ -331,6 +333,11 @@ class ArcData:
 
     class Config(Fig["ArcData"]):
         """Where the prepared arrays live, and how batches are drawn."""
+
+        augmentation: ArcAugmentation.Config = field(
+            default_factory=ArcAugmentation.Config,
+        )
+        """Offline recipe consumed by the preparer; never reapplied to loaded rows."""
 
         base_dir: Path | str | None = None
         """Resource root supplied during parent finalization."""
