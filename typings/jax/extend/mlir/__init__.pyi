@@ -1,6 +1,0 @@
-from _typeshed import Incomplete
-
-deserialize_portable_artifact: Incomplete
-serialize_portable_artifact: Incomplete
-refine_polymorphic_shapes: Incomplete
-hlo_to_stablehlo: Incomplete

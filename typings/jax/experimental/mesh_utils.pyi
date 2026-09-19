@@ -1,3 +1,0 @@
-from typing import Any
-
-def create_device_mesh(mesh_shape: Any, *args: Any, **kwargs: Any) -> Any: ...

@@ -1,3 +1,0 @@
-from jax._src import callback as callback
-
-def thread_map(f, num_threads, *args): ...

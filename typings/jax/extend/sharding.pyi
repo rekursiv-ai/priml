@@ -1,9 +1,0 @@
-from jax._src.lib import xla_client as xla_client
-
-def get_op_sharding_from_serialized_proto(sharding: bytes) -> xla_client.OpSharding: ...
-def get_hlo_sharding_from_serialized_proto(
-    sharding: bytes,
-) -> xla_client.HloSharding: ...
-def get_serialized_proto_from_hlo_sharding(
-    sharding: xla_client.HloSharding,
-) -> bytes: ...
