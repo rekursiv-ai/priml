@@ -318,7 +318,7 @@ class Cost:
     def __repr__(self) -> str:
         return (
             f"Cost(params={self.params}, params_active={self.params_active}, "
-            f"bytes_state={self.bytes_state})\n{_grid(self.cells)}"
+            f"bytes_state={self.bytes_state})\n{_grid(self.cells, derive_intensity=True)}"
         )
 
 
@@ -915,7 +915,7 @@ def peak() -> Report:
 def utilization(
     cost: Cost,
     *,
-    device: Device,
+    device: str | Report,
     duration_sec: float = math.inf,
 ) -> Report:
     """Report how well each whole invocation uses ``device``.
@@ -927,7 +927,8 @@ def utilization(
 
     Args:
       cost: Whole-invocation cost at one concrete geometry.
-      device: Which datasheet to read.
+      device: Device name or a single-device peak report, such as
+        ``peak()["h100"]``, keyed by dtype, measure, and kernel.
       duration_sec: Wall seconds the invocation took, accelerator work
         complete; omit for the shape limit alone.
 
@@ -936,7 +937,7 @@ def utilization(
         the device lists no peak for the cell.
 
     """
-    ceiling = peak()[device].cells
+    ceiling = (peak()[device] if isinstance(device, str) else device).cells
     ratios = intensity(cost).cells
     cells: dict[tuple[object, ...], float] = {}
     for key, flops in cost["flops"].cells.items():
@@ -1005,8 +1006,12 @@ def _validate_rows(rows: int) -> None:
 # The ``measure`` axis, wherever it sits, becomes the column group; the last other
 # axis joins it as columns (or, with only one other axis, labels the rows); every
 # axis between labels the rows.
-def _grid(cells: Mapping[tuple[object, ...], int | float]) -> str:
-    """Render a table as an aligned grid with a totals row."""
+def _grid(
+    cells: Mapping[tuple[object, ...], int | float],
+    *,
+    derive_intensity: bool = False,
+) -> str:
+    """Render a table with totals and optional derived FLOP-per-byte columns."""
     if not cells:
         return "(empty)"
     width = len(next(iter(cells)))
@@ -1021,6 +1026,9 @@ def _grid(cells: Mapping[tuple[object, ...], int | float]) -> str:
         if axis is not None
         else [""]
     )
+    derive_intensity = derive_intensity and axis is not None
+    if derive_intensity:
+        measures = list(_REPORT_MEASURES)
     others = [i for i in range(width) if i != axis]
     rows_only = axis is not None and len(others) == 1
     column_axis = None if rows_only or not others else others[-1]
@@ -1052,18 +1060,32 @@ def _grid(cells: Mapping[tuple[object, ...], int | float]) -> str:
         for k, v in cells.items()
     }
     rows: list[list[str]] = [[*[""] * depth, *line] for line in header]
-    totals = [0.0] * (len(measures) * len(columns_axis))
+    totals: list[int | float] = [0] * (len(measures) * len(columns_axis))
+    values_by_row: list[tuple[tuple[str, ...], list[int | float]]] = []
     for label in labels:
         fixed = dict(zip(row_axes, label, strict=True))
         values = [
-            lookup.get(_key(width, fixed, (axis, m), (column_axis, d)), 0.0)
+            lookup.get(_key(width, fixed, (axis, m), (column_axis, d)), 0)
             for m in measures
             for d in columns_axis
         ]
         totals = [t + v for t, v in zip(totals, values, strict=True)]
+        values_by_row.append((label, values))
+    if len(labels) > 1 and (derive_intensity or "intensity" not in measures):
+        values_by_row.append((("total",), totals))
+    for label, values in values_by_row:
+        if derive_intensity:
+            n = len(columns_axis)
+            values[2 * n :] = [
+                _div(values[i], values[n + i]) if values[i] else 0 for i in range(n)
+            ]
         rows.append(_line(label, values, depth=depth))
-    if len(labels) > 1 and "intensity" not in measures:
-        rows.append(_line(("total",), totals, depth=depth))
+    present = [
+        i
+        for i in range(len(rows[0]))
+        if i < depth or any(row[i] != "-" for row in rows[len(header) :])
+    ]
+    rows = [[row[i] for i in present] for row in rows]
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     return "\n".join(
         " ".join(

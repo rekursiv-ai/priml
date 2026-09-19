@@ -20,6 +20,7 @@ from configgle import Fig
 import pytest
 import torch
 
+from priml.baselines.sudoku.experiments import exp000
 from priml.cost import (
     MEASURES,
     Cost,
@@ -384,12 +385,36 @@ def test_repr_is_a_grid_with_totals() -> None:
     lines = text.splitlines()
     assert lines[0] == "Cost(params=7, params_active=0, bytes_state=0)"
     measure, dtype, primal, selection, adjoint, total = lines[1:]
-    assert measure.split() == ["flops", "flops", "bytes", "bytes"]
-    assert dtype.split() == ["bf16", "int64", "bf16", "int64"]
-    assert primal.split() == ["primal", "matmul", "64K", "-", "32", "-"]
-    assert selection.split() == ["primal", "selection", "-", "-", "-", "8"]
-    assert adjoint.split() == ["adjoint", "matmul", "1.5G", "-", "-", "-"]
-    assert total.split() == ["total", "1.5G", "-", "32", "8"]
+    assert measure.split() == ["flops", "bytes", "bytes", "intensity"]
+    assert dtype.split() == ["bf16", "bf16", "int64", "bf16"]
+    assert primal.split() == ["primal", "matmul", "64K", "32", "-", "2K"]
+    assert selection.split() == ["primal", "selection", "-", "-", "8", "-"]
+    assert adjoint.split() == ["adjoint", "matmul", "1.5G", "-", "-", "inf"]
+    assert total.split() == ["total", "1.5G", "32", "8", "46.88M"]
+    assert all(type(value) is int for value in c.cells.values())
+    assert all("intensity" not in key for key in c.cells)
+
+
+def test_repr_intensity_total_divides_totals_instead_of_adding_ratios() -> None:
+    c = Cost(
+        cells={
+            ("flops", "primal", "matmul", BF): 60,
+            ("bytes", "primal", "matmul", BF): 4,
+            ("flops", "adjoint", "matmul", BF): 120,
+            ("bytes", "adjoint", "matmul", BF): 12,
+        },
+    )
+    assert repr(c).splitlines()[-1].split() == ["total", "180", "16", "11.25"]
+    assert repr(c[BF]).splitlines()[-1].split() == ["total", "180", "16", "11.25"]
+    assert repr(c["primal"]).splitlines()[-1].split() == ["matmul", "60", "4", "15"]
+
+
+def test_sudoku_cost_repr_includes_derived_intensity() -> None:
+    c = exp000().finalize().step.model.cost(batch_size=1, dtype=BF)
+    text = repr(c)
+    assert "intensity" in text.splitlines()[1]
+    assert text.splitlines()[-1].startswith("total")
+    assert all(type(value) is int for value in c.cells.values())
 
 
 def test_report_repr_renders_float_reporting_cells() -> None:
@@ -425,7 +450,10 @@ def test_repr_of_a_slice_drops_the_fixed_axes_and_the_empty_table_says_so() -> N
 # -- metrics -----------------------------------------------------------------
 
 
-def test_utilization_without_a_duration_is_intensity_over_the_ridge() -> None:
+@pytest.mark.parametrize("use_report", [False, True])
+def test_utilization_without_a_duration_is_intensity_over_the_ridge(
+    use_report: bool,
+) -> None:
     c = Cost(
         cells={
             ("flops", "primal", "matmul", BF): 2 * 989_000_000_000_000,
@@ -436,14 +464,18 @@ def test_utilization_without_a_duration_is_intensity_over_the_ridge() -> None:
             ("bytes", "primal", "matmul", torch.int32): 1,
         },
     )
-    ratio = utilization(c, device="h100")
+    device: str | Report = peak()["h100"] if use_report else "h100"
+    ratio = utilization(c, device=device)
     assert isinstance(ratio, Report)
     assert ratio["primal", "matmul", BF] == pytest.approx(2)
     assert ratio["adjoint", "sort", F32] == pytest.approx(3.35 / 67)
     assert ratio["primal", "matmul", torch.int32] == math.inf
 
 
-def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling() -> None:
+@pytest.mark.parametrize("use_report", [False, True])
+def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling(
+    use_report: bool,
+) -> None:
     # 8 tokens a step: one compute-bound matmul, one memory-bound sort.
     c = Cost(
         cells={
@@ -453,7 +485,8 @@ def test_utilization_with_a_duration_is_achieved_over_the_roofline_ceiling() -> 
             ("bytes", "adjoint", "sort", F32): 1,
         },
     )
-    achieved = utilization(c, device="h100", duration_sec=2)
+    device: str | Report = peak()["h100"] if use_report else "h100"
+    achieved = utilization(c, device=device, duration_sec=2)
     assert isinstance(achieved, Report)
     assert achieved["primal", "matmul", BF] == pytest.approx(0.5)
     # Sort at intensity 1 is capped at bandwidth, 3.35e12 FLOP/s, not 67e12.
