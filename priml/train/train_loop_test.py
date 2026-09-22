@@ -3856,10 +3856,6 @@ def test_phase_heartbeat_fires_on_stall_and_names_phase(
     emit a per-rank heartbeat naming the exact phase, so a distributed hang is
     self-diagnosing from the logs alone (no external py-spy).
     """
-    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
-        _phase_heartbeat,
-    )
-
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
         _phase_heartbeat("eval batch 5 eval_loss", interval_sec=0.02),
@@ -3875,10 +3871,6 @@ def test_phase_heartbeat_silent_when_block_is_fast(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A block that returns before the interval emits no heartbeat (zero cost)."""
-    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
-        _phase_heartbeat,
-    )
-
     with (
         caplog.at_level(logging.WARNING, logger="priml.train.train_loop"),
         _phase_heartbeat("fast phase", interval_sec=5.0),
@@ -3901,10 +3893,6 @@ def test_phase_heartbeat_watchdog_never_fires_while_healthy(
     deadline is pushed forward and the dump never fires -- it may only fire
     for a genuine GIL-holding native wedge, whose frames are static.
     """
-    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
-        _phase_heartbeat,
-    )
-
     with _phase_heartbeat(
         "eval batch 12 eval_loss",
         interval_sec=0.01,
@@ -3928,9 +3916,6 @@ def test_phase_heartbeat_watchdog_fires_on_gil_holding_stall(
     Big-int multiplication is a single GIL-holding C call with a size knob;
     calibrate it to this machine, then wedge for several watchdog periods.
     """
-    from priml.train.train_loop import (  # noqa: PLC0415 -- The test imports the private heartbeat seam only inside this scenario.
-        _phase_heartbeat,
-    )
 
     def _timed(bits: int) -> float:
         start = time.perf_counter()
@@ -4097,6 +4082,70 @@ def test_a_finite_gc_cadence_disables_automatic_collection_while_training(
     assert barriers == [1, 1]
     assert gc.isenabled()
     assert any("GC at local_step 1" in r.message for r in caplog.records)
+
+
+def test_close_releases_an_unstarted_owned_loop_once_and_restores_gc() -> None:
+    """Constructed loops can be explicitly closed before entering ``train()``."""
+    config = _make_step_logging_loop_config()
+    config.num_steps_garbage_collect = 1
+    loop = config.make()
+    try:
+        assert loop._owns_runtime
+        assert not gc.isenabled()
+
+        loop.close()
+        loop.close()
+
+        assert gc.isenabled()
+        assert not loop._gc_disabled
+        assert loop._runtime_destroyed
+        with pytest.raises(RuntimeError, match="closed"):
+            loop.train()
+    finally:
+        gc.enable()
+        loop._destroy_runtime_once()
+
+
+def test_close_preserves_gc_disabled_by_caller() -> None:
+    """Closing a loop does not enable GC that the caller had disabled."""
+    config = _make_step_logging_loop_config()
+    config.num_steps_garbage_collect = 1
+    gc.disable()
+    loop = config.make()
+    try:
+        assert not gc.isenabled()
+        loop.close()
+        assert not gc.isenabled()
+    finally:
+        gc.enable()
+        loop._destroy_runtime_once()
+
+
+@pytest.mark.parametrize("caller_gc_enabled", [True, False])
+def test_constructor_failure_restores_owned_gc_state(
+    monkeypatch: pytest.MonkeyPatch,
+    caller_gc_enabled: bool,
+) -> None:
+    """Constructor cleanup restores only the GC state it changed."""
+    config = _make_step_logging_loop_config()
+    config.num_steps_garbage_collect = 1
+
+    if caller_gc_enabled:
+        gc.enable()
+    else:
+        gc.disable()
+
+    def fail_warm_eval_compile(self: TrainLoop) -> None:
+        del self
+        raise RuntimeError("warmup failure")
+
+    monkeypatch.setattr(TrainLoop, "_warm_eval_compile", fail_warm_eval_compile)
+    try:
+        with pytest.raises(RuntimeError, match="warmup failure"):
+            config.make()
+        assert gc.isenabled() is caller_gc_enabled
+    finally:
+        gc.enable()
 
 
 def test_an_eval_error_without_a_checkpointer_still_surfaces(tmp_path: Path) -> None:
