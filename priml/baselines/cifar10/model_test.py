@@ -14,7 +14,6 @@ from priml.baselines.cifar10.model import (
     ResNet,
     ScaledLinear,
     SpeedNet,
-    _max_pool_cost,
 )
 from priml.model.init import dirac
 from priml.model.norm import BatchNorm2d
@@ -380,34 +379,6 @@ def test_image_cost_scales_bytes_not_flops_with_itemsize(speednet: bool) -> None
         wide["bytes", torch.float64].sum() == narrow["bytes", torch.bfloat16].sum() * 4
     )
     assert wide["bytes", torch.int64] == narrow["bytes", torch.int64]
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
-@pytest.mark.parametrize("kernel_size", [2, 3])
-def test_max_pool_traffic_includes_argmax_and_dense_gradient(
-    dtype: torch.dtype,
-    kernel_size: int,
-) -> None:
-    costed = _max_pool_cost(
-        3,
-        kernel_size=kernel_size,
-        positions=1,
-        batch_size=1,
-        dtype=dtype,
-    )
-    elements = kernel_size**2
-    itemsize = dtype.itemsize
-    # Values and gradients at ``dtype``; the saved argmax is one int64 per channel.
-    assert costed["bytes", "primal", "reduction", dtype] == itemsize * 3 * (
-        elements + 1
-    )
-    assert costed["bytes", "primal", "reduction", torch.int64] == 8 * 3
-    assert costed["bytes", "adjoint", "selection", dtype] == itemsize * 3 * (
-        elements + 1
-    )
-    assert costed["bytes", "adjoint", "selection", torch.int64] == 8 * 3
-    assert costed["flops", "primal", "reduction"].sum() == 3 * (elements - 1)
-    assert costed["flops", "adjoint", "selection"].sum() == 3
 
 
 def test_scaled_linear_traffic_counts_scale_input_and_output() -> None:

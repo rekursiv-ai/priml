@@ -87,9 +87,16 @@ class DecodeCropResizeBatch:
         """
         pending: deque[tuple[dict[str, object], Callable[[], None] | None]] = deque()
         for batch in samples:
-            finish = (
-                self._submit(batch) if "media" in batch and "crop" in batch else None
-            )
+            try:
+                finish = (
+                    self._submit(batch)
+                    if "media" in batch and "crop" in batch
+                    else None
+                )
+            except _PoolClosedError:
+                # A prefetch thread can still be pulling while the interpreter
+                # exits, when the pool refuses work: the stream just ends.
+                return
             pending.append((batch, finish))
             # Hold back only the newest in-flight batch; order is preserved.
             while pending and (len(pending) > 1 or pending[0][1] is None):
@@ -108,16 +115,20 @@ class DecodeCropResizeBatch:
         # batch, not by which decode thread finishes first.
         flips = [random.random() < self.flip_p for _ in media]  # noqa: S311 -- Augmentation draw.
         out = torch.empty((len(media), height, width, 3), dtype=torch.uint8)
-        futures = [
-            self.pool.submit(
-                self._decode_one,
-                media[index],
-                crops[index],
-                out[index].numpy(),
-                flips[index],
-            )
-            for index in range(len(media))
-        ]
+        try:
+            futures = [
+                self.pool.submit(
+                    self._decode_one,
+                    media[index],
+                    crops[index],
+                    out[index].numpy(),
+                    flips[index],
+                )
+                for index in range(len(media))
+            ]
+        except RuntimeError as error:
+            # ``submit`` raises only once the pool, or the interpreter, shut down.
+            raise _PoolClosedError from error
 
         def finish() -> None:
             ok = [future.result() for future in futures]
@@ -162,6 +173,10 @@ class DecodeCropResizeBatch:
         if flip:
             out[:] = out[:, ::-1]
         return True
+
+
+class _PoolClosedError(Exception):
+    """The decode pool refused a batch because it is shutting down."""
 
 
 def _completed(

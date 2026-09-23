@@ -31,7 +31,6 @@ from priml.cost import (
     cost,
     elementwise_cost,
     matmul_cost,
-    traffic,
 )
 from priml.math.custom_types import TensorFn
 from priml.math.stats import PcaDecompose, pca_eigh
@@ -45,6 +44,7 @@ from priml.model.custom_types import (
 )
 from priml.model.init import InitFn, call_init
 from priml.model.norm import BatchNorm2d
+from priml.model.pool import avg_pool_cost, max_pool_cost
 from priml.model.swiglu import relu, silu
 from priml.model.whitening import PCAWhiteningConv2d
 
@@ -268,76 +268,6 @@ def _conv2d_cost(
     )
 
 
-# The saved argmax is one ``int64`` per pooled channel each way; the values and
-# gradients are at the batch's dtype.
-def _max_pool_cost(
-    channels: int,
-    *,
-    kernel_size: int,
-    positions: int,
-    batch_size: int,
-    dtype: torch.dtype | None,
-) -> Cost:
-    """Cost values and saved argmax forward; dense gradient writes backward."""
-    dt = dtype
-    index = torch.int64
-    window = kernel_size * kernel_size
-    rows = batch_size * positions
-    return (
-        traffic(
-            "primal",
-            "reduction",
-            elements=rows * channels * (window + 1),
-            flops=rows * channels * (window - 1),
-            dtype=dt,
-        )
-        + traffic("primal", "reduction", elements=rows * channels, dtype=index)
-        + traffic(
-            "adjoint",
-            "selection",
-            elements=rows * channels * (window + 1),
-            flops=rows * channels,
-            dtype=dt,
-        )
-        + traffic("adjoint", "selection", elements=rows * channels, dtype=index)
-    )
-
-
-def _avg_pool_cost(
-    channels: int,
-    *,
-    positions: int,
-    batch_size: int,
-    dtype: torch.dtype | None,
-) -> Cost:
-    """Cost global-average-pool work for the supplied image batch."""
-    dt = dtype
-    rows = batch_size * positions
-    return (
-        traffic(
-            "primal",
-            "reduction",
-            elements=channels * (rows + batch_size),
-            flops=channels * batch_size * (positions - 1),
-            dtype=dt,
-        )
-        + traffic(
-            "primal",
-            "elementwise",
-            elements=2 * channels * batch_size,
-            flops=channels * batch_size,
-            dtype=dt,
-        )
-        + traffic(
-            "adjoint",
-            "elementwise",
-            elements=channels * (rows + batch_size),
-            flops=channels * rows,
-            dtype=dt,
-        )
-    )
-
-
 def _grid(
     size: tuple[int, int],
     *,
@@ -456,11 +386,10 @@ class ConvBlock(nn.Module):
                 dtype=dtype,
             )
             pooled = (
-                _max_pool_cost(
-                    c_out,
+                max_pool_cost(
+                    channels=c_out,
                     kernel_size=2,
-                    positions=math.prod(pooled_grid),
-                    batch_size=batch_size,
+                    rows=rows_pooled,
                     dtype=dtype,
                 )
                 + norm_act
@@ -797,8 +726,8 @@ class ResNet(nn.Module):
             return (
                 costed
                 + at_output
-                + _avg_pool_cost(
-                    c_last,
+                + avg_pool_cost(
+                    channels=c_last,
                     positions=math.prod(grid),
                     batch_size=batch_size,
                     dtype=dtype,
@@ -997,11 +926,10 @@ class SpeedNet(nn.Module):
                 )
                 grid = _grid(grid, kernel_size=2, stride=2, padding=0)
             grid = _grid(grid, kernel_size=3, stride=3, padding=0)
-            tail = _max_pool_cost(
-                self.channels_hidden[-1],
+            tail = max_pool_cost(
+                channels=self.channels_hidden[-1],
                 kernel_size=3,
-                positions=math.prod(grid),
-                batch_size=batch_size,
+                rows=batch_size * math.prod(grid),
                 dtype=dtype,
             ) + cost(
                 self.proj_out,

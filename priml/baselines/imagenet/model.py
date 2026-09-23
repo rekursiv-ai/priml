@@ -27,9 +27,10 @@ from torch.nn import functional
 
 import torch
 
-from priml.cost import Cost, cost, elementwise_cost, matmul_cost, traffic
+from priml.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.model.conv import conv_cost
 from priml.model.norm import BatchNorm2d
+from priml.model.pool import avg_pool_cost, max_pool_cost
 from priml.model.swiglu import relu
 
 
@@ -189,16 +190,16 @@ def _layer_cost(
         # ``forward`` calls ``conv.forward`` directly, so the inner conv fires
         # no hook and is costed here. The blur is a buffer: it owns no
         # parameters and takes no weight gradient, but passes an input one.
-        blur = _conv_cost(
-            channels,
-            channels,
+        blur = conv_cost(
+            channels_in=channels,
+            channels_out=channels,
             kernel_size=3,
+            ndim=2,
             groups=channels,
-            grid=grid,
-            batch_size=batch_size,
-            stride=1,
-            padding=1,
             bias=False,
+            input_grid=grid,
+            batch_size=batch_size,
+            padding=1,
             dtype=dtype,
             weight_grad=False,
         )
@@ -209,16 +210,18 @@ def _layer_cost(
             dtype=dtype,
         )
     if isinstance(module, nn.Conv2d):
-        return _conv_cost(
-            module.in_channels,
-            module.out_channels,
-            kernel_size=module.kernel_size[0],
+        return conv_cost(
+            channels_in=module.in_channels,
+            channels_out=module.out_channels,
+            kernel_size=module.kernel_size,
+            ndim=2,
             groups=module.groups,
-            grid=grid,
-            batch_size=batch_size,
-            stride=module.stride[0],
-            padding=cast(tuple[int, int], module.padding)[0],
             bias=module.bias is not None,
+            input_grid=grid,
+            batch_size=batch_size,
+            stride=module.stride,
+            padding=cast(tuple[int, int], module.padding),
+            dilation=module.dilation,
             dtype=dtype,
         )
     if isinstance(module, nn.BatchNorm2d):
@@ -231,9 +234,19 @@ def _layer_cost(
     if isinstance(module, nn.ReLU):
         return cost(relu, channels=x.numel(), dtype=dtype)
     if isinstance(module, nn.MaxPool2d):
-        return _max_pool_cost(module, out, dtype=dtype)
+        return max_pool_cost(
+            channels=channels,
+            kernel_size=cast(int, module.kernel_size),
+            rows=out.numel() // channels,
+            dtype=dtype,
+        )
     if isinstance(module, nn.AdaptiveAvgPool2d):
-        return _avg_pool_cost(x, dtype=dtype)
+        return avg_pool_cost(
+            channels=channels,
+            positions=grid[0] * grid[1],
+            batch_size=batch_size,
+            dtype=dtype,
+        )
     if isinstance(module, nn.Linear):
         return matmul_cost(
             channels_in=module.in_features,
@@ -260,92 +273,3 @@ def _layer_cost(
             dtype=dtype,
         )
     raise TypeError(f"{type(module).__qualname__} has no cost.")
-
-
-def _conv_cost(
-    channels_in: int,
-    channels_out: int,
-    *,
-    kernel_size: int,
-    groups: int,
-    grid: tuple[int, int],
-    batch_size: int,
-    stride: int,
-    padding: int,
-    bias: bool,
-    dtype: torch.dtype | None,
-    weight_grad: bool = True,
-) -> Cost:
-    return conv_cost(
-        channels_in=channels_in,
-        channels_out=channels_out,
-        kernel_size=kernel_size,
-        ndim=2,
-        groups=groups,
-        bias=bias,
-        input_grid=grid,
-        batch_size=batch_size,
-        stride=stride,
-        padding=padding,
-        dtype=dtype,
-        weight_grad=weight_grad,
-    )
-
-
-# The saved argmax is one ``int64`` per pooled element each way; the values and
-# gradients are at the batch's dtype.
-def _max_pool_cost(
-    module: nn.MaxPool2d,
-    out: Tensor,
-    *,
-    dtype: torch.dtype | None,
-) -> Cost:
-    window = cast(int, module.kernel_size) ** 2
-    elements = out.numel()
-    return (
-        traffic(
-            "primal",
-            "reduction",
-            elements=elements * (window + 1),
-            flops=elements * (window - 1),
-            dtype=dtype,
-        )
-        + traffic("primal", "reduction", elements=elements, dtype=torch.int64)
-        + traffic(
-            "adjoint",
-            "selection",
-            elements=elements * (window + 1),
-            flops=elements,
-            dtype=dtype,
-        )
-        + traffic("adjoint", "selection", elements=elements, dtype=torch.int64)
-    )
-
-
-def _avg_pool_cost(x: Tensor, *, dtype: torch.dtype | None) -> Cost:
-    """Global average: a sum per channel, one scale, and a spread back."""
-    positions = x.shape[2] * x.shape[3]
-    pooled = x.shape[0] * x.shape[1]
-    return (
-        traffic(
-            "primal",
-            "reduction",
-            elements=x.numel() + pooled,
-            flops=pooled * (positions - 1),
-            dtype=dtype,
-        )
-        + traffic(
-            "primal",
-            "elementwise",
-            elements=2 * pooled,
-            flops=pooled,
-            dtype=dtype,
-        )
-        + traffic(
-            "adjoint",
-            "elementwise",
-            elements=x.numel() + pooled,
-            flops=x.numel(),
-            dtype=dtype,
-        )
-    )

@@ -19,6 +19,7 @@ from priml.cost import (
     traffic,
 )
 from priml.model.conv import conv_cost
+from priml.model.pool import max_pool_cost
 
 
 if TYPE_CHECKING:
@@ -156,11 +157,12 @@ class LPIPSLoss(nn.Module):
                         dtype=dt,
                     )
                 elif isinstance(module, nn.MaxPool2d):
-                    costed = _max_pool_cost(
-                        channels,
+                    costed = max_pool_cost(
+                        channels=channels,
                         kernel_size=module.kernel_size,
+                        rows=output_rows,
                         dtype=dt,
-                    ).tile(output_rows)
+                    )
                 else:
                     costed = elementwise_cost(
                         primal=channels,
@@ -338,37 +340,6 @@ def _conv2d_cost(
         dtype=dtype,
         weight_grad=module.weight.requires_grad,
         bias_grad=module.bias is not None and module.bias.requires_grad,
-    )
-
-
-# The saved argmax is one ``int64`` per pooled channel each way.
-def _max_pool_cost(
-    channels: int,
-    *,
-    kernel_size: int | tuple[int, ...],
-    dtype: torch.dtype | None,
-) -> Cost:
-    """Cost one pooled position: compares forward, one gradient routed to the argmax."""
-    taps = math.prod(
-        kernel_size if isinstance(kernel_size, tuple) else (kernel_size,) * 2,
-    )
-    return (
-        traffic(
-            "primal",
-            "reduction",
-            elements=channels * (taps + 1),
-            flops=channels * (taps - 1),
-            dtype=dtype,
-        )
-        + traffic("primal", "reduction", elements=channels, dtype=torch.int64)
-        + traffic(
-            "adjoint",
-            "selection",
-            elements=channels * (taps + 1),
-            flops=channels,
-            dtype=dtype,
-        )
-        + traffic("adjoint", "selection", elements=channels, dtype=torch.int64)
     )
 
 

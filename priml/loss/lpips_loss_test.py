@@ -12,7 +12,6 @@ import torch
 
 from priml.loss.lpips_loss import (
     LPIPSLoss,
-    _max_pool_cost,
     _normalize_cost,
     _spatial_average_cost,
 )
@@ -178,12 +177,6 @@ def test_lpips_cost_prices_the_frozen_trunk_twice_and_the_head_once() -> None:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_lpips_operand_traffic(dtype: torch.dtype) -> None:
     itemsize = dtype.itemsize
-    pooled = _max_pool_cost(3, kernel_size=2, dtype=dtype)
-    # Values at ``dtype``; the saved argmax is one int64 per channel each way.
-    assert pooled["bytes", "primal", "reduction", dtype] == itemsize * 3 * (4 + 1)
-    assert pooled["bytes", "primal", "reduction", torch.int64] == 8 * 3
-    assert pooled["bytes", "adjoint", "selection", dtype] == itemsize * 3 * (4 + 1)
-    assert pooled["bytes", "adjoint", "selection", torch.int64] == 8 * 3
     normalized = _normalize_cost(3, dtype=dtype)
     assert normalized["bytes", "primal", "elementwise"].sum() == itemsize * (4 * 3 + 5)
     assert normalized["bytes", "primal", "reduction"].sum() == itemsize * (3 + 1)

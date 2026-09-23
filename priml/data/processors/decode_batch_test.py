@@ -172,6 +172,13 @@ def test_the_next_batch_is_pulled_before_the_current_one_is_yielded() -> None:
     assert pulled == [0, 1]
 
 
+def test_a_shut_pool_ends_the_stream_instead_of_raising() -> None:
+    """At interpreter exit the pool refuses work while a prefetch thread pulls."""
+    stage = DecodeCropResizeBatch.Config().make()
+    stage.pool.shutdown()
+    assert list(stage(iter([_batch([(0, 0, 8, 8)])]))) == []
+
+
 @pytest.mark.parametrize("threads", [0, -1])
 def test_rejects_a_nonpositive_thread_count(threads: int) -> None:
     config = DecodeCropResizeBatch.Config()
