@@ -113,7 +113,8 @@ def categorical_entropy(log_probs: Tensor) -> Tensor:
 
     Computed as ``-sum(p * log p)`` over the last axis. A masked-out action
     carries ``log p = -inf`` and ``p = 0``, whose product is NaN rather than
-    the zero the limit gives, so those terms are dropped explicitly.
+    the zero the limit gives. Mask before multiplication to keep both entropy
+    and its gradient finite for valid masked distributions.
 
     Args:
       log_probs: Normalized log-probabilities, ``[..., actions]``.
@@ -122,5 +123,7 @@ def categorical_entropy(log_probs: Tensor) -> Tensor:
       entropy: Entropy in nats, shape ``[...]``.
 
     """
-    terms = log_probs.exp() * log_probs
-    return -torch.where(terms.isfinite(), terms, torch.zeros_like(terms)).sum(-1)
+    masked = log_probs == float("-inf")
+    safe_log_probs = torch.where(masked, torch.zeros_like(log_probs), log_probs)
+    terms = safe_log_probs.exp() * safe_log_probs
+    return -terms.sum(-1)

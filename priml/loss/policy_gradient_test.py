@@ -125,6 +125,38 @@ def test_masked_actions_do_not_poison_entropy() -> None:
     assert float(entropy) == pytest.approx(math.log(2.0))
 
 
+def test_masked_entropy_has_finite_gradients() -> None:
+    logits = torch.tensor([[0.0, 1.0, -math.inf]], requires_grad=True)
+    entropy = categorical_entropy(torch.log_softmax(logits, dim=-1))
+    entropy.sum().backward()
+
+    unmasked_logits = torch.tensor([[0.0, 1.0]], requires_grad=True)
+    torch.distributions.Categorical(logits=unmasked_logits).entropy().sum().backward()
+
+    assert logits.grad is not None
+    assert unmasked_logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    torch.testing.assert_close(logits.grad[:, :2], unmasked_logits.grad)
+    torch.testing.assert_close(
+        logits.grad,
+        torch.tensor([[0.19661193, -0.19661193, 0.0]]),
+    )
+
+
+def test_fully_masked_logits_remain_nonfinite() -> None:
+    logits = torch.full((1, 3), -math.inf)
+    entropy = categorical_entropy(torch.log_softmax(logits, dim=-1))
+
+    assert torch.isnan(entropy).all()
+
+
+@pytest.mark.parametrize("corrupt", [float("nan"), float("inf")])
+def test_corrupt_entropy_inputs_remain_nonfinite(corrupt: float) -> None:
+    entropy = categorical_entropy(torch.tensor([[0.0, corrupt, float("-inf")]]))
+
+    assert torch.isnan(entropy).any() or torch.isinf(entropy).any()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 
