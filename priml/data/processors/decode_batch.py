@@ -171,7 +171,8 @@ class DecodeCropResizeBatch:
             interpolation=cv2.INTER_AREA,
         )
         if flip:
-            out[:] = out[:, ::-1]
+            # In place; ``out[:] = out[:, ::-1]`` buffers a reversed copy.
+            _ = cv2.flip(out, 1, dst=out)
         return True
 
 
