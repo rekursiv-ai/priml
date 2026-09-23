@@ -19,6 +19,7 @@ from priml.math.schedules import (
     constant,
     cosine,
     cosine_restarts,
+    cyclic,
     exponential,
     linear,
     multiply_schedules,
@@ -41,6 +42,7 @@ DECAYS: list[tuple[str, Schedule[float]]] = [
     ("exponential", partial(exponential, decay=1e-3)),
     ("trapezoidal", trapezoidal),
     ("one_cycle", one_cycle),
+    ("cyclic", partial(cyclic, peak=0.0)),
 ]
 
 EVERY: list[tuple[str, Schedule[float]]] = [
@@ -269,6 +271,26 @@ def test_one_cycle_rises_then_falls() -> None:
 def test_one_cycle_rejects_an_all_ramp_run() -> None:
     with pytest.raises(ValueError, match=r"warmup_fraction must lie in \[0, 1\)"):
         one_cycle(0.5, warmup_fraction=1.0)
+
+
+@pytest.mark.parametrize("epoch", [0, 0.5, 1, 2, 3.25, 15, 16])
+def test_cyclic_matches_ffcv_imagenet_get_cyclic_lr(epoch: float) -> None:
+    """``np.interp([epoch], [0, 2, 16], [1e-4 * lr, lr, 0])`` at lr=1."""
+    # np.interp's two legs, written out: the first ends at epoch 2.
+    if epoch <= 2:
+        expected = 1e-4 + (1.0 - 1e-4) * epoch / 2
+    else:
+        expected = 1.0 - (epoch - 2) / 14
+    assert cyclic(epoch / 16, peak=2 / 16) == pytest.approx(expected, rel=1e-12)
+
+
+def test_cyclic_rejects_a_peak_outside_the_run() -> None:
+    with pytest.raises(ValueError, match=r"peak must lie in \[0, 1\]"):
+        cyclic(0.5, peak=1.5)
+
+
+def test_cyclic_all_ramp_ends_at_the_full_rate() -> None:
+    assert cyclic(1.0, peak=1.0) == 1.0
 
 
 def test_cosine_restarts_returns_to_the_full_rate() -> None:

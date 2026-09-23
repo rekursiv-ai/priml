@@ -646,6 +646,8 @@ def decode_jpeg_turbojpeg(
     *,
     crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
     channels_first: bool = True,
+    min_height: int = 0,
+    min_width: int = 0,
 ) -> Tensor | None:
     """Decode JPEG → uint8 Tensor. See ``priml.image.decode_jpeg_turbojpeg``.
 
@@ -656,13 +658,23 @@ def decode_jpeg_turbojpeg(
       width: Requested width (None means decode full size).
       crop: Crop box (h, w) or (top, left, bottom, right) in pixels.
       channels_first: True → (C, H, W), False → (H, W, C).
+      min_height: Floor a scaled crop decode may shrink the region to.
+      min_width: Floor a scaled crop decode may shrink the region to.
 
     Returns:
       tensor: uint8 image tensor, or None if decode fails.
 
     """
     return _to_tensor(
-        image.decode_jpeg_turbojpeg(image_bytes, turbo_jpeg, height, width, crop),
+        image.decode_jpeg_turbojpeg(
+            image_bytes,
+            turbo_jpeg,
+            height,
+            width,
+            crop,
+            min_height=min_height,
+            min_width=min_width,
+        ),
         channels_first,
     )
 

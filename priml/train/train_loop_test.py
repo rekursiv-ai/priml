@@ -56,6 +56,7 @@ from priml.train.train_loop import (
     _barrier_if_distributed,
     _compile_heartbeat,
     _HasTimer,
+    _loader_length,
     _phase_heartbeat,
     _set_loader_epoch,
 )
@@ -4950,6 +4951,19 @@ def _metric_float(metrics: Mapping[str, object], key: str) -> float:
     """Return a numeric tracker metric, or a failing sentinel when absent."""
     value = metrics.get(key)
     return float(value) if isinstance(value, (int, float)) else -1.0
+
+
+class _Stream(torch.utils.data.IterableDataset[int]):
+    @override
+    def __iter__(self) -> Iterator[int]:
+        return iter(range(3))
+
+
+def test_loader_length_is_zero_for_a_loader_over_a_stream() -> None:
+    """A DataLoader is ``Sized`` yet ``len`` raises over an IterableDataset."""
+    assert _loader_length(torch.utils.data.DataLoader(_Stream())) == 0
+    assert _loader_length(torch.utils.data.DataLoader(list(range(3)))) == 3
+    assert _loader_length(iter(range(3))) == 0
 
 
 if __name__ == "__main__":

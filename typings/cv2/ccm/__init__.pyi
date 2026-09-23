@@ -1,0 +1,142 @@
+import typing as _typing
+
+import cv2.typing
+
+__all__: list[str] = ...
+CCM_3x3: int
+CCM_3X3: int
+CCM_4x3: int
+CCM_4X3: int
+CCM_TYPE = int
+INITIAL_METHOD_WHITE_BALANCE: int
+INITIAL_METHOD_LEAST_SQUARE: int
+INITIAL_METHOD_TYPE = int
+COLORCHECKER_Macbeth: int
+COLORCHECKER_MACBETH: int
+COLORCHECKER_Vinyl: int
+COLORCHECKER_VINYL: int
+COLORCHECKER_DigitalSG: int
+COLORCHECKER_DIGITAL_SG: int
+CONST_COLOR = int
+COLOR_SPACE_sRGB: int
+COLOR_SPACE_S_RGB: int
+COLOR_SPACE_sRGBL: int
+COLOR_SPACE_S_RGBL: int
+COLOR_SPACE_AdobeRGB: int
+COLOR_SPACE_ADOBE_RGB: int
+COLOR_SPACE_AdobeRGBL: int
+COLOR_SPACE_ADOBE_RGBL: int
+COLOR_SPACE_WideGamutRGB: int
+COLOR_SPACE_WIDE_GAMUT_RGB: int
+COLOR_SPACE_WideGamutRGBL: int
+COLOR_SPACE_WIDE_GAMUT_RGBL: int
+COLOR_SPACE_ProPhotoRGB: int
+COLOR_SPACE_PRO_PHOTO_RGB: int
+COLOR_SPACE_ProPhotoRGBL: int
+COLOR_SPACE_PRO_PHOTO_RGBL: int
+COLOR_SPACE_DCI_P3_RGB: int
+COLOR_SPACE_DCI_P3_RGBL: int
+COLOR_SPACE_AppleRGB: int
+COLOR_SPACE_APPLE_RGB: int
+COLOR_SPACE_AppleRGBL: int
+COLOR_SPACE_APPLE_RGBL: int
+COLOR_SPACE_REC_709_RGB: int
+COLOR_SPACE_REC_709_RGBL: int
+COLOR_SPACE_REC_2020_RGB: int
+COLOR_SPACE_REC_2020_RGBL: int
+COLOR_SPACE_XYZ_D65_2: int
+COLOR_SPACE_XYZ_D65_10: int
+COLOR_SPACE_XYZ_D50_2: int
+COLOR_SPACE_XYZ_D50_10: int
+COLOR_SPACE_XYZ_A_2: int
+COLOR_SPACE_XYZ_A_10: int
+COLOR_SPACE_XYZ_D55_2: int
+COLOR_SPACE_XYZ_D55_10: int
+COLOR_SPACE_XYZ_D75_2: int
+COLOR_SPACE_XYZ_D75_10: int
+COLOR_SPACE_XYZ_E_2: int
+COLOR_SPACE_XYZ_E_10: int
+COLOR_SPACE_Lab_D65_2: int
+COLOR_SPACE_LAB_D65_2: int
+COLOR_SPACE_Lab_D65_10: int
+COLOR_SPACE_LAB_D65_10: int
+COLOR_SPACE_Lab_D50_2: int
+COLOR_SPACE_LAB_D50_2: int
+COLOR_SPACE_Lab_D50_10: int
+COLOR_SPACE_LAB_D50_10: int
+COLOR_SPACE_Lab_A_2: int
+COLOR_SPACE_LAB_A_2: int
+COLOR_SPACE_Lab_A_10: int
+COLOR_SPACE_LAB_A_10: int
+COLOR_SPACE_Lab_D55_2: int
+COLOR_SPACE_LAB_D55_2: int
+COLOR_SPACE_Lab_D55_10: int
+COLOR_SPACE_LAB_D55_10: int
+COLOR_SPACE_Lab_D75_2: int
+COLOR_SPACE_LAB_D75_2: int
+COLOR_SPACE_Lab_D75_10: int
+COLOR_SPACE_LAB_D75_10: int
+COLOR_SPACE_Lab_E_2: int
+COLOR_SPACE_LAB_E_2: int
+COLOR_SPACE_Lab_E_10: int
+COLOR_SPACE_LAB_E_10: int
+COLOR_SPACE = int
+LINEARIZATION_IDENTITY: int
+LINEARIZATION_GAMMA: int
+LINEARIZATION_COLORPOLYFIT: int
+LINEARIZATION_COLORLOGPOLYFIT: int
+LINEARIZATION_GRAYPOLYFIT: int
+LINEARIZATION_GRAYLOGPOLYFIT: int
+LINEAR_TYPE = int
+DISTANCE_CIE76: int
+DISTANCE_CIE94_GRAPHIC_ARTS: int
+DISTANCE_CIE94_TEXTILES: int
+DISTANCE_CIE2000: int
+DISTANCE_CMC_1TO1: int
+DISTANCE_CMC_2TO1: int
+DISTANCE_RGB: int
+DISTANCE_RGBL: int
+DISTANCE_TYPE = int
+
+class ColorCorrectionModel:
+    @_typing.overload
+    def __init__(self, src: cv2.typing.MatLike, constcolor: CONST_COLOR) -> None: ...
+    @_typing.overload
+    def __init__(
+        self,
+        src: cv2.typing.MatLike,
+        colors: cv2.typing.MatLike,
+        ref_cs: COLOR_SPACE,
+    ) -> None: ...
+    @_typing.overload
+    def __init__(
+        self,
+        src: cv2.typing.MatLike,
+        colors: cv2.typing.MatLike,
+        ref_cs: COLOR_SPACE,
+        colored: cv2.typing.MatLike,
+    ) -> None: ...
+    def setColorSpace(self, cs: COLOR_SPACE) -> None: ...
+    def setCCM_TYPE(self, ccm_type: CCM_TYPE) -> None: ...
+    def setDistance(self, distance: DISTANCE_TYPE) -> None: ...
+    def setLinear(self, linear_type: LINEAR_TYPE) -> None: ...
+    def setLinearGamma(self, gamma: float) -> None: ...
+    def setLinearDegree(self, deg: int) -> None: ...
+    def setSaturatedThreshold(self, lower: float, upper: float) -> None: ...
+    def setWeightsList(self, weights_list: cv2.typing.MatLike) -> None: ...
+    def setWeightCoeff(self, weights_coeff: float) -> None: ...
+    def setInitialMethod(self, initial_method_type: INITIAL_METHOD_TYPE) -> None: ...
+    def setMaxCount(self, max_count: int) -> None: ...
+    def setEpsilon(self, epsilon: float) -> None: ...
+    def run(self) -> None: ...
+    def getCCM(self) -> cv2.typing.MatLike: ...
+    def getLoss(self) -> float: ...
+    def get_src_rgbl(self) -> cv2.typing.MatLike: ...
+    def get_dst_rgbl(self) -> cv2.typing.MatLike: ...
+    def getMask(self) -> cv2.typing.MatLike: ...
+    def getWeights(self) -> cv2.typing.MatLike: ...
+    def infer(
+        self,
+        img: cv2.typing.MatLike,
+        islinear: bool = ...,
+    ) -> cv2.typing.MatLike: ...

@@ -24,6 +24,7 @@ __all__ = [
     "constant",
     "cosine",
     "cosine_restarts",
+    "cyclic",
     "exponential",
     "linear",
     "multiply_schedules",
@@ -91,6 +92,41 @@ def constant(progress: float) -> float:
     """
     del progress
     return 1.0
+
+
+def cyclic(
+    progress: float,
+    *,
+    peak: float,
+    initial: float = 1e-4,
+    final: float = 0.0,
+) -> float:
+    """Ramp linearly from ``initial`` to the full rate at ``peak``, then to ``final``.
+
+    The triangular schedule of ffcv-imagenet and the "1cycle" family, with
+    both legs straight lines. A ``peak`` of 0 makes the ramp instantaneous.
+
+    Args:
+      progress: Fraction of the budget spent.
+      peak: Progress at which the rate reaches its full value.
+      initial: Multiplier at the start of the run.
+      final: Multiplier at the end of the run.
+
+    Returns:
+      multiplier: The rate's share of its peak value.
+
+    Raises:
+      ValueError: ``peak`` is outside ``[0, 1]``.
+
+    """
+    if peak < 0.0 or peak > 1.0:
+        raise ValueError(f"peak must lie in [0, 1]; got {peak}.")
+    spent = _clamped(progress)
+    if spent < peak:
+        return initial + (1.0 - initial) * spent / peak
+    if peak == 1.0:
+        return 1.0
+    return 1.0 + (final - 1.0) * (spent - peak) / (1.0 - peak)
 
 
 def linear(progress: float, *, final: float = 0.0) -> float:

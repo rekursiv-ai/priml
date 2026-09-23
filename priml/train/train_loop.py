@@ -121,7 +121,7 @@ class TrainLoop:
     Example:
       cfg = TrainLoop.Config(
           step=TrainStep.Config(...),
-          dataset=ImageNetDataset.Config(...),
+          dataset=ImageNetData.Config(...),
           metrics_eval={"accuracy": TopK.Config(k_values=[1, 5])},
       )
       loop = cfg.make()
@@ -1092,7 +1092,7 @@ class TrainLoop:
         total_step_metrics: dict[str, float] = {}
         num_batches = 0
         total_weight = 0
-        total_batches = len(eval_loader) if isinstance(eval_loader, Sized) else 0
+        total_batches = _loader_length(eval_loader)
         narrate = is_rank_zero()
         log_every = max(1, total_batches // 20) if total_batches else 50
 
@@ -1326,6 +1326,19 @@ class _SupportsBindEpochTimer(Protocol):
     """
 
     def bind_epoch_timer(self, timer: CheckpointableStepTimer) -> None: ...
+
+
+# ``DataLoader`` defines ``__len__`` unconditionally, so it passes a ``Sized`` check
+# even over an ``IterableDataset`` without a length -- whose ``len`` then raises
+# ``TypeError``.
+def _loader_length(loader: object) -> int:
+    """Return the loader's batch count, or 0 when it has none."""
+    if not isinstance(loader, Sized):
+        return 0
+    try:
+        return len(loader)
+    except TypeError:
+        return 0
 
 
 def _set_loader_epoch(loader: object, epoch: int) -> None:

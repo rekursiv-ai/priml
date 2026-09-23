@@ -1,0 +1,3 @@
+from cv2.gapi.imgproc import fluid as fluid
+
+__all__: list[str] = ...

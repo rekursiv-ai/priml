@@ -1,0 +1,37 @@
+__all__: list[str] = ...
+POINTS: int
+LINES: int
+LINE_LOOP: int
+LINE_STRIP: int
+TRIANGLES: int
+TRIANGLE_STRIP: int
+TRIANGLE_FAN: int
+QUADS: int
+QUAD_STRIP: int
+POLYGON: int
+RenderModes = int
+Buffer_ARRAY_BUFFER: int
+BUFFER_ARRAY_BUFFER: int
+Buffer_ELEMENT_ARRAY_BUFFER: int
+BUFFER_ELEMENT_ARRAY_BUFFER: int
+Buffer_PIXEL_PACK_BUFFER: int
+BUFFER_PIXEL_PACK_BUFFER: int
+Buffer_PIXEL_UNPACK_BUFFER: int
+BUFFER_PIXEL_UNPACK_BUFFER: int
+Buffer_Target = int
+Buffer_READ_ONLY: int
+BUFFER_READ_ONLY: int
+Buffer_WRITE_ONLY: int
+BUFFER_WRITE_ONLY: int
+Buffer_READ_WRITE: int
+BUFFER_READ_WRITE: int
+Buffer_Access = int
+Texture2D_NONE: int
+TEXTURE2D_NONE: int
+Texture2D_DEPTH_COMPONENT: int
+TEXTURE2D_DEPTH_COMPONENT: int
+Texture2D_RGB: int
+TEXTURE2D_RGB: int
+Texture2D_RGBA: int
+TEXTURE2D_RGBA: int
+Texture2D_Format = int

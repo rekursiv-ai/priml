@@ -1,0 +1,244 @@
+ImageNetTrainLoop(
+                study_name='imagenet',
+                experiment_name='exp000',
+                base_dir='/opt/scratch',
+                working_dir=PosixPath('/opt/scratch/runs/imagenet/exp000'),
+                doc='',
+                step=ImageNetTrainStep.Config(
+                │       model=TorchvisionResNet.Config(
+                │               arch=PartialConfig(<class 'functools.partial'>, <function torchvision.models.resnet.resnet50 at 0xdefacedeface>),
+                │               channels_out=1_000,
+                │               use_blurpool=True,
+                │               image_size=(160, 160)
+                │       ),
+                │       optimizer=CompositeOptimizer.Config(
+                │               optimizers=[
+                │                       PartialConfig(<class 'functools.partial'>, <class 'torch.optim.sgd.SGD'>, lr=1.0, momentum=0.9, weight_decay=0.0),
+                │                       PartialConfig(<class 'functools.partial'>, <class 'torch.optim.sgd.SGD'>, lr=1.0, momentum=0.9, weight_decay=0.0001)
+                │               ],
+                │               select=[matching('bn'), complement(matching('bn'))],
+                │               require_total=True,
+                │               drop_empty=False
+                │       ),
+                │       loss=SimpleLoss.Config(
+                │               loss_fn=<function priml.loss.simple_loss.bce_with_logits at 0xdefacedeface>,
+                │               target_key='label',
+                │               kwargs={'reduction': 'none'},
+                │               channels_out=-1
+                │       ),
+                │       accumulate_grad_batches=1,
+                │       drop_partial_accumulation_on_epoch_end=True,
+                │       train_budget_steps=40_032,
+                │       train_budget_sec=inf,
+                │       train_budget_epochs=inf,
+                │       lr_schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.constant at 0xdefacedeface>),
+                │       parallelism=NoParallel.Config(device='auto'),
+                │       model_quantization=NoModelQuantization.Config(),
+                │       activation_memoization=DefaultActivationStorage.Config(),
+                │       compile=PartialConfig(<class 'functools.partial'>, <function torch.compile at 0xdefacedeface>, fullgraph=True),
+                │       ema=NoEMA.Config(),
+                │       gradient_clip_norm=inf,
+                │       skip_step_on_nonfinite_grad=False,
+                │       device_init='eager',
+                │       dtype_autocast=torch.float16,
+                │       autocast_cache_enabled=False,
+                │       schedule=PartialConfig(<class 'functools.partial'>, <function priml.math.schedules.cyclic at 0xdefacedeface>, peak=0.125),
+                │       learning_rate=0.5,
+                │       label_smoothing=0.1,
+                │       resolution_min=160,
+                │       resolution_max=192,
+                │       resize_start=0.6875,
+                │       resize_end=0.8125,
+                │       use_tta=True,
+                │       loss_scale_init=65536.0,
+                │       mean=(0.485, 0.456, 0.406),
+                │       std=(0.229, 0.224, 0.225)
+                ),
+                dataset=ImageNetData.Config(
+                │       train_data_pipeline=DataPipeline.Config(
+                │       │       source=ExtractedImageNetSource.Config(
+                │       │               base_dir=PosixPath('/opt/scratch'),
+                │       │               working_dir=PosixPath('/opt/scratch/datasets/imagenet'),
+                │       │               split='train',
+                │       │               validation_labels_file=None,
+                │       │               worker_slice=None,
+                │       │               shuffle=True,
+                │       │               epoch_seed=0
+                │       │       ),
+                │       │       processors=[
+                │       │       │       GetBytesFromFile.Config(),
+                │       │       │       GetDimensionsFromBytes.Config(),
+                │       │       │       ImagenetSynsetToIndex.Config(
+                │       │       │               labels_file='labels_imagenet.txt'
+                │       │       │       ),
+                │       │       │       GetRandomResizedCropBoxFromDimensions.Config(
+                │       │       │               size=(160, 160),
+                │       │       │               scale=(0.08, 1.0),
+                │       │       │               ratio=(0.75, 1.3333333333333333)
+                │       │       │       ),
+                │       │       │       FieldRenameKeys.Config(
+                │       │       │               mappings={       'media': 'media',
+                │       │       │                       'crop': 'crop',
+                │       │       │                       'target_height': 'target_height',
+                │       │       │                       'target_width': 'target_width',
+                │       │       │                       'label': 'label',
+                │       │       │                       '*': None}
+                │       │       │       ),
+                │       │       │       Batcher.Config(
+                │       │       │               size=512,
+                │       │       │               field_names=[
+                │       │       │                       'media',
+                │       │       │                       'crop',
+                │       │       │                       'target_height',
+                │       │       │                       'target_width',
+                │       │       │                       'label'
+                │       │       │               ],
+                │       │       │               drop_remainder=True,
+                │       │       │               device=None
+                │       │       │       ),
+                │       │       │       DecodeCropResizeBatch.Config(
+                │       │       │               num_threads=2,
+                │       │       │               flip_p=0.5,
+                │       │       │               scale_to_target=False,
+                │       │       │               fast_dct=True
+                │       │       │       ),
+                │       │       │       AsTensor.Config(
+                │       │       │               device=None,
+                │       │       │               dtype=torch.int64,
+                │       │       │               include=['label'],
+                │       │       │               exclude=['raw'],
+                │       │       │               pin_memory=False,
+                │       │       │               non_blocking=False,
+                │       │       │               stream_field='pending_tensorizations'
+                │       │       │       ),
+                │       │       │       PrefetchBuffer.Config(
+                │       │       │               size=2,
+                │       │       │               fill_first=False
+                │       │       │       )
+                │       │       ],
+                │       │       filters_shortcircuit=True,
+                │       │       enable_cache=False,
+                │       │       base_dir=PosixPath('/opt/scratch'),
+                │       │       working_dir=PosixPath('/opt/scratch')
+                │       ),
+                │       eval_data_pipeline=DataPipeline.Config(
+                │       │       source=ExtractedImageNetSource.Config(
+                │       │               base_dir=PosixPath('/opt/scratch'),
+                │       │               working_dir=PosixPath('/opt/scratch/datasets/imagenet'),
+                │       │               split='val',
+                │       │               validation_labels_file=PosixPath('validation_labels.txt'),
+                │       │               worker_slice=None,
+                │       │               shuffle=False,
+                │       │               epoch_seed=0
+                │       │       ),
+                │       │       processors=[
+                │       │       │       ImagenetSynsetToIndex.Config(
+                │       │       │               labels_file='labels_imagenet.txt'
+                │       │       │       ),
+                │       │       │       GetBytesFromFile.Config(),
+                │       │       │       GetDimensionsFromBytes.Config(),
+                │       │       │       GetCenterCropBoxFromDimensions.Config(
+                │       │       │               size=(256, 256),
+                │       │       │               ratio=0.875
+                │       │       │       ),
+                │       │       │       FieldRenameKeys.Config(
+                │       │       │               mappings={       'media': 'media',
+                │       │       │                       'crop': 'crop',
+                │       │       │                       'target_height': 'target_height',
+                │       │       │                       'target_width': 'target_width',
+                │       │       │                       'label': 'label',
+                │       │       │                       '*': None}
+                │       │       │       ),
+                │       │       │       Batcher.Config(
+                │       │       │               size=512,
+                │       │       │               field_names=[
+                │       │       │                       'media',
+                │       │       │                       'crop',
+                │       │       │                       'target_height',
+                │       │       │                       'target_width',
+                │       │       │                       'label'
+                │       │       │               ],
+                │       │       │               drop_remainder=False,
+                │       │       │               device=None
+                │       │       │       ),
+                │       │       │       DecodeCropResizeBatch.Config(
+                │       │       │               num_threads=2,
+                │       │       │               flip_p=0.0,
+                │       │       │               scale_to_target=False,
+                │       │       │               fast_dct=True
+                │       │       │       ),
+                │       │       │       AsTensor.Config(
+                │       │       │               device=None,
+                │       │       │               dtype=torch.int64,
+                │       │       │               include=['label'],
+                │       │       │               exclude=['raw'],
+                │       │       │               pin_memory=False,
+                │       │       │               non_blocking=False,
+                │       │       │               stream_field='pending_tensorizations'
+                │       │       │       ),
+                │       │       │       PrefetchBuffer.Config(
+                │       │       │               size=4,
+                │       │       │               fill_first=False
+                │       │       │       )
+                │       │       ],
+                │       │       filters_shortcircuit=True,
+                │       │       enable_cache=False,
+                │       │       base_dir=PosixPath('/opt/scratch'),
+                │       │       working_dir=PosixPath('/opt/scratch')
+                │       ),
+                │       num_workers=0,
+                │       prefetch_factor=2,
+                │       base_dir='/opt/scratch',
+                │       working_dir=PosixPath('/opt/scratch')
+                ),
+                metrics_train={},
+                metrics_eval={'accuracy': TopK.Config(k_values=[1, 5])},
+                checkpointer=Checkpointer.Config(
+                        base_dir=PosixPath('/opt/scratch/runs/imagenet/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/imagenet/exp000/checkpoints'),
+                        filename='step_{step:08d}.pt',
+                        save_every=1_000,
+                        keep_last_n=-1,
+                        keep_every=0,
+                        storer=SyncLocalStateDictStorer.Config(),
+                        resume=True,
+                        resume_step=-1,
+                        allow_checkpoint_overwrite=False,
+                        best_metric='',
+                        best_mode='max'
+                ),
+                profiler=None,
+                phase_timer=PhaseTimer.Config(
+                        enabled=False,
+                        torch_profile=False,
+                        base_dir=PosixPath('/opt/scratch/runs/imagenet/exp000'),
+                        working_dir=PosixPath('/opt/scratch/runs/imagenet/exp000/profiling'),
+                        heartbeat_interval_sec=20.0,
+                        fault_dump_interval_sec=40.0,
+                        cuda_events=False
+                ),
+                tracker=None,
+                max_steps=40_032,
+                max_epochs=inf,
+                max_time=inf,
+                max_time_kind='wall',
+                max_eval_time=inf,
+                eval_stop_on_time_limit=False,
+                num_steps_eval=2_502,
+                num_steps_log=10,
+                early_train_log_steps=100,
+                eval_every_epoch=True,
+                eval_extras_every_eval=False,
+                eval_warmup_batches=0,
+                eval_only=False,
+                restore_rng_state=True,
+                seed=None,
+                num_steps_garbage_collect=inf,
+                mesh_dim_model_seed='pp',
+                mesh_dim_data_seed='dp',
+                runtime=SingleProcess.Config(
+                        device='auto',
+                        deterministic=False,
+                        float32_matmul_precision=None
+                )
+        )

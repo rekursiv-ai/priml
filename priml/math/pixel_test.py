@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
+from turbojpeg import TJPF_RGB, TJSAMP_444, TurboJPEG
 
 import numpy as np
 import pytest
@@ -14,7 +15,6 @@ import torch
 
 if TYPE_CHECKING:
     from torchvision.transforms.functional import convert_image_dtype
-    from turbojpeg import TurboJPEG
 else:
     # 433ms measured, and only the two baseline-comparison tests below touch
     # torchvision; a top-level import bills every other test in the module.
@@ -770,7 +770,7 @@ def test_decode_jpeg_turbojpeg_success():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        cast("TurboJPEG", mock_turbo),
+        cast(TurboJPEG, mock_turbo),
         height=100,
         width=100,
     )
@@ -789,7 +789,7 @@ def test_decode_jpeg_turbojpeg_channels_last():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        cast("TurboJPEG", mock_turbo),
+        cast(TurboJPEG, mock_turbo),
         height=100,
         width=100,
         channels_first=False,
@@ -801,25 +801,21 @@ def test_decode_jpeg_turbojpeg_channels_last():
 
 
 def test_decode_jpeg_turbojpeg_with_crop():
-    """Test decode_jpeg_turbojpeg with cropping."""
-    mock_turbo = MagicMock()
-    mock_turbo.crop.return_value = b"cropped_jpeg_bytes"
-    rng = np.random.default_rng()
-    mock_bgr = rng.integers(0, 256, (100, 100, 3), dtype=np.uint8)
-    mock_turbo.decode.return_value = mock_bgr
-
-    image_bytes = b"fake_jpeg_bytes"
+    """A centred aspect crop decodes to (C, H, W) of the cropped region."""
+    rgb = np.random.default_rng(0).integers(0, 256, (200, 400, 3), dtype=np.uint8)
+    turbo = TurboJPEG()
+    image_bytes = turbo.encode(rgb, pixel_format=TJPF_RGB, jpeg_subsample=TJSAMP_444)
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        cast("TurboJPEG", mock_turbo),
+        turbo,
         height=200,
         width=400,
         crop=(100, 100),  # Center crop to 1:1 aspect ratio.
     )
 
     assert tensor is not None
-    # Verify crop was called.
-    mock_turbo.crop.assert_called_once()
+    full = torch.from_numpy(turbo.decode(image_bytes, pixel_format=TJPF_RGB))
+    assert torch.equal(tensor, full[:, 100:300].moveaxis(-1, -3))
 
 
 def test_decode_jpeg_turbojpeg_bgr_to_rgb():
@@ -834,7 +830,7 @@ def test_decode_jpeg_turbojpeg_bgr_to_rgb():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        cast("TurboJPEG", mock_turbo),
+        cast(TurboJPEG, mock_turbo),
         height=10,
         width=10,
         channels_first=False,
@@ -858,7 +854,7 @@ def test_decode_jpeg_turbojpeg_error():
     image_bytes = b"fake_jpeg_bytes"
     tensor = decode_jpeg_turbojpeg(
         image_bytes,
-        cast("TurboJPEG", mock_turbo),
+        cast(TurboJPEG, mock_turbo),
         height=100,
         width=100,
     )

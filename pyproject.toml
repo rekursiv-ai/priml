@@ -28,6 +28,7 @@ dependencies = [
     # media
     "imageio-ffmpeg>=0.6.0",
     "imagesize>=1.4",
+    "opencv-contrib-python-headless>=5.0.0.93",
     "pygame-ce>=2.5.8",
     # On 24.04 LTS, package libturbojpeg is too old.
     #   R=libjpeg-turbo/libjpeg-turbo/releases

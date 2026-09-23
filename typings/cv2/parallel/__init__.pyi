@@ -1,0 +1,6 @@
+__all__: list[str] = ...
+
+def setParallelForBackend(
+    backendName: str,
+    propagateNumThreads: bool = ...,
+) -> bool: ...

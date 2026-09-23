@@ -1,0 +1,14 @@
+__all__: list[str] = ...
+TYPE_GENERAL: int
+TYPE_MARKER: int
+TYPE_WRAPPER: int
+TYPE_FUN: int
+TYPE = int
+IMPL_PLAIN: int
+IMPL_IPP: int
+IMPL_OPENCL: int
+IMPL = int
+FLAGS_NONE: int
+FLAGS_MAPPING: int
+FLAGS_EXPAND_SAME_NAMES: int
+FLAGS = int
