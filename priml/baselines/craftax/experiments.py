@@ -10,7 +10,7 @@ settings.
             +-- exp002  a policy with memory, cheaply: a GRU at 1B
             +-- exp003  no policy at all: Q-learning with an LSTM at 1B
             +-- exp011  the 1B geometry at 100M, as a screening budget
-                  +-- exp013  a policy with memory, expensively: GTrXL at 1B
+            +-- exp013  a policy with memory, expensively: GTrXL at 1B
 
 The names are the JAX study's, kept so a torch result can be read against the
 number its JAX counterpart measured. What the names do NOT carry over is the
