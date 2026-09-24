@@ -527,7 +527,7 @@ def empty_state(*, num_envs: int, device: torch.device) -> EnvState:
             num_slots=constants.MAX_MOB_PROJECTILES,
             device=device,
         ),
-        mob_projectile_directions=torch.zeros(
+        mob_projectile_directions=torch.ones(
             (*per_level, constants.MAX_MOB_PROJECTILES, 2),
             dtype=torch.int32,
             device=device,
@@ -538,7 +538,7 @@ def empty_state(*, num_envs: int, device: torch.device) -> EnvState:
             num_slots=constants.MAX_PLAYER_PROJECTILES,
             device=device,
         ),
-        player_projectile_directions=torch.zeros(
+        player_projectile_directions=torch.ones(
             (*per_level, constants.MAX_PLAYER_PROJECTILES, 2),
             dtype=torch.int32,
             device=device,

@@ -180,6 +180,26 @@ def test_a_book_teaches_the_spell_still_unknown() -> None:
     assert read.learned_spells[:, 1].tolist() == [True, True]
 
 
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_reading_with_both_spells_known_spends_the_book_on_first_spell(
+    seed: int,
+) -> None:
+    """Upstream's zero-probability choice falls to index zero (game_logic.py:2697-2713)."""
+    state = _state(num_envs=1)
+    state.inventory.books[:] = 1
+    state.learned_spells[:] = True
+
+    read = abilities.read_book(
+        state,
+        _act(Action.READ_BOOK, num_envs=1),
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+    assert read.inventory.books.tolist() == [0]
+    assert read.achievements[0, int(Achievement.LEARN_FIREBALL)]
+    assert not read.achievements[0, int(Achievement.LEARN_ICEBALL)]
+
+
 def test_enchanting_binds_the_table_element_and_spends_its_gem() -> None:
     state = _state()
     state.map[:, 0, 10, 11] = int(BlockType.ENCHANTMENT_TABLE_FIRE)

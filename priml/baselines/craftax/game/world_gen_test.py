@@ -7,19 +7,17 @@ floors connect, and each floor uses its own materials.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
-import numpy as np
+import pytest
 import torch
 
-from priml.baselines.craftax.conftest import (
-    generated_world,
-    reference,
-    requires_craftax,
-)
+from priml.baselines.craftax.conftest import generated_world
 from priml.baselines.craftax.game import constants, world_config
 from priml.baselines.craftax.game.constants import BlockType, ItemType
 from priml.baselines.craftax.game.world_gen import (
+    _brighten_around,
+    _sample_tile,
     daylight,
     generate_dungeon,
     generate_smooth_world,
@@ -28,8 +26,6 @@ from priml.lib.custom_json import ListCodec
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from priml.baselines.craftax.game.state import EnvState
 
 
@@ -61,6 +57,12 @@ def test_the_player_starts_alive_and_supplied() -> None:
     assert state.player_food.tolist() == [9, 9]
     assert state.inventory.wood.tolist() == [0, 0]
     assert not state.achievements.any()
+
+
+def test_empty_projectile_directions_match_reference_defaults() -> None:
+    state = _world()
+    assert (state.mob_projectile_directions == 1).all()
+    assert (state.player_projectile_directions == 1).all()
 
 
 def test_the_surface_ladder_starts_open() -> None:
@@ -115,6 +117,16 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
     assert float(light.min()) > 0.0
 
 
+def test_empty_tile_weights_select_the_origin() -> None:
+    position = _sample_tile(
+        torch.zeros((1, 4)),
+        (2, 2),
+        generator=torch.Generator().manual_seed(17),
+        device=_DEVICE,
+    )
+    assert position.tolist() == [[0, 0]]
+
+
 def test_graveyard_sampled_stone_and_ladder_light_quirks() -> None:
     blocks, items, light, _, _ = generate_smooth_world(
         num_envs=1,
@@ -162,6 +174,29 @@ def test_a_dungeon_is_rooms_joined_by_corridors() -> None:
     assert (items == int(ItemType.TORCH)).any()
 
 
+def test_ladder_light_matches_negative_update_indices_at_map_edge() -> None:
+    light = torch.zeros((1, *constants.MAP_SIZE))
+    actual = _brighten_around(
+        light,
+        torch.tensor([[0, 0]]),
+        ambient=0.0,
+    )
+    expected = torch.zeros_like(light)
+    expected[0, -9:, -9:] = constants.TORCH_LIGHT_MAP
+    assert torch.equal(actual, expected)
+
+
+def test_fixed_dungeon_seed_pins_room_layout() -> None:
+    _, items, _, _, _ = generate_dungeon(
+        num_envs=1,
+        config=world_config.DUNGEON,
+        generator=torch.Generator().manual_seed(431),
+        device=_DEVICE,
+    )
+    corners = torch.nonzero(items[0] == int(ItemType.TORCH), as_tuple=False)
+    assert corners[:4].tolist() == [[0, 4], [0, 10], [7, 4], [7, 10]]
+
+
 def test_dungeon_walls_out_of_sight_read_as_darkness() -> None:
     blocks, _, _, _, _ = generate_dungeon(
         num_envs=2,
@@ -200,32 +235,24 @@ def test_daylight_repeats_every_day() -> None:
     assert torch.allclose(early, later, atol=1e-6)
 
 
-@requires_craftax
-def test_daylight_matches_the_reference() -> None:
-    game_logic = cast(_GameLogic, reference("craftax_classic.game_logic"))
-    calculate_light_level = game_logic.calculate_light_level
-    state_module = cast(
-        _StateModule,
-        reference("craftax_classic.envs.craftax_state"),
+@pytest.mark.cuda
+def test_daylight_matches_compiled_reference_exactly() -> None:
+    assert torch.cuda.is_available()
+    # Captured from upstream calculate_light_level on CUDA.
+    expected = torch.tensor(
+        [
+            1_061_946_187,
+            1_062_091_936,
+            1_063_970_034,
+            1_056_379_802,
+            1_061_797_309,
+            1_061_946_182,
+        ],
+        dtype=torch.int32,
+        device="cuda",
     )
-    params = state_module.EnvParams()
-    steps = torch.arange(0, 600, 7)
-    expected = np.array(
-        [float(calculate_light_level(int(step), params)) for step in steps],
-    )
-    assert np.allclose(daylight(steps).numpy(), expected, atol=1e-6)
-
-
-class _GameLogic(Protocol):
-    """Subset of the reference module used by the comparison test."""
-
-    calculate_light_level: Callable[[int, object], float]
-
-
-class _StateModule(Protocol):
-    """Subset of the reference state module used by the comparison test."""
-
-    EnvParams: Callable[[], object]
+    steps = torch.tensor((0, 1, 17, 149, 299, 300), device="cuda")
+    assert torch.equal(daylight(steps).view(torch.int32), expected)
 
 
 if __name__ == "__main__":

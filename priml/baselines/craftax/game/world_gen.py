@@ -15,6 +15,8 @@ same distribution, since every draw here is independent per environment.
 
 from __future__ import annotations
 
+from typing import Final
+
 import functools
 
 from torch import Tensor
@@ -35,6 +37,19 @@ from priml.baselines.craftax.game.world_config import (
     DungeonConfig,
     SmoothWorldConfig,
 )
+
+
+def _day_reciprocal() -> float:
+    exact = 1.0 / constants.DAY_LENGTH
+    nearest = torch.tensor(exact, dtype=torch.float32)
+    if float(nearest) > exact:
+        nearest = torch.nextafter(nearest, torch.zeros_like(nearest))
+    return float(nearest)
+
+
+# XLA GPU lowers traced f32 division to multiplication by a reciprocal rounded
+# toward zero.
+_DAY_RECIPROCAL: Final = _day_reciprocal()
 
 
 def generate_world(
@@ -307,37 +322,36 @@ def generate_dungeon(
         generator=generator,
         device=device,
     )
-    # Rooms take distinct chunks, so a permutation prefix is exactly the
-    # "choose without replacement" the reference performs by zeroing weights.
-    chunks = torch.stack(
-        [
-            torch.randperm(
-                chunks_down * chunks_across,
-                generator=generator,
-                device=device,
-            )[:num_rooms]
-            for _ in range(num_envs)
-        ],
-    )
-    offsets = torch.randint(
-        0,
-        chunk - smallest,
-        (num_envs, num_rooms, 2),
-        generator=generator,
+    room_chunks = torch.ones(
+        (num_envs, chunks_down * chunks_across),
         device=device,
     )
-    corners = (
-        torch.stack(
-            (chunks % chunks_across, chunks // chunks_across),
-            dim=-1,
-        )
-        * chunk
-        + offsets
-    )
-
+    corners = torch.empty((num_envs, num_rooms, 2), dtype=torch.int64, device=device)
     rows = torch.arange(shape[0], device=device)[None, :, None]
     columns = torch.arange(shape[1], device=device)[None, None, :]
+    environments = torch.arange(num_envs, device=device)
     for room in range(num_rooms):
+        selected_chunk = torch.multinomial(
+            room_chunks,
+            1,
+            generator=generator,
+        ).squeeze(-1)
+        room_chunks[environments, selected_chunk] = 0
+        chunk_position = (
+            torch.stack(
+                (selected_chunk % chunks_across, selected_chunk // chunks_across),
+                dim=-1,
+            )
+            * chunk
+        )
+        offset = torch.randint(
+            0,
+            chunk - smallest,
+            (num_envs, 2),
+            generator=generator,
+            device=device,
+        )
+        corners[:, room] = chunk_position + offset
         top, left = corners[:, room, 0, None, None], corners[:, room, 1, None, None]
         height = sizes[:, room, 0, None, None]
         width = sizes[:, room, 1, None, None]
@@ -362,13 +376,21 @@ def generate_dungeon(
             device=device,
         )
 
-    for room in range(1, num_rooms):
+    included_rooms = torch.zeros((num_envs, num_rooms), device=device)
+    included_rooms[:, -1] = 1
+    for room in range(num_rooms):
+        sink_index = torch.multinomial(
+            included_rooms,
+            1,
+            generator=generator,
+        ).squeeze(-1)
         blocks = _carve_corridor(
             blocks,
             source=corners[:, room],
-            sink=corners[:, room - 1],
+            sink=corners[environments, sink_index],
             device=device,
         )
+        included_rooms[:, room] = 1
 
     # The special block sits just inside the first room, which is where the
     # enchantment tables live on the floors that have them.
@@ -438,7 +460,7 @@ def daylight(timestep: Tensor) -> Tensor:
       light: Ambient surface light, same shape.
 
     """
-    phase = (timestep.float() / constants.DAY_LENGTH) % 1.0 + 0.3
+    phase = (timestep.float() * _DAY_RECIPROCAL) % 1.0 + 0.3
     return 1.0 - (torch.pi * phase).cos().abs() ** 3
 
 
@@ -454,8 +476,8 @@ def _distance_from(
     return (rows[:, None] ** 2 + columns[None, :] ** 2).float().sqrt()
 
 
-# A floor with no eligible tile would make the draw undefined, so an all-zero row falls
-# back to a uniform choice rather than raising.
+# Upstream's all-zero probabilities produce NaNs, which choice resolves to index 0
+# (world_gen.py:488-494).
 def _sample_tile(
     weights: Tensor,
     shape: tuple[int, int],
@@ -464,12 +486,11 @@ def _sample_tile(
     device: torch.device,
 ) -> Tensor:
     """Draw one tile per environment, proportional to ``weights``."""
-    safe = torch.where(
-        weights.sum(-1, keepdim=True) > 0,
-        weights,
-        torch.ones_like(weights),
-    )
+    total = weights.sum(-1, keepdim=True)
+    empty = total == 0
+    safe = torch.where(empty, torch.ones_like(weights), weights)
     flat = torch.multinomial(safe, 1, generator=generator).squeeze(-1)
+    flat = torch.where(empty.squeeze(-1), torch.zeros_like(flat), flat)
     return torch.stack((flat // shape[1], flat % shape[1]), dim=-1).int().to(device)
 
 
@@ -563,15 +584,25 @@ def _carve_corridor(
 def _brighten_around(light: Tensor, position: Tensor, *, ambient: float) -> Tensor:
     """Raise the light around an ascent so its tile is never pitch dark."""
     glow = constants.TORCH_LIGHT_MAP.to(light.device) * (1 - ambient) + ambient
-    rows = torch.arange(9, device=light.device) - 4
+    row_start = position[:, 0] - 4
+    row_start = torch.where(row_start < 0, light.shape[-2] + row_start, row_start)
+    row_start = row_start.clamp(max=light.shape[-2] - 9)
+    column_start = position[:, 1] - 4
+    column_start = torch.where(
+        column_start < 0,
+        light.shape[-1] + column_start,
+        column_start,
+    )
+    column_start = column_start.clamp(max=light.shape[-1] - 9)
     for row_offset in range(9):
         for column_offset in range(9):
-            offset = torch.stack(
-                (rows[row_offset], rows[column_offset]),
-            ).expand(light.shape[0], 2)
+            tile = torch.stack(
+                (row_start + row_offset, column_start + column_offset),
+                dim=-1,
+            )
             light = scatter_tiles(
                 light,
-                position + offset,
+                tile,
                 glow[row_offset, column_offset].expand(light.shape[0]),
             )
     return light
