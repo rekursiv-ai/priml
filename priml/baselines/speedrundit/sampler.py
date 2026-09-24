@@ -35,6 +35,8 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, field
 from typing import TYPE_CHECKING, NamedTuple, Self, override
 
+import math
+
 from configgle import Fig, Makeable, PartialConfig
 from torch import Tensor
 
@@ -158,7 +160,11 @@ class EulerMaruyamaSampler:
         def finalize(self) -> Self:
             if self.num_steps < 1:
                 raise ValueError(f"num_steps must be positive; got {self.num_steps}.")
-            if not 0.0 < self.last_time < 1.0:
+            if (
+                math.isnan(self.last_time)
+                or self.last_time <= 0.0
+                or self.last_time >= 1.0
+            ):
                 raise ValueError(f"last_time must be in (0, 1); got {self.last_time}.")
             return super().finalize()
 
@@ -259,6 +265,9 @@ class EulerMaruyamaSampler:
             cls_token=cls.to(cls_token.dtype),
         )
 
+    # Guidance mixes DRIFTS, not velocities, and its weak branch is the null class with
+    # the sparse path dropped -- two forwards, not one doubled batch, because the
+    # branches take different routes.
     def _drift(
         self,
         model: SpeedrunDiT,
@@ -270,51 +279,64 @@ class EulerMaruyamaSampler:
         null: Tensor | None,
         dtype: torch.dtype,
     ) -> tuple[Tensor, Tensor]:
-        """Evaluate both streams' drifts at one time, guided when asked.
-
-        Guidance mixes DRIFTS, not velocities, and its weak branch is the
-        null class with the sparse path dropped -- two forwards, not one
-        doubled batch, because the branches take different routes.
-
-        Args:
-          model: The trained velocity field.
-          latent: Current latents, float64.
-          cls: Current class token, float64.
-          t_curr: Current time, a float64 scalar.
-          label: Class indices.
-          null: The null class per sample, or ``None`` when unguided.
-          dtype: The model's input dtype.
-
-        Returns:
-          drift: Latent drift, float64.
-          drift_cls: Class-token drift, float64.
-
-        """
+        """Evaluate both streams' drifts at one time, guided when asked."""
         cfg = self.config
         low, high = cfg.guidance_interval
-        guided = null is not None and low <= float(t_curr) <= high
+        in_interval = low <= float(t_curr) <= high
         batch = latent.shape[0]
         time = torch.ones(batch, dtype=torch.float64, device=latent.device) * t_curr
         diffusion = cfg.diffusion(t_curr)
-
-        def drift(velocity: Tensor, state: Tensor) -> Tensor:
-            velocity = velocity.to(torch.float64)
-            t = time.view(-1, *[1] * (state.ndim - 1))
-            score = velocity_to_score(velocity, state, cfg.interpolant, t)
-            return velocity - 0.5 * diffusion * score
-
+        path = cfg.interpolant
         inputs = (latent.to(dtype), time.to(dtype))
         strong = model(*inputs, label, cls.to(dtype))
-        drift_strong = drift(strong.velocity, latent)
-        drift_strong_cls = drift(strong.cls_velocity, cls)
-        if not guided:
+        drift_strong = _sde_drift(
+            strong.velocity,
+            state=latent,
+            time=time,
+            path=path,
+            diffusion=diffusion,
+        )
+        drift_strong_cls = _sde_drift(
+            strong.cls_velocity,
+            state=cls,
+            time=time,
+            path=path,
+            diffusion=diffusion,
+        )
+        if null is None or not in_interval:
             return drift_strong, drift_strong_cls
-        assert null is not None
         weak = model(*inputs, null, cls.to(dtype), uncond=True)
-        drift_weak = drift(weak.velocity, latent)
-        drift_weak_cls = drift(weak.cls_velocity, cls)
+        drift_weak = _sde_drift(
+            weak.velocity,
+            state=latent,
+            time=time,
+            path=path,
+            diffusion=diffusion,
+        )
+        drift_weak_cls = _sde_drift(
+            weak.cls_velocity,
+            state=cls,
+            time=time,
+            path=path,
+            diffusion=diffusion,
+        )
         weight = cfg.guidance
         return (
             drift_weak + weight * (drift_strong - drift_weak),
             drift_weak_cls + weight * (drift_strong_cls - drift_weak_cls),
         )
+
+
+def _sde_drift(
+    velocity: Tensor,
+    state: Tensor,
+    *,
+    time: Tensor,
+    path: InterpolantFn,
+    diffusion: Tensor,
+) -> Tensor:
+    """Reverse-SDE drift ``v - g(t)^2 / 2 * score`` of one stream, in float64."""
+    velocity = velocity.to(torch.float64)
+    t = time.view(-1, *[1] * (state.ndim - 1))
+    score = velocity_to_score(velocity, state, path, t)
+    return velocity - 0.5 * diffusion * score

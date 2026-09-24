@@ -49,7 +49,6 @@ import subprocess
 import sys
 import tempfile
 
-from PIL import Image
 from torch import Tensor, nn
 
 import numpy as np
@@ -69,10 +68,17 @@ from priml.train.parallelism import NoParallel
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
 
+    from PIL import Image
     from torch.utils.data import Dataset
 
     from priml.baselines.speedrundit.loss import VelocityField
+else:
+    from wrapt import lazy_import
 
+    Image = lazy_import("PIL.Image")  # ~60 ms; only the synthetic ImageNet needs it.
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 SOURCE_URL: Final = "https://github.com/SwayStar123/SpeedrunDiT.git"
 """Reference repository."""
@@ -125,13 +131,6 @@ RENAMES: Final = (
     (r"^rope\.sin$", "feat_rope.freqs_sin"),
 )
 """Port state names rewritten to the reference's; every other name agrees."""
-
-
-class _Flags(Protocol):
-    """Parsed command line."""
-
-    upstream: Path | None
-    mint: bool
 
 
 class _Objective(Protocol):
@@ -304,15 +303,15 @@ def pinned_source(explicit: Path | None) -> Generator[Path]:
     with tempfile.TemporaryDirectory(prefix="speedrundit-parity-") as name:
         root = Path(name) / "srdit"
         subprocess.run(  # noqa: S603 -- Fixed executable and a constant URL.
-            ["git", "clone", "--quiet", "--no-checkout", SOURCE_URL, str(root)],  # noqa: S607
+            ["git", "clone", "--quiet", "--no-checkout", SOURCE_URL, str(root)],  # noqa: S607 -- git from PATH, as a developer's clone would run it.
             check=True,
         )
         subprocess.run(  # noqa: S603 -- Fixed executable, constant revision.
-            ["git", "-C", str(root), "checkout", "--quiet", SOURCE_REVISION],  # noqa: S607
+            ["git", "-C", str(root), "checkout", "--quiet", SOURCE_REVISION],  # noqa: S607 -- git from PATH, as a developer's clone would run it.
             check=True,
         )
         head = subprocess.run(  # noqa: S603 -- Fixed executable.
-            ["git", "-C", str(root), "rev-parse", "HEAD"],  # noqa: S607
+            ["git", "-C", str(root), "rev-parse", "HEAD"],  # noqa: S607 -- git from PATH, as a developer's clone would run it.
             check=True,
             capture_output=True,
             text=True,
@@ -636,7 +635,8 @@ def compare_loader(upstream: Path) -> bool:
 
         ok = report("order and labels", *tensors_equal(label, batch["label"]))
         ok &= report("latents", *tensors_equal(latent.squeeze(1), batch["media"]))
-        assert "raw_image" in batch
+        if "raw_image" not in batch:
+            raise ValueError("The loader dropped raw_image despite keep_images.")
         return ok & report("images", *tensors_equal(raw_image, batch["raw_image"]))
 
 
@@ -808,7 +808,8 @@ def run_native(
         )
         result = probe.result
         shadow = step.ema.shadow_model
-        assert shadow is not None
+        if shadow is None:
+            raise ValueError("exp000's train step carries no EMA shadow model.")
         trace.append(
             {
                 "loss": result.loss.detach().clone(),
@@ -849,44 +850,6 @@ class _StepProbe:
             for name, p in self._model.named_parameters()
             if p.grad is not None
         ]
-
-
-class _RecordingObjective(SpeedrunDiTLoss):
-    """The step's objective, keeping its last output on the probe."""
-
-    def __init__(self, probe: _StepProbe) -> None:
-        super().__init__(probe._objective.config)  # noqa: SLF001 -- The probe owns the wrapped objective.
-        self._probe = probe
-
-    @override
-    def __call__(
-        self,
-        model: VelocityField,
-        *,
-        media: Tensor,
-        label: Tensor,
-        cls_token: Tensor,
-        features: Sequence[Tensor] = (),
-        time: Tensor | None = None,
-        noise: Tensor | None = None,
-        noise_cls: Tensor | None = None,
-    ) -> SpeedrunDiTLoss.Output:
-        self._probe.result = super().__call__(
-            model,
-            media=media,
-            label=label,
-            cls_token=cls_token,
-            features=features,
-            time=time,
-            noise=noise,
-            noise_cls=noise_cls,
-        )
-        return self._probe.result
-
-
-def _named(model: nn.Module) -> list[tuple[str, Tensor]]:
-    """Snapshot every named parameter."""
-    return [(n, p.detach().clone()) for n, p in model.named_parameters()]
 
 
 def compare_forward(reference: nn.Module, candidate: SpeedrunDiT) -> bool:
@@ -1033,17 +996,7 @@ def main() -> int:
         description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--upstream",
-        type=Path,
-        default=None,
-        help="Existing reference checkout; omit to clone the pinned commit.",
-    )
-    parser.add_argument(
-        "--mint",
-        action="store_true",
-        help=f"Write the reference's initialization to testdata/{INIT_GOLDEN}.",
-    )
+    _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
 
     torch.use_deterministic_algorithms(True)
@@ -1055,8 +1008,8 @@ def main() -> int:
         ok &= compare_imagenet_convert(upstream)
 
         print("initialization")
-        testdata = Path(__file__).resolve().parents[1] / "testdata"
-        ok &= compare_initialization(testdata / INIT_GOLDEN if flags.mint else None)
+        golden = _CWD.parent / "testdata" / INIT_GOLDEN
+        ok &= compare_initialization(golden if flags.mint else None)
         reference, candidate = build_pair(GEOMETRY, seed=1234)
         ok &= compare_named(
             list(reference.named_parameters()),
@@ -1109,6 +1062,66 @@ def main() -> int:
     print()
     print("PARITY HOLDS" if ok else "PARITY BROKEN")
     return 0 if ok else 1
+
+
+class _Flags(Protocol):
+    """Parsed command line."""
+
+    upstream: Path | None
+    mint: bool
+
+
+class _RecordingObjective(SpeedrunDiTLoss):
+    """The step's objective, keeping its last output on the probe."""
+
+    def __init__(self, probe: _StepProbe) -> None:
+        super().__init__(probe._objective.config)  # noqa: SLF001 -- The probe owns the wrapped objective.
+        self._probe = probe
+
+    @override
+    def __call__(
+        self,
+        model: VelocityField,
+        *,
+        media: Tensor,
+        label: Tensor,
+        cls_token: Tensor,
+        features: Sequence[Tensor] = (),
+        time: Tensor | None = None,
+        noise: Tensor | None = None,
+        noise_cls: Tensor | None = None,
+    ) -> SpeedrunDiTLoss.Output:
+        self._probe.result = super().__call__(
+            model,
+            media=media,
+            label=label,
+            cls_token=cls_token,
+            features=features,
+            time=time,
+            noise=noise,
+            noise_cls=noise_cls,
+        )
+        return self._probe.result
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register flags on ``parser``."""
+    parser.add_argument(
+        "--upstream",
+        type=Path,
+        default=None,
+        help="Existing reference checkout; omit to clone the pinned commit.",
+    )
+    parser.add_argument(
+        "--mint",
+        action="store_true",
+        help=f"Write the reference's initialization to testdata/{INIT_GOLDEN}.",
+    )
+
+
+def _named(model: nn.Module) -> list[tuple[str, Tensor]]:
+    """Snapshot every named parameter."""
+    return [(n, p.detach().clone()) for n, p in model.named_parameters()]
 
 
 if __name__ == "__main__":

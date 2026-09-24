@@ -48,7 +48,7 @@ from priml.testing.bfb import assert_bfb_against_golden
 from priml.train.parallelism import NoParallel
 
 
-_CWD: Final = Path(__file__).parent.resolve()
+_CWD: Final = Path(__file__).resolve().parent
 
 STEPS: Final = 5
 BATCH: Final = 2

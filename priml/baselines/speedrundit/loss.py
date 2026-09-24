@@ -86,7 +86,7 @@ def mean_flat(x: Tensor) -> Tensor:
 
     Returns:
       reduced: ``[batch]`` for rank two or more; a scalar for rank one, where
-      the empty axis list makes torch reduce everything.
+        the empty axis list makes torch reduce everything.
 
     """
     return torch.mean(x, dim=list(range(1, len(x.size()))))
@@ -304,7 +304,7 @@ def resolution_time_shift(
         elements *= dim
     # Correctly rounded, as the reference computes it: ``** 0.5`` is a libm
     # ``pow`` and lands on a different last bit for some element counts.
-    shift = math.sqrt(elements / base)  # noqa: TID251
+    shift = math.sqrt(elements / base)  # noqa: TID251 -- Bit parity: correctly rounded sqrt, not libm pow.
     return torch.clamp((shift * t) / (1 + (shift - 1) * t), 0.0, 1.0)
 
 
@@ -551,28 +551,16 @@ class SpeedrunDiTLoss:
             noise=noise,
         )
 
+    # Accumulated one sample at a time, in batch order. That is slower than a single
+    # batched reduction and it is what the reference does; a batched sum associates the
+    # additions differently and lands on a different last bit.
     def _projection(
         self,
         features: Sequence[Tensor],
         projections: Sequence[Tensor],
         media: Tensor,
     ) -> Tensor:
-        """Average negative cosine similarity between features and projections.
-
-        Accumulated one sample at a time, in batch order. That is slower than a
-        single batched reduction and it is what the reference does; a batched
-        sum associates the additions differently and lands on a different last
-        bit.
-
-        Args:
-          features: Frozen encoder features, one tensor per target.
-          projections: Model projections, aligned with ``features``.
-          media: Clean latents, for device and dtype when there is no target.
-
-        Returns:
-          projection: A scalar alignment penalty; zero when no target is given.
-
-        """
+        """Average negative cosine similarity between features and projections."""
         if not features:
             return torch.zeros((), device=media.device, dtype=media.dtype)
         total = torch.zeros((), device=media.device, dtype=media.dtype)

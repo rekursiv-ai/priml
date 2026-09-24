@@ -40,13 +40,11 @@ import json
 import shutil
 import tempfile
 
-from PIL import Image
 from torch import Tensor
 
 import numpy as np
 
 from priml.baselines.imagenet.data import NUM_CLASSES
-from priml.baselines.imagenet.scripts import prepare_data as imagenet_prepare_data
 from priml.baselines.speedrundit.data import (
     SpeedrunDiTData,
     imagenet_image_pipeline,
@@ -58,9 +56,17 @@ from priml.data.sources.extracted_imagenet import ExtractedImageNetSource
 from priml.lib.custom_json import IntCodec
 from priml.train.train_loop import TrainLoop
 
+import priml.baselines.imagenet.scripts.prepare_data
+
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from PIL import Image
+else:
+    from wrapt import lazy_import
+
+    Image = lazy_import("PIL.Image")  # ~60 ms; only --convert writes PNGs.
 
 
 SHARD_WIDTH: Final = 5
@@ -68,25 +74,6 @@ SHARD_WIDTH: Final = 5
 
 INDEX_WIDTH: Final = 8
 """Digits in a sample's zero-padded index."""
-
-
-class _Flags(Protocol):
-    """Parsed command line."""
-
-    directory: Path | None
-    source: Path | None
-    synthetic: bool
-    verify: bool
-    convert: bool
-    imagenet: Path | None
-    workers: int
-    samples: int
-    image_size: int
-    latent_size: int
-    latent_channels: int
-    num_classes: int
-    encoder_width: int
-    seed: int
 
 
 def default_directory() -> Path:
@@ -265,6 +252,76 @@ def synthesize(
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def main() -> int:
+    """Prepare or verify the corpus.
+
+    Returns:
+      status: Zero on success.
+
+    """
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_arguments(parser)
+    flags = cast(_Flags, parser.parse_args())
+    directory = flags.directory or default_directory()
+
+    if flags.synthetic:
+        synthesize(
+            directory,
+            samples=flags.samples,
+            image_size=flags.image_size,
+            latent_size=flags.latent_size,
+            latent_channels=flags.latent_channels,
+            num_classes=flags.num_classes,
+            encoder_width=flags.encoder_width,
+            seed=flags.seed,
+        )
+        print(f"wrote {flags.samples} synthetic samples to {directory}")
+        return 0
+
+    if flags.convert:
+        imagenet = (
+            flags.imagenet
+            or priml.baselines.imagenet.scripts.prepare_data.default_directory()
+        )
+        count = convert(imagenet, directory, workers=flags.workers)
+        print(f"wrote {count} images from {imagenet} to {directory / 'images'}")
+        return 0
+
+    if flags.source is not None:
+        count = verify(flags.source)
+        print(f"{flags.source} holds {count} verified samples")
+        if flags.source.resolve() != directory.resolve():
+            shutil.copytree(flags.source, directory, dirs_exist_ok=False)
+            print(f"published to {directory}")
+        return 0
+
+    count = verify(directory)
+    print(f"{directory} holds {count} verified samples")
+    return 0
+
+
+class _Flags(Protocol):
+    """Parsed command line."""
+
+    directory: Path | None
+    source: Path | None
+    synthetic: bool
+    verify: bool
+    convert: bool
+    imagenet: Path | None
+    workers: int
+    samples: int
+    image_size: int
+    latent_size: int
+    latent_channels: int
+    num_classes: int
+    encoder_width: int
+    seed: int
+
+
 def _write_synthetic(
     root: Path,
     *,
@@ -276,19 +333,7 @@ def _write_synthetic(
     encoder_width: int,
     seed: int,
 ) -> None:
-    """Fill a staging directory with a synthetic corpus.
-
-    Args:
-      root: Staging directory.
-      samples: Samples to write.
-      image_size: Side length of each stored image.
-      latent_size: Side length of each stored latent.
-      latent_channels: Channels per latent.
-      num_classes: Classes cycled through.
-      encoder_width: Width of the synthetic alignment features.
-      seed: Seed for every draw.
-
-    """
+    """Fill a staging directory with a synthetic corpus."""
     rng = np.random.default_rng(seed)
     images_dir = root / "images"
     latents_dir = root / "vae-in"
@@ -326,12 +371,7 @@ def _write_synthetic(
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare the command line.
-
-    Args:
-      parser: Parser to populate.
-
-    """
+    """Declare the command line."""
     parser.add_argument("--directory", type=Path, default=None)
     parser.add_argument("--source", type=Path, default=None)
     parser.add_argument("--synthetic", action="store_true")
@@ -346,54 +386,6 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-classes", type=int, default=NUM_CLASSES)
     parser.add_argument("--encoder-width", type=int, default=768)
     parser.add_argument("--seed", type=int, default=0)
-
-
-def main() -> int:
-    """Prepare or verify the corpus.
-
-    Returns:
-      status: Zero on success.
-
-    """
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    _add_arguments(parser)
-    flags = cast(_Flags, parser.parse_args())
-    directory = flags.directory or default_directory()
-
-    if flags.synthetic:
-        synthesize(
-            directory,
-            samples=flags.samples,
-            image_size=flags.image_size,
-            latent_size=flags.latent_size,
-            latent_channels=flags.latent_channels,
-            num_classes=flags.num_classes,
-            encoder_width=flags.encoder_width,
-            seed=flags.seed,
-        )
-        print(f"wrote {flags.samples} synthetic samples to {directory}")
-        return 0
-
-    if flags.convert:
-        imagenet = flags.imagenet or imagenet_prepare_data.default_directory()
-        count = convert(imagenet, directory, workers=flags.workers)
-        print(f"wrote {count} images from {imagenet} to {directory / 'images'}")
-        return 0
-
-    if flags.source is not None:
-        count = verify(flags.source)
-        print(f"{flags.source} holds {count} verified samples")
-        if flags.source.resolve() != directory.resolve():
-            shutil.copytree(flags.source, directory, dirs_exist_ok=False)
-            print(f"published to {directory}")
-        return 0
-
-    count = verify(directory)
-    print(f"{directory} holds {count} verified samples")
-    return 0
 
 
 if __name__ == "__main__":

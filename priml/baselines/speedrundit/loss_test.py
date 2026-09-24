@@ -180,10 +180,10 @@ def test_the_draw_order_is_time_then_noise_then_class_noise() -> None:
     batch = inputs()
     objective = SpeedrunDiTLoss.Config().make()
 
-    torch.manual_seed(31337)
+    torch.manual_seed(31_337)
     result = objective(model, **batch)
 
-    torch.manual_seed(31337)
+    torch.manual_seed(31_337)
     expected_time = uniform_time(BATCH)
     expected_time = resolution_time_shift(
         expected_time,

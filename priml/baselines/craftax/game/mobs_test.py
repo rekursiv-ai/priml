@@ -158,6 +158,69 @@ def test_a_projectile_stops_at_a_wall() -> None:
     assert float(state.player_health[0]) == pytest.approx(9.0)
 
 
+def _arrow_at_melee(*, level: int, bow_enchantment: int) -> EnvState:
+    """Place a player arrow one tile from a sturdy melee creature on ``level``."""
+    state = _state()
+    state.player_level[:] = level
+    state.map[:] = int(BlockType.GRASS)
+    state.melee_mobs.mask[:, level, 0] = True
+    state.melee_mobs.health[:, level, 0] = 99.0
+    state.melee_mobs.type_id[:, level, 0] = int(
+        constants.FLOOR_MOB_TYPE[level, 1],
+    )
+    state.melee_mobs.position[:, level, 0] = torch.tensor([10, 14], dtype=torch.int32)
+    state.mob_map[:, level, 10, 14] = True
+    state.player_projectiles.mask[:, level, 0] = True
+    state.player_projectiles.type_id[:, level, 0] = int(
+        constants.ProjectileType.ARROW2,
+    )
+    state.player_projectiles.position[:, level, 0] = torch.tensor(
+        [10, 13],
+        dtype=torch.int32,
+    )
+    state.player_projectile_directions[:, level, 0] = torch.tensor(
+        [0, 1],
+        dtype=torch.int32,
+    )
+    state.bow_enchantment[:] = bow_enchantment
+    return state
+
+
+def test_a_player_arrow_wounds_the_creature_it_reaches() -> None:
+    state = mobs.update_mobs(
+        _arrow_at_melee(level=0, bow_enchantment=0),
+        generator=_seed(),
+    )
+    assert float(state.melee_mobs.health[0, 0, 0]) < 99.0
+    assert state.player_projectiles.mask[:, 0, 0].tolist() == [False, False]
+
+
+def test_a_player_arrow_kill_counts_toward_clearing_the_floor() -> None:
+    state = _arrow_at_melee(level=0, bow_enchantment=0)
+    state.melee_mobs.health[:, 0, 0] = 0.5
+    state = mobs.update_mobs(state, generator=_seed())
+    assert state.melee_mobs.mask[:, 0, 0].tolist() == [False, False]
+    assert state.monsters_killed[:, 0].tolist() == [1, 1]
+    assert not bool(state.mob_map[0, 0, 10, 14])
+
+
+def test_an_ice_bow_beats_a_fire_bow_in_the_fire_realm() -> None:
+    # Fire Realm creatures shrug off fire and take ice in full, so the bow's
+    # element decides the damage there -- the wall the carried-state
+    # experiments are about.
+    fire = mobs.update_mobs(
+        _arrow_at_melee(level=6, bow_enchantment=1),
+        generator=_seed(),
+    )
+    ice = mobs.update_mobs(
+        _arrow_at_melee(level=6, bow_enchantment=2),
+        generator=_seed(),
+    )
+    assert float(ice.melee_mobs.health[0, 6, 0]) < float(
+        fire.melee_mobs.health[0, 6, 0],
+    )
+
+
 def test_spawning_fills_empty_slots_near_the_player() -> None:
     state = mobs.spawn_mobs(_state(num_envs=16), generator=_seed(5))
     spawned = state.melee_mobs.mask[:, 0].any(-1) | state.passive_mobs.mask[:, 0].any(

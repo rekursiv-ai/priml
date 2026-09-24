@@ -221,12 +221,7 @@ def test_the_module_pins_the_reference_commit() -> None:
 
 
 def _configs() -> list[type]:
-    """Collect every Config class this baseline defines.
-
-    Returns:
-      configs: The loop's, then each module's, in definition order.
-
-    """
+    """Collect every Config class this baseline defines."""
     found: list[type] = [SpeedrunDiTLoop]
     for name in ("data", "loss", "metric", "model", "sampler", "train_step"):
         module = importlib.import_module(f"priml.baselines.speedrundit.{name}")

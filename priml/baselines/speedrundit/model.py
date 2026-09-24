@@ -403,7 +403,7 @@ class LabelEmbedder(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if not 0.0 <= self.dropout < 1.0:
+            if math.isnan(self.dropout) or self.dropout < 0.0 or self.dropout >= 1.0:
                 raise ValueError(f"dropout must be in [0, 1); got {self.dropout}.")
             return super().finalize()
 
@@ -859,8 +859,8 @@ class VisionRoPE(nn.Module):
         self.cos = nn.Buffer(angles.cos())
         self.sin = nn.Buffer(angles.sin())
 
-    @staticmethod
-    def rotate_pairs(x: Tensor) -> Tensor:
+    @classmethod
+    def rotate_pairs(cls, x: Tensor) -> Tensor:
         """Rotate adjacent channel pairs by a quarter turn.
 
         Args:
@@ -1402,11 +1402,19 @@ class SprintRouting(nn.Module):
 
         @override
         def finalize(self) -> Self:
-            if not 0.0 <= self.drop_ratio < 1.0:
+            if (
+                math.isnan(self.drop_ratio)
+                or self.drop_ratio < 0.0
+                or self.drop_ratio >= 1.0
+            ):
                 raise ValueError(
                     f"drop_ratio must be in [0, 1); got {self.drop_ratio}.",
                 )
-            if not 0.0 <= self.path_drop_prob <= 1.0:
+            if (
+                math.isnan(self.path_drop_prob)
+                or self.path_drop_prob < 0.0
+                or self.path_drop_prob > 1.0
+            ):
                 raise ValueError(
                     f"path_drop_prob must be in [0, 1]; got {self.path_drop_prob}.",
                 )
@@ -1645,7 +1653,7 @@ class SpeedrunDiT(nn.Module):
 
             Returns:
               channels: The first alignment target's width, which the class
-              stream shares so one projector serves both.
+                stream shares so one projector serves both.
 
             """
             return self.projector_dims[0]
@@ -2060,28 +2068,17 @@ class SpeedrunDiT(nn.Module):
             cls_velocity=cls_velocity,
         )
 
+    # The class token occupies slot zero and has no grid position, so the full-sequence
+    # ids are the patch ids shifted by one with a leading zero; gathering that shifted
+    # vector keeps every kept patch on its own position and leaves a surviving class
+    # token at id zero, where the rotation is the identity.
     def _gather_positions(self, positions: Tensor, keep: Tensor) -> Tensor:
-        """Select rotary ids for a kept token subset.
-
-        The class token occupies slot zero and has no grid position, so the
-        full-sequence ids are the patch ids shifted by one with a leading zero;
-        gathering that shifted vector keeps every kept patch on its own
-        position and leaves a surviving class token at id zero, where the
-        rotation is the identity.
-
-        Args:
-          positions: Patch ids, ``[batch, num_patches]``.
-          keep: Kept indices into the full sequence, ``[batch, kept]``.
-
-        Returns:
-          positions: ``[batch, kept]``.
-
-        """
+        """Select rotary ids for a kept token subset."""
         lead = positions.new_zeros(positions.shape[0], 1)
         return torch.cat([lead, positions], dim=1).gather(1, keep)
 
-    @staticmethod
-    def _gather_values(values: Tensor | None, keep: Tensor) -> Tensor | None:
+    @classmethod
+    def _gather_values(cls, values: Tensor | None, keep: Tensor) -> Tensor | None:
         """Select first-layer values for a kept token subset."""
         if values is None:
             return None

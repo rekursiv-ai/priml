@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, NotRequired, Self, TypedDict, cast, override
 
 from configgle import Fig
-from PIL import Image
 from torch import Tensor
 
 import numpy as np
@@ -67,6 +66,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
     from numpy.typing import NDArray
+    from PIL import Image
+else:
+    from wrapt import lazy_import
+
+    Image = lazy_import("PIL.Image")  # ~60 ms; only the ADM crop and PNG reads need it.
 
 
 __all__ = [
@@ -240,7 +244,7 @@ class SpeedrunDiTData:
 
         Returns:
           passes: An iterable whose every iteration walks one pass; a short
-          final batch is dropped unless ``drop_last`` is off.
+            final batch is dropped unless ``drop_last`` is off.
 
         """
         return _TrainPasses(self._train_pass, self.__len__)
@@ -248,8 +252,8 @@ class SpeedrunDiTData:
     def eval_dataloader(self) -> Iterator[SpeedrunDiTBatch]:
         """Iterate the corpus once, in stored order.
 
-        Returns:
-          batches: Unshuffled batches, padding the last one.
+        Yields:
+          batch: The next unshuffled batch; the last one is padded.
 
         """
         corpus = self.corpus
@@ -263,7 +267,7 @@ class SpeedrunDiTData:
 
         Returns:
           state: Passes started, the pass in progress, the next batch within
-          it, and the epoch timer.
+            it, and the epoch timer.
 
         """
         return {
@@ -302,33 +306,18 @@ class SpeedrunDiTData:
             return count // size
         return (count + size - 1) // size
 
+    # A named, salted stream rather than the global one: the order has to be replayable
+    # from ``(seed, pass_index)`` alone so a resumed run rebuilds the pass it was
+    # interrupted in without having saved the permutation.
     def _permutation(self, count: int, pass_index: int) -> Tensor:
-        """Draw the visiting order for one pass.
-
-        A named, salted stream rather than the global one: the order has to be
-        replayable from ``(seed, pass_index)`` alone so a resumed run rebuilds
-        the pass it was interrupted in without having saved the permutation.
-
-        Args:
-          count: Samples in the corpus.
-          pass_index: Zero-based pass number.
-
-        Returns:
-          order: A permutation of ``[0, count)``.
-
-        """
+        """Draw the visiting order for one pass."""
         generator = torch.Generator()
         generator.manual_seed(salt("speedrundit_shuffle", self.config.seed, pass_index))
         order = torch.randperm(count, generator=generator)
         return order.to(self.corpus.media.device)
 
     def _train_pass(self) -> Iterator[SpeedrunDiTBatch]:
-        """Walk the pass in progress, or begin the next one.
-
-        Yields:
-          batch: One training batch.
-
-        """
+        """Walk the pass in progress, or begin the next one."""
         corpus = self.corpus
         if self._active_pass is None:
             self._active_pass = self._passes
@@ -346,24 +335,6 @@ class SpeedrunDiTData:
             yield corpus.batch(rows, width=size, valid=valid)
         self._active_pass = None
         self._next_batch = 0
-
-
-class _TrainPasses:
-    """The training stream: each ``iter`` walks one pass over the corpus."""
-
-    def __init__(
-        self,
-        walk: Callable[[], Iterator[SpeedrunDiTBatch]],
-        length: Callable[[], int],
-    ) -> None:
-        self._walk = walk
-        self._length = length
-
-    def __iter__(self) -> Iterator[SpeedrunDiTBatch]:
-        return self._walk()
-
-    def __len__(self) -> int:
-        return self._length()
 
 
 class _Corpus:
@@ -599,24 +570,7 @@ def _load_corpus(
     keep_images: bool,
     limit: int | None,
 ) -> _Corpus:
-    """Read a prepared corpus into memory.
-
-    Args:
-      directory: Corpus root holding ``images/`` and ``vae-in/``.
-      device: Where the tensors land.
-      dtype: Latent dtype.
-      latent_scale: Multiplier applied to every latent.
-      keep_images: Whether to retain the source images.
-      limit: Prefix to read, or ``None`` for all.
-
-    Returns:
-      corpus: The resident tensors.
-
-    Raises:
-      FileNotFoundError: If the corpus or its manifest is absent.
-      ValueError: If the two trees disagree in length or a latent is misshaped.
-
-    """
+    """Read a prepared corpus into memory."""
     latents_dir = directory / "vae-in"
     images_dir = directory / "images"
     manifest = latents_dir / "dataset.json"
@@ -704,3 +658,21 @@ def _load_rows(
 ) -> Tensor:
     """Read the first ``count`` rows of a per-sample array."""
     return torch.from_numpy(np.load(path)[:count]).to(device=device, dtype=dtype)
+
+
+class _TrainPasses:
+    """The training stream: each ``iter`` walks one pass over the corpus."""
+
+    def __init__(
+        self,
+        walk: Callable[[], Iterator[SpeedrunDiTBatch]],
+        length: Callable[[], int],
+    ) -> None:
+        self._walk = walk
+        self._length = length
+
+    def __iter__(self) -> Iterator[SpeedrunDiTBatch]:
+        return self._walk()
+
+    def __len__(self) -> int:
+        return self._length()

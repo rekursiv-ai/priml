@@ -18,7 +18,11 @@ from torch import Tensor
 import torch
 
 from priml.baselines.craftax.game import constants, mechanics
-from priml.baselines.craftax.game.constants import Achievement, BlockType
+from priml.baselines.craftax.game.constants import (
+    Achievement,
+    BlockType,
+    ProjectileType,
+)
 from priml.baselines.craftax.game.indexing import (
     scatter_tiles_where,
 )
@@ -302,25 +306,30 @@ def _update_projectiles(state: EnvState) -> EnvState:
             position = _slot(mobs.position, state, slot)
             heading = _slot(directions, state, slot)
             flown = position + heading
+            species = _slot(mobs.type_id, state, slot)
 
-            hits_player = alive & (flown == state.player_position).all(-1)
             if hurts_player:
-                damage = constants.MOB_DAMAGE.to(state.device)[
-                    _slot(mobs.type_id, state, slot).long(),
-                    3,
-                ]
+                hits = alive & (flown == state.player_position).all(-1)
+                damage = constants.MOB_DAMAGE.to(state.device)[species.long(), 3]
                 state.player_health = state.player_health - torch.where(
-                    hits_player,
+                    hits,
                     mechanics.damage_to_player(state, damage),
                     torch.zeros_like(state.player_health),
                 )
-                state.is_sleeping = state.is_sleeping & ~hits_player
+                state.is_sleeping = state.is_sleeping & ~hits
+            else:
+                state, hits = _strike_with_projectile(
+                    state,
+                    species=species,
+                    at=(position, flown),
+                    alive=alive,
+                )
 
             # A projectile stops at the first solid thing it meets.
             blocked = constants.SOLID_BLOCK.to(state.device)[
                 mechanics.block_at(state, flown).long()
             ]
-            survives = alive & ~hits_player & ~blocked & mechanics.in_bounds(flown)
+            survives = alive & ~hits & ~blocked & mechanics.in_bounds(flown)
 
             rows = torch.arange(state.num_envs, device=state.device)
             level = state.player_level.long()
@@ -331,6 +340,94 @@ def _update_projectiles(state: EnvState) -> EnvState:
             )
             mobs.mask[rows, level, slot] = survives
     return state
+
+
+# Arrows add half their physical damage in the bow's element and scale with dexterity;
+# spells scale with intelligence. The projectile checks its current tile first, so a
+# creature that stepped into its path is not skipped.
+def _strike_with_projectile(
+    state: EnvState,
+    *,
+    species: Tensor,
+    at: tuple[Tensor, Tensor],
+    alive: Tensor,
+) -> tuple[EnvState, Tensor]:
+    """Land a player projectile on a creature at its tile or the next one."""
+    damage = constants.MOB_DAMAGE.to(state.device)[species.long(), 3] * alive[:, None]
+    arrow = (species == int(ProjectileType.ARROW)) | (
+        species == int(ProjectileType.ARROW2)
+    )
+    spell = (species == int(ProjectileType.FIREBALL)) | (
+        species == int(ProjectileType.ICEBALL)
+    )
+    element = torch.zeros_like(damage).scatter_(
+        -1,
+        state.bow_enchantment.long()[:, None],
+        damage[:, :1] / 2,
+    )
+    element[:, 0] = 0.0
+    damage = damage + element * arrow[:, None]
+    damage = (
+        damage
+        * torch.where(
+            arrow,
+            1 + 0.2 * (state.player_dexterity - 1),
+            torch.where(spell, 1 + 0.5 * (state.player_intelligence - 1), 1.0),
+        )[:, None]
+    )
+
+    hits = torch.zeros_like(alive)
+    for target in at:
+        remaining = damage * ~hits[:, None]
+        state, struck = _projectile_hits_tile(state, target=target, damage=remaining)
+        hits = hits | (struck & alive)
+    return state, hits
+
+
+def _projectile_hits_tile(
+    state: EnvState,
+    *,
+    target: Tensor,
+    damage: Tensor,
+) -> tuple[EnvState, Tensor]:
+    """Apply ``damage`` to any creature of any class standing on ``target``."""
+    struck = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
+    killed_monster = struck.clone()
+    killed_any = struck.clone()
+    # A projectile kill unlocks the monster achievement, but shooting a cow
+    # is not eating it: passive kills neither feed nor unlock.
+    for field, mob_class, can_unlock in (
+        ("melee_mobs", 1, True),
+        ("passive_mobs", 0, False),
+        ("ranged_mobs", 2, True),
+    ):
+        mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
+        assert isinstance(mobs, Mobs)
+        mobs, killed, hit, achievements = mechanics.attack_mob_class(
+            state,
+            mobs,
+            position=target,
+            damage=damage,
+            mob_class=mob_class,
+            can_unlock=torch.full_like(struck, can_unlock),
+        )
+        setattr(state, field, mobs)
+        state.achievements = achievements
+        struck = struck | hit
+        killed_any = killed_any | killed
+        if mob_class:
+            killed_monster = killed_monster | killed
+
+    rows = torch.arange(state.num_envs, device=state.device)
+    level = state.player_level.long()
+    state.monsters_killed[rows, level] += killed_monster.int()
+    state.mob_map[rows, level] = scatter_tiles_where(
+        state.mob_map[rows, level],
+        target,
+        torch.zeros(state.num_envs, dtype=torch.bool, device=state.device),
+        killed_any,
+    )
+    return state, struck
 
 
 def _step_toward_player(

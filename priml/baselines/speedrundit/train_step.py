@@ -189,6 +189,9 @@ class SpeedrunDiTTrainStep(TrainStep):
             "metrics": _metrics(result),
         }
 
+    # The base's autocast wraps the whole loss; this recipe's reference casts only the
+    # forward, so the objective reduces in float32. Wrapping the objective instead
+    # measured different gradients at step one.
     def _forward(
         self,
         media: Tensor,
@@ -197,12 +200,7 @@ class SpeedrunDiTTrainStep(TrainStep):
         cls_token: Tensor,
         /,
     ) -> SpeedrunDiT.Output:
-        """Run the model under autocast and return float32 outputs.
-
-        The base's autocast wraps the whole loss; this recipe's reference
-        casts only the forward, so the objective reduces in float32. Wrapping
-        the objective instead measured different gradients at step one.
-        """
+        """Run the model under autocast and return float32 outputs."""
         dtype = self.config.dtype_autocast
         context = (
             nullcontext()
@@ -222,15 +220,7 @@ class SpeedrunDiTTrainStep(TrainStep):
         )
 
     def _evaluate(self, batch: dict[str, object]) -> SpeedrunDiTLoss.Output:
-        """Run the objective over one batch.
-
-        Args:
-          batch: The raw batch mapping.
-
-        Returns:
-          result: Every term of the objective.
-
-        """
+        """Run the objective over one batch."""
         media = batch["media"]
         label = batch["label"]
         cls_token = batch["cls_token"]
