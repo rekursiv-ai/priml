@@ -19,9 +19,10 @@ noticing when the recipe moved.
 ``forward`` and ``five_steps`` go through the harness, which randomizes the
 parameters and LOADS them on replay; that is why initialization cannot be one
 of them, since the load overwrites exactly what construction produced. It is
-also why ``five_steps`` cannot see the EMA's construction-time seed, which
-predates the load: ``scripts/parity.py`` is what compares that, against the
-reference's own ``update_ema``.
+also why ``five_steps`` registers the EMA weights as buffers: its initial
+weights must be captured and loaded without the harness randomizing them.
+``scripts/parity.py`` compares the recipe's construction-time EMA seed against
+the reference's own ``update_ema``.
 Regenerate those two with ``BFB_REGENERATE=1``; a missing one is minted AND
 fails, which is what forces someone to read it first.
 """
@@ -44,7 +45,7 @@ from priml.baselines.speedrundit.scripts.parity import (
 )
 from priml.baselines.speedrundit.train_step import SpeedrunDiTTrainStep
 from priml.lib.custom_json import DictCodec
-from priml.testing.bfb import assert_bfb_against_golden
+from priml.testing.bfb import assert_bfb_against_golden, randomize_parameters
 from priml.train.parallelism import NoParallel
 
 
@@ -176,6 +177,12 @@ class _FiveSteps(nn.Module):
         super().__init__()
         self.step = config.make()
         self.inner = self.step.model
+        # The step is not an nn.Module, so the EMA is otherwise absent from
+        # the golden. Buffer views snapshot it without randomizing it again.
+        shadow = self.step.ema.shadow_model
+        assert shadow is not None
+        for name, parameter in shadow.named_parameters():
+            self.register_buffer(f"ema_{name.replace('.', '__')}", parameter.detach())
 
     @override
     def forward(
@@ -216,10 +223,8 @@ class _FiveSteps(nn.Module):
             loss = out["loss"]
             assert isinstance(loss, Tensor)
             pieces.append(loss.float().reshape(1))
-        # The shadow lives on the step, which is not a module, so no state
-        # the harness compares would otherwise reach it. Cloned INSIDE the
-        # swap: a lazy generator read after the context exits sees the
-        # restored live weights instead of the shadow.
+        # Cloned INSIDE the swap: a lazy generator read after the context exits
+        # sees the restored live weights instead of the shadow.
         with self.step.ema.apply_to(self.inner):
             pieces.extend(
                 [p.detach().float().flatten().clone() for p in self.inner.parameters()],
@@ -265,6 +270,42 @@ def test_forward_bfb() -> None:
         build_module=lambda: _Forward(miniature().make()),
         build_input=build_input,
         seed=0,
+    )
+
+
+def test_five_steps_state_restores_initial_ema() -> None:
+    """Restore the EMA on replay despite a different local initialization."""
+    original = _FiveSteps(miniature_step())
+    replay = _FiveSteps(miniature_step())
+    original_shadow = original.step.ema.shadow_model
+    replay_shadow = replay.step.ema.shadow_model
+    assert original_shadow is not None
+    assert replay_shadow is not None
+    with torch.no_grad():
+        next(replay_shadow.parameters()).add_(1)
+
+    replay.load_state_dict(original.state_dict())
+
+    for expected, actual in zip(
+        original_shadow.parameters(),
+        replay_shadow.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(actual, expected)
+
+
+def test_five_steps_randomization_preserves_initial_ema() -> None:
+    """Keep initial EMA weights unchanged by harness randomization."""
+    module = _FiveSteps(miniature_step())
+    shadow = module.step.ema.shadow_model
+    assert shadow is not None
+    before = [parameter.detach().clone() for parameter in shadow.parameters()]
+
+    randomize_parameters(module, seed=42)
+
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(shadow.parameters(), before, strict=True)
     )
 
 
