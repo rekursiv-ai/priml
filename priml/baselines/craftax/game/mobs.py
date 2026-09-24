@@ -85,18 +85,11 @@ def spawn_mobs(
 
     grid = mechanics.current_map(state)
     distance = _distance_to_player(state)
-    unoccupied = ~mechanics.current_mobs(state)
     walkable = (
         (grid == int(BlockType.GRASS))
         | (grid == int(BlockType.PATH))
         | (grid == int(BlockType.FIRE_GRASS))
         | (grid == int(BlockType.ICE_GRASS))
-    )
-    passive_room = (
-        (distance > 3)
-        & (distance < constants.MOB_DESPAWN_DISTANCE)
-        & unoccupied
-        & walkable
     )
     monster_distance = torch.where(
         fighting_boss[:, None, None],
@@ -109,12 +102,6 @@ def spawn_mobs(
         | (grid == int(BlockType.GRAVE3))
     )
     monster_tiles = torch.where(fighting_boss[:, None, None], grave, walkable)
-    monster_room = (
-        monster_distance
-        & (distance < constants.MOB_DESPAWN_DISTANCE)
-        & unoccupied
-        & monster_tiles
-    )
 
     chances = constants.FLOOR_MOB_SPAWN_CHANCE.to(state.device)[level]
     floor_species = constants.FLOOR_MOB_TYPE.to(state.device)[level]
@@ -131,8 +118,22 @@ def spawn_mobs(
         chance = chances[:, column]
         if column == 1:
             chance = chance + chances[:, 3] * (1.0 - state.light_level) ** 2
+        unoccupied = ~mechanics.current_mobs(state)
+        if column == 0:
+            room = (
+                (distance > 3)
+                & (distance < constants.MOB_DESPAWN_DISTANCE)
+                & unoccupied
+                & walkable
+            )
+        else:
+            room = (
+                monster_distance
+                & (distance < constants.MOB_DESPAWN_DISTANCE)
+                & unoccupied
+                & monster_tiles
+            )
         rate = torch.ones_like(chance) if column == 0 else monster_rate
-        room = passive_room if column == 0 else monster_room
         spawning = (
             (alive.sum(-1) < alive.shape[-1])
             & (
@@ -385,11 +386,7 @@ def _update_projectiles(state: EnvState) -> EnvState:
 
             rows = torch.arange(state.num_envs, device=state.device)
             level = state.player_level.long()
-            mobs.position[rows, level, slot] = torch.where(
-                survives[:, None],
-                flown.int(),
-                position.int(),
-            )
+            mobs.position[rows, level, slot] = flown.int()
             mobs.mask[rows, level, slot] = survives
     return state
 
@@ -495,7 +492,7 @@ def _step_toward_player(
     # keeps a diagonal approach from locking into a staircase.
     prefer_rows = magnitude[:, 0] > magnitude[:, 1]
     tied = magnitude[:, 0] == magnitude[:, 1]
-    coin = torch.rand(state.num_envs, generator=generator, device=state.device) < 0.5
+    coin = torch.rand(state.num_envs, generator=generator, device=state.device) >= 0.5
     use_rows = torch.where(tied, coin, prefer_rows)
     step = torch.zeros_like(position)
     step[:, 0] = torch.where(
@@ -520,7 +517,8 @@ def _random_step(
 ) -> Tensor:
     """Draw one step from the first ``moves`` neighbour offsets."""
     choice = torch.randint(0, moves, (num_envs,), generator=generator, device=device)
-    return constants.CLOSE_BLOCKS.to(device)[choice]
+    directions = constants.CLOSE_BLOCKS[:4] if moves == 4 else constants.DIRECTIONS[1:9]
+    return directions.to(device)[choice]
 
 
 def _strike_player(
@@ -640,7 +638,7 @@ def _relocate(
     )
     state.mob_map[rows, level] = occupancy
 
-    mobs.position[rows, level, slot] = torch.where(alive[:, None], new.int(), old.int())
+    mobs.position[rows, level, slot] = new.int()
     mobs.attack_cooldown[rows, level, slot] = cooldown
     mobs.mask[rows, level, slot] = remains
     return state
@@ -671,11 +669,7 @@ def _place_mob(
         health,
         mobs.health[rows, level, slot],
     )
-    mobs.type_id[rows, level, slot] = torch.where(
-        spawning,
-        species.int(),
-        mobs.type_id[rows, level, slot],
-    )
+    mobs.type_id[rows, level, slot] = species.int()
     mobs.mask[rows, level, slot] = mobs.mask[rows, level, slot] | spawning
     state.mob_map[rows, level] = scatter_tiles_where(
         state.mob_map[rows, level],

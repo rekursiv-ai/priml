@@ -117,6 +117,59 @@ def test_the_occupancy_grid_follows_the_creature() -> None:
     assert not bool(state.mob_map[0, 0, 10, 13]) or landed.tolist() == [10, 13]
 
 
+def test_passive_wandering_has_four_stationary_directions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream samples DIRECTIONS[1:9], including four no-ops (game_logic.py:1297-1305)."""
+    state = _state(num_envs=1)
+    state.passive_mobs.position[0, 0, 0] = torch.tensor([10, 14], dtype=torch.int32)
+    state.passive_mobs.mask[0, 0, 0] = True
+    state.mob_map[0, 0, 10, 14] = True
+
+    def choose_last(
+        low: int,
+        high: int,
+        size: tuple[int, ...],
+        *,
+        generator: torch.Generator | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        del low, generator
+        return torch.full(size, high - 1, device=device, dtype=dtype or torch.int64)
+
+    monkeypatch.setattr(torch, "randint", choose_last)
+    state = mobs.update_mobs(state, generator=_seed())
+
+    assert state.passive_mobs.position[0, 0, 0].tolist() == [10, 14]
+
+
+def test_empty_passive_slots_keep_the_upstream_proposed_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream writes proposed positions regardless of the mob mask (game_logic.py:1359-1369)."""
+    state = _state(num_envs=1)
+    state.passive_mobs.position[0, 0, 1] = torch.tensor([10, 14], dtype=torch.int32)
+
+    def choose_first(
+        low: int,
+        high: int,
+        size: tuple[int, ...],
+        *,
+        generator: torch.Generator | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        del high, generator
+        return torch.full(size, low, device=device, dtype=dtype or torch.int64)
+
+    monkeypatch.setattr(torch, "randint", choose_first)
+    updated = mobs.update_mobs(state, generator=_seed())
+
+    assert updated.passive_mobs.position[0, 0, 1].tolist() == [10, 13]
+    assert not updated.passive_mobs.mask[0, 0, 1]
+
+
 def test_a_grazing_creature_wanders_rather_than_hunting() -> None:
     state = _state(num_envs=32)
     state.passive_mobs.mask[:, 0, 0] = True
@@ -243,6 +296,15 @@ def test_a_player_arrow_wounds_the_creature_it_reaches() -> None:
     assert state.player_projectiles.mask[:, 0, 0].tolist() == [False, False]
 
 
+def test_hit_player_projectile_keeps_the_upstream_impact_position() -> None:
+    """Upstream records impact position before clearing the mask (game_logic.py:1795-1814)."""
+    state = mobs.update_mobs(
+        _arrow_at_melee(level=0, bow_enchantment=0),
+        generator=_seed(),
+    )
+    assert state.player_projectiles.position[:, 0, 0].tolist() == [[10, 14], [10, 14]]
+
+
 def test_a_player_arrow_kill_counts_toward_clearing_the_floor() -> None:
     state = _arrow_at_melee(level=0, bow_enchantment=0)
     state.melee_mobs.health[:, 0, 0] = 0.5
@@ -282,6 +344,33 @@ def test_spawning_fills_empty_slots_near_the_player() -> None:
     assert int(gaps[alive].min()) > 0
 
 
+def test_later_spawn_classes_see_earlier_mob_occupancy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream rebuilds spawn masks per class (game_logic.py:2104-2106, 2227-2229)."""
+    state = _state(num_envs=1)
+    state.map[:] = int(BlockType.STONE)
+    state.map[0, 0, 10, 20] = int(BlockType.GRASS)
+
+    def pinned_rand(
+        size: tuple[int, ...] | int,
+        *,
+        generator: torch.Generator | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        del generator
+        shape = (size,) if isinstance(size, int) else size
+        return torch.zeros(shape, dtype=dtype or torch.float32, device=device)
+
+    monkeypatch.setattr(torch, "rand", pinned_rand)
+    state = mobs.spawn_mobs(state, generator=_seed())
+
+    assert state.passive_mobs.mask[0, 0, 0]
+    assert not state.melee_mobs.mask[0, 0].any()
+    assert not state.ranged_mobs.mask[0, 0].any()
+
+
 def test_an_uncleared_floor_spawns_faster() -> None:
     cleared = _state(num_envs=64)
     cleared.monsters_killed[:, 0] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
@@ -312,8 +401,37 @@ def test_no_cattle_graze_on_the_boss_floor() -> None:
     assert int(state.passive_mobs.mask.sum()) == 0
 
 
+def test_empty_spawn_slots_record_the_current_floor_species(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream updates slot species even when spawn is false (game_logic.py:2159-2161, 2283-2285)."""
+    state = _state(num_envs=1)
+    state.player_level[:] = 1
+
+    def prevent_spawn(
+        size: tuple[int, ...] | int,
+        *,
+        generator: torch.Generator | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        del generator
+        shape = (size,) if isinstance(size, int) else size
+        return torch.full(shape, 0.99, dtype=dtype or torch.float32, device=device)
+
+    monkeypatch.setattr(torch, "rand", prevent_spawn)
+    state = mobs.spawn_mobs(state, generator=_seed())
+
+    assert not state.passive_mobs.mask[0, 1].any()
+    assert not state.melee_mobs.mask[0, 1].any()
+    assert not state.ranged_mobs.mask[0, 1].any()
+    assert state.passive_mobs.type_id[0, 1, 0] == constants.FLOOR_MOB_TYPE[1, 0]
+    assert state.melee_mobs.type_id[0, 1, 0] == constants.FLOOR_MOB_TYPE[1, 1]
+    assert state.ranged_mobs.type_id[0, 1, 0] == constants.FLOOR_MOB_TYPE[1, 2]
+
+
 def test_spawn_health_uses_species_not_floor() -> None:
-    """Upstream indexes health by mob species (game_logic.py:2136-2140)."""
+    """Upstream indexes health by species (game_logic.py:2136-2140)."""
     state = _state(num_envs=64)
     state.player_level[:] = 1
     state = mobs.spawn_mobs(state, generator=_seed(51))
@@ -389,7 +507,9 @@ def test_boss_floor_uses_progress_species_and_graves() -> None:
     state.boss_progress[:] = 2
     state.boss_timesteps_to_spawn_this_round[:] = 1
     state.map[:] = int(BlockType.STONE)
+    # Melee spawns first and occupies its grave, so ranged needs a second one.
     state.map[:, 8, 10, 15] = int(BlockType.GRAVE)
+    state.map[:, 8, 10, 5] = int(BlockType.GRAVE)
     state = mobs.spawn_mobs(state, generator=_seed(21))
     assert not bool(state.passive_mobs.mask[:, 8].any())
     for group, mob_class in ((state.melee_mobs, 1), (state.ranged_mobs, 2)):

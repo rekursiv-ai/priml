@@ -20,6 +20,76 @@ Numerical invariants (hold everywhere, not just here):
 - **Never swap custom numerics for stdlib without verifying tails.**
   Custom code usually exists for precision. If unsure, ask.
 
+## Porting against a reference implementation
+
+Use this when a port (e.g. torch) must reproduce a reference (e.g. JAX).
+"Bit-for-bit" means every function, including every random one, produces
+identical bits given identical inputs and identical random draws. It does
+not mean matching statistics. Do these steps in order. Do not start a
+whole-program rollout until step 5 is green.
+
+1. **Inventory.** List every function in the reference and pair each with
+   its port function in one table. An unpaired function is a gap. So is a
+   port function that restructures the reference, e.g. a permutation in
+   place of sequential weighted choice. Rewrite it to mirror the
+   reference's arithmetic and draw order.
+2. **Pin randomness on both sides.** Patch the lowest random primitives,
+   e.g. JAX's `jax._src.random.core` uniform and randint, not only the
+   public names. Let the reference's own sampling code (`choice`, etc.)
+   run on top of them. Emulate that exact formula on the port side; for
+   JAX's weighted choice that is `searchsorted(cumsum(p), p_total*(1-u))`.
+   Pass the pinned value as a traced argument, not a closure, or jit
+   caches will replay stale values. Any unpatched primitive must raise.
+3. **Compare by bisection.** Split the system into its few major
+   components (in ML: the model forward, the dataloader, a few train
+   steps; in an env: world gen, the step's sub-phases) and compare each
+   exactly. A component that matches, with full coverage (step 4), is
+   done. Split only the mismatching ones into their sub-functions and
+   recurse until each mismatch is pinned to one function's own code.
+   For each pair, run many random
+   inputs times several pinned values, with the reference under the same
+   compilation and backend it uses in production (jit, GPU). Compare every
+   output field with exact equality. Collect ALL mismatches into one
+   report (function, field, count, first example). Do not stop at the
+   first.
+4. **Prove coverage.** Count pinned calls per call site (file:line) on
+   both sides. Count at trace time for jitted code. Assert every random
+   call site in both codebases was reached, and that inputs drive every
+   branch (each side of every `where`/`select`/`cond`) at least once. An
+   unreached site or branch is untested.
+5. **Integrate.** Only then run whole-step or rollout lockstep with pins,
+   comparing full state after every step.
+6. **Fix every divergence in the port, then repeat from step 3.** No
+   separate approval is needed; the task is not done while any mismatch
+   remains. For each bug, add exactly one reference-free native test:
+   hardcode the reference's captured values as literals. Prove it red
+   with only that fix reverted.
+
+Writing the harness, adapters, and tests is not "modifying code" in the
+sense of the debugging rules below; start them immediately.
+
+Statistical or distributional tests are not bit-for-bit. They miss any
+bug that preserves rates. Keep them only as a supplement.
+
+Reference semantics a JAX port must mirror (each was a real bug):
+
+- `choice(p=x / x.sum())` with `x` all zero gives NaN weights and returns
+  index 0. Do not fall back to uniform.
+- `dynamic_slice` / `dynamic_update_slice` wrap a negative start by the
+  axis length, then clamp to `[0, dim - size]`. Do not clamp negatives
+  to 0.
+- XLA lowers a float32 divide by a *traced* value on GPU to
+  `x * rcp(y)`, with `rcp` rounded toward zero. Division by a Python
+  constant lowers differently. Find the lowering by measuring a
+  rounding-mode table, not by guessing.
+- Eager and jitted XLA round differently, and so do CPU and GPU. Compare
+  against the mode production uses. If the reference itself differs
+  across backends, pin to the production backend. Do not add a
+  tolerance.
+- An unconditional reference write (e.g. `type_id` into an empty slot, a
+  dead projectile's position) must be unconditional in the port too, even
+  when the value looks unused.
+
 ## Host-dependent float divergence (cross-implementation parity)
 
 When a test asserts bit-for-bit equality between **two different

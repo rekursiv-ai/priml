@@ -202,12 +202,16 @@ def read_book(
     unknown = ~state.learned_spells
     # A book teaches something new where it can; with both known it is spent
     # on the first slot, as the reference does.
-    weights = torch.where(
-        unknown.any(-1, keepdim=True),
-        unknown.float(),
-        torch.ones_like(unknown, dtype=torch.float32),
-    )
-    spell = torch.multinomial(weights, 1, generator=generator).squeeze(-1)
+    has_unknown = unknown.any(-1)
+    if bool(has_unknown.any()):
+        weights = torch.where(
+            has_unknown[:, None],
+            unknown.float(),
+            torch.tensor([1.0, 0.0], device=state.device),
+        )
+        spell = torch.multinomial(weights, 1, generator=generator).squeeze(-1)
+    else:
+        spell = torch.zeros(state.num_envs, dtype=torch.long, device=state.device)
 
     rows = torch.arange(state.num_envs, device=state.device)
     state.learned_spells[rows, spell] = state.learned_spells[rows, spell] | reading
