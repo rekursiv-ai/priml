@@ -178,6 +178,39 @@ def test_killing_a_monster_counts_toward_clearing_the_floor() -> None:
     assert state.monsters_killed[:, 0].tolist() == [1, 1]
 
 
+def test_a_non_do_action_does_not_kill_the_faced_mob() -> None:
+    state = _state(num_envs=1)
+    state.melee_mobs.mask[0, 0, 0] = True
+    state.melee_mobs.health[0, 0, 0] = 0.5
+    state.melee_mobs.position[0, 0, 0] = torch.tensor([10, 11], dtype=torch.int32)
+    state.mob_map[0, 0, 10, 11] = True
+
+    state = interact.interact(state, doing=torch.tensor([False]), generator=_quiet())
+
+    # Upstream restores old_state when the action is not DO (game_logic.py:509-515).
+    assert state.melee_mobs.mask[0, 0, 0]
+    assert state.melee_mobs.health[0, 0, 0].item() == 0.5
+    assert state.mob_map[0, 0, 10, 11]
+    assert state.monsters_killed[0, 0].item() == 0
+    assert not state.achievements[0, int(Achievement.DEFEAT_ZOMBIE)]
+
+
+def test_a_do_kill_clears_the_mob_occupancy_tile() -> None:
+    state = _state(num_envs=1)
+    state.melee_mobs.mask[0, 0, 0] = True
+    state.melee_mobs.health[0, 0, 0] = 0.5
+    state.melee_mobs.position[0, 0, 0] = torch.tensor([10, 11], dtype=torch.int32)
+    state.mob_map[0, 0, 10, 11] = True
+
+    state = interact.interact(state, doing=torch.tensor([True]), generator=_quiet())
+
+    # Upstream clears the killed mob tile (game_logic_utils.py:165-175).
+    assert not state.melee_mobs.mask[0, 0, 0]
+    assert not state.mob_map[0, 0, 10, 11]
+    assert state.monsters_killed[0, 0].item() == 1
+    assert state.achievements[0, int(Achievement.DEFEAT_ZOMBIE)]
+
+
 def test_not_interacting_leaves_the_world_alone() -> None:
     state = interact.interact(
         _facing(_state(), BlockType.TREE),
