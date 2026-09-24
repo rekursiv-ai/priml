@@ -95,10 +95,11 @@ def _strike_whatever_stands_there(
     doing: Tensor,
 ) -> tuple[EnvState, Tensor]:
     """Hit any creature on the faced tile, across all three classes."""
-    damage = mechanics.player_damage(state)
+    damage = mechanics.player_damage(state) * doing[:, None]
     yes = torch.ones(state.num_envs, dtype=torch.bool, device=state.device)
     struck = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
     killed_monster = struck.clone()
+    killed_any = struck.clone()
 
     for field, input_mobs, mob_class, can_unlock in (
         ("melee_mobs", state.melee_mobs, 1, yes),
@@ -135,9 +136,17 @@ def _strike_whatever_stands_there(
             )
         else:
             killed_monster = killed_monster | (killed & doing)
+        killed_any = killed_any | (killed & doing)
 
     rows = torch.arange(state.num_envs, device=state.device)
-    state.monsters_killed[rows, state.player_level.long()] += killed_monster.int()
+    level = state.player_level.long()
+    state.mob_map[rows, level] = scatter_tiles_where(
+        state.mob_map[rows, level],
+        target,
+        torch.zeros(state.num_envs, dtype=torch.bool, device=state.device),
+        killed_any,
+    )
+    state.monsters_killed[rows, level] += killed_monster.int()
     return state, struck
 
 
