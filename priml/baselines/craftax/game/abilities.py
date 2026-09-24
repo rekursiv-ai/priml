@@ -103,10 +103,15 @@ def shoot_arrow(state: EnvState, action: Tensor) -> EnvState:
       state: Updated EnvState with arrow removed and projectile spawned.
 
     """
+    has_projectile_slot = ~state.player_projectiles.mask[
+        torch.arange(state.num_envs, device=state.device),
+        state.player_level.long(),
+    ].all(-1)
     firing = (
         (action == int(Action.SHOOT_ARROW))
         & (state.inventory.bow >= 1)
         & (state.inventory.arrows >= 1)
+        & has_projectile_slot
     )
     state = _launch(
         state,
@@ -140,15 +145,21 @@ def cast_spell(state: EnvState, action: Tensor) -> EnvState:
       state: The world with the spell cast.
 
     """
+    rows = torch.arange(state.num_envs, device=state.device)
+    has_projectile_slot = (
+        ~state.player_projectiles.mask[rows, state.player_level.long()]
+    ).any(-1)
     fire = (
         (action == int(Action.CAST_FIREBALL))
         & (state.player_mana >= 2)
         & state.learned_spells[:, 0]
+        & has_projectile_slot
     )
     ice = (
         (action == int(Action.CAST_ICEBALL))
         & (state.player_mana >= 2)
         & state.learned_spells[:, 1]
+        & has_projectile_slot
     )
     casting = fire | ice
     kind = torch.where(
@@ -339,9 +350,9 @@ def grow_plants(state: EnvState) -> EnvState:
 
     """
     state.growing_plants_age = (
-        state.growing_plants_age + state.growing_plants_mask.int()
-    )
-    ripe = state.growing_plants_mask & (state.growing_plants_age > 600)
+        state.growing_plants_age + 1
+    ) * state.growing_plants_mask.int()
+    ripe = state.growing_plants_age >= 600
 
     rows = torch.arange(state.num_envs, device=state.device)
     level = state.player_level.long()
@@ -373,7 +384,7 @@ def _launch(state: EnvState, *, firing: Tensor, kind: Tensor) -> EnvState:
     heading = constants.DIRECTIONS.to(state.device)[state.player_direction.long()]
     projectiles.position[rows, level, slot] = torch.where(
         firing[:, None],
-        (state.player_position + heading).int(),
+        state.player_position.int(),
         projectiles.position[rows, level, slot],
     )
     projectiles.mask[rows, level, slot] = projectiles.mask[rows, level, slot] | firing

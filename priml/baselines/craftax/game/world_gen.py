@@ -207,6 +207,17 @@ def generate_smooth_world(
 
     lava = (mountain > 0.85) & (tree_noise > 0.7)
     blocks = torch.where(lava, config.lava, blocks)
+    stone_position = _sample_tile(
+        (blocks == int(BlockType.STONE)).flatten(1).float(),
+        shape,
+        generator=generator,
+        device=device,
+    )
+    blocks = scatter_tiles(
+        blocks,
+        stone_position,
+        torch.full((num_envs,), int(BlockType.STONE), device=device),
+    )
     blocks = scatter_tiles(
         blocks,
         player_position.expand(num_envs, 2),
@@ -231,7 +242,7 @@ def generate_smooth_world(
             up_ladder,
             torch.full((num_envs,), int(ItemType.LADDER_UP), device=device),
         )
-        light = _brighten_around(light, up_ladder, ambient=config.default_light)
+    light = _brighten_around(light, up_ladder, ambient=config.default_light)
 
     if config.lava == BlockType.LAVA:
         # Lava lights its surroundings. The kernel is symmetric, so a

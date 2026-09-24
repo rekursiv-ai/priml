@@ -96,7 +96,36 @@ def test_shooting_an_arrow_needs_a_bow_and_spends_one() -> None:
     fired = abilities.shoot_arrow(armed, _act(Action.SHOOT_ARROW))
     assert fired.inventory.arrows.tolist() == [2, 2]
     assert bool(fired.player_projectiles.mask[0, 0].any())
+    # Upstream spawn_projectile stores player_position (game_logic_utils.py:193-196).
+    assert fired.player_projectiles.position[0, 0, 0].tolist() == [10, 10]
     assert fired.achievements[:, int(Achievement.FIRE_BOW)].tolist() == [True, True]
+
+
+def test_a_full_projectile_pool_rejects_arrows() -> None:
+    # Upstream gates costs and achievements on a free slot (game_logic.py:2506-2525).
+    state = _state()
+    state.inventory.bow[:] = 1
+    state.inventory.arrows[:] = 3
+    state.player_projectiles.mask[:, 0] = True
+    rejected = abilities.shoot_arrow(state, _act(Action.SHOOT_ARROW))
+    assert rejected.inventory.arrows.tolist() == [3, 3]
+    assert rejected.achievements[:, int(Achievement.FIRE_BOW)].tolist() == [
+        False,
+        False,
+    ]
+
+
+def test_a_full_projectile_pool_rejects_spells() -> None:
+    # Upstream gates spell costs and achievements on free slots (game_logic.py:2541-2590).
+    state = _state()
+    state.learned_spells[:, 0] = True
+    state.player_projectiles.mask[:, 0] = True
+    rejected = abilities.cast_spell(state, _act(Action.CAST_FIREBALL))
+    assert rejected.player_mana.tolist() == [9, 9]
+    assert rejected.achievements[:, int(Achievement.CAST_FIREBALL)].tolist() == [
+        False,
+        False,
+    ]
 
 
 def test_a_spell_must_be_learned_before_it_can_be_cast() -> None:
@@ -241,13 +270,18 @@ def test_levelling_without_experience_does_nothing() -> None:
 
 
 def test_a_sown_plant_ripens_once_it_is_old_enough() -> None:
+    # Upstream update_plants uses age >= 600 (game_logic.py:1979-1987).
     state = _state()
     state.growing_plants_mask[:, 0] = True
     state.growing_plants_positions[:, 0] = torch.tensor([10, 12], dtype=torch.int32)
-    state.growing_plants_age[:, 0] = 600
+    state.growing_plants_age[:, 0] = 599
     grown = abilities.grow_plants(state)
-    assert grown.growing_plants_age[:, 0].tolist() == [601, 601]
+    assert grown.growing_plants_age[:, 0].tolist() == [600, 600]
     assert grown.map[0, 0, 10, 12].item() == int(BlockType.RIPE_PLANT)
+
+    inactive = _state()
+    inactive.growing_plants_age[:, 0] = 10
+    assert abilities.grow_plants(inactive).growing_plants_age[:, 0].tolist() == [0, 0]
 
 
 def test_a_young_plant_is_not_yet_ripe() -> None:

@@ -134,6 +134,27 @@ def test_arrows_and_torches_come_in_batches() -> None:
     assert torches.inventory.torches.tolist() == [4, 4]
 
 
+def test_arrow_and_torch_recipes_stop_at_the_reference_stock_cap() -> None:
+    # Upstream game_logic.py:758-785 refuses stock output at 99.
+    arrows = _with_table(_state())
+    arrows.inventory.wood[:] = 1
+    arrows.inventory.stone[:] = 1
+    arrows.inventory.arrows[:] = 99
+    crafted_arrows = crafting.craft(arrows, _act(Action.MAKE_ARROW))
+    assert crafted_arrows.inventory.arrows.tolist() == [99, 99]
+    assert crafted_arrows.inventory.wood.tolist() == [1, 1]
+    assert crafted_arrows.inventory.stone.tolist() == [1, 1]
+
+    torches = _with_table(_state())
+    torches.inventory.wood[:] = 1
+    torches.inventory.coal[:] = 1
+    torches.inventory.torches[:] = 99
+    crafted_torches = crafting.craft(torches, _act(Action.MAKE_TORCH))
+    assert crafted_torches.inventory.torches.tolist() == [99, 99]
+    assert crafted_torches.inventory.wood.tolist() == [1, 1]
+    assert crafted_torches.inventory.coal.tolist() == [1, 1]
+
+
 def test_armour_fills_one_slot_at_a_time() -> None:
     state = _with_furnace(_with_table(_state()))
     state.inventory.iron[:] = 30
@@ -147,7 +168,22 @@ def test_armour_fills_one_slot_at_a_time() -> None:
     ]
 
 
+def test_placing_a_table_costs_two_wood() -> None:
+    # Upstream game_logic.py:841,859 charges two wood for a table.
+    state = _state()
+    state.inventory.wood[:] = 1
+    unchanged = crafting.place(state, _act(Action.PLACE_TABLE))
+    assert unchanged.map[0, 0, 10, 11].item() == int(BlockType.GRASS)
+    assert unchanged.inventory.wood.tolist() == [1, 1]
+
+    state.inventory.wood[:] = 2
+    placed = crafting.place(state, _act(Action.PLACE_TABLE))
+    assert placed.map[0, 0, 10, 11].item() == int(BlockType.CRAFTING_TABLE)
+    assert placed.inventory.wood.tolist() == [0, 0]
+
+
 def test_placing_stone_spends_it_and_writes_the_block() -> None:
+    # Upstream game_logic.py:893-918 places stone on nonsolid ground.
     state = _state()
     state.inventory.stone[:] = 3
     placed = crafting.place(state, _act(Action.PLACE_STONE))
@@ -161,21 +197,67 @@ def test_placing_needs_the_material() -> None:
     assert placed.map[0, 0, 10, 11].item() == int(BlockType.GRASS)
 
 
+def test_blocks_can_be_placed_on_water() -> None:
+    # Upstream game_logic.py:841-859,867-918 allows each block on water.
+    for action, material, amount, block in (
+        (Action.PLACE_STONE, "stone", 1, BlockType.STONE),
+        (Action.PLACE_TABLE, "wood", 2, BlockType.CRAFTING_TABLE),
+        (Action.PLACE_FURNACE, "stone", 1, BlockType.FURNACE),
+    ):
+        state = _state()
+        getattr(state.inventory, material)[:] = amount
+        state.map[:, 0, 10, 11] = int(BlockType.WATER)
+        placed = crafting.place(state, _act(action))
+        assert placed.map[0, 0, 10, 11].item() == int(block)
+        stock = placed.inventory.wood if material == "wood" else placed.inventory.stone
+        assert stock.tolist() == [0, 0]
+
+
+def test_a_plant_can_only_be_placed_on_grass() -> None:
+    # Upstream game_logic.py:995-1004 requires GRASS for saplings.
+    state = _state()
+    state.inventory.sapling[:] = 1
+    state.map[:, 0, 10, 11] = int(BlockType.PATH)
+    placed = crafting.place(state, _act(Action.PLACE_PLANT))
+    assert placed.map[0, 0, 10, 11].item() == int(BlockType.PATH)
+    assert placed.inventory.sapling.tolist() == [1, 1]
+    assert placed.growing_plants_mask[:, 0].tolist() == [False, False]
+
+
+def test_a_block_cannot_be_placed_over_an_item_or_creature() -> None:
+    # Upstream game_logic.py:831-837,1037-1047 rejects occupied targets.
+    item_state = _state()
+    item_state.inventory.stone[:] = 1
+    item_state.item_map[:, 0, 10, 11] = int(ItemType.TORCH)
+    item_result = crafting.place(item_state, _act(Action.PLACE_STONE))
+    assert item_result.map[0, 0, 10, 11].item() == int(BlockType.GRASS)
+    assert item_result.inventory.stone.tolist() == [1, 1]
+
+    mob_state = _state()
+    mob_state.inventory.stone[:] = 1
+    mob_state.mob_map[:, 0, 10, 11] = True
+    mob_result = crafting.place(mob_state, _act(Action.PLACE_STONE))
+    assert mob_result.map[0, 0, 10, 11].item() == int(BlockType.GRASS)
+    assert mob_result.inventory.stone.tolist() == [1, 1]
+
+
+def test_a_torch_cannot_be_placed_on_an_occupied_or_invalid_tile() -> None:
+    # Upstream game_logic.py:928-942 checks eligible ground and an empty item tile.
+    state = _state()
+    state.inventory.torches[:] = 1
+    state.item_map[:, 0, 10, 11] = int(ItemType.TORCH)
+    placed = crafting.place(state, _act(Action.PLACE_TORCH))
+    assert placed.inventory.torches.tolist() == [1, 1]
+    assert placed.light_map.count_nonzero().item() == 0
+
+
 def test_a_block_cannot_be_placed_on_stone() -> None:
-    # Only loose ground accepts a placement.
+    # Upstream game_logic.py:833-837 rejects solid target blocks.
     state = _state()
     state.inventory.stone[:] = 3
     state.map[:, 0, 10, 11] = int(BlockType.STONE)
     placed = crafting.place(state, _act(Action.PLACE_TABLE))
     assert placed.map[0, 0, 10, 11].item() == int(BlockType.STONE)
-
-
-def test_a_block_cannot_be_placed_on_a_creature() -> None:
-    state = _state()
-    state.inventory.stone[:] = 3
-    state.mob_map[:, 0, 10, 11] = True
-    placed = crafting.place(state, _act(Action.PLACE_STONE))
-    assert placed.map[0, 0, 10, 11].item() == int(BlockType.GRASS)
 
 
 def test_sowing_a_sapling_records_a_growing_plant() -> None:
@@ -199,12 +281,31 @@ def test_a_torch_lights_its_surroundings() -> None:
     assert placed.achievements[:, int(Achievement.PLACE_TORCH)].tolist() == [True, True]
 
 
-def test_a_torch_never_dims_an_already_bright_tile() -> None:
+def test_a_bottom_edge_torch_preserves_the_upstream_glow_value() -> None:
+    # Upstream game_logic.py:956-987 pads the map and writes the full glow patch.
+    state = _state()
+    state.player_position[0] = torch.tensor([47, 10], dtype=torch.int32)
+    state.inventory.torches[:] = 1
+    placed = crafting.place(state, _act(Action.PLACE_TORCH))
+    assert float(placed.light_map[0, 0, 47, 7]) == 0.19999998807907104
+
+
+def test_torch_glow_matches_the_upstream_float_bits() -> None:
+    # Upstream constants.py:592-594 builds the glow; game_logic.py:971 adds it.
     state = _state()
     state.inventory.torches[:] = 1
-    state.light_map[:] = 1.0
     placed = crafting.place(state, _act(Action.PLACE_TORCH))
-    assert float(placed.light_map.min()) == pytest.approx(1.0)
+    assert float(placed.light_map[0, 0, 11, 12]) == 0.717157244682312
+
+
+def test_a_torch_adds_light_to_an_already_lit_tile() -> None:
+    # Upstream game_logic.py:971 adds the torch glow, then clips at one.
+    state = _state()
+    state.inventory.torches[:] = 1
+    state.light_map[:] = 0.5
+    placed = crafting.place(state, _act(Action.PLACE_TORCH))
+    assert float(placed.light_map[0, 0, 10, 12]) == 1.0
+    assert float(placed.light_map.min()) == 0.5
 
 
 def test_only_the_acting_environments_craft() -> None:

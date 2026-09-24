@@ -23,9 +23,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-pytestmark = pytest.mark.usefixtures("warm_reference")
-
-
 def _state(num_envs: int = 2) -> EnvState:
     state = empty_state(num_envs=num_envs, device=torch.device("cpu"))
     state.player_position[:] = torch.tensor([20, 20], dtype=torch.int32)
@@ -142,6 +139,27 @@ def test_creature_classes_are_distinguishable() -> None:
 
     assert not torch.equal(creature("melee_mobs"), creature("passive_mobs"))
     assert not torch.equal(creature("melee_mobs"), creature("ranged_mobs"))
+
+
+def test_melee_and_passive_use_their_reference_channels() -> None:
+    melee = _state(num_envs=1)
+    melee.melee_mobs.mask[:, 0, 0] = True
+    melee.melee_mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
+    passive = _state(num_envs=1)
+    passive.passive_mobs.mask[:, 0, 0] = True
+    passive.passive_mobs.position[:, 0, 0] = torch.tensor([20, 22], dtype=torch.int32)
+    tile_index = (
+        constants.OBS_DIM[0] // 2 * constants.OBS_DIM[1] + constants.OBS_DIM[1] // 2 + 2
+    ) * observation.CHANNELS_PER_TILE
+    melee_channel = tile_index + len(BlockType) + len(ItemType)
+    passive_channel = melee_channel + 8
+    melee_render = observation.render(melee)[0]
+    passive_render = observation.render(passive)[0]
+
+    assert melee_render[melee_channel] == 1
+    assert melee_render[passive_channel] == 0
+    assert passive_render[melee_channel] == 0
+    assert passive_render[passive_channel] == 1
 
 
 def test_the_facing_direction_is_reported() -> None:

@@ -68,7 +68,13 @@ def interact(
         acting=acting,
         generator=generator,
     )
-    state = _open_chest(state, target=target, block=block, acting=acting)
+    state = _open_chest(
+        state,
+        target=target,
+        block=block,
+        acting=acting,
+        generator=generator,
+    )
     return _damage_boss(state, block=block, acting=acting)
 
 
@@ -285,9 +291,11 @@ def _open_chest(
     target: Tensor,
     block: Tensor,
     acting: Tensor,
+    generator: torch.Generator | None,
 ) -> EnvState:
     """Empty a chest into the inventory and leave bare path behind."""
     opening = acting & (block == int(BlockType.CHEST))
+    state = _add_chest_loot(state, opening=opening, generator=generator)
     state = _replace_block(state, target, int(BlockType.PATH), opening)
     rows = torch.arange(state.num_envs, device=state.device)
     state.chests_opened[rows, state.player_level.long()] |= opening
@@ -300,6 +308,109 @@ def _open_chest(
         ),
         opening,
     )
+    return state
+
+
+def _add_chest_loot(
+    state: EnvState,
+    *,
+    opening: Tensor,
+    generator: torch.Generator | None,
+) -> EnvState:
+    """Draw and apply chest rewards in upstream evaluation order."""
+    device = state.device
+    envs = state.num_envs
+    rows = torch.arange(envs, device=device)
+    levels = state.player_level.long()
+    inventory = state.inventory
+
+    torch_found = torch.rand(envs, generator=generator, device=device) < 0.6
+    torch_amount = torch.randint(4, 8, (envs,), generator=generator, device=device)
+
+    ore_found = torch.rand(envs, generator=generator, device=device) < 0.6
+    ore_types = torch.multinomial(
+        torch.tensor([0.3, 0.3, 0.15, 0.125, 0.125], device=device),
+        envs,
+        replacement=True,
+        generator=generator,
+    )
+    ore_amount_draw = torch.rand(envs, generator=generator, device=device)
+    coal_amount = (ore_amount_draw * 3).floor().to(torch.int32) + 1
+    iron_amount = (ore_amount_draw * 2).floor().to(torch.int32) + 1
+    gem_amount = torch.ones(envs, dtype=torch.int32, device=device)
+
+    potion_found = torch.rand(envs, generator=generator, device=device) < 0.5
+    potion_indices = torch.randint(0, 6, (envs,), generator=generator, device=device)
+    potion_amount = torch.randint(1, 3, (envs,), generator=generator, device=device)
+
+    arrows_found = torch.rand(envs, generator=generator, device=device) < 0.25
+    arrows_amount = torch.randint(1, 5, (envs,), generator=generator, device=device)
+
+    tool_found = torch.rand(envs, generator=generator, device=device) < 0.2
+    tool_ids = torch.randint(0, 2, (envs,), generator=generator, device=device)
+    tool_weights = torch.tensor([0.4, 0.3, 0.2, 0.1], device=device)
+    pickaxe_level = (
+        torch.multinomial(
+            tool_weights,
+            envs,
+            replacement=True,
+            generator=generator,
+        )
+        + 1
+    )
+    sword_level = (
+        torch.multinomial(
+            tool_weights,
+            envs,
+            replacement=True,
+            generator=generator,
+        )
+        + 1
+    )
+
+    inventory.torches += (torch_found & opening).to(torch.int32) * torch_amount
+    inventory.coal += (ore_found & (ore_types == 0) & opening).to(
+        torch.int32,
+    ) * coal_amount
+    inventory.iron += (ore_found & (ore_types == 1) & opening).to(
+        torch.int32,
+    ) * iron_amount
+    inventory.diamond += (ore_found & (ore_types == 2) & opening).to(
+        torch.int32,
+    ) * gem_amount
+    inventory.sapphire += (ore_found & (ore_types == 3) & opening).to(
+        torch.int32,
+    ) * gem_amount
+    inventory.ruby += (ore_found & (ore_types == 4) & opening).to(
+        torch.int32,
+    ) * gem_amount
+    inventory.arrows += (arrows_found & opening).to(torch.int32) * arrows_amount
+
+    pickaxe_found = tool_found & (tool_ids == 0) & opening
+    inventory.pickaxe = torch.where(
+        pickaxe_found,
+        torch.maximum(inventory.pickaxe, pickaxe_level.to(torch.int32)),
+        inventory.pickaxe,
+    )
+    sword_found = tool_found & (tool_ids == 1) & opening
+    inventory.sword = torch.where(
+        sword_found,
+        torch.maximum(inventory.sword, sword_level.to(torch.int32)),
+        inventory.sword,
+    )
+
+    potion_loot = (potion_found & opening).to(torch.int32) * potion_amount
+    inventory.potions[rows, potion_indices] += potion_loot
+
+    first_chest = opening & ~state.chests_opened[rows, levels]
+    bow_reward = first_chest & (levels == 1)
+    inventory.bow = torch.where(
+        bow_reward,
+        torch.ones_like(inventory.bow),
+        inventory.bow,
+    )
+    book_reward = first_chest & ((levels == 3) | (levels == 4))
+    inventory.books += book_reward.to(torch.int32)
     return state
 
 

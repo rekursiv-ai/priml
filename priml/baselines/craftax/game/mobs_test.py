@@ -128,13 +128,20 @@ def test_a_grazing_creature_wanders_rather_than_hunting() -> None:
     assert int((gaps > 4).sum()) > 0
 
 
-def test_an_archer_keeps_its_distance_and_fires_down_a_line() -> None:
-    state = _state()
+def test_archer_fires_only_at_valid_distance_and_cooldown() -> None:
+    """Upstream fires at gaps 4-5, unless cooldown blocks it (game_logic.py:1465-1489)."""
+    state = _state(num_envs=3)
     state.ranged_mobs.mask[:, 0, 0] = True
     state.ranged_mobs.health[:, 0, 0] = 3.0
-    state.ranged_mobs.position[:, 0, 0] = torch.tensor([10, 16], dtype=torch.int32)
+    state.ranged_mobs.position[:, 0, 0] = torch.tensor(
+        [[10, 14], [10, 13], [10, 14]],
+        dtype=torch.int32,
+    )
+    state.ranged_mobs.attack_cooldown[2, 0, 0] = 2
     state = mobs.update_mobs(state, generator=_seed())
     assert bool(state.mob_projectiles.mask[0, 0].any())
+    assert not bool(state.mob_projectiles.mask[1, 0].any())
+    assert not bool(state.mob_projectiles.mask[2, 0].any())
 
 
 def test_a_projectile_flies_and_wounds_the_player() -> None:
@@ -156,6 +163,47 @@ def test_a_projectile_stops_at_a_wall() -> None:
     state = mobs.update_mobs(state, generator=_seed())
     assert state.mob_projectiles.mask[:, 0, 0].tolist() == [False, False]
     assert float(state.player_health[0]) == pytest.approx(9.0)
+
+
+def test_a_projectile_stops_at_a_creature() -> None:
+    """Upstream blocks projectile movement on mob occupancy (game_logic.py:1632-1637)."""
+    state = _state(num_envs=1)
+    state.player_position[:] = torch.tensor([10, 20], dtype=torch.int32)
+    state.passive_mobs.mask[0, 0, 0] = True
+    state.passive_mobs.health[0, 0, 0] = 3.0
+    state.passive_mobs.position[0, 0, 0] = torch.tensor([10, 12], dtype=torch.int32)
+    state.mob_map[0, 0, 10, 12] = True
+    for row in range(9, 12):
+        for column in range(11, 14):
+            if (row, column) != (10, 12):
+                state.map[0, 0, row, column] = int(BlockType.STONE)
+    state.mob_projectiles.mask[0, 0, 0] = True
+    state.mob_projectiles.position[0, 0, 0] = torch.tensor([10, 11], dtype=torch.int32)
+    state.mob_projectile_directions[0, 0, 0] = torch.tensor([0, 1], dtype=torch.int32)
+    state = mobs.update_mobs(state, generator=_seed())
+    assert not bool(state.mob_projectiles.mask[0, 0, 0])
+
+
+def test_a_mob_projectile_hit_clears_resting() -> None:
+    """Upstream projectile hits clear rest (game_logic.py:1696-1698)."""
+    state = _state(num_envs=1)
+    state.is_resting[:] = True
+    state.mob_projectiles.mask[0, 0, 0] = True
+    state.mob_projectiles.position[0, 0, 0] = torch.tensor([10, 11], dtype=torch.int32)
+    state.mob_projectile_directions[0, 0, 0] = torch.tensor([0, -1], dtype=torch.int32)
+    state = mobs.update_mobs(state, generator=_seed())
+    assert not bool(state.is_resting[0])
+
+
+def test_a_mob_despawns_from_its_pre_move_distance() -> None:
+    """Upstream tests initial distance against despawn range (game_logic.py:1319-1325)."""
+    state = _state(num_envs=1)
+    state.passive_mobs.mask[0, 0, 0] = True
+    state.passive_mobs.health[0, 0, 0] = 3.0
+    state.passive_mobs.position[0, 0, 0] = torch.tensor([10, 23], dtype=torch.int32)
+    state.mob_map[0, 0, 10, 23] = True
+    state = mobs.update_mobs(state, generator=_seed(91))
+    assert bool(state.passive_mobs.mask[0, 0, 0])
 
 
 def _arrow_at_melee(*, level: int, bow_enchantment: int) -> EnvState:
@@ -262,6 +310,104 @@ def test_no_cattle_graze_on_the_boss_floor() -> None:
     state.player_level[:] = constants.NUM_LEVELS - 1
     state = mobs.spawn_mobs(state, generator=_seed(13))
     assert int(state.passive_mobs.mask.sum()) == 0
+
+
+def test_spawn_health_uses_species_not_floor() -> None:
+    """Upstream indexes health by mob species (game_logic.py:2136-2140)."""
+    state = _state(num_envs=64)
+    state.player_level[:] = 1
+    state = mobs.spawn_mobs(state, generator=_seed(51))
+    groups = (
+        (state.passive_mobs, 0),
+        (state.melee_mobs, 1),
+        (state.ranged_mobs, 2),
+    )
+    rows = torch.arange(state.num_envs)
+    for group, mob_class in groups:
+        spawned = group.mask[rows, 1]
+        species = group.type_id[rows, 1]
+        health = group.health[rows, 1]
+        assert bool(spawned.any())
+        assert torch.equal(
+            health[spawned],
+            constants.MOB_HEALTH.to(state.device)[species[spawned].long(), mob_class],
+        )
+
+
+def test_monsters_spawn_beyond_nine_tiles_only() -> None:
+    """Upstream uses >9 tiles, or <=6 during a boss fight (game_logic.py:2181-2188)."""
+    state = _state(num_envs=64)
+    state.player_level[:] = 1
+    state.map[:] = int(BlockType.STONE)
+    state.map[:, 1, 10, 15] = int(BlockType.GRASS)
+    state.passive_mobs.mask[:, 1] = True
+    state = mobs.spawn_mobs(state, generator=_seed(3))
+    assert not bool(state.melee_mobs.mask[:, 1].any())
+    assert not bool(state.ranged_mobs.mask[:, 1].any())
+
+
+def test_uncleared_multiplier_does_not_change_passive_spawning() -> None:
+    """Upstream applies the uncleared multiplier only to monsters (game_logic.py:2056-2078)."""
+    cleared = _state(num_envs=64)
+    cleared.monsters_killed[:, 0] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
+    cleared = mobs.spawn_mobs(cleared, generator=_seed(71))
+    uncleared = mobs.spawn_mobs(_state(num_envs=64), generator=_seed(71))
+    assert torch.equal(cleared.passive_mobs.mask, uncleared.passive_mobs.mask)
+    assert int(uncleared.melee_mobs.mask.sum()) >= int(cleared.melee_mobs.mask.sum())
+
+    no_wave = _state(num_envs=8)
+    no_wave.player_level[:] = constants.NUM_LEVELS - 1
+    no_wave.map[:] = int(BlockType.STONE)
+    no_wave.map[:, 8, 10, 15] = int(BlockType.GRAVE)
+    no_wave = mobs.spawn_mobs(no_wave, generator=_seed(43))
+    wave = _state(num_envs=8)
+    wave.player_level[:] = constants.NUM_LEVELS - 1
+    wave.boss_timesteps_to_spawn_this_round[:] = 1
+    wave.map[:] = int(BlockType.STONE)
+    wave.map[:, 8, 10, 15] = int(BlockType.GRAVE)
+    wave = mobs.spawn_mobs(wave, generator=_seed(43))
+    assert not bool(no_wave.melee_mobs.mask[:, 8].any())
+    assert bool(wave.melee_mobs.mask[:, 8].any())
+
+
+def test_deep_thing_needs_water_to_spawn() -> None:
+    """Upstream restricts deep things to water tiles (game_logic.py:2326-2334)."""
+    state = _state(num_envs=64)
+    state.player_level[:] = 5
+    state.map[:] = int(BlockType.STONE)
+    state.map[:, 5, 10, 22] = int(BlockType.GRASS)
+    state.passive_mobs.mask[:, 5] = True
+    state.melee_mobs.mask[:, 5] = True
+    state = mobs.spawn_mobs(state, generator=_seed(17))
+    assert not bool(state.ranged_mobs.mask[:, 5].any())
+
+
+def test_boss_floor_uses_progress_species_and_graves() -> None:
+    """Upstream gates boss-floor spawns to graves and boss progress (game_logic.py:2195-2233)."""
+    state = _state(num_envs=8)
+    state.player_level[:] = constants.NUM_LEVELS - 1
+    state.boss_progress[:] = 2
+    state.boss_timesteps_to_spawn_this_round[:] = 1
+    state.map[:] = int(BlockType.STONE)
+    state.map[:, 8, 10, 15] = int(BlockType.GRAVE)
+    state = mobs.spawn_mobs(state, generator=_seed(21))
+    assert not bool(state.passive_mobs.mask[:, 8].any())
+    for group, mob_class in ((state.melee_mobs, 1), (state.ranged_mobs, 2)):
+        live = group.mask[:, 8]
+        assert bool(live.any())
+        assert bool(
+            (group.type_id[:, 8][live] == constants.FLOOR_MOB_TYPE[2, mob_class]).all(),
+        )
+
+
+def test_spawn_preserves_reused_slot_cooldown() -> None:
+    """Upstream leaves a free slot's cooldown untouched (game_logic.py:2259-2281)."""
+    state = _state(num_envs=64)
+    state.melee_mobs.attack_cooldown[:] = 7
+    state = mobs.spawn_mobs(state, generator=_seed(31))
+    live = state.melee_mobs.mask[:, 0]
+    assert bool(live.any())
+    assert bool((state.melee_mobs.attack_cooldown[:, 0][live] == 7).all())
 
 
 def test_creatures_never_leave_the_map() -> None:

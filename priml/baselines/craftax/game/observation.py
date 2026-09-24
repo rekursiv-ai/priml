@@ -137,9 +137,8 @@ def _render_mobs(state: EnvState, *, view: tuple[int, int]) -> Tensor:
         state.mob_projectiles,
         state.player_projectiles,
     )
-    # The reference stores melee first but encodes passive first, so the plane
-    # order here is the ENCODING order, not the state's field order.
-    encoded_class = (1, 0, 2, 3, 4)
+    # Plane order matches upstream: melee 0, passive 1.
+    encoded_class = (0, 1, 2, 3, 4)
     index = torch.arange(state.num_envs, device=state.device)
     for mobs, plane in zip(classes, encoded_class, strict=True):
         level = state.player_level.long()

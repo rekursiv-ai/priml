@@ -18,9 +18,6 @@ from priml.baselines.craftax.game.world_config import (
 )
 
 
-pytestmark = pytest.mark.usefixtures("warm_reference")
-
-
 def test_every_floor_has_a_recipe() -> None:
     assert len(world_config.LEVEL_CONFIGS) == NUM_LEVELS
 

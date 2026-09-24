@@ -75,26 +75,51 @@ def spawn_mobs(
     uncleared = (
         state.monsters_killed[rows, level] < constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
     )
-    rate = 1 + 2 * uncleared.int()
+    fighting_boss = mechanics.is_fighting_boss(state)
+    boss_wave = state.boss_timesteps_to_spawn_this_round >= 1
+    monster_rate = (1 + 2 * uncleared.int()) * torch.where(
+        fighting_boss,
+        boss_wave.int() * 1000,
+        torch.ones_like(level),
+    )
 
     grid = mechanics.current_map(state)
     distance = _distance_to_player(state)
-    # Far enough that they do not appear underfoot, near enough to matter.
-    room = (
-        (distance > 3)
-        & (distance < constants.MOB_DESPAWN_DISTANCE)
-        & ~mechanics.current_mobs(state)
-    )
+    unoccupied = ~mechanics.current_mobs(state)
     walkable = (
         (grid == int(BlockType.GRASS))
         | (grid == int(BlockType.PATH))
         | (grid == int(BlockType.FIRE_GRASS))
         | (grid == int(BlockType.ICE_GRASS))
     )
-    room = room & walkable
+    passive_room = (
+        (distance > 3)
+        & (distance < constants.MOB_DESPAWN_DISTANCE)
+        & unoccupied
+        & walkable
+    )
+    monster_distance = torch.where(
+        fighting_boss[:, None, None],
+        distance <= 6,
+        distance > 9,
+    )
+    grave = (
+        (grid == int(BlockType.GRAVE))
+        | (grid == int(BlockType.GRAVE2))
+        | (grid == int(BlockType.GRAVE3))
+    )
+    monster_tiles = torch.where(fighting_boss[:, None, None], grave, walkable)
+    monster_room = (
+        monster_distance
+        & (distance < constants.MOB_DESPAWN_DISTANCE)
+        & unoccupied
+        & monster_tiles
+    )
 
     chances = constants.FLOOR_MOB_SPAWN_CHANCE.to(state.device)[level]
-    species = constants.FLOOR_MOB_TYPE.to(state.device)[level]
+    floor_species = constants.FLOOR_MOB_TYPE.to(state.device)[level]
+    boss_species = constants.FLOOR_MOB_TYPE.to(state.device)[state.boss_progress.long()]
+    species = torch.where(fighting_boss[:, None], boss_species, floor_species)
     for field, column, mob_class in (
         ("passive_mobs", 0, 0),
         ("melee_mobs", 1, 1),
@@ -103,11 +128,11 @@ def spawn_mobs(
         mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
         assert isinstance(mobs, Mobs)
         alive = _on_level(mobs.mask, state.player_level)
-        # Night is when the surface becomes dangerous: the fourth column is
-        # the extra melee chance, weighted by how dark it is.
         chance = chances[:, column]
         if column == 1:
             chance = chance + chances[:, 3] * (1.0 - state.light_level) ** 2
+        rate = torch.ones_like(chance) if column == 0 else monster_rate
+        room = passive_room if column == 0 else monster_room
         spawning = (
             (alive.sum(-1) < alive.shape[-1])
             & (
@@ -117,12 +142,28 @@ def spawn_mobs(
             & room.flatten(1).any(-1)
         )
         if column == 0:
-            # The boss floor spawns no cattle; it is not a place to graze.
-            spawning = spawning & ~mechanics.is_fighting_boss(state)
+            spawning &= ~fighting_boss
+        if column == 2:
+            water_only = species[:, column] == 5
+            room = torch.where(
+                water_only[:, None, None],
+                grid == int(BlockType.WATER),
+                room,
+            )
+            room = torch.where(fighting_boss[:, None, None], grave, room)
+            room &= (
+                unoccupied
+                & monster_distance
+                & (distance < constants.MOB_DESPAWN_DISTANCE)
+            )
+            spawning &= room.flatten(1).any(-1)
 
         place = _sample_position(room, generator=generator)
         slot = (~alive).int().argmax(-1)
-        health = constants.MOB_HEALTH.to(state.device)[level, mob_class]
+        health = constants.MOB_HEALTH.to(state.device)[
+            species[:, column].long(),
+            mob_class,
+        ]
         state = _place_mob(
             state,
             field=field,
@@ -242,20 +283,27 @@ def _update_ranged(
         offset = state.player_position - position
         gap = offset.abs().sum(-1)
 
-        # Archers back away when the player closes, which is what makes them
-        # awkward to fight without a bow of your own.
         toward = _step_toward_player(state, position, generator=generator)
-        proposed = position + torch.where((gap < 5)[:, None], -toward, toward)
         wander = position + _random_step(
             state.num_envs,
             state.device,
             generator,
             moves=4,
         )
-        proposed = torch.where((gap < 10)[:, None], proposed, wander)
+        proposed = torch.where((gap >= 6)[:, None], position + toward, wander)
+        proposed = torch.where((gap <= 3)[:, None], position - toward, proposed)
+        use_wander = (
+            torch.rand(state.num_envs, generator=generator, device=state.device) <= 0.85
+        )
+        proposed = torch.where(use_wander[:, None], wander, proposed)
 
-        aligned = ((offset[:, 0] == 0) | (offset[:, 1] == 0)) & (gap < 10)
-        firing = aligned & alive & (_slot(mobs.attack_cooldown, state, slot) <= 0)
+        collides = constants.MOB_COLLIDES_WITH.to(state.device)[
+            state.player_level.long(),
+            2,
+        ]
+        can_retreat = mechanics.can_walk_on(state, proposed, collides)
+        firing = ((gap >= 4) & (gap <= 5)) | ((gap <= 3) & ~can_retreat)
+        firing &= alive & (_slot(mobs.attack_cooldown, state, slot) <= 0)
         state = _fire_projectile(
             state,
             source=position,
@@ -263,6 +311,7 @@ def _update_ranged(
             species=_slot(mobs.type_id, state, slot),
             firing=firing,
         )
+        proposed = torch.where(firing[:, None], position, proposed)
 
         collides = constants.MOB_COLLIDES_WITH.to(state.device)[
             state.player_level.long(),
@@ -317,6 +366,7 @@ def _update_projectiles(state: EnvState) -> EnvState:
                     torch.zeros_like(state.player_health),
                 )
                 state.is_sleeping = state.is_sleeping & ~hits
+                state.is_resting = state.is_resting & ~hits
             else:
                 state, hits = _strike_with_projectile(
                     state,
@@ -329,6 +379,8 @@ def _update_projectiles(state: EnvState) -> EnvState:
             blocked = constants.SOLID_BLOCK.to(state.device)[
                 mechanics.block_at(state, flown).long()
             ]
+            if hurts_player:
+                blocked |= mechanics.is_occupied(state, flown)
             survives = alive & ~hits & ~blocked & mechanics.in_bounds(flown)
 
             rows = torch.arange(state.num_envs, device=state.device)
@@ -569,7 +621,7 @@ def _relocate(
     # A creature that has wandered too far is forgotten, which is what keeps
     # the fixed slots available for creatures near the player.
     stays = (
-        (new - state.player_position).abs().sum(-1) < constants.MOB_DESPAWN_DISTANCE
+        (old - state.player_position).abs().sum(-1) < constants.MOB_DESPAWN_DISTANCE
     ) | ~despawns
     remains = alive & stays
 
@@ -623,11 +675,6 @@ def _place_mob(
         spawning,
         species.int(),
         mobs.type_id[rows, level, slot],
-    )
-    mobs.attack_cooldown[rows, level, slot] = torch.where(
-        spawning,
-        torch.zeros_like(species, dtype=torch.int32),
-        mobs.attack_cooldown[rows, level, slot],
     )
     mobs.mask[rows, level, slot] = mobs.mask[rows, level, slot] | spawning
     state.mob_map[rows, level] = scatter_tiles_where(

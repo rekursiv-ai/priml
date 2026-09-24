@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
-import pytest
 import torch
 
 from priml.baselines.craftax.conftest import (
@@ -35,8 +34,6 @@ if TYPE_CHECKING:
 
 
 _DEVICE = torch.device("cpu")
-
-pytestmark = pytest.mark.usefixtures("warm_reference")
 
 
 def _world(num_envs: int = 2, seed: int = 0) -> EnvState:
@@ -116,6 +113,24 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
     assert int(BlockType.TREE) in present
     # The surface is fully lit; only the caves need torches.
     assert float(light.min()) > 0.0
+
+
+def test_graveyard_sampled_stone_and_ladder_light_quirks() -> None:
+    blocks, items, light, _, _ = generate_smooth_world(
+        num_envs=1,
+        config=world_config.GRAVEYARD,
+        player_position=torch.tensor([24, 24]),
+        generator=torch.Generator().manual_seed(9),
+        device=_DEVICE,
+    )
+    # Upstream writes STONE with always_diamond=False (world_gen.py:483-504).
+    # The candidate is still lit without an ascent (world_gen.py:549-555).
+    actual = (
+        int((blocks == int(BlockType.STONE)).sum()),
+        bool((light > 0).any()),
+        bool((items == int(ItemType.LADDER_UP)).any()),
+    )
+    assert actual == (1, True, False)
 
 
 def test_water_and_mountains_keep_clear_of_the_spawn() -> None:

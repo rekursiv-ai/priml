@@ -132,6 +132,14 @@ def test_opening_a_chest_records_it_and_clears_the_tile() -> None:
     assert state.achievements[:, int(Achievement.OPEN_CHEST)].tolist() == [True, True]
 
 
+def test_first_chest_grants_a_bow_on_floor_one() -> None:
+    state = _state()
+    state.player_level[:] = 1
+    state.map[:, 1, 10, 11] = int(BlockType.CHEST)
+    state = interact.interact(state, doing=_all(), generator=_quiet())
+    assert state.inventory.bow.tolist() == [1, 1]
+
+
 def test_a_creature_takes_the_blow_instead_of_the_block() -> None:
     # Otherwise the player would mine through whatever is attacking them.
     state = _facing(_state(), BlockType.TREE)

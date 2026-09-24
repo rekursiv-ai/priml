@@ -29,6 +29,7 @@ from priml.baselines.craftax.game.constants import (
     ItemType,
 )
 from priml.baselines.craftax.game.indexing import (
+    gather_tiles,
     scatter_tiles_where,
 )
 
@@ -156,6 +157,9 @@ def craft(state: EnvState, action: Tensor) -> EnvState:
             # player from spending materials to downgrade.
             name, tier = recipe.tool
             making = making & (_inventory_tensor(state, name) < tier)
+        if recipe.stock is not None:
+            name, _ = recipe.stock
+            making = making & (_inventory_tensor(state, name) < 99)
 
         for material, amount in recipe.costs.items():
             setattr(
@@ -215,10 +219,11 @@ def place(state: EnvState, action: Tensor) -> EnvState:
         + constants.DIRECTIONS.to(state.device)[state.player_direction.long()]
     )
     block = mechanics.block_at(state, target)
-    # Only loose ground accepts a block, and never on top of a creature.
+    item = gather_tiles(mechanics.current_items(state), target)
     free = (
         mechanics.in_bounds(target)
-        & constants.CAN_PLACE_ITEM_ON.to(state.device)[block.long()]
+        & ~constants.SOLID_BLOCK.to(state.device)[block.long()]
+        & (item == int(ItemType.NONE))
         & ~mechanics.is_occupied(state, target)
     )
 
@@ -227,9 +232,7 @@ def place(state: EnvState, action: Tensor) -> EnvState:
         (
             Action.PLACE_TABLE,
             "wood",
-            # A table is the one placement that costs more than a single
-            # unit, which is what makes the first one a real decision.
-            1,
+            2,
             BlockType.CRAFTING_TABLE,
             Achievement.PLACE_TABLE,
         ),
@@ -254,6 +257,8 @@ def place(state: EnvState, action: Tensor) -> EnvState:
             & free
             & (_inventory_tensor(state, material) >= cost)
         )
+        if action_kind == Action.PLACE_PLANT:
+            placing = placing & (block == int(BlockType.GRASS))
         state = _write_block(state, target, int(block_kind), placing)
         setattr(
             state.inventory,
@@ -330,9 +335,11 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
         (action == int(Action.PLACE_TORCH))
         & (state.inventory.torches >= 1)
         & mechanics.in_bounds(target)
-        & ~constants.SOLID_BLOCK.to(state.device)[
+        & constants.CAN_PLACE_ITEM_ON.to(state.device)[
             mechanics.block_at(state, target).long()
         ]
+        & (gather_tiles(mechanics.current_items(state), target) == int(ItemType.NONE))
+        & ~mechanics.is_occupied(state, target)
     )
     state.inventory.torches = state.inventory.torches - placing.int()
 
@@ -349,36 +356,36 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
     # patch in Python cost 162 tensor dispatches for a tile nobody usually
     # places, and this step runs a few thousand dispatches already.
     #
-    # A torch brightens a tile, never dims one already brighter, so the write
-    # takes a maximum against what is there -- and because two patch cells
-    # never address the same tile, the maxima do not need sequencing.
-    glow = constants.TORCH_LIGHT_MAP.to(state.device)
+    # Every torch contributes its glow, clipped where light is already full.
     offsets = torch.arange(9, device=state.device) - 4
-    light = state.light_map[rows, level]
-
-    patch_rows = (target[:, 0, None, None] + offsets[None, :, None]).clamp(
-        0,
-        light.shape[-2] - 1,
+    squared = offsets[:, None].square() + offsets[None, :].square()
+    glow = constants.TORCH_LIGHT_MAP.to(state.device)
+    # Match the CPU XLA square-root results used to build upstream's table.
+    for distance, value in (
+        (2, 0.717157244682312),
+        (5, 0.5527863502502441),
+        (8, 0.4343145489692688),
+        (13, 0.2788897156715393),
+        (17, 0.17537885904312134),
+        (20, 0.10557276010513306),
+    ):
+        glow = torch.where(squared == distance, torch.full_like(glow, value), glow)
+    padding = 6
+    padded_light = torch.nn.functional.pad(
+        state.light_map[rows, level],
+        (padding, padding, padding, padding),
     )
-    patch_columns = (target[:, 1, None, None] + offsets[None, None, :]).clamp(
-        0,
-        light.shape[-1] - 1,
-    )
-    inside = (
-        (target[:, 0, None, None] + offsets[None, :, None] >= 0)
-        & (target[:, 0, None, None] + offsets[None, :, None] < light.shape[-2])
-        & (target[:, 1, None, None] + offsets[None, None, :] >= 0)
-        & (target[:, 1, None, None] + offsets[None, None, :] < light.shape[-1])
-    )
+    patch_rows = target[:, 0, None, None] + offsets[None, :, None] + padding
+    patch_columns = target[:, 1, None, None] + offsets[None, None, :] + padding
     env = rows[:, None, None].expand_as(patch_rows)
-    brightened = torch.maximum(light[env, patch_rows, patch_columns], glow)
-    light = light.clone()
-    light[env, patch_rows, patch_columns] = torch.where(
-        placing[:, None, None] & inside,
+    current = padded_light[env, patch_rows, patch_columns]
+    brightened = (current + glow).clamp(0.0, 1.0)
+    padded_light[env, patch_rows, patch_columns] = torch.where(
+        placing[:, None, None],
         brightened,
-        light[env, patch_rows, patch_columns],
+        current,
     )
-    state.light_map[rows, level] = light
+    state.light_map[rows, level] = padded_light[:, padding:-padding, padding:-padding]
     state.achievements = mechanics.unlock_achievement(
         state,
         torch.full(

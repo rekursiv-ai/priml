@@ -576,22 +576,13 @@ MOB_ACHIEVEMENT: Final = torch.tensor(
 """Per mob class and species, the achievement its defeat unlocks."""
 
 
-# The squared distance is summed as exact integers before its single conversion to
-# float, and the division by the radius is rounded to float32 before the subtraction,
-# matching the order the reference applies them.
-#
-# The 40 off-axis entries still differ from the reference in their last mantissa bit,
-# and deliberately so: the reference's square root truncates where IEEE-754 rounds to
-# nearest -- ``sqrt(20)`` is ``0x1.1e3779b9...``, which this returns as ``0x1.1e377a``
-# and the reference as ``0x1.1e3778``. Reproducing that would mean shipping a
-# deliberately less accurate square root. The gap is one part in 8 million of a light
-# level that is compared against a 0.05 threshold, so it cannot change a visibility
-# decision.
 def _torch_light_map() -> Tensor:
     """Build the radial falloff a placed torch casts on its 9x9 neighborhood."""
     offsets = (torch.arange(9, dtype=torch.int32) - 4).abs()
     squared = offsets[:, None] ** 2 + offsets[None, :] ** 2
-    scaled = squared.to(torch.float32).sqrt() / 5.0
+    distance = squared.to(torch.float32).sqrt()
+    # Upstream constants.py:593 lowers division by five to reciprocal multiplication.
+    scaled = distance * 0.2
     return (1.0 - scaled).clamp(0.0, 1.0)
 
 

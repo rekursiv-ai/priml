@@ -26,9 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 
-pytestmark = pytest.mark.usefixtures("warm_reference")
-
-
 def test_reward_table_sums_to_the_scoring_denominator() -> None:
     # The normalized score divides by this total, so a table that does not sum
     # to it would silently rescale every reported result.
@@ -63,6 +60,11 @@ def test_torch_light_map_peaks_at_its_own_tile_and_falls_to_zero() -> None:
     assert float(light[0, 0]) == pytest.approx(0.0)
     assert torch.equal(light, light.flip(0))
     assert torch.equal(light, light.flip(1))
+
+
+def test_torch_light_map_preserves_reference_reciprocal_multiplication() -> None:
+    # Upstream constants.py:593 divides the distance map by five.
+    assert float(constants.TORCH_LIGHT_MAP[0, 2]) == 0.10557276010513306
 
 
 @requires_craftax
@@ -108,24 +110,11 @@ def test_enumerations_match_reference_values() -> None:
 
 
 @requires_craftax
-def test_torch_light_map_matches_reference_to_one_ulp() -> None:
-    """The light map agrees with the reference except in its last bit.
-
-    The reference's square root truncates where IEEE-754 rounds to nearest, so
-    40 off-axis entries differ by one ulp. Reproducing that would require a
-    deliberately less accurate square root; the tolerance here is the size of
-    that rounding step, not a slackened comparison.
-    """
+def test_torch_light_map_matches_reference_exactly() -> None:
+    """The light map agrees exactly with the reference."""
     upstream = cast(_ReferenceConstants, reference("craftax.constants"))
     expected = as_tensor(upstream.TORCH_LIGHT_MAP)
-    difference = (constants.TORCH_LIGHT_MAP - expected).abs()
-    assert float(difference.max()) <= 2.0**-23
-    # The light threshold the renderer compares against is 0.05, so a one-ulp
-    # difference can never flip a tile between lit and dark.
-    assert torch.equal(
-        constants.TORCH_LIGHT_MAP > 0.05,
-        expected > 0.05,
-    )
+    assert torch.equal(constants.TORCH_LIGHT_MAP, expected)
 
 
 @requires_craftax
