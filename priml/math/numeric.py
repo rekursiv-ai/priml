@@ -407,6 +407,7 @@ def matrix_signum_via_newtonschulz(
     coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
     steps: int = 5,
     eps: float = 1e-7,
+    reference_numerics: bool = False,
 ) -> Tensor:
     """Newton-Schulz iteration for the matrix sign function (orthogonal factor).
 
@@ -422,6 +423,7 @@ def matrix_signum_via_newtonschulz(
       coefficients: Quintic iteration coefficients (a, b, c).
       steps: Number of Newton-Schulz iterations.
       eps: Norm clamping epsilon.
+      reference_numerics: Use REG's unfused operation order when true.
 
     Returns:
       result: Approximate orthogonal factor, same shape as input.
@@ -435,6 +437,20 @@ def matrix_signum_via_newtonschulz(
     a, b, c = coefficients
     orig_dtype = x.dtype
     x = x.bfloat16()
+    if reference_numerics:
+        # The REG Muon implementation transposes and adds eps before running
+        # the unfused quintic polynomial. Keep that arithmetic for exp000.
+        transpose = x.shape[-2] > x.shape[-1]
+        if transpose:
+            x = x.mT
+        x = x / (x.norm(dim=(-2, -1), keepdim=True) + eps)
+        for _ in range(steps):
+            gram = x @ x.mT
+            correction = b * gram + c * gram @ gram
+            x = a * x + correction @ x
+        if transpose:
+            x = x.mT
+        return x.to(orig_dtype)
     x = x / x.norm(dim=[-2, -1], keepdim=True).clamp(min=eps)
     if transpose := x.shape[-2] > x.shape[-1]:
         x = x.transpose(-2, -1)

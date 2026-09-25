@@ -163,6 +163,9 @@ class Muon(Optimizer):
         ns_steps: int = 5
         """Newton-Schulz iterations per update."""
 
+        reference_numerics: bool = False
+        """Use REG's unfused Newton-Schulz operation order."""
+
         adjust_lr_fn: AdjustLrFn = adjust_lr_original
         """Rescales the step for a parameter's shape; see :data:`AdjustLrFn`."""
 
@@ -186,6 +189,7 @@ class Muon(Optimizer):
                 ns_coefficients=final.ns_coefficients,
                 eps=final.eps,
                 ns_steps=final.ns_steps,
+                reference_numerics=final.reference_numerics,
                 adjust_lr_fn=final.adjust_lr_fn,
                 ensemble_dims=final.ensemble_dims,
             )
@@ -201,6 +205,7 @@ class Muon(Optimizer):
         ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
         eps: float = 1e-7,
         ns_steps: int = 5,
+        reference_numerics: bool = False,
         adjust_lr_fn: AdjustLrFn = adjust_lr_original,
         ensemble_dims: int = 0,
     ):
@@ -226,6 +231,7 @@ class Muon(Optimizer):
             "ns_coefficients": ns_coefficients,
             "eps": eps,
             "ns_steps": ns_steps,
+            "reference_numerics": reference_numerics,
             "ensemble_dims": ensemble_dims,
         }
         super().__init__(params, defaults)
@@ -268,6 +274,7 @@ class Muon(Optimizer):
             raise ValueError("Expected len(ns_coefficients) == 3.")
         eps = FloatCodec.coerce(group["eps"], None)
         ns_steps = IntCodec.coerce(group["ns_steps"], None)
+        reference_numerics = BoolCodec.coerce(group["reference_numerics"], None)
         ensemble_dims = IntCodec.coerce(group["ensemble_dims"], None)
 
         for p in cast(list[Tensor], group["params"]):
@@ -297,6 +304,7 @@ class Muon(Optimizer):
                 coefficients=ns_coefficients,
                 steps=ns_steps,
                 eps=eps,
+                reference_numerics=reference_numerics,
             ).reshape(g.shape)
 
             if weight_decay is not None:

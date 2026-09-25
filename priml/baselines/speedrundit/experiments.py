@@ -1,165 +1,94 @@
-r"""SR-DiT experiment ladder.
-
-``exp000`` REPRODUCES the reference pinned at
-c24c2ff25699cce63174ca56c2afcfeeb225e367 rather than stating a naive recipe of
-our own, and is never edited. That is a departure from the usual meaning of
-``exp000`` and it is deliberate: the baseline exists to establish that Priml's
-components compute the published model exactly, so the control has to be the
-published model, SPRINT routing and value residuals included. The bit-for-bit
-goldens beside it are the primary artifact, not the FID.
-
-Run::
-
-  uv --quiet run --frozen python -m priml priml.baselines.speedrundit.experiments.exp000  # noqa: E501
-
-Prepare the corpus first::
-
-  uv --quiet run --frozen python -m priml.baselines.speedrundit.scripts.prepare_data  # noqa: E501
-"""
+"""Updated REG/SPRINT SpeedrunDiT training configuration."""
 
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Final
 
 from configgle import Makes
 
-from priml.baselines.imagenet.data import NUM_CLASSES
-from priml.baselines.speedrundit.data import SpeedrunDiTData
-from priml.baselines.speedrundit.metric import VelocityError
-from priml.baselines.speedrundit.train_step import SpeedrunDiTTrainStep
-from priml.runtime import SingleProcess
+import torch
+
+from priml.baselines.speedrundit.data import SpeedrunImageNetData
+from priml.baselines.speedrundit.optimizers import speedrundit_optimizer
+from priml.baselines.speedrundit.train_step import SpeedrunTrainStep
+from priml.runtime import MultiProcess, SingleProcess
+from priml.train.checkpointer import Checkpointer
+from priml.train.parallelism import DataParallel, NoParallel
 from priml.train.train_loop import TrainLoop
 
 
-__all__ = ["SpeedrunDiTLoop", "exp000", "exp_smoke"]
-
-
-LATENT_SIZE: Final = 16
-"""Side length of an INVAE latent for a 256px image; the tokenizer is f16."""
-
-LATENT_CHANNELS: Final = 32
-"""Channels an INVAE latent carries."""
-
-ENCODER_WIDTH: Final = 768
-"""Feature width of DINOv2 ViT-B/14, the alignment target."""
-
-
-class SpeedrunDiTLoop(
+class SpeedrunTrainLoop(
     Makes["TrainLoop"],
-    TrainLoop.Config[SpeedrunDiTTrainStep.Config, SpeedrunDiTData.Config],
+    TrainLoop.Config[SpeedrunTrainStep.Config, SpeedrunImageNetData.Config],
 ):
-    """Narrows the loop's two slots to this baseline's concrete configs.
+    """Bind the SpeedrunDiT train step to its paired ImageNet dataset."""
 
-    Narrowed twice over: the generic parameters let a factory read
-    ``cfg.step.model`` with no ``isinstance``, and the field redeclarations
-    make the runtime defaults the narrow ones. Drop either and the slots
-    silently revert to the library's defaults.
-    """
+    step: SpeedrunTrainStep.Config = field(default_factory=SpeedrunTrainStep.Config)
+    """Model, teacher, objective, precision, and optimizer recipe."""
 
-    step: SpeedrunDiTTrainStep.Config = field(
-        default_factory=SpeedrunDiTTrainStep.Config,
+    dataset: SpeedrunImageNetData.Config = field(
+        default_factory=SpeedrunImageNetData.Config
     )
-    """What one optimizer update does."""
-
-    dataset: SpeedrunDiTData.Config = field(default_factory=SpeedrunDiTData.Config)
-    """Supplies the train and eval loaders."""
+    """Processed ImageNet and INVAE pairs."""
 
 
-def exp000() -> SpeedrunDiTLoop:
-    """SR-DiT-B/1 on ImageNet-256 INVAE latents, reproducing the reference.
+def exp000() -> SpeedrunTrainLoop:
+    """REG/SPRINT SiT-B/1 with source Muon arithmetic and MLP scaling.
 
     Hypothesis:
-      Priml's building blocks compute the published SR-DiT exactly. The claim
-      under test is numerical identity with the pinned reference across
-      initialization, one forward, the objective, and five optimizer steps --
-      not a score. A score only becomes meaningful once identity holds.
-
-    Returns:
-      cfg: Training loop for the reference recipe.
+      Reproduce the later REG branch's Muon optimizer, RMS normalization,
+      value residual, contrastive flow loss, and depth-dependent MLP widths.
 
     References:
-      https://github.com/SwayStar123/SpeedrunDiT
-        Pinned at c24c2ff25699cce63174ca56c2afcfeeb225e367.
-      https://arxiv.org/abs/2512.12386
-        Bhanded 2025, "Speedrunning ImageNet Diffusion."
-      https://arxiv.org/abs/2410.06940
-        Yu et al. 2024, "Representation Alignment for Generation."
-      https://arxiv.org/abs/2506.05350
-        Stoica et al. 2025, "Contrastive Flow Matching."
+      https://github.com/SwayStar123/REG/tree/invae-sprint-rms-rope-valres-cfm-muon-layerwisescaling
 
     Results:
       TBD.
 
     """
-    cfg = SpeedrunDiTLoop()
-    cfg.study_name = "speedrundit"
-    cfg.experiment_name = "exp000"
-
-    model = cfg.step.model
-    model.channels_in = LATENT_CHANNELS
-    model.channels_hidden = 768
-    model.image_size = LATENT_SIZE
-    model.patch_size = 1
-    model.num_layers = 12
-    model.heads = 12
-    model.num_classes = NUM_CLASSES
-    model.label_embedder.dropout = 0.1
-    model.projector_dims = (ENCODER_WIDTH,)
-    model.projector_hidden = 2048
-
-    cfg.dataset.batch_size = 256
-    cfg.dataset.latent_scale = 0.3099
-
-    cfg.metrics_eval["velocity"] = VelocityError.Config()
-
-    # A constant rate for the whole run: the reference builds no scheduler, and
-    # a warmup here would be a second change riding along with the port.
-    cfg.max_steps = cfg.step.train_budget_steps = 400_000
-    cfg.num_steps_eval = 10_000
-    cfg.runtime = SingleProcess.Config()
-    return cfg
+    config = SpeedrunTrainLoop()
+    config.study_name = "speedrundit"
+    config.experiment_name = "exp000"
+    config.max_steps = config.step.train_budget_steps = 400_000
+    config.num_steps_eval = float(
+        "inf"
+    )  # The reference evaluates generated images separately.
+    config.eval_every_epoch = False
+    config.seed = 0
+    config.runtime = MultiProcess.Config(float32_matmul_precision="high")
+    config.step.parallelism = DataParallel.Config()
+    assert isinstance(config.checkpointer, Checkpointer.Config)
+    config.checkpointer.save_every = 10_000
+    return config
 
 
-def exp_smoke() -> SpeedrunDiTLoop:
-    """exp000 at the smallest size that still exercises every path.
+def exp001() -> SpeedrunTrainLoop:
+    """Keep exp000's algorithm with shared, simpler floating-point arithmetic.
 
-    Cuts width, depth, heads, the latent grid, the class count, the batch, and
-    the step budget. The SPRINT split is kept at two encoder and two decoder
-    layers around one sparse layer, because a trunk short enough to drop the
-    sparse stage entirely would stop covering the routing, the mask token, and
-    the fusion projection -- which is most of what makes this model unusual.
-
-    Not a result: nothing measured here is comparable with exp000.
-
-    The corpus it reads is a synthetic one at this geometry::
-
-      uv --quiet run --frozen python -m priml.baselines.speedrundit.scripts.prepare_data --synthetic --samples 4 --image-size 8 --latent-size 4 --latent-channels 8 --num-classes 10 --encoder-width 16  # noqa: E501
-
-    Returns:
-      cfg: A tiny loop that runs on CPU over that synthetic corpus.
-
+    The fixed position table is computed in float32 and Muon uses the shared
+    fused Newton-Schulz update. These are small numerical changes only.
     """
-    cfg = exp000()
-    cfg.experiment_name = "exp_smoke"
+    config = exp000()
+    config.experiment_name = "exp001"
+    config.step.model.position_compute_dtype = torch.float32
+    config.step.model.reference_rope = False
+    config.step.optimizer = speedrundit_optimizer(reference_numerics=False)
+    return config
 
-    model = cfg.step.model
-    model.channels_in = 8
-    model.channels_hidden = 64
-    model.image_size = 4
-    model.num_layers = 5
-    model.heads = 4
-    model.num_classes = 10
-    model.projector_dims = (16,)
-    model.projector_hidden = 32
 
-    cfg.dataset.batch_size = 2
-    cfg.dataset.eval_batch_size = 2
-    cfg.dataset.num_samples = 4
-
-    cfg.step.dtype_autocast = None
-    cfg.step.compile = None
-    cfg.max_steps = cfg.step.train_budget_steps = 4
-    cfg.num_steps_eval = 2
-    cfg.checkpointer = None
-    return cfg
+def exp_smoke() -> SpeedrunTrainLoop:
+    """Five quick single-device updates with the same training mechanisms."""
+    config = exp000()
+    config.experiment_name = "exp_smoke"
+    config.runtime = SingleProcess.Config()
+    config.step.parallelism = NoParallel.Config()
+    config.max_steps = config.step.train_budget_steps = 5
+    config.step.model.hidden_size = 32
+    config.step.model.num_heads = 4
+    config.step.model.depth = 6
+    config.step.model.projector_hidden = 64
+    config.step.model.projection_depths = (2, 3, 6)
+    config.dataset.batch_size = 2
+    config.checkpointer = None
+    config.dataset.num_workers = 0
+    return config

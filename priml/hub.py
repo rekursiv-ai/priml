@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, cast
 import logging
 import os
 
-from torch import Tensor
+from torch import Tensor, nn
 
 import torch
 
@@ -58,6 +58,34 @@ def get_cache_dir() -> Path:
         models_dir = cache_dir() / "rekursiv-ai" / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     return models_dir
+
+
+def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
+    """Let rank zero populate the Hub cache before other ranks load a model.
+
+    A rank-zero download failure is broadcast before peers enter ``hub.load``;
+    otherwise they could wait indefinitely at their next distributed step.
+    """
+    distributed = torch.distributed
+    if not distributed.is_available() or not distributed.is_initialized():
+        return cast(nn.Module, torch.hub.load(repository, model))
+
+    loaded: nn.Module | None = None
+    error: Exception | None = None
+    if distributed.get_rank() == 0:
+        try:
+            loaded = cast(nn.Module, torch.hub.load(repository, model))
+        except Exception as exc:  # noqa: BLE001 - every rank must see the failure
+            error = exc
+    status = [str(error) if error is not None else None]
+    distributed.broadcast_object_list(status, src=0)
+    if status[0] is not None:
+        if error is not None:
+            raise error
+        raise RuntimeError(f"rank 0 could not load {repository}/{model}: {status[0]}")
+    if loaded is None:
+        loaded = cast(nn.Module, torch.hub.load(repository, model))
+    return loaded
 
 
 def load_transformers_model(

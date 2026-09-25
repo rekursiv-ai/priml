@@ -1,8 +1,8 @@
 SpeedrunTrainLoop(
                 study_name='speedrundit',
-                experiment_name='exp000',
+                experiment_name='exp001',
                 base_dir='/opt/scratch',
-                working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000'),
+                working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp001'),
                 doc='',
                 step=SpeedrunTrainStep.Config(
                 │       model=SpeedrunDiT.Config(
@@ -22,8 +22,8 @@ SpeedrunTrainLoop(
                 │               path_drop_prob=0.05,
                 │               class_dropout_prob=0.1,
                 │               qk_norm=True,
-                │               position_compute_dtype=torch.float64,
-                │               reference_rope=True,
+                │               position_compute_dtype=torch.float32,
+                │               reference_rope=False,
                 │               encoder_blocks=2,
                 │               decoder_blocks=2
                 │       ),
@@ -38,7 +38,7 @@ SpeedrunTrainLoop(
                 │                               ns_coefficients=(3.4445, -4.775, 2.0315),
                 │                               eps=1e-07,
                 │                               ns_steps=5,
-                │                               reference_numerics=True,
+                │                               reference_numerics=False,
                 │                               adjust_lr_fn=<function priml.optimizers.muon.adjust_lr_original at 0xdefacedeface>,
                 │                               ensemble_dims=0
                 │                       )
@@ -114,8 +114,8 @@ SpeedrunTrainLoop(
                 metrics_train={},
                 metrics_eval={},
                 checkpointer=Checkpointer.Config(
-                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000/checkpoints'),
+                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp001'),
+                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp001/checkpoints'),
                         filename='step_{step:08d}.pt',
                         save_every=10_000,
                         keep_last_n=-1,
@@ -131,8 +131,8 @@ SpeedrunTrainLoop(
                 phase_timer=PhaseTimer.Config(
                         enabled=False,
                         torch_profile=False,
-                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000'),
-                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp000/profiling'),
+                        base_dir=PosixPath('/opt/scratch/runs/speedrundit/exp001'),
+                        working_dir=PosixPath('/opt/scratch/runs/speedrundit/exp001/profiling'),
                         heartbeat_interval_sec=20.0,
                         fault_dump_interval_sec=40.0,
                         cuda_events=False
