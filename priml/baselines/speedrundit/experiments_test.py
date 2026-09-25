@@ -2,33 +2,36 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING
 
+from configgle.testing import assert_pprint_golden
+
+import pytest
 import torch
 
-from priml.baselines.speedrundit.experiments import exp000, exp001, exp_smoke
+from priml.baselines.speedrundit.experiments import (
+    SpeedrunTrainLoop,
+    exp000,
+    exp001,
+    exp_smoke,
+)
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
 
 
-_CWD: Final = Path(__file__).resolve().parent
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-def test_experiment_config_goldens() -> None:
-    """Keep both recipes reviewable on Linux and Windows."""
-    for name, recipe in (("exp000", exp000), ("exp001", exp001)):
-        rendered = (
-            recipe()
-            .pformat(
-                finalize=True,
-                mask_memory_addresses=True,
-                hide_default_values=False,
-            )
-            .replace("WindowsPath(", "PosixPath(")
-        )
-        expected = _CWD / "testdata" / f"{name}.txt"
-        assert rendered + "\n" == expected.read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    ("name", "recipe"),
+    [("exp000", exp000), ("exp001", exp001)],
+)
+def test_experiment_config_goldens(
+    name: str,
+    recipe: Callable[[], SpeedrunTrainLoop],
+) -> None:
+    assert_pprint_golden(test_file=__file__, name=name, config=recipe())
 
 
 def test_smoke_keeps_the_training_recipe() -> None:
