@@ -235,7 +235,7 @@ def test_daylight_repeats_every_day() -> None:
     assert torch.allclose(early, later, atol=1e-6)
 
 
-@pytest.mark.cuda
+@pytest.mark.gpu_torch_cuda
 def test_daylight_matches_compiled_reference_exactly() -> None:
     assert torch.cuda.is_available()
     # Captured from upstream calculate_light_level on CUDA.
