@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol, cast, override
+
 from configgle import Fig
 from torch import Tensor, nn
 from torch.nn import functional
@@ -105,10 +107,12 @@ class DinoV2Teacher(nn.Module):
         if config.image_size % 16:
             raise ValueError("image_size must be divisible by 16")
         self.config = config
-        self.encoder = load_torch_hub_distributed(
-            "facebookresearch/dinov2", config.variant
+        encoder = load_torch_hub_distributed(
+            "facebookresearch/dinov2",
+            config.variant,
         )
-        self.encoder.eval().requires_grad_(False)
+        encoder.eval().requires_grad_(False)
+        self.encoder = cast("_DinoV2Encoder", encoder)
         patch_grid = config.image_size // 16
         # Match the reference's 224/448-pixel input and resized DINO position table.
         position = self.encoder.pos_embed.detach()
@@ -126,6 +130,7 @@ class DinoV2Teacher(nn.Module):
         resized = torch.cat((position[:, :1], patch.flatten(2).transpose(1, 2)), dim=1)
         self.encoder.pos_embed = nn.Parameter(resized, requires_grad=False)
 
+    @override
     @torch.no_grad()
     def forward(self, image: Tensor) -> tuple[Tensor, ...]:
         """Return CLS plus patch tokens at the requested DINO block indices."""
@@ -154,3 +159,21 @@ class DinoV2Teacher(nn.Module):
             for index, (patches, cls) in zip(unique, layers, strict=True)
         }
         return tuple(by_layer[i] for i in requested)
+
+
+class _DinoV2Encoder(Protocol):
+    """Describe the DINOv2 surface used by the frozen teacher."""
+
+    pos_embed: Tensor
+    blocks: nn.ModuleList
+
+    def get_intermediate_layers(
+        self,
+        image: Tensor,
+        *,
+        n: list[int],
+        reshape: bool,
+        return_class_token: bool,
+    ) -> tuple[tuple[Tensor, Tensor], ...]:
+        """Return intermediate patch and class tokens."""
+        ...

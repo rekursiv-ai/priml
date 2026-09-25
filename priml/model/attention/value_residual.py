@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import override
+
 from configgle import Fig
 from torch import Tensor, nn
 from torch.nn import functional
@@ -115,6 +117,7 @@ class ValueResidualAttention(nn.Module):
             nn.Parameter(torch.tensor(0.5)) if config.value_residual else None
         )
 
+    @override
     def forward(
         self,
         x: Tensor,
@@ -140,7 +143,8 @@ class ValueResidualAttention(nn.Module):
 
             def rotate_half(heads: Tensor) -> Tensor:
                 return torch.stack(
-                    (-heads[..., 1::2], heads[..., 0::2]), dim=-1
+                    (-heads[..., 1::2], heads[..., 0::2]),
+                    dim=-1,
                 ).reshape_as(heads)
 
             q = q * cos + rotate_half(q) * sin
