@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import override
+
 from configgle import Fig
 from torch import Tensor, nn
 
@@ -51,6 +53,7 @@ class SparseDenseFusion(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config.channels))
         self.proj = nn.Linear(2 * config.channels, config.channels)
 
+    @override
     def forward(
         self,
         dense: Tensor,
