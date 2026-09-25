@@ -100,7 +100,7 @@ test = [
 ]
 typecheck = [
     "basedpyright>=1.40.1",
-    "ty>=0.0.82",
+    "ty>=0.0.84",
     "rekursiv-ai-typeshed",
     "hatchling>=1.32.4",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py subscripts its one-parameter BuildHookInterface.
     "safetensors",
@@ -298,6 +298,20 @@ extend-include = ["*.ipynb"]
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
 select = ["ALL"]
+
+extend-safe-fixes = [
+    "C4",     # Collection and comprehension rewrites.
+    "E711",   # Compare to None with identity.
+    "E712",   # Compare booleans by truthiness.
+    "F401",   # Remove unused imports.
+    "F601",   # Remove overwritten dictionary entries.
+    "F841",   # Remove unused local bindings.
+    "PT006",  # Use tuple for pytest.mark.parametrize names.
+    "RET504", # Remove unnecessary local assignment directly before return.
+    "SIM102", # Collapse nested if statements.
+    "TC",     # Type-checking import and annotation rewrites.
+    "UP",     # Python syntax upgrades.
+]
 
 ignore = [
     # COM812 is deliberately ignored here and re-enabled only by the

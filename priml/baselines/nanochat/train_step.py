@@ -54,10 +54,6 @@ if TYPE_CHECKING:
     from priml.train.custom_types import TrainStepOutput
 
 
-class _Compile(Protocol):
-    def __call__[**P, R](self, model: Callable[P, R], /) -> Callable[P, R]: ...
-
-
 class TokenCrossEntropy:
     """Per-token cross-entropy over ``[B, S, V]`` logits, unreduced."""
 
@@ -229,9 +225,9 @@ class NanoChatTrainStep(TrainStep):
         dtype_autocast: torch.dtype | None = torch.bfloat16
         """Autocast dtype; ``None`` trains in full precision."""
 
-        compile: Makeable[_Compile] | None = field(
-            default_factory=lambda: PartialConfig(torch.compile),
-        )
+        compile: (
+            Makeable[Callable[[Callable[..., object]], Callable[..., object]]] | None
+        ) = field(default_factory=lambda: PartialConfig(torch.compile))
         """Compile the model AND the loss with ``torch.compile``; ``None`` runs
         them eagerly.
 

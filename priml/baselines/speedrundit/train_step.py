@@ -15,7 +15,6 @@ from priml.baselines.speedrundit.model import ModelOutput, SpeedrunDiT
 from priml.baselines.speedrundit.objective import LossTerms, SpeedrunObjective
 from priml.baselines.speedrundit.optimizers import speedrundit_optimizer
 from priml.model.dinov2 import DinoV2Teacher
-from priml.model.invae import LATENT_SCALE
 from priml.train.custom_types import EMAProtocol
 from priml.train.ema import EMA
 from priml.train.train_step import TrainStep, _assert_uniform_microbatch_count
@@ -29,42 +28,58 @@ class SpeedrunTrainStep(TrainStep):
     """Frozen DINO targets plus the four-term latent flow objective."""
 
     class Config(
-        Makes["SpeedrunTrainStep"], TrainStep.Config[SpeedrunDiT.Config], kw_only=True
+        Makes["SpeedrunTrainStep"],
+        TrainStep.Config[SpeedrunDiT.Config],
+        kw_only=True,
     ):
         model: SpeedrunDiT.Config = field(default_factory=SpeedrunDiT.Config)
         """Latent SiT student architecture."""
+
         teacher: Makeable[nn.Module] = field(default_factory=DinoV2Teacher.Config)
         """Frozen representation teacher."""
+
         optimizer: Makeable[Callable[..., torch.optim.Optimizer]] = field(
-            default_factory=speedrundit_optimizer
+            default_factory=speedrundit_optimizer,
         )
         """AdamW and Muon parameter split."""
+
         dtype_autocast: torch.dtype | None = torch.bfloat16
         """Autocast dtype for the student and teacher."""
+
         compile: (
             Makeable[Callable[[Callable[..., object]], Callable[..., object]]] | None
         ) = None
         """Optional training compilation; disabled in the reference branch."""
+
         ema: Makeable[EMAProtocol] = field(
             default_factory=lambda: cast(
-                Makeable[EMAProtocol], EMA.Config(decay=0.9999, track_buffers=False)
-            )
+                Makeable[EMAProtocol],
+                EMA.Config(decay=0.9999, track_buffers=False),
+            ),
         )
         """Exponential moving average of student parameters."""
+
         gradient_clip_norm: float = 1.0
         """Global gradient norm clipping threshold."""
-        latent_scale: float = LATENT_SCALE
+
+        latent_scale: float = 0.3099
         """Scale applied to sampled INVAE latents."""
+
         projection_coeff: float = 0.5
         """REG projection loss weight."""
+
         cls_coeff: float = 0.03
         """CLS flow loss weight."""
+
         cfm_coeff: float = 0.05
         """Contrastive flow loss weight."""
+
         cfm_weighting: Literal["uniform", "linear"] = "uniform"
         """Time weighting used by contrastive flow matching."""
+
         time_shifting: bool = True
         """Apply the reference resolution-dependent time shift."""
+
         shift_base: int = 4096
         """Reference latent dimension for time shifting."""
 
@@ -111,8 +126,8 @@ class SpeedrunTrainStep(TrainStep):
             model = cast(Callable[..., ModelOutput], self.__call__)
         return self.objective(model, latent, label, teacher_features)
 
-    @staticmethod
-    def _result(terms: LossTerms) -> TrainStepOutput:
+    @classmethod
+    def _result(cls, terms: LossTerms) -> TrainStepOutput:
         return {
             "loss": terms.loss.detach(),
             "model": terms.output.velocity.detach(),

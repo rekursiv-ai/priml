@@ -56,3 +56,9 @@ def test_reference_names_and_tensor_values(tmp_path: Path) -> None:
     torch.manual_seed(0)
     order = [batch["label"].tolist() for batch in data.train_dataloader()]
     assert order == [[11, 12], [6, 9], [7, 5], [14, 13], [8, 10]]
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

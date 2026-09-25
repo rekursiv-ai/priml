@@ -12,9 +12,18 @@ from priml.optimizers.parameter_filter import complement, excluding
 
 
 def speedrundit_optimizer(
-    *, reference_numerics: bool = True
+    *,
+    reference_numerics: bool = True,
 ) -> CompositeOptimizer.Config:
-    """Use the REG AdamW/Muon split, selecting source arithmetic for exp000."""
+    """Build the REG AdamW/Muon parameter split.
+
+    Args:
+      reference_numerics: Whether Muon preserves REG's arithmetic order.
+
+    Returns:
+      config: Composite optimizer configuration for SpeedrunDiT.
+
+    """
     on_muon = excluding(
         Muon.eligible_tensor,
         "x_embedder",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import override
+from typing import Final, override
 
 from configgle import Fig
 from torch import Tensor, nn
@@ -17,6 +17,9 @@ from priml.baselines.speedrundit.train_step import SpeedrunTrainStep
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.train.ema import NoEMA
 from priml.train.parallelism import NoParallel
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class FakeTeacher(nn.Module):
@@ -35,7 +38,10 @@ class FakeTeacher(nn.Module):
         tokens = 4 if image.shape[-1] == 4 else image.shape[-1] // 16
         channels = 8 if tokens == 4 else 768
         feature = torch.ones(
-            image.shape[0], tokens * tokens + 1, channels, device=image.device
+            image.shape[0],
+            tokens * tokens + 1,
+            channels,
+            device=image.device,
         )
         return feature, feature, feature
 
@@ -55,7 +61,7 @@ def test_train_step_updates_model_and_advances_budget() -> None:
             "image": torch.zeros(2, 3, 4, 4, dtype=torch.uint8),
             "latent": torch.randn(2, 2, 4, 4),
             "label": torch.tensor([1, 2]),
-        }
+        },
     )
     result = step.train_step(**batch)
     assert step.global_step == 1
@@ -112,10 +118,16 @@ def test_exp_smoke_five_steps_bfb() -> None:
         return module(batch)
 
     assert_bfb_against_golden(
-        golden_dir=Path(__file__).parent / "testdata",
+        golden_dir=_CWD / "testdata",
         golden_name="exp_smoke",
         build_module=_SmokeSteps,
         build_input=build_input,
         seed=0,
         run=run,
     )
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)
