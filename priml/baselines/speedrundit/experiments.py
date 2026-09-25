@@ -27,7 +27,7 @@ class SpeedrunTrainLoop(
     """Model, teacher, objective, precision, and optimizer recipe."""
 
     dataset: SpeedrunImageNetData.Config = field(
-        default_factory=SpeedrunImageNetData.Config
+        default_factory=SpeedrunImageNetData.Config,
     )
     """Processed ImageNet and INVAE pairs."""
 
@@ -51,7 +51,7 @@ def exp000() -> SpeedrunTrainLoop:
     config.experiment_name = "exp000"
     config.max_steps = config.step.train_budget_steps = 400_000
     config.num_steps_eval = float(
-        "inf"
+        "inf",
     )  # The reference evaluates generated images separately.
     config.eval_every_epoch = False
     config.seed = 0

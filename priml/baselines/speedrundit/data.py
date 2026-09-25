@@ -103,7 +103,7 @@ class SpeedrunImageNetData:
 
     class Config(Fig["SpeedrunImageNetData"]):
         source: Makeable[PairedImageLatentDataset] = field(
-            default_factory=PairedImageLatentDataset.Config
+            default_factory=PairedImageLatentDataset.Config,
         )
         """Indexed processed ImageNet/INVAE pairs."""
 
@@ -143,7 +143,11 @@ class SpeedrunImageNetData:
     def _loader(self, *, shuffle: bool) -> DataLoader[dict[str, Tensor]]:
         sampler: DistributedSampler[dict[str, Tensor]] | None = None
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            sampler = DistributedSampler(self.dataset, shuffle=shuffle, drop_last=True)
+            sampler = DistributedSampler[dict[str, Tensor]](
+                self.dataset,
+                shuffle=shuffle,
+                drop_last=True,
+            )
         if shuffle:
             self.dataset.sampler = sampler
         if self.config.num_workers:
@@ -182,5 +186,5 @@ class SpeedrunImageNetData:
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore the epoch timer from a checkpoint."""
         self.timer_epoch.load_state_dict(
-            cast(dict[str, object], state_dict["timer_epoch"])
+            cast(dict[str, object], state_dict["timer_epoch"]),
         )

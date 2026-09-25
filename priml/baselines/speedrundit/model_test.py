@@ -100,13 +100,14 @@ def test_training_routing_alignment_and_backward() -> None:
 
 def test_position_table_promotes_bfloat16_tokens_to_float32() -> None:
     model = tiny_model().eval()
-    model.wg_norm = nn.Identity()  # pyright: ignore[reportAttributeAccessIssue]
+    model.wg_norm = nn.Identity()  # ty: ignore[invalid-assignment] -- Test patch isolates position dtype.  # pyright: ignore[reportAttributeAccessIssue] -- Test patch isolates position dtype.
     captured = None
 
     class StopForwardError(Exception):
         pass
 
-    def capture_input(_module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+    def capture_input(module: nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+        del module
         nonlocal captured
         captured = inputs[0]
         raise StopForwardError
@@ -172,8 +173,11 @@ def test_shift_and_sampler_return_expected_latent_shapes() -> None:
 
 
 def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
+    class ConstantVelocityConfig:
+        num_classes: int = 2
+
     class ConstantVelocityModel(nn.Module):
-        config = type("Config", (), {"num_classes": 2})()
+        config = ConstantVelocityConfig()
 
         @override
         def forward(
@@ -181,11 +185,13 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
             x: torch.Tensor,
             t: torch.Tensor,
             y: torch.Tensor,
-            cls: torch.Tensor,
+            cls_token: torch.Tensor,
             **_kwargs: object,
         ) -> ModelOutput:
             del t
-            cls_velocity = torch.where(y[:, None] == 2, -1.0, 1.0).expand_as(cls)
+            cls_velocity = torch.where(y[:, None] == 2, -1.0, 1.0).expand_as(
+                cls_token,
+            )
             return ModelOutput(torch.zeros_like(x), cls_velocity, ())
 
     model = ConstantVelocityModel()
@@ -194,7 +200,7 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
     labels = torch.tensor([1])
     torch.manual_seed(7)
     _, conditional_cls = sample_latents(
-        model,  # pyright: ignore[reportArgumentType] -- model API test double
+        model,
         latents,
         cls,
         labels,
@@ -203,7 +209,7 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
     )
     torch.manual_seed(7)
     _, zero_guidance_cls = sample_latents(
-        model,  # pyright: ignore[reportArgumentType] -- model API test double
+        model,
         latents,
         cls,
         labels,
@@ -213,3 +219,9 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
         shift_time=False,
     )
     assert torch.equal(zero_guidance_cls, conditional_cls)
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

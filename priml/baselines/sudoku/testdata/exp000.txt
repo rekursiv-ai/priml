@@ -97,6 +97,7 @@ SudokuTrainLoop(
                 │                               ns_coefficients=(3.4445, -4.775, 2.0315),
                 │                               eps=1e-07,
                 │                               ns_steps=3,
+                │                               reference_numerics=False,
                 │                               adjust_lr_fn=<function priml.optimizers.muon.adjust_lr_original at 0xdefacedeface>,
                 │                               ensemble_dims=0
                 │                       )

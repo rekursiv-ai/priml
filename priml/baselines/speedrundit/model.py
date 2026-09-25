@@ -10,6 +10,7 @@ MLP width. The default configuration is the published SiT-B/1 run.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import NamedTuple, override
 
 from configgle import Fig
@@ -19,7 +20,10 @@ import torch
 
 from priml.cost import Cost, cost, elementwise_cost, matmul_cost
 from priml.math.diffusion.conditioning import modulate
-from priml.math.position_embedding import image_token_positions, sincos_position_table
+from priml.math.position_embedding import (
+    image_token_positions,
+    sincos_position_table,
+)
 from priml.model.attention.rope import RoPE
 from priml.model.attention.value_residual import ValueResidualAttention
 from priml.model.conditioning import LabelEmbedder, TimestepEmbedder
@@ -125,42 +129,61 @@ class SpeedrunDiT(nn.Module):
     class Config(Fig["SpeedrunDiT"]):
         input_size: int = 16
         """Spatial side of the INVAE latent grid."""
+
         in_channels: int = 32
         """INVAE latent channels."""
+
         patch_size: int = 1
         """Latent cells in each patch side."""
+
         hidden_size: int = 768
         """Transformer token width."""
+
         depth: int = 12
         """Total number of transformer blocks."""
+
         num_heads: int = 12
         """Attention heads per block."""
+
         num_classes: int = 1000
         """ImageNet classes, excluding the classifier-free token."""
+
         cls_channels: int = 768
         """DINO CLS feature width."""
+
         projector_hidden: int = 2048
         """Width of the REG projection MLP."""
+
         projection_depths: tuple[int, ...] = (2, 4, 6)
         """Blocks whose tokens are aligned to DINO features."""
+
         mlp_ratio_min: float = 2.0
         """Feedforward expansion in the first block."""
+
         mlp_ratio_max: float = 6.0
         """Feedforward expansion in the last block."""
+
         drop_ratio: float = 0.75
         """Fraction of patch tokens removed from the sparse middle blocks."""
+
         path_drop_prob: float = 0.05
         """Chance of removing the sparse branch during training."""
+
         class_dropout_prob: float = 0.1
         """Chance of using the classifier-free class embedding."""
+
         qk_norm: bool = True
         """Normalize query and key heads with RMSNorm."""
+
         position_compute_dtype: torch.dtype = torch.float64
         """Intermediate precision for fixed sin/cos positions; REG used float64."""
+
         reference_rope: bool = True
         """Use the source rotary arithmetic for backward parity."""
+
         encoder_blocks: int = 2
         """Dense blocks before SPRINT token selection."""
+
         decoder_blocks: int = 2
         """Dense blocks after sparse and dense streams are fused."""
 
@@ -171,22 +194,24 @@ class SpeedrunDiT(nn.Module):
             dtype: torch.dtype | None = None,
             **kwargs: object,
         ) -> Cost:
-            """Estimate a training forward, pricing SPRINT blocks at routed length."""
+            """Estimate a training forward at SPRINT's routed sequence lengths.
+
+            Args:
+              batch_size: Samples processed by the forward pass.
+              dtype: Floating-point dtype used by priced operations.
+              **kwargs: Unused compatibility arguments accepted by ``cost``.
+
+            Returns:
+              estimate: Parameter, FLOP, and activation-memory costs.
+
+            """
             del kwargs
             width = self.hidden_size
             grid = self.input_size // self.patch_size
             dense = grid * grid + 1
             sparse = max(1, int(dense * (1 - self.drop_ratio)))
             middle_end = self.depth - self.decoder_blocks
-
-            def linear(channels_in: int, channels_out: int, rows: int) -> Cost:
-                return matmul_cost(
-                    channels_in=channels_in,
-                    channels_out=channels_out,
-                    bias=True,
-                    rows=rows,
-                    dtype=dtype,
-                )
+            linear = partial(_linear_cost, dtype=dtype)
 
             total = (
                 linear(
@@ -314,13 +339,14 @@ class SpeedrunDiT(nn.Module):
             config.patch_size,
         )
         self.t_embedder = TimestepEmbedder.Config(
-            channels_out=config.hidden_size
+            channels_out=config.hidden_size,
         ).make()
         self.y_embedder = LabelEmbedder.Config(
             channels_in=config.num_classes,
             channels_out=config.hidden_size,
             dropout=config.class_dropout_prob,
         ).make()
+        self.pos_embed: Tensor
         self.register_buffer(
             "pos_embed",
             sincos_position_table(
@@ -367,8 +393,10 @@ class SpeedrunDiT(nn.Module):
         self.rope = RoPE.Config(channels_head=(axis_channels, axis_channels)).make()
         if config.reference_rope:
             factors = self.rope(
-                image_token_positions(self.grid_size, torch.device("cpu"))
+                image_token_positions(self.grid_size, torch.device("cpu")),
             )
+            self.reference_rope_cos: Tensor
+            self.reference_rope_sin: Tensor
             self.register_buffer("reference_rope_cos", factors[0], persistent=False)
             self.register_buffer("reference_rope_sin", factors[1], persistent=False)
         self.reset_parameters()
@@ -381,7 +409,8 @@ class SpeedrunDiT(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         nn.init.xavier_uniform_(self.x_embedder.weight.flatten(1))
-        assert self.x_embedder.bias is not None
+        if self.x_embedder.bias is None:
+            raise ValueError("x_embedder must include a bias")
         nn.init.zeros_(self.x_embedder.bias)
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
         for module in (self.t_embedder.mlp[0], self.t_embedder.mlp[2]):
@@ -389,7 +418,8 @@ class SpeedrunDiT(nn.Module):
         for block in self.blocks:
             nn.init.zeros_(block.adaLN_modulation[-1].weight)
             bias = block.adaLN_modulation[-1].bias
-            assert bias is not None
+            if bias is None:
+                raise ValueError("adaLN modulation must include a bias")
             nn.init.zeros_(bias)
         for module in (
             self.final_layer.adaLN_modulation[-1],
@@ -397,7 +427,8 @@ class SpeedrunDiT(nn.Module):
             self.final_layer.linear_cls,
         ):
             nn.init.zeros_(module.weight)
-            assert module.bias is not None
+            if module.bias is None:
+                raise ValueError("final projections must include a bias")
             nn.init.zeros_(module.bias)
 
     def _project(
@@ -461,16 +492,9 @@ class SpeedrunDiT(nn.Module):
         if kept is None:
             sparse_rope_factors = rope_factors
         else:
-
-            def select_factor(factor: Tensor) -> Tensor:
-                return factor.expand(batch, -1, -1, -1).gather(
-                    1,
-                    kept[:, :, None, None].expand(-1, -1, 1, factor.shape[-1]),
-                )
-
             sparse_rope_factors = (
-                select_factor(rope_factors[0]),
-                select_factor(rope_factors[1]),
+                _select_factor(rope_factors[0], kept, batch=batch),
+                _select_factor(rope_factors[1], kept, batch=batch),
             )
         sparse_v = (
             first_v.gather(
@@ -506,3 +530,26 @@ class SpeedrunDiT(nn.Module):
             .reshape(batch, channels, height, width)
         )
         return ModelOutput(velocity, cls_velocity, tuple(projections))
+
+
+def _linear_cost(
+    channels_in: int,
+    channels_out: int,
+    rows: int,
+    *,
+    dtype: torch.dtype | None,
+) -> Cost:
+    return matmul_cost(
+        channels_in=channels_in,
+        channels_out=channels_out,
+        bias=True,
+        rows=rows,
+        dtype=dtype,
+    )
+
+
+def _select_factor(factor: Tensor, kept: Tensor, *, batch: int) -> Tensor:
+    return factor.expand(batch, -1, -1, -1).gather(
+        1,
+        kept[:, :, None, None].expand(-1, -1, 1, factor.shape[-1]),
+    )

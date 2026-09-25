@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import torch
 
 from priml.baselines.speedrundit.experiments import exp000, exp001, exp_smoke
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.muon import Muon
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_experiment_config_goldens() -> None:
@@ -23,7 +27,7 @@ def test_experiment_config_goldens() -> None:
             )
             .replace("WindowsPath(", "PosixPath(")
         )
-        expected = Path(__file__).parent / "testdata" / f"{name}.txt"
+        expected = _CWD / "testdata" / f"{name}.txt"
         assert rendered + "\n" == expected.read_text(encoding="utf-8")
 
 
@@ -62,3 +66,9 @@ def test_exp001_changes_only_numerical_implementations() -> None:
     assert source.step.projection_coeff == simpler.step.projection_coeff
     assert source.step.cls_coeff == simpler.step.cls_coeff
     assert source.step.cfm_coeff == simpler.step.cfm_coeff
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)

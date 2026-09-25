@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from torch import Tensor
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 def time_shift(
-    t: Tensor, latent_dimensions: int, reference_dimensions: int = 4096
+    t: Tensor,
+    latent_dimensions: int,
+    reference_dimensions: int = 4_096,
 ) -> Tensor:
     """Shift uniform times toward the noisier end for larger latent spaces."""
     if latent_dimensions <= 0 or reference_dimensions <= 0:

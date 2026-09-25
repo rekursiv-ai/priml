@@ -15,12 +15,22 @@ def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
 
 
 def timestep_embedding(t: Tensor, width: int = 256, period: float = 10_000.0) -> Tensor:
-    """Sinusoidal embedding for fractional diffusion times."""
+    """Build sinusoidal embeddings for fractional diffusion times.
+
+    Args:
+      t: One-dimensional tensor of diffusion times.
+      width: Embedding width.
+      period: Largest sinusoidal period.
+
+    Returns:
+      embedding: Time embeddings with shape ``[len(t), width]``.
+
+    """
     half = width // 2
     frequencies = torch.exp(
         -math.log(period)
         * torch.arange(half, device=t.device, dtype=torch.float32)
-        / half
+        / half,
     )
     angles = t.float()[:, None] * frequencies[None]
     result = torch.cat((angles.cos(), angles.sin()), dim=-1)

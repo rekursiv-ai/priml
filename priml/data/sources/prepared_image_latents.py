@@ -21,19 +21,36 @@ else:
 
 
 def read_labels(manifest: Path) -> dict[str, int]:
-    """Read class labels keyed by slash-separated latent names."""
+    """Read class labels keyed by slash-separated latent names.
+
+    Args:
+      manifest: JSON manifest containing image names and labels.
+
+    Returns:
+      labels: Class labels keyed by normalized latent names.
+
+    """
     payload = DictCodec.coerce(loads(manifest.read_text(encoding="utf-8")))
     entries = [ListCodec.coerce(entry) for entry in ListCodec.coerce(payload["labels"])]
     return {
         StrCodec.coerce(entry[0]).replace("\\", "/"): IntCodec.coerce(
-            entry[1], default=None
+            entry[1],
+            default=None,
         )
         for entry in entries
     }
 
 
 def read_image(path: Path) -> NDArray[np.uint8]:
-    """Decode a stored image to ``[channels, height, width]`` uint8."""
+    """Decode a stored image to ``[channels, height, width]`` uint8.
+
+    Args:
+      path: NumPy or image file to decode.
+
+    Returns:
+      image: Channel-first uint8 image.
+
+    """
     if path.suffix.lower() == ".npy":
         array = cast("NDArray[np.uint8]", np.load(path))
         shape = cast("tuple[int, ...]", array.shape)

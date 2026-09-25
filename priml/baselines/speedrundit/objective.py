@@ -22,9 +22,22 @@ if TYPE_CHECKING:
 
 
 def interpolant(
-    t: Tensor, path: Literal["linear", "cosine"]
+    t: Tensor,
+    path: Literal["linear", "cosine"],
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Return clean/noise coefficients and their time derivatives."""
+    """Compute probability-path coefficients and derivatives.
+
+    Args:
+      t: Flow times, one per sample.
+      path: Linear or cosine probability path.
+
+    Returns:
+      alpha: Clean-data coefficients.
+      sigma: Noise coefficients.
+      d_alpha: Time derivatives of clean-data coefficients.
+      d_sigma: Time derivatives of noise coefficients.
+
+    """
     if path == "linear":
         return 1 - t, t, -torch.ones_like(t), torch.ones_like(t)
     if path == "cosine":
@@ -35,13 +48,28 @@ def interpolant(
             -(math.pi / 2) * angle.sin(),
             (math.pi / 2) * angle.cos(),
         )
-    raise ValueError(f"unsupported flow path: {path}")  # pyright: ignore[reportUnreachable]
+    raise ValueError(
+        f"unsupported flow path: {path}",
+    )  # pyright: ignore[reportUnreachable] -- Runtime guard protects untyped callers.
 
 
 def projection_loss(
-    predictions: tuple[Projection, ...], teacher_features: tuple[Tensor, ...]
+    predictions: tuple[Projection, ...],
+    teacher_features: tuple[Tensor, ...],
 ) -> Tensor:
-    """Cosine alignment at configured dense or routed block depths."""
+    """Compute cosine alignment at configured projection depths.
+
+    Args:
+      predictions: Student projections and retained token indices.
+      teacher_features: Teacher token features at matching depths.
+
+    Returns:
+      loss: Per-sample sum of mean token alignment losses.
+
+    Raises:
+      ValueError: Projection counts or token shapes do not match.
+
+    """
     if len(predictions) != len(teacher_features) or not predictions:
         raise ValueError("teacher and student projection depths must match")
     total: Tensor | float = 0.0
@@ -64,7 +92,7 @@ def projection_loss(
     return total / len(predictions)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class LossTerms:
     """Unreduced objective and its component losses."""
 
@@ -77,7 +105,7 @@ class LossTerms:
     output: ModelOutput
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class SpeedrunObjective:
     """Combine SiT velocity, REG alignment, CLS diffusion, and CFM."""
 
@@ -91,7 +119,15 @@ class SpeedrunObjective:
     shift_base: int = 4096
 
     def sample_time(self, latents: Tensor) -> Tensor:
-        """Draw and optionally shift one flow time per latent sample."""
+        """Draw and optionally shift one flow time per latent sample.
+
+        Args:
+          latents: Clean latent batch whose shape determines time shifting.
+
+        Returns:
+          time: One sampled flow time per batch element.
+
+        """
         if self.weighting == "uniform":
             t = torch.rand(latents.shape[0], device=latents.device)
         elif self.weighting == "lognormal":
@@ -158,4 +194,12 @@ class SpeedrunObjective:
             + self.cls_coeff * cls
             + self.cfm_coeff * cfm
         )
-        return LossTerms(loss, mean_loss, velocity, cls, projection, cfm, output)
+        return LossTerms(
+            loss=loss,
+            mean_loss=mean_loss,
+            velocity=velocity,
+            cls=cls,
+            projection=projection,
+            cfm=cfm,
+            output=output,
+        )

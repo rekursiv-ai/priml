@@ -24,7 +24,8 @@ def test_rank_zero_populates_hub_before_other_ranks(
     rank = 0
     encoder = nn.Identity()
 
-    def load(_repository: str, _variant: str) -> nn.Module:
+    def load(repository: str, variant: str) -> nn.Module:
+        del repository, variant
         events.append(f"load:{rank}")
         return encoder
 
@@ -57,7 +58,8 @@ def test_rank_zero_hub_failure_reaches_other_ranks(
     rank = 0
     status_message = None
 
-    def load(_repository: str, _variant: str) -> nn.Module:
+    def load(repository: str, variant: str) -> nn.Module:
+        del repository, variant
         raise OSError("hub unavailable")
 
     def broadcast(status: list[str | None], *, src: int) -> None:
@@ -78,6 +80,13 @@ def test_rank_zero_hub_failure_reaches_other_ranks(
         load_torch_hub_distributed("facebookresearch/dinov2", "dinov2_vitb14")
     rank = 1
     with pytest.raises(
-        RuntimeError, match="rank 0 could not load facebookresearch/dinov2"
+        RuntimeError,
+        match="rank 0 could not load facebookresearch/dinov2",
     ):
         load_torch_hub_distributed("facebookresearch/dinov2", "dinov2_vitb14")
+
+
+if __name__ == "__main__":
+    from priml.lib.testing.main import test_main
+
+    test_main(__file__)
