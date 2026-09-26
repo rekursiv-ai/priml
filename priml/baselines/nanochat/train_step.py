@@ -456,6 +456,11 @@ class NanoChatTrainStep(TrainStep):
         return result
 
     @property
+    def accumulation_complete(self) -> bool:
+        """Whether no pass of a partial optimizer step is pending."""
+        return self._pending_passes == 0
+
+    @property
     @override
     def progress_learning_schedule(self) -> float:
         """Fraction of the budget spent, clamped to ``[0, 1]``."""
