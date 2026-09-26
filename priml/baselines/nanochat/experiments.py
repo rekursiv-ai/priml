@@ -172,6 +172,16 @@ class NanoChatLoop(TrainLoop):
         assert isinstance(step, NanoChatTrainStep)
         return step.elapsed_sec
 
+    # Loading is charged per PASS (below), so the budget can expire between the
+    # passes of one optimizer step; stopping there leaves partial gradients the
+    # terminal checkpoint refuses to serialize, losing the run.
+    @override
+    def _time_limit_reached(self) -> bool:
+        """Stop on the budget only at an optimizer-step boundary."""
+        step = self.step
+        assert isinstance(step, NanoChatTrainStep)
+        return step.accumulation_complete and super()._time_limit_reached()
+
     # Its ``next(train_loader)`` runs inside the region its clock brackets
     # (train.py:550, between 543 and 573). Ours happens here, outside the step, so the
     # budget would otherwise buy free steps: measured at 0.160 of 1.683 s/step on a

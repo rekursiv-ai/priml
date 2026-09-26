@@ -442,6 +442,24 @@ def test_the_loop_reads_the_steps_budget_clock() -> None:
     assert loop._train_elapsed() == 12.5
 
 
+def test_the_budget_never_stops_a_run_mid_accumulation() -> None:
+    """Loading is charged per pass, so the budget can expire between passes.
+
+    Stopping there leaves partial gradients the terminal checkpoint refuses to
+    serialize, which loses the whole run's state.
+    """
+    loop = NanoChatLoop.__new__(NanoChatLoop)
+    step = NanoChatTrainStep.__new__(NanoChatTrainStep)
+    step.elapsed_sec = 12.5
+    step._pending_passes = 1
+    loop.step = step
+    loop.max_time = 10.0
+    loop.max_time_kind = "train"
+    assert not loop._time_limit_reached()
+    step._pending_passes = 0
+    assert loop._time_limit_reached()
+
+
 def test_the_dataset_batch_follows_the_steps_pass_size() -> None:
     """Two places naming the same number silently disagree; one propagates."""
     config = experiments.exp000()
