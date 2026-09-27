@@ -13,8 +13,18 @@ from priml.cost import Cost, matmul_cost
 
 
 def select_tokens(x: Tensor, drop_ratio: float) -> tuple[Tensor, Tensor | None]:
-    """Keep a random subset of tokens and return their original indices."""
-    if not 0 <= drop_ratio < 1:
+    """Keep a random subset of tokens and return their original indices.
+
+    Args:
+      x: ``[B, N, C]`` tokens.
+      drop_ratio: Fraction of tokens to drop, in ``[0, 1)``.
+
+    Returns:
+      kept: ``[B, K, C]`` kept tokens, or ``x`` when nothing is dropped.
+      ids: ``[B, K]`` original indices of the kept tokens, or None.
+
+    """
+    if drop_ratio < 0 or drop_ratio >= 1:
         raise ValueError("drop_ratio must be in [0, 1)")
     keep = max(1, int(x.shape[1] * (1 - drop_ratio)))
     if keep >= x.shape[1]:
@@ -38,7 +48,18 @@ class SparseDenseFusion(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost the fusion projection and its learned mask token."""
+            """Cost the fusion projection and its learned mask token.
+
+            Args:
+              seq_len: Tokens per example.
+              batch_size: Examples per batch.
+              dtype: Compute dtype.
+              **kwargs: Ignored cost-protocol arguments.
+
+            Returns:
+              cost: Fusion projection plus mask-token parameter cost.
+
+            """
             del kwargs
             return matmul_cost(
                 channels_in=2 * self.channels,

@@ -21,8 +21,10 @@ class DinoV2Teacher(nn.Module):
     class Config(Fig["DinoV2Teacher"]):
         variant: str = "dinov2_vitb14"
         """Torch Hub DINOv2 backbone name."""
+
         layer_indices: tuple[int, ...] = (12, 12, 12)
         """Reference block indices for the three REG targets."""
+
         image_size: int = 256
         """Side length of the preprocessed teacher image."""
 
@@ -33,7 +35,20 @@ class DinoV2Teacher(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Estimate the frozen ViT-B/14 forward through the requested layer."""
+            """Estimate the frozen ViT-B/14 forward through the requested layer.
+
+            Args:
+              batch_size: Images per batch.
+              dtype: Compute dtype.
+              **kwargs: Ignored cost-protocol arguments.
+
+            Returns:
+              cost: Frozen teacher forward cost.
+
+            Raises:
+              ValueError: No cost model exists for ``variant``.
+
+            """
             del kwargs
             if self.variant != "dinov2_vitb14":
                 raise ValueError(f"no cost model for DINOv2 variant {self.variant}")

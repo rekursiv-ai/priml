@@ -65,6 +65,14 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
 
     A rank-zero download failure is broadcast before peers enter ``hub.load``;
     otherwise they could wait indefinitely at their next distributed step.
+
+    Args:
+      repository: Torch Hub repository, ``owner/repo[:ref]``.
+      model: Entry point name within the repository.
+
+    Returns:
+      module: The loaded model.
+
     """
     distributed = torch.distributed
     if not distributed.is_available() or not distributed.is_initialized():
@@ -75,7 +83,7 @@ def load_torch_hub_distributed(repository: str, model: str) -> nn.Module:
     if distributed.get_rank() == 0:
         try:
             loaded = cast(nn.Module, torch.hub.load(repository, model))
-        except Exception as exc:  # noqa: BLE001 - every rank must see the failure
+        except Exception as exc:  # noqa: BLE001 -- Every rank must see any rank-zero failure.
             error = exc
     status = [str(error) if error is not None else None]
     distributed.broadcast_object_list(status, src=0)

@@ -48,7 +48,18 @@ class ValueResidualAttention(nn.Module):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost projections, QK normalization, rotary, SDPA, and value blend."""
+            """Cost projections, QK normalization, rotary, SDPA, and value blend.
+
+            Args:
+              seq_len: Tokens per example.
+              batch_size: Examples per batch.
+              dtype: Compute dtype.
+              **kwargs: Ignored cost-protocol arguments.
+
+            Returns:
+              cost: Total attention-layer cost.
+
+            """
             del kwargs
             head_dim = self.channels // self.heads
             rows = seq_len * batch_size
@@ -140,15 +151,8 @@ class ValueResidualAttention(nn.Module):
         if self.reference_rope:
             cos = cos.transpose(1, 2).repeat_interleave(2, dim=-1).to(q.dtype)
             sin = sin.transpose(1, 2).repeat_interleave(2, dim=-1).to(q.dtype)
-
-            def rotate_half(heads: Tensor) -> Tensor:
-                return torch.stack(
-                    (-heads[..., 1::2], heads[..., 0::2]),
-                    dim=-1,
-                ).reshape_as(heads)
-
-            q = q * cos + rotate_half(q) * sin
-            k = k * cos + rotate_half(k) * sin
+            q = q * cos + _rotate_half(q) * sin
+            k = k * cos + _rotate_half(k) * sin
         else:
             q, k = RoPE.rotate(
                 q.transpose(1, 2),
@@ -160,3 +164,8 @@ class ValueResidualAttention(nn.Module):
             q, k = q.transpose(1, 2), k.transpose(1, 2)
         output = functional.scaled_dot_product_attention(q, k, v)
         return self.proj(output.transpose(1, 2).reshape(batch, tokens, channels)), raw_v
+
+
+def _rotate_half(heads: Tensor) -> Tensor:
+    """Rotate interleaved channel pairs, ``(a, b) -> (-b, a)``."""
+    return torch.stack((-heads[..., 1::2], heads[..., 0::2]), dim=-1).reshape_as(heads)

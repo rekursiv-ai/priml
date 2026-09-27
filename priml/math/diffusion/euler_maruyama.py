@@ -66,6 +66,18 @@ def integrate_two_streams(
     The forward callback evaluates both drifts at the current time. Keeping
     the two streams in one loop ensures that both see the same time grid and
     that their independent noise tensors are drawn in a fixed order.
+
+    Args:
+      media: Initial latent stream.
+      cls_token: Initial CLS stream.
+      grid: Descending time grid; its final step is deterministic.
+      drift: Maps ``(latent, cls, t)`` to both streams' drifts.
+      diffusion: Squared diffusion coefficient ``g(t)^2``.
+
+    Returns:
+      latent: Integrated latent stream, in float64.
+      cls: Integrated CLS stream, in float64.
+
     """
     latent, cls = media.to(torch.float64), cls_token.to(torch.float64)
     last = grid.shape[0] - 2

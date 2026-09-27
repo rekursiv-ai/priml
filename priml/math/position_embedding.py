@@ -27,6 +27,16 @@ def sincos_position_table(
     The original SpeedrunDiT builds the table in NumPy float64 and rounds
     once to float32. The later REG branch computes it directly in float32.
     Keeping the intermediate dtype explicit preserves both recipes.
+
+    Args:
+      channels: Table width; divisible by four.
+      grid: Side length of the square token grid.
+      lead: Zeroed rows prepended for leading tokens such as CLS.
+      compute_dtype: Dtype the table is built in before rounding to float32.
+
+    Returns:
+      table: ``[lead + grid**2, channels]`` float32 position table.
+
     """
     if channels % 4:
         raise ValueError("position channels must be divisible by four")
