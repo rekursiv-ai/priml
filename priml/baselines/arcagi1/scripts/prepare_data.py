@@ -12,6 +12,7 @@ keeps tests and offline rebuilds hermetic.
 Examples:
   prepare_data.py
   prepare_data.py --directory /datasets/my-arcagi1
+  prepare_data.py --experiment exp004
 
 '''
 # fmt: on
@@ -19,17 +20,20 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import argparse
 import logging
 import subprocess
 import tempfile
 
-from priml.baselines.arcagi1.data import ArcData
+from priml.baselines.arcagi1.experiments import exp000, exp004
 from priml.baselines.arcagi1.scripts.build_dataset import build_arc_dataset
 from priml.lib.custom_json import DictCodec, IntCodec, loads
-from priml.train.train_loop import TrainLoop
+
+
+if TYPE_CHECKING:
+    from priml.baselines.arcagi1.data import ArcData
 
 
 SOURCE_URL: Final = "https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git"
@@ -53,21 +57,29 @@ def main() -> int:
     _add_arguments(parser)
     flags = cast(_Flags, parser.parse_args())
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    config = ArcData.Config()
-    config.base_dir = TrainLoop.Config().base_dir
+    config = dataset_config(flags.experiment)
     if flags.directory is not None:
         config.working_dir = flags.directory
-    config.augmentation.num_aug = flags.num_aug
-    config.augmentation.seed = flags.seed
+    if flags.num_aug is not None:
+        config.augmentation.num_aug = flags.num_aug
+    if flags.seed is not None:
+        config.augmentation.seed = flags.seed
     prepare(config, input_file_prefix=flags.input_prefix)
     return 0
 
 
+def dataset_config(experiment: str) -> ArcData.Config:
+    """Return the dataset config used by the named ARC experiment."""
+    factories = {"exp000": exp000, "exp004": exp004}
+    loop = factories[experiment]()
+    config = loop.dataset.copy_tree()
+    config.base_dir = loop.base_dir
+    return config
+
+
 def default_directory() -> Path:
-    """Return the directory a default ``TrainLoop`` resolves for ARC data."""
-    config = ArcData.Config()
-    config.base_dir = TrainLoop.Config().base_dir
-    return Path(config.copy_tree().finalize().working_dir)
+    """Return the directory the default ARC experiment resolves for data."""
+    return Path(dataset_config("exp000").finalize().working_dir)
 
 
 def prepare(
@@ -156,18 +168,20 @@ def _pinned_source() -> _PinnedSource:
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     """Register flags on ``parser``."""
     parser.add_argument("--directory", type=Path, default=None)
+    parser.add_argument("--experiment", choices=("exp000", "exp004"), default="exp000")
     parser.add_argument("--input-prefix", type=Path, default=None)
-    parser.add_argument("--num-aug", type=int, default=1_000)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num-aug", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
 
 
 class _Flags(Protocol):
     """Parsed command-line flags."""
 
     directory: Path | None
+    experiment: str
     input_prefix: Path | None
-    num_aug: int
-    seed: int
+    num_aug: int | None
+    seed: int | None
 
 
 if __name__ == "__main__":

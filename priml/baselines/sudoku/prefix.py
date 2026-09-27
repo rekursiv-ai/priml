@@ -206,7 +206,10 @@ class SparsePuzzleEmbedding(nn.Module):
         """Runtime multiplier; -1 derives it from ``channels_out``."""
 
         dtype: torch.dtype | None = None
-        """Cast applied to the forward output; ``None`` keeps the table dtype."""
+        """Cast applied to looked-up rows before reshape; ``None`` keeps their dtype."""
+
+        dtype_scale: torch.dtype | None = None
+        """Cast the prefix before scaling; ``None`` scales in its current dtype."""
 
         def cost(
             self,
@@ -259,7 +262,7 @@ class SparsePuzzleEmbedding(nn.Module):
                     channels=width,
                     adjoint_inputs=1,
                     rows=rows,
-                    dtype=dtype,
+                    dtype=self.dtype_scale if self.dtype_scale is not None else dtype,
                 )
             )
 
@@ -325,6 +328,8 @@ class SparsePuzzleEmbedding(nn.Module):
             config.num_tokens,
             config.channels_out,
         )
+        if config.dtype_scale is not None:
+            prefix = prefix.to(config.dtype_scale)
         return self.embed_scale * prefix
 
     def _lookup(self, identifiers: Tensor) -> Tensor:

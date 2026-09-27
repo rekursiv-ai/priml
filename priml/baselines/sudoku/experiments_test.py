@@ -11,7 +11,7 @@ ladder stays checkable on any machine.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol, Self, cast
 
 from configgle.pprinting import pformat
 
@@ -23,12 +23,23 @@ from priml.baselines.sudoku.embedding import (
     GridEmbedding,
     PredictionFeedback,
 )
+from priml.baselines.sudoku.eval import (
+    NINE_VIEWS,
+    AgreementLockEval,
+    SieveEval,
+    VerifierAcceptor,
+)
+from priml.baselines.sudoku.trainer import Trainer
+from priml.baselines.sudoku.trm import recipe_block
+from priml.model.attention.self_attention import SelfAttention
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.transformer.block import TransformerBlock
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    import torch
 
     from priml.baselines.sudoku.experiments import SudokuTrainLoop
 
@@ -170,6 +181,313 @@ def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> Non
         "exp000 changed; read the diff, then rerun with --golden-overwrite "
         "if the change is intended."
     )
+
+
+TRM_LADDER: Final = (
+    experiments.exp004,
+    experiments.exp005,
+    experiments.exp006,
+    experiments.exp007,
+    experiments.exp008,
+    experiments.exp009,
+    experiments.exp010,
+)
+"""The TRM training ladder; each forks the previous one."""
+
+EVALUATIONS: Final = (
+    experiments.exp011,
+    experiments.exp012,
+    experiments.exp013,
+    experiments.exp014,
+)
+"""Forks of exp010 that change how an answer is produced and accepted."""
+
+EXP010_CHECKPOINT: Final = "/runs/exp010/checkpoints/step_00019500.pt"
+
+
+type _Tree = dict[str, "_Tree"] | list["_Tree"] | str | int | float | bool | None
+"""A serialized config tree (jsonpickle-style ``py/*`` dict/list/primitives)."""
+
+
+class _Runtime(Protocol):
+    device: torch.device | str | None
+
+
+class _Runner(Protocol):
+    """What every TRM experiment config shares: identity, runtime, lifecycle."""
+
+    experiment_name: str
+
+    @property
+    def runtime(self) -> _Runtime:
+        """Return the runtime config."""
+        ...
+
+    def copy_tree(self) -> Self:
+        """Return a deep copy."""
+        ...
+
+    def finalize(self) -> Self:
+        """Apply derived defaults."""
+        ...
+
+    def make(self) -> object:
+        """Build the runner."""
+        ...
+
+
+@pytest.mark.parametrize(
+    ("name", "factory"),
+    [(f.__name__, f) for f in (*TRM_LADDER, *EVALUATIONS)],
+)
+def test_trm_experiment_constructs_and_finalizes(
+    name: str,
+    factory: Callable[[], _Runner],
+) -> None:
+    """Every rung builds without a dataset or a GPU, under its own name."""
+    cfg = factory()
+    assert cfg.experiment_name == name
+    cfg.copy_tree().finalize()
+
+
+@pytest.mark.parametrize("factory", EVALUATIONS)
+def test_evaluation_runner_makes(factory: Callable[[], _Runner]) -> None:
+    """Runners defer data, weights, and models to ``run()``; ``make()`` is cheap."""
+    config = factory()
+    config.runtime.device = "cpu"
+    config.make()
+
+
+def test_exp005_adds_only_the_2d_position_tables() -> None:
+    assert_rung_delta(
+        experiments.exp004(),
+        experiments.exp005(),
+        {"experiment_name", "model.pos2d_grid_shape"},
+    )
+
+
+def test_exp006_adds_only_qk_norm_and_the_convergence_horizon() -> None:
+    assert_rung_delta(
+        experiments.exp005(),
+        experiments.exp006(),
+        {
+            "experiment_name",
+            "model.block.attn.norm_qk",
+            "model.block.attn.norm_qk.channels_in",
+            "model.block.attn.norm_qk.device",
+            "model.block.attn.norm_qk.dtype",
+            "model.block.attn.norm_qk.elementwise_affine",
+            "model.block.attn.norm_qk.eps",
+            "max_steps",
+            "total_train_steps",
+            "num_steps_eval",
+        },
+    )
+
+
+def test_exp007_adds_only_the_consolidated_recipe_stack() -> None:
+    assert_rung_delta(
+        experiments.exp006(),
+        experiments.exp007(),
+        {
+            "experiment_name",
+            "max_act_steps",
+            "label_smoothing",
+            "ema_decay",
+            "ema_warmup_steps",
+            "csp_loss_weight",
+            "dataset.augment_digits_only",
+        },
+    )
+
+
+def test_exp008_adds_only_the_feedback_repair_channel() -> None:
+    assert_rung_delta(
+        experiments.exp007(),
+        experiments.exp008(),
+        {"experiment_name", "feedback"},
+    )
+
+
+def test_exp009_adds_only_depth_and_the_recipe_seed() -> None:
+    assert_rung_delta(
+        experiments.exp008(),
+        experiments.exp009(),
+        {"experiment_name", "model.slow_cycles", "model.fast_cycles", "seed"},
+    )
+
+
+def test_exp010_adds_only_the_capmax_horizon() -> None:
+    assert_rung_delta(
+        experiments.exp009(),
+        experiments.exp010(),
+        {"experiment_name", "max_steps", "total_train_steps"},
+    )
+
+
+def test_exp010_is_the_flat_recipe() -> None:
+    """The trainer defaults ARE the recipe: exp010 adds only identity and data."""
+    expected = Trainer.Config()
+    expected.study_name = "sudoku"
+    expected.experiment_name = "exp010"
+    expected.seed = 44
+    expected.max_steps = 19_500
+    expected.num_steps_eval = 500
+    expected.model.block = recipe_block()
+    expected.dataset.batch_size = 384
+    expected.dataset.seed = 0
+    expected.dataset.eval_num_instances = 2_000
+    expected.dataset.augment = True
+    expected.dataset.augment_digits_only = True
+    assert leaf_delta(expected, experiments.exp010()) == []
+
+
+def test_exp004_mirrors_the_annealed_baseline() -> None:
+    cfg = experiments.exp004().copy_tree().finalize()
+    assert cfg.seed == 0
+    assert (cfg.max_steps, cfg.total_train_steps) == (62_000, 62_000)
+    assert (cfg.max_act_steps, cfg.label_smoothing) == (16, 0.2)
+    assert (cfg.ema_decay, cfg.ema_warmup_steps) == (0.9, 5_000)
+    assert (cfg.csp_loss_weight, cfg.feedback) == (0.0, False)
+    assert cfg.model.pos2d_grid_shape is None
+    assert (cfg.model.slow_cycles, cfg.model.fast_cycles) == (3, 4)
+    assert cfg.model.block is not None
+    attn = cfg.model.block.attn
+    assert isinstance(attn, SelfAttention.Config)
+    assert attn.norm_qk is None
+    assert cfg.dataset.augment_digits_only is False
+
+
+def test_exp011_scores_exp010_with_the_recipe_search() -> None:
+    cfg = experiments.exp011().copy_tree().finalize()
+    assert str(cfg.checkpoint_path) == EXP010_CHECKPOINT
+    parent = experiments.exp010().copy_tree().finalize()
+    assert leaf_delta(parent.model, cfg.model) == []
+    assert cfg.evaluation_count == 422_786
+    search = cfg.search
+    assert (
+        search.search_candidates,
+        search.search_depth,
+        search.search_cell_attempts,
+        search.search_budget,
+    ) == (5, 3, 2, 512)
+    assert search.acceptance_threshold == 7.875
+    assert search.acceptance_checkpoints == (24, 28, 32)
+
+
+def test_exp012_trains_exp010_then_locks_nine_views() -> None:
+    cfg = experiments.exp012()
+    assert leaf_delta(experiments.exp010(), cfg.generator) == []
+    assert (cfg.generator_names, cfg.generator_seeds) == (
+        ("exp012_generator",),
+        (44,),
+    )
+    assert (cfg.screen, cfg.trigger) == ("nine_view", "dev_perfect")
+    lock = cfg.full_eval
+    assert isinstance(lock, AgreementLockEval.Config)
+    assert tuple(member.view for member in lock.members) == NINE_VIEWS
+
+
+def test_exp013_trains_exp010_then_sieves_under_a_fresh_committee() -> None:
+    cfg = experiments.exp013()
+    assert leaf_delta(experiments.exp010(), cfg.generator) == []
+    assert str(cfg.harvest_source_checkpoint) == EXP010_CHECKPOINT
+    assert cfg.verifier_names == tuple(f"exp013_verifier_s{s}" for s in range(3))
+    assert (cfg.screen, cfg.trigger) == ("committee", "dev_perfect")
+    sieve = cfg.full_eval
+    assert isinstance(sieve, SieveEval.Config)
+    assert isinstance(sieve.acceptor, VerifierAcceptor.Config)
+    assert sieve.acceptor.threshold == 0.0
+    assert sieve.views == NINE_VIEWS
+    assert sieve.tail_search == (7, 4, 3, 8_400)
+
+
+def test_exp013_full_evaluation_locks_with_its_own_committee() -> None:
+    """The full-set sieve offers grids to the verifiers this pipeline trained."""
+    cfg = experiments.exp013()
+    cfg.runtime.device = "cpu"
+    sieve = cfg.make()._sieve_run_config(19_500).make()
+    acceptor = sieve.config.acceptor
+    assert isinstance(acceptor, VerifierAcceptor.Config)
+    assert acceptor.checkpoint_paths == tuple(
+        f"/runs/exp013_verifier_s{seed}/checkpoints/step_00004000.pt"
+        for seed in range(3)
+    )
+
+
+def test_exp014_swaps_nine_views_for_three_seeds() -> None:
+    assert_rung_delta(
+        experiments.exp012(),
+        experiments.exp014(),
+        {
+            "experiment_name",
+            "screen",
+            "trigger",
+            "generator_seeds",
+            "generator_names",
+        },
+    )
+
+
+class _Serializable(Protocol):
+    def serialize(self) -> object:
+        """Return the config as a jsonpickle-style tree."""
+        ...
+
+
+def leaf_delta(
+    base: _Serializable,
+    variant: _Serializable,
+) -> list[tuple[str, object, object]]:
+    """Differing serialized leaves as sorted (path, base, variant) tuples."""
+    base_leaves = _flatten(cast(_Tree, base.serialize()))
+    variant_leaves = _flatten(cast(_Tree, variant.serialize()))
+    return [
+        (path, base_leaves.get(path, "<absent>"), variant_leaves.get(path, "<absent>"))
+        for path in sorted(base_leaves.keys() | variant_leaves.keys())
+        if base_leaves.get(path, "<absent>") != variant_leaves.get(path, "<absent>")
+    ]
+
+
+def assert_rung_delta(
+    base: _Serializable,
+    variant: _Serializable,
+    allowed: set[str],
+) -> None:
+    """Assert the fork changes EXACTLY the allowed config fields, no more, no less."""
+    changed = {_field_path(path) for path, _, _ in leaf_delta(base, variant)}
+    unexpected = {
+        path
+        for path in changed
+        if not any(path == a or path.startswith(f"{a}.") for a in allowed)
+    }
+    assert not unexpected, f"fork changes undeclared fields: {sorted(unexpected)}"
+    dead = {
+        a
+        for a in allowed
+        if not any(path == a or path.startswith(f"{a}.") for path in changed)
+    }
+    assert not dead, f"fork declares fields that did not change: {sorted(dead)}"
+
+
+def _field_path(path: str) -> str:
+    """Collapse a serialized leaf path to its config field path."""
+    return path.split(".py/", maxsplit=1)[0]
+
+
+def _flatten(tree: _Tree, prefix: str = "") -> dict[str, object]:
+    """Flatten a serialized dict/list tree into ``{dotted_path: leaf}``."""
+    if isinstance(tree, dict):
+        out: dict[str, object] = {}
+        for key, value in tree.items():
+            out.update(_flatten(value, f"{prefix}.{key}" if prefix else key))
+        return out
+    if isinstance(tree, list):
+        out = {}
+        for index, value in enumerate(tree):
+            out.update(_flatten(value, f"{prefix}[{index}]"))
+        return out
+    return {prefix: tree}
 
 
 if __name__ == "__main__":

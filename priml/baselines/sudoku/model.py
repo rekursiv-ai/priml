@@ -26,8 +26,19 @@ is simply unused without one.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import field
-from typing import NamedTuple, Protocol, Self, cast, override, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    NamedTuple,
+    Protocol,
+    Self,
+    cast,
+    override,
+    runtime_checkable,
+)
 
 import copy
 import functools
@@ -46,11 +57,16 @@ from priml.cost import (
     elementwise_cost,
     traffic,
 )
+from priml.model.attention.rope import RoPE
 from priml.model.custom_types import ChannelsIn, ChannelsOut, TensorModule
 from priml.model.init import truncated_normal
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
 from priml.model.transformer.block import TransformerBlock
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +91,23 @@ def corrected_fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
         depth_index=(),
         variance_correction=True,
     )
+
+
+def fan_in_normal(w: Tensor, *, depth: int = -1) -> None:
+    """Initialize truncated normal at ``std = 1/sqrt(fan_in)``, clipped at 2 std.
+
+    The uncorrected sibling of :func:`corrected_fan_in_normal`: the realized
+    standard deviation is about 0.88x the request, as torch's own
+    ``trunc_normal_`` gives. ``depth`` is accepted and discarded for the same
+    reason as there.
+
+    Args:
+      w: Tensor to initialize in place.
+      depth: Ignored; present for the ``InitFn`` protocol.
+
+    """
+    del depth
+    truncated_normal(w, std=w.shape[-1] ** -0.5, depth_index=())
 
 
 class CoreOutput(NamedTuple):
@@ -112,6 +145,44 @@ class ForwardOutput(NamedTuple):
     """Per-cycle logits when the caller asked for intermediates."""
 
 
+class CoreCompile:
+    """Compile the recurrence's hot loop with ``torch.compile``.
+
+    Bound once at construction, before any data-parallel wrap, so every rank
+    traces the same graph at the same point. ``unit`` picks the granularity:
+    the whole core application, or one pass of the block stack -- far faster
+    to trace for a deep inner loop, at a small runtime cost.
+    """
+
+    class Config(Fig["CoreCompile"]):
+        """What to trace, and how."""
+
+        unit: Literal["core", "reasoning"] = "core"
+        """``core`` traces one core application; ``reasoning`` one block pass."""
+
+        mode: Literal[
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+        ] = "default"
+        """``torch.compile`` mode."""
+
+        fullgraph: bool = True
+        """Refuse graph breaks. ``False`` tolerates them -- the lever when a
+        strict single-graph trace of a deep recurrence stalls."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    def __call__[FnT: Callable[..., object]](self, fn: FnT) -> FnT:
+        """Return ``fn`` compiled under this config."""
+        return cast(
+            FnT,
+            torch.compile(fn, mode=self.config.mode, fullgraph=self.config.fullgraph),
+        )
+
+
 class GridConfig(Makeable[GridEmbedding], Protocol):
     """A config that builds a grid embedding and declares the grid it embeds.
 
@@ -145,13 +216,99 @@ class CoreFn(Protocol):
 
 
 @runtime_checkable
+class RotaryFactors(Protocol):
+    """A block whose rotary factors the model may precompute once per forward.
+
+    Every block in the stack sees the same positions, so the first block's
+    factors serve them all.
+    """
+
+    def factors(
+        self,
+        seq_len: int,
+        *,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor] | None:
+        """Return ``(cos, sin)`` for ``seq_len`` positions, or ``None``."""
+        ...
+
+
+def lattice_positions(
+    seq_len: int,
+    *,
+    grid_shape: tuple[int, ...],
+    device: torch.device,
+) -> Tensor:
+    """Place grid tokens on an N-D lattice after a run of prefix tokens.
+
+    Grid tokens get their lattice coordinates, shifted along the first axis
+    by the prefix length; prefix tokens count up along the last axis with
+    every other coordinate zero. So no prefix token shares a position with a
+    grid token. A one-axis grid degenerates to ``arange(seq_len)``.
+
+    Args:
+      seq_len: Prefix plus grid tokens; the leading tokens are the prefix.
+      grid_shape: Grid extent per axis.
+      device: Device to build the positions on.
+
+    Returns:
+      positions: ``[seq_len]`` below two axes, else ``[seq_len, len(grid_shape)]``.
+
+    """
+    if len(grid_shape) < 2:
+        return torch.arange(seq_len, device=device)
+    mesh = torch.meshgrid(
+        *[torch.arange(extent, device=device) for extent in grid_shape],
+        indexing="ij",
+    )
+    grid = torch.stack(mesh, dim=-1).reshape(-1, len(grid_shape))
+    prefix_len = seq_len - grid.shape[0]
+    grid[:, 0] += prefix_len
+    prefix = torch.zeros(prefix_len, len(grid_shape), dtype=torch.long, device=device)
+    prefix[:, -1] = torch.arange(prefix_len, device=device)
+    return torch.cat([prefix, grid])
+
+
+class MixFn(Protocol):
+    """One pass of the block stack over a latent state."""
+
+    def __call__(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
+        """Apply to the input."""
+        ...
+
+
+@runtime_checkable
 class Recurrence(Protocol):
     """Drives repeated applications of a core over carried latent state.
 
-    A recurrence decides HOW MANY times the reasoning core runs per forward and
-    which of those applications carry gradient. It owns no parameters -- the
-    core it drives does.
+    A recurrence decides HOW MANY times the reasoning core runs per forward,
+    which of those applications carry gradient, and how one application
+    updates the latents. It owns no parameters -- the core it drives does.
     """
+
+    def refine(
+        self,
+        mix: MixFn,
+        input_emb: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        cos_sin: tuple[Tensor, Tensor] | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Update ``(z_slow, z_fast)`` once; the readout reads ``z_slow``.
+
+        Args:
+          mix: One pass of the model's block stack.
+          input_emb: ``[B, S, C]`` prefix-prepended input embedding.
+          z_slow: ``[B, S, C]`` slow latent.
+          z_fast: ``[B, S, C]`` fast latent.
+          cos_sin: Optional rotary pair forwarded to ``mix``.
+
+        Returns:
+          z_slow: Updated slow latent, which the heads read.
+          z_fast: Updated fast latent.
+
+        """
+        ...
 
     def forward(
         self,
@@ -242,6 +399,37 @@ class DeepRecurrence(nn.Module):
                 f"{config.slow_cycles} and {config.fast_cycles}.",
             )
         self.config = config
+
+    def refine(
+        self,
+        mix: MixFn,
+        input_emb: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        cos_sin: tuple[Tensor, Tensor] | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Refine the fast latent ``fast_cycles`` times, then the slow one once.
+
+        Args:
+          mix: One pass of the model's block stack.
+          input_emb: ``[B, S, C]`` input embedding.
+          z_slow: ``[B, S, C]`` slow latent.
+          z_fast: ``[B, S, C]`` fast latent.
+          cos_sin: Optional rotary pair forwarded to ``mix``.
+
+        Returns:
+          z_slow: Updated slow latent.
+          z_fast: Updated fast latent.
+
+        """
+        return two_latent_refine(
+            mix,
+            input_emb,
+            z_slow,
+            z_fast,
+            cos_sin,
+            fast_cycles=self.config.fast_cycles,
+        )
 
     @override
     def forward(
@@ -345,6 +533,41 @@ class SudokuNet(nn.Module):
         halt_init_bias: float = -5.0
         """Initial halt-head bias. Strongly negative so a fresh model does not
         halt on its first step before learning anything."""
+
+        dtype: torch.dtype | None = None
+        """Storage dtype every parameter and buffer is cast to once built.
+
+        ``None`` keeps float32 masters, which an autocast forward reads at
+        compute precision; ``torch.bfloat16`` trains the weights themselves in
+        bfloat16."""
+
+        rope: RoPE.Config | None = None
+        """Rotary positions shared by every block; ``None`` leaves them to
+        the blocks.
+
+        Owned here rather than per block because a rotary with LEARNED or
+        randomly initialized frequencies (``RoPEMixed``) is one table the
+        whole stack shares, drawn once, after the prefix and before the
+        initial latents."""
+
+        rope_grid_shape: tuple[int, ...] = ()
+        """Lattice the grid tokens sit on for ``rope``; fewer than two axes
+        number the whole sequence in order. Its product is the grid length."""
+
+        compile_core: CoreCompile.Config | None = None
+        """Compile the recurrence's hot loop; ``None`` runs eager.
+
+        Only the TRAINING forward uses it: evaluation stays eager unless
+        :meth:`SudokuNet.eager` is told otherwise, because a compiled bfloat16
+        autocast graph elides the casts autocast inserts and a long carried
+        rollout compounds the difference."""
+
+        dtype_latent_init: torch.dtype | None = None
+        """Dtype the learned initial latents are DRAWN in; ``None`` is float32.
+
+        Separate from ``dtype`` because the draw itself runs at this width: a
+        bfloat16 truncated normal is not a float32 one rounded, so a recipe
+        that drew its latents in half precision must say so to reproduce them."""
 
         @property
         def grid_len(self) -> int:
@@ -481,14 +704,36 @@ class SudokuNet(nn.Module):
         ).make()
 
         self.prefix = config.prefix.make() if config.prefix is not None else None
+        # After the prefix, before the latent inits: RoPEMixed draws its
+        # per-head directions from the global RNG at construction.
+        self.rope = None if config.rope is None else config.rope.make()
 
-        self.slow_init = nn.Buffer(_latent_init(c), persistent=True)
-        self.fast_init = nn.Buffer(_latent_init(c), persistent=True)
+        self.slow_init = nn.Buffer(
+            _latent_init(c, dtype=config.dtype_latent_init),
+            persistent=True,
+        )
+        self.fast_init = nn.Buffer(
+            _latent_init(c, dtype=config.dtype_latent_init),
+            persistent=True,
+        )
 
         self.recurrence: Recurrence | None = (
             config.recurrence.make() if config.recurrence is not None else None
         )
         self._dummy = nn.Buffer(torch.empty(0), persistent=True)
+        if config.dtype is not None:
+            self.to(dtype=config.dtype)
+        # A compiled callable, not a module: registering it would add
+        # ``_orig_mod`` keys to the state dict.
+        self._compiled_core: CoreFn | None = None
+        self._compiled_mix: MixFn | None = None
+        self.compiled = config.compile_core is not None
+        if config.compile_core is not None:
+            compile_fn = config.compile_core.make()
+            if config.compile_core.unit == "core":
+                self._compiled_core = compile_fn(self._core)
+            else:
+                self._compiled_mix = compile_fn(self._mix_eager)
         logger.info(
             "model parameters: %.2fM",
             sum(p.numel() for p in self.parameters()) / 1e6,
@@ -514,6 +759,25 @@ class SudokuNet(nn.Module):
         z_fast = self.fast_init[0].expand(batch_size, s, -1).contiguous()
         return z_slow, z_fast
 
+    @contextmanager
+    def eager(self, *, enabled: bool = True) -> Generator[None]:
+        """Run the compiled paths eagerly for the duration.
+
+        Args:
+          enabled: Whether to force eager; ``False`` is a no-op, which lets a
+            caller keep one ``with`` for both policies.
+
+        Yields:
+          context: Block in which no compiled graph runs.
+
+        """
+        previous = self.compiled
+        self.compiled = previous and not enabled
+        try:
+            yield
+        finally:
+            self.compiled = previous
+
     def core(
         self,
         input_emb: Tensor,
@@ -533,11 +797,35 @@ class SudokuNet(nn.Module):
           out: Logits, halt logit, and both updated latents.
 
         """
-        _, fast_cycles = _cycles(self.config.recurrence)
-        combined = z_slow + input_emb
-        for _ in range(fast_cycles):
-            z_fast = self._mix(z_fast + combined, cos_sin)
-        z_slow = self._mix(z_slow + z_fast, cos_sin)
+        if self.compiled and self._compiled_core is not None:
+            return self._compiled_core(input_emb, z_slow, z_fast, cos_sin)
+        return self._core(input_emb, z_slow, z_fast, cos_sin)
+
+    def _core(
+        self,
+        input_emb: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        cos_sin: tuple[Tensor, Tensor] | None = None,
+    ) -> CoreOutput:
+        """Apply the block stack once, never compiled."""
+        if self.recurrence is None:
+            z_slow, z_fast = two_latent_refine(
+                self._mix,
+                input_emb,
+                z_slow,
+                z_fast,
+                cos_sin,
+                fast_cycles=1,
+            )
+        else:
+            z_slow, z_fast = self.recurrence.refine(
+                self._mix,
+                input_emb,
+                z_slow,
+                z_fast,
+                cos_sin,
+            )
         logits = self.head(z_slow)
         halt_logits = self.halt_head(z_slow[:, 0]).to(torch.float32)
         halt = (
@@ -574,7 +862,7 @@ class SudokuNet(nn.Module):
         input_emb = self._embed(tokens, prefix_kwargs)
         if z_slow is None or z_fast is None:
             z_slow, z_fast = self.init_latents(tokens.shape[0])
-        cos_sin = None
+        cos_sin = self._cos_sin(input_emb)
         if self.recurrence is None:
             out = self.core(input_emb, z_slow, z_fast, cos_sin)
             result = ForwardOutput(
@@ -593,21 +881,49 @@ class SudokuNet(nn.Module):
                 cos_sin,
                 collect_intermediates=collect_intermediates,
             )
+        return self._strip_prefix(result)
+
+    def step(
+        self,
+        tokens: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        **prefix_kwargs: object,
+    ) -> ForwardOutput:
+        """Apply the core exactly once, whatever the recurrence prescribes.
+
+        One slow cycle, not a forward: a rollout of these runs the latents in
+        a regime a model trained on :meth:`forward` never saw, so this is a
+        probe of the core, not an evaluation step.
+
+        Args:
+          tokens: ``[B, grid_len]`` input token ids.
+          z_slow: Carried slow latent.
+          z_fast: Carried fast latent.
+          **prefix_kwargs: Forwarded to the prefix module, if any.
+
+        Returns:
+          out: Grid logits with prefix tokens stripped, the halt logit, and
+            both latents detached.
+
+        """
+        input_emb = self._embed(tokens, prefix_kwargs)
+        out = self.core(input_emb, z_slow, z_fast, self._cos_sin(input_emb))
+        return self._strip_prefix(
+            ForwardOutput(out.logits, out.halt, out.z_slow, out.z_fast),
+        )
+
+    def _strip_prefix(self, result: ForwardOutput) -> ForwardOutput:
+        """Drop prefix positions from the logits and detach the latents."""
         n_prefix = self.config.num_prefix_tokens
-        if n_prefix:
-            result = ForwardOutput(
-                result.logits[:, n_prefix:],
-                result.halt,
-                result.z_slow,
-                result.z_fast,
-                tuple(lg[:, n_prefix:] for lg in result.all_logits),
-            )
         return ForwardOutput(
-            result.logits,
+            result.logits[:, n_prefix:] if n_prefix else result.logits,
             result.halt,
             result.z_slow.detach(),
             result.z_fast.detach(),
-            result.all_logits,
+            tuple(lg[:, n_prefix:] for lg in result.all_logits)
+            if n_prefix
+            else result.all_logits,
         )
 
     def _embed(self, tokens: Tensor, prefix_kwargs: dict[str, object]) -> Tensor:
@@ -620,9 +936,61 @@ class SudokuNet(nn.Module):
         prefix = cast(Tensor, self.prefix(tokens.shape[0], **prefix_kwargs))
         return torch.cat([prefix.to(dtype=embeddings.dtype), embeddings], dim=1)
 
+    def _cos_sin(self, input_emb: Tensor) -> tuple[Tensor, Tensor] | None:
+        """Rotary factors shared by every block, or ``None`` if none need them."""
+        seq_len, device = input_emb.shape[-2], input_emb.device
+        if self.rope is not None:
+            positions = lattice_positions(
+                seq_len,
+                grid_shape=self.config.rope_grid_shape,
+                device=device,
+            )
+            cos, sin = self.rope(positions)
+            return cos, sin
+        first = self.reasoning[0]
+        if not isinstance(first, RotaryFactors):
+            return None
+        return first.factors(seq_len, device=device)
+
     def _mix(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
         """Run the block stack once over a latent state."""
+        if self.compiled and self._compiled_mix is not None:
+            return self._compiled_mix(z, cos_sin)
+        return self._mix_eager(z, cos_sin)
+
+    def _mix_eager(self, z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
+        """Run the block stack once, never compiled."""
         return self.reasoning(z, cos_sin=cos_sin)
+
+
+def two_latent_refine(
+    mix: MixFn,
+    input_emb: Tensor,
+    z_slow: Tensor,
+    z_fast: Tensor,
+    cos_sin: tuple[Tensor, Tensor] | None,
+    *,
+    fast_cycles: int,
+) -> tuple[Tensor, Tensor]:
+    """Run the TRM update: ``fast_cycles`` fast refinements, then one slow.
+
+    Args:
+      mix: One pass of the block stack.
+      input_emb: ``[B, S, C]`` input embedding.
+      z_slow: ``[B, S, C]`` slow latent.
+      z_fast: ``[B, S, C]`` fast latent.
+      cos_sin: Optional rotary pair forwarded to ``mix``.
+      fast_cycles: Fast refinements before the slow update.
+
+    Returns:
+      z_slow: Updated slow latent.
+      z_fast: Updated fast latent.
+
+    """
+    combined = z_slow + input_emb
+    for _ in range(fast_cycles):
+        z_fast = mix(z_fast + combined, cos_sin)
+    return mix(z_slow + z_fast, cos_sin), z_fast
 
 
 def _head(config: SudokuNet.Config) -> Linear.Config:
@@ -664,8 +1032,8 @@ def _count_prefix_tokens(prefix: PrefixConfig | None) -> int:
     return 0 if prefix is None else prefix.num_tokens
 
 
-def _latent_init(channels_in: int) -> Tensor:
-    """Return a ``[1, C]`` learned-ish starting latent, unit-scaled."""
-    w = torch.empty(1, channels_in)
+def _latent_init(channels_in: int, *, dtype: torch.dtype | None) -> Tensor:
+    """Return a ``[1, C]`` learned-ish starting latent, unit-scaled, drawn in ``dtype``."""
+    w = torch.empty(1, channels_in, dtype=dtype)
     truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
     return w

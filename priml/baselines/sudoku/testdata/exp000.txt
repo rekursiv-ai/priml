@@ -84,7 +84,12 @@ SudokuTrainLoop(
                 │       │       num_prefix_tokens=0,
                 │       │       vocab_size=11,
                 │       │       halt_outputs=2,
-                │       │       halt_init_bias=-5.0
+                │       │       halt_init_bias=-5.0,
+                │       │       dtype=None,
+                │       │       rope=None,
+                │       │       rope_grid_shape=(),
+                │       │       compile_core=None,
+                │       │       dtype_latent_init=None
                 │       ),
                 │       optimizer=CompositeOptimizer.Config(
                 │               optimizers=[

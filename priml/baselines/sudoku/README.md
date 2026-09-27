@@ -10,10 +10,10 @@ with many validity-preserving transformations of each. That is the point of the
 benchmark: with a thousand puzzles and a million copies, memorizing instances
 does not help and learning the rules does.
 
-## The ladder
+## The 2x2
 
-Two mechanisms vary independently, so the experiments form a 2x2 rather than a
-chain:
+Two mechanisms vary independently, so `exp000`-`exp003` form a 2x2 rather
+than a chain:
 
 |           | transformer | MLP-mixer |
 |-----------|-------------|-----------|
@@ -49,6 +49,41 @@ Recurrent runs also spend a variable number of steps per puzzle. Each occupies
 a slot in a pool and takes one step per call, carrying its state forward until
 the model's halt head says it is done; an easy puzzle leaves early, a hard one
 keeps its slot, and the batch shape never changes.
+
+## The recursive-model ladder
+
+`exp004`-`exp010` build the tiny recursive model (TRM) recipe, one
+mechanism per experiment. `exp011`-`exp014` fork the finished recipe and
+change only how an answer is produced and accepted.
+
+| Exp | Parent | Change | Result |
+|---|---|---|---|
+| `exp004` | -- | TRM baseline, 62k-step anneal | 0.61 (2K) |
+| `exp005` | `exp004` | + row/column/box position tables | 0.70 (2K) |
+| `exp006` | `exp005` | + QK-norm, 12k steps | ~5x faster |
+| `exp007` | `exp006` | + ACT 32, EMA .999, cardinality loss, digit-only augmentation | 0.78 (2K) |
+| `exp008` | `exp007` | + corrupted-feedback repair | 0.82 (2K) |
+| `exp009` | `exp008` | + deep recurrence (slow 6 / fast 9) | 0.86-0.90 (2K) |
+| `exp010` | `exp009` | + 19,500-step anneal | 0.93 (2K); 0.9624 full |
+| `exp011` | `exp010` | + hypothesis-pinning search at eval | 0.99920 full |
+| `exp012` | `exp010` | + nine-view agreement lock at eval | 1.0 full |
+| `exp013` | `exp010` | + verifier-committee sieve at eval | 1.0 full (frozen `exp010`) |
+| `exp014` | `exp012` | three training seeds instead of nine views | TBD |
+
+2K is the first 2,000 test puzzles, which underestimates the full set of
+422,786. Each experiment's docstring states its hypothesis and the
+measurement behind its result.
+
+`exp011` scores `exp010`'s final checkpoint. To skip training, place the
+released one where it reads:
+
+```bash
+uv --quiet run --frozen python -m priml.baselines.sudoku.scripts.download_checkpoints --names exp006:exp010
+```
+
+`exp012`-`exp014` train their generator, then evaluate it. `exp013` also
+harvests its verifiers' training candidates from `exp010`'s final
+checkpoint, so it needs that checkpoint first.
 
 ## Slots worth knowing
 

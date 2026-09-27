@@ -91,12 +91,18 @@ ArcTrainLoop(
                 │       │               batch_size=256,
                 │       │               init_std=0.0,
                 │       │               embed_scale=-1.0,
-                │       │               dtype=torch.bfloat16
+                │       │               dtype=torch.bfloat16,
+                │       │               dtype_scale=None
                 │       │       ),
                 │       │       num_prefix_tokens=16,
                 │       │       vocab_size=12,
                 │       │       halt_outputs=2,
-                │       │       halt_init_bias=-5.0
+                │       │       halt_init_bias=-5.0,
+                │       │       dtype=None,
+                │       │       rope=None,
+                │       │       rope_grid_shape=(),
+                │       │       compile_core=None,
+                │       │       dtype_latent_init=None
                 │       ),
                 │       optimizer=AdamATan2.Config(
                 │               lr=0.0001,

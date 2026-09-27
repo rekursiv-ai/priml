@@ -91,6 +91,30 @@ def test_eval_reads_the_master_table_directly() -> None:
     assert torch.equal(out[0], out[3])
 
 
+@pytest.mark.parametrize("training", [True, False])
+def test_sparse_embedding_scales_after_the_configured_upcast(training: bool) -> None:
+    """Round rows to bf16, then upcast before multiplying by the scale."""
+    config = SparsePuzzleEmbedding.Config(
+        num_puzzles=8,
+        num_tokens=2,
+        batch_size=4,
+        dtype=torch.bfloat16,
+        dtype_scale=torch.float32,
+    )
+    config.channels_out = 512
+    module = config.make()
+    with torch.no_grad():
+        module.weights[0, 0] = 0.3
+    module.train(training)
+
+    out = module(4, puzzle_identifiers=torch.zeros(4, dtype=torch.int32))
+
+    assert out.dtype == torch.float32
+    expected = torch.tensor(0.3).to(torch.bfloat16).to(torch.float32) * (512**0.5)
+    assert torch.equal(out[0, 0, 0], expected)
+    assert not torch.equal(out[0, 0, 0], expected.to(torch.bfloat16).float())
+
+
 def test_gradient_buffer_survives_a_device_move() -> None:
     """``_apply`` replaces buffers with copies that drop ``requires_grad``.
 
@@ -248,6 +272,10 @@ def test_sparse_prefix_traffic_counts_lookup_copy_padding_and_scale(
     assert costed["bytes", "primal", "selection", dtype] == itemsize * (4 * 8 + 8 + 16)
     assert costed["bytes", "primal", "elementwise"].sum() == itemsize * 2 * 16
     assert costed["bytes", "adjoint", "elementwise"].sum() == itemsize * 2 * 16
+    config.dtype_scale = torch.float32
+    scaled = config.cost(seq_len=1, batch_size=1, dtype=torch.bfloat16)
+    assert scaled["bytes", "primal", "elementwise"].sum() == 4 * 2 * 16
+    assert scaled["bytes", "adjoint", "elementwise"].sum() == 4 * 2 * 16
 
 
 def _run_prefix(module: nn.Module, identifiers: Tensor) -> Tensor:

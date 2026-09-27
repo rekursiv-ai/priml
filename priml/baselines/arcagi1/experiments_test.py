@@ -20,9 +20,13 @@ from configgle.pprinting import pformat
 import pytest
 
 from priml.baselines.arcagi1 import experiments
+from priml.baselines.arcagi1.augmentation import ColorDihedral
 from priml.baselines.arcagi1.experiments import GRID_LEN, VOCAB_SIZE, ArcTrainLoop
+from priml.baselines.arcagi1.metric import CanonicalPassK
+from priml.baselines.arcagi1.model import ConvSwiGLU
+from priml.baselines.arcagi1.train_step import HPSFeedbackTrainStep
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import SudokuNet
+from priml.baselines.sudoku.model import DeepRecurrence, SudokuNet
 from priml.baselines.sudoku.prefix import (
     PrefixStack,
     RegisterTokens,
@@ -35,6 +39,12 @@ from priml.model.transformer.block import TransformerBlock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")  # ~1050 ms; the dtype assertions need bf16.
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -174,6 +184,59 @@ def test_the_pool_is_built_to_the_models_shape() -> None:
     assert act.grid_len == model.grid_len
     assert act.seq_len == model.total_seq_len
     assert act.channels_hidden == model.channels_in
+
+
+def test_exp004_pins_the_hps_recipe_and_public_metric_slices() -> None:
+    """Keep HPS semantics explicit without pinning irrelevant config fields."""
+    config = experiments.exp004().copy_tree().finalize()
+    assert isinstance(config.step, HPSFeedbackTrainStep.Config)
+    assert config.step.batch_size == config.dataset.batch_size == 96
+    assert config.dataset.eval_batch_size == 256
+    assert config.dataset.epochs_per_iter == 5
+    assert not config.dataset.device_resident
+    assert config.step.ignore_label_id == -100
+    assert config.step.model.halt_outputs == 2
+    assert isinstance(config.step.model.prefix, PrefixStack.Config)
+    prefix_puzzle = config.step.model.prefix.parts[0]
+    assert isinstance(prefix_puzzle, SparsePuzzleEmbedding.Config)
+    assert prefix_puzzle.dtype is torch.bfloat16
+    assert prefix_puzzle.dtype_scale is torch.float32
+    recurrence = config.step.model.recurrence
+    assert isinstance(recurrence, DeepRecurrence.Config)
+    assert recurrence.slow_cycles == 2
+    assert recurrence.fast_cycles == 6
+    assert isinstance(config.step.model.block, TransformerBlock.Config)
+    assert isinstance(config.step.model.block.ffn, ConvSwiGLU.Config)
+    assert config.step.model.block.ffn.shift_conv
+    assert config.step.feedback_corruption_rate == 0.075
+    schedule = config.step.lr_schedule.make()
+    assert schedule(0) == 0
+    assert schedule(0.5) == 0.5
+    assert schedule(1) == 1
+    spatial = config.dataset.augmentation.spatial
+    assert spatial.translation_prob == spatial.scale_prob == 0.2
+    assert spatial.train_scale_weights == {2: 1.0}
+    assert config.dataset.augmentation.spatial_eval_views
+    assert config.dataset.augmentation.spatial_eval_scale == 2
+    assert config.max_time == 172_800
+    assert config.max_time_kind == "train"
+    assert set(config.metrics_eval) == {"", "spatial_eq", "spatial_big"}
+
+
+def test_exp004_metrics_share_the_dataset_transform() -> None:
+    config = experiments.exp004()
+    transform = config.dataset.augmentation.transform
+    assert isinstance(transform, ColorDihedral.Config)
+    transform.separator = "::"
+    for metric in config.metrics_eval.values():
+        assert isinstance(metric, CanonicalPassK.Config)
+        assert metric.transform is transform
+
+    finalized = config.copy_tree().finalize()
+    for metric in finalized.metrics_eval.values():
+        assert isinstance(metric, CanonicalPassK.Config)
+        assert isinstance(metric.transform, ColorDihedral.Config)
+        assert metric.transform.separator == "::"
 
 
 def test_schedule_horizon_matches_the_step_budget() -> None:

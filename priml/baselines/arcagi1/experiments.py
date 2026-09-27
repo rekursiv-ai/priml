@@ -19,33 +19,70 @@ so the same four-corner comparison holds on a harder benchmark.
 
 Launch (8 GPUs)::
 
-    uv --quiet run --frozen torchrun --standalone --nproc_per_node=8 -m priml priml.baselines.arcagi1.experiments.exp000
+    uv --quiet run --frozen python -m torch.distributed.run \
+      --standalone --nproc_per_node=8 -m priml \
+      priml.baselines.arcagi1.experiments.exp000
+
+Prepare exp004, train to step 280000 (8 GPUs), then evaluate separately::
+
+    priml/baselines/arcagi1/scripts/prepare_data.py --experiment exp004
+    uv --quiet run --frozen python -m torch.distributed.run \
+      --standalone --nproc_per_node=8 -m priml \
+      priml.baselines.arcagi1.experiments.exp004 \
+      --override experiment_name=exp004_full280k \
+      --override max_steps=280000 \
+      --override num_steps_eval=0 \
+      --override eval_warmup_batches=0
+    uv --quiet run --frozen python -m torch.distributed.run \
+      --standalone --nproc_per_node=8 -m priml \
+      priml.baselines.arcagi1.experiments.exp004 \
+      --override experiment_name=exp004_full280k \
+      --override checkpointer.resume=True \
+      --override checkpointer.resume_step=280000 \
+      --override eval_only=True
 """
 
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+
+if TYPE_CHECKING:
+    import torch
+else:
+    from wrapt import lazy_import
+
+    torch = lazy_import("torch")  # ~1050 ms; the exp004 factory needs bf16.
 
 from configgle import Makes
 
 from priml.baselines.arcagi1.data import ArcData
-from priml.baselines.arcagi1.metric import PassK
+from priml.baselines.arcagi1.metric import CanonicalPassK, PassK
+from priml.baselines.arcagi1.model import ConvSwiGLU
+from priml.baselines.arcagi1.train_step import HPSFeedbackTrainStep
+from priml.baselines.arcagi2.train_step import ArcDataParallel
 from priml.baselines.sudoku.act import ActPool
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import DeepRecurrence
+from priml.baselines.sudoku.model import (
+    CoreCompile,
+    DeepRecurrence,
+    corrected_fan_in_normal,
+)
 from priml.baselines.sudoku.prefix import (
     PrefixStack,
     RegisterTokens,
     SparsePuzzleEmbedding,
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.model.attention.rope import RoPE
+from priml.model.attention.self_attention import SelfAttention
 from priml.model.init import kaiming_uniform
 from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
-from priml.runtime import SingleProcess
+from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.train_loop import TrainLoop
 
@@ -82,6 +119,18 @@ class ArcTrainLoop(
 
     dataset: ArcData.Config = field(default_factory=ArcData.Config)
     """Augmented ARC tasks, grouped so a batch draws whole tasks."""
+
+
+class HPSArcTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[HPSFeedbackTrainStep.Config, ArcData.Config],
+):
+    """Historical HPS model and atomic feedback step on the public ARC data."""
+
+    step: HPSFeedbackTrainStep.Config = field(
+        default_factory=HPSFeedbackTrainStep.Config,
+    )
+    dataset: ArcData.Config = field(default_factory=ArcData.Config)
 
 
 def exp000() -> ArcTrainLoop:
@@ -255,6 +304,122 @@ def exp003() -> ArcTrainLoop:
     cfg = exp002()
     cfg.experiment_name = "exp003"
     cfg.step.model.block = _mixer_block(cfg.step.model.total_seq_len)
+    return cfg
+
+
+def exp004() -> HPSArcTrainLoop:
+    """Build the public HPS URM recipe with 2x6 recurrence and ACT.
+
+    This reproduces the recorded recipe semantics where the public priml
+    components permit. The published 71.375% result is not asserted: this
+    public port has not been rerun for 280k steps on the GX10 setup.
+
+    Hypothesis:
+      Single-state URM, atomic feedback ACT, and the historical optimizer and
+      data recipe reproduce the HPS result.
+
+    References:
+      https://arxiv.org/abs/2510.04871
+        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny Networks.
+
+    Results:
+      Historical non-spatial pass@2: 71.375% at step 280k. Public rerun pending.
+
+    """
+    cfg = HPSArcTrainLoop()
+    cfg.study_name = "arcagi1"
+    cfg.experiment_name = "exp004"
+    cfg.seed = 0
+    step = cfg.step
+    step.batch_size = 96
+    step.total_train_steps = 388_670
+    step.warmup_steps = 2_000
+    step.ignore_label_id = -100  # ArcData maps its zero ignore token to -100.
+    step.dtype_autocast = torch.bfloat16
+    step.model.channels_in = 512
+    step.model.num_layers = 4
+    step.model.vocab_size = VOCAB_SIZE
+    step.model.halt_outputs = 2
+    step.model.compile_core = CoreCompile.Config()
+    assert isinstance(step.model.embedding, GridEmbedding.Config)
+    step.model.embedding.grid_shape = (GRID_LEN,)
+    step.model.embedding.channels = [PredictionFeedback.Config()]
+    assert isinstance(step.model.block, TransformerBlock.Config)
+    step.model.block.prenorm = False
+    step.model.block.ffn = ConvSwiGLU.Config(
+        init_weight=corrected_fan_in_normal,
+        init_weight_out=corrected_fan_in_normal,
+        norm=RMSNorm.Config(),
+        kernel_size=2,
+        shift_conv=True,
+    )
+    assert isinstance(step.model.block.attn, SelfAttention.Config)
+    step.model.block.norm1 = RMSNorm.Config(eps=1e-5)
+    step.model.block.norm2 = RMSNorm.Config(eps=1e-5)
+    step.model.block.attn.num_heads = 8
+    step.model.block.attn.channels_head = 64
+    step.model.block.attn.init_weight = corrected_fan_in_normal
+    step.model.block.attn.rope = RoPE.Config(channels_head=64)
+    step.model.block.attn.norm_qk = RMSNorm.Config(
+        channels_in=64,
+        elementwise_affine=False,
+    )
+    step.model.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=6)
+    prefix = PrefixStack.Config()
+    prefix.parts = [
+        SparsePuzzleEmbedding.Config(
+            num_puzzles=NUM_PUZZLE_IDENTIFIERS,
+            num_tokens=16,
+            batch_size=step.batch_size,
+            dtype=torch.bfloat16,
+            dtype_scale=torch.float32,
+        ),
+    ]
+    step.model.prefix = prefix
+    cfg.dataset.batch_size = step.batch_size
+    cfg.dataset.eval_batch_size = 256
+    cfg.dataset.epochs_per_iter = 5
+    cfg.dataset.device_resident = False
+    cfg.dataset.working_dir = "/datasets/arcagi1-hps"
+    cfg.dataset.augmentation.spatial.translation_prob = 0.2
+    cfg.dataset.augmentation.spatial.scale_prob = 0.2
+    cfg.dataset.augmentation.spatial.train_scale_weights = {2: 1.0}
+    cfg.dataset.augmentation.spatial_eval_views = True
+    cfg.dataset.augmentation.spatial_eval_scale = 2
+    cfg.max_steps = step.total_train_steps
+    cfg.num_steps_eval = 10_000
+    cfg.num_steps_log = 100
+    cfg.eval_warmup_batches = 1
+    cfg.eval_every_epoch = False
+    cfg.metrics_eval = {
+        "": CanonicalPassK.Config(
+            working_dir=cfg.dataset.working_dir,
+            spatial_views="non_spatial",
+            transform=cfg.dataset.augmentation.transform,
+        ),
+        "spatial_eq": CanonicalPassK.Config(
+            working_dir=cfg.dataset.working_dir,
+            spatial_views="all",
+            max_views_per_input=1_001,
+            transform=cfg.dataset.augmentation.transform,
+        ),
+        "spatial_big": CanonicalPassK.Config(
+            working_dir=cfg.dataset.working_dir,
+            spatial_views="all",
+            transform=cfg.dataset.augmentation.transform,
+        ),
+    }
+    cfg.max_time = 172_800
+    cfg.max_time_kind = "train"
+    cfg.checkpointer = Checkpointer.Config(
+        save_every=5_000,
+        keep_last_n=8,
+        keep_every=40_000,
+    )
+    cfg.runtime = MultiProcess.Config()
+    cfg.runtime.mesh_topology = {"dp": -1, "pp": 1, "tp": 1}
+    cfg.step.parallelism = ArcDataParallel.Config()
+    cfg.step.parallelism.gradient_as_bucket_view = True
     return cfg
 
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import json
+import sys
 
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.data import ArcData
 from priml.baselines.arcagi1.scripts.prepare_data import (
+    main,
     num_puzzle_identifiers,
     prepare,
 )
@@ -16,7 +19,7 @@ from priml.baselines.sudoku.prefix import PrefixStack, SparsePuzzleEmbedding
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    import pytest
 
 
 def test_dataset_declares_its_augmentation_recipe(tmp_path: Path) -> None:
@@ -27,6 +30,34 @@ def test_dataset_declares_its_augmentation_recipe(tmp_path: Path) -> None:
     assert "num_aug=1_000" in rendered
     assert "translation_prob=1.0" in rendered
     assert not (tmp_path / "absent").exists()
+
+
+def test_exp004_cli_forwards_spatial_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[ArcData.Config] = []
+    monkeypatch.setattr(sys, "argv", ["prepare_data.py", "--experiment", "exp004"])
+
+    def fake_prepare(
+        config: ArcData.Config,
+        *,
+        input_file_prefix: Path | str | None = None,
+    ) -> Path:
+        del input_file_prefix
+        captured.append(config.copy_tree().finalize())
+        return Path(captured[0].working_dir)
+
+    monkeypatch.setattr(
+        "priml.baselines.arcagi1.scripts.prepare_data.prepare",
+        fake_prepare,
+    )
+
+    assert main() == 0
+    augmentation = captured[0].augmentation
+    assert augmentation.spatial.translation_prob == 0.2
+    assert augmentation.spatial.scale_prob == 0.2
+    assert augmentation.spatial.train_scale_weights == {2: 1.0}
+    assert augmentation.spatial_eval_views
+    assert augmentation.spatial_eval_scale == 2
+    assert str(captured[0].working_dir) == "/opt/scratch/datasets/arcagi1-hps"
 
 
 def test_prepare_data_loads_and_sizes_exp000(tmp_path: Path) -> None:

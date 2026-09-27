@@ -1439,6 +1439,24 @@ def test_host_agnostic_keeps_uniform_factories_native() -> None:
     assert torch.equal(drawn, torch.rand(18))
 
 
+def test_host_agnostic_numerics_loads_float32_checkpoints(tmp_path: Path) -> None:
+    """``torch.load`` rebinds float32 storage via ``set_``; it must pass through.
+
+    A runner that restores a checkpoint mid-golden (an evaluation reading a
+    trained model) otherwise dies: an upcast ``set_`` binds a float64 view to
+    the file's float32 bytes and the storage refuses to resize.
+    """
+    saved = torch.linspace(-1.0, 1.0, 9)
+    path = tmp_path / "state.pt"
+    torch.save({"weight": saved}, path)
+    with host_agnostic_numerics():
+        loaded = DictCodec.coerce(
+            cast(object, torch.load(path, weights_only=True)),
+            Tensor,
+        )
+    assert torch.equal(loaded["weight"], saved)
+
+
 def test_host_agnostic_upcasts_inplace_op_and_mutates_original() -> None:
     """An upcast in-place op writes the float64 result back into the original.
 

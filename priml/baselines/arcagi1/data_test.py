@@ -219,6 +219,54 @@ def test_sampled_len_handles_variable_puzzle_sizes(dataset_dir: Path) -> None:
     assert len(loader) == len(list(loader))
 
 
+def test_five_pass_global_plan_shards_to_memory_mapped_rank_batches(
+    dataset_dir: Path,
+) -> None:
+    """Eight-GPU ARC uses one global task order, then slices each rank's rows."""
+    global_loader = _data(
+        dataset_dir,
+        batch_size=4,
+        epochs_per_iter=5,
+        device_resident=False,
+    ).train_dataloader()
+    rank_loaders = [
+        _data(
+            dataset_dir,
+            batch_size=2,
+            rank=rank,
+            num_replicas=2,
+            epochs_per_iter=5,
+            device_resident=False,
+        ).train_dataloader()
+        for rank in (0, 1)
+    ]
+    assert isinstance(global_loader.inputs, np.memmap)
+    whole = list(global_loader)
+    left, right = (list(loader) for loader in rank_loaders)
+    assert len(whole) == len(left) == len(right)
+    assert len(whole) > len(
+        list(_data(dataset_dir, batch_size=4).train_dataloader()),
+    )
+    for full, first, second in zip(whole, left, right, strict=True):
+        assert torch.equal(
+            _tensor(full["media"]),
+            torch.cat([_tensor(first["media"]), _tensor(second["media"])]),
+        )
+
+
+def test_eval_shards_keep_a_zero_valid_tail_rank(dataset_dir: Path) -> None:
+    """Every rank yields the same number of eval batches for DDP collectives."""
+    first = list(
+        _data(dataset_dir, batch_size=5, rank=0, num_replicas=2).eval_dataloader(),
+    )
+    second = list(
+        _data(dataset_dir, batch_size=5, rank=1, num_replicas=2).eval_dataloader(),
+    )
+    assert len(first) == len(second) == 3
+    assert _int(first[-1]["valid_count"]) == 4
+    assert _int(second[-1]["valid_count"]) == 0
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

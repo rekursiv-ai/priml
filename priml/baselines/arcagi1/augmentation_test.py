@@ -10,6 +10,7 @@ from priml.baselines.arcagi1.augmentation import (
     ArcAugmentation,
     ColorDihedral,
     SpatialAugmentation,
+    canonicalize_arc_grid,
 )
 
 
@@ -53,6 +54,48 @@ def test_spatial_identity_preserves_rng() -> None:
         [[2, 3, 1, 0], [4, 5, 1, 0], [1, 1, 0, 0], [0, 0, 0, 0]],
     )
     assert rng.bit_generator.state == before
+
+
+def test_prediction_crop_uses_its_own_shape() -> None:
+    config = SpatialAugmentation.Config(max_grid=8)
+    augmentation = config.make()
+    inp = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.uint8)
+    prediction = np.array([[7, 8]], dtype=np.uint8)
+    _, predicted_tokens = augmentation.pack_at(inp, out=prediction, tag=(2, 1, 2))
+    name, restored = canonicalize_arc_grid(
+        torch.from_numpy(predicted_tokens),
+        name="task",
+        spatial_tags=torch.tensor([2, 1, 2]),
+    )
+    assert name == "task"
+    assert restored.shape == (1, 2)
+    assert torch.equal(restored, torch.from_numpy(prediction))
+
+
+def test_canonicalize_uses_configured_transform_separator() -> None:
+    config = ColorDihedral.Config(separator="::", transforms=(1,))
+    augmentation = config.make()
+    grid = np.array([[1, 2], [3, 4]], dtype=np.uint8)
+    name, forward = augmentation.sample("task", rng=np.random.default_rng(7))
+    packed = (
+        SpatialAugmentation.Config(max_grid=3)
+        .make()
+        .pack(
+            forward(grid),
+            forward(grid),
+            training=False,
+            rng=np.random.default_rng(7),
+        )[0]
+    )
+
+    original, restored = canonicalize_arc_grid(
+        torch.from_numpy(packed),
+        name=name,
+        spatial_tags=torch.tensor([1, 0, 0]),
+        transform=augmentation,
+    )
+    assert original == "task"
+    assert torch.equal(restored, torch.from_numpy(grid))
 
 
 def test_nested_policy_is_injectable() -> None:

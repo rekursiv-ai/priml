@@ -12,6 +12,8 @@ import json
 import numpy as np
 import pytest
 
+from priml.baselines.sudoku.eval import Harvest, VerifierData
+from priml.baselines.sudoku.puzzle_data import PuzzleDataset, resolve_working_dir
 from priml.baselines.sudoku.scripts.prepare_data import (
     default_directory,
     prepare,
@@ -207,6 +209,13 @@ def test_default_directory_matches_the_loaders(tmp_path: Path) -> None:
     """Preparer and training agree without either naming a path."""
     del tmp_path
     assert default_directory().name == "sudoku-extreme"
+    trm_loaders = (
+        PuzzleDataset.Config(),
+        VerifierData.Config(),
+        Harvest.Config(),
+    )
+    for config in trm_loaders:
+        assert resolve_working_dir(None, config.working_dir) == default_directory()
 
 
 if __name__ == "__main__":

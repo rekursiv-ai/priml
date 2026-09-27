@@ -39,6 +39,11 @@ class ArcBatches:
         passes: int = 0,
     ) -> None:
         prepared = data.train_dataloader() if train else data.eval_dataloader()
+        if not isinstance(prepared.inputs, torch.Tensor) or not isinstance(
+            prepared.labels,
+            torch.Tensor,
+        ):
+            raise TypeError("ARC2 requires device-resident prepared data")
         self.inputs = prepared.inputs
         self.labels = prepared.labels
         self.groups = ListCodec.coerce(cast(object, prepared.groups.tolist()), int)

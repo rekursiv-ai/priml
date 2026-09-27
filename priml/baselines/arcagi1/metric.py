@@ -15,17 +15,27 @@ thousands of 900-cell grids, and only equality between them matters.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict, cast
+from dataclasses import field
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, Self, TypedDict, cast, override
 
 import hashlib
+import json
 
-from configgle import Fig
+from configgle import Fig, Makeable
 from torch import Tensor
 
+import numpy as np
 import torch
-import torch.distributed as dist
+import torch.distributed
 
+from priml.baselines.arcagi1.augmentation import (
+    ColorDihedral,
+    canonicalize_arc_grid,
+    grid_hash,
+)
 from priml.lib.custom_json import FloatCodec
+from priml.paths import resolve_working_dir
 
 
 if TYPE_CHECKING:
@@ -135,12 +145,12 @@ class PassK:
             [float(len(self._votes)), *(float(solved[k]) for k in self.config.pass_ks)],
             dtype=torch.float64,
         )
-        if dist.is_available() and dist.is_initialized():
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
             # NCCL reduces only CUDA tensors; gloo only CPU ones. Move for the
             # former and come back, so ``.tolist()`` works either way.
-            if dist.get_backend() != "gloo":
+            if torch.distributed.get_backend() != "gloo":
                 counts = counts.to(torch.device("cuda", torch.cuda.current_device()))
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+            torch.distributed.all_reduce(counts, op=torch.distributed.ReduceOp.SUM)
             counts = counts.cpu()
         total, *hits = [FloatCodec.coerce(count) for count in counts.tolist()]
         return {
@@ -173,6 +183,203 @@ class PassK:
         state = cast(PassK.StateDict, state_dict)
         self._votes = state.get("votes", {})
         self._truth = state.get("truth", {})
+
+
+class _TestPair(TypedDict):
+    input: list[list[int]]
+    output: list[list[int]]
+
+
+class _TestTask(TypedDict):
+    test: list[_TestPair]
+
+
+type _CanonicalVotes = dict[str, dict[str, list[tuple[str, float]]]]
+
+
+class CanonicalPassK:
+    """Vote on restored ARC grids, grouping all augmented views by source task."""
+
+    class Config(Fig["CanonicalPassK"]):
+        """Source dataset and the spatial view budget used for pass@K."""
+
+        base_dir: Path | str | None = None
+        working_dir: Path | str = "/datasets/arc1concept-aug-1000"
+        pass_ks: tuple[int, ...] = (1, 2, 5, 10, 100, 1_000)
+        spatial_views: Literal["all", "non_spatial"] = "all"
+        max_views_per_input: int = 0
+        transform: Makeable[ColorDihedral] = field(default_factory=ColorDihedral.Config)
+
+        @override
+        def finalize(self) -> Self:
+            self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
+            return super().finalize()
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self._root = Path(config.working_dir)
+        self._transform = config.transform.make()
+        self._identifiers: list[str] | None = None
+        self._test_tasks: dict[str, _TestTask] | None = None
+        self.reset()
+
+    def reset(self) -> None:
+        """Clear votes while retaining the immutable source metadata."""
+        self._votes: _CanonicalVotes = {}
+
+    def update(self, logits: Tensor, **batch: object) -> None:
+        """Add each restored prediction as a vote for its canonical test input.
+
+        Args:
+          logits: Halt score followed by predicted grid tokens for each row.
+          **batch: Input grids, puzzle ids, spatial tags, and valid row count.
+
+        """
+        media = batch["media"]
+        identifiers = batch["puzzle_identifiers"]
+        assert isinstance(media, Tensor)
+        assert isinstance(identifiers, Tensor)
+        tags = batch.get("spatial_tags")
+        if tags is None:
+            tags = torch.zeros((media.shape[0], 3), dtype=torch.int64)
+            tags[:, 0] = 1
+        assert isinstance(tags, Tensor)
+        raw_count = batch.get("valid_count", media.shape[0])
+        assert isinstance(raw_count, int)
+        names, _ = self._load_source()
+        if logits.ndim != 2 or logits.shape[1] != media.shape[1] + 1:
+            raise ValueError("ARC vote output must contain one halt logit and a grid.")
+        predictions = logits[:, -media.shape[1] :].detach().to(torch.int64).cpu()
+        confidence = torch.sigmoid(logits[:, 0].detach().to(torch.float64)).cpu()
+        media = media.detach().cpu()
+        identifiers = identifiers.detach().cpu()
+        tags = tags.detach().cpu()
+        for row in range(raw_count):
+            puzzle_id = int(identifiers[row])
+            if puzzle_id == 0:
+                continue
+            if puzzle_id < 0 or puzzle_id >= len(names):
+                raise ValueError(f"Unknown ARC puzzle identifier {puzzle_id}.")
+            tag = tags[row]
+            if self.config.spatial_views == "non_spatial" and tuple(tag.tolist()) != (
+                1,
+                0,
+                0,
+            ):
+                continue
+            name = names[puzzle_id]
+            source_name, source_grid = canonicalize_arc_grid(
+                media[row],
+                name=name,
+                spatial_tags=tag,
+                transform=self._transform,
+            )
+            prediction_name, answer_grid = canonicalize_arc_grid(
+                predictions[row],
+                name=name,
+                spatial_tags=tag,
+                transform=self._transform,
+            )
+            if source_name != prediction_name:
+                raise ValueError(
+                    "Input and prediction resolved to different ARC tasks.",
+                )
+            input_hash = _canonical_digest(source_grid)
+            answer_hash = _canonical_digest(answer_grid)
+            self._votes.setdefault(source_name, {}).setdefault(input_hash, []).append(
+                (answer_hash, float(confidence[row])),
+            )
+
+    def compute(self) -> dict[str, float]:
+        """Report mean per-task pass@K over every known public test pair.
+
+        Returns:
+          scores: Mean per-task pass@K scores for the configured ranks.
+
+        """
+        _, tasks = self._load_source()
+        votes = self._gather_votes()
+        solved = dict.fromkeys(self.config.pass_ks, 0.0)
+        for name, task in tasks.items():
+            pairs = task["test"]
+            if not pairs:
+                continue
+            for pair in pairs:
+                source = np.asarray(pair["input"], dtype=np.uint8)
+                answer = np.asarray(pair["output"], dtype=np.uint8)
+                records = votes.get(name, {}).get(grid_hash(source), [])
+                if (
+                    self.config.max_views_per_input > 0
+                    and len(records) > self.config.max_views_per_input
+                ):
+                    records = sorted(
+                        records,
+                        key=lambda item: (-item[1], item[0]),
+                    )[: self.config.max_views_per_input]
+                tallies: dict[str, list[float]] = {}
+                for answer_hash, weight in records:
+                    count_and_weight = tallies.setdefault(answer_hash, [0.0, 0.0])
+                    count_and_weight[0] += 1.0
+                    count_and_weight[1] += weight
+                ranked = sorted(
+                    tallies,
+                    key=lambda digest: (
+                        tallies[digest][0],
+                        tallies[digest][1] / tallies[digest][0],
+                    ),
+                    reverse=True,
+                )
+                truth = grid_hash(answer)
+                for k in self.config.pass_ks:
+                    solved[k] += float(truth in ranked[:k]) / len(pairs)
+        return {
+            f"pass@{k}": solved[k] / max(1, len(tasks)) for k in self.config.pass_ks
+        }
+
+    class StateDict(TypedDict):
+        votes: _CanonicalVotes
+
+    def state_dict(self) -> StateDict:
+        """Return votes for checkpointed evaluation."""
+        return {"votes": self._votes}
+
+    def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
+        """Restore votes from a previous evaluation."""
+        self._votes = cast("_CanonicalVotes", state_dict["votes"])
+
+    def _load_source(self) -> tuple[list[str], dict[str, _TestTask]]:
+        if self._identifiers is None:
+            self._identifiers = cast(
+                "list[str]",
+                json.loads((self._root / "identifiers.json").read_text()),
+            )
+        if self._test_tasks is None:
+            self._test_tasks = cast(
+                "dict[str, _TestTask]",
+                json.loads((self._root / "test_puzzles.json").read_text()),
+            )
+        return self._identifiers, self._test_tasks
+
+    def _gather_votes(self) -> _CanonicalVotes:
+        if (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+        ):
+            return self._votes
+        gathered: list[object] = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(gathered, self._votes)
+        merged: _CanonicalVotes = {}
+        for shard in gathered:
+            local = cast("_CanonicalVotes", shard)
+            for name, by_input in local.items():
+                target = merged.setdefault(name, {})
+                for input_hash, records in by_input.items():
+                    target.setdefault(input_hash, []).extend(records)
+        return merged
+
+
+def _canonical_digest(grid: Tensor) -> str:
+    return grid_hash(grid.to(torch.uint8).cpu().numpy())
 
 
 # Only equality between grids matters, and an evaluation holds hundreds of thousands of

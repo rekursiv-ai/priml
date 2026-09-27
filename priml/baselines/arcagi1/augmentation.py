@@ -167,6 +167,79 @@ class ColorDihedral:
         )
 
 
+def invert_spatial_transform(tokens: Tensor, *, spatial_tags: Tensor) -> Tensor:
+    """Undo spatial augmentation using its independent view metadata.
+
+    Args:
+      tokens: Flattened square token grid.
+      spatial_tags: ``(scale, row_offset, col_offset)`` for this view.
+
+    Returns:
+      tokens: Restored square token grid, padded to the original side.
+
+    """
+    flat = tokens.reshape(-1)
+    side = math.isqrt(flat.numel())
+    if side * side != flat.numel():
+        raise ValueError("ARC token count must be a perfect square")
+    flat_tags = spatial_tags.reshape(-1)
+    if flat_tags.numel() != 3:
+        raise ValueError("spatial tags must contain scale, row, and column")
+    scale, pad_r, pad_c = (int(flat_tags[index]) for index in range(3))
+    if scale == 1 and pad_r == 0 and pad_c == 0:
+        return flat
+    shifted = flat.reshape(side, side)[pad_r:, pad_c:][::scale, ::scale]
+    return torch.nn.functional.pad(
+        shifted,
+        (0, side - shifted.shape[1], 0, side - shifted.shape[0]),
+    ).reshape(-1)
+
+
+def canonicalize_arc_grid(
+    tokens: Tensor,
+    *,
+    name: str,
+    spatial_tags: Tensor,
+    transform: ColorDihedral | None = None,
+) -> tuple[str, Tensor]:
+    """Invert a view and infer its raw-color rectangle from its own tokens.
+
+    Args:
+      tokens: Flattened input or predicted output tokens.
+      name: Augmented puzzle identifier encoding color/dihedral transforms.
+      spatial_tags: ``(scale, row_offset, col_offset)`` for this view.
+      transform: Configured color/dihedral policy that encoded the identifier.
+
+    Returns:
+      original_name: Original puzzle name.
+      canonical: Cropped raw-color grid in 0..9.
+
+    """
+    spatial = invert_spatial_transform(tokens, spatial_tags=spatial_tags)
+    side = math.isqrt(spatial.numel())
+    grid = spatial.reshape(side, side).detach().to("cpu", torch.uint8).numpy()
+    max_area = max_rows = max_cols = 0
+    ncols = side
+    for row in range(side):
+        for col in range(ncols):
+            token = cast(int, grid[row, col])
+            if token < 2 or token >= 12:
+                ncols = col
+                break
+        area = (row + 1) * ncols
+        if area > max_area:
+            max_area, max_rows, max_cols = area, row + 1, ncols
+    colors = (grid[:max_rows, :max_cols] - 2).astype(np.uint8)
+    color_dihedral = (
+        transform if transform is not None else ColorDihedral.Config().make()
+    )
+    original_name, inverse = color_dihedral.inverse(name)
+    canonical = inverse(colors)
+    return original_name, torch.from_numpy(np.array(canonical, copy=True)).to(
+        tokens.device,
+    )
+
+
 class SpatialAugmentation:
     """Scale and translate paired grids, then encode them as square token rows."""
 
@@ -232,14 +305,71 @@ class SpatialAugmentation:
           rows: Input and target token rows; 0 is padding, 1 EOS, 2..11 colors.
 
         """
+        rows, _ = self.pack_with_tags(inp, out=out, training=training, rng=rng)
+        return rows
+
+    def pack_with_tags(
+        self,
+        inp: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+        *,
+        out: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+        training: bool,
+        rng: np.random.Generator,
+    ) -> tuple[list[NDArray[np.uint8]], tuple[int, int, int]]:
+        """Pack paired grids and return their shared spatial tag.
+
+        Args:
+          inp: Input colors in 0..9.
+          out: Target colors in 0..9.
+          training: Whether to sample train-only scale and translation.
+          rng: Dataset builder's shared random stream.
+
+        Returns:
+          rows: Packed input and target token rows.
+          tag: Shared ``(scale, row, col)`` offsets.
+
+        """
         side = self.config.max_grid
-        if max(*inp.shape, *out.shape) > side:
-            raise ValueError(f"Grid shape exceeds max_grid={side}.")
         scale = (
             self._sample_scale(inp, out, rng=rng)
             if training and _bernoulli(self.config.scale_prob, rng=rng)
             else 1
         )
+        pad_r = pad_c = 0
+        if training and _bernoulli(self.config.translation_prob, rng=rng):
+            pad_r = int(
+                rng.integers(0, side - max(inp.shape[0], out.shape[0]) * scale + 1),
+            )
+            pad_c = int(
+                rng.integers(0, side - max(inp.shape[1], out.shape[1]) * scale + 1),
+            )
+        tag = (scale, pad_r, pad_c)
+        return self.pack_at(inp, out=out, tag=tag), tag
+
+    def pack_at(
+        self,
+        inp: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+        *,
+        out: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
+        tag: tuple[int, int, int],
+    ) -> list[NDArray[np.uint8]]:
+        """Pack both grids using one preselected shared spatial transform.
+
+        Args:
+          inp: Input colors in 0..9.
+          out: Target colors in 0..9.
+          tag: Shared ``(scale, row_offset, col_offset)`` selected per view.
+
+        Returns:
+          rows: Input and target token rows with the same transform.
+
+        """
+        side = self.config.max_grid
+        scale, pad_r, pad_c = tag
+        if scale < 1 or pad_r < 0 or pad_c < 0:
+            raise ValueError("tag requires positive scale and nonnegative padding")
+        if max(*inp.shape, *out.shape) > side:
+            raise ValueError(f"Grid shape exceeds max_grid={side}.")
         if scale > 1:
             inp = cast(
                 np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
@@ -249,10 +379,11 @@ class SpatialAugmentation:
                 np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
                 np.repeat(np.repeat(out, scale, axis=0), scale, axis=1),
             )
-        pad_r = pad_c = 0
-        if training and _bernoulli(self.config.translation_prob, rng=rng):
-            pad_r = int(rng.integers(0, side - max(inp.shape[0], out.shape[0]) + 1))
-            pad_c = int(rng.integers(0, side - max(inp.shape[1], out.shape[1]) + 1))
+        if (
+            pad_r + max(inp.shape[0], out.shape[0]) > side
+            or pad_c + max(inp.shape[1], out.shape[1]) > side
+        ):
+            raise ValueError("spatial tag places the transformed grid outside max_grid")
         result: list[NDArray[np.uint8]] = []
         for grid in (inp, out):
             nrow, ncol = grid.shape
@@ -309,6 +440,12 @@ class ArcAugmentation:
             default_factory=SpatialAugmentation.Config,
         )
         """Training-only scale/translation and token packing policy."""
+
+        spatial_eval_views: bool = False
+        """Add S=2 spatially transformed evaluation views during preparation."""
+
+        spatial_eval_scale: int = 2
+        """Integer scale used for optional spatial evaluation rows."""
 
     def __init__(self, config: Config) -> None:
         if config.num_aug < 0 or config.retries_factor < 1:

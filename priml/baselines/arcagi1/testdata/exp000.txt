@@ -82,7 +82,8 @@ ArcTrainLoop(
                 │       │                               batch_size=256,
                 │       │                               init_std=0.0,
                 │       │                               embed_scale=-1.0,
-                │       │                               dtype=None
+                │       │                               dtype=None,
+                │       │                               dtype_scale=None
                 │       │                       ),
                 │       │                       RegisterTokens.Config(
                 │       │                               num_tokens=1,
@@ -97,7 +98,12 @@ ArcTrainLoop(
                 │       │       num_prefix_tokens=17,
                 │       │       vocab_size=12,
                 │       │       halt_outputs=2,
-                │       │       halt_init_bias=-5.0
+                │       │       halt_init_bias=-5.0,
+                │       │       dtype=None,
+                │       │       rope=None,
+                │       │       rope_grid_shape=(),
+                │       │       compile_core=None,
+                │       │       dtype_latent_init=None
                 │       ),
                 │       optimizer=CompositeOptimizer.Config(
                 │               optimizers=[
@@ -169,7 +175,9 @@ ArcTrainLoop(
                                         train_scale_weights={1: 1.0},
                                         translation_prob=1.0,
                                         scale_prob=1.0
-                                )
+                                ),
+                                spatial_eval_views=False,
+                                spatial_eval_scale=2
                         ),
                         base_dir='/opt/scratch',
                         working_dir=PosixPath('/opt/scratch/datasets/arcagi1'),
@@ -178,7 +186,11 @@ ArcTrainLoop(
                         device='auto',
                         seed=0,
                         num_tasks=None,
-                        num_eval_tasks=None
+                        num_eval_tasks=None,
+                        rank=-1,
+                        num_replicas=-1,
+                        epochs_per_iter=1,
+                        device_resident=True
                 ),
                 metrics_train={},
                 metrics_eval={       'pass': PassK.Config(

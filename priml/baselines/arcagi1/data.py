@@ -1,4 +1,4 @@
-"""ARC-AGI tasks, served from device memory.
+"""ARC-AGI tasks, served from device memory or streamed from prepared arrays.
 
 The prepared dataset is a three-level hierarchy, which is what makes ARC
 different from a flat dataset::
@@ -14,6 +14,7 @@ On disk::
     all__puzzle_indices.npy     [n_puzzles + 1]   example offsets per puzzle
     all__group_indices.npy      [n_groups + 1]    puzzle offsets per task
     all__puzzle_identifiers.npy [n_puzzles]       per-puzzle task id
+    all__spatial_tags.npy       [n_examples, 3]  scale and row/column offsets
     dataset.json                shape and vocabulary metadata
 
 Tokens are ``0`` pad, ``1`` a blank marker, and ``2``-``11`` the ten ARC
@@ -43,6 +44,7 @@ from torch import Tensor
 
 import numpy as np
 import torch
+import torch.distributed
 
 from priml.baselines.arcagi1.augmentation import ArcAugmentation
 from priml.lib.custom_json import DictCodec, IntCodec, loads
@@ -61,16 +63,17 @@ logger = logging.getLogger(__name__)
 
 
 class _Split(TypedDict):
-    inputs: Tensor
-    labels: Tensor
+    inputs: Tensor | NDArray[np.generic]
+    labels: Tensor | NDArray[np.generic]
     puzzle_indices: NDArray[np.int64]
     group_indices: NDArray[np.int64]
     puzzle_identifiers: NDArray[np.int64]
+    spatial_tags: NDArray[np.int64]
     ignore_label_id: int
 
 
 class _ArcBatches:
-    """One split, resident on device, iterated in fixed-size batches."""
+    """One prepared split, iterated in fixed-size batches."""
 
     def __init__(
         self,
@@ -83,8 +86,12 @@ class _ArcBatches:
         num_tasks: int | None,
         seed: int,
         passes: int,
+        rank: int,
+        num_replicas: int,
+        epochs_per_iter: int,
+        device_resident: bool,
     ) -> None:
-        data = _load_split(dataset_dir, split)
+        data = _load_split(dataset_dir, split=split, mmap=not device_resident)
         groups = data["group_indices"]
         puzzles = data["puzzle_indices"]
         if num_tasks is not None and num_tasks < len(groups) - 1:
@@ -100,8 +107,18 @@ class _ArcBatches:
             rows = len(data["inputs"])
 
         self.device = get_device(device)
-        self.inputs: Tensor = data["inputs"][:rows].to(self.device)
-        self.labels: Tensor = data["labels"][:rows].to(self.device)
+        inputs = data["inputs"][:rows]
+        labels = data["labels"][:rows]
+        self.inputs: Tensor | NDArray[np.generic] = (
+            inputs.to(self.device) if isinstance(inputs, Tensor) else inputs
+        )
+        self.labels: Tensor | NDArray[np.generic] = (
+            labels.to(self.device) if isinstance(labels, Tensor) else labels
+        )
+        tags = data["spatial_tags"][:rows]
+        self.spatial_tags: Tensor | NDArray[np.generic] = (
+            torch.from_numpy(tags).to(self.device) if device_resident else tags
+        )
         self.groups: NDArray[np.int64] = groups
         self.puzzles: NDArray[np.int64] = puzzles
         self.identifiers: NDArray[np.int64] = data["puzzle_identifiers"][
@@ -109,6 +126,10 @@ class _ArcBatches:
         ]
         self.ignore_label_id = int(data["ignore_label_id"])
         self.batch_size = batch_size
+        self.rank = rank
+        self.num_replicas = num_replicas
+        self.global_batch_size = batch_size * num_replicas
+        self.epochs_per_iter = epochs_per_iter
         self.sample_by_task = sample_by_task
         self.seed = seed
         self.passes = passes
@@ -134,7 +155,7 @@ class _ArcBatches:
                 int(
                     self.puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 ),
-                self.batch_size,
+                self.global_batch_size,
             )
         pass_index = self.passes if self._active_pass is None else self._active_pass
         return sum(1 for _ in self._plan_sampled(pass_index))
@@ -187,7 +208,15 @@ class _ArcBatches:
             if batch_index < self._next_batch:
                 continue
             self._next_batch = batch_index + 1
-            yield self._batch(rows, puzzle_ids, valid=self.batch_size)
+            local = slice(
+                self.rank * self.batch_size,
+                (self.rank + 1) * self.batch_size,
+            )
+            yield self._batch(
+                rows[local],
+                puzzle_ids=puzzle_ids[local],
+                valid=self.batch_size,
+            )
         self._active_pass = None
         self._next_batch = 0
 
@@ -196,13 +225,15 @@ class _ArcBatches:
         rng = np.random.Generator(
             np.random.Philox(seed=salt("arcagi1_task_sampling", self.seed, pass_index)),
         )
-        order = rng.permutation(self.num_tasks)
+        order = np.concatenate(
+            [rng.permutation(self.num_tasks) for _ in range(self.epochs_per_iter)],
+        )
         cursor = 0
         while cursor < order.size:
             rows: list[np.ndarray] = []
             puzzle_ids: list[np.ndarray] = []
             filled = 0
-            while cursor < order.size and filled < self.batch_size:
+            while cursor < order.size and filled < self.global_batch_size:
                 task = int(
                     order[cursor],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
                 )
@@ -225,11 +256,11 @@ class _ArcBatches:
                     )
                     - start
                 )
-                take = min(size, self.batch_size - filled)
+                take = min(size, self.global_batch_size - filled)
                 rows.append(start + rng.choice(size, take, replace=False))
                 puzzle_ids.append(np.full(take, puzzle, dtype=np.int64))
                 filled += take
-            if filled < self.batch_size:
+            if filled < self.global_batch_size:
                 return
             yield (
                 np.concatenate(rows),
@@ -241,24 +272,46 @@ class _ArcBatches:
         total = int(
             self.puzzles[-1],  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
         )
-        for start in range(0, total, self.batch_size):
-            end = min(total, start + self.batch_size)
-            rows = np.arange(start, end, dtype=np.int64)
+        for start in range(0, total, self.global_batch_size):
+            end = min(total, start + self.global_batch_size)
+            local_start = min(start + self.rank * self.batch_size, end)
+            local_end = min(start + (self.rank + 1) * self.batch_size, end)
+            rows = np.arange(local_start, local_end, dtype=np.int64)
             # Which puzzle each row belongs to, for the per-task prefix.
             puzzle_ids = np.searchsorted(self.puzzles, rows, side="right") - 1
-            yield self._batch(rows, puzzle_ids, valid=int(end - start))
+            yield self._batch(
+                rows,
+                puzzle_ids=puzzle_ids,
+                valid=int(local_end - local_start),
+            )
 
     def _batch(
         self,
         rows: np.ndarray,
-        puzzle_ids: np.ndarray,
         *,
+        puzzle_ids: np.ndarray,
         valid: int,
     ) -> dict[str, object]:
         """Gather one batch, padding it to full width."""
-        index = torch.from_numpy(rows).to(self.device)
-        media = self.inputs[index]
-        labels = self.labels[index]
+        if isinstance(self.inputs, Tensor):
+            index = torch.from_numpy(rows).to(self.device)
+            media = self.inputs[index]
+            assert isinstance(self.labels, Tensor)
+            assert isinstance(self.spatial_tags, Tensor)
+            labels = self.labels[index]
+            spatial_tags = self.spatial_tags[index]
+        else:
+            assert isinstance(self.labels, np.ndarray)
+            assert isinstance(self.spatial_tags, np.ndarray)
+            media = torch.from_numpy(
+                np.asarray(self.inputs[rows], dtype=np.int32).copy(),
+            ).to(self.device)
+            labels = torch.from_numpy(
+                np.asarray(self.labels[rows], dtype=np.int32).copy(),
+            ).to(self.device)
+            spatial_tags = torch.from_numpy(
+                np.asarray(self.spatial_tags[rows], dtype=np.int64).copy(),
+            ).to(self.device)
         # The build marks skipped cells with its own id; the loss and the halt
         # target both key on -100, so remap once here rather than at each use.
         labels = torch.where(
@@ -274,15 +327,19 @@ class _ArcBatches:
             media = torch.cat([media, media.new_zeros(pad, media.shape[1])])
             labels = torch.cat([labels, labels.new_full((pad, labels.shape[1]), -100)])
             identifiers = torch.cat([identifiers, identifiers.new_zeros(pad)])
+            spatial_tags = torch.cat(
+                [spatial_tags, spatial_tags.new_zeros((pad, 3))],
+            )
         return {
             "media": media,
             "label": labels,
             "valid_count": valid,
             "puzzle_identifiers": identifiers,
+            "spatial_tags": spatial_tags,
         }
 
 
-def _load_split(dataset_dir: Path, split: str) -> _Split:
+def _load_split(dataset_dir: Path, *, split: str, mmap: bool = False) -> _Split:
     """Read one prepared split into tensors."""
     path = Path(dataset_dir).expanduser() / split
     metadata_path = path / "dataset.json"
@@ -294,11 +351,28 @@ def _load_split(dataset_dir: Path, split: str) -> _Split:
         )
     metadata = DictCodec.coerce(loads(metadata_path.read_text()))
     logger.info("loading ARC split %r from %s", split, path)
-    inputs = torch.from_numpy(np.load(path / "all__inputs.npy")).to(torch.int32)
-    labels = torch.from_numpy(np.load(path / "all__labels.npy")).to(torch.int32)
+    if mmap:
+        inputs: Tensor | NDArray[np.generic] = cast(
+            "NDArray[np.generic]",
+            np.load(path / "all__inputs.npy", mmap_mode="r"),
+        )
+        labels: Tensor | NDArray[np.generic] = cast(
+            "NDArray[np.generic]",
+            np.load(path / "all__labels.npy", mmap_mode="r"),
+        )
+    else:
+        inputs = torch.from_numpy(np.load(path / "all__inputs.npy")).to(torch.int32)
+        labels = torch.from_numpy(np.load(path / "all__labels.npy")).to(torch.int32)
     puzzles = cast(NDArray[np.int64], np.load(path / "all__puzzle_indices.npy"))
     groups = cast(NDArray[np.int64], np.load(path / "all__group_indices.npy"))
     identifiers = cast(NDArray[np.int64], np.load(path / "all__puzzle_identifiers.npy"))
+    spatial_path = path / "all__spatial_tags.npy"
+    spatial_tags = cast(
+        NDArray[np.int64],
+        np.load(spatial_path, mmap_mode="r" if mmap else None)
+        if spatial_path.is_file()
+        else np.tile([1, 0, 0], (len(inputs), 1)),
+    )
     logger.info(
         "ARC %r: %d rows, %d puzzles, %d tasks",
         split,
@@ -312,12 +386,13 @@ def _load_split(dataset_dir: Path, split: str) -> _Split:
         "puzzle_indices": puzzles,
         "group_indices": groups,
         "puzzle_identifiers": identifiers,
+        "spatial_tags": spatial_tags,
         "ignore_label_id": IntCodec.coerce(metadata.get("ignore_label_id", 0)),
     }
 
 
 class ArcData:
-    """ARC tasks held in device memory, yielding ``media`` / ``label`` batches.
+    """ARC tasks yielded as ``media`` / ``label`` batches.
 
     Every batch is exactly ``batch_size`` rows: a short final batch is padded
     with zero rows and reports how many are real, so downstream tensor shapes
@@ -374,6 +449,16 @@ class ArcData:
         it and the reported number comes from an uncapped final pass. The two
         populations are not comparable."""
 
+        rank: int = -1
+        num_replicas: int = -1
+        """Distributed batch shard; -1 resolves both from torch.distributed."""
+
+        epochs_per_iter: int = 1
+        """Independent group permutations per training loader iteration."""
+
+        device_resident: bool = True
+        """False memory-maps the corpus and transfers only local batches."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
@@ -386,6 +471,12 @@ class ArcData:
             raise ValueError(
                 f"eval_batch_size must be positive; got {config.eval_batch_size}.",
             )
+        if config.epochs_per_iter <= 0:
+            raise ValueError("epochs_per_iter must be positive")
+        self.rank, self.num_replicas = _resolve_rank(
+            config.rank,
+            num_replicas=config.num_replicas,
+        )
         self.config = config
         self.dataset_dir = Path(config.working_dir)
         self.batch_size = config.batch_size
@@ -423,6 +514,10 @@ class ArcData:
             num_tasks=self.config.num_tasks,
             seed=self.config.seed,
             passes=self._passes,
+            rank=self.rank,
+            num_replicas=self.num_replicas,
+            epochs_per_iter=self.config.epochs_per_iter,
+            device_resident=self.config.device_resident,
         )
         if self._pending_loader_state is not None:
             stream.load_state_dict(self._pending_loader_state)
@@ -449,6 +544,10 @@ class ArcData:
             num_tasks=self.config.num_eval_tasks,
             seed=self.config.seed,
             passes=0,
+            rank=self.rank,
+            num_replicas=self.num_replicas,
+            epochs_per_iter=1,
+            device_resident=self.config.device_resident,
         )
 
     class StateDict(TypedDict):
@@ -499,3 +598,14 @@ class ArcData:
             self._live.passes = self._passes
         if "timer_epoch" in state:
             self.timer_epoch.load_state_dict(state["timer_epoch"])
+
+
+def _resolve_rank(rank: int, *, num_replicas: int) -> tuple[int, int]:
+    """Resolve a rank/world-size pair without mixing explicit and auto values."""
+    if rank == -1 and num_replicas == -1:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank(), torch.distributed.get_world_size()
+        return 0, 1
+    if num_replicas < 1 or rank < 0 or rank >= num_replicas:
+        raise ValueError("rank/num_replicas require 0 <= rank < num_replicas")
+    return rank, num_replicas

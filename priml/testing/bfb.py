@@ -235,6 +235,7 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
     "clone": "movement",
     "contiguous": "movement",
     "copy_": "movement",
+    "set_": "movement",
     "detach": "movement",
     "_to_copy": "movement",
     "to": "movement",

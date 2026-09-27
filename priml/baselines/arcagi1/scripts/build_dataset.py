@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import hashlib
 import json
@@ -134,6 +134,7 @@ def _build_arc_dataset(
             id_map,
             augmentation=augmentation,
             rng=rng,
+            spatial_rng=np.random.default_rng(augmentation.config.seed),
         )
     inverse_id_map = {value: key for key, value in id_map.items()}
     identifiers = [inverse_id_map.get(i, "<blank>") for i in range(len(id_map) + 1)]
@@ -149,6 +150,7 @@ def _write_split(
     *,
     augmentation: ArcAugmentation,
     rng: np.random.Generator,
+    spatial_rng: np.random.Generator,
 ) -> None:
     split_path = out_path / split_name
     split_path.mkdir(parents=True)
@@ -158,6 +160,7 @@ def _write_split(
         subset_names.append(subset_name)
         all_inputs: list[NDArray[np.uint8]] = []
         all_labels: list[NDArray[np.uint8]] = []
+        all_spatial_tags: list[tuple[int, int, int]] = []
         all_puzzle_ids: list[int] = []
         puzzle_indices = [0]
         group_indices = [0]
@@ -166,24 +169,53 @@ def _write_split(
             for puzzle in group:
                 no_aug_idx = int(rng.integers(0, len(puzzle.examples)))
                 for index, (inp, out) in enumerate(puzzle.examples):
-                    inp_seq, out_seq = augmentation.spatial.pack(
-                        inp,
-                        out,
-                        training=split_name == "train" and index != no_aug_idx,
-                        rng=rng,
+                    (inp_seq, out_seq), spatial_tag = (
+                        augmentation.spatial.pack_with_tags(
+                            inp,
+                            out=out,
+                            training=split_name == "train" and index != no_aug_idx,
+                            rng=rng,
+                        )
                     )
                     all_inputs.append(inp_seq)
                     all_labels.append(out_seq)
+                    all_spatial_tags.append(spatial_tag)
                     example_count += 1
                     total_examples += 1
                 puzzle_indices.append(example_count)
                 all_puzzle_ids.append(id_map[puzzle.name])
                 puzzle_count += 1
                 total_puzzles += 1
+                if split_name == "test" and augmentation.config.spatial_eval_views:
+                    tag = _spatial_eval_tag(
+                        puzzle,
+                        augmentation=augmentation,
+                        rng=spatial_rng,
+                    )
+                    if tag is not None:
+                        for inp, out in puzzle.examples:
+                            inp_seq, out_seq = augmentation.spatial.pack_at(
+                                inp,
+                                out=out,
+                                tag=tag,
+                            )
+                            all_inputs.append(inp_seq)
+                            all_labels.append(out_seq)
+                            all_spatial_tags.append(tag)
+                            example_count += 1
+                            total_examples += 1
+                        puzzle_indices.append(example_count)
+                        all_puzzle_ids.append(id_map[puzzle.name])
+                        puzzle_count += 1
+                        total_puzzles += 1
             group_indices.append(puzzle_count)
             total_groups += 1
         np.save(split_path / f"{subset_name}__inputs.npy", np.stack(all_inputs))
         np.save(split_path / f"{subset_name}__labels.npy", np.stack(all_labels))
+        np.save(
+            split_path / f"{subset_name}__spatial_tags.npy",
+            np.asarray(all_spatial_tags, dtype=np.int16),
+        )
         np.save(
             split_path / f"{subset_name}__puzzle_indices.npy",
             np.array(puzzle_indices, dtype=np.int32),
@@ -214,6 +246,33 @@ def _write_split(
             },
         ),
     )
+
+
+def _spatial_eval_tag(
+    puzzle: _Puzzle,
+    *,
+    augmentation: ArcAugmentation,
+    rng: np.random.Generator,
+) -> tuple[int, int, int] | None:
+    """Choose one shared scale and translation fitting every puzzle grid."""
+    max_rows = max(
+        cast(int, grid.shape[0]) for pair in puzzle.examples for grid in pair
+    )
+    max_cols = max(
+        cast(int, grid.shape[1]) for pair in puzzle.examples for grid in pair
+    )
+    side = augmentation.spatial.config.max_grid
+    scale = augmentation.config.spatial_eval_scale
+    if scale < 1:
+        raise ValueError("spatial_eval_scale must be positive")
+    scale = (
+        int(rng.choice([scale], p=[1.0]))
+        if scale * max_rows <= side and scale * max_cols <= side
+        else 1
+    )
+    pad_r = int(rng.integers(0, side - scale * max_rows + 1))
+    pad_c = int(rng.integers(0, side - scale * max_cols + 1))
+    return None if (scale, pad_r, pad_c) == (1, 0, 0) else (scale, pad_r, pad_c)
 
 
 def _convert_puzzle(
