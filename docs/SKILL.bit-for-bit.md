@@ -184,6 +184,55 @@ host with no archive skips. A missing golden means nobody minted one for that
 machine. Do not invent a tolerance, and do not pin an env var that measurement
 shows is inert.
 
+## Goldens: small, scoped, conventionally named
+
+A golden proves the code path, not kernel throughput. Every checked-in `.pt`
+stays far under 32 KiB. SIMD width is not what the test pins; touching every
+line of Python is.
+
+### Scope and names
+
+- Golden only the nexus experiments. A derivative recipe gets no golden.
+- Test a component in the baseline that owns it. A sudoku mechanism is unit
+  tested in `sudoku/`, not replayed through an ARC recipe.
+- Name goldens by priml convention: `testdata/<expNNN>[_<precision>].pt`, or
+  `<module>.pt`. Never `legacy_`, `oss_`, `source_`, `_digest`, and never json.
+- Mint on the SOURCE side. The minting test sits beside the old code (a
+  `priml_golden_test.py` in the source package) and is deleted with it; the
+  priml test only replays. A priml test importing the stack it replaces is a
+  bug.
+- Mint under the priml conftest environment (`OMP_NUM_THREADS=1`, ...,
+  `MKL_CBWR=COMPATIBLE`), i.e. through `pytest`, never a bare `python`: a
+  two-rank golden minted without it failed replay.
+
+### Shrink levers
+
+Apply in order; re-mint and confirm zero source mismatches after each.
+
+| Lever | Before -> after (measured) | Why it stays a valid test |
+|---|---|---|
+| Shrink by size only: width 16->8, heads 2, 1 layer, batch 2, 3-5 steps, 9-cell grid, `round_to` 8 | arcagi1 `exp004` 216 KB -> 38 KB (with the rows below) | Every numerical choice (init, norms, optimizer, loss, ACT) still runs. |
+| Record weights, grads, EMA, optimizer state as their first 4 elements (`golden.leading` / `golden.heads`), not whole tensors | arcagi2 `train_step` 411 KB -> 28 KB | A weight is the product of every update before it; a divergence anywhere upstream reaches its first elements. |
+| Do not store initial weights: randomize under `host_agnostic_numerics` at replay (`randomize_parameters`) | lium `trajectory` 559 KB -> 3.7 KB | float64 `randn` rounded to float32 is identical under DEFAULT/AVX2/AVX-512 (measured); float32 `randn` is not. |
+| RNG as its next 8 draws (`golden.rng_fingerprint`), not the 5 KB Mersenne state | 5,056 B -> 64 B per record | Same position pinned; any extra draw changes it. |
+| One key per quantity: stack per-step values on a step axis (`golden.put_steps`); join per-parameter heads into one tensor | arcagi1 110 -> 57 keys; `exp004` 25 KB -> 13 KB | Same values; per-key pickle overhead (~70-100 B) dominated. |
+| Write with `golden.write_tensors`: one flat tensor per dtype plus a zlib index | arcagi2 `metric_distributed` 300 keys: 25 KB -> 5.3 KB | File size stops growing with key count; still a plain `torch.load`. |
+| Narrow whole small numbers to uint8 (`golden.stored`) | token grids, counters: 8x smaller | Exact; a value that stops being whole changes the dtype, which is reported. |
+| Record carried state once, at the end (ACT latents, final params) | arcagi2 `distributed` 33 KB -> 18.6 KB | Final carried state depends on every step. |
+| Never lzma or other whole-file compression | -- | `bfb_test` `torch.load`s every `.pt`; a compressed one broke it. |
+
+Prove each shrunk golden still bites: perturb one weight by one ULP, or one
+constant, and require a reported mismatch.
+
+### Order is numerics
+
+Parameter REGISTRATION order is part of the computation. A body norm sums
+parameters in that order; under `torch.compile` the float32 reduction landed
+1 ULP differently when a prefix was registered after the blocks instead of
+before. Eager goldens under `host_agnostic_numerics` cannot see this; only the
+compiled comparison did. Match the reference's registration order and pin it
+with a unit test.
+
 ## Protocol
 
 1. Create an isolated checkout of the known-good commit. Read the repository's
