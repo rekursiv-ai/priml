@@ -7,9 +7,10 @@ model and the traffic to read them.
 The two steps are one decision, which is why they are one module: the draws
 happen at full precision and the table is cast AFTER, because sampling straight
 into bfloat16 quantizes every value to its ~3 significant digits and changes the
-table's spread (measured: std 0.0189 against 0.0203 at ``std=0.02``). A caller
-setting ``Embedding.Config.dtype`` gets the quantized table instead, so the
-ordering has to belong to something that owns both steps.
+table's spread (measured: std 0.0189 against 0.0203 at ``std=0.02``). priml's
+``Embedding`` draws through ``call_init``, which already draws in fp32, but
+``inner`` may be any lookup table, so the ordering has to belong to something
+that owns both steps.
 
 A narrowed table makes the model runnable ONLY under autocast, since the
 half-precision stream it emits meets a float32 projection one layer later. That

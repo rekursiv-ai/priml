@@ -252,6 +252,71 @@ def test_truncated_normal_corrected_depth_scaling():
     assert torch.allclose(w3, w0 / 2.0)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    "initializer",
+    [
+        kaiming_uniform,
+        kaiming_normal,
+        xavier_uniform,
+        xavier_normal,
+        normal,
+        truncated_normal,
+        unit_fan_in_uniform,
+        mup_output,
+    ],
+)
+def test_a_narrow_tensor_holds_the_fp32_draw_rounded_once(
+    initializer: Callable[..., None],
+    dtype: torch.dtype,
+) -> None:
+    """``call_init`` draws in fp32 and rounds once, whatever the tensor's dtype.
+
+    Drawn in bf16, torch's CPU generator fills a uniform from 8 random bits
+    (256 values per tensor; fp16 keeps 11) and runs the normal's Box-Muller in
+    bf16, which never passes ~3.3 sigma. The depth scale rides along, so it
+    rounds once too.
+    """
+    torch.manual_seed(0)
+    wide = torch.empty(64, 64)
+    call_init(initializer, wide, depth_index=((3, 4),))
+    torch.manual_seed(0)
+    narrow = torch.empty(64, 64, dtype=dtype)
+    call_init(initializer, narrow, depth_index=((3, 4),))
+    assert torch.equal(narrow, wide.to(dtype))
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float32, torch.float64, torch.int16, torch.bool, torch.complex64],
+)
+def test_other_dtypes_are_initialized_in_place(dtype: torch.dtype) -> None:
+    """Only floats narrower than fp32 widen: every other dtype gets the tensor itself."""
+    tensor = torch.zeros(4, dtype=dtype)
+    seen: list[torch.Tensor] = []
+    call_init(seen.append, tensor)
+    assert len(seen) == 1
+    assert seen[0] is tensor
+
+
+def test_a_bf16_linear_holds_the_fp32_linears_init_rounded_once() -> None:
+    torch.manual_seed(0)
+    wide = Linear.Config(64, 64, bias=True, init_bias=normal).make()
+    torch.manual_seed(0)
+    narrow = Linear.Config(
+        64,
+        64,
+        bias=True,
+        init_bias=normal,
+        dtype=torch.bfloat16,
+    ).make()
+    assert narrow.weight.dtype == torch.bfloat16
+    assert torch.equal(narrow.weight, wide.weight.bfloat16())
+    assert narrow.bias is not None
+    assert wide.bias is not None
+    assert torch.equal(narrow.bias, wide.bias.bfloat16())
+
+
 def test_dirac_conv2d():
     w = torch.empty(8, 8, 3, 3)
     dirac(w)

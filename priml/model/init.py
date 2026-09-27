@@ -10,6 +10,8 @@ import math
 
 from torch import Tensor, nn
 
+import torch
+
 from priml.model.custom_types import DepthIndex, flatten_depth_index
 
 
@@ -26,6 +28,8 @@ InitFn = Callable[[Tensor], object] | DepthAwareInit
 
 def call_init(fn: InitFn, t: Tensor, **kwargs: DepthIndex) -> None:
     """Call init fn, passing kwargs only if the fn accepts them.
+
+    A tensor narrower than fp32 gets fn's fp32 draw, rounded to its dtype once.
 
     Args:
       fn: torch.nn.init function or compatible callable.
@@ -51,6 +55,18 @@ def call_init(fn: InitFn, t: Tensor, **kwargs: DepthIndex) -> None:
             }
     except (ValueError, TypeError):
         kwargs = {}
+    # Only real floats narrower than fp32 (bf16, fp16, fp8) widen: integers,
+    # bools and complex keep the direct call. Drawn in its own dtype, a bf16
+    # tensor gets torch's CPU uniform from 8 random bits (256 values per tensor;
+    # fp16 keeps 11) and a normal whose Box-Muller runs in bf16 and stops near
+    # 3.3 sigma; fp8 has no CPU draws at all. The fp32 draw takes the same
+    # generator steps, so later draws do not shift.
+    if t.is_floating_point() and torch.finfo(t.dtype).bits < 32:
+        wide = t.detach().to(torch.float32)
+        fn(wide, **kwargs)
+        with torch.no_grad():
+            t.copy_(wide)
+        return
     fn(t, **kwargs)
 
 
