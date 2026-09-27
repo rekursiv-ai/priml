@@ -245,6 +245,17 @@ def test_device_mismatch_is_rejected_at_the_actor_boundary() -> None:
 
 
 @pytest.mark.compute_large_fixture
+def test_a_device_named_without_its_index_is_the_same_device() -> None:
+    # A training step on "cuda" names the device without an index while the
+    # evaluation's tensors report "cuda:0"; the CPU spelling of the same pair.
+    actor = _actor()
+    actor.device = torch.device("cpu", 0)
+    score = _score(steps=1)
+    score.update(torch.zeros(2, 43), actor=actor)
+    assert actor.reset_count == 1
+
+
+@pytest.mark.compute_large_fixture
 def test_evaluation_switches_model_mode_once_per_rollout() -> None:
     score = _score(steps=5)
     actor = _actor()

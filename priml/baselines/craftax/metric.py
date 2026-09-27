@@ -26,6 +26,7 @@ from priml.baselines.craftax.data import EvaluationActor
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import evaluation_mode
 from priml.baselines.craftax.game import constants
+from priml.baselines.craftax.restart import RestartOnDemand
 from priml.lib.custom_json import ListCodec
 from priml.math.numeric import shifted_geometric_mean
 
@@ -177,6 +178,10 @@ class CraftaxScore:
         config.device = self.config.device
         config.seed = self.config.seed + self._rollout_index
         config.view = self.config.view
+        # Which worlds a score is measured in is part of what the score means,
+        # so they are drawn on demand as they were for every recorded score,
+        # whatever the training environment's default.
+        config.restart = RestartOnDemand.Config()
         env = config.make()
 
         observation = env.reset()
@@ -185,7 +190,11 @@ class CraftaxScore:
                 f"Evaluation observation_size={observation.shape[-1]} does not match "
                 f"actor observation_size={actor.observation_size}.",
             )
-        if observation.device != actor.device:
+        # Compared where each lands, not as written: a training step on "cuda"
+        # names the current device without its index, while a tensor always
+        # reports one ("cuda:0"), so the literal comparison refused every
+        # evaluation on a GPU.
+        if observation.device != torch.empty(0, device=actor.device).device:
             raise ValueError(
                 f"Evaluation device={observation.device} does not match "
                 f"actor device={actor.device}.",

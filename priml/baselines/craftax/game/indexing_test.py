@@ -41,6 +41,18 @@ def test_gather_past_the_end_reads_the_nearest_edge() -> None:
     assert values.tolist() == [12, 31]
 
 
+def test_gather_wraps_once_then_clamps_on_a_rectangular_grid() -> None:
+    # Three rows, five columns, so a helper that mixed up the two extents reads
+    # the wrong tile. A negative wraps ONCE: -4 rows is -1 after the wrap, which
+    # then clamps to the first row rather than wrapping again.
+    grid = torch.arange(15, dtype=torch.int32).reshape(1, 3, 5)
+    positions = [(-4, -6), (-3, -5), (-1, -2), (2, 7), (5, 3)]
+    values = [
+        int(gather_tiles(grid, torch.tensor([position]))[0]) for position in positions
+    ]
+    assert values == [0, 0, 13, 14, 13]
+
+
 def test_scatter_writes_the_addressed_tile() -> None:
     updated = scatter_tiles(
         _grid(),

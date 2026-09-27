@@ -16,7 +16,7 @@ import torch
 
 from priml.baselines.craftax.game import constants
 from priml.baselines.craftax.game.constants import BlockType
-from priml.baselines.craftax.game.indexing import gather_tiles
+from priml.baselines.craftax.game.indexing import batch_rows, gather_tiles
 from priml.baselines.craftax.game.state import EnvState, Mobs
 
 
@@ -99,10 +99,9 @@ def player_damage(state: EnvState) -> Tensor:
       damage: Damage by element, ``[envs, 3]``.
 
     """
-    physical = torch.tensor(
-        [1.0, 2.0, 3.0, 5.0, 8.0],
-        device=state.device,
-    )[state.inventory.sword.long()]
+    physical = constants.on_device(constants.SWORD_DAMAGE, state.device)[
+        state.inventory.sword.long()
+    ]
     fire = physical * (state.sword_enchantment == 1) * 0.5
     ice = physical * (state.sword_enchantment == 2) * 0.5
     physical = physical * (1 + 0.25 * (state.player_strength - 1))
@@ -246,13 +245,8 @@ def in_bounds(position: Tensor) -> Tensor:
       valid: Boolean tensor, shape ``[envs]``, True for in-bounds tiles.
 
     """
-    rows, columns = constants.MAP_SIZE
-    return (
-        (position[..., 0] >= 0)
-        & (position[..., 0] < rows)
-        & (position[..., 1] >= 0)
-        & (position[..., 1] < columns)
-    )
+    extent = constants.on_device(constants.MAP_EXTENT, position.device)
+    return ((position >= 0) & (position < extent)).all(-1)
 
 
 def is_occupied(state: EnvState, position: Tensor) -> Tensor:
@@ -289,7 +283,7 @@ def can_walk_on(
 
     """
     block = block_at(state, position)
-    solid = constants.SOLID_BLOCK.to(state.device)[block.long()]
+    solid = constants.on_device(constants.SOLID_BLOCK, state.device)[block.long()]
     water = block == int(BlockType.WATER)
     lava = block == int(BlockType.LAVA)
     ground = ~solid & ~water & ~lava
@@ -317,7 +311,8 @@ def is_near_block(state: EnvState, block: int) -> Tensor:
       near: Whether it is adjacent, ``[envs]``.
 
     """
-    neighbours = state.player_position[:, None, :] + constants.CLOSE_BLOCKS.to(
+    neighbours = state.player_position[:, None, :] + constants.on_device(
+        constants.CLOSE_BLOCKS,
         state.device,
     )
     grid = current_map(state)
@@ -388,7 +383,7 @@ def unlock_achievement(state: EnvState, achievement: Tensor, earned: Tensor) -> 
 
     """
     index = achievement.long()
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     updated = state.achievements.clone()
     updated[rows, index] = updated[rows, index] | earned
     return updated
@@ -421,7 +416,7 @@ def attack_mob_class(
       achievements: The updated unlock table.
 
     """
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     positions = _on_level(mobs.position, state.player_level)
     alive = _on_level(mobs.mask, state.player_level)
     present = (positions == position[:, None, :]).all(-1) & alive
@@ -429,7 +424,7 @@ def attack_mob_class(
     target = present.int().argmax(-1)
 
     species = _on_level(mobs.type_id, state.player_level)[rows, target]
-    defense = constants.MOB_DEFENSE.to(state.device)[
+    defense = constants.on_device(constants.MOB_DEFENSE, state.device)[
         state.player_level.long(),
         mob_class,
     ]
@@ -443,7 +438,10 @@ def attack_mob_class(
 
     achievements = unlock_achievement(
         state,
-        constants.MOB_ACHIEVEMENT.to(state.device)[mob_class, species.long()],
+        constants.on_device(constants.MOB_ACHIEVEMENT, state.device)[
+            mob_class,
+            species.long(),
+        ],
         killed & can_unlock,
     )
     return (
@@ -462,4 +460,4 @@ def attack_mob_class(
 
 def _on_level(field: Tensor, level: Tensor) -> Tensor:
     """Select each environment's current floor from a per-level field."""
-    return field[torch.arange(field.shape[0], device=field.device), level.long()]
+    return field[batch_rows(field.shape[0], field.device), level.long()]

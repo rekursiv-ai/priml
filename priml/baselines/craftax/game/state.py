@@ -370,6 +370,41 @@ class EnvState:
 
         return _map_state(gather, self, self)
 
+    def head(self, count: int) -> Self:
+        """Return a view of the first ``count`` environments; writes go through.
+
+        Args:
+          count: Environments the view covers.
+
+        Returns:
+          state: A state whose tensors are views into this one's.
+
+        """
+        return _map_state(lambda mine, _: mine[:count], self, self)
+
+    def shallow_copy(self) -> Self:
+        """Return a new state holding these same tensors.
+
+        A step rebinds the fields of the state it is handed. Handing it a copy
+        keeps THIS state's fields pointing at the memory they had, which is
+        what a CUDA graph replaying against that memory needs; in-place writes
+        still land in the shared tensors.
+
+        Returns:
+          state: New containers around this state's tensors.
+
+        """
+        return _map_state(lambda mine, _: mine, self, self)
+
+    def copy_(self, other: Self) -> None:
+        """Overwrite every tensor with ``other``'s values, in place.
+
+        Args:
+          other: A state of the same shapes; tensors are cast and moved to match.
+
+        """
+        _map_state(Tensor.copy_, self, other)
+
     def state_dict(self) -> dict[str, Tensor]:
         """Return every tensor by dotted name, for checkpointing.
 
@@ -396,6 +431,9 @@ class EnvState:
     def load_state_dict(self, state_dict: Mapping[str, object]) -> None:
         """Restore tensors saved by :meth:`state_dict`, in place.
 
+        Copied into the existing tensors rather than rebinding them, so the
+        state keeps its memory and its device whatever the checkpoint held.
+
         Args:
           state_dict: State dict.
 
@@ -404,7 +442,9 @@ class EnvState:
         for name, value in state.items():
             head, _, tail = name.partition(".")
             target = getattr(self, head) if tail else self
-            setattr(target, tail or head, value)
+            current: object = getattr(target, tail or head)  # pyright: ignore[reportAny] -- dataclass fields are dynamically accessed.
+            assert isinstance(current, Tensor)
+            current.copy_(value)
 
 
 def _map_state[StateT: EnvState](

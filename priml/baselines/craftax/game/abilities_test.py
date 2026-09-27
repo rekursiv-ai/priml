@@ -200,6 +200,18 @@ def test_reading_with_both_spells_known_spends_the_book_on_first_spell(
     assert not read.achievements[0, int(Achievement.LEARN_ICEBALL)]
 
 
+def test_reading_draws_the_spell_even_when_nothing_is_left_to_learn() -> None:
+    # As the reference does. Skipping the draw would need the host to read the
+    # batch first, a stall that also keeps a step out of a CUDA graph.
+    state = _state()
+    state.inventory.books[:] = 1
+    state.learned_spells[:] = True
+    generator = torch.Generator().manual_seed(0)
+    before = generator.get_state()
+    abilities.read_book(state, _act(Action.READ_BOOK), generator=generator)
+    assert not torch.equal(generator.get_state(), before)
+
+
 def test_enchanting_binds_the_table_element_and_spends_its_gem() -> None:
     state = _state()
     state.map[:, 0, 10, 11] = int(BlockType.ENCHANTMENT_TABLE_FIRE)

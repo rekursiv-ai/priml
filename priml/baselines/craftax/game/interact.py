@@ -25,6 +25,7 @@ from priml.baselines.craftax.game.constants import (
     ItemType,
 )
 from priml.baselines.craftax.game.indexing import (
+    batch_rows,
     gather_tiles,
     scatter_tiles_where,
 )
@@ -53,7 +54,9 @@ def interact(
     """
     target = (
         state.player_position
-        + constants.DIRECTIONS.to(state.device)[state.player_direction.long()]
+        + constants.on_device(constants.DIRECTIONS, state.device)[
+            state.player_direction.long()
+        ]
     )
     state, struck = _strike_whatever_stands_there(state, target=target, doing=doing)
     # A blow that lands on a creature does not also mine the tile behind it.
@@ -138,7 +141,7 @@ def _strike_whatever_stands_there(
             killed_monster = killed_monster | (killed & doing)
         killed_any = killed_any | (killed & doing)
 
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     state.mob_map[rows, level] = scatter_tiles_where(
         state.mob_map[rows, level],
@@ -306,7 +309,7 @@ def _open_chest(
     opening = acting & (block == int(BlockType.CHEST))
     state = _add_chest_loot(state, opening=opening, generator=generator)
     state = _replace_block(state, target, int(BlockType.PATH), opening)
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     state.chests_opened[rows, state.player_level.long()] |= opening
     state.achievements = mechanics.unlock_achievement(
         state,
@@ -329,7 +332,7 @@ def _add_chest_loot(
     """Draw and apply chest rewards in upstream evaluation order."""
     device = state.device
     envs = state.num_envs
-    rows = torch.arange(envs, device=device)
+    rows = batch_rows(envs, device)
     levels = state.player_level.long()
     inventory = state.inventory
 
@@ -338,7 +341,7 @@ def _add_chest_loot(
 
     ore_found = torch.rand(envs, generator=generator, device=device) < 0.6
     ore_types = torch.multinomial(
-        torch.tensor([0.3, 0.3, 0.15, 0.125, 0.125], device=device),
+        constants.on_device(constants.CHEST_ORE_WEIGHTS, device),
         envs,
         replacement=True,
         generator=generator,
@@ -357,7 +360,7 @@ def _add_chest_loot(
 
     tool_found = torch.rand(envs, generator=generator, device=device) < 0.2
     tool_ids = torch.randint(0, 2, (envs,), generator=generator, device=device)
-    tool_weights = torch.tensor([0.4, 0.3, 0.2, 0.1], device=device)
+    tool_weights = constants.on_device(constants.CHEST_TOOL_WEIGHTS, device)
     pickaxe_level = (
         torch.multinomial(
             tool_weights,
@@ -461,7 +464,7 @@ def _replace_block(
     applies: Tensor,
 ) -> EnvState:
     """Write one block on the player's floor where ``applies``."""
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     state.map[rows, level] = scatter_tiles_where(
         state.map[rows, level],

@@ -29,7 +29,7 @@ from priml.baselines.craftax.game import (
     world_gen,
 )
 from priml.baselines.craftax.game.constants import Achievement, Action, ItemType
-from priml.baselines.craftax.game.indexing import gather_tiles
+from priml.baselines.craftax.game.indexing import batch_rows, gather_tiles
 
 
 if TYPE_CHECKING:
@@ -134,7 +134,7 @@ def change_floor(state: EnvState, action: Tensor) -> EnvState:
       state: The world with the player moved between floors.
 
     """
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     standing_on = gather_tiles(
         mechanics.current_items(state),
         state.player_position,
@@ -166,7 +166,9 @@ def change_floor(state: EnvState, action: Tensor) -> EnvState:
     )
     state.player_level = state.player_level + delta
 
-    achievement = constants.LEVEL_ACHIEVEMENT.to(state.device)[arrival]
+    achievement = constants.on_device(constants.LEVEL_ACHIEVEMENT, state.device)[
+        arrival
+    ]
     # Only the first arrival on a floor pays: the experience point is for
     # getting there, not for using the ladder.
     first_visit = (arrival != 0) & ~state.achievements[rows, achievement.long()]
@@ -241,5 +243,7 @@ def _reward(
 ) -> Tensor:
     """Score the step: what was achieved, plus a tenth of health gained."""
     newly = (state.achievements.int() - unlocked_before.int()).float()
-    earned = (newly * constants.ACHIEVEMENT_REWARD.to(state.device)).sum(-1)
+    earned = (
+        newly * constants.on_device(constants.ACHIEVEMENT_REWARD, state.device)
+    ).sum(-1)
     return earned + (state.player_health - health_before) * 0.1

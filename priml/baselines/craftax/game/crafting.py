@@ -29,6 +29,7 @@ from priml.baselines.craftax.game.constants import (
     ItemType,
 )
 from priml.baselines.craftax.game.indexing import (
+    batch_rows,
     gather_tiles,
     scatter_tiles_where,
 )
@@ -216,13 +217,15 @@ def place(state: EnvState, action: Tensor) -> EnvState:
     """
     target = (
         state.player_position
-        + constants.DIRECTIONS.to(state.device)[state.player_direction.long()]
+        + constants.on_device(constants.DIRECTIONS, state.device)[
+            state.player_direction.long()
+        ]
     )
     block = mechanics.block_at(state, target)
     item = gather_tiles(mechanics.current_items(state), target)
     free = (
         mechanics.in_bounds(target)
-        & ~constants.SOLID_BLOCK.to(state.device)[block.long()]
+        & ~constants.on_device(constants.SOLID_BLOCK, state.device)[block.long()]
         & (item == int(ItemType.NONE))
         & ~mechanics.is_occupied(state, target)
     )
@@ -318,7 +321,7 @@ def _craft_armour(
                 material,
                 _inventory_tensor(state, material) - amount * making.int(),
             )
-        rows = torch.arange(state.num_envs, device=state.device)
+        rows = batch_rows(state.num_envs, state.device)
         current = state.inventory.armour[rows, slot]
         state.inventory.armour[rows, slot] = torch.where(making, tier, current)
         state.achievements = mechanics.unlock_achievement(
@@ -335,7 +338,7 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
         (action == int(Action.PLACE_TORCH))
         & (state.inventory.torches >= 1)
         & mechanics.in_bounds(target)
-        & constants.CAN_PLACE_ITEM_ON.to(state.device)[
+        & constants.on_device(constants.CAN_PLACE_ITEM_ON, state.device)[
             mechanics.block_at(state, target).long()
         ]
         & (gather_tiles(mechanics.current_items(state), target) == int(ItemType.NONE))
@@ -343,7 +346,7 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
     )
     state.inventory.torches = state.inventory.torches - placing.int()
 
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     state.item_map[rows, level] = scatter_tiles_where(
         state.item_map[rows, level],
@@ -359,7 +362,7 @@ def _place_torch(state: EnvState, target: Tensor, action: Tensor) -> EnvState:
     # Every torch contributes its glow, clipped where light is already full.
     offsets = torch.arange(9, device=state.device) - 4
     squared = offsets[:, None].square() + offsets[None, :].square()
-    glow = constants.TORCH_LIGHT_MAP.to(state.device)
+    glow = constants.on_device(constants.TORCH_LIGHT_MAP, state.device)
     # Match the CPU XLA square-root results used to build upstream's table.
     for distance, value in (
         (2, 0.717157244682312),
@@ -402,7 +405,7 @@ def _sow_plant(state: EnvState, target: Tensor, placing: Tensor) -> EnvState:
     """Record a sown plant so it can ripen over the coming steps."""
     free = ~state.growing_plants_mask
     slot = free.int().argmax(-1)
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     sowing = placing & free.any(-1)
     state.growing_plants_positions[rows, slot] = torch.where(
         sowing[:, None],
@@ -434,7 +437,7 @@ def _write_block(
     applies: Tensor,
 ) -> EnvState:
     """Write one block on the player's floor where ``applies``."""
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     state.map[rows, level] = scatter_tiles_where(
         state.map[rows, level],

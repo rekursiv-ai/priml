@@ -255,6 +255,31 @@ def test_daylight_matches_compiled_reference_exactly() -> None:
     assert torch.equal(daylight(steps).view(torch.int32), expected)
 
 
+@pytest.mark.parametrize(
+    "position",
+    [(0, 0), (0, 47), (47, 0), (47, 47), (3, 44), (4, 4), (24, 24), (43, 43)],
+)
+def test_ladder_light_writes_one_torch_patch_wherever_the_ladder_is(
+    position: tuple[int, int],
+) -> None:
+    # The patch starts four tiles up and left of the ladder; a start off the
+    # top or left edge wraps, and every start is pulled back so all 81 tiles
+    # stay on the map.
+    rows, columns = constants.MAP_SIZE
+    light = torch.rand((1, rows, columns), generator=torch.Generator().manual_seed(0))
+    starts: list[int] = []
+    for coordinate, extent in zip(position, (rows, columns), strict=True):
+        start = coordinate - 4
+        start = start + extent if start < 0 else start
+        starts.append(min(start, extent - 9))
+    expected = light.clone()
+    expected[0, starts[0] : starts[0] + 9, starts[1] : starts[1] + 9] = (
+        constants.TORCH_LIGHT_MAP * (1 - 0.25) + 0.25
+    )
+    actual = _brighten_around(light, torch.tensor([position]), ambient=0.25)
+    assert torch.equal(actual, expected)
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

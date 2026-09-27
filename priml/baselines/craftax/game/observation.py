@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import functools
+
 from torch import Tensor
 from torch.nn import functional
 
@@ -23,7 +25,7 @@ import torch
 
 from priml.baselines.craftax.game import constants, mechanics
 from priml.baselines.craftax.game.constants import BlockType, ItemType
-from priml.baselines.craftax.game.indexing import local_view
+from priml.baselines.craftax.game.indexing import batch_rows, local_view
 
 
 if TYPE_CHECKING:
@@ -126,10 +128,7 @@ def _render_mobs(state: EnvState, *, view: tuple[int, int]) -> Tensor:
         (state.num_envs, rows, columns, 5 * 8),
         device=state.device,
     )
-    corner = state.player_position - torch.tensor(
-        [rows // 2, columns // 2],
-        device=state.device,
-    )
+    corner = state.player_position - _half_view(view, state.device)
     classes = (
         state.melee_mobs,
         state.passive_mobs,
@@ -139,7 +138,7 @@ def _render_mobs(state: EnvState, *, view: tuple[int, int]) -> Tensor:
     )
     # Plane order matches upstream: melee 0, passive 1.
     encoded_class = (0, 1, 2, 3, 4)
-    index = torch.arange(state.num_envs, device=state.device)
+    index = batch_rows(state.num_envs, state.device)
     for mobs, plane in zip(classes, encoded_class, strict=True):
         level = state.player_level.long()
         for slot in range(mobs.mask.shape[-1]):
@@ -164,6 +163,14 @@ def _render_mobs(state: EnvState, *, view: tuple[int, int]) -> Tensor:
                 visible.float(),
             )
     return planes
+
+
+# Cached because a tensor built from Python numbers is copied from the host at every
+# call, which a CUDA graph cannot capture; the view is fixed for an environment's life.
+@functools.cache
+def _half_view(view: tuple[int, int], device: torch.device) -> Tensor:
+    """Return the offset from the player to the view's top-left tile."""
+    return torch.tensor([view[0] // 2, view[1] // 2], device=device)
 
 
 def _render_player(state: EnvState) -> Tensor:
@@ -209,7 +216,7 @@ def _render_player(state: EnvState) -> Tensor:
         ),
         dim=-1,
     )
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     condition = torch.stack(
         (
             state.light_level,

@@ -40,9 +40,9 @@ def move_player(state: EnvState, action: Tensor) -> EnvState:
       state: The world with the player moved and facing.
 
     """
-    step = constants.DIRECTIONS.to(state.device)[action.long()]
+    step = constants.on_device(constants.DIRECTIONS, state.device)[action.long()]
     proposed = state.player_position + step
-    land = torch.tensor([False, True, True], device=state.device).expand(
+    land = constants.on_device(constants.PLAYER_COLLIDES_WITH, state.device).expand(
         state.num_envs,
         3,
     )

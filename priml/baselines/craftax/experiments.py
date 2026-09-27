@@ -203,7 +203,13 @@ def exp001() -> CraftaxTrainLoop:
       open-ended reinforcement learning.
 
     Results:
-      TBD. The JAX port of this recipe measured 11.867% at seed 42.
+      12.07% normalized return at seed 42 (final evaluation over 1,102
+      episodes; score 6.56%, achievements 31.9%), matching the official
+      Craftax_Baselines run on the same cluster (12.16%, mean of seeds 42/43/44,
+      from its training return) and the JAX port's 11.867%. Trained with CUDA
+      graphs and on-demand worlds in 7.7 h on one H200 (~36k transitions/s
+      including checkpoints); the reserve-world default runs about 1.5x faster.
+      The official JAX code trains at ~155k transitions/s on the same GPU.
 
     """
     cfg = exp000()
@@ -370,8 +376,8 @@ def exp011() -> CraftaxTrainLoop:
       pool. Both were ways to get around XLA's static shapes, and neither has
       anything to work around here: ``lax.scan`` exists to keep an eval loop
       off the host, which a torch loop never leaves, and the fixed reset pool
-      approximated a count this environment simply takes (see
-      ``CraftaxEnv._restart``). Optimistic reset, the third treatment, is
+      approximated a count this environment can simply take
+      (``restart.RestartOnDemand``). Optimistic reset, the third treatment, is
       carried directly as ``optimistic_reset_ratio``.
 
     Returns:

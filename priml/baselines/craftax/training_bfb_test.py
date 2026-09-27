@@ -33,6 +33,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.craftax.restart import RestartOnDemand
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
 from priml.train.parallelism import NoParallel
@@ -143,6 +144,9 @@ def _build_trace() -> nn.Module:
     # Pinned, not defaulted: compiling changes which random numbers are drawn,
     # so a golden minted uncompiled cannot be replayed compiled.
     config.compile = None
+    # Pinned for the same reason: dealing fresh worlds from a reserve draws
+    # them at different times, so its random numbers are not this golden's.
+    config.env.restart = RestartOnDemand.Config()
     config.seed = 7
     return _PPOTrace(config.make())
 

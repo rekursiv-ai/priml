@@ -22,7 +22,10 @@ from priml.baselines.craftax.game.constants import (
     BlockType,
     ProjectileType,
 )
-from priml.baselines.craftax.game.indexing import scatter_tiles_where
+from priml.baselines.craftax.game.indexing import (
+    batch_rows,
+    scatter_tiles_where,
+)
 
 
 if TYPE_CHECKING:
@@ -53,7 +56,7 @@ def drink_potion(state: EnvState, action: Tensor) -> EnvState:
         Action.DRINK_POTION_CYAN,
         Action.DRINK_POTION_YELLOW,
     )
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     drinking = torch.zeros(state.num_envs, dtype=torch.bool, device=state.device)
     colour = torch.zeros(state.num_envs, dtype=torch.long, device=state.device)
     for index, potion in enumerate(colours):
@@ -104,7 +107,7 @@ def shoot_arrow(state: EnvState, action: Tensor) -> EnvState:
 
     """
     has_projectile_slot = ~state.player_projectiles.mask[
-        torch.arange(state.num_envs, device=state.device),
+        batch_rows(state.num_envs, state.device),
         state.player_level.long(),
     ].all(-1)
     firing = (
@@ -145,7 +148,7 @@ def cast_spell(state: EnvState, action: Tensor) -> EnvState:
       state: The world with the spell cast.
 
     """
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     has_projectile_slot = (
         ~state.player_projectiles.mask[rows, state.player_level.long()]
     ).any(-1)
@@ -201,19 +204,15 @@ def read_book(
     reading = (action == int(Action.READ_BOOK)) & (state.inventory.books > 0)
     unknown = ~state.learned_spells
     # A book teaches something new where it can; with both known it is spent
-    # on the first slot, as the reference does.
-    has_unknown = unknown.any(-1)
-    if bool(has_unknown.any()):
-        weights = torch.where(
-            has_unknown[:, None],
-            unknown.float(),
-            torch.tensor([1.0, 0.0], device=state.device),
-        )
-        spell = torch.multinomial(weights, 1, generator=generator).squeeze(-1)
-    else:
-        spell = torch.zeros(state.num_envs, dtype=torch.long, device=state.device)
+    # on the first slot, as the reference does. The draw happens even when no
+    # environment has anything left to learn, as the reference's does: skipping
+    # it would mean reading the batch on the host, a stall that also keeps the
+    # step out of a CUDA graph.
+    first_slot = torch.arange(2, device=state.device) == 0
+    weights = torch.where(unknown.any(-1, keepdim=True), unknown, first_slot)
+    spell = torch.multinomial(weights.float(), 1, generator=generator).squeeze(-1)
 
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     state.learned_spells[rows, spell] = state.learned_spells[rows, spell] | reading
     state.inventory.books = state.inventory.books - reading.int()
     for index, achievement in (
@@ -251,7 +250,9 @@ def enchant(
     """
     target = (
         state.player_position
-        + constants.DIRECTIONS.to(state.device)[state.player_direction.long()]
+        + constants.on_device(constants.DIRECTIONS, state.device)[
+            state.player_direction.long()
+        ]
     )
     block = mechanics.block_at(state, target)
     fire_table = block == int(BlockType.ENCHANTMENT_TABLE_FIRE)
@@ -291,7 +292,7 @@ def enchant(
         torch.ones_like(candidates),
     )
     piece = torch.multinomial(candidates, 1, generator=generator).squeeze(-1)
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     state.armour_enchantments[rows, piece] = torch.where(
         on_armour,
         element.int(),
@@ -358,7 +359,7 @@ def grow_plants(state: EnvState) -> EnvState:
     ) * state.growing_plants_mask.int()
     ripe = state.growing_plants_age >= 600
 
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     grid = state.map[rows, level]
     for slot in range(state.growing_plants_mask.shape[-1]):
@@ -379,13 +380,15 @@ def grow_plants(state: EnvState) -> EnvState:
 def _launch(state: EnvState, *, firing: Tensor, kind: Tensor) -> EnvState:
     """Put one of the player's projectiles into a free slot."""
     projectiles = state.player_projectiles
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     free = projectiles.mask[rows, level]
     slot = (~free).int().argmax(-1)
     firing = firing & (~free).any(-1)
 
-    heading = constants.DIRECTIONS.to(state.device)[state.player_direction.long()]
+    heading = constants.on_device(constants.DIRECTIONS, state.device)[
+        state.player_direction.long()
+    ]
     projectiles.position[rows, level, slot] = torch.where(
         firing[:, None],
         state.player_position.int(),

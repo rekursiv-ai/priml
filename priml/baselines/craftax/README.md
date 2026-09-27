@@ -52,6 +52,28 @@ an installation.
 exists nowhere in the code, so it can neither be rerun nor compared. Write a
 fork instead; that is what they are for.
 
+## Speed
+
+On a GPU a step of this environment is thousands of kernels, each too small to
+occupy the device, so launching them -- not running them -- is what a step
+costs. The environment's step, the policy's action step, and the whole PPO
+update (every epoch, minibatch, and optimizer step) are therefore captured once
+as CUDA graphs and replayed. The environment's graphs run the same kernels and
+draw the same random numbers as stepping eagerly, so they are bit-identical to
+it. The update's graph runs Adam in its capturable form, which rounds
+differently in the last bit. ``cuda_graphs = False`` on the environment or the
+step runs eagerly; on a CPU there is nothing to capture.
+
+Generating fresh worlds for finished workers is the other large cost, and it is
+paid per call rather than per world. ``restart`` chooses when it is paid:
+``RestartFromReserve`` (the default) generates a pool at a time and deals from
+it until it runs out; ``RestartOnDemand`` generates exactly the worlds each
+step needs and is what every golden was minted with. Both deal worlds from the
+same generator and the same distribution, and exp011 trained to scores within
+seed noise of each other under the two; they consume the random numbers in a
+different order, so they do not reproduce each other bit for bit. The
+evaluation always draws on demand.
+
 ## Experiments
 
 `exp000` is the baseline and is frozen: improvements land as forks, never as
@@ -85,6 +107,8 @@ of them were workarounds for XLA's static shapes, which do not exist here.
 | `game/` | The game: rules, world generation, and the symbolic observation |
 | `game/render/` | Watching it: sprites, a pygame viewer, keyboard play, video |
 | `env.py` | The learner's view: batched reset, step, and auto-restart |
+| `restart.py` | When finished workers' fresh worlds are generated |
+| `cuda_graph.py` | Replaying a step's thousands of kernels as one CUDA graph |
 | `model.py`, `rnn.py`, `gtrxl.py`, `pqn.py` | The four networks |
 | `*_train_step.py` | PPO, recurrent PPO, windowed PPO, and Q-learning |
 | `metric.py` | Normalized return and the Crafter achievement score |

@@ -51,6 +51,12 @@ def _day_reciprocal() -> float:
 # toward zero.
 _DAY_RECIPROCAL: Final = _day_reciprocal()
 
+_LAVA_GLOW: Final = torch.tensor([[0.2, 0.7, 0.2], [0.7, 1.0, 0.7], [0.2, 0.7, 0.2]])
+"""Light lava casts on its own tile and its eight neighbours."""
+
+_ADJACENCY: Final = torch.tensor([[0.0, 1.0, 0.0], [1.0, 1.0, 1.0], [0.0, 1.0, 0.0]])
+"""A tile and its four orthogonal neighbours."""
+
 
 def generate_world(
     *,
@@ -70,8 +76,7 @@ def generate_world(
 
     """
     state = empty_state(num_envs=num_envs, device=device)
-    rows, columns = constants.MAP_SIZE
-    player_position = torch.tensor([rows // 2, columns // 2], device=device)
+    player_position = constants.on_device(constants.PLAYER_SPAWN, device)
     state.player_position = player_position.expand(num_envs, 2).contiguous().int()
 
     for level, config in enumerate(LEVEL_CONFIGS):
@@ -262,13 +267,9 @@ def generate_smooth_world(
     if config.lava == BlockType.LAVA:
         # Lava lights its surroundings. The kernel is symmetric, so a
         # cross-correlation is the same as the convolution the reference uses.
-        glow = torch.tensor(
-            [[0.2, 0.7, 0.2], [0.7, 1.0, 0.7], [0.2, 0.7, 0.2]],
-            device=device,
-        )
         light = light + functional.conv2d(
             lava.float().unsqueeze(1),
-            glow[None, None],
+            constants.on_device(_LAVA_GLOW, device)[None, None],
             padding=1,
         ).squeeze(1)
     return blocks.int(), items.int(), light.clamp(0.0, 1.0), down_ladder, up_ladder
@@ -336,7 +337,9 @@ def generate_dungeon(
             1,
             generator=generator,
         ).squeeze(-1)
-        room_chunks[environments, selected_chunk] = 0
+        # ``scatter_`` rather than an indexed assignment of 0, which would copy
+        # the scalar from the host -- a copy a CUDA graph cannot capture.
+        room_chunks.scatter_(1, selected_chunk[:, None], 0.0)
         chunk_position = (
             torch.stack(
                 (selected_chunk % chunks_across, selected_chunk // chunks_across),
@@ -402,14 +405,10 @@ def generate_dungeon(
 
     # A wall touching a corridor is masonry; one buried behind other walls is
     # never seen, so it reads as darkness instead.
-    adjacency = torch.tensor(
-        [[0.0, 1.0, 0.0], [1.0, 1.0, 1.0], [0.0, 1.0, 0.0]],
-        device=device,
-    )
     near_path = (
         functional.conv2d(
             (blocks != int(BlockType.WALL)).float().unsqueeze(1),
-            adjacency[None, None],
+            constants.on_device(_ADJACENCY, device)[None, None],
             padding=1,
         ).squeeze(1)
         > 0.5
@@ -583,7 +582,10 @@ def _carve_corridor(
 
 def _brighten_around(light: Tensor, position: Tensor, *, ambient: float) -> Tensor:
     """Raise the light around an ascent so its tile is never pitch dark."""
-    glow = constants.TORCH_LIGHT_MAP.to(light.device) * (1 - ambient) + ambient
+    glow = (
+        constants.on_device(constants.TORCH_LIGHT_MAP, light.device) * (1 - ambient)
+        + ambient
+    )
     row_start = position[:, 0] - 4
     row_start = torch.where(row_start < 0, light.shape[-2] + row_start, row_start)
     row_start = row_start.clamp(max=light.shape[-2] - 9)
@@ -594,15 +596,14 @@ def _brighten_around(light: Tensor, position: Tensor, *, ambient: float) -> Tens
         column_start,
     )
     column_start = column_start.clamp(max=light.shape[-1] - 9)
-    for row_offset in range(9):
-        for column_offset in range(9):
-            tile = torch.stack(
-                (row_start + row_offset, column_start + column_offset),
-                dim=-1,
-            )
-            light = scatter_tiles(
-                light,
-                tile,
-                glow[row_offset, column_offset].expand(light.shape[0]),
-            )
-    return light
+    # The patch is written in ONE indexed assignment, not eighty-one scatters: the
+    # loop was more than half of every world generated. The clamps above keep all
+    # 81 tiles on the map and distinct, which is what makes a single write equal to
+    # the sequence -- two writes to one tile in one assignment land in no fixed order.
+    offsets = torch.arange(9, device=light.device)
+    patch_rows = row_start.long()[:, None, None] + offsets[None, :, None]
+    patch_columns = column_start.long()[:, None, None] + offsets[None, None, :]
+    env = torch.arange(light.shape[0], device=light.device)[:, None, None]
+    brightened = light.clone()
+    brightened[env, patch_rows, patch_columns] = glow
+    return brightened

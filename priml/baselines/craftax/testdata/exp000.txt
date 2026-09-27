@@ -39,7 +39,9 @@ CraftaxTrainLoop(
                 │               device='auto',
                 │               seed=42,
                 │               view=(9, 11),
-                │               optimistic_reset_ratio=16
+                │               optimistic_reset_ratio=16,
+                │               restart=RestartFromReserve.Config(),
+                │               cuda_graphs=True
                 │       ),
                 │       rollout_steps=16,
                 │       num_epochs=4,
@@ -53,7 +55,8 @@ CraftaxTrainLoop(
                 │       entropy_coefficient=0.01,
                 │       value_coefficient=0.5,
                 │       max_grad_norm=1.0,
-                │       seed=42
+                │       seed=42,
+                │       cuda_graphs=True
                 ),
                 dataset=CraftaxRollouts.Config(updates_per_epoch=244, eval_batches=1),
                 metrics_train={},

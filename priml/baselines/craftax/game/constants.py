@@ -7,8 +7,9 @@ reason -- an experiment that wants different numbers is playing a different
 game, not running a variant.
 
 Tables are indexed by the enum values below, so ``SOLID_BLOCK[BlockType.STONE]``
-reads as the question it answers. Every table is a CPU tensor; a caller moves
-what it needs to its device once, at construction.
+reads as the question it answers. Every table is a CPU tensor, and a caller
+reads it through ``on_device``, which copies each table to a device once rather
+than at every use.
 
 References:
     https://arxiv.org/abs/2402.16801
@@ -21,6 +22,8 @@ from __future__ import annotations
 
 from enum import IntEnum
 from typing import Final
+
+import functools
 
 from torch import Tensor
 
@@ -290,6 +293,21 @@ CLOSE_BLOCKS: Final = torch.tensor(
 )
 """The eight neighbors of a tile, orthogonal first."""
 
+MAP_EXTENT: Final = torch.tensor(MAP_SIZE)
+"""``MAP_SIZE`` as a table, to compare ``(row, column)`` positions against."""
+
+PLAYER_SPAWN: Final = torch.tensor([MAP_SIZE[0] // 2, MAP_SIZE[1] // 2])
+"""The tile every episode starts the player on: the center of each floor."""
+
+SWORD_DAMAGE: Final = torch.tensor([1.0, 2.0, 3.0, 5.0, 8.0])
+"""Physical damage of a bare hand and of each sword tier, indexed by the tier."""
+
+CHEST_ORE_WEIGHTS: Final = torch.tensor([0.3, 0.3, 0.15, 0.125, 0.125])
+"""Odds of a chest's ore being coal, iron, diamond, sapphire, or ruby."""
+
+CHEST_TOOL_WEIGHTS: Final = torch.tensor([0.4, 0.3, 0.2, 0.1])
+"""Odds of a chest's pickaxe or sword being wood, stone, iron, or diamond."""
+
 SOLID_BLOCK: Final = torch.zeros(len(BlockType), dtype=torch.bool).index_fill_(
     0,
     torch.tensor(
@@ -391,6 +409,9 @@ MOB_COLLIDES_WITH: Final = torch.tensor(
     dtype=torch.bool,
 )
 """Per floor and mob class, whether ``(path, water, lava)`` blocks movement."""
+
+PLAYER_COLLIDES_WITH: Final = torch.tensor(_LAND)
+"""Whether ``(path, water, lava)`` blocks the player, who walks like the land mobs."""
 
 MOB_DAMAGE: Final = torch.tensor(
     [
@@ -588,3 +609,22 @@ def _torch_light_map() -> Tensor:
 
 TORCH_LIGHT_MAP: Final = _torch_light_map()
 """Light contributed by a torch, brightest at its own tile."""
+
+
+# A step reads these tables hundreds of times, and moving one from the host at each
+# read is a copy from pageable memory that a CUDA graph cannot capture. Keyed on the
+# table object itself, so only long-lived tables belong here.
+@functools.cache
+def on_device(table: Tensor, device: torch.device) -> Tensor:
+    """Return ``table`` on ``device``, copied the first time it is asked for.
+
+    Args:
+      table: A CPU table that lives as long as the process, as a module
+        constant does; a temporary would be pinned in the cache forever.
+      device: Device the caller computes on.
+
+    Returns:
+      table: The same values on ``device``; the table itself on the CPU.
+
+    """
+    return table.to(device)

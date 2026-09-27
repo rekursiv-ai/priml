@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest import mock
 
+import copy
+
 from torch import Tensor
 
 import pytest
@@ -12,11 +14,20 @@ import torch
 
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.game import constants, observation, world_gen
+from priml.baselines.craftax.restart import (
+    RestartFromReserve,
+    RestartOnDemand,
+)
 from priml.data.environment import BatchedEnvironmentProtocol
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from configgle import Makeable
+
     from priml.baselines.craftax.game.state import EnvState
+    from priml.baselines.craftax.restart import RestartPolicy
 
 
 pytestmark = pytest.mark.compute_large_fixture
@@ -36,6 +47,8 @@ def _env(
     # One world per worker by default: most tests here assert on WHICH world a
     # restarted worker got, and sharing would make that ambiguous.
     config.optimistic_reset_ratio = reset_ratio
+    # On demand, because these tests count the worlds each step generates.
+    config.restart = RestartOnDemand.Config()
     return config.make()
 
 
@@ -324,6 +337,114 @@ def test_an_empty_view_is_refused() -> None:
     config.view = (0, 11)
     with pytest.raises(ValueError, match="view"):
         config.make()
+
+
+def test_a_reserve_generates_a_whole_pool_then_deals_from_it() -> None:
+    env = _reserve_env()
+    env.reset()
+    spy = _GenerationSpy()
+    env.state.player_health[0] = 0.0
+    with mock.patch.object(world_gen, "generate_world", spy):
+        env.step(_actions(env, 4))
+    first = env.state.map[0].clone()
+    env.state.player_health[1] = 0.0
+    with mock.patch.object(world_gen, "generate_world", spy):
+        env.step(_actions(env, 4, 1))
+    assert spy.generated == [4]
+    # The second worker took the NEXT world of the pool, not the first again.
+    assert not torch.equal(env.state.map[1], first)
+    assert int(env.state.timestep[1]) == 0
+
+
+def test_a_reserve_refills_when_too_few_worlds_remain() -> None:
+    env = _reserve_env()
+    env.reset()
+    spy = _GenerationSpy()
+    env.state.player_health[:3] = 0.0
+    with mock.patch.object(world_gen, "generate_world", spy):
+        env.step(_actions(env, 4))
+    env.state.player_health[1:3] = 0.0
+    with mock.patch.object(world_gen, "generate_world", spy):
+        env.step(_actions(env, 4, 1))
+    assert spy.generated == [4, 4]
+
+
+def test_a_checkpoint_resumes_the_identical_episode_from_a_reserve() -> None:
+    # The pool's unused worlds and where dealing stopped are part of the world:
+    # a resumed run must hand the next finished worker the same fresh world.
+    env = _reserve_env(seed=9)
+    env.reset()
+    env.state.player_health[0] = 0.0
+    env.step(_actions(env, 4))
+    saved = copy.deepcopy(env.state_dict())
+    env.state.player_health[2] = 0.0
+    expected = env.step(_actions(env, 4, 1)).observation
+
+    resumed = _reserve_env(seed=9)
+    resumed.load_state_dict(saved)
+    resumed.state.player_health[2] = 0.0
+    assert torch.equal(resumed.step(_actions(resumed, 4, 1)).observation, expected)
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("restart", [RestartOnDemand.Config, RestartFromReserve.Config])
+def test_cuda_graphs_step_bit_for_bit_like_eager(
+    restart: Callable[[], Makeable[RestartPolicy]],
+) -> None:
+    envs: list[CraftaxEnv] = []
+    for graphs in (False, True):
+        config = CraftaxEnv.Config()
+        config.num_envs = 16
+        config.device = "cuda"
+        config.optimistic_reset_ratio = 4
+        config.restart = restart()
+        config.cuda_graphs = graphs
+        envs.append(config.make())
+    eager, graphed = envs
+    assert torch.equal(eager.reset(), graphed.reset())
+    generator = torch.Generator(device="cuda").manual_seed(1)
+    for index in range(24):
+        actions = torch.randint(0, 43, (16,), generator=generator, device="cuda")
+        for env in envs:
+            env.state.player_health[index % 16] = 0.0
+            env.state.player_health[(5 * index) % 16] = 0.0
+        a, b = eager.step(actions), graphed.step(actions)
+        assert torch.equal(a.observation, b.observation), index
+        assert torch.equal(a.reward, b.reward), index
+        assert torch.equal(a.done, b.done), index
+    for name, value in eager.state.state_dict().items():
+        assert torch.equal(value, graphed.state.state_dict()[name]), name
+
+
+def _reserve_env(*, seed: int = 0) -> CraftaxEnv:
+    """Four workers sharing a pool of four worlds dealt from a reserve."""
+    config = CraftaxEnv.Config()
+    config.view = (3, 3)
+    config.num_envs = 4
+    config.device = "cpu"
+    config.seed = seed
+    config.optimistic_reset_ratio = 1
+    config.restart = RestartFromReserve.Config()
+    return config.make()
+
+
+class _GenerationSpy:
+    """Records the batch size of every world generation, then performs it."""
+
+    def __init__(self) -> None:
+        self.generated: list[int] = []
+        self._generate = world_gen.generate_world
+
+    def __call__(
+        self,
+        *,
+        num_envs: int,
+        generator: torch.Generator | None = None,
+        device: torch.device,
+    ) -> EnvState:
+        self.generated.append(num_envs)
+        return self._generate(num_envs=num_envs, generator=generator, device=device)
 
 
 if __name__ == "__main__":

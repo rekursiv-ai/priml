@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, override
+
 import copy
 import math
 
@@ -16,6 +18,10 @@ from priml.optimizers import learning_rate
 from priml.testing.fixtures import torch_compiler_isolation
 from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 pytestmark = pytest.mark.compute_training
@@ -289,6 +295,59 @@ def test_compiling_agrees_with_eager_to_float32_rounding() -> None:
 
     eager = loss(compiled=False)
     assert loss(compiled=True) == pytest.approx(eager, abs=1e-6)
+
+
+def test_cuda_graphs_leave_a_cpu_step_eager() -> None:
+    # Nothing to capture on a CPU, so the optimizer keeps its eager form -- the
+    # one the golden was minted with.
+    step = _config(cuda_graphs=True).make()
+    assert isinstance(step, CraftaxTrainStep)
+    group = step.optimizer.param_groups[0]
+    assert isinstance(group["lr"], float)
+    assert not group["capturable"]
+    step.train_step()
+    assert isinstance(group["lr"], float)
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_a_graphed_update_replays_the_eager_procedures_bit_for_bit() -> None:
+    """The graphs change launches, not arithmetic -- across a checkpoint too.
+
+    The eager twin keeps the graphed step's capturable Adam, which is the one
+    numerical difference graphs bring; everything else must match exactly,
+    including after a load replaces the optimizer state the graph addressed.
+    """
+    steps: list[CraftaxTrainStep] = []
+    for step_class in (CraftaxTrainStep, _EagerProcedures):
+        config = _config(cuda_graphs=True, seed=3)
+        config.parallelism = NoParallel.Config(device="cuda")
+        config.env.device = "cuda"
+        config.env.num_envs = 8
+        config.rollout_steps = 4
+        config.num_minibatches = 2
+        steps.append(step_class(config.copy_tree().finalize()))
+    for step in steps:
+        step.train_step()
+        saved = copy.deepcopy(step.state_dict())
+        step.train_step()
+        step.load_state_dict(saved)
+        step.train_step()
+    graphed, eager = steps
+    for mine, theirs in zip(
+        graphed.model.parameters(),
+        eager.model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(mine, theirs)
+
+
+class _EagerProcedures(CraftaxTrainStep):
+    """The graphed step's procedures, called directly instead of replayed."""
+
+    @override
+    def _procedure(self, procedure: Callable[[], None]) -> Callable[[], None]:
+        return procedure
 
 
 def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:

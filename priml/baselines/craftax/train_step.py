@@ -10,6 +10,13 @@ describes.
 The step owns the environment rather than receiving batches, because on-policy
 data cannot be prepared in advance: the next observation depends on the action
 this policy just chose.
+
+On a GPU the policy's action step and the whole update -- every epoch, every
+minibatch, every optimizer step -- are replayed as CUDA graphs (``cuda_graph``),
+so an update costs one launch instead of Python per minibatch. What a graph
+reads and writes must keep its memory, which is why the rollout, the policy's
+outputs, and the update's results live in buffers allocated once and
+overwritten in place.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from torch import Tensor
 
 import torch
 
+from priml.baselines.craftax.cuda_graph import CudaGraphed
 from priml.baselines.craftax.env import CraftaxEnv
 from priml.baselines.craftax.evaluation import (
     evaluation_mode,
@@ -38,7 +46,6 @@ from priml.loss.policy_gradient import (
 )
 from priml.math.advantage import explained_variance, generalized_advantage
 from priml.math.schedules import linear
-from priml.optimizers.lr import learning_rate
 from priml.train.train_step import TrainStep
 
 
@@ -87,6 +94,39 @@ class Rollout:
         self.done = done
         self.advantage = advantage
         self.target = target
+
+    @classmethod
+    def zeros(
+        cls,
+        *,
+        steps: int,
+        envs: int,
+        observation_size: int,
+        device: torch.device,
+    ) -> Self:
+        """Allocate a rollout to fill one step at a time, reused every update.
+
+        Args:
+          steps: Environment steps per worker.
+          envs: Parallel workers.
+          observation_size: Width of one observation.
+          device: Device the rollout lives on.
+
+        Returns:
+          rollout: Zero-filled storage.
+
+        """
+        shape = (steps, envs)
+        return cls(
+            observation=torch.zeros((*shape, observation_size), device=device),
+            action=torch.zeros(shape, dtype=torch.int64, device=device),
+            log_prob=torch.zeros(shape, device=device),
+            value=torch.zeros(shape, device=device),
+            reward=torch.zeros(shape, device=device),
+            done=torch.zeros(shape, dtype=torch.bool, device=device),
+            advantage=torch.zeros(shape, device=device),
+            target=torch.zeros(shape, device=device),
+        )
 
     def minibatches(
         self,
@@ -184,6 +224,15 @@ class CraftaxTrainStep(TrainStep):
         seed: int = 0
         """Seed for action sampling and minibatch shuffling."""
 
+        cuda_graphs: bool = True
+        """Replay the action step and the whole update as CUDA graphs on a GPU.
+
+        The graphed update runs Adam in its capturable form, which keeps the
+        step count and learning rate on the device and rounds differently from
+        the eager optimizer in the last bit: a run with this on does not
+        reproduce one with it off bit for bit. Off, and on a CPU, the update
+        runs eagerly with the eager optimizer."""
+
         @override
         def finalize(self) -> Self:
             # The environment renders the observations the model consumes and
@@ -261,6 +310,32 @@ class CraftaxTrainStep(TrainStep):
         self._finished_returns: list[float] = []
         self._finished_lengths: list[int] = []
 
+        workers = self._observation.shape[0]
+        self._rollout = Rollout.zeros(
+            steps=config.rollout_steps,
+            envs=workers,
+            observation_size=self._observation.shape[1],
+            device=self.device,
+        )
+        # What the procedures read and store; see ``_act`` and ``_update``.
+        self._policy_input = torch.zeros_like(self._observation)
+        self._action = torch.zeros(workers, dtype=torch.int64, device=self.device)
+        self._log_prob = torch.zeros(workers, device=self.device)
+        self._value = torch.zeros(workers, device=self.device)
+        self._update_scalars = torch.zeros(6, device=self.device)
+        self._update_loss = torch.zeros((), device=self.device)
+        self._update_logits = torch.zeros(0, device=self.device)
+
+        self._cuda_graphs = config.cuda_graphs and self.device.type == "cuda"
+        if self._cuda_graphs:
+            _make_capturable(
+                self._adam.param_groups,
+                self._adam.state,
+                self.device,
+            )
+        self._act_procedure = self._procedure(self._act)
+        self._update_procedure = self._procedure(self._update)
+
     @property
     @override
     def model(self) -> ActorCritic:
@@ -301,12 +376,12 @@ class CraftaxTrainStep(TrainStep):
         """
         del batch
         rollout = self.collect()
-        self._set_learning_rate()
+        rate = self._set_learning_rate()
         # The timer brackets the update, so ``global_step`` and the budget
         # clock advance exactly as they do for every other recipe -- one
         # tick per PPO update, however many optimizer calls it makes.
         with self.timer_step:
-            metrics: dict[str, float | Tensor] = self._optimize(rollout)
+            metrics: dict[str, float | Tensor] = self._optimize(rate)
 
         metrics.update(self._episode_metrics())
         metrics["explained_variance"] = float(
@@ -324,62 +399,37 @@ class CraftaxTrainStep(TrainStep):
 
         Returns:
           rollout: The collected experience, already scored with advantages.
+            The step's own storage, overwritten by the next collection.
 
         """
-        observations: list[Tensor] = []
-        actions: list[Tensor] = []
-        log_probs: list[Tensor] = []
-        values: list[Tensor] = []
-        rewards: list[Tensor] = []
-        dones: list[Tensor] = []
+        rollout = self._rollout
+        for step in range(self.config.rollout_steps):
+            self._policy_input.copy_(self._observation)
+            self._act_procedure()
+            rollout.observation[step].copy_(self._observation)
+            rollout.action[step].copy_(self._action)
+            rollout.log_prob[step].copy_(self._log_prob)
+            rollout.value[step].copy_(self._value)
 
-        for _ in range(self.config.rollout_steps):
-            logits, value = self.model(self._observation)
-            log_probs_all = logits.log_softmax(-1)
-            # Sampled through the step's own generator rather than
-            # ``Categorical.sample``, which draws from the global stream: a
-            # run must replay from its seed regardless of what else in the
-            # process has consumed randomness.
-            action = torch.multinomial(
-                log_probs_all.exp(),
-                1,
-                generator=self._generator,
-            ).squeeze(-1)
-
-            observations.append(self._observation)
-            actions.append(action)
-            log_probs.append(log_probs_all.gather(-1, action[:, None])[:, 0])
-            values.append(value)
-
-            transition = self.env.step(action)
+            transition = self.env.step(self._action)
             self._observation = transition.observation
             self._done = transition.done
-            rewards.append(transition.reward)
-            dones.append(transition.done)
+            rollout.reward[step].copy_(transition.reward)
+            rollout.done[step].copy_(transition.done)
             self._record_episodes(transition.reward, transition.done)
 
         _, last_value = self.model(self._observation)
-        reward = torch.stack(rewards)
-        value = torch.stack(values)
-        done = torch.stack(dones)
         advantage, target = generalized_advantage(
-            rewards=reward,
-            values=value,
-            dones=done,
+            rewards=rollout.reward,
+            values=rollout.value,
+            dones=rollout.done,
             last_value=last_value,
             discount=self.config.discount,
             trace_decay=self.config.trace_decay,
         )
-        return Rollout(
-            observation=torch.stack(observations),
-            action=torch.stack(actions),
-            log_prob=torch.stack(log_probs),
-            value=value,
-            reward=reward,
-            done=done,
-            advantage=advantage,
-            target=target,
-        )
+        rollout.advantage.copy_(advantage)
+        rollout.target.copy_(target)
+        return rollout
 
     @override
     def train_loss(self, **batch: object) -> TrainStepOutput:
@@ -513,12 +563,73 @@ class CraftaxTrainStep(TrainStep):
         self._episode_length = state["episode_length"]
         self._finished_returns = list(state["finished_returns"])
         self._finished_lengths = list(state["finished_lengths"])
+        if self._cuda_graphs:
+            # Loading replaced the optimizer's state tensors, which the captured
+            # update still addresses, so it is captured afresh.
+            _make_capturable(
+                self._adam.param_groups,
+                self._adam.state,
+                self.device,
+            )
+            self._update_procedure = self._procedure(self._update)
 
-    def _optimize(self, rollout: Rollout) -> dict[str, float | Tensor]:
-        """Take every configured pass over the rollout."""
-        metrics: dict[str, float | Tensor] = {}
+    @property
+    def _adam(self) -> torch.optim.Adam:
+        """The optimizer, at the class ``__init__`` builds it as."""
+        optimizer = self.optimizer
+        assert isinstance(optimizer, torch.optim.Adam)
+        return optimizer
+
+    def _procedure(self, procedure: Callable[[], None]) -> Callable[[], None]:
+        """Return ``procedure``, replayed as a CUDA graph when graphs are on."""
+        if self._cuda_graphs:
+            return CudaGraphed(procedure, generators=(self._generator,))
+        return procedure
+
+    # A CUDA-graph procedure: reads ``_policy_input``, stores the step's outputs.
+    def _act(self) -> None:
+        """Sample every worker's action from the current policy."""
+        logits, value = self.model(self._policy_input)
+        log_probs_all = logits.log_softmax(-1)
+        # Sampled through the step's own generator rather than
+        # ``Categorical.sample``, which draws from the global stream: a run must
+        # replay from its seed regardless of what else in the process has
+        # consumed randomness.
+        action = torch.multinomial(
+            log_probs_all.exp(),
+            1,
+            generator=self._generator,
+        ).squeeze(-1)
+        # Stored rather than copied into buffers: a tensor made during capture
+        # lives in the graph's memory, and every replay refills it.
+        self._action = action
+        self._log_prob = log_probs_all.gather(-1, action[:, None])[:, 0]
+        self._value = value
+
+    def _optimize(self, rate: float) -> dict[str, float | Tensor]:
+        """Take every configured pass over the rollout and report the last one."""
+        self._update_procedure()
+        policy, value, entropy, approx_kl, clip_fraction, grad_norm = ListCodec.coerce(
+            self._update_scalars.tolist(),
+            float,
+        )
+        return {
+            "policy_loss": policy,
+            "value_loss": value,
+            "entropy": entropy,
+            "approx_kl": approx_kl,
+            "clip_fraction": clip_fraction,
+            "grad_norm": grad_norm,
+            "learning_rate": rate,
+            "_loss_tensor": self._update_loss.clone(),
+            "_logits": self._update_logits.clone(),
+        }
+
+    # A CUDA-graph procedure: reads the rollout, stores the last minibatch's results.
+    def _update(self) -> None:
+        """Take every configured pass over the stored rollout."""
         for _ in range(self.config.num_epochs):
-            for minibatch in rollout.minibatches(
+            for minibatch in self._rollout.minibatches(
                 count=self.config.num_minibatches,
                 generator=self._generator,
             ):
@@ -530,18 +641,20 @@ class CraftaxTrainStep(TrainStep):
                     self.config.max_grad_norm,
                 )
                 self.optimizer.step()
-                metrics = {
-                    "policy_loss": float(terms.policy.detach()),
-                    "value_loss": float(terms.value.detach()),
-                    "entropy": float(terms.entropy.detach()),
-                    "approx_kl": float(terms.approx_kl.detach()),
-                    "clip_fraction": float(terms.clip_fraction.detach()),
-                    "grad_norm": float(grad_norm.detach()),
-                    "learning_rate": learning_rate(self.optimizer),
-                    "_loss_tensor": loss.detach(),
-                    "_logits": logits.detach(),
-                }
-        return metrics
+                # Kept on the device, not read out per minibatch: each read is a
+                # host sync, and only the last minibatch's are reported.
+                self._update_scalars = torch.stack(
+                    (
+                        terms.policy,
+                        terms.value,
+                        terms.entropy,
+                        terms.approx_kl,
+                        terms.clip_fraction,
+                        grad_norm,
+                    ),
+                ).detach()
+                self._update_loss = loss.detach()
+                self._update_logits = logits.detach()
 
     def _loss(
         self,
@@ -568,13 +681,14 @@ class CraftaxTrainStep(TrainStep):
         )
         return loss, logits, terms
 
-    def _set_learning_rate(self) -> None:
-        """Anneal the rate linearly across the configured horizon."""
-        if not self.config.anneal_learning_rate:
-            return
-        multiplier = linear(self.progress_learning_schedule)
+    def _set_learning_rate(self) -> float:
+        """Anneal the rate linearly across the configured horizon, returning it."""
+        rate = self.config.learning_rate
+        if self.config.anneal_learning_rate:
+            rate *= linear(self.progress_learning_schedule)
         for group in self.optimizer.param_groups:
-            group["lr"] = self.config.learning_rate * multiplier
+            _write_rate(group, rate)
+        return rate
 
     def _record_episodes(self, reward: Tensor, done: Tensor) -> None:
         """Accumulate per-worker returns and bank the finished ones."""
@@ -607,6 +721,34 @@ class CraftaxTrainStep(TrainStep):
         self._finished_returns = []
         self._finished_lengths = []
         return metrics
+
+
+# A captured update reads its rate from device memory, so the rate is written into
+# that memory; rebinding the group's entry would go unseen by the replay.
+def _write_rate(group: dict[str, object], rate: float) -> None:
+    """Set one parameter group's learning rate, in place where it is a tensor."""
+    current = group["lr"]
+    if isinstance(current, Tensor):
+        current.fill_(rate)
+    else:
+        group["lr"] = rate
+
+
+# ``torch.optim.Adam`` reads both flags per group at every step, so flipping them before
+# the first step -- or after a checkpoint restored an eager run's -- is enough.
+def _make_capturable(
+    param_groups: list[dict[str, object]],
+    state: Mapping[Tensor, dict[str, object]],
+    device: torch.device,
+) -> None:
+    """Keep Adam's step counts and learning rates on the device, as capture needs."""
+    for group in param_groups:
+        group["capturable"] = True
+        group["lr"] = torch.as_tensor(group["lr"], device=device)
+    for per_parameter in state.values():
+        step = per_parameter.get("step")
+        if isinstance(step, Tensor):
+            per_parameter["step"] = step.to(device=device, dtype=torch.float32)
 
 
 class _EvaluationActor:

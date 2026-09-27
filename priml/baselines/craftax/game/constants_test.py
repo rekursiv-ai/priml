@@ -235,6 +235,13 @@ def _ported_tensor(name: str) -> Tensor:
     return value
 
 
+def test_a_table_is_moved_to_a_device_once() -> None:
+    first = constants.on_device(constants.SOLID_BLOCK, torch.device("cpu"))
+    again = constants.on_device(constants.SOLID_BLOCK, torch.device("cpu"))
+    assert first is again
+    assert first is constants.SOLID_BLOCK
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

@@ -132,6 +132,46 @@ def test_take_returns_an_independent_state() -> None:
     assert int(dealt.timestep[1]) == 0
 
 
+def test_head_is_a_view_that_writes_through() -> None:
+    state = _state(num_envs=3)
+    state.head(2).timestep[:] = 4
+    assert state.timestep.tolist() == [4, 4, 0]
+
+
+def test_a_shallow_copy_can_be_rebound_without_moving_the_original() -> None:
+    # A step rebinds the fields of the state it is handed; the environment's
+    # own state must keep addressing the memory a CUDA graph replays against.
+    state = _state()
+    timestep = state.timestep
+    alias = state.shallow_copy()
+    alias.timestep = alias.timestep + 1
+    alias.inventory.wood = alias.inventory.wood + 1
+    alias.map[:] = 3
+    assert state.timestep is timestep
+    assert int(state.inventory.wood.sum()) == 0
+    assert bool((state.map == 3).all())
+
+
+def test_copy_overwrites_every_tensor_in_its_own_memory() -> None:
+    state, source = _state(), _state()
+    source.player_health += 2.0
+    source.melee_mobs.health += 5.0
+    health = state.player_health
+    state.copy_(source)
+    assert state.player_health is health
+    assert state.player_health.tolist() == [2.0] * 4
+    assert state.melee_mobs.health.eq(6.0).all()
+
+
+def test_loading_a_checkpoint_keeps_the_state_in_its_own_memory() -> None:
+    state, saved = _state(), _state()
+    saved.timestep += 7
+    timestep = state.timestep
+    state.load_state_dict({k: v.clone() for k, v in saved.state_dict().items()})
+    assert state.timestep is timestep
+    assert state.timestep.tolist() == [7] * 4
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

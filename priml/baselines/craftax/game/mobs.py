@@ -24,6 +24,7 @@ from priml.baselines.craftax.game.constants import (
     ProjectileType,
 )
 from priml.baselines.craftax.game.indexing import (
+    batch_rows,
     scatter_tiles_where,
 )
 from priml.baselines.craftax.game.state import EnvState, Mobs
@@ -70,7 +71,7 @@ def spawn_mobs(
       state: The world with any new creatures placed.
 
     """
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     uncleared = (
         state.monsters_killed[rows, level] < constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
@@ -103,9 +104,11 @@ def spawn_mobs(
     )
     monster_tiles = torch.where(fighting_boss[:, None, None], grave, walkable)
 
-    chances = constants.FLOOR_MOB_SPAWN_CHANCE.to(state.device)[level]
-    floor_species = constants.FLOOR_MOB_TYPE.to(state.device)[level]
-    boss_species = constants.FLOOR_MOB_TYPE.to(state.device)[state.boss_progress.long()]
+    chances = constants.on_device(constants.FLOOR_MOB_SPAWN_CHANCE, state.device)[level]
+    floor_species = constants.on_device(constants.FLOOR_MOB_TYPE, state.device)[level]
+    boss_species = constants.on_device(constants.FLOOR_MOB_TYPE, state.device)[
+        state.boss_progress.long()
+    ]
     species = torch.where(fighting_boss[:, None], boss_species, floor_species)
     for field, column, mob_class in (
         ("passive_mobs", 0, 0),
@@ -161,7 +164,7 @@ def spawn_mobs(
 
         place = _sample_position(room, generator=generator)
         slot = (~alive).int().argmax(-1)
-        health = constants.MOB_HEALTH.to(state.device)[
+        health = constants.on_device(constants.MOB_HEALTH, state.device)[
             species[:, column].long(),
             mob_class,
         ]
@@ -205,7 +208,7 @@ def _update_melee(
             striking=striking,
         )
 
-        collides = constants.MOB_COLLIDES_WITH.to(state.device)[
+        collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
             state.player_level.long(),
             1,
         ]
@@ -249,7 +252,7 @@ def _update_passive(
             generator,
             moves=8,
         )
-        collides = constants.MOB_COLLIDES_WITH.to(state.device)[
+        collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
             state.player_level.long(),
             0,
         ]
@@ -298,7 +301,7 @@ def _update_ranged(
         )
         proposed = torch.where(use_wander[:, None], wander, proposed)
 
-        collides = constants.MOB_COLLIDES_WITH.to(state.device)[
+        collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
             state.player_level.long(),
             2,
         ]
@@ -314,7 +317,7 @@ def _update_ranged(
         )
         proposed = torch.where(firing[:, None], position, proposed)
 
-        collides = constants.MOB_COLLIDES_WITH.to(state.device)[
+        collides = constants.on_device(constants.MOB_COLLIDES_WITH, state.device)[
             state.player_level.long(),
             2,
         ]
@@ -360,7 +363,10 @@ def _update_projectiles(state: EnvState) -> EnvState:
 
             if hurts_player:
                 hits = alive & (flown == state.player_position).all(-1)
-                damage = constants.MOB_DAMAGE.to(state.device)[species.long(), 3]
+                damage = constants.on_device(constants.MOB_DAMAGE, state.device)[
+                    species.long(),
+                    3,
+                ]
                 state.player_health = state.player_health - torch.where(
                     hits,
                     mechanics.damage_to_player(state, damage),
@@ -377,14 +383,14 @@ def _update_projectiles(state: EnvState) -> EnvState:
                 )
 
             # A projectile stops at the first solid thing it meets.
-            blocked = constants.SOLID_BLOCK.to(state.device)[
+            blocked = constants.on_device(constants.SOLID_BLOCK, state.device)[
                 mechanics.block_at(state, flown).long()
             ]
             if hurts_player:
                 blocked |= mechanics.is_occupied(state, flown)
             survives = alive & ~hits & ~blocked & mechanics.in_bounds(flown)
 
-            rows = torch.arange(state.num_envs, device=state.device)
+            rows = batch_rows(state.num_envs, state.device)
             level = state.player_level.long()
             mobs.position[rows, level, slot] = flown.int()
             mobs.mask[rows, level, slot] = survives
@@ -402,7 +408,10 @@ def _strike_with_projectile(
     alive: Tensor,
 ) -> tuple[EnvState, Tensor]:
     """Land a player projectile on a creature at its tile or the next one."""
-    damage = constants.MOB_DAMAGE.to(state.device)[species.long(), 3] * alive[:, None]
+    damage = (
+        constants.on_device(constants.MOB_DAMAGE, state.device)[species.long(), 3]
+        * alive[:, None]
+    )
     arrow = (species == int(ProjectileType.ARROW)) | (
         species == int(ProjectileType.ARROW2)
     )
@@ -467,7 +476,7 @@ def _projectile_hits_tile(
         if mob_class:
             killed_monster = killed_monster | killed
 
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     state.monsters_killed[rows, level] += killed_monster.int()
     state.mob_map[rows, level] = scatter_tiles_where(
@@ -517,8 +526,9 @@ def _random_step(
 ) -> Tensor:
     """Draw one step from the first ``moves`` neighbour offsets."""
     choice = torch.randint(0, moves, (num_envs,), generator=generator, device=device)
-    directions = constants.CLOSE_BLOCKS[:4] if moves == 4 else constants.DIRECTIONS[1:9]
-    return directions.to(device)[choice]
+    if moves == 4:
+        return constants.on_device(constants.CLOSE_BLOCKS, device)[:4][choice]
+    return constants.on_device(constants.DIRECTIONS, device)[1:9][choice]
 
 
 def _strike_player(
@@ -529,7 +539,10 @@ def _strike_player(
     striking: Tensor,
 ) -> EnvState:
     """Land a creature's blow, waking the player if they were asleep."""
-    base = constants.MOB_DAMAGE.to(state.device)[species.long(), mob_class]
+    base = constants.on_device(constants.MOB_DAMAGE, state.device)[
+        species.long(),
+        mob_class,
+    ]
     # A sleeping player takes far more: sleeping is a gamble, not a rest stop.
     damage = mechanics.damage_to_player(
         state,
@@ -578,7 +591,7 @@ def _fire_projectile(
     slot = free.int().argmax(-1)
     firing = firing & free.any(-1)
 
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     projectiles.position[rows, level, slot] = torch.where(
         firing[:, None],
@@ -588,7 +601,9 @@ def _fire_projectile(
     projectiles.mask[rows, level, slot] = projectiles.mask[rows, level, slot] | firing
     projectiles.type_id[rows, level, slot] = torch.where(
         firing,
-        constants.RANGED_MOB_PROJECTILE.to(state.device)[species.long()],
+        constants.on_device(constants.RANGED_MOB_PROJECTILE, state.device)[
+            species.long()
+        ],
         projectiles.type_id[rows, level, slot],
     )
     state.mob_projectile_directions[rows, level, slot] = torch.where(
@@ -612,7 +627,7 @@ def _relocate(
     """Move one creature slot and keep the occupancy grid in step with it."""
     mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
     assert isinstance(mobs, Mobs)
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     alive = mobs.mask[rows, level, slot]
 
@@ -657,7 +672,7 @@ def _place_mob(
     """Fill one free slot with a new creature."""
     mobs: object = getattr(state, field)  # pyright: ignore[reportAny] -- Dynamic state fields are narrowed below.
     assert isinstance(mobs, Mobs)
-    rows = torch.arange(state.num_envs, device=state.device)
+    rows = batch_rows(state.num_envs, state.device)
     level = state.player_level.long()
     mobs.position[rows, level, slot] = torch.where(
         spawning[:, None],
@@ -713,7 +728,7 @@ def _distance_to_player(state: EnvState) -> Tensor:
 
 def _on_level(field: Tensor, level: Tensor) -> Tensor:
     """Select each environment's current floor from a per-level field."""
-    return field[torch.arange(field.shape[0], device=field.device), level.long()]
+    return field[batch_rows(field.shape[0], field.device), level.long()]
 
 
 def _slot(field: Tensor, state: EnvState, slot: int) -> Tensor:

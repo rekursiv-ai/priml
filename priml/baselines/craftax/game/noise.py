@@ -19,9 +19,17 @@ References:
 
 from __future__ import annotations
 
+from typing import Final
+
 from torch import Tensor
 
 import torch
+
+from priml.baselines.craftax.game import constants
+
+
+_ROW_OFFSET: Final = torch.tensor([1.0, 0.0])
+"""One lattice cell down, as a ``(row, column)`` offset."""
 
 
 def fractal_noise(
@@ -128,7 +136,7 @@ def perlin_noise(
     top_right = gradients[:, : -cells[0], cells[1] :]
     bottom_right = gradients[:, cells[0] :, cells[1] :]
 
-    offset = torch.tensor([1.0, 0.0], device=device)
+    offset = constants.on_device(_ROW_OFFSET, device)
     ramp_top_left = (grid * top_left).sum(-1)
     ramp_bottom_left = ((grid - offset) * bottom_left).sum(-1)
     ramp_top_right = ((grid - offset.flip(0)) * top_right).sum(-1)

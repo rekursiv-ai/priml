@@ -42,7 +42,7 @@ def gather_tiles(grid: Tensor, positions: Tensor) -> Tensor:
 
     """
     rows, columns = _clamped(positions, grid.shape[-2], grid.shape[-1])
-    return grid[_rows(grid.shape[0], grid.device), rows, columns]
+    return grid[batch_rows(grid.shape[0], grid.device), rows, columns]
 
 
 def scatter_tiles(grid: Tensor, positions: Tensor, values: Tensor) -> Tensor:
@@ -63,7 +63,7 @@ def scatter_tiles(grid: Tensor, positions: Tensor, values: Tensor) -> Tensor:
     """
     envs, height, width = grid.shape[0], grid.shape[-2], grid.shape[-1]
     rows, columns = _clamped(positions, height, width)
-    index = _rows(envs, grid.device)
+    index = batch_rows(envs, grid.device)
     updated = grid.clone()
     updated[index, rows, columns] = torch.where(
         _inside(positions, height, width),
@@ -96,7 +96,7 @@ def scatter_tiles_where(
     """
     height, width = grid.shape[-2], grid.shape[-1]
     rows, columns = _clamped(positions, height, width)
-    index = _rows(grid.shape[0], grid.device)
+    index = batch_rows(grid.shape[0], grid.device)
     updated = grid.clone()
     # Read from the CLONE, not the source: the value already there is what an
     # unselected environment keeps, and reading it twice costs a second
@@ -154,27 +154,39 @@ def local_view(
     return torch.where(inside, gathered, torch.full_like(gathered, outside))
 
 
-# Arithmetic rather than ``torch.where``: a compare-plus-select is three kernel launches
-# per axis, and launch overhead is the entire cost on the four-element tensors this runs
-# on a few hundred times per game step.
+# Cached because a game step indexes by environment a few hundred times, and on these
+# small batches building the index costs more than the indexing. Shared, so callers
+# index with it and never write to it.
+@functools.cache
+def batch_rows(envs: int, device: torch.device) -> Tensor:
+    """Return ``arange(envs)``, built once per batch size and device."""
+    return torch.arange(envs, device=device)
+
+
+# Both axes in one clamp and one remainder, because launch overhead is the entire cost
+# on the tensors this runs on a few hundred times per step. Clamping to
+# ``[-extent, extent - 1]`` and taking the floored remainder IS wrap-then-clamp: a
+# coordinate below ``-extent`` gives 0 both ways, a negative one wraps once, and one
+# past the end gives ``extent - 1``.
 def _clamped(positions: Tensor, height: int, width: int) -> tuple[Tensor, Tensor]:
     """Return usable row and column indices: negatives wrap, overflow clamps."""
-    rows = positions[..., 0].long()
-    columns = positions[..., 1].long()
-    rows = (rows + height * (rows < 0)).clamp_(0, height - 1)
-    columns = (columns + width * (columns < 0)).clamp_(0, width - 1)
-    return rows, columns
+    low, high, extent = _bounds(height, width, positions.device)
+    tiles = positions.long().clamp(low, high) % extent
+    return tiles[..., 0], tiles[..., 1]
 
 
 def _inside(positions: Tensor, height: int, width: int) -> Tensor:
     """Return whether each position addresses a tile once negatives wrap."""
-    rows, columns = positions[..., 0], positions[..., 1]
-    return (rows >= -height) & (rows < height) & (columns >= -width) & (columns < width)
+    low, _, extent = _bounds(height, width, positions.device)
+    return ((positions >= low) & (positions < extent)).all(-1)
 
 
-# Cached because a game step does a few hundred of these on four-element tensors, where
-# allocating the index costs more than the indexing.
 @functools.cache
-def _rows(envs: int, device: torch.device) -> Tensor:
-    """Return ``arange(envs)``, built once per batch size and device."""
-    return torch.arange(envs, device=device)
+def _bounds(
+    height: int,
+    width: int,
+    device: torch.device,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Return ``-extent``, ``extent - 1``, and ``extent`` of a grid, per axis."""
+    extent = torch.tensor([height, width], device=device)
+    return -extent, extent - 1, extent
