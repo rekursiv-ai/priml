@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast, override
+from typing import TYPE_CHECKING, ClassVar, TypedDict, cast, override
 
 import faulthandler
 import functools
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from priml.loss.custom_types import LossOutput
     from priml.train.custom_types import TrackerProtocol, TrainStepOutput
 
-from configgle import Fig, Makeable, Makes, PartialConfig
+from configgle import Fig, InlineConfig, Makeable, Makes, PartialConfig
 
 from priml.cost import Cost, matmul_cost
 from priml.data.dummy import DummyDataset
@@ -47,6 +47,7 @@ from priml.runtime import SingleProcess, runtime_initialized
 from priml.timer import CheckpointableStepTimer
 from priml.train import train_loop
 from priml.train.checkpointer import Checkpointer, _agreed_across_ranks
+from priml.train.custom_types import Closeable
 from priml.train.parallelism import NoParallel
 from priml.train.profiler import PhaseTimer, TorchProfiler
 from priml.train.tracker import FileTracker
@@ -4105,6 +4106,96 @@ def test_close_releases_an_unstarted_owned_loop_once_and_restores_gc() -> None:
     finally:
         gc.enable()
         loop._destroy_runtime_once()
+
+
+class _ClosingStep(TrainStep):
+    """A supervised step that owns something to release; it counts its closes."""
+
+    closes_total: ClassVar[int] = 0
+    """Closes across every instance: a setup that raises leaves no handle."""
+
+    class Config(Makes["_ClosingStep"], TrainStep.Config[_LinearModel.Config]):
+        """The step, and the update at which its training raises."""
+
+        fail_at_step: int = -1
+        """``train_step`` raises at this global step; -1 never."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.fail_at_step = config.fail_at_step
+        self.closes = 0
+
+    @override
+    def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
+        if self.global_step == self.fail_at_step:
+            raise RuntimeError("the step failed")
+        return super().train_step(**preprocessed_batch)
+
+    def close(self) -> None:
+        self.closes += 1
+        _ClosingStep.closes_total += 1
+
+
+def _closing_loop_config(
+    tmp: str,
+    *,
+    fail_at_step: int = -1,
+) -> TrainLoop.Config[TrainStep.Config[_LinearModel.Config], Makeable[DatasetProtocol]]:
+    config = _make_simple_loop_config(tmp)
+    step = _ClosingStep.Config()
+    step.model = _LinearModel.Config(in_features=2, out_features=2)
+    step.optimizer = PartialConfig(torch.optim.Adam, lr=0.1)
+    step.loss = PartialConfig(_cross_entropy)
+    step.parallelism = NoParallel.Config(device="cpu")
+    step.compile = None
+    step.fail_at_step = fail_at_step
+    config.step = step
+    return config
+
+
+def _raise_on_build() -> DatasetProtocol:
+    raise RuntimeError("the dataset failed")
+
+
+def test_the_loop_closes_a_closeable_step_once_after_training() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        loop = _closing_loop_config(tmp).make()
+        loop.train()
+        step = loop.step
+        assert isinstance(step, _ClosingStep)
+        assert step.closes == 1
+        loop.close()
+        assert step.closes == 1
+
+
+def test_the_loop_closes_a_closeable_step_when_training_raises() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        loop = _closing_loop_config(tmp, fail_at_step=3).make()
+        step = loop.step
+        assert isinstance(step, _ClosingStep)
+        with pytest.raises(RuntimeError, match="the step failed"):
+            loop.train()
+        assert step.closes == 1
+
+
+def test_the_loop_closes_a_closeable_step_when_setup_aborts() -> None:
+    """A step built before a later part of setup fails is still closed."""
+    before = _ClosingStep.closes_total
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _closing_loop_config(tmp)
+        config.dataset = InlineConfig(_raise_on_build)
+        with pytest.raises(RuntimeError, match="the dataset failed"):
+            config.make()
+    assert _ClosingStep.closes_total == before + 1
+
+
+def test_a_step_without_close_is_left_alone_by_cleanup() -> None:
+    """The gate is structural: an ordinary step has no ``close`` and none is called."""
+    with tempfile.TemporaryDirectory() as tmp:
+        loop = _make_simple_loop_config(tmp).make()
+        assert not isinstance(loop.step, Closeable)
+        loop.train()
+        assert loop._closed
 
 
 def test_close_preserves_gc_disabled_by_caller() -> None:

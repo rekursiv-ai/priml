@@ -8,6 +8,7 @@ import torch
 from priml.math.advantage import (
     explained_variance,
     generalized_advantage,
+    observation_aligned_advantage,
     q_lambda_targets,
 )
 
@@ -94,6 +95,79 @@ def test_multiple_environments_are_independent() -> None:
     )
     assert advantages[:, 0].tolist() == pytest.approx([1.1625, 1.85])
     assert advantages[:, 1].tolist() == pytest.approx([0.6, 1.85])
+
+
+def test_observation_aligned_advantage_reads_the_next_steps_reward() -> None:
+    # The hand-computed recursion above, one step later: step 0's reward and
+    # terminal arrived with the first observation and are never read, and the
+    # last step, with nothing after it, is left at zero.
+    advantages, targets = observation_aligned_advantage(
+        rewards=torch.tensor([[9.0, 1.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.2, 0.1]]),
+        dones=torch.tensor([[1.0, 0.0, 0.0]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    assert advantages.flatten().tolist() == pytest.approx([1.1625, 1.85, 0.0])
+    assert targets.flatten().tolist() == pytest.approx([1.5625, 2.05, 0.1])
+
+
+def test_observation_aligned_terminal_blocks_the_bootstrap_before_it() -> None:
+    # The transition into the last observation ended an episode: step 1 takes
+    # its reward alone, and step 0 carries only that.
+    advantages, _ = observation_aligned_advantage(
+        rewards=torch.tensor([[9.0, 1.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.2, 0.1]]),
+        dones=torch.tensor([[False, False, True]]),
+        discount=0.5,
+        trace_decay=0.5,
+    )
+    assert advantages.flatten().tolist() == pytest.approx([1.15, 1.8, 0.0])
+
+
+def test_observation_aligned_advantage_rounds_as_a_fused_fp32_walk() -> None:
+    """At PufferLib's Craftax coefficients, the bits of a kernel's fp32 recursion.
+
+    The kernel takes both coefficients as fp32 arguments and forms the decay
+    from them; at this pair that product rounds as the float64 one does.
+    """
+    discount, trace_decay = 0.999414682, 0.801190972
+    generator = torch.Generator().manual_seed(0)
+    rewards = torch.randn(256, 128, generator=generator)
+    values = torch.randn(256, 128, generator=generator)
+    dones = (torch.rand(256, 128, generator=generator) < 0.1).float()
+    advantages, targets = observation_aligned_advantage(
+        rewards=rewards,
+        values=values,
+        dones=dones,
+        discount=discount,
+        trace_decay=trace_decay,
+    )
+    gamma = torch.tensor(discount)
+    decay = gamma * torch.tensor(trace_decay)
+    expected = torch.zeros_like(values)
+    trace = torch.zeros(256)
+    for step in range(126, -1, -1):
+        continuing = 1.0 - dones[:, step + 1]
+        bootstrap = gamma * values[:, step + 1] * continuing + rewards[:, step + 1]
+        trace = (bootstrap - values[:, step]) + (decay * trace) * continuing
+        expected[:, step] = trace
+    assert torch.equal(advantages, expected)
+    assert torch.equal(targets, expected + values)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_observation_aligned_advantage_runs_in_the_inputs_dtype(
+    dtype: torch.dtype,
+) -> None:
+    advantages, targets = observation_aligned_advantage(
+        rewards=torch.ones(2, 4, dtype=dtype),
+        values=torch.zeros(2, 4, dtype=dtype),
+        dones=torch.zeros(2, 4, dtype=dtype),
+        discount=0.99,
+        trace_decay=0.95,
+    )
+    assert advantages.dtype == targets.dtype == dtype
 
 
 def test_explained_variance_reports_fit_and_constant_targets() -> None:

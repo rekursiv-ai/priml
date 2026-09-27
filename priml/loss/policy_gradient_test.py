@@ -1,4 +1,8 @@
-"""Tests for the clipped policy-gradient objective."""
+"""Tests for the clipped policy-gradient objectives.
+
+The torch rule's formulas are pinned against float64 autograd of the
+objective, and its outputs and gradients against a golden on any CPU.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +17,17 @@ import torch
 
 from priml.loss.policy_gradient import (
     ClippedPolicyLoss,
+    TorchPPO,
     categorical_entropy,
     clipped_policy_loss,
+)
+from priml.math.advantage import observation_aligned_advantage
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import assert_text_golden
+from priml.testing.policy_gradient import (
+    portable_minibatch,
+    random_minibatch,
+    rule_entries,
 )
 
 
@@ -155,6 +168,268 @@ def test_corrupt_entropy_inputs_remain_nonfinite(corrupt: float) -> None:
     entropy = categorical_entropy(torch.tensor([[0.0, corrupt, float("-inf")]]))
 
     assert torch.isnan(entropy).any() or torch.isinf(entropy).any()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("discount", float("nan")),
+        ("trace_decay", 1.5),
+        ("clip_epsilon", float("inf")),
+        ("entropy_coefficient", -1e-3),
+    ],
+)
+def test_the_rule_refuses_a_coefficient_it_would_run_wrongly(
+    field: str,
+    value: float,
+) -> None:
+    config = TorchPPO.Config()
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=field):
+        config.make()
+
+
+def test_log_probs_is_the_masked_log_softmax() -> None:
+    batch = random_minibatch(rows=3, horizon=4)
+    rule = TorchPPO.Config().make()
+    result = rule.log_probs(
+        batch["decoded"],
+        batch["actions"],
+        batch["action_mask"],
+    )
+    masked = torch.where(
+        batch["action_mask"] != 0,
+        batch["decoded"][..., :43].float(),
+        TorchPPO.Config.MASKED_LOGIT,
+    )
+    torch.testing.assert_close(result.logps, masked.log_softmax(-1))
+    torch.testing.assert_close(
+        result.new_lp,
+        result.logps.gather(-1, batch["actions"].long()[..., None])[..., 0],
+    )
+    assert torch.equal(result.values, batch["decoded"][..., 43])
+    assert result.logps.dtype == result.new_lp.dtype == torch.float32
+    # An illegal action carries essentially no probability.
+    assert result.logps[batch["action_mask"] == 0].max() < -1e3
+
+
+def test_advantage_is_gae_from_the_next_row_with_a_zero_last_step() -> None:
+    batch = random_minibatch(rows=3, horizon=6)
+    config = TorchPPO.Config()
+    discount, trace_decay = config.discount, config.trace_decay
+    advantages, returns = config.make().advantage(
+        batch["values"],
+        batch["rewards"],
+        batch["terminals"],
+    )
+    v = batch["values"].double()
+    r = batch["rewards"].double()
+    d = batch["terminals"].double()
+    expected = torch.zeros_like(v)
+    for time in range(4, -1, -1):
+        continuing = 1 - d[:, time + 1]
+        delta = r[:, time + 1] + discount * v[:, time + 1] * continuing - v[:, time]
+        expected[:, time] = (
+            delta + discount * trace_decay * expected[:, time + 1] * continuing
+        )
+    assert torch.equal(advantages[:, -1], torch.zeros_like(advantages[:, -1]))
+    torch.testing.assert_close(advantages.double(), expected, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(returns.double(), (v + expected), rtol=1e-2, atol=1e-2)
+    assert advantages.dtype == returns.dtype == torch.bfloat16
+
+
+def test_advantage_runs_the_observation_aligned_estimate_in_fp32() -> None:
+    batch = random_minibatch(rows=3, horizon=6)
+    config = TorchPPO.Config()
+    advantages, returns = config.make().advantage(
+        batch["values"],
+        batch["rewards"],
+        batch["terminals"],
+    )
+    expected, expected_returns = observation_aligned_advantage(
+        rewards=batch["rewards"].float(),
+        values=batch["values"].float(),
+        dones=batch["terminals"].float(),
+        discount=config.discount,
+        trace_decay=config.trace_decay,
+    )
+    assert torch.equal(advantages, expected.bfloat16())
+    assert torch.equal(returns, expected_returns.bfloat16())
+
+
+def test_the_advantages_take_the_dtype_the_values_and_rewards_promote_to() -> None:
+    """fp32 rewards keep the fp32 estimate that bf16 inputs round once."""
+    batch = random_minibatch(rows=3, horizon=6)
+    rule = TorchPPO.Config().make()
+    values, terminals = batch["values"], batch["terminals"]
+    rounded = rule.advantage(values, batch["rewards"], terminals)
+    exact = rule.advantage(values, batch["rewards"].float(), terminals)
+    assert all(value.dtype == torch.bfloat16 for value in rounded)
+    assert all(value.dtype == torch.float32 for value in exact)
+    for ours, theirs in zip(exact, rounded, strict=True):
+        assert torch.equal(ours.bfloat16(), theirs)
+        assert not torch.equal(ours, theirs.float())
+
+
+def _objective(
+    logits: Tensor,
+    value_pred: Tensor,
+    batch: dict[str, Tensor],
+    advantages: Tensor,
+    returns: Tensor,
+) -> Tensor:
+    """Compute the objective in float64 for autograd: the mean per row."""
+    coefficients = TorchPPO.Config()
+    clip = coefficients.clip_epsilon
+    masked = torch.where(
+        batch["action_mask"] != 0,
+        logits,
+        TorchPPO.Config.MASKED_LOGIT,
+    )
+    logps = masked.log_softmax(-1)
+    new_lp = logps.gather(-1, batch["actions"].long()[..., None])[..., 0]
+    ratio = torch.exp(new_lp - batch["old_logprobs"].double())
+    adv = advantages.double()
+    policy = torch.maximum(-adv * ratio, -adv * ratio.clamp(1 - clip, 1 + clip))
+    val = batch["values"].double()
+    ret = returns.double()
+    value_clip = coefficients.value_clip_epsilon
+    clipped = val + (value_pred - val).clamp(-value_clip, value_clip)
+    value = 0.5 * torch.maximum((value_pred - ret) ** 2, (clipped - ret) ** 2)
+    entropy = -(logps.exp() * logps).sum(-1)
+    return (
+        policy
+        + coefficients.value_coefficient * value
+        - coefficients.entropy_coefficient * entropy
+    ).mean()
+
+
+def test_loss_gradients_agree_with_autograd_of_the_objective() -> None:
+    batch = random_minibatch(rows=4, horizon=8, seed=1)
+    config = TorchPPO.Config()
+    rule = config.make()
+    logprobs = rule.log_probs(
+        batch["decoded"],
+        batch["actions"],
+        batch["action_mask"],
+    )
+    advantages, returns = rule.advantage(
+        logprobs.values,
+        batch["rewards"],
+        batch["terminals"],
+    )
+    loss = rule.loss(
+        logprobs,
+        decoded=batch["decoded"],
+        actions=batch["actions"],
+        old_logprobs=batch["old_logprobs"],
+        advantages=advantages,
+        values=batch["values"],
+        returns=returns,
+    )
+    logits = batch["decoded"][..., :43].double().requires_grad_()
+    value_pred = batch["decoded"][..., 43].double().requires_grad_()
+    _objective(logits, value_pred, batch, advantages, returns).backward()
+    assert logits.grad is not None
+    assert value_pred.grad is not None
+    torch.testing.assert_close(
+        loss.grad_logits.double(),
+        logits.grad,
+        rtol=1e-4,
+        atol=1e-7,
+    )
+    torch.testing.assert_close(
+        loss.grad_values.double(),
+        value_pred.grad,
+        rtol=1e-4,
+        atol=1e-7,
+    )
+    assert loss.losses.shape == (len(TorchPPO.Config.LOSS_NAMES),)
+    # The total is the policy, value and entropy terms combined.
+    torch.testing.assert_close(
+        loss.losses[3],
+        loss.losses[0]
+        + config.value_coefficient * loss.losses[1]
+        - config.entropy_coefficient * loss.losses[2],
+    )
+
+
+def test_the_value_clip_zeroes_the_gradient_where_the_clipped_loss_wins() -> None:
+    batch = random_minibatch(rows=2, horizon=3, seed=2)
+    rule = TorchPPO.Config().make()
+    # The live value sits on the return but far from the rollout's value, so
+    # the clipped value loses more than the unclipped: its branch wins, and it
+    # is constant in the prediction.
+    decoded = batch["decoded"]
+    returns = decoded[..., 43]
+    values = (returns.float() - 10).bfloat16()
+    logprobs = rule.log_probs(decoded, batch["actions"], batch["action_mask"])
+    loss = rule.loss(
+        logprobs,
+        decoded=decoded,
+        actions=batch["actions"],
+        old_logprobs=batch["old_logprobs"],
+        advantages=torch.zeros_like(returns),
+        values=values,
+        returns=returns,
+    )
+    assert torch.equal(loss.grad_values, torch.zeros_like(loss.grad_values))
+
+
+def test_calling_the_rule_runs_its_stages_and_backpropagates_their_gradient() -> None:
+    """The call's total differentiates to :meth:`loss`'s gradients, times the seed."""
+    batch = random_minibatch(rows=3, horizon=4, seed=4)
+    rule = TorchPPO.Config().make()
+    logprobs = rule.log_probs(batch["decoded"], batch["actions"], batch["action_mask"])
+    advantages, returns = rule.advantage(
+        logprobs.values,
+        batch["rewards"],
+        batch["terminals"],
+    )
+    loss = rule.loss(
+        logprobs,
+        decoded=batch["decoded"],
+        actions=batch["actions"],
+        old_logprobs=batch["old_logprobs"],
+        advantages=advantages,
+        values=batch["values"],
+        returns=returns,
+    )
+    decoded = batch["decoded"].clone().requires_grad_()
+    total, losses = rule(
+        decoded,
+        actions=batch["actions"],
+        action_mask=batch["action_mask"],
+        old_logprobs=batch["old_logprobs"],
+        rewards=batch["rewards"],
+        terminals=batch["terminals"],
+        values=batch["values"],
+    )
+    assert torch.equal(losses, loss.losses)
+    assert torch.equal(total, loss.losses[3])
+    assert not losses.requires_grad
+    (2 * total).backward()
+    closed_form = torch.cat((loss.grad_logits, loss.grad_values[..., None]), dim=-1)
+    assert decoded.grad is not None
+    assert decoded.grad.dtype == torch.bfloat16
+    assert torch.equal(decoded.grad, (2 * closed_form).bfloat16())
+
+
+def test_the_reference_rule_matches_its_golden(request: pytest.FixtureRequest) -> None:
+    """The torch rule on 4 rows of 16 steps with the default coefficients, frozen.
+
+    Portable inputs inside ``host_agnostic_numerics``: every CPU computes the
+    same bits.
+    """
+    batch = portable_minibatch(rows=4, horizon=16)
+    with host_agnostic_numerics():
+        lines = rule_entries(TorchPPO.Config().make(), batch)
+    assert_text_golden(
+        request,
+        test_file=__file__,
+        name="torch_ppo",
+        rendered="\n".join(lines),
+    )
 
 
 if __name__ == "__main__":

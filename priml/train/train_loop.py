@@ -70,6 +70,7 @@ from priml.runtime import (
 from priml.train.checkpointer import Checkpointer
 from priml.train.custom_types import (
     CheckpointerProtocol,
+    Closeable,
     CudaEventProtocol,
     PhaseTimerProtocol,
     ProfilerProtocol,
@@ -322,6 +323,8 @@ class TrainLoop:
         self.checkpointer: CheckpointerProtocol | None = None
         self.tracker: TrackerProtocol | None = None
         self.profiler: ProfilerProtocol | None = None
+        self._close_step: Callable[[], None] | None = None
+        """The step's ``close`` when it owns resources; set once the step exists."""
         self._gc_disabled = False
         self._closed = False
         self._training = False
@@ -342,6 +345,8 @@ class TrainLoop:
             self.phase_timer = config.phase_timer.make()
             with self.phase_timer.phase("model_init"):
                 self.step = config.step.make()
+            if isinstance(self.step, Closeable):
+                self._close_step = self.step.close
             if isinstance(self.step, _HasTimer):
                 self.step.timer = self.phase_timer
             self.metrics_train = {
@@ -989,6 +994,10 @@ class TrainLoop:
         if self._closed:
             return
         actions: list[Callable[[], object]] = []
+        # First: a step's threads (a prefetching rollout, say) stop before the
+        # checkpointer, the tracker and the runtime they may use go away.
+        if self._close_step is not None:
+            actions.append(self._close_step)
         if self.checkpointer is not None:
             actions.append(self.checkpointer.close)
         if self.tracker is not None:

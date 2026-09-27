@@ -5,6 +5,7 @@ from __future__ import annotations
 from priml.optimizers.adam_atan2 import AdamATan2
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.fused_adamw import FusedAdamW
+from priml.optimizers.fused_muon import FusedMuon
 from priml.optimizers.lr import (
     HasParamGroups,
     apply_lr_scale,
@@ -25,6 +26,7 @@ __all__ = [
     "AdamATan2",
     "CompositeOptimizer",
     "FusedAdamW",
+    "FusedMuon",
     "HasParamGroups",
     "Muon",
     "Newton",

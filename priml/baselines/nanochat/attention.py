@@ -14,7 +14,6 @@ from dataclasses import field
 from functools import lru_cache, partial
 from importlib import import_module
 from pathlib import Path
-from types import FunctionType
 from typing import TYPE_CHECKING, Protocol, Self, cast, override, runtime_checkable
 
 import hashlib
@@ -39,6 +38,7 @@ from priml.cost import (
     reduction_cost,
     traffic,
 )
+from priml.kernel import jit_kernel
 from priml.model.attention.kernel import attention_kernel_cost
 from priml.model.attention.rope import rotate_conjugate
 from priml.model.attention.value_gated_attention import ValueGatedAttention
@@ -1139,23 +1139,6 @@ def _qk_backward_cuda(
     return (qo, ko)
 
 
-def _jit_kernel(function: Callable[..., None]) -> "triton.JITFunction[..., None]":
-    """Bind concrete language modules before Triton hashes and compiles the function."""
-    assert isinstance(function, FunctionType)
-    bound = FunctionType(
-        function.__code__,
-        function.__globals__
-        | {
-            "language": import_module("triton.language"),
-            "libdevice": import_module("triton.language.extra.cuda.libdevice"),
-        },
-        function.__name__,
-        function.__defaults__,
-    )
-    bound.__annotations__ = function.__annotations__
-    return triton.jit(bound)
-
-
 @lru_cache(maxsize=1)
 def _compiled_qk_forward() -> "triton.Autotuner":
     return triton.autotune(
@@ -1165,7 +1148,7 @@ def _compiled_qk_forward() -> "triton.Autotuner":
             for w in (2, 4, 8)
         ],
         key=["n_rows"],
-    )(_jit_kernel(_qk_norm_rope_fwd_triton))
+    )(jit_kernel(_qk_norm_rope_fwd_triton))
 
 
 def _qk_norm_rope_fwd_triton(
@@ -1236,7 +1219,7 @@ def _compiled_qk_backward() -> "triton.Autotuner":
             for w in (2, 4, 8)
         ],
         key=["n_rows"],
-    )(_jit_kernel(_qk_norm_rope_bwd_triton))
+    )(jit_kernel(_qk_norm_rope_bwd_triton))
 
 
 def _qk_norm_rope_bwd_triton(

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ActivationMemoizationProtocol",
     "CheckpointerProtocol",
+    "Closeable",
     "CudaEventProtocol",
     "EMAProtocol",
     "LossFn",
@@ -497,6 +498,15 @@ class ModelQuantizationProtocol(Protocol):
 
     def __call__(self, model: nn.Module) -> nn.Module:
         """Apply quantization to model."""
+        ...
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    """Holds resources -- threads, processes, handles -- its owner must release."""
+
+    def close(self) -> None:
+        """Release them; a second call is a no-op."""
         ...
 
 

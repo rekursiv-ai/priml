@@ -7,8 +7,6 @@ and omit future annotations, which makes the formatter remove those quotes.
 from collections.abc import Callable
 from dataclasses import field
 from functools import lru_cache, partial
-from importlib import import_module
-from types import FunctionType
 from typing import TYPE_CHECKING, NamedTuple, Protocol, Self, override
 
 import math
@@ -25,6 +23,7 @@ from priml.cost import (
     elementwise_cost,
     traffic,
 )
+from priml.kernel import jit_kernel
 from priml.model.embedding import Embedding
 from priml.model.narrow_embedding import NarrowEmbedding
 
@@ -703,26 +702,9 @@ def _pad_ngram_sources(values: list[Tensor], length: int) -> list[Tensor]:
     return values + [values[0]] * (length - len(values))
 
 
-def _jit_kernel(function: Callable[..., None]) -> "triton.JITFunction[..., None]":
-    """Bind concrete language modules before Triton hashes and compiles the function."""
-    assert isinstance(function, FunctionType)
-    bound = FunctionType(
-        function.__code__,
-        function.__globals__
-        | {
-            "language": import_module("triton.language"),
-            "libdevice": import_module("triton.language.extra.cuda.libdevice"),
-        },
-        function.__name__,
-        function.__defaults__,
-    )
-    bound.__annotations__ = function.__annotations__
-    return triton.jit(bound)
-
-
 @lru_cache(maxsize=1)
-def _compiled_ngram_forward() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_ngram_mix_fwd_triton)
+def _compiled_ngram_forward() -> "triton.JITFunction[..., object]":
+    return jit_kernel(_ngram_mix_fwd_triton)
 
 
 def _ngram_mix_fwd_triton(
@@ -800,8 +782,8 @@ def _ngram_mix_fwd_triton(
 
 
 @lru_cache(maxsize=1)
-def _compiled_ngram_backward() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_ngram_mix_bwd_triton)
+def _compiled_ngram_backward() -> "triton.JITFunction[..., object]":
+    return jit_kernel(_ngram_mix_bwd_triton)
 
 
 def _ngram_mix_bwd_triton(  # noqa: PLR0917 -- Triton JIT binds the kernel operands by position.
@@ -936,8 +918,8 @@ def _ngram_mix_bwd_triton(  # noqa: PLR0917 -- Triton JIT binds the kernel opera
 
 
 @lru_cache(maxsize=1)
-def _compiled_sink_clear() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_clear_marked_sink_triton)
+def _compiled_sink_clear() -> "triton.JITFunction[..., object]":
+    return jit_kernel(_clear_marked_sink_triton)
 
 
 def _clear_marked_sink_triton(

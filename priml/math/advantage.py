@@ -62,6 +62,69 @@ def generalized_advantage(
     return advantages, advantages + values
 
 
+def observation_aligned_advantage(
+    *,
+    rewards: Tensor,
+    values: Tensor,
+    dones: Tensor,
+    discount: float,
+    trace_decay: float,
+) -> tuple[Tensor, Tensor]:
+    """Estimate advantages by GAE when each reward is stored with its observation.
+
+    :func:`generalized_advantage` stores beside each observation the reward and
+    terminal of the transition that LEAVES it. Here step ``t`` holds the ones
+    that ARRIVED with observation ``t``, as an actor stores them when it writes
+    a step's reward beside the observation that step produced. Step ``t``'s
+    residual therefore reads step ``t + 1``, and the last step has no next
+    step: its advantage is zero and its target is its own value. On the other
+    steps this is :func:`generalized_advantage` of the rewards and terminals
+    shifted back by one, bootstrapped from the last value, which is how it is
+    computed.
+
+    The recursion runs in the tensors' dtype, so the caller chooses the
+    precision. Time is the LAST axis. The decay ``discount * trace_decay``
+    rounds once, from float64, where a kernel that multiplies two fp32
+    arguments (``TritonPPO``'s walk) rounds each first: the two decays differ
+    by one ulp at 30% of random pairs, though not at PufferLib's Craftax pair
+    or at the policy-gradient rule's defaults.
+
+    Args:
+      rewards: The reward that arrived with each observation, ``[..., time]``.
+      values: Critic estimates at each observation, ``[..., time]``.
+      dones: Whether the transition into each observation ended an episode,
+        ``[..., time]``; any dtype that compares as 0/1.
+      discount: Reward discount factor, usually written gamma.
+      trace_decay: Eligibility-trace decay, usually written lambda.
+
+    Returns:
+      advantages: Advantage estimates, ``[..., time]``; zero at the last step.
+      targets: Value-regression targets, ``advantages + values``.
+
+    References:
+      https://arxiv.org/abs/1506.02438
+        Schulman et al. 2015. High-dimensional continuous control using
+        generalized advantage estimation.
+      https://github.com/PufferAI/PufferLib
+        Suarez. PufferLib (MIT license), ``puff_advantage`` in
+        ``src/algo.cu``, pin ``6ffa5b10``.
+
+    """
+    advantages, _ = generalized_advantage(
+        rewards=rewards[..., 1:].movedim(-1, 0),
+        values=values[..., :-1].movedim(-1, 0),
+        dones=dones[..., 1:].movedim(-1, 0),
+        last_value=values[..., -1],
+        discount=discount,
+        trace_decay=trace_decay,
+    )
+    advantages = torch.cat(
+        [advantages.movedim(0, -1), torch.zeros_like(values[..., -1:])],
+        dim=-1,
+    )
+    return advantages, advantages + values
+
+
 def q_lambda_targets(
     *,
     rewards: Tensor,

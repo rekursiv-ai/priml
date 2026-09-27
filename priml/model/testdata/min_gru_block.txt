@@ -1,0 +1,16 @@
+MinGRUBlock.Config(
+                channels_hidden=4,
+                proj_gates=Linear.Config(
+                        channels_in=4,
+                        channels_out=12,
+                        bias=False,
+                        depth_index=(),
+                        device=None,
+                        dtype=None,
+                        init_weight=<function priml.model.init.kaiming_uniform at 0xdefacedeface>,
+                        init_bias=<function torch.nn.init.zeros_ at 0xdefacedeface>,
+                        shard=None
+                ),
+                scan=TorchScan.Config(),
+                dtype=None
+        )

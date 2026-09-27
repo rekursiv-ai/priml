@@ -7,8 +7,6 @@ and omit future annotations, which makes the formatter remove those quotes.
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
-from importlib import import_module
-from types import FunctionType
 from typing import (
     TYPE_CHECKING,
     Final,
@@ -28,6 +26,7 @@ from torch.optim import Optimizer, optimizer
 
 import torch
 
+from priml.kernel import jit_kernel
 from priml.lib.custom_json import FloatCodec
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
@@ -701,26 +700,9 @@ BITMAP_DTYPES = (torch.bool, torch.uint8, torch.int8, torch.int32)
 """Bitmap element types supported by the inactive-moment kernel."""
 
 
-def _jit_kernel(function: Callable[..., None]) -> "triton.JITFunction[..., None]":
-    """Bind concrete language modules before Triton hashes and compiles the function."""
-    assert isinstance(function, FunctionType)
-    bound = FunctionType(
-        function.__code__,
-        function.__globals__
-        | {
-            "language": import_module("triton.language"),
-            "libdevice": import_module("triton.language.extra.cuda.libdevice"),
-        },
-        function.__name__,
-        function.__defaults__,
-    )
-    bound.__annotations__ = function.__annotations__
-    return triton.jit(bound)
-
-
 @lru_cache(maxsize=1)
-def _compiled_inactive_moment() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_inactive_moment_rows_triton)
+def _compiled_inactive_moment() -> "triton.JITFunction[..., object]":
+    return jit_kernel(_inactive_moment_rows_triton)
 
 
 def _inactive_moment_rows_triton(
@@ -751,8 +733,8 @@ def _inactive_moment_rows_triton(
 
 
 @lru_cache(maxsize=1)
-def _compiled_sparse_rmsprop() -> "triton.JITFunction[..., None]":
-    return _jit_kernel(_sparse_rmsprop_rows_triton)
+def _compiled_sparse_rmsprop() -> "triton.JITFunction[..., object]":
+    return jit_kernel(_sparse_rmsprop_rows_triton)
 
 
 def _sparse_rmsprop_rows_triton(
