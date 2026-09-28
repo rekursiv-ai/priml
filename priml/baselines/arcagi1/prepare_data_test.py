@@ -9,7 +9,7 @@ import json
 import sys
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.data import ArcData
+from priml.baselines.arcagi1.data import ArcData, PuzzleData
 from priml.baselines.arcagi1.scripts.prepare_data import (
     main,
     num_puzzle_identifiers,
@@ -32,12 +32,13 @@ def test_dataset_declares_its_augmentation_recipe(tmp_path: Path) -> None:
     assert not (tmp_path / "absent").exists()
 
 
-def test_exp004_cli_forwards_spatial_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[ArcData.Config] = []
-    monkeypatch.setattr(sys, "argv", ["prepare_data.py", "--experiment", "exp004"])
+def test_experiment_flag_forwards_that_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--experiment`` builds the named recipe's tree, not the default one."""
+    captured: list[ArcData.Config | PuzzleData.Config] = []
+    monkeypatch.setattr(sys, "argv", ["prepare_data.py", "--experiment", "exp007"])
 
     def fake_prepare(
-        config: ArcData.Config,
+        config: ArcData.Config | PuzzleData.Config,
         *,
         input_file_prefix: Path | str | None = None,
     ) -> Path:
@@ -51,13 +52,11 @@ def test_exp004_cli_forwards_spatial_recipe(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert main() == 0
-    augmentation = captured[0].augmentation
-    assert augmentation.spatial.translation_prob == 0.2
-    assert augmentation.spatial.scale_prob == 0.2
-    assert augmentation.spatial.train_scale_weights == {2: 1.0}
-    assert augmentation.spatial_eval_views
-    assert augmentation.spatial_eval_scale == 2
-    assert str(captured[0].working_dir) == "/opt/scratch/datasets/arcagi1-hps"
+    expected = experiments.exp007().copy_tree().finalize().dataset
+    spatial = captured[0].augmentation.spatial
+    assert spatial.translation_prob == spatial.scale_prob == 0.2
+    assert spatial.train_scale_weights == {2: 1.0}
+    assert captured[0].working_dir == expected.working_dir
 
 
 def test_prepare_data_loads_and_sizes_exp000(tmp_path: Path) -> None:

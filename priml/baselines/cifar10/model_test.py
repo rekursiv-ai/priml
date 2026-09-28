@@ -159,14 +159,32 @@ def test_speednet_dirac_init_passes_input_through_each_block() -> None:
     assert torch.equal(weight, torch.nn.init.dirac_(torch.empty_like(weight)))
 
 
+# Every path -- residual shortcut, the affine norms, the init -- still runs; only the
+# convolution tensors are smaller.
+def _golden_resnet() -> ResNet.Config:
+    """Return ``tiny_resnet`` at golden width: stage widths ``(2, 4)``, size only."""
+    config = tiny_resnet()
+    config.channels_hidden = (2, 4)
+    return config
+
+
 def test_resnet_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="resnet",
-        build_module=lambda: tiny_resnet().make(),
+        build_module=lambda: _golden_resnet().make(),
         build_input=lambda: torch.randn(2, 3, 8, 8),
         seed=0,
     )
+
+
+# The whitening, every pool, and the residual still run; only the convolution tensors
+# shrink.
+def _golden_speednet() -> SpeedNet.Config:
+    """Return ``tiny_speednet`` at golden width: stages ``(2, 4, 6)``, size only."""
+    config = tiny_speednet()
+    config.channels_hidden = (2, 4, 6)
+    return config
 
 
 def test_speednet_bfb() -> None:
@@ -184,7 +202,7 @@ def test_speednet_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="speednet",
-        build_module=lambda: tiny_speednet().make(),
+        build_module=lambda: _golden_speednet().make(),
         build_input=lambda: torch.randn(1, 3, 32, 32),
         seed=0,
     )

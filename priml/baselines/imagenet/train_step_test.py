@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Final, cast, override
 
@@ -150,12 +151,44 @@ def test_state_dict_round_trip_restores_progress_and_scaler() -> None:
     assert "scaler" in step.state_dict()
 
 
+# The blur rewrite needs a stride-2 conv of at least 16 input channels to fire, so
+# ``conv2`` keeps 16 inputs; only its output and the head narrow.
+def _golden_net(num_classes: int) -> nn.Module:
+    """Half-width ``strided_net`` for the golden: 3->8->4 rather than 3->16->8."""
+    return nn.Sequential(
+        OrderedDict(
+            conv1=nn.Conv2d(3, 16, 3, stride=2, padding=1, bias=False),
+            bn1=nn.BatchNorm2d(16),
+            relu=nn.ReLU(),
+            conv2=nn.Conv2d(16, 4, 3, stride=2, padding=1, bias=False),
+            pool=nn.AdaptiveAvgPool2d(1),
+            flatten=nn.Flatten(),
+            fc=nn.Linear(4, num_classes),
+        ),
+    )
+
+
+# The resize, the blur rewrite, the fused loss, and the optimizer split all still run.
+# Pin the resolution to its 32 floor (the schedule rounds to a multiple of 32, so 32 is
+# the smallest it resizes to) rather than ramping to 64, and narrow the head net. The
+# resize, the blur rewrite, the fused loss, and the optimizer split all still run.
+def _golden_step() -> ImageNetTrainStep.Config:
+    """Return ``tiny_step`` shrunk for the golden by size only."""
+    config = tiny_step()
+    config.model = TorchvisionResNet.Config()
+    config.model.arch = PartialConfig(_golden_net)
+    config.model.channels_out = 10
+    config.resolution_min = 32
+    config.resolution_max = 32
+    return config
+
+
 def test_three_train_steps_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="three_steps",
-        build_module=lambda: _TrainStepModule(tiny_step()),
-        build_input=tiny_batch,
+        build_module=lambda: _TrainStepModule(_golden_step()),
+        build_input=lambda: tiny_batch(size=1, image=32),
         seed=42,
     )
 

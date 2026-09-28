@@ -12,9 +12,9 @@ Mirrors the JAX study's ``training_bfb_test``, with two deliberate departures:
   The JAX golden could not afford that; four workers for four steps here is
   cheap, and pinning the simulator is most of the value.
 * It compares one trace tensor rather than twenty named arrays, because that
-  is the shape ``assert_bfb_against_golden`` speaks. The post-run state_dict
-  the harness also checks covers what the separate arrays covered: every
-  weight the update touched.
+  is the shape ``assert_bfb_against_golden`` speaks. The post-run state the
+  harness also checks, bit for bit, covers what the separate arrays covered:
+  every weight the update touched.
 
 Regenerate after an intentional numeric change::
 
@@ -26,7 +26,7 @@ Regenerate after an intentional numeric change::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final, cast, override
+from typing import Final, override
 
 from torch import Tensor, nn
 
@@ -35,7 +35,12 @@ import torch
 
 from priml.baselines.craftax.restart import RestartOnDemand
 from priml.baselines.craftax.train_step import CraftaxTrainStep
-from priml.testing.bfb import assert_bfb_against_golden, bfb_devices
+from priml.testing.bfb import (
+    assert_bfb_against_golden,
+    bfb_devices,
+    load_golden,
+    state_digest,
+)
 from priml.train.parallelism import NoParallel
 
 
@@ -126,16 +131,16 @@ def _build_trace() -> nn.Module:
     config.num_minibatches = 2
     config.total_train_steps = 8
     config.learning_rate = 3e-3
-    # A 3x3 view rather than the benchmark's 9x11. The observation is one
+    # A 1x1 view rather than the benchmark's 9x11. The observation is one
     # one-hot vector per visible tile, so the window is what sets the input
-    # width -- 798 floats here against 8,268 -- and the first layer's weights
+    # width -- 134 floats here against 8,268 -- and the first layer's weights
     # are almost the whole committed file. The encoding is identical either
     # way: same channels, same order, same arithmetic, fewer tiles.
     #
     # What the golden gives up is pinning the published geometry, and it never
     # was the thing pinning it: ``observation_test`` checks the real width
     # against the reference implementation directly.
-    config.env.view = (3, 3)
+    config.env.view = (1, 1)
     # TWO hidden units, and not one. A width-1 axis broadcasts against
     # anything, so a transposed or mis-ordered tensor still lines up and the
     # golden would record the wrong arithmetic as correct.
@@ -170,7 +175,7 @@ def test_the_golden_is_small_enough_to_keep_in_git() -> None:
     # size, which is almost entirely first-layer weights, so a widening that
     # doubles it has to be deliberate.
     golden = _CWD / "testdata" / "craftax_ppo_training.pt"
-    assert golden.stat().st_size < 40_000
+    assert golden.stat().st_size < 20_000
 
 
 def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:
@@ -179,16 +184,10 @@ def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:
     A golden that only pinned a forward pass would still match after the
     optimizer changed, which is the regression this file exists to catch.
     """
-    payload = cast(
-        dict[str, dict[str, Tensor]],
-        torch.load(
-            _CWD / "testdata" / "craftax_ppo_training.pt",
-            weights_only=False,
-            map_location="cpu",
-        ),
-    )
-    before = payload["post_state_dict"]["policy.policy.0.weight"]
-    after = payload["state_dict"]["policy.policy.0.weight"]
+    payload = load_golden(_CWD / "testdata" / "craftax_ppo_training.pt")
+    assert "post_state_digest" in payload
+    before = payload["post_state_digest"]["policy.policy.0.weight"]
+    after = state_digest(payload["state_dict"]["policy.policy.0.weight"])
     assert not torch.equal(before, after)
 
 

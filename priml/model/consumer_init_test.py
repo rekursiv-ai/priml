@@ -29,6 +29,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.kimi_k2 import KimiK2
 from priml.model.transformer.mmdit import MMDiTBlock, MMDiTStream
 from priml.model.transformer.qwen3 import Qwen3
+from priml.testing import golden
 from priml.testing.bfb import assert_bfb_against_golden
 
 
@@ -275,19 +276,21 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         cfg_nano.block.attn.gate_channels = 4
         model = cfg_nano.make()
     state = DictCodec.coerce(model.state_dict(), Tensor)
+    # Leading elements pin each parameter's init; the fingerprint pins the draw
+    # count in 8 values instead of the 5 KB Mersenne state.
     values: list[Tensor] = [
-        value.detach().flatten().float() for value in state.values()
+        golden.heads(state.values(), count=8),
+        golden.rng_fingerprint().float(),
     ]
-    values.append(torch.get_rng_state().float())
     x = torch.randn(1, 3, 8)
     if isinstance(model, MMDiTBlock):
         outputs = model([x, x])
-        values.extend(value.flatten().float() for value in outputs)
+        values.extend(golden.spread(value.float()) for value in outputs)
     elif kind in ("nanochat", "qwen", "kimi"):
-        values.append(model(torch.tensor([[0, 1, 2]])).flatten().float())
+        values.append(golden.spread(model(torch.tensor([[0, 1, 2]])).float()))
     else:
-        values.append(model(x).flatten().float())
-    values.append(torch.get_rng_state().float())
+        values.append(golden.spread(model(x).float()))
+    values.append(golden.rng_fingerprint().float())
     return torch.cat(values)
 
 

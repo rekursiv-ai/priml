@@ -5,10 +5,11 @@ Pattern (see write-code skill rationale):
 1. **Build** a module at minimum width: 1 layer, hidden=8, smallest seq_len.
 2. **Randomize** every parameter with seeded ``torch.randn`` so structurally-zero
    inits (q-head bias, etc.) don't hide a regression.
-3. **Snapshot** pre-run state, input, output, and changed post-run state to
-   ``<test_file_dir>/testdata/``.
+3. **Snapshot** to ``<test_file_dir>/testdata/`` the pre-run state and input
+   whole, and a SHA-256 plus the first elements of the output and of any
+   changed post-run state.
 4. **Assert** on subsequent runs that loading the golden state and applying it
-   to the same input reproduces every stored tensor bit.
+   to the same input reproduces the output and post-run state bit for bit.
 
 Regenerate (after an intentional numeric change)::
 
@@ -119,16 +120,19 @@ from typing import (
     override,
 )
 
+import hashlib
 import os
 import tempfile
 
 from torch import Tensor, nn
+from torch._decomp import decomposition_table
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
 
 from priml.lib.custom_json import ListCodec
+from priml.testing.golden import pack, unpack
 
 
 if TYPE_CHECKING:
@@ -263,6 +267,10 @@ _EXACT_F32_OPS: Final[dict[str, str]] = {
 # name like ``_EXACT_F32_OPS``; a ``normal`` overload with a tensor mean or std
 # already carries a float argument and takes the ordinary upcast path.
 _RANDOM_FACTORIES: Final = frozenset({"randn", "normal"})
+
+# Namespaces of distributed collective ops (``dist.broadcast``/``dist.all_reduce``
+# and their functional-collective form); see ``_Float64Compute.__torch_dispatch__``.
+_COLLECTIVE_NAMESPACES: Final = frozenset({"c10d", "_c10d_functional"})
 
 
 @contextmanager
@@ -437,8 +445,9 @@ def assert_bfb_against_golden[InputT](
     First call (no golden file present, or ``BFB_REGENERATE=1`` set):
       - Builds the module, builds the input, randomizes parameters under
         ``seed``, runs ``module(input)``, and writes ``{golden_name}.pt``
-        containing the pre-run state_dict, input, output, and the post-run
-        state_dict when the run mutates state. ``randomize_parameters`` uses its
+        containing the pre-run state_dict and input whole, and a SHA-256 plus
+        the first elements of the output and, when the run mutates state, of
+        every post-run tensor. ``randomize_parameters`` uses its
         own seeded generator,
         so it is independent of the global RNG ``build_input`` may consume.
       - Immediately reloads the just-written golden, reruns, and asserts
@@ -450,9 +459,8 @@ def assert_bfb_against_golden[InputT](
 
     Subsequent calls:
       - Builds the module fresh, loads the pre-run state_dict, runs the
-        module on the input, asserts the output matches the golden's
-        output and the post-run state_dict matches the golden's post-run
-        state_dict bit-for-bit.
+        module on the input, and asserts the output and every post-run
+        tensor match the golden bit-for-bit.
 
     The post-run state is captured unconditionally: a non-mutating
     ``forward`` may still mutate registered buffers (BatchNorm
@@ -573,7 +581,7 @@ def regenerate_golden[InputT](
 def state_differs(before: Mapping[str, Tensor], after: Mapping[str, Tensor]) -> bool:
     """Whether any stored tensor changed across the run.
 
-    Public because it decides whether a golden STORES ``post_state_dict``, so
+    Public because it decides whether a golden STORES a post-run state, so
     anything reasoning about that key asks the same question. A second
     spelling of "did the state change" is how two callers drift.
 
@@ -592,6 +600,127 @@ def state_differs(before: Mapping[str, Tensor], after: Mapping[str, Tensor]) -> 
     )
 
 
+class _Golden(TypedDict):
+    """What a golden file stores.
+
+    ``post_state_digest`` and ``post_state_heads`` are absent when the run
+    mutated nothing, which the replay reads as "equal to ``state_dict``".
+    """
+
+    state_dict: dict[str, Tensor]
+    input: object
+    output: NotRequired[Tensor]
+    output_digest: NotRequired[Tensor]
+    output_head: NotRequired[Tensor]
+    seed: int
+    post_state_digest: NotRequired[dict[str, Tensor]]
+    post_state_heads: NotRequired[dict[str, Tensor]]
+
+
+# The pre-run state is the replay's INPUT, so it is stored whole. The output and the
+# post-run state are only ever compared, so a SHA-256 of each tensor's dtype, shape,
+# and bytes pins every bit; the first elements ride along so a mismatch still reports
+# its size in ULPs. ``torch.save`` frames every tensor as its own ~300-byte storage, so
+# each record is packed: one flat tensor per dtype plus an index.
+_HEAD: Final = 4
+
+
+def state_digest(value: Tensor) -> Tensor:
+    """Return the SHA-256 of a tensor's dtype, shape, and bytes, as 32 ``uint8``.
+
+    Args:
+      value: A state tensor.
+
+    Returns:
+      digest: ``[32]`` ``uint8``.
+
+    """
+    flat = value.detach().cpu().contiguous().reshape(-1)
+    hasher = hashlib.sha256(f"{value.dtype}{tuple(value.shape)}".encode())
+    hasher.update(flat.view(torch.uint8).numpy().tobytes())
+    return torch.frombuffer(bytearray(hasher.digest()), dtype=torch.uint8)
+
+
+def save_golden(path: Path, payload: _Golden) -> None:
+    """Write a golden with each record packed.
+
+    Args:
+      path: Destination ``.pt``.
+      payload: The golden, records as plain name-to-tensor mappings.
+
+    """
+    stored: dict[str, object] = {**payload, "state_dict": pack(payload["state_dict"])}
+    if "post_state_digest" in payload:
+        stored["post_state_digest"] = pack(payload["post_state_digest"])
+    if "post_state_heads" in payload:
+        stored["post_state_heads"] = pack(payload["post_state_heads"])
+    torch.save(stored, path)
+
+
+def load_golden(path: Path) -> _Golden:
+    """Read a golden written by :func:`save_golden`, records unpacked.
+
+    Args:
+      path: Source ``.pt``.
+
+    Returns:
+      payload: The golden, records as plain name-to-tensor mappings.
+
+    """
+    payload = cast(_Golden, torch.load(path, weights_only=False, map_location="cpu"))
+    payload["state_dict"] = unpack(payload["state_dict"])
+    if "post_state_digest" in payload:
+        payload["post_state_digest"] = unpack(payload["post_state_digest"])
+    if "post_state_heads" in payload:
+        payload["post_state_heads"] = unpack(payload["post_state_heads"])
+    return payload
+
+
+def post_state_record(state: Mapping[str, Tensor]) -> _PostState:
+    """Return the digests and leading elements that pin a post-run state.
+
+    Args:
+      state: The post-run state dict.
+
+    Returns:
+      record: ``digest`` and ``heads``, each keyed like ``state``.
+
+    """
+    return {
+        "digest": {key: state_digest(value) for key, value in state.items()},
+        "heads": {
+            key: value.detach().reshape(-1)[:_HEAD].cpu().clone()
+            for key, value in state.items()
+        },
+    }
+
+
+class _PostState(TypedDict):
+    digest: dict[str, Tensor]
+    heads: dict[str, Tensor]
+
+
+# bfloat16 and float16 are refused too, not float64 alone: the harness computes in all
+# three and only the rounding makes a value portable (see the module docstring). Complex
+# outputs are unsupported. Integers carry no rounding and pass.
+def _assert_portable_output_dtype(output: Tensor) -> None:
+    """Refuse a golden comparand that skipped the round back to float32."""
+    if output.dtype.is_complex:
+        raise TypeError(
+            f"bfb golden output is {output.dtype}, which is not supported; "
+            "return a float32 or integer tensor.",
+        )
+    if not output.dtype.is_floating_point or output.dtype == torch.float32:
+        return
+    raise TypeError(
+        f"bfb golden output is {output.dtype}, which is not portable across "
+        "hosts; it must be float32. host_agnostic_numerics computes in "
+        "float64 and the ROUND BACK to float32 is what makes the result "
+        "host-independent; returning the unrounded value stores this host's "
+        "libm error. Narrow in the runner: `return value.float()`.",
+    )
+
+
 def _replay_golden[InputT](
     *,
     golden_path: Path,
@@ -606,10 +735,7 @@ def _replay_golden[InputT](
     device = _module_device(module)
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
-    payload = cast(
-        _Golden,
-        torch.load(golden_path, weights_only=False, map_location="cpu"),
-    )
+    payload = load_golden(golden_path)
     module.load_state_dict(payload["state_dict"])
     inp = cast(InputT, move_to_device(payload["input"], device))
     with host_agnostic_numerics():
@@ -618,10 +744,25 @@ def _replay_golden[InputT](
     # gate exists still carries a float64 comparand, and reporting WHY it is
     # unportable beats an opaque one-ULP mismatch on someone else's host.
     _assert_portable_output_dtype(output)
+    if "output_digest" in payload:
+        _assert_digest_match(
+            output,
+            digest=payload["output_digest"],
+            head=payload.get("output_head"),
+            label="output",
+        )
+    else:
+        _assert_equal(output, payload.get("output"), label="output")
     # Absent means the run did not mutate its state, so the pre-run copy IS
     # the expectation -- a mutation introduced later then fails against it.
-    _assert_equal(output, payload["output"], label="output")
-    _assert_state_match(module, payload.get("post_state_dict", payload["state_dict"]))
+    if "post_state_digest" in payload:
+        expected = {
+            "digest": payload["post_state_digest"],
+            "heads": payload.get("post_state_heads", {}),
+        }
+    else:
+        expected = post_state_record(payload["state_dict"])
+    _assert_state_match(module, cast(_PostState, expected))
 
 
 def _default_runner(module: nn.Module, inp: object) -> Tensor:
@@ -636,10 +777,10 @@ def _default_runner(module: nn.Module, inp: object) -> Tensor:
     return result
 
 
-def _assert_state_match(module: nn.Module, golden: Mapping[str, Tensor]) -> None:
+def _assert_state_match(module: nn.Module, golden: _PostState) -> None:
     live = module.state_dict()
     live_keys = set(live.keys())
-    golden_keys = set(golden.keys())
+    golden_keys = set(golden["digest"].keys())
     if live_keys != golden_keys:
         added = live_keys - golden_keys
         removed = golden_keys - live_keys
@@ -647,7 +788,29 @@ def _assert_state_match(module: nn.Module, golden: Mapping[str, Tensor]) -> None
             f"state_dict keys differ: added={sorted(added)} removed={sorted(removed)}",
         )
     for k in sorted(live_keys):
-        _assert_equal(live[k], golden[k], label=f"state[{k}]")
+        _assert_digest_match(
+            live[k],
+            digest=golden["digest"][k],
+            head=golden["heads"].get(k),
+            label=f"state[{k}]",
+        )
+
+
+def _assert_digest_match(
+    value: Tensor,
+    *,
+    digest: Tensor,
+    head: Tensor | None,
+    label: str,
+) -> None:
+    """Compare the leading elements (for a ULP report), then every bit via SHA-256."""
+    if head is not None:
+        _assert_equal(value.detach().reshape(-1)[:_HEAD].cpu(), head, label=label)
+    if not torch.equal(state_digest(value), digest):
+        raise AssertionError(
+            f"{label}: bitwise comparison failed (dtype, shape, or an element "
+            f"past the first {_HEAD})",
+        )
 
 
 def _to_cpu(value: object) -> object:
@@ -952,6 +1115,72 @@ def _op_name(func: OpOverload[..., object]) -> str:
     return func.name().split("::")[-1].split(".")[0]
 
 
+# ``add``/``sub`` with ``alpha != 1`` compute ``a + alpha * b``: vectorized kernels
+# fuse it into one FMA rounding, the scalar kernel rounds twice, so the float32
+# result depends on the host's vector ISA. Measured: 271-367 of 4096 differ between
+# ATEN_CPU_CAPABILITY=default and avx2/avx512, enough to fork Adam's first moment.
+def _scales_operand(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> bool:
+    """Whether an allowlisted op carries a non-unit ``alpha`` multiplier."""
+    for index, argument in enumerate(func._schema.arguments):  # noqa: SLF001 -- The harness reads the op schema to find the multiplier argument.
+        if argument.name != "alpha":
+            continue
+        alpha = kwargs.get("alpha", args[index] if index < len(args) else 1)
+        return alpha != 1
+    return False
+
+
+# Upcasting is not enough for a fused multiply-add: its float64 kernel is itself
+# ISA-dependent (vectorized FMA vs. the scalar kernel's two roundings), and under
+# cancellation the gap reaches ~1e5 float64 ULP -- measured on lerp, addcmul,
+# addcdiv, scaled add, layer_norm, and the softmax backwards -- which flips the
+# float32 round. Their decompositions issue separate mul/add/sub, each correctly
+# rounded on every host.
+_UNFUSED_OPS: Final = frozenset(
+    {
+        "add",
+        "add_",
+        "sub",
+        "sub_",
+        "lerp",
+        "lerp_",
+        "addcmul",
+        "addcmul_",
+        "addcdiv",
+        "addcdiv_",
+        "native_layer_norm",
+        "native_layer_norm_backward",
+        "_log_softmax_backward_data",
+        "_softmax_backward_data",
+    },
+)
+
+
+def _run_unfused(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> object:
+    """Run ``func``, through its decomposition when its kernel may fuse an FMA."""
+    if _op_name(func) in _UNFUSED_OPS and _scales_or_fuses(func, args, kwargs):
+        return decomposition_table[func](*args, **kwargs)
+    return func(*args, **kwargs)
+
+
+def _scales_or_fuses(
+    func: OpOverload[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> bool:
+    """Whether ``func`` multiplies inside its kernel (plain add/sub do not)."""
+    if _op_name(func).rstrip("_") in {"add", "sub"}:
+        return _scales_operand(func, args, kwargs)
+    return func in decomposition_table
+
+
 class _Float64Compute(TorchDispatchMode):
     """Compute every float32 arithmetic op in float64, return float32.
 
@@ -968,6 +1197,13 @@ class _Float64Compute(TorchDispatchMode):
     reduction absent from every list is still upcast, so it cannot silently mint
     a host-dependent golden. The only unsafe act is wrongly *adding* an op to
     ``_EXACT_F32_OPS``, which the guard test in ``bfb_test.py`` catches.
+
+    Distributed collective ops (``_COLLECTIVE_NAMESPACES``) run natively,
+    never upcast: their schema declares no ``alias_info`` for the mutated
+    tensor, so an upcast-then-copy-back would have no write target and the
+    collective would silently become a no-op. Every other non-aten op --
+    including a project's own ``torch.library`` custom op -- keeps the
+    upcast.
     """
 
     @override
@@ -979,7 +1215,13 @@ class _Float64Compute(TorchDispatchMode):
         kwargs: dict[str, object] | None = None,
     ) -> object:
         kwargs = kwargs or {}
-        exact = _op_name(func) in _EXACT_F32_OPS
+        if func.namespace in _COLLECTIVE_NAMESPACES:
+            return func(*args, **kwargs)
+        exact = _op_name(func) in _EXACT_F32_OPS and not _scales_operand(
+            func,
+            args,
+            kwargs,
+        )
         input_dtypes: set[torch.dtype] = set()
         for value in (*args, *kwargs.values()):
             input_dtypes |= _floating_dtypes(value)
@@ -994,8 +1236,10 @@ class _Float64Compute(TorchDispatchMode):
                 else torch.get_default_dtype(),
             )
         narrow = {dtype for dtype in input_dtypes if _is_narrow_float(dtype)}
-        if exact or not narrow:
+        if exact:
             return func(*args, **kwargs)
+        if not narrow:
+            return _run_unfused(func, args, kwargs)
         target = (
             explicit_dtype
             if isinstance(explicit_dtype, torch.dtype)
@@ -1007,7 +1251,7 @@ class _Float64Compute(TorchDispatchMode):
             isinstance(explicit_dtype, torch.dtype) and _is_narrow_float(explicit_dtype)
         ):
             up_kwargs["dtype"] = torch.float64
-        result = func(*up_args, **up_kwargs)
+        result = _run_unfused(func, up_args, up_kwargs)
         if any(
             arg.alias_info is not None and arg.alias_info.is_write
             for arg in func._schema.arguments  # noqa: SLF001 -- The benchmark harness inspects private state to compare implementations..
@@ -1061,20 +1305,6 @@ def _seed_bfb(seed: int) -> None:
     torch.set_rng_state(generator.get_state())
 
 
-class _Golden(TypedDict):
-    """What a golden file stores.
-
-    ``post_state_dict`` is absent when the run mutated nothing, which the
-    replay reads as "equal to ``state_dict``".
-    """
-
-    state_dict: dict[str, Tensor]
-    input: object
-    output: Tensor
-    seed: int
-    post_state_dict: NotRequired[dict[str, Tensor]]
-
-
 def _write_golden[InputT](
     *,
     golden_path: Path,
@@ -1083,7 +1313,7 @@ def _write_golden[InputT](
     seed: int,
     run: Callable[[nn.Module, InputT], Tensor],
 ) -> None:
-    """Build, randomize, run, and snapshot pre- and post-run state."""
+    """Build, randomize, run; store the pre-run state and digest the rest."""
     torch.use_deterministic_algorithms(True)
     _seed_bfb(seed)
     module = build_module()
@@ -1100,32 +1330,14 @@ def _write_golden[InputT](
     payload: _Golden = {
         "state_dict": pre_state,
         "input": _to_cpu(inp),
-        "output": output.detach().cpu(),
+        "output_digest": state_digest(output),
+        "output_head": output.detach().reshape(-1)[:_HEAD].cpu().clone(),
         "seed": seed,
     }
     # Absence means "unchanged", which the replay asserts against the pre-run
     # copy -- so omitting it is not a weaker check.
     if state_differs(pre_state, post_state):
-        payload["post_state_dict"] = post_state
-    torch.save(payload, golden_path)
-
-
-# bfloat16 and float16 are refused too, not float64 alone: the harness computes in all
-# three and only the rounding makes a value portable (see the module docstring). Complex
-# outputs are unsupported. Integers carry no rounding and pass.
-def _assert_portable_output_dtype(output: Tensor) -> None:
-    """Refuse a golden comparand that skipped the round back to float32."""
-    if output.dtype.is_complex:
-        raise TypeError(
-            f"bfb golden output is {output.dtype}, which is not supported; "
-            "return a float32 or integer tensor.",
-        )
-    if not output.dtype.is_floating_point or output.dtype == torch.float32:
-        return
-    raise TypeError(
-        f"bfb golden output is {output.dtype}, which is not portable across "
-        "hosts; it must be float32. host_agnostic_numerics computes in "
-        "float64 and the ROUND BACK to float32 is what makes the result "
-        "host-independent; returning the unrounded value stores this host's "
-        "libm error. Narrow in the runner: `return value.float()`.",
-    )
+        record = post_state_record(post_state)
+        payload["post_state_digest"] = record["digest"]
+        payload["post_state_heads"] = record["heads"]
+    save_golden(golden_path, payload)

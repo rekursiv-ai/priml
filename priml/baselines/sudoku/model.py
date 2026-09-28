@@ -323,15 +323,15 @@ class Recurrence(Protocol):
         """Run the core to completion for one forward pass.
 
         Args:
-          core: Core.
-          input_emb: Input emb.
-          z_slow: Z slow.
-          z_fast: Z fast.
-          cos_sin: Cos sin.
-          collect_intermediates: Collect intermediates.
+          core: One core application: a block-stack pass over the latents.
+          input_emb: ``[B, S, C]`` prefix-prepended input embedding.
+          z_slow: ``[B, S, C]`` slow latent.
+          z_fast: ``[B, S, C]`` fast latent.
+          cos_sin: Rotary tables, or ``None`` without rotary positions.
+          collect_intermediates: Whether to record per-cycle latents.
 
         Returns:
-          result: The ForwardOutput.
+          out: Logits, halt logit, and both updated latents.
 
         """
         ...
@@ -687,6 +687,11 @@ class SudokuNet(nn.Module):
         super().__init__()
         self.config = config
         c = config.channels_in
+        # Registered first, filled after the blocks: parameter ORDER follows
+        # registration, and the legacy TRM held its prefix parameters directly, so
+        # they led. A norm over the body sums in that order, and a compiled float32
+        # reduction lands a different last bit when the order changes.
+        self.register_module("prefix", None)
         # Construction order fixes the global-RNG draw order, so a seeded init
         # is reproducible: embedding -> head -> blocks -> latent inits. The halt
         # head draws nothing (zeros and a constant bias).
@@ -748,10 +753,11 @@ class SudokuNet(nn.Module):
         """Return the initial ``(z_slow, z_fast)`` for a batch.
 
         Args:
-          batch_size: Batch size.
+          batch_size: Puzzles in the batch.
 
         Returns:
-          result: The tuple[Tensor, Tensor].
+          z_slow: ``[B, S, C]`` slow latent, the init vector at every position.
+          z_fast: ``[B, S, C]`` fast latent, likewise.
 
         """
         s = self.config.total_seq_len
@@ -1033,7 +1039,7 @@ def _count_prefix_tokens(prefix: PrefixConfig | None) -> int:
 
 
 def _latent_init(channels_in: int, *, dtype: torch.dtype | None) -> Tensor:
-    """Return a ``[1, C]`` learned-ish starting latent, unit-scaled, drawn in ``dtype``."""
+    """Return a ``[1, C]`` fixed random starting latent, unit-scaled, drawn in ``dtype``."""
     w = torch.empty(1, channels_in, dtype=dtype)
     truncated_normal(w, std=1.0, depth_index=(), variance_correction=True)
     return w

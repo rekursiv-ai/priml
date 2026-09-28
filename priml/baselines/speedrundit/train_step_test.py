@@ -77,11 +77,27 @@ class _SmokeSteps(nn.Module):
         config = exp_smoke().step
         config.model.input_size = 4
         config.model.in_channels = 2
-        config.model.hidden_size = 16
-        config.model.num_heads = 4
+        # Size only. Eight channels over two heads keeps a real head axis. Three
+        # blocks -- one dense encoder, one routed sparse middle, one dense
+        # decoder -- run every path; the recipe's 2+2 dense blocks at depth 4
+        # left no sparse middle block at all. The stored initial state is the
+        # golden's bulk, so width and depth are the levers. Every training
+        # mechanism -- routing, alignment, the optimizer -- is unchanged.
+        config.model.hidden_size = 8
+        config.model.timestep_frequencies = 16
+        config.model.num_heads = 2
         config.model.cls_channels = 8
-        config.model.projector_hidden = 16
+        config.model.projector_hidden = 8
         config.model.num_classes = 4
+        config.model.depth = 3
+        config.model.encoder_blocks = 1
+        config.model.decoder_blocks = 1
+        config.model.projection_depths = (1, 2, 3)
+        # Flatten the feed-forward expansion ramp to 1x: the per-block MLP is
+        # otherwise 2x-6x the width. The arithmetic (attention, alignment,
+        # adaLN) is unchanged; only the hidden width shrinks.
+        config.model.mlp_ratio_min = 1.0
+        config.model.mlp_ratio_max = 1.0
         config.teacher = FakeTeacher.Config()
         config.parallelism = NoParallel.Config(device="cpu")
         config.dtype_autocast = None

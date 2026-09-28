@@ -26,9 +26,15 @@ import pytest
 import torch
 
 from priml.baselines.sudoku import experiments, trm
-from priml.lib.custom_json import DictCodec
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import (
+    mismatches,
+    put_steps,
+    read_tensors,
+    rng_fingerprint,
+    stored,
+)
 
 
 if TYPE_CHECKING:
@@ -59,17 +65,6 @@ CASES: Final = tuple(
 """Every rung in fp32; the ladder's ends also under the recipe's bf16."""
 
 TRAIN_STEPS: Final = 5
-
-
-def rng_fingerprint() -> Tensor:
-    """Return the global generator's next draws without advancing it.
-
-    The raw state is 5 KB of Mersenne Twister words; the next 8 draws pin
-    the same position for a hundredth of the bytes.
-    """
-    generator = torch.Generator()
-    generator.set_state(torch.get_rng_state())
-    return torch.randint(0, 2**31 - 1, (8,), generator=generator)
 
 
 class Loader(Protocol):
@@ -289,41 +284,14 @@ def record(subject: Subject) -> dict[str, Tensor]:
         data.append(flatten(batch))
         train.append(flatten(subject.train_step(**batch)))
         steps.append({"steps": subject._pool_h_step.clone()})
-    _put_steps(out, "data", data)
-    _put_steps(out, "train", train)
-    _put_steps(out, "pool", steps)
+    put_steps(out, "data", data)
+    put_steps(out, "train", train)
+    put_steps(out, "pool", steps)
     _put(out, "pool/final", {**_pool(subject), **_latents(subject)})
     _put(out, "post", _state(subject))
     _put(out, "ema", dict(subject.ema_shadow or {}))
     _put(out, "eval_after", flatten(subject.eval_loss(**evaluation)))
     return out
-
-
-def mismatches(
-    expected: Mapping[str, Tensor],
-    actual: Mapping[str, Tensor],
-) -> list[str]:
-    """Every key whose presence, dtype, shape, or bits differ.
-
-    Args:
-      expected: Reference record.
-      actual: Candidate record.
-
-    Returns:
-      report: One line per mismatch, all of them.
-
-    """
-    report = [f"missing {k}" for k in sorted(expected.keys() - actual.keys())]
-    report += [f"unexpected {k}" for k in sorted(actual.keys() - expected.keys())]
-    for key in sorted(expected.keys() & actual.keys()):
-        want, got = expected[key], actual[key]
-        if want.dtype != got.dtype or want.shape != got.shape:
-            report.append(
-                f"{key}: {got.dtype}{list(got.shape)} vs {want.dtype}{list(want.shape)}",
-            )
-        elif not torch.equal(want, got):
-            report.append(f"{key}: {(want != got).sum().item()}/{want.numel()} differ")
-    return report
 
 
 def run(config: Makeable[object], scratch: Path) -> dict[str, Tensor]:
@@ -350,50 +318,7 @@ def golden_path(recipe: str, precision: str) -> Path:
 
 def load_golden(recipe: str, precision: str) -> dict[str, Tensor]:
     """Load a frozen golden."""
-    return read_golden(golden_path(recipe, precision))
-
-
-def write_golden(path: Path, record: Mapping[str, Tensor]) -> None:
-    """Save a record as a plain ``torch.save`` of name-to-tensor.
-
-    Every tensor of one dtype is a view into one shared storage: ``torch.save``
-    writes one archive entry per storage, so this halves a record of many small
-    tensors while leaving the file an ordinary dict of tensors.
-
-    Args:
-      path: Destination ``.pt``.
-      record: Flat name-to-tensor record.
-
-    """
-    by_dtype: dict[torch.dtype, list[str]] = {}
-    for key, value in record.items():
-        by_dtype.setdefault(value.dtype, []).append(key)
-    packed: dict[str, Tensor] = {}
-    for keys in by_dtype.values():
-        flat = torch.cat([record[key].reshape(-1) for key in keys])
-        for key, part in zip(
-            keys,
-            flat.split([record[key].numel() for key in keys]),
-            strict=True,
-        ):
-            packed[key] = part.view(record[key].shape)
-    torch.save(packed, path)
-
-
-def read_golden(path: Path) -> dict[str, Tensor]:
-    """Load a golden written by :func:`write_golden`.
-
-    Args:
-      path: Source ``.pt``.
-
-    Returns:
-      record: Flat name-to-tensor record.
-
-    """
-    return DictCodec.coerce(
-        cast(object, torch.load(path, weights_only=True)),
-        Tensor,
-    )
+    return read_tensors(golden_path(recipe, precision))
 
 
 @pytest.mark.parametrize(("recipe", "precision"), CASES)
@@ -464,53 +389,10 @@ def _latents(subject: Subject) -> dict[str, Tensor]:
     return {"z_slow": subject._pool_z_slow, "z_fast": subject._pool_z_fast}
 
 
-def stored(value: Tensor) -> Tensor:
-    """Return a detached copy of ``value``, small integer grids as bytes.
-
-    Args:
-      value: A recorded tensor.
-
-    Returns:
-      copy: The same values; a tensor of whole numbers in [0, 256) -- token
-        grids, counters, including grids packed into float32 dump rows --
-        narrowed to uint8, which holds them exactly. Anything else keeps its
-        dtype, so no bit is lost, and a value that stops being whole changes
-        the stored dtype, which the comparison reports.
-
-    """
-    copy = value.detach().clone()
-    whole = copy.dtype in {torch.int32, torch.int64} or (
-        copy.dtype == torch.float32 and bool((copy == copy.round()).all())
-    )
-    narrow = copy.numel() > 1 and whole and bool(((copy >= 0) & (copy < 256)).all())
-    return copy.to(torch.uint8) if narrow else copy
-
-
 def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> None:
     """Store :func:`stored` copies of ``values`` under ``prefix``."""
     for key, value in values.items():
         out[f"{prefix}/{key}"] = stored(value)
-
-
-# One key per quantity rather than per step: a golden's size is dominated by per-key
-# overhead, not by the bytes of its small tensors.
-# A key missing from some step, or changing shape, is stored per step under
-# ``prefix/<step>/`` (1-based) instead.
-def _put_steps(
-    out: dict[str, Tensor],
-    prefix: str,
-    records: list[dict[str, Tensor]],
-) -> None:
-    """Store per-step records stacked on a leading step axis."""
-    for key in sorted({key for record in records for key in record}):
-        values = [record[key] for record in records if key in record]
-        uniform = len({(value.shape, value.dtype) for value in values}) == 1
-        if len(values) == len(records) and uniform:
-            out[f"{prefix}/{key}"] = stored(torch.stack(values))
-            continue
-        for index, record in enumerate(records, start=1):
-            if key in record:
-                out[f"{prefix}/{index}/{key}"] = stored(record[key])
 
 
 if __name__ == "__main__":

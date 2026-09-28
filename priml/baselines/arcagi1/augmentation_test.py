@@ -1,4 +1,4 @@
-"""ARC augmentation configuration and exact source parity."""
+"""ARC augmentation configuration and transforms."""
 
 from __future__ import annotations
 

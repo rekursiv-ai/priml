@@ -77,6 +77,34 @@ def _model(**overrides: object) -> NanoChatLM:
     return _config(**overrides).make()
 
 
+# Size-only shrink for the forward goldens: the shared ``_config`` above pins
+# shapes ~30 assertion tests depend on, so the goldens get their own narrower
+# geometry. Every numerical choice (init, norm, softcap, value gate) is
+# unchanged, so a refactor still moves the golden; only the tensors are smaller.
+GOLDEN_VOCAB = 16
+GOLDEN_SEQ = 8
+
+
+def _golden_config(**overrides: object) -> NanoChatLM.Config:
+    config = NanoChatLM.Config()
+    config.vocab_size = GOLDEN_VOCAB
+    config.max_seq_len = GOLDEN_SEQ
+    config.channels_in = 8
+    config.num_layers = 1
+    attention = config.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.window_pattern = "L"
+    attention.channels_head = 4
+    attention.gate_channels = 4
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return config
+
+
+def _golden_tokens() -> Tensor:
+    return torch.randint(0, GOLDEN_VOCAB, (2, GOLDEN_SEQ))
+
+
 def _memory_config(*, buckets: int = 16) -> MemoryNanoChatLM.Config:
     config = MemoryNanoChatLM.Config()
     config.vocab_size = VOCAB
@@ -645,8 +673,8 @@ def test_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="plain",
-        build_module=lambda: _config().make(),
-        build_input=_tokens,
+        build_module=lambda: _golden_config().make(),
+        build_input=_golden_tokens,
         seed=0,
     )
 
@@ -660,8 +688,8 @@ def test_value_embedding_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="value_embedding",
-        build_module=lambda: _config(value_embedding_stride=1).make(),
-        build_input=_tokens,
+        build_module=lambda: _golden_config(value_embedding_stride=1).make(),
+        build_input=_golden_tokens,
         seed=0,
     )
 
@@ -679,11 +707,23 @@ def test_the_shipped_experiments_forward_bfb() -> None:
     bfloat16 stream reaches a float32 projection and the matmul refuses. That
     pairing IS the recipe, so the golden freezes it rather than widening it
     away.
+
+    Narrowed by SIZE only (width, heads, gate, one layer): every shared field
+    -- norm epsilon, the bf16 embedding dtype, the window pattern, the softcap,
+    the value gate -- is left as the ladder sets it, so a change to any of them
+    still lands here. ``gate_channels`` moves with ``channels_in`` because the
+    gate reads the whole stream.
     """
 
     def _model() -> NanoChatLM.Config:
         model = experiments.exp_smoke().step.model
         assert isinstance(model, NanoChatLM.Config)
+        model.channels_in = 8
+        model.num_layers = 1
+        attention = model.template.attn
+        assert isinstance(attention, ValueGatedAttention.Config)
+        attention.channels_head = 4
+        attention.gate_channels = 8
         return model
 
     def build() -> nn.Module:

@@ -101,11 +101,35 @@ def test_kimi_k2_config_pprint() -> None:
     )
 
 
+# The harness stores the randomized state_dict, so the golden's size is the parameter
+# count -- dominated by the dense and per-expert FFNs. Narrowing the intermediate widths
+# leaves every numerical path (MLA, routing, shared and routed experts, both dense and
+# MoE layers) intact.
+def _bfb_config() -> KimiK2.Config:
+    """Canonical Kimi with the dense and MoE FFN widths narrowed by size only."""
+    return KimiK2.Config.from_hf(
+        _hf_config(
+            vocab_size=16,
+            hidden_size=8,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            qk_nope_head_dim=4,
+            qk_rope_head_dim=4,
+            v_head_dim=4,
+            kv_lora_rank=8,
+            intermediate_size=8,
+            moe_intermediate_size=4,
+            n_routed_experts=2,
+            num_experts_per_tok=1,
+        ),
+    )
+
+
 def test_kimi_k2_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="kimi_k2",
-        build_module=lambda: _canonical_config().make(),
+        build_module=lambda: _bfb_config().make(),
         build_input=lambda: torch.tensor([[0, 1, 2]]),
         seed=0,
     )

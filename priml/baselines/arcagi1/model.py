@@ -1,125 +1,180 @@
-"""ARC model components that extend the shared priml puzzle solver."""
+"""Reference-TRM pieces the ARC recipes inject into the shared puzzle solver.
+
+The solver is :class:`~priml.baselines.sudoku.model.SudokuNet`; everything
+here fills one of its slots:
+
+* :class:`ConvSwiGLU` -- a feed-forward for the transformer block's ``ffn``
+  slot that mixes a short window of neighbouring tokens on the gated branch.
+* :class:`UrmRecurrence` -- a recurrence for the ``recurrence`` slot that
+  carries ONE latent state instead of TRM's slow/fast pair.
+
+Together they are the Universal Reasoning Model's architecture on the TRM
+chassis: the same embedding, heads, halting, and puzzle prefix, a different
+update rule and a different block.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self, override
+from dataclasses import KW_ONLY
+from typing import TYPE_CHECKING, Protocol, Self, override
 
-from configgle import Makes
-from torch import Tensor
+from configgle import Fig, Makeable, Makes
+from torch import Tensor, nn
 
 import torch
 
-from priml.baselines.sudoku.model import CoreOutput, SudokuNet
+from priml.baselines.sudoku.model import DeepRecurrence
 from priml.cost import Cost, cost, elementwise_cost
+from priml.math.basic import ceil_multiple
 from priml.model.conv import Conv1d
-from priml.model.init import InitFn, unit_fan_in_uniform
+from priml.model.custom_types import ChannelsIn, TensorModule
+from priml.model.init import InitFn, kaiming_uniform
 from priml.model.linear import Linear
 from priml.model.swiglu import SwiGLU, silu
 
 
 if TYPE_CHECKING:
-    from torch.distributed.tensor.parallel import ParallelStyle
+    from priml.baselines.sudoku.model import MixFn
 
 
-class HPSURM(SudokuNet):
-    """Single-state URM core, using priml's shared puzzle model machinery.
+class ShortConvFn(Protocol):
+    """Depthwise short convolution over the sequence axis of ``[B, S, C]``."""
 
-    The slow state is the one carried hidden state. The fast state remains an
-    inert compatibility slot because the shared recurrence driver carries two
-    tensors; HPS's inner loop is implemented here and injects the input at each
-    pass, as in the historical URM.
+    def __call__(self, conv: nn.Conv1d, x: Tensor, *, causal: bool) -> Tensor:
+        """Apply to the input."""
+        ...
+
+
+def depthwise_conv(conv: nn.Conv1d, x: Tensor, *, causal: bool) -> Tensor:
+    """Run the depthwise ``Conv1d`` kernel, then SiLU.
+
+    Non-causal pads ``kernel // 2`` on both sides and trims the right overhang
+    to the input length, so each token mixes a small symmetric window; causal
+    left-pads ``kernel - 1``.
+
+    Args:
+      conv: Depthwise convolution (``groups == channels``), unpadded.
+      x: ``[B, S, C]`` gated activations.
+      causal: Restrict the window to positions at or before each token.
+
+    Returns:
+      mixed: ``[B, S, C]`` in ``x``'s dtype.
+
+    """
+    kernel = conv.kernel_size[0]
+    s = x.shape[1]
+    xt = x.transpose(1, 2)
+    if causal:
+        xt = conv(nn.functional.pad(xt, (kernel - 1, 0)).to(conv.weight.dtype))
+    else:
+        padded = nn.functional.pad(xt, (kernel // 2, kernel // 2))
+        xt = conv(padded.to(conv.weight.dtype))[..., :s]
+    return nn.functional.silu(xt).transpose(1, 2).to(x.dtype)
+
+
+def depthwise_shift(conv: nn.Conv1d, x: Tensor, *, causal: bool) -> Tensor:
+    """Evaluate the same depthwise window as shifted elementwise taps, then SiLU.
+
+    Reads ``conv``'s weight and bias but never its kernel, so the taps stay
+    fused elementwise work inside a compiled core. It agrees with
+    :func:`depthwise_conv` up to the order of the per-tap additions: bit-equal
+    in bfloat16 at kernel 2, one float32 ULP apart otherwise.
+
+    Args:
+      conv: Depthwise convolution whose ``[C, 1, K]`` weight supplies the taps.
+      x: ``[B, S, C]`` gated activations.
+      causal: Restrict the window to positions at or before each token.
+
+    Returns:
+      mixed: ``[B, S, C]``; SiLU applied after the cast back to ``x``'s dtype.
+
+    """
+    weight = conv.weight
+    kernel = conv.kernel_size[0]
+    h = x.to(weight.dtype)
+    s = h.shape[1]
+    left_pad = kernel - 1 if causal else kernel // 2
+    out = h * weight[:, 0, left_pad]
+    for k in range(kernel):
+        shift = k - left_pad
+        if shift < 0:
+            shifted = nn.functional.pad(h, (0, 0, -shift, 0))[:, :s, :]
+        elif shift > 0:
+            shifted = nn.functional.pad(h[:, shift:, :], (0, 0, 0, shift))[:, :s, :]
+        else:
+            continue
+        out = out + shifted * weight[:, 0, k]
+    if conv.bias is not None:
+        out = out + conv.bias
+    return nn.functional.silu(out.to(x.dtype))
+
+
+class ConvSwiGLU(nn.Module):
+    """SwiGLU feed-forward with a depthwise short convolution on the gated output.
+
+    ``down(short_conv(g(gate, up)))`` where ``gate, up = up_proj(x).chunk(2)``
+    and ``g`` is ``silu(gate) * up`` without a norm, or the modified
+    ``sigmoid(gate) * norm(gate * up)`` with one -- the form that keeps a
+    high-rate Muon body stable.
+
+    References:
+      https://arxiv.org/abs/2512.14693
+        Gao et al. Universal Reasoning Model.
+
     """
 
-    class Config(Makes["HPSURM"], SudokuNet.Config):
-        """Shared SudokuNet shape and slots with HPSURM construction."""
+    class Config(Fig["ConvSwiGLU"], kw_only=False):
+        """Widths, the short window, and the optional gate norm."""
 
-        @override
-        def cost(self, *, batch_size: int, dtype: torch.dtype | None) -> Cost:
-            """Remove the shared two-state core's unused stack and state adds."""
-            total = SudokuNet.Config.cost(self, batch_size=batch_size, dtype=dtype)
-            rows = batch_size * self.total_seq_len
-            stack = cost(
-                self.block,
-                seq_len=self.total_seq_len,
-                batch_size=batch_size,
-                dtype=dtype,
-            ).tile(self.num_layers, copies=self.num_layers)
-            add = elementwise_cost(
-                primal=self.channels_in * rows,
-                adjoint=self.channels_in * rows,
-                channels=self.channels_in,
-                inputs=2,
-                rows=rows,
-                dtype=dtype,
-            )
-            excess = stack + add.tile(2)
-            slow_cycles = 1 if self.recurrence is None else self.recurrence.slow_cycles
-            excess += excess.only("primal").tile(slow_cycles - 1)
-            return Cost(
-                cells={
-                    key: value - excess.cells.get(key, 0)
-                    for key, value in total.cells.items()
-                },
-                params=total.params,
-                params_active=total.params_active,
-                bytes_state=total.bytes_state,
-            )
+        channels_in: int = -1
+        """Input width; -1 infers it from ``channels_out``."""
 
-    @override
-    def _core(
-        self,
-        input_emb: Tensor,
-        z_slow: Tensor,
-        z_fast: Tensor,
-        cos_sin: tuple[Tensor, Tensor] | None = None,
-    ) -> CoreOutput:
-        """Run the URM inner loop over its single carried latent."""
-        cycles = (
-            1 if self.config.recurrence is None else self.config.recurrence.fast_cycles
-        )
-        hidden = z_slow
-        for _ in range(cycles):
-            hidden = self._mix(hidden + input_emb, cos_sin)
-        logits = self.head(hidden)
-        halt_logits = self.halt_head(hidden[:, 0]).to(torch.float32)
-        halt = (
-            halt_logits.squeeze(-1)
-            if self.config.halt_outputs == 1
-            else halt_logits[..., 0]
-        )
-        return CoreOutput(logits, halt, hidden, z_fast)
+        channels_out: int = -1
+        """Output width; -1 infers it from ``channels_in``."""
 
+        _: KW_ONLY
 
-class ConvSwiGLU(SwiGLU):
-    """SwiGLU with the HPS depthwise short convolution between gate and head."""
+        channels_hidden: int = -1
+        """Hidden width; -1 rounds ``channels_in * expansion`` up to ``round_to``."""
 
-    class Config(Makes["ConvSwiGLU"], SwiGLU.Config):
-        """SwiGLU settings plus URM's depthwise convolution width."""
+        expansion: float = 8 / 3
+        """Hidden-to-input ratio when ``channels_hidden`` is inferred."""
 
-        if TYPE_CHECKING:
+        round_to: int = 256
+        """Grid the inferred hidden width is rounded up to."""
 
-            @override
-            def make(self) -> ConvSwiGLU:
-                """Build the configured convolutional SwiGLU."""
-                ...
-
-        init_weight_out: InitFn = unit_fan_in_uniform
         kernel_size: int = 2
-        shift_conv: bool = True
+        """Short-convolution window."""
+
+        causal: bool = False
+        """Left-only window; the default mixes a symmetric one."""
+
+        bias: bool = False
+        """Bias on the two projections. The convolution always has one."""
+
+        short_conv: ShortConvFn = depthwise_conv
+        """Evaluates the window; :func:`depthwise_shift` keeps it elementwise."""
+
+        norm: Makeable[TensorModule] | None = None
+        """Gate norm; ``None`` is the plain SiLU gate."""
+
+        init_weight: InitFn = kaiming_uniform
+        """Initializer for both projections."""
 
         @override
         def finalize(self) -> Self:
-            if not self.gate or self.split_gate_projection or self.act is not silu:
-                raise ValueError("ConvSwiGLU requires the fused gated projection")
-            if self.init_weight_out is unit_fan_in_uniform:
-                self.init_weight_out = self.init_weight
-            elif self.init_weight_out is not self.init_weight:
-                raise ValueError("ConvSwiGLU uses init_weight for both projections")
-            if self.shard not in (None, "colwise"):
-                raise ValueError(f"unsupported ConvSwiGLU shard policy: {self.shard}")
+            if self.channels_in == -1:
+                self.channels_in = self.channels_out
+            if self.channels_out == -1:
+                self.channels_out = self.channels_in
+            if self.channels_hidden == -1:
+                self.channels_hidden = int(
+                    ceil_multiple(self.channels_in * self.expansion, self.round_to),
+                )
+            if isinstance(self.norm, ChannelsIn) and self.norm.channels_in == -1:
+                self.norm.channels_in = self.channels_hidden
             return super().finalize()
 
-        @override
         def cost(
             self,
             *,
@@ -128,31 +183,34 @@ class ConvSwiGLU(SwiGLU):
             dtype: torch.dtype | None,
             **kwargs: object,
         ) -> Cost:
-            """Cost the gated projections and the depthwise convolution.
+            """Cost the gated projections, the short window, and its SiLU.
+
+            The gate and projections are :class:`SwiGLU`'s with the same widths.
+            :func:`depthwise_shift` runs the window as ``kernel_size`` shifted
+            taps, so it is elementwise work; :func:`depthwise_conv` runs one
+            depthwise convolution over the padded sequence.
 
             Args:
-              seq_len: Sequence length entering the block.
-              batch_size: Number of examples.
-              dtype: Activation dtype, or ``None`` for the default.
-              **kwargs: Ignored additional cost context.
+              seq_len: Tokens per sequence.
+              batch_size: Sequences per step.
+              dtype: Activation dtype; ``None`` is torch's default.
+              **kwargs: The open bus, unread.
 
             Returns:
-              result: Forward and backward operation estimate.
+              cost: Integer FLOPs and logical bytes for the complete invocation.
 
             """
             del kwargs
-            base = SwiGLU.Config(
+            gated = SwiGLU.Config(
                 channels_in=self.channels_in,
                 channels_out=self.channels_out,
                 channels_hidden=self.channels_hidden,
                 bias=self.bias,
                 norm=self.norm,
-                init_weight=self.init_weight,
-                init_weight_out=self.init_weight,
             )
             hidden = self.channels_hidden
             rows = seq_len * batch_size
-            if self.shift_conv:
+            if self.short_conv is depthwise_shift:
                 tap = elementwise_cost(
                     primal=hidden * rows,
                     adjoint=2 * hidden * rows,
@@ -169,7 +227,7 @@ class ConvSwiGLU(SwiGLU):
                     rows=rows,
                     dtype=dtype,
                 )
-                bias = elementwise_cost(
+                conv_bias = elementwise_cost(
                     primal=hidden * rows,
                     adjoint=hidden * rows,
                     channels=hidden,
@@ -177,10 +235,13 @@ class ConvSwiGLU(SwiGLU):
                     rows=rows,
                     dtype=dtype,
                 )
-                conv = tap.tile(self.kernel_size, copies=self.kernel_size)
-                conv += combine + bias
+                window = tap.tile(self.kernel_size, copies=self.kernel_size)
+                window += combine + conv_bias
             else:
-                conv = cost(
+                pad = (
+                    self.kernel_size - 1 if self.causal else 2 * (self.kernel_size // 2)
+                )
+                window = cost(
                     Conv1d.Config(
                         channels_in=hidden,
                         channels_out=hidden,
@@ -189,108 +250,108 @@ class ConvSwiGLU(SwiGLU):
                         groups=hidden,
                         bias=True,
                     ),
-                    input_grid=seq_len + 2 * (self.kernel_size // 2),
+                    input_grid=seq_len + pad,
                     batch_size=batch_size,
                     dtype=dtype,
                 )
             return (
-                cost(
-                    base,
-                    seq_len=seq_len,
-                    batch_size=batch_size,
-                    dtype=dtype,
-                )
-                + conv
+                cost(gated, seq_len=seq_len, batch_size=batch_size, dtype=dtype)
+                + window
                 + cost(silu, channels=hidden * rows, dtype=dtype)
             )
 
     def __init__(self, config: Config) -> None:
-        torch.nn.Module.__init__(self)
+        super().__init__()
+        c_h = config.channels_hidden
+        self.causal = config.causal
+        self.short_conv = config.short_conv
+        # Construction order is the init draw order: up, down, conv.
         self.up_proj = Linear.Config(
             channels_in=config.channels_in,
-            channels_out=config.channels_hidden * 2,
+            channels_out=c_h * 2,
             bias=config.bias,
             init_weight=config.init_weight,
-            depth_index=config.depth_index,
         ).make()
         self.down_proj = Linear.Config(
-            channels_in=config.channels_hidden,
+            channels_in=c_h,
             channels_out=config.channels_out,
             bias=config.bias,
             init_weight=config.init_weight,
-            depth_index=config.depth_index,
         ).make()
         self.conv = Conv1d.Config(
-            channels_in=config.channels_hidden,
-            channels_out=config.channels_hidden,
+            channels_in=c_h,
+            channels_out=c_h,
             kernel_size=config.kernel_size,
             padding=0,
-            groups=config.channels_hidden,
+            groups=c_h,
             bias=True,
-            depth_index=config.depth_index,
         ).make()
-        self.norm = config.norm.make() if config.norm is not None else None
-        self.shift_conv = config.shift_conv
-        self.shard = config.shard
+        self.norm = None if config.norm is None else config.norm.make()
 
-    @override
     def reset_parameters(self) -> None:
-        """Reset the projections, normalization, and depthwise convolution."""
-        super().reset_parameters()
+        """Initialize every parameter in place."""
+        self.up_proj.reset_parameters()
+        self.down_proj.reset_parameters()
         self.conv.reset_parameters()
 
     @override
-    def tensor_parallel_style(self) -> ParallelStyle:
-        """Reject tensor parallelism until the depthwise convolution can shard."""
-        raise NotImplementedError(
-            "ConvSwiGLU tensor parallelism needs a depthwise convolution plan.",
-        )
+    def forward(self, x: Tensor, **kwargs: object) -> Tensor:
+        del kwargs
+        gate, up = self.up_proj(x).chunk(2, dim=-1)
+        if self.norm is None:
+            gated = nn.functional.silu(gate) * up
+        else:
+            gated = torch.sigmoid(gate) * self.norm(gate * up)
+        return self.down_proj(self.short_conv(self.conv, gated, causal=self.causal))
+
+
+class UrmRecurrence(DeepRecurrence):
+    """Refine ONE latent by ``fast_cycles`` block passes per core application.
+
+    The state rides in the ``z_slow`` slot, which the heads read; ``z_fast`` is
+    carried through untouched so the two-latent pool contract holds. Truncated
+    backprop is the parent's ``slow_cycles`` split by default; with
+    ``inner_grad_loops`` it moves inside the core instead.
+
+    References:
+      https://arxiv.org/abs/2512.14693
+        Gao et al. Universal Reasoning Model.
+
+    """
+
+    class Config(Makes["UrmRecurrence"], DeepRecurrence.Config):
+        """Cycle counts plus the in-core truncation length."""
+
+        inner_grad_loops: int = 0
+        """Passes that carry gradient inside one core application.
+
+        0 keeps every pass differentiable, so truncation is the parent's
+        ``slow_cycles`` split. Positive runs the first
+        ``fast_cycles - inner_grad_loops`` passes without gradient, the
+        paper's in-core truncation; pair it with ``slow_cycles=1``."""
 
     @override
-    def forward(self, x: Tensor, *args: object, **kwargs: object) -> Tensor:
-        """Apply gated expansion, short convolution, and output projection.
-
-        Args:
-          x: Hidden sequence shaped ``[batch, sequence, channels]``.
-          *args: Ignored compatibility arguments.
-          **kwargs: Ignored compatibility options.
-
-        Returns:
-          output: Transformed hidden sequence with ``channels_out`` channels.
-
-        """
-        del args, kwargs
-        gate, up = self.up_proj(x).chunk(2, dim=-1)
-        gated = (
-            torch.sigmoid(gate) * self.norm(gate * up)
-            if self.norm is not None
-            else torch.nn.functional.silu(gate) * up
-        )
-        length = gated.shape[1]
-        if not self.shift_conv:
-            convolved = torch.nn.functional.pad(
-                gated.transpose(1, 2),
-                (self.conv.kernel_size[0] // 2,) * 2,
-            )
-            convolved = torch.nn.functional.silu(
-                self.conv(convolved.to(self.conv.weight.dtype))[..., :length],
-            )
-            return self.down_proj(convolved.transpose(1, 2).to(gated.dtype))
-        weight = self.conv.weight
-        values = gated.to(weight.dtype)
-        left_pad = self.conv.kernel_size[0] // 2
-        convolved = values * weight[:, 0, left_pad]
-        for tap in range(weight.shape[-1]):
-            shift = tap - left_pad
-            if shift == 0:
-                continue
-            shifted = (
-                torch.nn.functional.pad(values, (0, 0, -shift, 0))
-                if shift < 0
-                else torch.nn.functional.pad(values[:, shift:], (0, 0, 0, shift))
-            )[:, :length]
-            convolved = convolved + shifted * weight[:, 0, tap]
-        if self.conv.bias is not None:
-            convolved = convolved + self.conv.bias
-        convolved = torch.nn.functional.silu(convolved.to(gated.dtype))
-        return self.down_proj(convolved)
+    def refine(
+        self,
+        mix: MixFn,
+        input_emb: Tensor,
+        z_slow: Tensor,
+        z_fast: Tensor,
+        cos_sin: tuple[Tensor, Tensor] | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Re-inject the input before every pass over the single state."""
+        config = self.config
+        assert isinstance(config, UrmRecurrence.Config)
+        h = z_slow
+        grad_loops = config.inner_grad_loops
+        if grad_loops > 0:
+            with torch.no_grad():
+                for _ in range(max(config.fast_cycles - grad_loops, 0)):
+                    h = mix(h.detach() + input_emb.detach(), cos_sin)
+            h = h.detach()
+            for _ in range(grad_loops):
+                h = mix(h + input_emb, cos_sin)
+        else:
+            for _ in range(config.fast_cycles):
+                h = mix(h + input_emb, cos_sin)
+        return h, z_fast

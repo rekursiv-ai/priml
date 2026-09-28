@@ -1,4 +1,4 @@
-"""Tests for the HPS solver and its convolutional feed-forward block."""
+"""Tests for the convolutional feed-forward and the single-latent recurrence."""
 
 from __future__ import annotations
 
@@ -7,62 +7,22 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.baselines.arcagi1.experiments import exp004
-from priml.baselines.arcagi1.model import HPSURM, ConvSwiGLU
+from priml.baselines.arcagi1.model import (
+    ConvSwiGLU,
+    UrmRecurrence,
+    depthwise_conv,
+    depthwise_shift,
+)
 from priml.baselines.sudoku.embedding import GridEmbedding
-from priml.baselines.sudoku.model import DeepRecurrence
+from priml.baselines.sudoku.model import SudokuNet
 from priml.cost import cost
-from priml.model.attention.self_attention import SelfAttention
+from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
-from priml.model.transformer.block import TransformerBlock
 from priml.testing.cost import assert_cost_matches_torch
 
 
-@pytest.mark.parametrize(
-    ("recurrence", "core_passes"),
-    [(None, 1), (DeepRecurrence.Config(slow_cycles=2, fast_cycles=6), 12)],
-)
-def test_hps_cost_counts_the_actual_inner_passes(
-    recurrence: DeepRecurrence.Config | None,
-    core_passes: int,
-) -> None:
-    """The one-state core runs its stack exactly once per fast cycle."""
-    config = HPSURM.Config(channels_in=4, num_layers=1, vocab_size=3)
-    config.embedding = GridEmbedding.Config(grid_shape=(2,))
-    config.block = SwiGLU.Config(channels_hidden=8, round_to=1)
-    config.recurrence = recurrence
-    analytical = assert_cost_matches_torch(
-        config,
-        build_input=lambda: torch.randint(0, 3, (1, 2)),
-        run=_logits_and_halt,
-        batch_size=1,
-        dtype=None,
-    )
-    unstacked = config.copy_tree()
-    unstacked.num_layers = 0
-    block = cost(
-        config.copy_tree().finalize().block,
-        seq_len=2,
-        batch_size=1,
-        dtype=None,
-    )
-    base = cost(unstacked.finalize(), batch_size=1, dtype=None)
-    assert (
-        analytical["flops", "primal", "matmul"].sum()
-        - base["flops", "primal", "matmul"].sum()
-        == core_passes * block["flops", "primal", "matmul"].sum()
-    )
-
-
-def _logits_and_halt(module: nn.Module, tokens: Tensor) -> Tensor:
-    """Pull gradients through both prediction heads."""
-    assert isinstance(module, HPSURM)
-    result = module(tokens)
-    return result.logits.sum() + result.halt.sum()
-
-
 def test_conv_swiglu_reset_initializes_its_convolution() -> None:
-    """Post-materialization reset must cover the extra convolution parameters."""
+    """A reset after meta materialization must cover the convolution too."""
     ffn = ConvSwiGLU.Config(channels_in=4, channels_hidden=4).make()
     assert ffn.conv.bias is not None
     with torch.no_grad():
@@ -70,32 +30,21 @@ def test_conv_swiglu_reset_initializes_its_convolution() -> None:
         ffn.conv.bias.fill_(float("nan"))
     ffn.reset_parameters()
     assert torch.isfinite(ffn.conv.weight).all()
-    assert torch.equal(ffn.conv.bias, torch.zeros_like(ffn.conv.bias))
-
-
-def test_conv_swiglu_rejects_tensor_parallelism_explicitly() -> None:
-    ffn = ConvSwiGLU.Config(
-        channels_in=4,
-        channels_hidden=4,
-        shard="colwise",
-    ).make()
-    assert ffn.shard == "colwise"
-    with pytest.raises(NotImplementedError, match="ConvSwiGLU"):
-        ffn.tensor_parallel_style()
+    assert torch.isfinite(ffn.conv.bias).all()
 
 
 @pytest.mark.parametrize("kernel_size", [2, 3])
-@pytest.mark.parametrize("shift_conv", [False, True])
-def test_conv_swiglu_cost_matches_its_selected_path(
-    shift_conv: bool,
+@pytest.mark.parametrize("short_conv", [depthwise_conv, depthwise_shift])
+def test_conv_swiglu_cost_matches_torch(
+    short_conv: object,
     kernel_size: int,
 ) -> None:
-    """Shifted taps are elementwise; Conv1d computes the padded extra row."""
+    """Shifted taps cost elementwise work; the convolution adds matmul work."""
     config = ConvSwiGLU.Config(
         channels_in=4,
         channels_hidden=4,
         kernel_size=kernel_size,
-        shift_conv=shift_conv,
+        short_conv=depthwise_shift if short_conv is depthwise_shift else depthwise_conv,
     )
     analytical = assert_cost_matches_torch(
         config,
@@ -110,60 +59,75 @@ def test_conv_swiglu_cost_matches_its_selected_path(
         batch_size=1,
         dtype=None,
     )
-    actual_matmul = analytical["flops", "matmul"].sum()
-    base_matmul = base["flops", "matmul"].sum()
-    if shift_conv:
-        assert actual_matmul == base_matmul
-    else:
-        assert actual_matmul > base_matmul
-    elementwise = (
-        analytical["flops", "primal", "elementwise"].sum()
-        - base["flops", "primal", "elementwise"].sum()
-    )
-    conv_rows = 3 + 2 * (kernel_size // 2) - kernel_size + 1
-    expected = (2 * kernel_size + 5) * 3 * 4 if shift_conv else (conv_rows + 5 * 3) * 4
-    assert elementwise == expected
+    extra = analytical["flops", "matmul"].sum() - base["flops", "matmul"].sum()
+    assert (extra == 0) is (short_conv is depthwise_shift)
 
 
-@pytest.mark.parametrize("kernel_size", [5, 7])
-def test_shift_convolution_keeps_short_sequence_length(kernel_size: int) -> None:
-    """Shifts beyond the input are all padding, even for a one-token input."""
-    shifted = ConvSwiGLU.Config(
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("kernel_size", [2, 3, 5])
+@pytest.mark.parametrize("length", [1, 4])
+def test_shifted_taps_match_the_convolution(
+    causal: bool,
+    kernel_size: int,
+    length: int,
+) -> None:
+    """Both windows keep the sequence length, even past a one-token input."""
+    conv = nn.Conv1d(4, 4, kernel_size, groups=4, bias=True).double()
+    x = torch.randn(2, length, 4, dtype=torch.float64)
+    shifted = depthwise_shift(conv, x, causal=causal)
+    reference = depthwise_conv(conv, x, causal=causal)
+    assert shifted.shape == x.shape
+    torch.testing.assert_close(shifted, reference)
+
+
+def test_the_gate_norm_changes_the_output() -> None:
+    """With a norm the gate is ``sigmoid(g) * norm(g * u)``, not ``silu(g) * u``."""
+    plain = ConvSwiGLU.Config(channels_in=4, channels_hidden=4).make()
+    normed = ConvSwiGLU.Config(
         channels_in=4,
         channels_hidden=4,
-        kernel_size=kernel_size,
-        shift_conv=True,
+        norm=RMSNorm.Config(),
     ).make()
-    reference = ConvSwiGLU.Config(
-        channels_in=4,
-        channels_hidden=4,
-        kernel_size=kernel_size,
-        shift_conv=False,
-    ).make()
-    reference.load_state_dict(shifted.state_dict())
-    x = torch.randn(2, 1, 4)
-    actual = shifted(x)
-    assert actual.shape == x.shape
-    torch.testing.assert_close(actual, reference(x))
+    normed.load_state_dict(plain.state_dict(), strict=False)
+    x = torch.randn(2, 3, 4)
+    assert not torch.equal(plain(x), normed(x))
 
 
-def test_hps_recipe_finalizes_and_tiny_model_runs_without_parallelism() -> None:
-    """The transformer may auto-fill the FFN shard slot for a local model."""
-    assert isinstance(exp004().copy_tree().finalize().step.model, HPSURM.Config)
-    config = HPSURM.Config(channels_in=4, num_layers=1, vocab_size=3)
-    config.embedding = GridEmbedding.Config(grid_shape=(2,))
-    config.block = TransformerBlock.Config(
-        attn=SelfAttention.Config(num_heads=2, channels_head=2),
-        ffn=ConvSwiGLU.Config(channels_hidden=4),
-        prenorm=False,
+@pytest.mark.parametrize("inner_grad_loops", [0, 2])
+def test_urm_carries_one_latent_and_leaves_the_other_untouched(
+    inner_grad_loops: int,
+) -> None:
+    config = SudokuNet.Config(channels_in=8, num_layers=1, vocab_size=5)
+    config.embedding = GridEmbedding.Config(grid_shape=(4,))
+    config.block = SwiGLU.Config(channels_hidden=8, round_to=1)
+    config.recurrence = UrmRecurrence.Config(
+        slow_cycles=1,
+        fast_cycles=3,
+        inner_grad_loops=inner_grad_loops,
     )
     model = config.make()
-    block = model.reasoning[0]
-    assert isinstance(block, TransformerBlock)
-    ffn = block.ffn
-    assert isinstance(ffn, ConvSwiGLU)
-    assert ffn.shard == "colwise"
-    assert model(torch.randint(0, 3, (1, 2))).logits.shape == (1, 2, 3)
+    tokens = torch.randint(0, 5, (2, 4))
+    z_slow, z_fast = model.init_latents(2)
+    out = model(tokens, z_slow, z_fast)
+    assert not torch.equal(out.z_slow, z_slow)
+    assert torch.equal(out.z_fast, z_fast)
+    (out.logits.sum() + out.halt.sum()).backward()
+    assert all(p.grad is not None for p in model.parameters() if p.requires_grad)
+
+
+def test_inner_grad_loops_truncate_the_backward() -> None:
+    """Passes before the last ``inner_grad_loops`` carry no gradient."""
+    seen: list[bool] = []
+
+    def mix(z: Tensor, cos_sin: tuple[Tensor, Tensor] | None) -> Tensor:
+        del cos_sin
+        seen.append(torch.is_grad_enabled())
+        return z * 2.0
+
+    recurrence = UrmRecurrence.Config(fast_cycles=4, inner_grad_loops=1).make()
+    x = torch.ones(1, 2, 3, requires_grad=True)
+    recurrence.refine(mix, x, x, x, None)
+    assert seen == [False, False, False, True]
 
 
 if __name__ == "__main__":

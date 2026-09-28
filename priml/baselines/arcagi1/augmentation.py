@@ -1,9 +1,16 @@
-"""Configurable ARC view generation and spatial packing for prepared datasets."""
+"""Configurable ARC view generation and spatial packing for prepared datasets.
+
+Token layout: ``0`` pad, ``1`` EOS (content boundary), ``2``-``11`` colors. An
+augmented puzzle name encodes its view as
+``"{name}|||t{tid}|||{''.join(str(x) for x in mapping)}"``: a dihedral id and a
+color permutation that fixes 0. :func:`inverse_aug` decodes it for voting.
+"""
 
 from __future__ import annotations
 
-from dataclasses import field
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, cast
 
 import functools
 import hashlib
@@ -15,11 +22,48 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.lib.custom_json import ListCodec
+
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
     from numpy.typing import NDArray
+
+
+@dataclass(slots=True, kw_only=True, frozen=True)
+class ArcSpec:
+    """The ARC token format, grouped into one named scope."""
+
+    puzzle_id_separator: str = "|||"
+    """Delimiter joining ``{name}``, ``t{tid}``, and the color permutation."""
+
+    max_grid: int = 30
+    """Square side an ARC grid is packed/padded to (the real 900-token grid)."""
+
+    vocab_pad: int = 0
+    """Pad token id."""
+
+    vocab_eos: int = 1
+    """End-of-sequence token id (content boundary marker)."""
+
+    vocab_color_offset: int = 2
+    """First color token id; colors occupy ``[offset, offset + 10)``."""
+
+    aug_retries_factor: int = 5
+    """Rejection-sampling retry budget per augmentation, as a multiple of count."""
+
+    @property
+    def vocab_size(self) -> int:
+        """Total token count: pad + eos + 10 colors (12 for the default offset)."""
+        return self.vocab_color_offset + 10
+
+
+ARC: Final = ArcSpec()
+"""The ARC token format shared by builders, loaders, and pass@K voting."""
+
+NO_TRAIN_SCALE_WEIGHTS: Final[Mapping[int, float]] = MappingProxyType({1: 1.0})
+"""Identity scale distribution (factor 1): the scale gate never changes a grid."""
 
 
 class ColorDihedral:
@@ -167,79 +211,6 @@ class ColorDihedral:
         )
 
 
-def invert_spatial_transform(tokens: Tensor, *, spatial_tags: Tensor) -> Tensor:
-    """Undo spatial augmentation using its independent view metadata.
-
-    Args:
-      tokens: Flattened square token grid.
-      spatial_tags: ``(scale, row_offset, col_offset)`` for this view.
-
-    Returns:
-      tokens: Restored square token grid, padded to the original side.
-
-    """
-    flat = tokens.reshape(-1)
-    side = math.isqrt(flat.numel())
-    if side * side != flat.numel():
-        raise ValueError("ARC token count must be a perfect square")
-    flat_tags = spatial_tags.reshape(-1)
-    if flat_tags.numel() != 3:
-        raise ValueError("spatial tags must contain scale, row, and column")
-    scale, pad_r, pad_c = (int(flat_tags[index]) for index in range(3))
-    if scale == 1 and pad_r == 0 and pad_c == 0:
-        return flat
-    shifted = flat.reshape(side, side)[pad_r:, pad_c:][::scale, ::scale]
-    return torch.nn.functional.pad(
-        shifted,
-        (0, side - shifted.shape[1], 0, side - shifted.shape[0]),
-    ).reshape(-1)
-
-
-def canonicalize_arc_grid(
-    tokens: Tensor,
-    *,
-    name: str,
-    spatial_tags: Tensor,
-    transform: ColorDihedral | None = None,
-) -> tuple[str, Tensor]:
-    """Invert a view and infer its raw-color rectangle from its own tokens.
-
-    Args:
-      tokens: Flattened input or predicted output tokens.
-      name: Augmented puzzle identifier encoding color/dihedral transforms.
-      spatial_tags: ``(scale, row_offset, col_offset)`` for this view.
-      transform: Configured color/dihedral policy that encoded the identifier.
-
-    Returns:
-      original_name: Original puzzle name.
-      canonical: Cropped raw-color grid in 0..9.
-
-    """
-    spatial = invert_spatial_transform(tokens, spatial_tags=spatial_tags)
-    side = math.isqrt(spatial.numel())
-    grid = spatial.reshape(side, side).detach().to("cpu", torch.uint8).numpy()
-    max_area = max_rows = max_cols = 0
-    ncols = side
-    for row in range(side):
-        for col in range(ncols):
-            token = cast(int, grid[row, col])
-            if token < 2 or token >= 12:
-                ncols = col
-                break
-        area = (row + 1) * ncols
-        if area > max_area:
-            max_area, max_rows, max_cols = area, row + 1, ncols
-    colors = (grid[:max_rows, :max_cols] - 2).astype(np.uint8)
-    color_dihedral = (
-        transform if transform is not None else ColorDihedral.Config().make()
-    )
-    original_name, inverse = color_dihedral.inverse(name)
-    canonical = inverse(colors)
-    return original_name, torch.from_numpy(np.array(canonical, copy=True)).to(
-        tokens.device,
-    )
-
-
 class SpatialAugmentation:
     """Scale and translate paired grids, then encode them as square token rows."""
 
@@ -278,12 +249,6 @@ class SpatialAugmentation:
                 "Scale weights require positive scales and finite nonnegative weights with a positive total.",
             )
         self.config = config
-        total = sum(weight for _, weight in sorted(weights.items()) if weight > 0)
-        self.weights = {
-            scale: weight / total
-            for scale, weight in sorted(weights.items())
-            if weight > 0
-        }
 
     def pack(
         self,
@@ -316,33 +281,43 @@ class SpatialAugmentation:
         training: bool,
         rng: np.random.Generator,
     ) -> tuple[list[NDArray[np.uint8]], tuple[int, int, int]]:
-        """Pack paired grids and return their shared spatial tag.
+        """Pack paired grids and return the spatial tag they share.
+
+        Draws exactly what :meth:`pack` draws, in the same order.
 
         Args:
           inp: Input colors in 0..9.
           out: Target colors in 0..9.
-          training: Whether to sample train-only scale and translation.
+          training: Apply spatial augmentation; false preserves the canonical view.
           rng: Dataset builder's shared random stream.
 
         Returns:
-          rows: Packed input and target token rows.
-          tag: Shared ``(scale, row, col)`` offsets.
+          rows: Input and target token rows.
+          tag: Shared ``(scale, row_offset, col_offset)``.
 
         """
         side = self.config.max_grid
+        if max(*inp.shape, *out.shape) > side:
+            raise ValueError(
+                f"grid shape exceeds max_grid={side}: inp={inp.shape}, out={out.shape}.",
+            )
         scale = (
-            self._sample_scale(inp, out, rng=rng)
-            if training and _bernoulli(self.config.scale_prob, rng=rng)
+            sample_scale_factor(
+                inp,
+                out,
+                self.config.train_scale_weights,
+                rng,
+                max_grid=side,
+            )
+            if training and bernoulli(self.config.scale_prob, rng)
             else 1
         )
         pad_r = pad_c = 0
-        if training and _bernoulli(self.config.translation_prob, rng=rng):
-            pad_r = int(
-                rng.integers(0, side - max(inp.shape[0], out.shape[0]) * scale + 1),
-            )
-            pad_c = int(
-                rng.integers(0, side - max(inp.shape[1], out.shape[1]) * scale + 1),
-            )
+        if training and bernoulli(self.config.translation_prob, rng):
+            rows = max(inp.shape[0], out.shape[0]) * scale
+            cols = max(inp.shape[1], out.shape[1]) * scale
+            pad_r = int(rng.integers(0, side - rows + 1))
+            pad_c = int(rng.integers(0, side - cols + 1))
         tag = (scale, pad_r, pad_c)
         return self.pack_at(inp, out=out, tag=tag), tag
 
@@ -353,37 +328,39 @@ class SpatialAugmentation:
         out: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
         tag: tuple[int, int, int],
     ) -> list[NDArray[np.uint8]]:
-        """Pack both grids using one preselected shared spatial transform.
+        """Pack both grids under one preselected spatial tag.
 
         Args:
           inp: Input colors in 0..9.
           out: Target colors in 0..9.
-          tag: Shared ``(scale, row_offset, col_offset)`` selected per view.
+          tag: Shared ``(scale, row_offset, col_offset)``.
 
         Returns:
-          rows: Input and target token rows with the same transform.
+          rows: Input and target token rows under the same transform.
 
         """
         side = self.config.max_grid
         scale, pad_r, pad_c = tag
         if scale < 1 or pad_r < 0 or pad_c < 0:
-            raise ValueError("tag requires positive scale and nonnegative padding")
+            raise ValueError(f"tag needs scale >= 1 and offsets >= 0; got {tag}.")
         if max(*inp.shape, *out.shape) > side:
-            raise ValueError(f"Grid shape exceeds max_grid={side}.")
+            raise ValueError(
+                f"grid shape exceeds max_grid={side}: inp={inp.shape}, out={out.shape}.",
+            )
         if scale > 1:
             inp = cast(
                 np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
-                np.repeat(np.repeat(inp, scale, axis=0), scale, axis=1),
+                scale_grid(inp, scale),
             )
             out = cast(
                 np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
-                np.repeat(np.repeat(out, scale, axis=0), scale, axis=1),
+                scale_grid(out, scale),
             )
         if (
             pad_r + max(inp.shape[0], out.shape[0]) > side
             or pad_c + max(inp.shape[1], out.shape[1]) > side
         ):
-            raise ValueError("spatial tag places the transformed grid outside max_grid")
+            raise ValueError(f"tag {tag} places the grid outside max_grid={side}.")
         result: list[NDArray[np.uint8]] = []
         for grid in (inp, out):
             nrow, ncol = grid.shape
@@ -399,25 +376,6 @@ class SpatialAugmentation:
                 padded[pad_r:eos_row, eos_col] = 1
             result.append(padded.flatten())
         return result
-
-    def _sample_scale(
-        self,
-        inp: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
-        out: np.ndarray[tuple[int, ...], np.dtype[np.uint8]],
-        *,
-        rng: np.random.Generator,
-    ) -> int:
-        fitting = [
-            (scale, weight)
-            for scale, weight in self.weights.items()
-            if max(*inp.shape, *out.shape) * scale <= self.config.max_grid
-        ]
-        # The identity path consumes no draw, preserving the source RNG stream.
-        if not fitting or [scale for scale, _ in fitting] == [1]:
-            return 1
-        scales = np.array([scale for scale, _ in fitting], dtype=np.int64)
-        weights = np.array([weight for _, weight in fitting], dtype=np.float64)
-        return int(rng.choice(scales, p=weights / weights.sum()))
 
 
 class ArcAugmentation:
@@ -442,10 +400,10 @@ class ArcAugmentation:
         """Training-only scale/translation and token packing policy."""
 
         spatial_eval_views: bool = False
-        """Add S=2 spatially transformed evaluation views during preparation."""
+        """Add one spatially transformed view of every test puzzle when preparing."""
 
         spatial_eval_scale: int = 2
-        """Integer scale used for optional spatial evaluation rows."""
+        """Integer scale of the spatial evaluation views."""
 
     def __init__(self, config: Config) -> None:
         if config.num_aug < 0 or config.retries_factor < 1:
@@ -482,12 +440,284 @@ def dihedral_transform[T: np.generic](arr: NDArray[T], *, tid: int) -> NDArray[T
         return arr.T
     if tid == 7:
         return np.fliplr(np.rot90(arr, k=1))
-    raise ValueError("Dihedral transform must be in 0..7.")
+    raise ValueError(f"Invalid dihedral tid={tid}; must be in 0..7.")
+
+
+def inverse_dihedral_transform[T: np.generic](
+    arr: NDArray[T],
+    *,
+    tid: int,
+) -> NDArray[T]:
+    """Undo :func:`dihedral_transform` with the same ``tid``."""
+    # Reflections and rot180 are self-inverse; rot90 and rot270 swap.
+    return dihedral_transform(arr, tid=(0, 3, 2, 1, 4, 5, 6, 7)[tid])
+
+
+def inverse_aug(
+    name: str,
+) -> tuple[str, Callable[[NDArray[np.uint8]], NDArray[np.uint8]]]:
+    """Decode an augmented identifier into its original name and inverse view.
+
+    Args:
+      name: Encoded identifier like ``"abc|||t3|||0123456789"``, or a bare name.
+
+    Returns:
+      name: The portion before the first separator.
+      inverse: Maps a grid in the augmented frame back to the canonical frame:
+        inverse dihedral first, then the inverse color permutation.
+
+    """
+    separator = ARC.puzzle_id_separator
+    if separator not in name:
+        return name, lambda x: x
+    tid_str, perm_str = name.split(separator)[-2:]
+    tid = int(tid_str[1:])
+    # A non-bijective suffix would misroute colors and silently miscompare hashes.
+    if len(perm_str) != 10 or set(perm_str) != set("0123456789"):
+        raise ValueError(
+            f"invalid color-permutation suffix {perm_str!r} in identifier {name!r}; "
+            "expected a permutation of '0123456789'.",
+        )
+    inv_perm = np.argsort(list(perm_str)).astype(np.uint8)
+
+    def _map_grid(grid: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        return inv_perm[inverse_dihedral_transform(grid, tid=tid)]
+
+    return name.split(separator, maxsplit=1)[0], _map_grid
+
+
+def canonicalize_arc_grid(
+    tokens: Tensor,
+    *,
+    name: str,
+    spatial_tags: Tensor,
+    transform: ColorDihedral | None = None,
+) -> tuple[str, Tensor]:
+    """Undo a view's spatial tag, crop to its colors, and invert its color/symmetry.
+
+    Args:
+      tokens: Flattened square input or predicted token grid.
+      name: Augmented puzzle identifier encoding the color/dihedral view.
+      spatial_tags: ``(scale, row_offset, col_offset)`` of this view.
+      transform: Policy that encoded ``name``; ``None`` is the default one.
+
+    Returns:
+      original_name: Source puzzle name.
+      canonical: Cropped raw-color grid in 0..9, on ``tokens``'s device.
+
+    """
+    flat = tokens.detach().to("cpu", torch.uint8).reshape(-1).numpy()
+    tag = ListCodec.coerce(spatial_tags.reshape(-1).tolist(), int)
+    if len(tag) != 3:
+        raise ValueError(f"spatial tags hold (scale, row, col); got {tag}.")
+    scale, pad_r, pad_c = tag
+    colors = crop_grid(untranslate_unscale(flat, scale=scale, pad_r=pad_r, pad_c=pad_c))
+    policy = transform if transform is not None else ColorDihedral.Config().make()
+    original_name, inverse = policy.inverse(name)
+    canonical = np.array(inverse(colors), copy=True)
+    return original_name, torch.from_numpy(canonical).to(tokens.device)
+
+
+def untranslate_unscale(
+    flat: NDArray[np.uint8],
+    *,
+    scale: int,
+    pad_r: int,
+    pad_c: int,
+) -> NDArray[np.uint8]:
+    """Invert :meth:`SpatialAugmentation.pack`'s scale+translate on a flat grid.
+
+    Slices the content window at ``(pad_r, pad_c)``, keeps the top-left token of
+    each ``scale x scale`` block, then re-pads to the square, top-left anchored
+    frame :func:`crop_grid` expects. A model prediction need not have constant
+    blocks; it is judged by each block's top-left token.
+
+    Args:
+      flat: Square flat token grid in the augmented frame.
+      scale: Forward block-upscale factor (>= 1).
+      pad_r: Forward top-left row pad.
+      pad_c: Forward top-left column pad.
+
+    Returns:
+      flat: Square flat token grid in the canonical frame.
+
+    """
+    if scale < 1:
+        raise ValueError(f"scale must be >= 1, got {scale}.")
+    if pad_r < 0 or pad_c < 0:
+        raise ValueError(f"pads must be >= 0, got ({pad_r}, {pad_c}).")
+    # Validated before the identity fast path so non-square input always fails.
+    side = square_side(len(flat), who="untranslate_unscale")
+    if scale == 1 and pad_r == 0 and pad_c == 0:
+        return flat
+    shifted = flat.reshape(side, side)[pad_r:, pad_c:]
+    if scale > 1:
+        shifted = shifted[::scale, ::scale]
+    return np.pad(
+        shifted,
+        ((0, side - shifted.shape[0]), (0, side - shifted.shape[1])),
+    ).flatten()
 
 
 def grid_hash(grid: NDArray[np.uint8]) -> str:
-    """Hash a uint8 grid's shape and content."""
+    """Hash a 2D uint8 grid's shape and content."""
+    if grid.ndim != 2:
+        raise ValueError("Expected grid.ndim == 2.")
+    if grid.dtype != np.uint8:
+        raise ValueError("Expected grid.dtype == np.uint8.")
     return hashlib.sha256(bytes(grid.shape) + grid.tobytes()).hexdigest()
+
+
+def normalize_scale_weights(
+    train_scale_weights: Mapping[int, float],
+) -> dict[int, float]:
+    """Validate integer scale weights and normalize them to probabilities.
+
+    Args:
+      train_scale_weights: Scale factor -> nonnegative weight.
+
+    Returns:
+      weights: Scale -> probability over the positive-weight scales, ascending.
+
+    """
+    if not train_scale_weights:
+        raise ValueError("train_scale_weights must contain at least one scale.")
+    total = 0.0
+    normalized: dict[int, float] = {}
+    for scale, weight in sorted(train_scale_weights.items()):
+        if scale <= 0:
+            raise ValueError(f"scale factors must be positive: {train_scale_weights}.")
+        if weight < 0 or math.isnan(weight) or math.isinf(weight):
+            raise ValueError(
+                f"scale weights must be finite and nonnegative: {train_scale_weights}.",
+            )
+        if weight == 0:
+            continue
+        normalized[int(scale)] = float(weight)
+        total += float(weight)
+    if total <= 0:
+        raise ValueError(
+            f"scale weights must include a positive weight: {train_scale_weights}.",
+        )
+    return {scale: weight / total for scale, weight in normalized.items()}
+
+
+def scale_weights_slug(train_scale_weights: Mapping[int, float]) -> str:
+    """Return a stable path slug such as ``1w0p5-2w0p5`` for scale weights."""
+    return "-".join(
+        f"{scale}w{str(weight).replace('.', 'p')}"
+        for scale, weight in normalize_scale_weights(train_scale_weights).items()
+    )
+
+
+def parse_scale_weights(values: Sequence[str]) -> dict[int, float]:
+    """Parse and normalize CLI scale weights.
+
+    Args:
+      values: Strings written ``SCALE=WEIGHT``, such as ``"2=0.5"``.
+
+    Returns:
+      weights: Normalized scale -> probability.
+
+    """
+    result: dict[int, float] = {}
+    for value in values:
+        scale_text, sep, weight_text = value.partition("=")
+        if not sep:
+            raise ValueError(f"scale weight must be SCALE=WEIGHT, got {value!r}.")
+        result[int(scale_text)] = float(weight_text)
+    return normalize_scale_weights(result)
+
+
+def scale_grid[T: np.generic](grid: NDArray[T], scale: int) -> NDArray[T]:
+    """Nearest-neighbor upscale a grid by an integer factor."""
+    return np.repeat(np.repeat(grid, scale, axis=0), scale, axis=1)
+
+
+# Skipping the draw at the boundaries keeps an always/never policy's stream identical
+# to a build without the gate.
+def bernoulli(prob: float, rng: np.random.Generator) -> bool:
+    """Draw Bernoulli(``prob``), consuming no randomness when ``prob`` is 0 or 1."""
+    if prob >= 1.0:
+        return True
+    if prob <= 0.0:
+        return False
+    return bool(rng.random() < prob)
+
+
+def sample_scale_factor(
+    inp: NDArray[np.uint8],
+    out: NDArray[np.uint8],
+    train_scale_weights: Mapping[int, float],
+    rng: np.random.Generator,
+    *,
+    max_grid: int = ARC.max_grid,
+) -> int:
+    """Sample a scale factor that fits both grids of a pair in ``max_grid``.
+
+    Draws nothing when the only fitting factor is 1 (or none fits): the result
+    cannot vary, and the identity policy must reproduce the unscaled stream. A
+    singleton ``{k > 1}`` still draws.
+
+    Args:
+      inp: Input grid.
+      out: Output grid.
+      train_scale_weights: Scale factor -> sampling weight.
+      rng: Dataset builder's shared random stream.
+      max_grid: Square side the packed grid must fit.
+
+    Returns:
+      scale: Sampled factor.
+
+    """
+    normalized = normalize_scale_weights(train_scale_weights)
+    inp_rows, inp_cols = ListCodec.coerce(list(inp.shape), int)
+    out_rows, out_cols = ListCodec.coerce(list(out.shape), int)
+    rows, cols = max(inp_rows, out_rows), max(inp_cols, out_cols)
+    fitting = [
+        (scale, weight)
+        for scale, weight in normalized.items()
+        if rows * scale <= max_grid and cols * scale <= max_grid
+    ]
+    if not fitting or [scale for scale, _ in fitting] == [1]:
+        return 1
+    scales = np.array([scale for scale, _ in fitting], dtype=np.int64)
+    weights = np.array([weight for _, weight in fitting], dtype=np.float64)
+    return int(rng.choice(scales, p=weights / weights.sum()))
+
+
+def crop_grid(flat: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Recover the largest top-left all-color rectangle from a flat token grid.
+
+    Args:
+      flat: Square flat token grid; the side is inferred from its length.
+
+    Returns:
+      grid: Color grid with values 0..9.
+
+    """
+    side = square_side(len(flat), who="crop_grid")
+    grid = flat.reshape(side, side)
+    values = ListCodec.coerce(cast(object, flat.tolist()), int)
+    max_area = max_nr = max_nc = 0
+    num_c = side
+    for num_r in range(1, side + 1):
+        row = values[(num_r - 1) * side : num_r * side]
+        for c in range(1, num_c + 1):
+            if row[c - 1] < ARC.vocab_color_offset or row[c - 1] >= ARC.vocab_size:
+                num_c = c - 1
+                break
+        if num_r * num_c > max_area:
+            max_area, max_nr, max_nc = num_r * num_c, num_r, num_c
+    return (grid[:max_nr, :max_nc] - ARC.vocab_color_offset).astype(np.uint8)
+
+
+def square_side(length: int, *, who: str) -> int:
+    """Return ``sqrt(length)`` for a square flat grid; reject any other length."""
+    side = math.isqrt(length)
+    if side * side != length:
+        raise ValueError(f"{who} expects a square flat grid, got length {length}.")
+    return side
 
 
 def arc_grid_to_np(grid: list[list[int]], *, max_grid: int) -> NDArray[np.uint8]:
@@ -502,10 +732,15 @@ def arc_grid_to_np(grid: list[list[int]], *, max_grid: int) -> NDArray[np.uint8]
 
     """
     arr = np.array(grid, dtype=np.int64)
-    if arr.ndim != 2 or max(arr.shape) > max_grid:
-        raise ValueError("Source grid must be two-dimensional and fit max_grid.")
+    if arr.ndim != 2:
+        raise ValueError("Expected arr.ndim == 2.")
+    if arr.shape[0] > max_grid:
+        raise ValueError("Expected arr.shape[0] <= ARC.max_grid.")
+    if arr.shape[1] > max_grid:
+        raise ValueError("Expected arr.shape[1] <= ARC.max_grid.")
+    # Checked on the wide dtype, so 256 is rejected rather than wrapping to a color.
     if not np.all((arr >= 0) & (arr <= 9)):
-        raise ValueError("Source grid colors must be in 0..9.")
+        raise ValueError("ARC grid colors must be in 0..9.")
     return arr.astype(np.uint8)
 
 
@@ -519,11 +754,3 @@ def _token_symmetries(
     return torch.from_numpy(
         np.stack([dihedral_transform(grid, tid=tid).reshape(-1) for tid in transforms]),
     ).to(device)
-
-
-def _bernoulli(prob: float, *, rng: np.random.Generator) -> bool:
-    if prob >= 1.0:
-        return True
-    if prob <= 0.0:
-        return False
-    return bool(rng.random() < prob)

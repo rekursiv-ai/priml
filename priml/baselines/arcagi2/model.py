@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 class RotaryBlock(TransformerBlock):
-    """Apply one-dimensional rotary positions across the prefix and grid."""
+    """Apply rotary positions across the prefix and grid."""
 
     class Config(Makes["RotaryBlock"], TransformerBlock.Config):
         """Transformer block and the rotary position encoding it consumes."""
@@ -67,18 +67,51 @@ class RotaryBlock(TransformerBlock):
         prenorm: bool = False
         """Normalize after each residual addition."""
 
-        rope: RoPE.Config = field(default_factory=RoPE.Config)
-        """Rotary encoding, with the same head width as the attention slot."""
+        rope: RoPE.Config | None = field(default_factory=RoPE.Config)
+        """Rotary encoding, with the same head width as the attention slot.
+
+        ``None`` leaves positions to the caller: every forward must then pass
+        ``cos_sin``, as :class:`SudokuNet` does when it owns the ``rope``."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.rope = config.rope.make()
+        self.rope = None if config.rope is None else config.rope.make()
 
     @override
     def forward(self, x: Tensor, **kwargs: object) -> Tensor:
-        """Supply rotary positions to the shared transformer block."""
-        kwargs["cos_sin"] = self.rope(torch.arange(x.shape[-2], device=x.device))
+        """Supply rotary positions unless the caller precomputed them."""
+        if kwargs.get("cos_sin") is None:
+            factors = self.factors(x.shape[-2], device=x.device)
+            if factors is None:
+                raise ValueError("RotaryBlock without a rope needs cos_sin.")
+            kwargs["cos_sin"] = factors
         return super().forward(x, **kwargs)
+
+    def factors(
+        self,
+        seq_len: int,
+        *,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor] | None:
+        """Return the ``(cos, sin)`` pair :meth:`forward` would compute.
+
+        A recurrence calls this once per forward and hands the pair to every
+        pass, so the factors are computed eagerly, outside any compiled core.
+        Traced inside the core instead, Inductor fuses the ``sin``/``cos`` and
+        the factors differ in the last bit from the eager ones.
+
+        Args:
+          seq_len: Sequence length the factors cover.
+          device: Device to build them on.
+
+        Returns:
+          factors: Rotary ``(cos, sin)``, or ``None`` without a rope.
+
+        """
+        if self.rope is None:
+            return None
+        cos, sin = self.rope(torch.arange(seq_len, device=device))
+        return cos, sin
 
 
 class PuzzleEmbedding(SparsePuzzleEmbedding):

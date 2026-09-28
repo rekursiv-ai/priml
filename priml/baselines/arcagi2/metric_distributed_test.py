@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from functools import partial
-from typing import TYPE_CHECKING, Literal, override
+from typing import TYPE_CHECKING, Final, Literal, cast, override
 
 import traceback
 
@@ -12,9 +12,11 @@ import pytest
 import torch
 
 from priml.baselines.arcagi2.metric import PassK
+from priml.baselines.arcagi2.record_test import load, reduce
+from priml.lib.custom_json import DictCodec
+from priml.testing.golden import mismatches
 
 
-# isort: split
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -25,23 +27,17 @@ if TYPE_CHECKING:
     from priml.metrics.custom_types import MetricProtocol
 
 
-@pytest.mark.compute_distributed
-@pytest.mark.parametrize(
-    "mode",
-    ["majority", "tie", "empty", "all_empty", "empty_corpus"],
+type Mode = Literal["majority", "tie", "empty", "all_empty", "empty_corpus"]
+"""Which ballots each rank casts; see :func:`_worker`."""
+
+MODES: Final[tuple[Mode, ...]] = (
+    "majority",
+    "tie",
+    "empty",
+    "all_empty",
+    "empty_corpus",
 )
-def test_global_ballots(
-    tmp_path: Path,
-    warm_pools: WarmPoolGetter,
-    mode: Literal["majority", "tie", "empty", "all_empty", "empty_corpus"],
-) -> None:
-    """Gather all ranks once per compute, preserving local state and tie order."""
-    _manifest(tmp_path)
-    if mode == "empty_corpus":
-        (tmp_path / "test_puzzles.json").write_text("{}")
-    warm_pools({"dp": 2})(partial(_worker, tmp_path, mode))
-    for rank in range(2):
-        assert (tmp_path / f"metric_{rank}").read_text() == "ok"
+"""Every :data:`Mode`, in parametrize order."""
 
 
 @pytest.mark.compute_distributed
@@ -90,16 +86,14 @@ def _manifest(root: Path) -> None:
 
 def _worker(
     root: Path,
-    mode: Literal["majority", "tie", "empty", "all_empty", "empty_corpus"],
+    mode: Mode,
     mesh: DeviceMesh,
     *,
-    candidate: Callable[[Path], PassK] | None = None,
-    reference: Callable[[Path], MetricProtocol] | None = None,
+    candidate: Callable[[Path], MetricProtocol] | None = None,
 ) -> None:
     rank = mesh.get_rank()
     try:
         port = candidate(root) if candidate else PassK.Config(working_dir=root).make()
-        source = reference(root) if reference else None
         count = (
             0
             if mode in ("all_empty", "empty_corpus") or (mode == "empty" and rank == 1)
@@ -116,25 +110,53 @@ def _worker(
         }
         if count:
             port.update(packed, **batch)
-            if source is not None:
-                source.update(packed, **batch)
         snapshot = deepcopy(port.state_dict())
-        expected = source.compute() if source is not None else None
         actual = port.compute()
+        torch.save(reduce(actual), root / f"scores_{rank}.pt")
         assert actual["pass@1"] == (
             0.0 if mode in ("tie", "all_empty", "empty_corpus") else 1.0
         ), "global pass@1"
         assert actual["pass@2"] == (
             0.0 if mode in ("all_empty", "empty_corpus") else 1.0
         ), "global pass@2"
-        if expected is not None:
-            assert actual == expected, "source metrics"
         assert port.compute() == actual, "repeated compute"
         assert port.state_dict() == snapshot, "local ballots mutated"
         result = "ok"
     except (AssertionError, RuntimeError, ValueError, TypeError, KeyError):
         result = traceback.format_exc()
     (root / f"metric_{rank}").write_text(result)
+
+
+@pytest.mark.compute_distributed
+@pytest.mark.parametrize(
+    "mode",
+    MODES,
+)
+def test_source_global_ballots(
+    tmp_path: Path,
+    warm_pools: WarmPoolGetter,
+    mode: Mode,
+) -> None:
+    """Gather all ranks once per compute, preserving local state and tie order.
+
+    Every rank's scores also equal the ones the source computed on two CPU ranks.
+    """
+    _manifest(tmp_path)
+    if mode == "empty_corpus":
+        (tmp_path / "test_puzzles.json").write_text("{}")
+    warm_pools({"dp": 2})(partial(_worker, tmp_path, mode))
+    frozen = load("metric_distributed")
+    for rank in range(2):
+        assert (tmp_path / f"metric_{rank}").read_text() == "ok"
+        actual = DictCodec.coerce(
+            cast(
+                object,
+                torch.load(tmp_path / f"scores_{rank}.pt", weights_only=True),
+            ),
+            torch.Tensor,
+        )
+        report = mismatches(frozen[f"{mode}/rank{rank}"], actual)
+        assert not report, "\n".join(report)
 
 
 if __name__ == "__main__":

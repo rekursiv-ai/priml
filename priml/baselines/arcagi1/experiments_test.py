@@ -11,40 +11,44 @@ ladder stays checkable on any machine.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import inspect
 
+from configgle import PartialConfig
 from configgle.pprinting import pformat
 
 import pytest
 
 from priml.baselines.arcagi1 import experiments
-from priml.baselines.arcagi1.augmentation import ColorDihedral
-from priml.baselines.arcagi1.experiments import GRID_LEN, VOCAB_SIZE, ArcTrainLoop
-from priml.baselines.arcagi1.metric import CanonicalPassK
-from priml.baselines.arcagi1.model import ConvSwiGLU
-from priml.baselines.arcagi1.train_step import HPSFeedbackTrainStep
+from priml.baselines.arcagi1.act import AtomicPool
+from priml.baselines.arcagi1.experiments import (
+    GRID_LEN,
+    VOCAB_SIZE,
+    ArcTrainLoop,
+    TrmTrainLoop,
+)
+from priml.baselines.arcagi1.loss import MeanOverBatch
+from priml.baselines.arcagi1.model import ConvSwiGLU, UrmRecurrence
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import DeepRecurrence, SudokuNet
+from priml.baselines.sudoku.model import SudokuNet
 from priml.baselines.sudoku.prefix import (
     PrefixStack,
     RegisterTokens,
     SparsePuzzleEmbedding,
 )
 from priml.baselines.sudoku.train_step import SudokuTrainStep
+from priml.lib.custom_json import FloatCodec
 from priml.model.mlpmixer import MLPMixerBlock
+from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
+from priml.optimizers import AdamATan2
+from priml.optimizers.composite import CompositeOptimizer
+from priml.optimizers.muon import Muon
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import torch
-else:
-    from wrapt import lazy_import
-
-    torch = lazy_import("torch")  # ~1050 ms; the dtype assertions need bf16.
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -186,59 +190,6 @@ def test_the_pool_is_built_to_the_models_shape() -> None:
     assert act.channels_hidden == model.channels_in
 
 
-def test_exp004_pins_the_hps_recipe_and_public_metric_slices() -> None:
-    """Keep HPS semantics explicit without pinning irrelevant config fields."""
-    config = experiments.exp004().copy_tree().finalize()
-    assert isinstance(config.step, HPSFeedbackTrainStep.Config)
-    assert config.step.batch_size == config.dataset.batch_size == 96
-    assert config.dataset.eval_batch_size == 256
-    assert config.dataset.epochs_per_iter == 5
-    assert not config.dataset.device_resident
-    assert config.step.ignore_label_id == -100
-    assert config.step.model.halt_outputs == 2
-    assert isinstance(config.step.model.prefix, PrefixStack.Config)
-    prefix_puzzle = config.step.model.prefix.parts[0]
-    assert isinstance(prefix_puzzle, SparsePuzzleEmbedding.Config)
-    assert prefix_puzzle.dtype is torch.bfloat16
-    assert prefix_puzzle.dtype_scale is torch.float32
-    recurrence = config.step.model.recurrence
-    assert isinstance(recurrence, DeepRecurrence.Config)
-    assert recurrence.slow_cycles == 2
-    assert recurrence.fast_cycles == 6
-    assert isinstance(config.step.model.block, TransformerBlock.Config)
-    assert isinstance(config.step.model.block.ffn, ConvSwiGLU.Config)
-    assert config.step.model.block.ffn.shift_conv
-    assert config.step.feedback_corruption_rate == 0.075
-    schedule = config.step.lr_schedule.make()
-    assert schedule(0) == 0
-    assert schedule(0.5) == 0.5
-    assert schedule(1) == 1
-    spatial = config.dataset.augmentation.spatial
-    assert spatial.translation_prob == spatial.scale_prob == 0.2
-    assert spatial.train_scale_weights == {2: 1.0}
-    assert config.dataset.augmentation.spatial_eval_views
-    assert config.dataset.augmentation.spatial_eval_scale == 2
-    assert config.max_time == 172_800
-    assert config.max_time_kind == "train"
-    assert set(config.metrics_eval) == {"", "spatial_eq", "spatial_big"}
-
-
-def test_exp004_metrics_share_the_dataset_transform() -> None:
-    config = experiments.exp004()
-    transform = config.dataset.augmentation.transform
-    assert isinstance(transform, ColorDihedral.Config)
-    transform.separator = "::"
-    for metric in config.metrics_eval.values():
-        assert isinstance(metric, CanonicalPassK.Config)
-        assert metric.transform is transform
-
-    finalized = config.copy_tree().finalize()
-    for metric in finalized.metrics_eval.values():
-        assert isinstance(metric, CanonicalPassK.Config)
-        assert isinstance(metric.transform, ColorDihedral.Config)
-        assert metric.transform.separator == "::"
-
-
 def test_schedule_horizon_matches_the_step_budget() -> None:
     """A schedule annealing past the end of training wastes the last steps."""
     for name, factory in LADDER:
@@ -259,6 +210,82 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     table = prefix.parts[0]
     assert isinstance(table, SparsePuzzleEmbedding.Config)
     assert table.batch_size == smoke.dataset.batch_size
+
+
+REFERENCE: list[tuple[str, Callable[[], TrmTrainLoop]]] = [
+    ("exp004", experiments.exp004),
+    ("exp005", experiments.exp005),
+    ("exp006", experiments.exp006),
+    ("exp007", experiments.exp007),
+    ("exp008", experiments.exp008),
+]
+
+
+@pytest.mark.parametrize(("name", "factory"), REFERENCE, ids=[n for n, _ in REFERENCE])
+def test_reference_recipes_finalize(
+    name: str,
+    factory: Callable[[], TrmTrainLoop],
+) -> None:
+    """Each reference recipe builds a config with no data and no device."""
+    config = factory().copy_tree().finalize()
+    assert config.experiment_name == name
+    assert config.max_steps == config.step.total_train_steps
+    pool = config.step.pool
+    assert isinstance(pool, AtomicPool.Config)
+    assert pool.seq_len == config.step.model.total_seq_len
+    table = config.step.model.prefix
+    assert isinstance(table, SparsePuzzleEmbedding.Config)
+    assert table.batch_size == pool.batch_size == config.dataset.batch_size
+    reduction = config.step.reduction
+    assert isinstance(reduction, MeanOverBatch.Config)
+    assert reduction.batch_size == pool.batch_size
+
+
+def test_exp005_swaps_the_gate_norm_and_the_body_optimizer() -> None:
+    base, fork = experiments.exp004(), experiments.exp005()
+    assert isinstance(base.step.optimizer, AdamATan2.Config)
+    assert isinstance(fork.step.optimizer, CompositeOptimizer.Config)
+    for config, has_norm in ((base, False), (fork, True)):
+        block = config.step.model.block
+        assert isinstance(block, TransformerBlock.Config)
+        assert isinstance(block.ffn, SwiGLU.Config)
+        assert (block.ffn.norm is not None) is has_norm
+
+
+def test_exp006_raises_only_the_muon_rate() -> None:
+    base, fork = experiments.exp005(), experiments.exp006()
+    rates: list[list[float]] = []
+    for config in (base, fork):
+        optimizer = config.step.optimizer
+        assert isinstance(optimizer, CompositeOptimizer.Config)
+        adamw, muon2, muon3 = optimizer.optimizers
+        assert isinstance(adamw, PartialConfig)
+        assert isinstance(muon2, Muon.Config)
+        assert isinstance(muon3, Muon.Config)
+        adamw_lr = FloatCodec.coerce(cast(object, adamw.lr), None)
+        rates.append([adamw_lr, muon2.lr, muon3.lr])
+    assert rates == [[1e-4, 5e-3, 5e-3], [1e-4, 0.01, 0.01]]
+
+
+def test_exp007_moves_to_the_urm_recipe() -> None:
+    fork = experiments.exp007()
+    assert isinstance(fork.step.model.recurrence, UrmRecurrence.Config)
+    block = fork.step.model.block
+    assert isinstance(block, TransformerBlock.Config)
+    assert isinstance(block.ffn, ConvSwiGLU.Config)
+    assert fork.step.signals is not None
+    assert set(fork.metrics_eval) == {"", "spatial_eq", "spatial_big"}
+
+
+def test_exp008_adds_only_the_bundle() -> None:
+    base, fork = experiments.exp007(), experiments.exp008()
+    for config, bundled in ((base, False), (fork, True)):
+        pool = config.step.pool
+        assert isinstance(pool, AtomicPool.Config)
+        assert (pool.feedback is not None) is bundled
+        embedding = config.step.model.embedding
+        assert isinstance(embedding, GridEmbedding.Config)
+        assert bool(embedding.channels) is bundled
 
 
 def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:

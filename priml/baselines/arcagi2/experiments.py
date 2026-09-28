@@ -12,6 +12,7 @@ from priml.baselines.arcagi2.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi2.train_step import ArcDataParallel, ArcTrainStep
 from priml.baselines.sudoku.act import ActPool
 from priml.baselines.sudoku.model import DeepRecurrence
+from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.swiglu import SwiGLU
 from priml.runtime import MultiProcess, SingleProcess
@@ -84,6 +85,7 @@ def exp_smoke() -> ArcTrainLoop:
     assert isinstance(model.block.ffn, SwiGLU.Config)
     assert isinstance(model.recurrence, DeepRecurrence.Config)
     assert isinstance(model.prefix, PuzzleEmbedding.Config)
+    assert isinstance(model.block.rope, RoPE.Config)
     model.channels_in = 32
     model.block.attn.num_heads = 2
     model.block.attn.channels_head = 16

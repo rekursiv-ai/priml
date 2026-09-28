@@ -14,6 +14,7 @@ SpeedrunTrainLoop(
                 │               num_heads=12,
                 │               num_classes=1_000,
                 │               cls_channels=768,
+                │               timestep_frequencies=256,
                 │               projector_hidden=2_048,
                 │               projection_depths=(2, 4, 6),
                 │               mlp_ratio_min=2.0,

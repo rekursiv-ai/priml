@@ -11,11 +11,11 @@ from configgle.testing import assert_pprint_golden
 import numpy as np
 import torch
 
-from priml.baselines.arcagi2.bfb_test import miniature_config
 from priml.baselines.arcagi2.data import Arc2Data
 from priml.baselines.arcagi2.experiments import exp000, exp_smoke
 from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.train_step import ArcDataParallel, ArcTrainStep
+from priml.baselines.arcagi2.train_step_test import training_config
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
@@ -90,7 +90,7 @@ def test_train_loop_evaluation_checkpoint_and_resume(tmp_path: Path) -> None:
             np.save(directory / f"all__{name}.npy", array)
     config = exp_smoke()
     config.base_dir = tmp_path
-    config.step = miniature_config()
+    config.step = training_config(8, torch.bfloat16)
     config.runtime = SingleProcess.Config(device="cpu")
     config.dataset.device = "cpu"
     config.max_steps = 1

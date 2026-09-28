@@ -1,369 +1,507 @@
-"""Focused behavioral checks for HPS atomic feedback state."""
+"""Replay frozen trajectories through the reference TRM recipes.
+
+The goldens in ``testdata/<expNNN>[_<precision>].pt`` were recorded from the
+implementation these recipes reproduce, through :func:`record`; this module
+imports none of it, so the proof outlives that code. Each recipe is shrunk by
+SIZE only -- width, depth, grid, batch, step cap, cycle counts, the EMA
+warmup -- so every numerical choice the experiment makes is exercised.
+
+Recorded per recipe, all compared with ``torch.equal``: the leading elements
+of every parameter and persistent buffer after init and a fingerprint of the
+global RNG; one forward and one single-core step; an evaluation rollout
+before and after training (loss, packed output, every metric, and the rollout
+logits); five train steps (loss, probe, every metric, the ACT pool, and its
+final latents); the leading elements of gradients and post-update state, EMA
+shadow included, after the first and fifth. A weight is the product of every
+step before it, so its first elements catch a divergence anywhere upstream,
+and the goldens stay a few KB each.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from functools import partial
-from typing import TYPE_CHECKING, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
-import copy
-import traceback
-
-from torch._inductor import config as inductor_config
-from torch.nn.functional import binary_cross_entropy_with_logits
+from configgle import PartialConfig
+from torch import Tensor, nn
 
 import pytest
 import torch
 
-from priml.baselines.arcagi1.model import ConvSwiGLU
-from priml.baselines.arcagi1.train_step import (
-    HPSFeedbackTrainStep,
-    _precision_casts,
+from priml.baselines.arcagi1 import experiments
+from priml.baselines.arcagi1.act import (
+    AtomicPool,
 )
-from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
-from priml.baselines.sudoku.model import DeepRecurrence
-from priml.baselines.sudoku.prefix import PrefixStack, SparsePuzzleEmbedding
+from priml.baselines.arcagi1.model import ConvSwiGLU
+from priml.baselines.arcagi1.train_step import TrmTrainStep
+from priml.baselines.arcagi2.model import RotaryBlock
+from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.baselines.sudoku.model import (
+    DeepRecurrence,
+    SudokuNet,
+)
+from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.self_attention import SelfAttention
-from priml.model.transformer.block import TransformerBlock
-from priml.optimizers.lr import learning_rate
-from priml.runtime import MultiProcess
-from priml.train.checkpointer import SyncLocalStateDictStorer
-from priml.train.parallelism import DataParallel, NoParallel
+from priml.model.norm import RMSNorm
+from priml.model.swiglu import SwiGLU
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import (
+    heads,
+    mismatches,
+    put_steps,
+    read_tensors,
+    rng_fingerprint,
+    stored,
+)
+from priml.train.ema import EMA
+from priml.train.parallelism import NoParallel
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable, Iterator, Mapping
 
-    from torch.distributed.device_mesh import DeviceMesh
-
-    from priml.distributed.testing import WarmPoolGetter
+    from priml.train.custom_types import TrainStepOutput
 
 
-def _tiny_step(*, data_parallel: bool = False) -> HPSFeedbackTrainStep:
-    config = HPSFeedbackTrainStep.Config()
-    config.batch_size = 2
-    config.max_act_steps = 2
-    config.total_train_steps = 3
-    config.warmup_steps = 4
-    config.use_ema = False
-    config.ignore_label_id = -100
-    config.parallelism = (
-        DataParallel.Config() if data_parallel else NoParallel.Config(device="cpu")
-    )
-    model = config.model
-    model.channels_in = 16
-    model.num_layers = 1
-    model.vocab_size = 12
-    model.embedding = GridEmbedding.Config(
-        grid_shape=(4,),
-        channels=[PredictionFeedback.Config()],
-    )
-    model.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=2)
-    model.prefix = PrefixStack.Config(
-        parts=[
-            SparsePuzzleEmbedding.Config(
-                num_puzzles=20,
-                num_tokens=2,
-                batch_size=2,
-            ),
-        ],
-    )
-    model.block = TransformerBlock.Config(
-        channels_in=16,
-        channels_out=16,
-        prenorm=False,
-        attn=SelfAttention.Config(
-            channels_in=16,
-            channels_out=16,
-            num_heads=2,
-            channels_head=8,
-        ),
-        ffn=ConvSwiGLU.Config(
-            channels_in=16,
-            channels_out=16,
-            channels_hidden=32,
-            kernel_size=2,
-        ),
-    )
-    return config.copy_tree().finalize().make()
+_CWD: Final = Path(__file__).resolve().parent
+
+RECIPES: Final = ("exp004", "exp005", "exp007", "exp008")
+"""The reference recipes: each reproduces a published TRM run."""
+
+PRECISIONS: Final = ("fp32", "bf16_autocast")
+"""``fp32`` runs without autocast; ``bf16_autocast`` keeps float32 masters and
+autocasts forwards to bfloat16, as every recipe here sets it."""
+
+CASES: Final = tuple(
+    (recipe, precision) for precision in PRECISIONS for recipe in RECIPES
+)
+
+WIDTH: Final = 8
+HEADS: Final = 2
+GRID: Final = 9
+BATCH: Final = 2
+MAX_STEPS: Final = 3
+TRAIN_STEPS: Final = 5
+SNAPSHOT_STEPS: Final = (1, TRAIN_STEPS)
 
 
-def test_act_requires_at_least_two_steps() -> None:
-    config = HPSFeedbackTrainStep.Config()
-    config.max_act_steps = 1
-    with pytest.raises(ValueError, match="max_act_steps"):
-        config.finalize()
+class Subject(Protocol):
+    """One implementation of a recipe, seen through the golden's parameter names."""
+
+    def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]:
+        """Return the trainable parameters under canonical names."""
+        ...
+
+    def state(self) -> dict[str, Tensor]:
+        """Return the parameters and persistent buffers under canonical names."""
+        ...
+
+    def ema(self) -> dict[str, Tensor]:
+        """Return the EMA shadow under canonical names; empty before it is seeded."""
+        ...
+
+    def pool(self) -> dict[str, Tensor]:
+        """Return the ACT slot state."""
+        ...
+
+    def init_z(self, rows: int) -> tuple[Tensor, Tensor]:
+        """Return the initial latents."""
+        ...
+
+    def forward(
+        self,
+        tokens: Tensor,
+        z: tuple[Tensor, Tensor],
+        ids: Tensor,
+        *,
+        single: bool,
+    ) -> tuple[Tensor, ...]:
+        """``(logits, halt, z_slow, z_fast)`` of a forward, or of one core pass."""
+        ...
+
+    def train_step(self, **batch: object) -> TrainStepOutput:
+        """Run one training call."""
+        ...
+
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
+        """Run one evaluation call."""
+        ...
+
+    def call_eval(self, **batch: object) -> Tensor:
+        """Return the evaluation logits."""
+        ...
 
 
-def test_nan_feedback_corruption_rate_is_rejected() -> None:
-    config = HPSFeedbackTrainStep.Config()
-    config.feedback_corruption_rate = float("nan")
-    with pytest.raises(ValueError, match="feedback_corruption_rate"):
-        config.finalize()
+def port_config(recipe: str, precision: str = "fp32") -> TrmTrainStep.Config:
+    """Return ``recipe``'s step shrunk by size only, in one precision arm.
+
+    Args:
+      recipe: One of :data:`RECIPES`.
+      precision: One of :data:`PRECISIONS`.
+
+    Returns:
+      config: A CPU-sized step config.
+
+    """
+    step = cast(
+        "Callable[[], experiments.TrmTrainLoop]",
+        getattr(experiments, recipe),
+    )().step
+    step.parallelism = NoParallel.Config(device="cpu")
+    step.model.compile_core = None
+    step.dtype_autocast = None if precision == "fp32" else torch.bfloat16
+    step.total_train_steps = 10
+    step.warmup_steps = 0
+    if isinstance(step.ema, EMA.Config):
+        step.ema.update_after_step = 2
+    pool = step.pool
+    assert isinstance(pool, AtomicPool.Config)
+    pool.batch_size = BATCH
+    pool.max_steps = MAX_STEPS
+    _shrink_model(step.model)
+    return step
 
 
-def test_atomic_slots_keep_their_ids_and_feedback_until_halted() -> None:
-    step = _tiny_step()
-    media = torch.tensor([[2, 3, 0, 0], [4, 5, 0, 0]])
-    labels = torch.tensor([[2, 3, -100, -100], [4, 5, -100, -100]])
-    step._refill(media, labels=labels, ids=torch.tensor([7, 8]), valid_count=2)
-    step._pool_halted[0] = False
-    step._pool_feedback[0] = torch.tensor([9, 9, 9, 9])
+class PortSubject:
+    """The priml recipe under canonical names."""
 
-    step._refill(media + 2, labels=labels, ids=torch.tensor([17, 18]), valid_count=2)
+    def __init__(self, recipe: str, precision: str = "fp32") -> None:
+        self.step = TrmTrainStep(port_config(recipe, precision).finalize())
 
-    assert step._pool_ids.tolist() == [7, 18]
-    assert step._pool_feedback[0].tolist() == [9, 9, 9, 9]
-    assert step._pool_feedback[1].tolist() == [6, 7, 2, 2]
+    @classmethod
+    def from_config(cls, config: TrmTrainStep.Config) -> PortSubject:
+        """Wrap a step built from an already-edited port config."""
+        subject = cls.__new__(cls)
+        subject.step = TrmTrainStep(config.finalize())
+        return subject
 
+    def named_parameters(self) -> Iterator[tuple[str, nn.Parameter]]:
+        """Return the trainable parameters under canonical names."""
+        for name, parameter in self.step.model.named_parameters():
+            yield canonical_name(name), parameter
 
-def test_partial_batch_ignores_empty_pool_slots_in_halt_loss() -> None:
-    step = _tiny_step()
-    media = torch.tensor([[2, 3, 0, 0], [4, 5, 0, 0]])
-    labels = torch.tensor([[2, 3, -100, -100], [4, 5, -100, -100]])
-    step._refill(media, labels=labels, ids=torch.tensor([7, 8]), valid_count=1)
-    step._pool_halted[0] = False
-    step._refill(media + 1, labels=labels, ids=torch.tensor([9, 10]), valid_count=0)
-
-    logits = torch.zeros(2, 4, 12)
-    halt = torch.tensor([0.0, 3.0], requires_grad=True)
-    _, _, halt_loss, _ = step._loss(logits, halt=halt, labels=step._pool_labels)
-    expected = (
-        binary_cross_entropy_with_logits(
-            halt[0],
-            torch.zeros_like(halt[0]),
-        )
-        / step.config.batch_size
-    )
-    torch.testing.assert_close(halt_loss, expected)
-    halt_loss.backward()
-    assert halt.grad is not None
-    assert halt.grad[0] != 0
-    assert halt.grad[1] == 0
-
-
-def test_feedback_rng_is_checkpointed_and_color_outputs_are_not_clamped() -> None:
-    step = _tiny_step()
-    step.config.feedback_corruption_rate = 0.5
-    prediction = torch.tensor([[11, 10, 9, 8]])
-    torch.manual_seed(1)
-    before = torch.random.get_rng_state()
-    checkpoint = step.state_dict()
-    expected = step._corrupt(prediction)
-    assert torch.equal(torch.random.get_rng_state(), before)
-    step._feedback_rng.manual_seed(123)
-    step.load_state_dict(checkpoint)
-    assert torch.equal(step._corrupt(prediction), expected)
-
-
-def test_checkpoint_restores_inflight_act_pool() -> None:
-    step = _tiny_step()
-    media = torch.tensor([[2, 3, 0, 0], [4, 5, 0, 0]])
-    labels = torch.tensor([[2, 3, -100, -100], [4, 5, -100, -100]])
-    step.train_step(
-        media=media,
-        label=labels,
-        puzzle_identifiers=torch.tensor([7, 8]),
-        valid_count=2,
-    )
-    step._pool_halted.fill_(True)
-    step._refill(media, labels=labels, ids=torch.tensor([7, 8]), valid_count=2)
-    step._pool_feedback.fill_(9)
-    step._pool_z_slow.fill_(1)
-    step._pool_z_fast.fill_(2)
-    step._pool_halted[0] = False
-    step._pool_steps[:] = torch.tensor([1, 2])
-    checkpoint = copy.deepcopy(step.state_dict())
-
-    resumed = _tiny_step()
-    resumed.load_state_dict(checkpoint)
-    for name in (
-        "_pool_inputs",
-        "_pool_labels",
-        "_pool_ids",
-        "_pool_feedback",
-        "_pool_z_slow",
-        "_pool_z_fast",
-        "_pool_halted",
-        "_pool_steps",
-    ):
-        torch.testing.assert_close(getattr(resumed, name), getattr(step, name))
-
-    next_batch = {
-        "media": media + 1,
-        "label": labels,
-        "puzzle_identifiers": torch.tensor([9, 10]),
-        "valid_count": 0,
-    }
-    expected = step.train_step(**next_batch)
-    actual = resumed.train_step(**next_batch)
-    torch.testing.assert_close(actual["loss"], expected["loss"])
-    torch.testing.assert_close(actual["model"], expected["model"])
-    for name, weight in step.model.state_dict().items():
-        torch.testing.assert_close(resumed.model.state_dict()[name], weight)
-
-
-def test_checkpoint_rejects_changed_dp_size() -> None:
-    step = _tiny_step()
-    checkpoint = dict(step.state_dict())
-    checkpoint["hps_dp_size"] = 2
-    with pytest.raises(ValueError, match="DP size"):
-        step.load_state_dict(checkpoint)
-
-
-def _distributed_pool_checkpoint_worker(root: Path, mesh: DeviceMesh) -> None:
-    rank = mesh.get_rank()
-    runtime_config = MultiProcess.Config()
-    runtime_config.device = "cpu"
-    runtime_config.mesh_topology = {"dp": 2, "pp": 1, "tp": 1}
-    runtime = runtime_config.make()
-    try:
-        runtime.initialize()
-        step = _tiny_step(data_parallel=True)
-        step._pool_inputs.fill_(rank + 1)
-        step._pool_labels.fill_(rank + 2)
-        step._pool_ids.fill_(rank + 3)
-        step._pool_feedback.fill_(rank + 4)
-        step._pool_z_slow.fill_(rank + 5)
-        step._pool_z_fast.fill_(rank + 6)
-        step._pool_halted.fill_(rank == 0)
-        step._pool_steps.fill_(rank + 7)
-        step._halt_rng.manual_seed(rank + 101)
-        step._feedback_rng.manual_seed(rank + 201)
-        path = root / "step.pt"
-        storer = SyncLocalStateDictStorer()
-        storer.write(path, {"step": step.state_dict()})
-
-        resumed = _tiny_step(data_parallel=True)
-        saved = storer.read(path, {"step": resumed.state_dict()})["step"]
-        assert isinstance(saved, Mapping)
-        resumed.load_state_dict(cast(Mapping[str, object], saved))
-        for name in (
-            "_pool_inputs",
-            "_pool_labels",
-            "_pool_ids",
-            "_pool_feedback",
-            "_pool_z_slow",
-            "_pool_z_fast",
-            "_pool_halted",
-            "_pool_steps",
-        ):
-            torch.testing.assert_close(getattr(resumed, name), getattr(step, name))
-        assert torch.equal(resumed._halt_rng.get_state(), step._halt_rng.get_state())
-        assert torch.equal(
-            resumed._feedback_rng.get_state(),
-            step._feedback_rng.get_state(),
-        )
-        assert path.is_dir()
-        result = "ok"
-    except Exception:  # noqa: BLE001 -- The worker must report failures to pytest.
-        result = traceback.format_exc()
-    finally:
-        runtime.destroy()
-    (root / f"rank_{rank}").write_text(result)
-
-
-@pytest.mark.compute_distributed
-def test_distributed_checkpoint_preserves_rank_local_pool(
-    tmp_path: Path,
-    warm_pools: WarmPoolGetter,
-) -> None:
-    warm_pools({"dp": 2})(partial(_distributed_pool_checkpoint_worker, tmp_path))
-    assert {
-        path.name: path.read_text()
-        for path in tmp_path.iterdir()
-        if path.name.startswith("rank_")
-    } == {
-        "rank_0": "ok",
-        "rank_1": "ok",
-    }
-
-
-def test_precision_cast_emulation_is_scoped_to_train_and_eval() -> None:
-    with _precision_casts(False):
-        step = _tiny_step()
-        assert cast(bool, inductor_config.emulate_precision_casts) is False
-        forward_values: list[bool] = []
-        backward_values: list[bool] = []
-
-        def record_forward(module: torch.nn.Module, inputs: tuple[object, ...]) -> None:
-            del module, inputs
-            forward_values.append(cast(bool, inductor_config.emulate_precision_casts))
-
-        def record_backward(gradient: torch.Tensor) -> torch.Tensor:
-            backward_values.append(cast(bool, inductor_config.emulate_precision_casts))
-            return gradient
-
-        step.model.register_forward_pre_hook(record_forward)
-        next(step.model.parameters()).register_hook(record_backward)
-        media = torch.tensor([[2, 3, 0, 0], [4, 5, 0, 0]])
-        labels = torch.tensor([[2, 3, -100, -100], [4, 5, -100, -100]])
-        batch = {
-            "media": media,
-            "label": labels,
-            "puzzle_identifiers": torch.tensor([7, 8]),
-            "valid_count": 2,
+    def state(self) -> dict[str, Tensor]:
+        """Return the parameters and persistent buffers under canonical names."""
+        return {
+            canonical_name(k): v
+            for k, v in self.step.model.state_dict().items()
+            if k != "_dummy"
         }
-        step.train_step(**batch)
-        assert cast(bool, inductor_config.emulate_precision_casts) is False
-        step.eval_loss(**batch)
-        assert cast(bool, inductor_config.emulate_precision_casts) is False
-        assert forward_values == [True] * (1 + step.config.max_act_steps)
-        assert backward_values == [True]
+
+    def ema(self) -> dict[str, Tensor]:
+        """Return the EMA shadow under canonical names."""
+        shadow = self.step.ema_shadow or {}
+        return {canonical_name(k): v for k, v in shadow.items()}
+
+    def pool(self) -> dict[str, Tensor]:
+        """Return the ACT slot state."""
+        pool = self.step.pool
+        state = {
+            "inputs": pool.inputs,
+            "labels": pool.labels,
+            "z_slow": pool.z_slow,
+            "z_fast": pool.z_fast,
+            "steps": pool.steps,
+            "puzzle_ids": pool.puzzle_ids,
+        }
+        state["halted"] = pool.halted
+        if pool.carry is not None:
+            state["feedback"] = pool.feedback
+        return state
+
+    def init_z(self, rows: int) -> tuple[Tensor, Tensor]:
+        """Return the initial latents."""
+        return self.step.net.init_latents(rows)
+
+    def forward(
+        self,
+        tokens: Tensor,
+        z: tuple[Tensor, Tensor],
+        ids: Tensor,
+        *,
+        single: bool,
+    ) -> tuple[Tensor, ...]:
+        """Forward (or one core pass) with the task ids the model reads."""
+        net = self.step.net
+        if self.step.puzzle_table is None:
+            out = net.step(tokens, *z) if single else net(tokens, *z)
+        elif single:
+            out = net.step(tokens, *z, puzzle_identifiers=ids)
+        else:
+            out = net(tokens, *z, puzzle_identifiers=ids)
+        return out.logits, out.halt, out.z_slow, out.z_fast
+
+    def train_step(self, **batch: object) -> TrainStepOutput:
+        """Run one training call."""
+        return self.step.train_step(**batch)
+
+    def eval_loss(self, **batch: object) -> TrainStepOutput:
+        """Run one evaluation call."""
+        return self.step.eval_loss(**batch)
+
+    def call_eval(self, **batch: object) -> Tensor:
+        """Return the evaluation logits."""
+        return self.step.call_eval(**batch)
 
 
-def test_tiny_step_runs_train_and_clean_eval_with_padding() -> None:
-    step = _tiny_step()
-    step.config.feedback_corruption_rate = 0
-    torch.manual_seed(42)
-    media = torch.tensor([[2, 3, 0, 0], [4, 5, 0, 0]])
-    labels = torch.tensor([[2, 3, -100, -100], [4, 5, -100, -100]])
-    identifiers = torch.tensor([1, 2])
-    train = step.train_step(
-        media=media,
-        label=labels,
-        puzzle_identifiers=identifiers,
-        valid_count=1,
-    )
-    evaluation = step.eval_loss(
-        media=media,
-        label=labels,
-        puzzle_identifiers=identifiers,
-        valid_count=1,
-    )
-    assert torch.isfinite(train["loss"]).all()
-    assert not torch.equal(step._pool_feedback[:, :2], media[:, :2])
-    assert evaluation["model"].shape == (2, 5)
-    assert torch.isfinite(evaluation["loss"]).all()
+def canonical_name(name: str) -> str:
+    """Map a priml parameter or buffer name to the one the golden records."""
+    for port, recorded in (
+        ("embedding.embed_tokens.", "embed_tokens."),
+        ("embedding.channels.0.embed_feedback", "embed_feedback"),
+        ("halt_head.", "q_head."),
+        ("prefix.register_tokens", "register_tokens"),
+        ("prefix.weights", "puzzle_emb.weights"),
+    ):
+        if name.startswith(port):
+            return recorded + name.removeprefix(port)
+    return name
 
 
-def test_dense_optimizer_warms_up_but_sparse_table_rate_stays_flat() -> None:
-    step = _tiny_step()
-    sparse_lr = learning_rate(step._sparse_optimizer)
-    group_count = len(step.optimizer.param_groups)
-    initial_lrs = [
-        learning_rate(step.optimizer, group_index=index) for index in range(group_count)
+def batches() -> list[dict[str, object]]:
+    """Five changing training batches; step 3 is short, exercising the pad mask."""
+    vocab = 12
+    generator = torch.Generator().manual_seed(0)
+    out: list[dict[str, object]] = []
+    for index in range(TRAIN_STEPS):
+        media = torch.randint(2, vocab, (BATCH, GRID), generator=generator)
+        label = torch.randint(2, vocab, (BATCH, GRID), generator=generator)
+        media[:, -2:] = 0
+        label[:, -2:] = -100
+        out.append(
+            {
+                "media": media,
+                "label": label,
+                "puzzle_identifiers": torch.tensor(
+                    [index % 3 + 1, (index + 2) % 7 + 1],
+                    dtype=torch.int32,
+                ),
+                "valid_count": 1 if index == 2 else BATCH,
+            },
+        )
+    return out
+
+
+def record(subject: Subject) -> dict[str, Tensor]:
+    """Run the recorded protocol; call inside ``host_agnostic_numerics``.
+
+    Args:
+      subject: The implementation to record.
+
+    Returns:
+      trajectory: Flat name-to-tensor record.
+
+    """
+    out: dict[str, Tensor] = {"rng": rng_fingerprint()}
+    states = [{"heads": _heads(subject.state())}]
+    data = batches()
+    tokens = cast(Tensor, data[0]["media"])
+    ids = cast(Tensor, data[0]["puzzle_identifiers"])
+    generator = torch.Generator().manual_seed(1)
+    z_init = subject.init_z(BATCH)
+    z_random = tuple(torch.randn(z.shape, generator=generator) for z in z_init)
+    with torch.no_grad():
+        for label, single in (("forward", False), ("core", True)):
+            outputs = [
+                subject.forward(tokens, (z[0], z[1]), ids, single=single)
+                for z in (z_init, z_random)
+            ]
+            put_steps(out, label, [_forward_record(o) for o in outputs])
+    evaluation = [data[0], {**data[1], "valid_count": 1}]
+    evaluations = [_evaluate(subject, evaluation)]
+    gradients: dict[str, Tensor] = {}
+    handles = [
+        parameter.register_post_accumulate_grad_hook(_capture(gradients, name))
+        for name, parameter in subject.named_parameters()
+        if parameter.requires_grad
     ]
-    step.timer_step.global_count = 0
-    step.apply_learning_rate()
-    assert [
-        learning_rate(step.optimizer, group_index=index) for index in range(group_count)
-    ] == [0.0] * group_count
-    assert learning_rate(step._sparse_optimizer) == sparse_lr
+    train: list[dict[str, Tensor]] = []
+    pools: list[dict[str, Tensor]] = []
+    grads: list[dict[str, Tensor]] = []
+    emas: list[dict[str, Tensor]] = []
+    try:
+        for index, batch in enumerate(data, start=1):
+            gradients.clear()
+            train.append(flatten(subject.train_step(**batch)))
+            pools.append(
+                {k: v for k, v in subject.pool().items() if not k.startswith("z_")},
+            )
+            if index in SNAPSHOT_STEPS:
+                grads.append({"heads": _heads(gradients)})
+                states.append({"heads": _heads(subject.state())})
+                emas.append({"heads": _heads(subject.ema())})
+    finally:
+        for handle in handles:
+            handle.remove()
+    put_steps(out, "train", train)
+    put_steps(out, "pool", pools)
+    put_steps(out, "grad", grads)
+    put_steps(out, "state", states)
+    put_steps(out, "ema", emas)
+    # The latents are carried state, so their final value already depends on every
+    # step before it.
+    final = subject.pool()
+    _put(out, "pool/final", {k: v for k, v in final.items() if k.startswith("z_")})
+    evaluations.append(_evaluate(subject, evaluation))
+    put_steps(out, "eval", evaluations)
+    return out
 
-    step.timer_step.global_count = step.config.warmup_steps // 2
-    step.apply_learning_rate()
-    assert [
-        learning_rate(step.optimizer, group_index=index) for index in range(group_count)
-    ] == [rate / 2 for rate in initial_lrs]
-    assert learning_rate(step._sparse_optimizer) == sparse_lr
 
-    step.timer_step.global_count = step.config.warmup_steps
-    step.apply_learning_rate()
-    assert [
-        learning_rate(step.optimizer, group_index=index) for index in range(group_count)
-    ] == initial_lrs
-    assert learning_rate(step._sparse_optimizer) == sparse_lr
+def run_port(recipe: str, precision: str = "fp32") -> dict[str, Tensor]:
+    """Build and record the priml recipe from seed 0."""
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        return record(PortSubject(recipe, precision))
+
+
+def golden_path(recipe: str, precision: str = "fp32") -> Path:
+    """Where the golden for ``recipe`` in ``precision`` lives."""
+    suffix = "" if precision == "fp32" else f"_{precision}"
+    return _CWD / "testdata" / f"{recipe}{suffix}.pt"
+
+
+def load_golden(recipe: str, precision: str = "fp32") -> dict[str, Tensor]:
+    """Load a frozen golden."""
+    return read_tensors(golden_path(recipe, precision))
+
+
+@pytest.mark.parametrize(("recipe", "precision"), CASES)
+def test_golden_replays_bit_for_bit(recipe: str, precision: str) -> None:
+    """The recipe reproduces the frozen trajectory with zero mismatches."""
+    report = mismatches(load_golden(recipe, precision), run_port(recipe, precision))
+    assert not report, "\n".join(report)
+
+
+@pytest.mark.parametrize("perturb", ["halt_weight", "parameter"])
+@pytest.mark.parametrize(("recipe", "precision"), CASES)
+def test_golden_bites(recipe: str, precision: str, perturb: str) -> None:
+    """A changed constant or a one-ULP weight nudge is reported, not absorbed."""
+    expected = load_golden(recipe, precision)
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        subject = PortSubject(recipe, precision)
+        if perturb == "halt_weight":
+            assert subject.step.halting is not None
+            subject.step.halting.weight *= 1.5
+        else:
+            # On the integer view: a float nudge is done in float64 here and
+            # rounds straight back to the weight's own width.
+            with torch.no_grad():
+                weight = next(subject.step.model.parameters())
+                bits = torch.int32 if weight.dtype == torch.float32 else torch.int16
+                weight.view(bits).view(-1)[0] += 1
+        actual = record(subject)
+    assert mismatches(expected, actual)
+
+
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_an_all_padding_eval_batch_keeps_the_packed_width(recipe: str) -> None:
+    """A rank's all-padding eval tail returns the same packed columns as any batch.
+
+    The metric reads the header width from the column count and rejects any
+    other, so a narrower zero-filled output would fail the whole evaluation on
+    the rank that drew the padding.
+    """
+    batch = batches()[0]
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.manual_seed(0)
+        step = PortSubject(recipe).step
+        full = step.eval_loss(**batch)
+        empty = step.eval_loss(**{**batch, "valid_count": 0})
+    assert empty["model"].shape == full["model"].shape
+    assert empty.get("metrics", {}).keys() == full.get("metrics", {}).keys()
+
+
+def test_a_whole_model_compile_is_rejected() -> None:
+    """The step calls the model directly, so a whole-model compile would be ignored."""
+    config = port_config("exp004")
+    config.compile = PartialConfig(torch.compile)
+    with pytest.raises(ValueError, match="compile_core"):
+        TrmTrainStep(config.finalize())
+
+
+def _shrink_model(model: SudokuNet.Config) -> None:
+    """Width, depth, grid, table, and cycles; never a numerical choice."""
+    model.channels_in = WIDTH
+    model.num_layers = 1
+    assert isinstance(model.embedding, GridEmbedding.Config)
+    model.embedding.grid_shape = (GRID,)
+    assert isinstance(model.recurrence, DeepRecurrence.Config)
+    model.recurrence.slow_cycles = 2
+    model.recurrence.fast_cycles = 2
+    block = model.block
+    if isinstance(block, RotaryBlock.Config):
+        assert isinstance(block.attn, SelfAttention.Config)
+        block.attn.num_heads = HEADS
+        block.attn.channels_head = WIDTH // HEADS
+        if isinstance(block.attn.norm_qk, RMSNorm.Config):
+            block.attn.norm_qk.channels_in = WIDTH // HEADS
+        assert block.rope is not None
+        block.rope.channels_head = WIDTH // HEADS
+        assert isinstance(block.ffn, SwiGLU.Config | ConvSwiGLU.Config)
+        block.ffn.round_to = WIDTH
+    if isinstance(model.prefix, SparsePuzzleEmbedding.Config):
+        model.prefix.num_puzzles = 8
+        model.prefix.num_tokens = 2
+        model.prefix.batch_size = BATCH
+
+
+def _evaluate(
+    subject: Subject,
+    evaluation: list[dict[str, object]],
+) -> dict[str, Tensor]:
+    """Record each evaluation batch's outputs and the rollout logits."""
+    out: dict[str, Tensor] = {}
+    for index, batch in enumerate(evaluation):
+        for key, value in flatten(subject.eval_loss(**batch)).items():
+            out[f"{index}/{key}"] = value
+    out["call_eval"] = subject.call_eval(**evaluation[0])
+    return out
+
+
+def flatten(result: TrainStepOutput) -> dict[str, Tensor]:
+    """Loss, probe, and every metric as tensors, float64 narrowed to float32.
+
+    The stablemax loss runs in float64, which ``host_agnostic_numerics`` does
+    not normalize: its last bit follows the host's libm. Rounding to float32
+    is what absorbs that, as it does for every upcast float32 op.
+    """
+    out = {"loss": result["loss"], "model": result["model"]}
+    for key, value in result.get("metrics", {}).items():
+        out[f"metrics/{key}"] = torch.as_tensor(value)
+    return {
+        key: value.float() if value.dtype == torch.float64 else value
+        for key, value in out.items()
+    }
+
+
+def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> None:
+    """Store :func:`stored` copies of ``values`` under ``prefix``."""
+    for key, value in values.items():
+        out[f"{prefix}/{key}"] = stored(value)
+
+
+# The latents feed the logits, so a divergence in them already shows there; their
+# leading elements localize it without storing them whole.
+def _forward_record(outputs: tuple[Tensor, ...]) -> dict[str, Tensor]:
+    """Logits and halt whole, the returned latents as their leading elements."""
+    logits, halt, *latents = outputs
+    return {"logits": logits, "halt": halt, "latents": heads(latents, count=16)}
+
+
+def _heads(state: Mapping[str, Tensor]) -> Tensor:
+    """Return every tensor's leading elements, in name order, as one tensor."""
+    return heads(state[name] for name in sorted(state))
+
+
+def _capture(store: dict[str, Tensor], name: str) -> Callable[[Tensor], None]:
+    """Record a parameter's accumulated gradient, before clipping."""
+
+    def capture(parameter: Tensor) -> None:
+        assert parameter.grad is not None
+        store[name] = parameter.grad.detach().clone()
+
+    return capture
 
 
 if __name__ == "__main__":

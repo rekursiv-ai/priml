@@ -25,6 +25,7 @@ from priml.model.linear import Linear
 from priml.model.norm import RMSNorm
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
+from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.transformer import Transformer
 from priml.testing.bfb import assert_bfb_against_golden
@@ -104,11 +105,25 @@ def test_load_state_dict_absorbs_legacy_projection_keys() -> None:
         assert torch.equal(fresh.state_dict()[k], v)
 
 
+# The harness stores the randomized state_dict, so the golden's size is the parameter
+# count -- dominated by the default 256-wide FFN. Narrowing the hidden width leaves
+# every numerical path (init, norms, attention, forward) intact while keeping the golden
+# small.
+def _bfb_config() -> Transformer.Config:
+    """Canonical config with the FFN narrowed by size only."""
+    config = _canonical_config()
+    assert isinstance(config.block, TransformerBlock.Config)
+    assert isinstance(config.block.ffn, SwiGLU.Config)
+    config.block.ffn.channels_hidden = 8
+    config.block.ffn.round_to = 1
+    return config
+
+
 def test_transformer_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="transformer",
-        build_module=lambda: _canonical_config().make(),
+        build_module=lambda: _bfb_config().make(),
         build_input=lambda: torch.tensor([[0, 1, 2, 3]]),
         seed=0,
     )

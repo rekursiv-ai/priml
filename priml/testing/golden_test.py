@@ -1,16 +1,35 @@
-"""Tests for readable golden-file assertions."""
+"""Tests for golden-file assertions and compact tensor records."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+import zlib
 
 import pytest
+import torch
 
-from priml.testing.golden import assert_text_golden
+from priml.testing.golden import (
+    assert_tensor_golden,
+    assert_text_golden,
+    heads,
+    leading,
+    mismatches,
+    put_steps,
+    read_tensors,
+    rng_fingerprint,
+    spread,
+    stored,
+    write_tensors,
+)
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from torch import Tensor
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_assert_text_golden_reads_testdata(
@@ -45,6 +64,242 @@ def test_assert_text_golden_regenerates_missing_then_fails(
         )
 
     assert (tmp_path / "testdata" / "example.txt").read_text() == "value\n"
+
+
+def test_assert_text_golden_fails_a_changed_render_as_an_assertion(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "owner_test.py"
+    testdata = tmp_path / "testdata"
+    testdata.mkdir()
+    (testdata / "example.txt").write_text("value\n", encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="example changed"):
+        assert_text_golden(
+            request,
+            test_file=str(test_file),
+            name="example",
+            rendered="other",
+        )
+
+
+def _record() -> dict[str, Tensor]:
+    generator = torch.Generator().manual_seed(0)
+    return {
+        "a": torch.randn(3, 2, generator=generator),
+        "b": torch.randn(5, generator=generator),
+        "c": torch.arange(4, dtype=torch.int64),
+        "d": torch.tensor(1.5, dtype=torch.float64),
+    }
+
+
+def test_write_tensors_round_trips_every_key(tmp_path: Path) -> None:
+    record = _record()
+    write_tensors(tmp_path / "g.pt", record)
+    loaded = read_tensors(tmp_path / "g.pt")
+    assert loaded.keys() == record.keys()
+    for key, value in record.items():
+        assert loaded[key].dtype == value.dtype
+        assert loaded[key].shape == value.shape
+        assert torch.equal(loaded[key], value)
+
+
+def test_write_tensors_overhead_does_not_grow_with_key_count(tmp_path: Path) -> None:
+    few = {"k0": torch.arange(300, dtype=torch.float64)}
+    many = {
+        f"metric/key_{i}": torch.tensor(float(i), dtype=torch.float64)
+        for i in range(300)
+    }
+    write_tensors(tmp_path / "few.pt", few)
+    write_tensors(tmp_path / "many.pt", many)
+    index = sum(len(key) + 24 for key in many)
+    growth = (tmp_path / "many.pt").stat().st_size - (
+        tmp_path / "few.pt"
+    ).stat().st_size
+    assert growth < index
+
+
+def test_write_tensors_keeps_scalars_empty_and_every_dtype(tmp_path: Path) -> None:
+    record = {
+        "scalar": torch.tensor(3.5, dtype=torch.float64),
+        "empty": torch.zeros(0, 3),
+        "flag": torch.tensor([True, False]),
+        "half": torch.tensor([[0.5, 1.5]], dtype=torch.bfloat16),
+        "bytes": torch.tensor([1, 255], dtype=torch.uint8),
+        "a/b\\c": torch.arange(3, dtype=torch.int32),
+    }
+    write_tensors(tmp_path / "g.pt", record)
+    loaded = read_tensors(tmp_path / "g.pt")
+    assert list(loaded) == list(record)
+    for key, value in record.items():
+        assert loaded[key].dtype == value.dtype, key
+        assert loaded[key].shape == value.shape, key
+        assert torch.equal(loaded[key], value), key
+
+
+def test_write_tensors_rejects_a_key_the_index_reserves(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="tab or newline"):
+        write_tensors(tmp_path / "g.pt", {"a\tb": torch.zeros(1)})
+
+
+def test_read_tensors_rejects_a_foreign_file(tmp_path: Path) -> None:
+    torch.save({"a": torch.zeros(1)}, tmp_path / "g.pt")
+    with pytest.raises(TypeError):
+        read_tensors(tmp_path / "g.pt")
+
+
+def test_read_tensors_rejects_a_non_tensor_value(tmp_path: Path) -> None:
+    index = torch.frombuffer(bytearray(zlib.compress(b"")), dtype=torch.uint8)
+    torch.save({"index": index, "a": 1}, tmp_path / "g.pt")
+    with pytest.raises(TypeError):
+        read_tensors(tmp_path / "g.pt")
+
+
+@pytest.mark.parametrize(
+    ("value", "dtype"),
+    [
+        (torch.tensor([0, 3, 255], dtype=torch.int64), torch.uint8),
+        (torch.tensor([0, 3, 255], dtype=torch.int32), torch.uint8),
+        (torch.tensor([0.0, 3.0, 255.0]), torch.uint8),
+        (torch.tensor([0, 256], dtype=torch.int64), torch.int64),
+        (torch.tensor([-1, 3], dtype=torch.int64), torch.int64),
+        (torch.tensor([0.5, 3.0]), torch.float32),
+        (torch.tensor([0.0, 3.0], dtype=torch.float64), torch.float64),
+        (torch.tensor(3, dtype=torch.int64), torch.int64),
+        (torch.tensor([-0.0, 3.0]), torch.float32),
+    ],
+)
+def test_stored_narrows_only_exact_small_whole_numbers(
+    value: Tensor,
+    dtype: torch.dtype,
+) -> None:
+    copy = stored(value)
+    assert copy.dtype == dtype
+    assert torch.equal(copy.to(value.dtype), value)
+    assert torch.equal(copy.to(value.dtype).signbit(), value.signbit())
+
+
+def test_stored_detaches_and_copies() -> None:
+    value = torch.ones(2, requires_grad=True) * 0.5
+    copy = stored(value)
+    assert not copy.requires_grad
+    assert copy.data_ptr() != value.data_ptr()
+
+
+def test_put_steps_stacks_uniform_quantities() -> None:
+    out: dict[str, Tensor] = {}
+    put_steps(
+        out,
+        "train",
+        [{"loss": torch.tensor([0.5 * i, 1.0])} for i in range(3)],
+    )
+    assert list(out) == ["train/loss"]
+    assert out["train/loss"].shape == (3, 2)
+
+
+def test_put_steps_keeps_ragged_quantities_per_step() -> None:
+    out: dict[str, Tensor] = {}
+    put_steps(
+        out,
+        "pool",
+        [
+            {"x": torch.zeros(2) + 0.5, "y": torch.zeros(1) + 0.5},
+            {"x": torch.zeros(3) + 0.5},
+        ],
+    )
+    assert sorted(out) == ["pool/1/x", "pool/1/y", "pool/2/x"]
+
+
+def test_rng_fingerprint_does_not_advance_the_generator() -> None:
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        first = rng_fingerprint()
+        assert torch.equal(first, rng_fingerprint())
+        torch.rand(1)
+        assert not torch.equal(first, rng_fingerprint())
+
+
+def test_leading_keeps_the_first_elements_of_each_tensor() -> None:
+    state = {"w": torch.arange(12.0).view(3, 4), "b": torch.arange(2.0)}
+    heads = leading(state, count=4)
+    assert torch.equal(heads["w"], torch.arange(4.0))
+    assert torch.equal(heads["b"], torch.arange(2.0))
+    heads["w"][0] = 99.0
+    assert state["w"][0, 0] == 0.0
+
+
+def test_spread_keeps_small_tensors_whole() -> None:
+    value = torch.arange(6.0).view(2, 3)
+    assert torch.equal(spread(value, count=8), value.flatten())
+
+
+def test_spread_samples_evenly_across_a_large_tensor() -> None:
+    assert spread(torch.arange(100), count=4).tolist() == [0, 25, 50, 75]
+
+
+def test_spread_samples_the_last_stride_of_a_tensor() -> None:
+    """The final sample lands within one stride of the end, not near the start."""
+    sample = spread(torch.arange(1000), count=128)
+    assert int(sample[-1]) == 127 * 1000 // 128
+
+
+def test_heads_joins_leading_elements_and_widens_exactly() -> None:
+    joined = heads(
+        [
+            torch.arange(6.0).view(2, 3),
+            torch.tensor([0.5], dtype=torch.bfloat16),
+            torch.tensor([1.25, 2.0, 3.0, 4.0, 5.0], dtype=torch.float64),
+        ],
+        count=4,
+    )
+    assert joined.dtype == torch.float64
+    expected = [0.0, 1.0, 2.0, 3.0, 0.5, 1.25, 2.0, 3.0, 4.0]
+    assert joined.tolist() == expected
+
+
+def test_mismatches_sees_presence_dtype_shape_and_bits() -> None:
+    base = {"x": torch.arange(6, dtype=torch.float32)}
+    variants = [
+        base["x"].to(torch.float64),
+        base["x"].reshape(2, 3),
+        base["x"].clone().index_fill_(0, torch.tensor([5]), 6.0),
+    ]
+    assert all(mismatches(base, {"x": v}) for v in variants)
+    assert mismatches(base, {}) == ["missing x"]
+    assert mismatches({}, base) == ["unexpected x"]
+    assert not mismatches(base, {"x": base["x"].clone()})
+
+
+def test_assert_tensor_golden_mints_missing_then_compares(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BFB_REGENERATE", raising=False)
+    path = tmp_path / "testdata" / "g.pt"
+    record = _record()
+    with pytest.raises(AssertionError, match="Missing golden minted"):
+        assert_tensor_golden(path, record)
+    assert_tensor_golden(path, record)
+    changed = {**record, "d": torch.tensor(2.5, dtype=torch.float64)}
+    with pytest.raises(AssertionError, match="1 mismatches"):
+        assert_tensor_golden(path, changed)
+    monkeypatch.setenv("BFB_REGENERATE", "1")
+    assert_tensor_golden(path, changed)
+    assert torch.equal(read_tensors(path)["d"], changed["d"])
+
+
+def test_every_priml_golden_is_at_most_28_000_bytes() -> None:
+    """A golden pins a code path, so it stores only what its check needs."""
+    root = _CWD.parent
+    goldens = sorted(root.rglob("*.pt"))
+    assert goldens, "no goldens found; the glob no longer matches the layout"
+    large = [
+        f"{path.relative_to(root)}: {path.stat().st_size}"
+        for path in goldens
+        if path.stat().st_size > 28_000
+    ]
+    assert not large, "goldens over 28,000 bytes:\n" + "\n".join(large)
 
 
 if __name__ == "__main__":

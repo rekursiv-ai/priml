@@ -10,6 +10,7 @@ import torch
 
 from priml.model.attention.multi_stream import MultiStreamAttention
 from priml.model.transformer.mmdit import MMDiTBlock
+from priml.testing import golden
 from priml.testing.bfb import assert_bfb_against_golden
 
 
@@ -39,9 +40,14 @@ def _constructor_state(config: MMDiTBlock.Config) -> Tensor:
         torch.manual_seed(0)
         module = config.make()
         state = module.state_dict()
-        values = [value.reshape(-1).float() for value in state.values()]
-        values.append(torch.get_rng_state().float())
-        return torch.cat(values)
+        # Leading elements pin each parameter's init; the fingerprint pins the draw
+        # count in 8 values instead of the 5 KB Mersenne state.
+        return torch.cat(
+            [
+                golden.heads(state.values(), count=8),
+                golden.rng_fingerprint().float(),
+            ],
+        )
 
 
 if __name__ == "__main__":

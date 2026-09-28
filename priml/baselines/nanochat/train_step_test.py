@@ -15,7 +15,11 @@ import torch
 
 from priml.baselines.nanochat import experiments, train_step
 from priml.baselines.nanochat.attention import CausalAttention
-from priml.baselines.nanochat.model import MemoryNanoChatLM
+from priml.baselines.nanochat.model import (
+    MemoryNanoChatLM,
+    NanoChatLM,
+    OutputNormFeedForward,
+)
 from priml.baselines.nanochat.optimizers import (
     BiasCorrectedRMSProp,
     FFNScaledNorMuon,
@@ -33,6 +37,7 @@ from priml.model.attention.value_gated_attention import (
 from priml.model.linear import Linear
 from priml.model.narrow_embedding import NarrowEmbedding
 from priml.model.softcap import SoftCap
+from priml.model.transformer.block import TransformerBlock
 from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.fused_adamw import FusedAdamW
 from priml.testing.bfb import assert_bfb_against_golden
@@ -146,7 +151,13 @@ class _EndpointTrajectory(nn.Module):
         model = config.model
         assert isinstance(model, MemoryNanoChatLM.Config)
         model.vocab_size = 16
-        model.channels_in = 16
+        # Size-only: eight blocks stay (their window pattern is the coverage),
+        # so the per-block width is the lever on the stored initial state.
+        # Eight is the floor: a trigram layer reads three gate slices of two
+        # channels (``3 * gate_channels <= channels_in``), and four channels a
+        # head keeps two heads, so no head-axis reshape is the identity. Every
+        # numeric choice is unchanged.
+        model.channels_in = 8
         model.max_seq_len = 4
         model.dtype = torch.float32
         model.rope.dtype = torch.float32
@@ -159,13 +170,21 @@ class _EndpointTrajectory(nn.Module):
         embedding.dtype = None
         assert isinstance(model.block, list)
         for block in model.block:
+            assert isinstance(block, TransformerBlock.Config)
             attention = block.attn
             assert isinstance(attention, CausalAttention.Config)
-            attention.channels_head = 8
-            attention.gate_channels = 4
+            attention.channels_head = 4
+            attention.gate_channels = 2
             attention.fused_qk_rope = False
             attention.window = model.max_seq_len if attention.window == 2048 else 2
             attention.kernel = PartialConfig(sdpa_attention)
+            # Size-only: pin every block's feed-forward hidden width to 8 rather
+            # than its per-depth ramp (~24-80 here). The stored pre-run state
+            # spans eight blocks and the FFN is its bulk; the relu-square
+            # nonlinearity and the output norm are unchanged.
+            ffn = block.ffn
+            assert isinstance(ffn, OutputNormFeedForward.Config)
+            ffn.channels_hidden = 8
         for table in (*model.bigrams.values(), *model.trigrams.values()):
             table.num_embeddings = 8
         config.parallelism = NoParallel.Config(device="cpu")
@@ -717,6 +736,18 @@ def _smoke_step() -> NanoChatTrainStep:
     """``exp_smoke``'s step, built for a golden."""
     config = experiments.exp_smoke().step
     config.parallelism = NoParallel.Config(device="cpu")
+    # Size-only shrink of the experiment config: the pre-run state is stored
+    # whole, so the per-layer width is the lever.
+    # Width, heads, and the gate move together (the gate reads the whole
+    # stream); both layers stay, so the window pattern is still exercised.
+    # Every numeric choice the ladder sets is untouched.
+    model = config.model
+    assert isinstance(model, NanoChatLM.Config)
+    model.channels_in = 8
+    attention = model.template.attn
+    assert isinstance(attention, ValueGatedAttention.Config)
+    attention.channels_head = 4
+    attention.gate_channels = 8
     torch.manual_seed(0)
     built = config.make()
     assert isinstance(built, NanoChatTrainStep)

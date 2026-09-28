@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from torch import Tensor, nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.flop_counter import FlopCounterMode
 
 import torch
@@ -10,7 +11,7 @@ import torch
 from priml.baselines.sudoku.eval import SudokuVerifier
 from priml.baselines.sudoku.trm import TRM
 from priml.cost import cost
-from priml.model.attention.kernel import SdpaNaive, attention_kernel_cost
+from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -61,30 +62,24 @@ def test_trm_cost_matches_torch() -> None:
     )
 
 
-def test_verifier_cost_matches_torch_outside_attention() -> None:
-    """Torch's counter skips the masked CPU SDPA call, so compare the rest."""
+def test_verifier_cost_matches_torch() -> None:
+    """Torch counts attention only through the math kernel, so pin it.
+
+    A fused SDPA kernel is invisible to ``FlopCounterMode``, and which kernel
+    CPU SDPA picks varies by host and by what ran before in the process.
+    """
     config = SudokuVerifier.Config(width=16, depth=1, heads=2).finalize()
     analytical = cost(config, batch_size=2, dtype=None)
-    kernel = attention_kernel_cost(
-        seq_len=81,
-        batch_size=2,
-        dtype=None,
-        num_heads=2,
-        channels_head=8,
-    )
     torch.manual_seed(0)
     module = config.make()
     module.train()
-    with FlopCounterMode(display=False) as counter:
+    with sdpa_kernel(SDPBackend.MATH), FlopCounterMode(display=False) as counter:
         module(
             torch.randint(1, 11, (2, 81)),
             torch.randint(2, 11, (2, 81)),
         ).sum().backward()
     assert analytical.params == sum(p.numel() for p in module.parameters())
-    assert (
-        analytical["flops", "matmul"].sum() - kernel["flops", "matmul"].sum()
-        == counter.get_total_flops()
-    )
+    assert analytical["flops", "matmul"].sum() == counter.get_total_flops()
 
 
 if __name__ == "__main__":

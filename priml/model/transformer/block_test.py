@@ -274,12 +274,24 @@ def test_block_checkpoint_wraps_under_grad():
     assert spy.call_count > 0, "checkpoint=True did not checkpoint during training"
 
 
+# The harness stores the randomized state_dict, so the golden's size is the parameter
+# count -- dominated by the default 256-wide FFN. Narrowing the hidden width leaves
+# every numerical path intact and keeps the golden small.
+def _bfb_config() -> TransformerBlock.Config:
+    """Canonical block with the FFN narrowed by size only."""
+    config = _canonical_config()
+    assert isinstance(config.ffn, SwiGLU.Config)
+    config.ffn.channels_hidden = 8
+    config.ffn.round_to = 1
+    return config
+
+
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_transformer_block_bfb(device: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="transformer_block",
-        build_module=lambda: _canonical_config().make().to(device),
+        build_module=lambda: _bfb_config().make().to(device),
         build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
         seed=0,
     )

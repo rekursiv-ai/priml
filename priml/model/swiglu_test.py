@@ -39,6 +39,7 @@ from priml.model.swiglu import (
     sigmoid,
     silu,
 )
+from priml.testing import golden
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
@@ -454,11 +455,15 @@ def _constructor_rng_and_forward(config: SwiGLU.Config) -> torch.Tensor:
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         module = config.make()
-        state_values: list[Tensor] = list(module.state_dict().values())
-        values = [value.reshape(-1).float() for value in state_values]
-        values.append(torch.get_rng_state().float())
+        state_values = list(module.state_dict().values())
+        # A parameter's leading elements pin its init; the RNG fingerprint pins how
+        # many draws that init consumed, in 8 values rather than the 5 KB state.
+        values = [
+            golden.heads(state_values, count=8),
+            golden.rng_fingerprint().float(),
+        ]
         x = torch.randn(2, 3, config.channels_in)
-        values.extend([x.reshape(-1), module(x).reshape(-1).float()])
+        values.extend([golden.spread(x), golden.spread(module(x).float())])
         return torch.cat(values)
 
 

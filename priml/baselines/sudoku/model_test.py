@@ -168,6 +168,19 @@ def test_prefix_tokens_reach_the_sequence() -> None:
     assert out.logits.shape == (2, 81, 11)
 
 
+def test_prefix_parameters_lead_the_parameter_order() -> None:
+    """Prefix parameters come first, where the legacy TRM registered its prefix.
+
+    A body norm sums parameters in registration order, and the compiled float32
+    reduction behind it lands a different last bit when that order changes:
+    measured 1 ULP on ``param_norm`` against the legacy step.
+    """
+    config = _config()
+    config.prefix = RegisterTokens.Config(num_tokens=2)
+    names = [name for name, _ in config.make().named_parameters()]
+    assert names[0].startswith("prefix."), names
+
+
 def test_a_prefix_without_a_token_count_is_rejected() -> None:
     """Guessing 0 would silently shift every grid position."""
     config = _config()
@@ -189,6 +202,16 @@ def test_cycle_counts_must_be_positive() -> None:
         DeepRecurrence.Config(slow_cycles=0).make()
 
 
+def _golden_config(*, recurrent: bool = False) -> SudokuNet.Config:
+    """Shrink ``_config`` by size only: width 8, the FFN hidden rounded to 8."""
+    config = _config(recurrent=recurrent)
+    config.channels_in = 8
+    assert isinstance(config.block, TransformerBlock.Config)
+    assert isinstance(config.block.ffn, SwiGLU.Config)
+    config.block.ffn.round_to = 8
+    return config
+
+
 def test_plain_forward_bfb() -> None:
     """Freeze exp000's architecture: same weights in, same logits out.
 
@@ -199,7 +222,7 @@ def test_plain_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="plain",
-        build_module=lambda: _config().make(),
+        build_module=lambda: _golden_config().make(),
         build_input=lambda: torch.randint(0, 11, (2, 81)),
         seed=0,
         run=_logits,
@@ -215,7 +238,7 @@ def test_recurrent_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="recurrent",
-        build_module=lambda: _config(recurrent=True).make(),
+        build_module=lambda: _golden_config(recurrent=True).make(),
         build_input=lambda: torch.randint(0, 11, (2, 81)),
         seed=0,
         run=_logits,

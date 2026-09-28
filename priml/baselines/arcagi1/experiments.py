@@ -22,51 +22,51 @@ Launch (8 GPUs)::
     uv --quiet run --frozen python -m torch.distributed.run \
       --standalone --nproc_per_node=8 -m priml \
       priml.baselines.arcagi1.experiments.exp000
-
-Prepare exp004, train to step 280000 (8 GPUs), then evaluate separately::
-
-    priml/baselines/arcagi1/scripts/prepare_data.py --experiment exp004
-    uv --quiet run --frozen python -m torch.distributed.run \
-      --standalone --nproc_per_node=8 -m priml \
-      priml.baselines.arcagi1.experiments.exp004 \
-      --override experiment_name=exp004_full280k \
-      --override max_steps=280000 \
-      --override num_steps_eval=0 \
-      --override eval_warmup_batches=0
-    uv --quiet run --frozen python -m torch.distributed.run \
-      --standalone --nproc_per_node=8 -m priml \
-      priml.baselines.arcagi1.experiments.exp004 \
-      --override experiment_name=exp004_full280k \
-      --override checkpointer.resume=True \
-      --override checkpointer.resume_step=280000 \
-      --override eval_only=True
 """
 
 from __future__ import annotations
 
 from dataclasses import field
-from typing import TYPE_CHECKING, Final
-
-
-if TYPE_CHECKING:
-    import torch
-else:
-    from wrapt import lazy_import
-
-    torch = lazy_import("torch")  # ~1050 ms; the exp004 factory needs bf16.
+from pathlib import Path
+from typing import Final, Literal
 
 from configgle import Makes
 
-from priml.baselines.arcagi1.data import ArcData
-from priml.baselines.arcagi1.metric import CanonicalPassK, PassK
-from priml.baselines.arcagi1.model import ConvSwiGLU
-from priml.baselines.arcagi1.train_step import HPSFeedbackTrainStep
+from priml.baselines.arcagi1.act import (
+    AtomicPool,
+    FeedbackCarry,
+    HaltTraining,
+    SampledMinimum,
+)
+from priml.baselines.arcagi1.data import ArcData, PuzzleData
+from priml.baselines.arcagi1.loss import MeanOverBatch, StablemaxTokens
+from priml.baselines.arcagi1.metric import (
+    CanonicalPassK,
+    PassK,
+    SignalDumpTracker,
+)
+from priml.baselines.arcagi1.model import (
+    ConvSwiGLU,
+    UrmRecurrence,
+    depthwise_shift,
+)
+from priml.baselines.arcagi1.optimizer import adamw_muon
+from priml.baselines.arcagi1.scripts.build_dataset import (
+    DEFAULT_SCALE_WEIGHTS,
+    aug_policy_template,
+)
+from priml.baselines.arcagi1.scripts.build_spatial_eval import (
+    spatial_eval_dataset_dir,
+)
+from priml.baselines.arcagi1.train_step import EvalSignals, TrmTrainStep
+from priml.baselines.arcagi2.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi2.train_step import ArcDataParallel
 from priml.baselines.sudoku.act import ActPool
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
 from priml.baselines.sudoku.model import (
     CoreCompile,
     DeepRecurrence,
+    SudokuNet,
     corrected_fan_in_normal,
 )
 from priml.baselines.sudoku.prefix import (
@@ -82,8 +82,11 @@ from priml.model.mlpmixer import MLPMixerBlock
 from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
+from priml.optimizers import AdamATan2
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
+from priml.train.ema import EMA
+from priml.train.tracker import TrackerList, WandbTracker
 from priml.train.train_loop import TrainLoop
 
 
@@ -119,18 +122,6 @@ class ArcTrainLoop(
 
     dataset: ArcData.Config = field(default_factory=ArcData.Config)
     """Augmented ARC tasks, grouped so a batch draws whole tasks."""
-
-
-class HPSArcTrainLoop(
-    Makes["TrainLoop"],
-    TrainLoop.Config[HPSFeedbackTrainStep.Config, ArcData.Config],
-):
-    """Historical HPS model and atomic feedback step on the public ARC data."""
-
-    step: HPSFeedbackTrainStep.Config = field(
-        default_factory=HPSFeedbackTrainStep.Config,
-    )
-    dataset: ArcData.Config = field(default_factory=ArcData.Config)
 
 
 def exp000() -> ArcTrainLoop:
@@ -307,122 +298,6 @@ def exp003() -> ArcTrainLoop:
     return cfg
 
 
-def exp004() -> HPSArcTrainLoop:
-    """Build the public HPS URM recipe with 2x6 recurrence and ACT.
-
-    This reproduces the recorded recipe semantics where the public priml
-    components permit. The published 71.375% result is not asserted: this
-    public port has not been rerun for 280k steps on the GX10 setup.
-
-    Hypothesis:
-      Single-state URM, atomic feedback ACT, and the historical optimizer and
-      data recipe reproduce the HPS result.
-
-    References:
-      https://arxiv.org/abs/2510.04871
-        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny Networks.
-
-    Results:
-      Historical non-spatial pass@2: 71.375% at step 280k. Public rerun pending.
-
-    """
-    cfg = HPSArcTrainLoop()
-    cfg.study_name = "arcagi1"
-    cfg.experiment_name = "exp004"
-    cfg.seed = 0
-    step = cfg.step
-    step.batch_size = 96
-    step.total_train_steps = 388_670
-    step.warmup_steps = 2_000
-    step.ignore_label_id = -100  # ArcData maps its zero ignore token to -100.
-    step.dtype_autocast = torch.bfloat16
-    step.model.channels_in = 512
-    step.model.num_layers = 4
-    step.model.vocab_size = VOCAB_SIZE
-    step.model.halt_outputs = 2
-    step.model.compile_core = CoreCompile.Config()
-    assert isinstance(step.model.embedding, GridEmbedding.Config)
-    step.model.embedding.grid_shape = (GRID_LEN,)
-    step.model.embedding.channels = [PredictionFeedback.Config()]
-    assert isinstance(step.model.block, TransformerBlock.Config)
-    step.model.block.prenorm = False
-    step.model.block.ffn = ConvSwiGLU.Config(
-        init_weight=corrected_fan_in_normal,
-        init_weight_out=corrected_fan_in_normal,
-        norm=RMSNorm.Config(),
-        kernel_size=2,
-        shift_conv=True,
-    )
-    assert isinstance(step.model.block.attn, SelfAttention.Config)
-    step.model.block.norm1 = RMSNorm.Config(eps=1e-5)
-    step.model.block.norm2 = RMSNorm.Config(eps=1e-5)
-    step.model.block.attn.num_heads = 8
-    step.model.block.attn.channels_head = 64
-    step.model.block.attn.init_weight = corrected_fan_in_normal
-    step.model.block.attn.rope = RoPE.Config(channels_head=64)
-    step.model.block.attn.norm_qk = RMSNorm.Config(
-        channels_in=64,
-        elementwise_affine=False,
-    )
-    step.model.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=6)
-    prefix = PrefixStack.Config()
-    prefix.parts = [
-        SparsePuzzleEmbedding.Config(
-            num_puzzles=NUM_PUZZLE_IDENTIFIERS,
-            num_tokens=16,
-            batch_size=step.batch_size,
-            dtype=torch.bfloat16,
-            dtype_scale=torch.float32,
-        ),
-    ]
-    step.model.prefix = prefix
-    cfg.dataset.batch_size = step.batch_size
-    cfg.dataset.eval_batch_size = 256
-    cfg.dataset.epochs_per_iter = 5
-    cfg.dataset.device_resident = False
-    cfg.dataset.working_dir = "/datasets/arcagi1-hps"
-    cfg.dataset.augmentation.spatial.translation_prob = 0.2
-    cfg.dataset.augmentation.spatial.scale_prob = 0.2
-    cfg.dataset.augmentation.spatial.train_scale_weights = {2: 1.0}
-    cfg.dataset.augmentation.spatial_eval_views = True
-    cfg.dataset.augmentation.spatial_eval_scale = 2
-    cfg.max_steps = step.total_train_steps
-    cfg.num_steps_eval = 10_000
-    cfg.num_steps_log = 100
-    cfg.eval_warmup_batches = 1
-    cfg.eval_every_epoch = False
-    cfg.metrics_eval = {
-        "": CanonicalPassK.Config(
-            working_dir=cfg.dataset.working_dir,
-            spatial_views="non_spatial",
-            transform=cfg.dataset.augmentation.transform,
-        ),
-        "spatial_eq": CanonicalPassK.Config(
-            working_dir=cfg.dataset.working_dir,
-            spatial_views="all",
-            max_views_per_input=1_001,
-            transform=cfg.dataset.augmentation.transform,
-        ),
-        "spatial_big": CanonicalPassK.Config(
-            working_dir=cfg.dataset.working_dir,
-            spatial_views="all",
-            transform=cfg.dataset.augmentation.transform,
-        ),
-    }
-    cfg.max_time = 172_800
-    cfg.max_time_kind = "train"
-    cfg.checkpointer = Checkpointer.Config(
-        save_every=5_000,
-        keep_last_n=8,
-        keep_every=40_000,
-    )
-    cfg.runtime = MultiProcess.Config()
-    cfg.runtime.mesh_topology = {"dp": -1, "pp": 1, "tp": 1}
-    cfg.step.parallelism = ArcDataParallel.Config()
-    cfg.step.parallelism.gradient_as_bucket_view = True
-    return cfg
-
-
 def exp_smoke() -> ArcTrainLoop:
     """exp000 at minimum size, for verifying an installation end to end.
 
@@ -436,7 +311,7 @@ def exp_smoke() -> ArcTrainLoop:
     costs 112 MB and 35 ms, which does not bear on the question.
 
     Returns:
-      cfg: exp000 config at 1/8 scale (32 channels, 1 layer, 4 steps, 4 tasks)
+      cfg: exp000 config at 1/16 width (32 channels, 1 layer, 4 steps, 4 tasks)
         for installation verification.
 
     """
@@ -457,6 +332,303 @@ def exp_smoke() -> ArcTrainLoop:
     assert isinstance(table, SparsePuzzleEmbedding.Config)
     table.batch_size = cfg.dataset.batch_size
     return cfg
+
+
+class TrmTrainLoop(
+    Makes["TrainLoop"],
+    TrainLoop.Config[TrmTrainStep.Config, PuzzleData.Config],
+):
+    """The reference TRM step over the reference-plan loader."""
+
+    step: TrmTrainStep.Config = field(default_factory=TrmTrainStep.Config)
+    """Pooled ACT, halt training, and the sparse task table."""
+
+    dataset: PuzzleData.Config = field(default_factory=PuzzleData.Config)
+    """Rank-sharded Philox sampling of the prepared ARC tree."""
+
+
+def exp004() -> TrmTrainLoop:
+    """Train the reference TRM recipe.
+
+    A new root rather than a fork of exp000..exp003: those use the shared
+    sudoku step, which has no atomic pool, sparse optimizer, or stablemax. The
+    recipe is the paper's: AdamATan2 body plus SignSGD task table, unnormalized
+    SwiGLU, float64 stablemax, atomic ACT with sampled-minimum exploration, EMA
+    0.999, global batch 2048 for 388,670 steps. ``train_step_test.py`` pins its
+    trajectory bit for bit against the implementation it was ported from.
+
+    Hypothesis:
+      The shared priml pieces reproduce the reference TRM exactly.
+
+    References:
+      https://arxiv.org/abs/2510.04871
+        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
+        Networks.
+
+    Results:
+      TBD. The implementation it was ported from reached eval pass@1 0.40375
+      at step 270,000.
+
+    Returns:
+      cfg: The reference-parity recipe.
+
+    """
+    cfg = TrmTrainLoop()
+    cfg.study_name = "arcagi1"
+    cfg.experiment_name = "exp004"
+    cfg.seed = 0
+
+    batch_size = 256
+    cfg.step.model = _reference_model(batch_size)
+    cfg.step.optimizer = AdamATan2.Config(lr=1e-4, betas=(0.9, 0.95), weight_decay=0.1)
+    cfg.step.token_loss = StablemaxTokens.Config()
+    cfg.step.reduction = MeanOverBatch.Config()
+    cfg.step.pool = AtomicPool.Config(batch_size=batch_size, max_steps=16)
+    cfg.step.halting = HaltTraining.Config(
+        weight=0.5,
+        exploration=SampledMinimum.Config(prob=0.1),
+    )
+    cfg.step.ema = EMA.Config(
+        decay=0.999,
+        update_after_step=2_000,
+        warmup_seed=True,
+        track_buffers=False,
+        shadow_kind="param_dict",
+    )
+    cfg.step.total_train_steps = 388_670
+    cfg.step.warmup_steps = 2_000
+    cfg.step.lr_min_ratio = 1.0
+    cfg.step.norm_log_interval = 100
+    cfg.step.parallelism = ArcDataParallel.Config(gradient_as_bucket_view=True)
+
+    cfg.dataset.num_puzzle_identifiers = NUM_PUZZLE_IDENTIFIERS
+    cfg.dataset.batch_size = batch_size
+    cfg.dataset.eval_batch_size = batch_size
+    cfg.dataset.epochs_per_iter = 5
+
+    cfg.metrics_eval[""] = CanonicalPassK.Config()
+    cfg.max_steps = cfg.step.total_train_steps
+    cfg.num_steps_eval = 10_000
+    cfg.num_steps_log = 100
+    cfg.early_train_log_steps = 100
+    cfg.eval_warmup_batches = 1
+    cfg.eval_every_epoch = False
+    cfg.checkpointer = Checkpointer.Config(
+        save_every=4_000,
+        keep_last_n=8,
+        keep_every=40_000,
+    )
+    cfg.tracker = WandbTracker.Config(project="trm")
+    cfg.runtime = MultiProcess.Config(mesh_topology={"dp": -1, "pp": 1, "tp": 1})
+    return cfg
+
+
+def exp005() -> TrmTrainLoop:
+    """exp004 + the modified SwiGLU and a Muon body.
+
+    Two changes, inseparable: the gate norm is what keeps a high-rate Muon body
+    stable. Label smoothing is not set: the stablemax loss has no such term.
+
+    Hypothesis:
+      Orthogonalized updates on the reasoning matrices train faster than
+      AdamATan2 once the gate norm bounds their scale.
+
+    References:
+      https://arxiv.org/abs/2601.19085
+        Dillon. Speed is Confidence.
+
+    Results:
+      TBD. The implementation it was ported from reached eval pass@1 0.44625
+      at step 70,000.
+
+    Returns:
+      cfg: exp004 with the Muon recipe.
+
+    """
+    cfg = exp004()
+    cfg.experiment_name = "exp005"
+    block = cfg.step.model.block
+    assert isinstance(block, TransformerBlock.Config)
+    assert isinstance(block.ffn, SwiGLU.Config)
+    block.ffn.norm = RMSNorm.Config()
+    cfg.step.optimizer = adamw_muon(adamw_lr=1e-4, muon_lr=5e-3)
+    return cfg
+
+
+def exp006() -> TrmTrainLoop:
+    """exp005 with the Muon rate doubled to 0.01.
+
+    Hypothesis:
+      The gate norm leaves headroom above 5e-3; a higher rate converges faster.
+
+    References:
+      https://kellerjordan.github.io/posts/muon/
+
+    Results:
+      TBD.
+
+    Returns:
+      cfg: exp005 at Muon rate 0.01.
+
+    """
+    cfg = exp005()
+    cfg.experiment_name = "exp006"
+    cfg.step.optimizer = adamw_muon(adamw_lr=1e-4, muon_lr=0.01)
+    return cfg
+
+
+def exp007() -> TrmTrainLoop:
+    """exp006 + the URM model, 0.2/0.2 spatial training aug, and signal dumps.
+
+    A single latent refined by four ConvSwiGLU blocks six times per core
+    application, two applications per forward; Muon back at 5e-3; batch 96; the
+    translation and scale aug-policy tree; and evaluation packing label-free
+    signals.
+
+    Hypothesis:
+      A short convolution in the feed-forward supplies the local mixing ARC's
+      grids reward, and one latent at greater depth beats two shallower ones.
+
+    References:
+      https://arxiv.org/abs/2512.14693
+        Gao et al. Universal Reasoning Model.
+
+    Results:
+      TBD. The implementation it was ported from reached eval pass@2 0.70125
+      at step 380,000.
+
+    Returns:
+      cfg: exp006 with the URM recipe.
+
+    """
+    cfg = exp006()
+    cfg.experiment_name = "exp007"
+    batch_size = 96
+    model = cfg.step.model = _reference_model(batch_size)
+    model.num_layers = 4
+    model.recurrence = UrmRecurrence.Config(slow_cycles=2, fast_cycles=6)
+    assert isinstance(model.block, TransformerBlock.Config)
+    model.block.ffn = ConvSwiGLU.Config(
+        short_conv=depthwise_shift,
+        init_weight=corrected_fan_in_normal,
+        norm=RMSNorm.Config(),
+    )
+    cfg.step.optimizer = adamw_muon(adamw_lr=1e-4, muon_lr=5e-3)
+    assert isinstance(cfg.step.pool, AtomicPool.Config)
+    cfg.step.pool.batch_size = batch_size
+    cfg.step.emulate_precision_casts = True
+    cfg.step.signals = EvalSignals.Config(per_step=True)
+
+    cfg.dataset.working_dir = spatial_eval_dataset_dir(
+        spatial_views=2,
+        source_name=Path(
+            aug_policy_template(translation_prob=0.2, scale_prob=0.2),
+        ).name,
+        working_dir="/datasets",
+    )
+    cfg.dataset.augmentation.spatial.translation_prob = 0.2
+    cfg.dataset.augmentation.spatial.scale_prob = 0.2
+    cfg.dataset.augmentation.spatial.train_scale_weights = dict(DEFAULT_SCALE_WEIGHTS)
+    cfg.dataset.batch_size = batch_size
+    cfg.dataset.eval_batch_size = 256
+    # The spatial expansion is built by scripts/build_spatial_eval.py, not the
+    # loader; a positive count would make the loader rebuild the plain tree.
+    cfg.dataset.num_puzzle_identifiers = 0
+
+    base = CanonicalPassK.Config(per_step_acts=cfg.step.pool.max_steps)
+    base.working_dir = cfg.dataset.working_dir
+    cfg.metrics_eval = {
+        "": _sliced(base, spatial_views="non_spatial", max_views=0),
+        # The non-spatial per-input budget: one canonical view plus 1,000.
+        "spatial_eq": _sliced(base, spatial_views="all", max_views=1_001),
+        "spatial_big": _sliced(base, spatial_views="all", max_views=0),
+    }
+    assert isinstance(cfg.checkpointer, Checkpointer.Config)
+    cfg.checkpointer.save_every = 5_000
+    cfg.tracker = TrackerList.Config(
+        trackers={
+            "wandb": WandbTracker.Config(project="trm"),
+            "signals": SignalDumpTracker.Config(),
+        },
+    )
+    return cfg
+
+
+def exp008() -> TrmTrainLoop:
+    """exp007 + QK-norm, prediction feedback, and corrupted-feedback repair.
+
+    The three mechanisms were measured as one bundle, so they are one change
+    here: parameter-free per-head RMSNorm on Q and K; the
+    previous step's argmax grid fed back through a zero-initialized table; and
+    7.5% of fed-back cells replaced by random colors in training.
+
+    Hypothesis:
+      Conditioning on its own current answer lets the recurrence refine rather
+      than re-derive, and corruption teaches it to repair rather than copy.
+
+    References:
+      https://arxiv.org/abs/2510.04871
+        Jolicoeur-Martineau. Less is More: Recursive Reasoning with Tiny
+        Networks.
+
+    Results:
+      TBD. The implementation it was ported from reached eval pass@2 0.71375
+      at step 280,000; ``scripts/reproduce_blog_post.py`` reruns it.
+
+    Returns:
+      cfg: exp007 with the bundle mechanisms.
+
+    """
+    cfg = exp007()
+    cfg.experiment_name = "exp008"
+    model = cfg.step.model
+    assert isinstance(model.block, TransformerBlock.Config)
+    assert isinstance(model.block.attn, SelfAttention.Config)
+    model.block.attn.norm_qk = RMSNorm.Config(model.block.attn.channels_head)
+    assert isinstance(model.embedding, GridEmbedding.Config)
+    model.embedding.channels = [PredictionFeedback.Config()]
+    assert isinstance(cfg.step.pool, AtomicPool.Config)
+    cfg.step.pool.feedback = FeedbackCarry.Config(corruption_rate=0.075)
+    return cfg
+
+
+# The model half of exp004: every value the URM fork keeps, so both build from one
+# place. Master weights stay float32; the step autocasts forwards to bfloat16.
+def _reference_model(batch_size: int) -> SudokuNet.Config:
+    """Return the reference TRM solver sized for ``batch_size`` slots."""
+    model = SudokuNet.Config()
+    model.channels_in = 512
+    model.num_layers = 2
+    model.vocab_size = VOCAB_SIZE
+    model.embedding = GridEmbedding.Config(grid_shape=(GRID_LEN,))
+    model.block = RotaryBlock.Config(
+        attn=SelfAttention.Config(
+            num_heads=8,
+            channels_head=64,
+            init_weight=corrected_fan_in_normal,
+        ),
+        rope=RoPE.Config(channels_head=64),
+    )
+    model.recurrence = DeepRecurrence.Config(slow_cycles=3, fast_cycles=4)
+    model.prefix = PuzzleEmbedding.Config(
+        num_puzzles=NUM_PUZZLE_IDENTIFIERS,
+        batch_size=batch_size,
+    )
+    model.compile_core = CoreCompile.Config()
+    return model
+
+
+def _sliced(
+    base: CanonicalPassK.Config,
+    *,
+    spatial_views: Literal["all", "non_spatial"],
+    max_views: int,
+) -> CanonicalPassK.Config:
+    """Clone ``base`` with one spatial-view slice and per-input budget."""
+    metric = base.copy_tree()
+    metric.spatial_views = spatial_views
+    metric.max_views_per_input = max_views
+    return metric
 
 
 # Post-norm, matching the transformer default: a recurrence feeds a block its own

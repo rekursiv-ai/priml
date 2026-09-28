@@ -12,7 +12,7 @@ math environment before torch imports.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from configgle.testing import assert_pprint_golden
 from torch import Tensor, nn
@@ -24,6 +24,7 @@ from priml.cost import Cost, cost
 from priml.lib.custom_json import DictCodec
 from priml.model.attention.kernel import SdpaNaive
 from priml.model.attention.self_attention import SelfAttention
+from priml.model.embedding import Embedding
 from priml.model.linear import Linear
 from priml.model.sequential import Sequential
 from priml.model.special import TiedLinear
@@ -31,18 +32,16 @@ from priml.model.swiglu import SwiGLU
 from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import AdaLNZero, MMDiTStream
 from priml.model.transformer.mmdit_graft import MMDiTGraft
-from priml.model.transformer.qwen3_test import _canonical_config
+from priml.model.transformer.qwen3 import Qwen3
+from priml.model.transformer.qwen3_test import _canonical_config, _hf_config
 from priml.model.transformer.transformer import Transformer, head_is_tied
+from priml.testing import golden
 from priml.testing.bfb import (
     assert_bfb_against_golden,
     host_agnostic_numerics,
     randomize_parameters,
 )
 from priml.testing.cost import assert_cost_matches_torch
-
-
-if TYPE_CHECKING:
-    from priml.model.transformer.qwen3 import Qwen3
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -90,10 +89,12 @@ def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
     del module, input
     model = _config(conditioned=True).make()
     state = DictCodec.coerce(model.state_dict(), Tensor)
+    # Leading elements pin each parameter's init; the fingerprint pins the draw
+    # count in 8 values instead of the 5 KB Mersenne state.
     return torch.cat(
         [
-            *(value.detach().flatten().float() for value in state.values()),
-            torch.get_rng_state().float(),
+            golden.heads(state.values(), count=8),
+            golden.rng_fingerprint().float(),
         ],
     )
 
@@ -108,19 +109,40 @@ def test_graft_constructor_bfb() -> None:
     )
 
 
+def _golden_config() -> MMDiTGraft.Config:
+    """Shrink ``_config`` by size only: width 8, one KV head of 4, smaller hiddens."""
+    config = _config(conditioned=True)
+    config.backbone = Qwen3.Config.from_hf(
+        _hf_config(
+            vocab_size=16,
+            hidden_size=8,
+            intermediate_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=4,
+        ),
+    )
+    assert isinstance(config.backbone.block, TransformerBlock.Config)
+    assert isinstance(config.backbone.block.attn, SelfAttention.Config)
+    config.backbone.block.attn.attn_kernel = SdpaNaive.Config()
+    config.streams[0].ffn = SwiGLU.Config(channels_hidden=8)
+    return config
+
+
 def test_graft_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="mmdit_graft_forward",
-        build_module=lambda: _config(conditioned=True).make(),
-        build_input=_graft_batch,
+        build_module=lambda: _golden_config().make(),
+        build_input=lambda: _graft_batch(width=8),
         run=_run_graft_forward,
     )
 
 
-def _graft_batch() -> tuple[Tensor, Tensor, Tensor]:
+def _graft_batch(*, width: int = 16) -> tuple[Tensor, Tensor, Tensor]:
     """Draw tokens, one modality stream, and its conditioning from the seeded RNG."""
-    return torch.tensor([[1, 2, 3]]), torch.randn(1, 2, 16), torch.randn(1, 4)
+    return torch.tensor([[1, 2, 3]]), torch.randn(1, 2, width), torch.randn(1, 4)
 
 
 def _run_graft_forward(
@@ -158,19 +180,51 @@ def _language_only_masks(
     return [mask, None]
 
 
+_FROZEN_CHANNELS: Final = 8
+
+
 def test_graft_frozen_step_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="mmdit_graft_frozen_step",
         build_module=_frozen_graft,
-        build_input=_graft_batch,
+        build_input=_frozen_batch,
         run=_run_frozen_step,
     )
 
 
+def _frozen_batch() -> tuple[Tensor, Tensor, Tensor]:
+    """Draw a narrow-width batch: tokens, one modality stream, its conditioning."""
+    tokens = torch.tensor([[1, 2, 3]])
+    return tokens, torch.randn(1, 2, _FROZEN_CHANNELS), torch.randn(1, 4)
+
+
+# The harness stores this model's pre-step state_dict whole, so the golden's size is
+# the parameter count. Every width here is a size-only knob -- residual, vocab, and both
+# FFN hiddens -- narrowed to keep the golden small while every trained and frozen
+# numerical path still runs.
 def _frozen_graft() -> MMDiTGraft:
     """Build the conditioned graft with only its modality stream trainable."""
-    graft = _config(conditioned=True).make()
+    backbone = _backbone()
+    backbone.channels_in = _FROZEN_CHANNELS
+    backbone.channels_out = 8
+    assert isinstance(backbone.proj_in, Embedding.Config)
+    backbone.proj_in.channels_in = 8
+    backbone_block = backbone.block
+    assert isinstance(backbone_block, TransformerBlock.Config)
+    assert isinstance(backbone_block.attn, SelfAttention.Config)
+    backbone_block.attn.num_heads = 2
+    backbone_block.attn.channels_head = 4
+    assert isinstance(backbone_block.ffn, SwiGLU.Config)
+    backbone_block.ffn.channels_hidden = 4
+    backbone_block.ffn.round_to = 1
+    config = MMDiTGraft.Config()
+    config.backbone = backbone
+    stream = MMDiTStream.Config()
+    stream.ffn = SwiGLU.Config(channels_hidden=6, round_to=1)
+    stream.adaln = AdaLNZero.Config(cond_dim=4)
+    config.streams = [stream]
+    graft = config.make()
     graft.freeze_backbone()
     return graft
 

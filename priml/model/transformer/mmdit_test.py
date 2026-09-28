@@ -291,12 +291,22 @@ def test_extra_batch_dims():
     assert y1.shape == (2, 3, 12, 64)
 
 
+# The harness stores the randomized state_dict, so the golden's size is the parameter
+# count -- dominated by each stream's default 256-wide FFN. Narrowing the hidden width
+# leaves every numerical path intact.
+def _bfb_mmdit_config() -> MMDiTBlock.Config:
+    """Canonical MMDiT block with the per-stream FFNs narrowed by size only."""
+    config = _canonical_mmdit_config()
+    config.ffn = SwiGLU.Config(channels_hidden=4, round_to=1)
+    return config
+
+
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_mmdit_block_bfb(device: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="mmdit_block",
-        build_module=lambda: _canonical_mmdit_config().make().to(device),
+        build_module=lambda: _bfb_mmdit_config().make().to(device),
         build_input=lambda: move_to_device(
             [torch.randn(2, 3, 8), torch.randn(2, 2, 8)],
             device,

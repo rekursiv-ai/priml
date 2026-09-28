@@ -27,8 +27,8 @@ import torch
 
 from priml.baselines.sudoku import trainer, trm
 from priml.baselines.sudoku.eval import Reproduction
-from priml.baselines.sudoku.trainer_test import read_golden, stored
 from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.golden import leading, mismatches, read_tensors, stored
 
 
 if TYPE_CHECKING:
@@ -135,33 +135,6 @@ def run_case(stack: Stack, case: str, scratch: Path) -> dict[str, Tensor]:
         }
 
 
-def mismatches(
-    expected: Mapping[str, Tensor],
-    actual: Mapping[str, Tensor],
-) -> list[str]:
-    """Every key whose presence, dtype, shape, or bits differ.
-
-    Args:
-      expected: Reference record.
-      actual: Candidate record.
-
-    Returns:
-      report: One line per mismatch, all of them.
-
-    """
-    report = [f"missing {k}" for k in sorted(expected.keys() - actual.keys())]
-    report += [f"unexpected {k}" for k in sorted(actual.keys() - expected.keys())]
-    for key in sorted(expected.keys() & actual.keys()):
-        want, got = expected[key], actual[key]
-        if want.dtype != got.dtype or want.shape != got.shape:
-            report.append(
-                f"{key}: {got.dtype}{list(got.shape)} vs {want.dtype}{list(want.shape)}",
-            )
-        elif not torch.equal(want, got):
-            report.append(f"{key}: {(want != got).sum().item()}/{want.numel()} differ")
-    return report
-
-
 # On Linux/aarch64 the float64 GEMM in exp013's committee verifier runs on
 # NVPL rather than x86's MKL, flipping a couple of elements by 1-2 float32
 # ULP. Host-keyed golden per docs/SKILL.bit-for-bit.md, same pattern as
@@ -181,7 +154,7 @@ def golden_path(case: str) -> Path:
 
 def load_golden(case: str) -> dict[str, Tensor]:
     """Load a frozen golden."""
-    return read_golden(golden_path(case))
+    return read_tensors(golden_path(case))
 
 
 class PrimlStack:
@@ -355,12 +328,9 @@ class _ProtocolConfig(Protocol):
 _PipelineConfig = Reproduction.Config
 
 
-# A trained weight is the product of every step before it, so its bits already pin
-# the whole trajectory; a handful of elements per tensor catches any divergence
-# without storing the model.
 def _weights(prefix: str, state: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    """Return the first 4 elements of every trained tensor."""
-    return {f"{prefix}/{k}": v.flatten()[:4].clone() for k, v in state.items()}
+    """Return the first 4 elements of every trained tensor under ``prefix``."""
+    return {f"{prefix}/{k}": v for k, v in leading(state).items()}
 
 
 def _metrics(values: Mapping[str, object]) -> dict[str, Tensor]:
@@ -508,7 +478,7 @@ def _record_node_corpus(h: _Harness) -> dict[str, Tensor]:
     return h.dumps("harvest")
 
 
-def _pipeline(h: _Harness, name: str) -> object:
+def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
     """Return a tiny from-scratch pipeline: 4 steps in 2-step segments."""
     cfg = h.eval.Reproduction.Config()
     cfg.study_name = "sudoku"
@@ -534,23 +504,21 @@ def _pipeline(h: _Harness, name: str) -> object:
     return cfg
 
 
-def _full_eval_defaults(h: _Harness, full_eval: object) -> None:
+def _full_eval_defaults(h: _Harness, full_eval: _ProtocolConfig) -> None:
     """Shrink a pipeline's full-set protocol by size."""
-    cast("_ProtocolConfig", full_eval).model = h.model()
-    dataset = cast("_ProtocolConfig", full_eval).dataset
-    dataset.working_dir = h.data
-    dataset.batch_size = 4
-    cast("_ProtocolConfig", full_eval).search = h.search()
-    cast("_ProtocolConfig", full_eval).evaluation_count = 4
+    full_eval.model = h.model()
+    full_eval.dataset.working_dir = h.data
+    full_eval.dataset.batch_size = 4
+    full_eval.search = h.search()
+    full_eval.evaluation_count = 4
 
 
 def _run_pipeline(
     h: _Harness,
-    cfg: object,
+    config: _PipelineConfig,
     names: tuple[str, ...],
 ) -> dict[str, Tensor]:
     """Run a pipeline; record its dumps, metrics, and final generator weights."""
-    config = cast("_PipelineConfig", cfg)
     config.make().run()
     out = h.dumps(config.experiment_name)
     metrics = cast(
@@ -573,7 +541,7 @@ def _run_pipeline(
 
 
 def _record_repro_lock(h: _Harness) -> dict[str, Tensor]:
-    cfg = cast("_PipelineConfig", _pipeline(h, "repro_lock"))
+    cfg = _pipeline(h, "repro_lock")
     lock = h.eval.AgreementLockEval.Config()
     _full_eval_defaults(h, lock)
     lock.members = h.eval.nine_view_members("template.pt")[:2]
@@ -583,7 +551,7 @@ def _record_repro_lock(h: _Harness) -> dict[str, Tensor]:
 
 def _record_repro_sieve(h: _Harness) -> dict[str, Tensor]:
     source = h.generator("source", seed=0)
-    cfg = cast("_PipelineConfig", _pipeline(h, "repro_sieve"))
+    cfg = _pipeline(h, "repro_sieve")
     cfg.screen = "committee"
     cfg.harvest_source_checkpoint = source
     cfg.harvest = h.eval.Harvest.Config()
@@ -636,7 +604,7 @@ def _record_repro_sieve(h: _Harness) -> dict[str, Tensor]:
 
 
 def _record_repro_seeds(h: _Harness) -> dict[str, Tensor]:
-    cfg = cast("_PipelineConfig", _pipeline(h, "repro_seeds"))
+    cfg = _pipeline(h, "repro_seeds")
     cfg.screen = "single_view"
     cfg.trigger = "final_only"
     cfg.generator_seeds = (44, 45, 46)

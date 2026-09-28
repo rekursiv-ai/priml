@@ -1,4 +1,149 @@
-"""Exact source checks for the ARC2 reference recipe's reusable components."""
+"""Exact source checks for the ARC2 reference recipe's reusable components.
+
+The model this recipe was ported from was recorded once through
+:func:`record_model`; the port must reproduce every digest.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from torch import Tensor, nn
+
+import torch
+
+from priml.baselines.arcagi2.model import (
+    ArcModelConfig,
+    PuzzleEmbedding,
+    RotaryBlock,
+)
+from priml.baselines.arcagi2.record_test import assert_matches, load, reduce
+from priml.baselines.arcagi2.train_step_test import training_config
+from priml.baselines.sudoku.embedding import GridEmbedding
+from priml.baselines.sudoku.model import SudokuNet
+from priml.model.attention.kernel import SdpaNaive
+from priml.model.attention.self_attention import SelfAttention
+from priml.testing.bfb import host_agnostic_numerics
+from priml.testing.cost import assert_cost_matches_torch
+from priml.testing.golden import mismatches, rng_fingerprint
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+def record_token_init(build: Callable[[], Tensor]) -> dict[str, Tensor]:
+    """Record the first initialized tensor, the token embedding, from seed 0."""
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.default_generator.manual_seed(0)
+        return reduce({"embed_tokens": build().detach()})
+
+
+def record_model(
+    build: Callable[[], nn.Module],
+    *,
+    latents: Callable[[nn.Module], tuple[Tensor, Tensor]],
+    forward: Callable[[nn.Module, Tensor, Tensor], Tensor],
+) -> dict[str, Tensor]:
+    """Record init (parameters in order, latent inits, RNG fingerprint), a forward.
+
+    Args:
+      build: Constructs the model; called seeded, under portable numerics.
+      latents: Returns the model's slow and fast latent inits.
+      forward: Returns the forward logits for ``(model, tokens, identifiers)``.
+
+    Returns:
+      record: Name-to-tensor record.
+
+    """
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        torch.default_generator.manual_seed(0)
+        model = build()
+        out: dict[str, Tensor] = {"rng": rng_fingerprint()}
+        for index, parameter in enumerate(model.parameters()):
+            out[f"param/{index}"] = parameter.detach().clone()
+        out["slow_init"], out["fast_init"] = latents(model)
+        tokens = torch.arange(18).reshape(2, 9) % 12
+        out["logits"] = forward(model, tokens, torch.tensor([1, 2]))
+    return reduce(out)
+
+
+def port_token_init() -> Tensor:
+    """Build the port's grid embedding sized like the reference and return it."""
+    candidate = GridEmbedding.Config(channels_in=12, channels_out=16, grid_shape=(9,))
+    return candidate.make().embed_tokens.weight
+
+
+def port_latents(model: nn.Module) -> tuple[Tensor, Tensor]:
+    """Slow and fast latent inits of the port."""
+    assert isinstance(model, SudokuNet)
+    return model.slow_init, model.fast_init
+
+
+def port_forward(model: nn.Module, tokens: Tensor, identifiers: Tensor) -> Tensor:
+    """Forward logits of the port."""
+    assert isinstance(model, SudokuNet)
+    return model(tokens, puzzle_identifiers=identifiers).logits
+
+
+def port_model() -> ArcModelConfig:
+    """Return the port's miniature model."""
+    candidate = training_config(8, torch.bfloat16).model
+    assert isinstance(candidate, ArcModelConfig)
+    return candidate
+
+
+def run_port_model() -> dict[str, Tensor]:
+    """Record the port's miniature model."""
+    return record_model(port_model().make, latents=port_latents, forward=port_forward)
+
+
+def test_reference_token_initialization() -> None:
+    """Match the first initialized tensor before comparing later checkpoints."""
+    assert_matches("model", "token_init", record_token_init(port_token_init))
+
+
+def test_reference_model_initialization_and_forward() -> None:
+    """Every initialized parameter, latent init, RNG byte, and the logits match."""
+    assert_matches("model", "model", run_port_model())
+
+
+def test_reference_model_bites() -> None:
+    """A different init seed is reported, not absorbed."""
+    candidate = port_model()
+
+    def build() -> nn.Module:
+        torch.default_generator.manual_seed(1)
+        return candidate.make()
+
+    record = record_model(build, latents=port_latents, forward=port_forward)
+    assert mismatches(load("model")["model"], record)
+
+
+def test_full_model_cost_matches_torch() -> None:
+    """Count the recurrent rotary model and sparse prefix through the common harness."""
+    config = training_config(8, torch.bfloat16).model
+    assert isinstance(config.embedding, GridEmbedding.Config)
+    assert isinstance(config.block, RotaryBlock.Config)
+    assert isinstance(config.block.attn, SelfAttention.Config)
+    assert isinstance(config.prefix, PuzzleEmbedding.Config)
+    config.embedding.grid_shape = (4,)
+    config.prefix.num_tokens = 2
+    config.block.attn.attn_kernel = SdpaNaive.Config()
+    assert_cost_matches_torch(
+        config,
+        build_input=lambda: torch.zeros(2, 4, dtype=torch.int32),
+        batch_size=2,
+        dtype=None,
+        run=_cost_forward,
+    )
+
+
+def _cost_forward(module: nn.Module, tokens: Tensor) -> Tensor:
+    assert isinstance(module, SudokuNet)
+    output = module(tokens, puzzle_identifiers=torch.tensor([1, 2]))
+    return output.logits.sum() + output.halt.sum()
+
 
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main

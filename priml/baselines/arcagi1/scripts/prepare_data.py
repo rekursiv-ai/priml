@@ -12,7 +12,7 @@ keeps tests and offline rebuilds hermetic.
 Examples:
   prepare_data.py
   prepare_data.py --directory /datasets/my-arcagi1
-  prepare_data.py --experiment exp004
+  prepare_data.py --experiment exp007
 
 '''
 # fmt: on
@@ -20,27 +20,21 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import logging
-import subprocess
-import tempfile
 
-from priml.baselines.arcagi1.experiments import exp000, exp004
-from priml.baselines.arcagi1.scripts.build_dataset import build_arc_dataset
+from priml.baselines.arcagi1 import experiments
+from priml.baselines.arcagi1.scripts.build_dataset import (
+    KaggleSource,
+    build_arc_dataset,
+)
 from priml.lib.custom_json import DictCodec, IntCodec, loads
 
 
 if TYPE_CHECKING:
-    from priml.baselines.arcagi1.data import ArcData
-
-
-SOURCE_URL: Final = "https://github.com/SamsungSAILMontreal/TinyRecursiveModels.git"
-"""Pinned upstream source repository."""
-
-SOURCE_REVISION: Final = "c01103738605ba39d1430519b1ee0c62f4c707f8"
-"""Immutable upstream commit containing the ARC source files."""
+    from priml.baselines.arcagi1.data import ArcData, PuzzleData
 
 
 def main() -> int:
@@ -68,22 +62,29 @@ def main() -> int:
     return 0
 
 
-def dataset_config(experiment: str) -> ArcData.Config:
-    """Return the dataset config used by the named ARC experiment."""
-    factories = {"exp000": exp000, "exp004": exp004}
-    loop = factories[experiment]()
+def dataset_config(experiment: str) -> ArcData.Config | PuzzleData.Config:
+    """Return the dataset config the named ARC experiment trains on.
+
+    Args:
+      experiment: Name of a factory in :mod:`~priml.baselines.arcagi1.experiments`.
+
+    Returns:
+      config: A copy of that experiment's dataset config, rooted at its base.
+
+    """
+    loop = cast(_Experiment, getattr(experiments, experiment))()
     config = loop.dataset.copy_tree()
     config.base_dir = loop.base_dir
     return config
 
 
 def default_directory() -> Path:
-    """Return the directory the default ARC experiment resolves for data."""
+    """Return the directory ``exp000`` resolves for ARC data."""
     return Path(dataset_config("exp000").finalize().working_dir)
 
 
 def prepare(
-    config: ArcData.Config,
+    config: ArcData.Config | PuzzleData.Config,
     *,
     input_file_prefix: Path | str | None = None,
 ) -> Path:
@@ -108,7 +109,7 @@ def prepare(
         )
         return target
 
-    with _pinned_source() as prefix:
+    with KaggleSource() as prefix:
         build_arc_dataset(
             target_dir=target,
             input_file_prefix=str(prefix),
@@ -125,50 +126,14 @@ def num_puzzle_identifiers(directory: Path | str) -> int:
     return IntCodec.coerce(metadata["num_puzzle_identifiers"])
 
 
-class _PinnedSource:
-    """Clone the source at one revision and verify the checked-out digest."""
-
-    def __init__(self) -> None:
-        self._temporary: tempfile.TemporaryDirectory[str] | None = None
-
-    def __enter__(self) -> Path:
-        self._temporary = tempfile.TemporaryDirectory(prefix="arcagi1-source-")
-        clone = Path(self._temporary.name) / "TinyRecursiveModels"
-        subprocess.run(  # noqa: S603 -- Fixed Git executable and repository URL.
-            ["git", "clone", "--no-checkout", SOURCE_URL, str(clone)],  # noqa: S607 -- Fixed Git executable.
-            check=True,
-        )
-        subprocess.run(  # noqa: S603 -- Fixed Git executable and revision.
-            ["git", "-C", str(clone), "checkout", SOURCE_REVISION],  # noqa: S607 -- Fixed Git executable.
-            check=True,
-        )
-        actual = subprocess.run(  # noqa: S603 -- Fixed Git executable and revision.
-            ["git", "-C", str(clone), "rev-parse", "HEAD"],  # noqa: S607 -- Fixed Git executable.
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        if actual != SOURCE_REVISION:
-            raise RuntimeError(
-                f"source revision mismatch: got {actual}, expected {SOURCE_REVISION}",
-            )
-        return clone / "kaggle" / "combined" / "arc-agi"
-
-    def __exit__(self, *exc: object) -> None:
-        del exc
-        if self._temporary is not None:
-            self._temporary.cleanup()
-
-
-def _pinned_source() -> _PinnedSource:
-    """Return a context manager for the verified source checkout."""
-    return _PinnedSource()
-
-
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     """Register flags on ``parser``."""
     parser.add_argument("--directory", type=Path, default=None)
-    parser.add_argument("--experiment", choices=("exp000", "exp004"), default="exp000")
+    parser.add_argument(
+        "--experiment",
+        default="exp000",
+        help="experiment whose dataset recipe to build",
+    )
     parser.add_argument("--input-prefix", type=Path, default=None)
     parser.add_argument("--num-aug", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -182,6 +147,21 @@ class _Flags(Protocol):
     input_prefix: Path | None
     num_aug: int | None
     seed: int | None
+
+
+class _Loop(Protocol):
+    """The two fields of an experiment config the preparer reads."""
+
+    base_dir: Path | str | None
+
+    @property
+    def dataset(self) -> ArcData.Config | PuzzleData.Config:
+        """Return the dataset config."""
+        ...
+
+
+class _Experiment(Protocol):
+    def __call__(self) -> _Loop: ...
 
 
 if __name__ == "__main__":

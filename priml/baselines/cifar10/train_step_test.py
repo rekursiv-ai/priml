@@ -457,6 +457,12 @@ def _assert_train_bfb(
 
     def build() -> nn.Module:
         config = tiny_step()
+        # Size-only shrink for the golden: the ResNet stage widths drop to
+        # (2, 4). The pre-run state is stored whole, so the weights are the
+        # lever. Every recipe choice is untouched.
+        model = config.model
+        assert isinstance(model, ResNet.Config)
+        model.channels_hidden = (2, 4)
         if optimizer is not None:
             config.optimizer = optimizer
         return _TrainStepModule(config)

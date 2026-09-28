@@ -17,6 +17,7 @@ from priml.baselines.arcagi1.metric import CanonicalPassK, PassK
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 
@@ -212,7 +213,7 @@ def test_canonical_votes_restore_augmented_views_and_cap_by_confidence(
     }
     metric = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1, 2)).make()
     metric.update(_packed(predictions, torch.tensor([-4.0, 4.0])), **batch)
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 0.5}
+    assert _pass_at(metric.compute()) == {"pass@1": 0.0, "pass@2": 0.5}
 
     capped = CanonicalPassK.Config(
         working_dir=tmp_path,
@@ -220,7 +221,7 @@ def test_canonical_votes_restore_augmented_views_and_cap_by_confidence(
         max_views_per_input=1,
     ).make()
     capped.update(_packed(predictions, torch.tensor([-4.0, 4.0])), **batch)
-    assert capped.compute() == {"pass@1": 0.0, "pass@2": 0.0}
+    assert _pass_at(capped.compute()) == {"pass@1": 0.0, "pass@2": 0.0}
 
     translated_media = np.pad(
         augmented_media.reshape(3, 3)[:2, :2],
@@ -247,13 +248,13 @@ def test_canonical_votes_restore_augmented_views_and_cap_by_confidence(
         _packed(tagged_predictions, torch.tensor([-4.0, 4.0])),
         **tagged_batch,
     )
-    assert non_spatial.compute() == {"pass@1": 0.5, "pass@2": 0.5}
+    assert _pass_at(non_spatial.compute()) == {"pass@1": 0.5, "pass@2": 0.5}
     all_views = CanonicalPassK.Config(working_dir=tmp_path, pass_ks=(1, 2)).make()
     all_views.update(
         _packed(tagged_predictions, torch.tensor([-4.0, 4.0])),
         **tagged_batch,
     )
-    assert all_views.compute() == {"pass@1": 0.0, "pass@2": 0.5}
+    assert _pass_at(all_views.compute()) == {"pass@1": 0.0, "pass@2": 0.5}
 
 
 def test_canonical_votes_use_configured_transform_separator(tmp_path: Path) -> None:
@@ -287,7 +288,7 @@ def test_canonical_votes_use_configured_transform_separator(tmp_path: Path) -> N
         media=torch.from_numpy(media)[None, :],
         puzzle_identifiers=torch.tensor([1]),
     )
-    assert metric.compute() == {"pass@1": 1.0}
+    assert _pass_at(metric.compute()) == {"pass@1": 1.0}
 
 
 @pytest.mark.parametrize("max_views_per_input", [0, 3])
@@ -324,7 +325,12 @@ def test_canonical_equal_votes_keep_first_view_order(
         media=torch.tensor(np.stack([media] * 3)),
         puzzle_identifiers=torch.ones(3, dtype=torch.long),
     )
-    assert metric.compute() == {"pass@1": 0.0, "pass@2": 1.0}
+    assert _pass_at(metric.compute()) == {"pass@1": 0.0, "pass@2": 1.0}
+
+
+def _pass_at(scores: Mapping[str, object]) -> dict[str, object]:
+    """Keep only the ``pass@K`` scores; report-only rankings are tested elsewhere."""
+    return {key: value for key, value in scores.items() if key.startswith("pass@")}
 
 
 if __name__ == "__main__":

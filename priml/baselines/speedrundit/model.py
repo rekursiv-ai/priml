@@ -151,6 +151,9 @@ class SpeedrunDiT(nn.Module):
         cls_channels: int = 768
         """DINO CLS feature width."""
 
+        timestep_frequencies: int = 256
+        """Width of the sinusoidal timestep features."""
+
         projector_hidden: int = 2048
         """Width of the REG projection MLP."""
 
@@ -227,7 +230,10 @@ class SpeedrunDiT(nn.Module):
                     dtype=dtype,
                 )
                 + cost(
-                    TimestepEmbedder.Config(channels_out=width),
+                    TimestepEmbedder.Config(
+                        channels_out=width,
+                        channels_frequency=self.timestep_frequencies,
+                    ),
                     batch_size=batch_size,
                     dtype=dtype,
                 )
@@ -340,6 +346,7 @@ class SpeedrunDiT(nn.Module):
         )
         self.t_embedder = TimestepEmbedder.Config(
             channels_out=config.hidden_size,
+            channels_frequency=config.timestep_frequencies,
         ).make()
         self.y_embedder = LabelEmbedder.Config(
             channels_in=config.num_classes,

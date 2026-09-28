@@ -376,6 +376,8 @@ def test_moe_bfb(device: str) -> None:
             MoE.Config(
                 channels_in=4,
                 router=SoftmaxRouter.Config(num_experts=2, top_k=1),
+                # Size only: the default ``round_to`` makes each expert 256 wide.
+                expert=SwiGLU.Config(round_to=8),
             )
             .make()
             .to(device)
