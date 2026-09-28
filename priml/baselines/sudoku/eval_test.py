@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import importlib
 import json
-import platform
 
 from torch import Tensor
 
@@ -135,20 +134,8 @@ def run_case(stack: Stack, case: str, scratch: Path) -> dict[str, Tensor]:
         }
 
 
-# On Linux/aarch64 the float64 GEMM in exp013's committee verifier runs on
-# NVPL rather than x86's MKL, flipping a couple of elements by 1-2 float32
-# ULP. Host-keyed golden per docs/SKILL.bit-for-bit.md, same pattern as
-# whitening_test.py's aarch64 golden.
-_AARCH64_KEYED_GOLDENS: Final = frozenset({"exp013"})
-
-
 def golden_path(case: str) -> Path:
     """Where the golden for ``case`` lives."""
-    if case in _AARCH64_KEYED_GOLDENS and (
-        platform.system(),
-        platform.machine(),
-    ) == ("Linux", "aarch64"):
-        return _CWD / "testdata" / f"{case}-linux-aarch64.pt"
     return _CWD / "testdata" / f"{case}.pt"
 
 
