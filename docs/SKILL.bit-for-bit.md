@@ -204,11 +204,13 @@ survive.
 2. **An input the replay cannot rebuild? Store it whole.** Randomized initial
    weights are this. Never regenerate them from a seed: RNG bits differ across
    architectures and torch versions, so a seed is not a spec.
-3. **Only compared for equality? Store a digest.** A post-run state, a
-   gradient, or an output checked with `torch.equal` needs a SHA-256 of its
-   dtype, shape, and bytes (`bfb.state_digest`), not a copy. Keep its first
-   few elements beside the digest so a failure still reports its size in ULPs.
-   Raw 32-byte digests, never hex strings keyed by name.
+3. **Compared for equality? Store the tensor whole.** Never a SHA-256 or any
+   other digest as a size shortcut. A digest is not debuggable: a mismatch
+   names the tensor but not which element moved or by how many ULPs, so a
+   1-ULP host residue and a real regression look identical. Nor is it
+   reproducible: the expected values cannot be read, diffed against a live
+   run, or re-derived without rerunning whatever minted them. Over the size
+   ceiling? Shrink the model (next section), never hash.
 4. **Implied by something already stored? Drop it.** Intermediate gradients
    and step-1 optimizer state are implied by the final optimizer state; a
    resumed run checked equal in place needs no stored copy; a full model output
@@ -241,7 +243,6 @@ Apply in order; re-mint and confirm zero source mismatches after each.
 | Lever | Before -> after (measured) | Why it stays a valid test |
 |---|---|---|
 | Shrink by size only: width 16->8, heads 2, 1 layer, batch 2, 3-5 steps, 9-cell grid, `round_to` 8 | arcagi1 `exp004` 216 KB -> 38 KB (with the rows below) | Every numerical choice (init, norms, optimizer, loss, ACT) still runs. |
-| Compared-only state as a digest plus first elements (`bfb.state_digest`; the bfb harness does this for the post-run state) | nanochat `exp022` 69 KB -> 42 KB; speedrundit `reg_source` 40 KB -> 16.6 KB (hex -> raw bytes) | SHA-256 over dtype, shape, and bytes: any one-bit change fails; the first elements keep the ULP report. |
 | Drop stored inputs the test rebuilds, and outputs implied by stored state | arcagi3 `canonical_exp000_training` 192 KB -> 11 KB | The rebuilt input and the implied output are still computed and still reach the compared state. |
 | RNG as its next 8 draws (`golden.rng_fingerprint`), not the 5 KB Mersenne state | 5,056 B -> 64 B per record | Same position pinned; any extra draw changes it. |
 | One key per quantity: stack per-step values on a step axis (`golden.put_steps`); join per-parameter heads into one tensor | arcagi1 110 -> 57 keys; `exp004` 25 KB -> 13 KB | Same values; per-key pickle overhead (~70-100 B) dominated. |
