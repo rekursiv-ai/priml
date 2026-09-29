@@ -830,7 +830,7 @@ def seeded_checkpoints(tmp_path_factory: pytest.TempPathFactory) -> Path:
     loop.train()
     assert (source / "step_00000020.pt").exists()
     # Several one-time torch imports hide under this path: the first optimizer
-    # build pulls in torch._dynamo (417ms on colossus against 3ms warm), the
+    # build pulls in torch._dynamo (417ms on the benchmark host against 3ms warm), the
     # first RESUME pulls in torch.load's deserialization machinery, and the
     # first EVAL pulls in its own. Each is per-process, so leaving them to
     # whichever test runs first bills an arbitrary one -- a different one per

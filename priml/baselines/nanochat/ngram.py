@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    # Triton adds 100 ms median on Colossus after torch (five fresh processes,
+    # Triton adds 100 ms median on the benchmark host after torch (five fresh processes,
     # Python 3.14/Triton 3.6); CPU embeddings never need its CUDA kernels.
     triton = lazy_import("triton")
     language = lazy_import("triton.language")

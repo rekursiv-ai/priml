@@ -175,7 +175,7 @@ def test_chunk_matches_recurrent(
     Unlike the HF-parity tests above, this imports no optional dependency --
     the export build's only coverage of the chunked scan, a chunk boundary
     (``length`` need not divide ``chunk_size``), state carry, and non-trivial
-    decay (trax Issue#20644).
+    decay.
     """
     torch.manual_seed(length * 1_000 + chunk_size)
     heads, key_width, value_width = 2, 4, 3
@@ -223,7 +223,7 @@ def test_delta_rule_matches_closed_form_with_orthonormal_keys() -> None:
     every earlier one, so the delta correction recovers ``v_j`` exactly and
     the running state after ``t`` steps is ``sum_{j<=t} k_j (x) v_j`` --
     giving ``out_t = d**-0.5 * sum_{j<=t} (q_t . k_j) v_j``, a closed form
-    independent of both kernels under test (trax Issue#20644).
+    independent of both kernels under test.
     """
     torch.manual_seed(0)
     sequence, heads, value_width = 6, 2, 3

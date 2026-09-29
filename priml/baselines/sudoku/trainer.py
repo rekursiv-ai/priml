@@ -779,7 +779,7 @@ class Trainer:
 
         Args:
           *args: Ignored (logged); accepted so launcher passthrough CLI args
-            (the jobber path calls ``job.run(*unparsed)``) never TypeError.
+            (a launcher calls ``job.run(*unparsed)``) never TypeError.
 
         Raises:
           ValueError: If neither ``max_steps`` nor ``max_time`` is finite

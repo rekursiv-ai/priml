@@ -191,7 +191,7 @@ def test_gated_attention_window_restricts_attention() -> None:
     """A caller requesting window=k must get windowed, not full, attention.
 
     Regression for a bug where the kernel's window argument was silently
-    discarded by a hand-rolled full-causal mask (trax Issue#20643).
+    discarded by a hand-rolled full-causal mask.
     """
     config = GatedSelfAttention.Config()
     config.channels_in = 8

@@ -101,7 +101,7 @@ _runtime_initialized: bool = (
 )
 _single_process_settings: tuple[bool, Float32MatmulPrecision | None] | None = None
 # Whether THIS module created the torch.distributed process group, as opposed
-# to entering a process where a launcher (torchrun, a jobber run body) or an
+# to entering a process where a launcher (torchrun, a job launcher's run body) or an
 # earlier lifecycle already initialized one. Experiment loops may
 # run many short, failure-isolated initialize/destroy lifecycles per process
 # -- multi-phase jobs, seed panels, subprocess evaluation, dense test suites

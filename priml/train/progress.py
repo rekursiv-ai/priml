@@ -1,6 +1,6 @@
-"""Structured job progress: the ``progress.json`` writer (jobber spec §8).
+"""Structured job progress: the ``progress.json`` writer, read by the job launcher.
 
-A job may periodically call :func:`write_progress`; ``jobber status``/``wait``
+A job may periodically call :func:`write_progress`; the launcher's ``status``/``wait``
 surface the file verbatim, so agents poll structured progress instead of
 grepping log prose. Deliberately tiny and dependency-free: any script the
 scheduler launches can afford it.
