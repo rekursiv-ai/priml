@@ -72,6 +72,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast, override
+from urllib import request
 
 import argparse
 import fcntl
@@ -87,7 +88,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 
 from numpy import (
     arange,
@@ -117,14 +117,12 @@ import tokenizers
 if TYPE_CHECKING:
     from pyarrow import Table, parquet
 
-    import pyarrow.parquet
     import torch
 else:
     from wrapt import lazy_import
 
     Table = lazy_import("pyarrow", "Table")
     parquet = lazy_import("pyarrow.parquet")
-    pyarrow = lazy_import("pyarrow")
     torch = lazy_import("torch")
 
 from configgle import Fig
@@ -305,7 +303,7 @@ def _download(out: Path, *, count: int) -> list[Path]:
             staging = Path(staged)
             # Stream rather than read whole: a shard is hundreds of MB.
             with (
-                cast(io.BufferedIOBase, urllib.request.urlopen(url)) as response,  # noqa: S310 -- The benchmark fetches a URL supplied by its controlled dataset manifest.
+                cast(io.BufferedIOBase, request.urlopen(url)) as response,  # noqa: S310 -- The benchmark fetches a URL supplied by its controlled dataset manifest.
                 staging.open("wb") as file,
             ):
                 shutil.copyfileobj(response, file)
@@ -541,7 +539,7 @@ def fetch_file(url: str, *, destination: Path) -> None:
             with (
                 cast(
                     io.BufferedIOBase,
-                    urllib.request.urlopen(url, timeout=120),  # noqa: S310 -- HTTPS checked above.
+                    request.urlopen(url, timeout=120),  # noqa: S310 -- HTTPS checked above.
                 ) as response,
                 staged.open("wb") as output,
             ):
@@ -1016,13 +1014,13 @@ def pack_row(
 
 def _document_batches(config: RowPreparation.Config) -> Iterator[list[str]]:
     for shard in config.train_shard_indices:
-        parquet = pyarrow.parquet.ParquetFile(
+        shard_file = parquet.ParquetFile(
             config.raw_dir / f"shard_{shard:05d}.parquet",
         )
-        for group in range(parquet.num_row_groups):
+        for group in range(shard_file.num_row_groups):
             texts = cast(
                 list[str],
-                parquet.read_row_group(group).column("text").to_pylist(),
+                shard_file.read_row_group(group).column("text").to_pylist(),
             )
             for start in range(0, len(texts), config.documents_per_refill):
                 yield texts[start : start + config.documents_per_refill]
