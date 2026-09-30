@@ -190,11 +190,7 @@ class CompositeOptimizer(Optimizer):
                 but does not name exactly one filter per member.
 
             """
-            final = (
-                self.copy_tree()
-                if getattr(self, "_finalized", False)
-                else self.copy_tree().finalize()
-            )
+            final = self.finalized()
             if not final.optimizers:
                 raise ValueError("CompositeOptimizer.Config needs a member.")
             if final.select and len(final.select) != len(final.optimizers):

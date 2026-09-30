@@ -57,17 +57,6 @@ _CWD: Final = Path(__file__).resolve().parent
 RECIPES: Final = ("exp004", "exp005", "exp006", "exp007", "exp008", "exp009", "exp010")
 """Every rung of the training ladder."""
 
-PRECISIONS: Final = ("fp32", "bf16_autocast")
-"""``fp32`` runs without autocast; ``bf16_autocast`` is the recipe's own."""
-
-CASES: Final = tuple(
-    (recipe, precision)
-    for precision in PRECISIONS
-    for recipe in RECIPES
-    if precision == "fp32" or recipe in {"exp004", "exp010"}
-)
-"""Every rung in fp32; the ladder's ends also under the recipe's bf16."""
-
 TRAIN_STEPS: Final = 3
 
 
@@ -221,12 +210,11 @@ def write_dataset(root: Path, *, grid_len: int = 16, vocab_size: int = 6) -> Pat
     return root
 
 
-def port_config(recipe: str, precision: str, scratch: Path) -> Trainer.Config:
+def port_config(recipe: str, scratch: Path) -> Trainer.Config:
     """Return the priml ``recipe`` shrunk by size only."""
     factory = cast("Callable[[], Trainer.Config]", getattr(experiments, recipe))
     config = shrink(
         factory(),
-        precision=precision,
         scratch=scratch,
         recipe_block=trm.recipe_block,
     )
@@ -241,15 +229,13 @@ def port_config(recipe: str, precision: str, scratch: Path) -> Trainer.Config:
 def shrink[ConfigT: Shrinkable](
     config: ConfigT,
     *,
-    precision: str,
     scratch: Path,
     recipe_block: Callable[[], TransformerBlock.Config],
 ) -> ConfigT:
-    """Shrink a trainer config by size only, in place.
+    """Shrink a trainer config by size only, in place; precision as it runs.
 
     Args:
       config: A full-size recipe of either port; both share these field names.
-      precision: One of :data:`PRECISIONS`.
       scratch: Holds the dataset (``data/``) and the run directory.
       recipe_block: The port's default block, materialized so its feed-forward
         width can shrink before anything finalizes it.
@@ -280,8 +266,6 @@ def shrink[ConfigT: Shrinkable](
     assert isinstance(config.model.block.ffn, SwiGLU.Config)
     config.model.block.ffn.expansion = 1
     config.model.block.ffn.round_to = 1
-    if precision == "fp32":
-        config.dtype_autocast = config.model.dtype = None
     config.dataset.working_dir = scratch / "data"
     config.dataset.device = "cpu"
     config.dataset.batch_size = 2
@@ -353,31 +337,26 @@ def run(config: Makeable[object], scratch: Path) -> dict[str, Tensor]:
         return record(cast(Subject, config.make()))
 
 
-def golden_path(recipe: str, precision: str) -> Path:
-    """Where the golden for ``recipe`` in ``precision`` lives."""
-    suffix = "" if precision == "fp32" else f"_{precision}"
-    return _CWD / "testdata" / f"{recipe}{suffix}.pt"
+def golden_path(recipe: str) -> Path:
+    """Where the golden for ``recipe`` lives."""
+    return _CWD / "testdata" / f"{recipe}.pt"
 
 
-def load_golden(recipe: str, precision: str) -> dict[str, Tensor]:
+def load_golden(recipe: str) -> dict[str, Tensor]:
     """Load a frozen golden."""
-    return read_tensors(golden_path(recipe, precision))
+    return read_tensors(golden_path(recipe))
 
 
-@pytest.mark.parametrize(("recipe", "precision"), CASES)
-def test_golden_replays_bit_for_bit(
-    recipe: str,
-    precision: str,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_golden_replays_bit_for_bit(recipe: str, tmp_path: Path) -> None:
     """The trainer reproduces the frozen trajectory with zero mismatches."""
-    actual = run(port_config(recipe, precision, tmp_path), tmp_path)
-    assert_tensor_golden(golden_path(recipe, precision), actual)
+    actual = run(port_config(recipe, tmp_path), tmp_path)
+    assert_tensor_golden(golden_path(recipe), actual)
 
 
-@pytest.mark.parametrize(("recipe", "precision"), CASES)
-def test_full_geometry_still_runs(recipe: str, precision: str, tmp_path: Path) -> None:
-    config = port_config(recipe, precision, tmp_path)
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_full_geometry_still_runs(recipe: str, tmp_path: Path) -> None:
+    config = port_config(recipe, tmp_path)
     config.dataset.spec = SudokuSpec()
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         write_dataset(tmp_path / "data", grid_len=81, vocab_size=11)
@@ -385,9 +364,9 @@ def test_full_geometry_still_runs(recipe: str, precision: str, tmp_path: Path) -
     assert result["data/media"].shape[-1] == 81
 
 
-@pytest.mark.parametrize(("recipe", "precision"), CASES)
-def test_one_ulp_weight_bites(recipe: str, precision: str, tmp_path: Path) -> None:
-    config = port_config(recipe, precision, tmp_path)
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_one_ulp_weight_bites(recipe: str, tmp_path: Path) -> None:
+    config = port_config(recipe, tmp_path)
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         write_dataset(tmp_path / "data")
         subject = config.make()
@@ -396,15 +375,15 @@ def test_one_ulp_weight_bites(recipe: str, precision: str, tmp_path: Path) -> No
             bits = torch.int32 if weight.dtype == torch.float32 else torch.int16
             weight.view(bits).view(-1)[0] += 1
         actual = record(cast(Subject, subject))
-    report = mismatches(load_golden(recipe, precision), actual)
+    report = mismatches(load_golden(recipe), actual)
     assert any(line.startswith("init/") for line in report), report
 
 
 def test_golden_bites(tmp_path: Path) -> None:
     """A changed loss weight is reported, not absorbed."""
-    config = port_config("exp010", "fp32", tmp_path)
+    config = port_config("exp010", tmp_path)
     config.csp_loss_weight = 0.25
-    report = mismatches(load_golden("exp010", "fp32"), run(config, tmp_path))
+    report = mismatches(load_golden("exp010"), run(config, tmp_path))
     assert any(line.startswith("train/loss") for line in report), report
 
 
@@ -444,7 +423,7 @@ def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> N
 
 
 def test_trainer_execution_variants(tmp_path: Path) -> None:
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.grad_clip_max_norm = None
     config.log_body_norms = True
@@ -473,18 +452,18 @@ def test_trainer_execution_variants(tmp_path: Path) -> None:
 
 
 def test_trainer_optional_constructor_and_stop_guards(tmp_path: Path) -> None:
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.train_q_halt = False
     config.doc = "notes"
     write_dataset(tmp_path / "data")
     subject = config.make()
     assert all(not p.requires_grad for p in subject.model.q_head.parameters())
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.use_ema = False
     assert config.make().ema_shadow is None
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     config.max_steps = float("inf")
     config.max_time = float("inf")
@@ -493,7 +472,7 @@ def test_trainer_optional_constructor_and_stop_guards(tmp_path: Path) -> None:
 
 
 def test_trainer_run_and_resume_guard_branches(tmp_path: Path) -> None:
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.dataset.working_dir = tmp_path / "data"
     write_dataset(tmp_path / "data")
     subject = config.make()
@@ -508,19 +487,19 @@ def test_trainer_run_and_resume_guard_branches(tmp_path: Path) -> None:
 
 
 def test_trainer_constructor_rejects_invalid_protocol_configs(tmp_path: Path) -> None:
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.experiment_name = ""
     with pytest.raises(ValueError, match="experiment_name"):
         config.make()
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.eval_act_steps = -1
     with pytest.raises(ValueError, match="eval_act_steps"):
         config.make()
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.eval_min_act_steps = 0
     with pytest.raises(ValueError, match="eval_min_act_steps"):
         config.make()
-    config = port_config("exp004", "fp32", tmp_path)
+    config = port_config("exp004", tmp_path)
     config.csp_loss_weight = 1.0
     config.dataset.spec = SudokuSpec(grid_shape=(4, 4), box_shape=(3, 3), vocab_size=6)
     with pytest.raises(ValueError, match="csp_loss_weight"):

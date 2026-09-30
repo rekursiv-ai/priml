@@ -103,11 +103,7 @@ class Newton(Optimizer):
         @override
         def make(self) -> Callable[..., Newton]:
             """Return a constructor awaiting the parameters to optimize."""
-            final = (
-                self.copy_tree()
-                if getattr(self, "_finalized", False)
-                else self.copy_tree().finalize()
-            )
+            final = self.finalized()
             return partial(Newton, lr=final.lr, damping=final.damping)
 
     def __init__(

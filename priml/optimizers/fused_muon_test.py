@@ -151,6 +151,46 @@ def test_a_step_updates_the_masters_and_rounds_the_parameters() -> None:
     assert torch.equal(vector.grad, torch.ones_like(vector))
 
 
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.gpu_triton)],
+)
+@pytest.mark.parametrize("shape", [(5, 2, 3, 4), (25, 2, 3, 4)])
+def test_a_conv_weight_steps_as_the_matrix_of_its_rows(
+    shape: tuple[int, ...],
+    device: str,
+) -> None:
+    """A 4-D weight is orthogonalized as ``[out, -1]``, as priml's ``Muon`` reshapes it.
+
+    ``[5, 24]`` is wide and ``[25, 24]`` tall, so the aspect scale is the
+    matrix's ``sqrt(25 / 24)``, not one from the weight's first two axes. On
+    CUDA the fused kernels read both through the same flat memory.
+    """
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("the fused kernels need a CUDA device")
+    conv = torch.nn.Parameter(_parameter(*shape).detach().to(device))
+    matrix = torch.nn.Parameter(conv.detach().reshape(shape[0], -1).clone())
+    optimizers = [FusedMuon.Config().make()([weight]) for weight in (conv, matrix)]
+    generator = torch.Generator().manual_seed(2)
+    for _ in range(2):
+        gradient = torch.randn(*shape, generator=generator).bfloat16().to(device)
+        conv.grad = gradient
+        matrix.grad = gradient.reshape(matrix.shape)
+        for optimizer in optimizers:
+            optimizer.step()
+    ours, theirs = optimizers
+    assert torch.equal(
+        ours.master_weights[0].reshape(matrix.shape),
+        theirs.master_weights[0],
+    )
+    assert torch.equal(
+        ours.momentum_buffers[0].reshape(matrix.shape),
+        theirs.momentum_buffers[0],
+    )
+    assert torch.equal(conv.detach().reshape(matrix.shape), matrix.detach())
+    assert not torch.equal(conv.detach().cpu(), _parameter(*shape).detach())
+
+
 def test_a_tensor_rate_steps_as_its_float_does() -> None:
     rate = _rate(7)
     by_float = _two_steps(rate)

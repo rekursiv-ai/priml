@@ -38,6 +38,7 @@ from typing import (
 
 import hashlib
 import logging
+import re
 import struct
 
 from configgle import Fig, Makeable
@@ -749,12 +750,28 @@ class SignalDumpTracker:
         spec: ArcSpec = field(default_factory=ArcSpec)
         """Prepared dataset's packed-grid geometry."""
 
+        keep_last_n: int = -1
+        """Newest step-stamped dumps kept after each write; ``-1`` keeps all.
+
+        Rotation deletes files an offline analysis may still want: copy a dump
+        out of the run directory to pin it, or archive with ``keep_every``."""
+
+        keep_every: int = 0
+        """Never delete a dump whose step is a multiple of this; ``0`` is off."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
+        if config.keep_last_n < -1 or config.keep_last_n == 0:
+            raise ValueError(
+                "keep_last_n must be -1 (keep all) or positive; got "
+                f"{config.keep_last_n}.",
+            )
+        if config.keep_every < 0:
+            raise ValueError(f"keep_every must be >= 0; got {config.keep_every}.")
         self.config = config
 
     def log_metrics(
@@ -802,6 +819,30 @@ class SignalDumpTracker:
             global_step=step,
             spec=self.config.spec,
         )
+        self._prune()
+
+    def _prune(self) -> None:
+        """Delete the oldest step-stamped dumps beyond ``keep_last_n``, on rank 0."""
+        template = str(self.config.working_dir)
+        if self.config.keep_last_n < 0 or "{global_step}" not in template:
+            return
+        if not is_rank_zero():
+            return
+        path = Path(template).expanduser()
+        pattern = re.compile(
+            re.escape(path.name).replace(re.escape("{global_step}"), r"(\d+)"),
+        )
+        dumps = sorted(
+            (int(match.group(1)), candidate)
+            for candidate in path.parent.glob(path.name.replace("{global_step}", "*"))
+            if (match := pattern.fullmatch(candidate.name))
+        )
+        every = self.config.keep_every
+        for step, doomed in dumps[: max(0, len(dumps) - self.config.keep_last_n)]:
+            if every > 0 and step % every == 0:
+                continue
+            doomed.unlink()
+            logger.info("Deleted signal dump %s (keep_last_n rotation).", doomed)
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
         """Ignore images; this tracker writes only the signal dump."""

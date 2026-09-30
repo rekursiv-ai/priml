@@ -145,6 +145,15 @@ class ForwardOutput(NamedTuple):
     """Per-cycle logits when the caller asked for intermediates."""
 
 
+type CompileMode = Literal[
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+]
+"""The ``torch.compile`` modes a core compile accepts."""
+
+
 class CoreCompile:
     """Compile the recurrence's hot loop with ``torch.compile``.
 
@@ -160,12 +169,7 @@ class CoreCompile:
         unit: Literal["core", "reasoning"] = "core"
         """``core`` traces one core application; ``reasoning`` one block pass."""
 
-        mode: Literal[
-            "default",
-            "reduce-overhead",
-            "max-autotune",
-            "max-autotune-no-cudagraphs",
-        ] = "default"
+        mode: CompileMode = "default"
         """``torch.compile`` mode."""
 
         fullgraph: bool = True

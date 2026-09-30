@@ -14,8 +14,11 @@ optimizer instead of a flag:
 3. **Per-step Newton-Schulz coefficients.** Each matrix is normalized by
    ``max(norm, eps)``, then takes one ``(a, b, c)`` triple per step as GEMMs in
    its dtype (:func:`newton_schulz`), then the scale
-   ``sqrt(max(1, rows / cols))``. A vector skips all three and takes its
-   Nesterov update as it is.
+   ``sqrt(max(1, rows / cols))``. A parameter of more than two dimensions is
+   the matrix of its rows, ``[shape[0], -1]``, as priml's
+   :class:`~priml.optimizers.muon.Muon` takes it: a conv weight's ``[out,
+   in, height, width]`` is ``[out, in * height * width]``. A vector skips all
+   three and takes its Nesterov update as it is.
 4. **Fused kernels.** On CUDA with bf16 parameters, :meth:`FusedMuon.step`
    launches Triton kernels: one for the clip and Nesterov step, one per matrix
    for its normalization, and one for the aspect scale, the master update and
@@ -137,11 +140,7 @@ class FusedMuon(Optimizer):
         @override
         def make(self) -> Callable[..., FusedMuon]:
             """Return a constructor awaiting the parameters to optimize."""
-            final = (
-                self.copy_tree()
-                if getattr(self, "_finalized", False)
-                else self.copy_tree().finalize()
-            )
+            final = self.finalized()
             return partial(
                 FusedMuon,
                 lr=final.lr,
@@ -256,15 +255,17 @@ class FusedMuon(Optimizer):
                 index += 1
                 scale = 1.0
                 if update.ndim >= 2:
-                    update = newton_schulz(
+                    matrix = update.reshape(update.shape[0], -1)
+                    matrix = newton_schulz(
                         (self._normalize_cuda if fused else normalize)(
-                            update,
-                            norm=self.norm([update]),
+                            matrix,
+                            norm=self.norm([matrix]),
                             eps=eps,
                         ),
                         self.ns_coefficients,
                     )
-                    scale = aspect_scale(update.shape)
+                    scale = aspect_scale(matrix.shape)
+                    update = matrix.reshape(update.shape)
                 (self._apply_cuda if fused else apply_update)(
                     parameter,
                     state["master_weight"],

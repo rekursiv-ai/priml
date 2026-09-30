@@ -16,7 +16,8 @@ update rule and a different block.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY
-from typing import TYPE_CHECKING, Protocol, Self, override
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Protocol, Self, override
 
 from configgle import Fig, Makeable, Makes
 from torch import Tensor, nn
@@ -34,7 +35,31 @@ from priml.model.swiglu import SwiGLU, silu
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from priml.baselines.sudoku.model import MixFn
+
+
+REFERENCE_NAMES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "embed_tokens.": "embedding.embed_tokens.",
+        "embed_feedback": "embedding.channels.0.embed_feedback",
+        "q_head.": "halt_head.",
+        "register_tokens": "prefix.register_tokens",
+        "puzzle_emb.weights": "prefix.weights",
+    },
+)
+"""Parameter-name prefixes of the reference implementation's checkpoints, to ours.
+
+Every other name -- the reasoning blocks, the output head -- is shared."""
+
+
+def from_reference_name(name: str) -> str:
+    """Return the priml name of a reference checkpoint's parameter ``name``."""
+    for old, new in REFERENCE_NAMES.items():
+        if name.startswith(old):
+            return new + name.removeprefix(old)
+    return name
 
 
 class ShortConvFn(Protocol):

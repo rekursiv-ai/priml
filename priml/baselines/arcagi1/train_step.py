@@ -153,6 +153,12 @@ class TrmTrainStep(TrainStep):
         signals: EvalSignals.Config | None = None
         """Extra evaluation columns for offline reranking."""
 
+        warm_start: Makeable[Callable[[nn.Module], object]] | None = None
+        """Initializes the built model from another run; ``None`` trains from init.
+
+        Runs after the model is placed and before the first update, so an EMA
+        seeded at its warmup boundary starts from the loaded weights."""
+
         ignore_label_id: int = -100
         """Label excluded from the loss and from correctness."""
 
@@ -206,6 +212,8 @@ class TrmTrainStep(TrainStep):
         inductor_config.emulate_precision_casts = config.emulate_precision_casts
         super().__init__(config)
         self.config: TrmTrainStep.Config = config
+        if config.warm_start is not None:
+            config.warm_start.make()(self.model)
         self.pool: TrmPool = config.pool.make()
         self.pool.to(self.device)
         self.halting = None if config.halting is None else config.halting.make()

@@ -1,6 +1,6 @@
 """Replay frozen trajectories through the reference TRM recipes.
 
-The goldens in ``testdata/<expNNN>[_<precision>].pt`` record each recipe
+The goldens in ``testdata/<expNNN>.pt`` record each recipe as it runs
 through :func:`record`; this module imports none of the implementation it
 reproduces. Every recipe uses one compact CPU configuration while retaining
 its architectural, optimizer, precision, and recurrence branches.
@@ -27,7 +27,7 @@ import torch
 
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.act import AtomicPool
-from priml.baselines.arcagi1.model import ConvSwiGLU
+from priml.baselines.arcagi1.model import REFERENCE_NAMES, ConvSwiGLU
 from priml.baselines.arcagi1.train_step import TrmTrainStep
 from priml.baselines.arcagi2.model import RotaryBlock
 from priml.baselines.sudoku.embedding import GridEmbedding
@@ -68,14 +68,6 @@ SNAPSHOT_STEPS: Final = (1, TRAIN_STEPS)
 
 RECIPES: Final = ("exp004", "exp005", "exp007", "exp008")
 """The reference recipes: each reproduces a published TRM run."""
-
-PRECISIONS: Final = ("fp32", "bf16_autocast")
-"""``fp32`` runs without autocast; ``bf16_autocast`` keeps float32 masters and
-autocasts forwards to bfloat16, as every recipe here sets it."""
-
-CASES: Final = tuple(
-    (recipe, precision) for precision in PRECISIONS for recipe in RECIPES
-)
 
 
 class Subject(Protocol):
@@ -125,12 +117,11 @@ class Subject(Protocol):
         ...
 
 
-def port_config(recipe: str, precision: str = "fp32") -> TrmTrainStep.Config:
-    """Return the compact ``recipe`` step in one precision arm.
+def port_config(recipe: str) -> TrmTrainStep.Config:
+    """Return the compact ``recipe`` step, its own precision kept.
 
     Args:
       recipe: One of :data:`RECIPES`.
-      precision: One of :data:`PRECISIONS`.
 
     Returns:
       config: A CPU-sized step config.
@@ -142,7 +133,6 @@ def port_config(recipe: str, precision: str = "fp32") -> TrmTrainStep.Config:
     )().step
     step.parallelism = NoParallel.Config(device="cpu")
     step.model.compile_core = None
-    step.dtype_autocast = None if precision == "fp32" else torch.bfloat16
     step.total_train_steps = 3
     step.warmup_steps = 0
     if isinstance(step.ema, EMA.Config):
@@ -151,15 +141,15 @@ def port_config(recipe: str, precision: str = "fp32") -> TrmTrainStep.Config:
     assert isinstance(pool, AtomicPool.Config)
     pool.batch_size = 2
     pool.max_steps = 2
-    _configure_model(step.model)
+    shrink_model(step.model)
     return step
 
 
 class PortSubject:
     """The priml recipe under canonical names."""
 
-    def __init__(self, recipe: str, precision: str = "fp32") -> None:
-        self.step = TrmTrainStep(port_config(recipe, precision).finalize())
+    def __init__(self, recipe: str) -> None:
+        self.step = TrmTrainStep(port_config(recipe).finalize())
 
     @classmethod
     def from_config(cls, config: TrmTrainStep.Config) -> PortSubject:
@@ -239,13 +229,7 @@ class PortSubject:
 
 def canonical_name(name: str) -> str:
     """Map a priml parameter or buffer name to the one the golden records."""
-    for port, recorded in (
-        ("embedding.embed_tokens.", "embed_tokens."),
-        ("embedding.channels.0.embed_feedback", "embed_feedback"),
-        ("halt_head.", "q_head."),
-        ("prefix.register_tokens", "register_tokens"),
-        ("prefix.weights", "puzzle_emb.weights"),
-    ):
+    for recorded, port in REFERENCE_NAMES.items():
         if name.startswith(port):
             return recorded + name.removeprefix(port)
     return name
@@ -349,39 +333,38 @@ def record(subject: Subject) -> dict[str, Tensor]:
     return out
 
 
-def run_port(recipe: str, precision: str = "fp32") -> dict[str, Tensor]:
+def run_port(recipe: str) -> dict[str, Tensor]:
     """Build and record the priml recipe from seed 0."""
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        return record(PortSubject(recipe, precision))
+        return record(PortSubject(recipe))
 
 
-def golden_path(recipe: str, precision: str = "fp32") -> Path:
-    """Where the golden for ``recipe`` in ``precision`` lives."""
-    suffix = "" if precision == "fp32" else f"_{precision}"
-    return _CWD / "testdata" / f"{recipe}{suffix}.pt"
+def golden_path(recipe: str) -> Path:
+    """Where the golden for ``recipe`` lives."""
+    return _CWD / "testdata" / f"{recipe}.pt"
 
 
-def load_golden(recipe: str, precision: str = "fp32") -> dict[str, Tensor]:
+def load_golden(recipe: str) -> dict[str, Tensor]:
     """Load a frozen golden."""
-    return read_tensors(golden_path(recipe, precision))
+    return read_tensors(golden_path(recipe))
 
 
-@pytest.mark.parametrize(("recipe", "precision"), CASES)
-def test_golden_replays_bit_for_bit(recipe: str, precision: str) -> None:
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_golden_replays_bit_for_bit(recipe: str) -> None:
     """The recipe reproduces the frozen trajectory with zero mismatches."""
-    report = mismatches(load_golden(recipe, precision), run_port(recipe, precision))
+    report = mismatches(load_golden(recipe), run_port(recipe))
     assert not report, "\n".join(report)
 
 
 @pytest.mark.parametrize("perturb", ["halt_weight", "parameter"])
-@pytest.mark.parametrize(("recipe", "precision"), CASES)
-def test_golden_bites(recipe: str, precision: str, perturb: str) -> None:
+@pytest.mark.parametrize("recipe", RECIPES)
+def test_golden_bites(recipe: str, perturb: str) -> None:
     """A changed constant or a one-ULP weight nudge is reported, not absorbed."""
-    expected = load_golden(recipe, precision)
+    expected = load_golden(recipe)
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
         torch.manual_seed(0)
-        subject = PortSubject(recipe, precision)
+        subject = PortSubject(recipe)
         if perturb == "halt_weight":
             assert subject.step.halting is not None
             subject.step.halting.weight *= 1.5
@@ -422,7 +405,7 @@ def test_a_whole_model_compile_is_rejected() -> None:
         TrmTrainStep(config.finalize())
 
 
-def _configure_model(model: SudokuNet.Config) -> None:
+def shrink_model(model: SudokuNet.Config) -> None:
     """Configure the compact model without changing recipe behavior."""
     model.channels_in = 4
     model.vocab_size = 4

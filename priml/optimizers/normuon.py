@@ -248,11 +248,7 @@ class NorMuon(Optimizer):
         @override
         def make(self) -> Callable[..., NorMuon]:
             """Return a constructor awaiting the parameters to optimize."""
-            final = (
-                self.copy_tree()
-                if getattr(self, "_finalized", False)
-                else self.copy_tree().finalize()
-            )
+            final = self.finalized()
             return partial(
                 NorMuon,
                 lr=final.lr,

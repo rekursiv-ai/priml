@@ -461,6 +461,40 @@ def test_canonical_construction_defers_reading_the_tree(tmp_path: Path) -> None:
     assert metric.compute()["strict@1"] == 0.5
 
 
+def test_signal_dumps_rotate_but_keep_archived_steps(tmp_path: Path) -> None:
+    """The newest ``keep_last_n`` stay, and so does every ``keep_every`` multiple."""
+    payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=(1,))
+    tracker = SignalDumpTracker.Config(
+        working_dir=str(tmp_path / "signals_{global_step}.npz"),
+        keep_last_n=2,
+        keep_every=20,
+    ).make()
+    for step in (10, 20, 30, 40, 50):
+        tracker.log_metrics({"extras": {"signal_dump": payload}}, step, prefix="eval/")
+    kept = sorted(path.name for path in tmp_path.iterdir())
+    assert kept == ["signals_20.npz", "signals_40.npz", "signals_50.npz"]
+
+
+def test_signal_dumps_are_all_kept_by_default(tmp_path: Path) -> None:
+    payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=(1,))
+    tracker = SignalDumpTracker.Config(
+        working_dir=str(tmp_path / "signals_{global_step}.npz"),
+    ).make()
+    for step in (1, 2, 3):
+        tracker.log_metrics({"extras": {"signal_dump": payload}}, step, prefix="eval/")
+    assert len(list(tmp_path.iterdir())) == 3
+
+
+@pytest.mark.parametrize(("keep_last_n", "keep_every"), [(0, 0), (-2, 0), (-1, -1)])
+def test_signal_dump_retention_rejects_nonsense(
+    keep_last_n: int,
+    keep_every: int,
+) -> None:
+    config = SignalDumpTracker.Config(keep_last_n=keep_last_n, keep_every=keep_every)
+    with pytest.raises(ValueError, match="keep_"):
+        config.make()
+
+
 def _pass_at(scores: Mapping[str, object]) -> dict[str, object]:
     """Keep only the ``pass@K`` scores; report-only rankings are tested elsewhere."""
     return {key: value for key, value in scores.items() if key.startswith("pass@")}

@@ -104,7 +104,7 @@ class BiasCorrectedRMSProp(Optimizer):
 
         @override
         def make(self) -> "Callable[..., BiasCorrectedRMSProp]":
-            return partial(BiasCorrectedRMSProp, config=self.copy_tree().finalize())
+            return partial(BiasCorrectedRMSProp, config=self.finalized())
 
     def __init__(self, params: Iterable[Tensor], *, config: Config) -> None:
         self.rowwise = config.rowwise
@@ -380,7 +380,7 @@ class FFNScaledNorMuon:
 
         @override
         def make(self) -> Callable[..., NorMuon]:
-            return partial(_ffn_scaled_normuon, config=self.copy_tree().finalize())
+            return partial(_ffn_scaled_normuon, config=self.finalized())
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)

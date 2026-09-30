@@ -45,6 +45,7 @@ import os
 
 from priml.baselines.arcagi1.act import AtomicPool
 from priml.baselines.arcagi1.experiments import TrmTrainLoop, exp008
+from priml.baselines.arcagi1.model import from_reference_name
 from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.runtime import SingleProcess
 from priml.train.checkpointer import Checkpointer
@@ -153,19 +154,12 @@ def overlay(
       into: The updated state.
 
     """
-    renames = {
-        "embed_tokens.weight": "embedding.embed_tokens.weight",
-        "embed_feedback": "embedding.channels.0.embed_feedback",
-        "q_head.weight": "halt_head.weight",
-        "q_head.bias": "halt_head.bias",
-        "puzzle_emb.weights": "prefix.weights",
-    }
     old = cast("dict[str, object]", archive["step"])
     fresh = cast("dict[str, object]", into["step"])
     source = cast("dict[str, torch.Tensor]", old["model"])
     old_ema = cast("dict[str, torch.Tensor]", old["ema"])
-    fresh["model"] = {renames.get(name, name): value for name, value in source.items()}
-    ema = {renames.get(name, name): value for name, value in old_ema.items()}
+    fresh["model"] = {from_reference_name(k): v for k, v in source.items()}
+    ema = {from_reference_name(k): v for k, v in old_ema.items()}
     fresh["ema"] = {"shadow_params": ema, "global_step": steps}
     fresh["timer_step"] = {"global_count": steps, "global_sec": 0.0}
     return into
