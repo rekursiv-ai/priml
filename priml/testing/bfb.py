@@ -2,7 +2,7 @@
 
 Pattern:
 
-1. **Build** a module at minimum width: 1 layer, hidden=8, smallest seq_len.
+1. **Build** a module at minimum size: every dim at least 2, pairwise distinct.
 2. **Randomize** every parameter with seeded ``torch.randn`` so structurally-zero
    inits (q-head bias, etc.) don't hide a regression.
 3. **Snapshot** to ``<test_file_dir>/testdata/`` the pre-run state, input,
@@ -53,7 +53,10 @@ Cross-architecture portability (the whole point):
   MKL takes a generic path, and broke goldens on Intel.
 
 Determinism is required: the harness enables deterministic Torch algorithms
-and seeds the CPU default generator before any tensor allocation.
+and seeds the CPU default generator before any tensor allocation. Every step --
+building the module, randomizing it, building the input, and running -- sits
+inside one ``host_agnostic_numerics``, so an initializer or input drawn with
+``randn`` is as portable as the forward.
 
 Usage::
 
@@ -129,12 +132,12 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
 
-from priml.lib.custom_json import ListCodec
+from priml.lib.custom_json import DictCodec, ListCodec
 from priml.testing.golden import pack, unpack
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping, Sequence
+    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 
     from torch._ops import OpOverload
 
@@ -480,62 +483,19 @@ def assert_bfb_against_golden[InputT](
 
     """
     state = _capture_torch_process_state()
+    # Everything the golden stores or replays is computed in here, not only the
+    # run: an initializer, an unsaved buffer, and the input each draw or compute
+    # through vector-ISA-dependent kernels when left native.
     try:
-        golden_dir.mkdir(parents=True, exist_ok=True)
-        golden_path = golden_dir / f"{golden_name}.pt"
-        missing = not golden_path.exists()
-        regenerate = os.environ.get(_ENV_REGENERATE, "0") == "1"
-        runner = _default_runner if run is None else run
-
-        if missing or regenerate:
-            with tempfile.NamedTemporaryFile(
-                dir=golden_dir,
-                prefix=f".{golden_name}.",
-                suffix=".pt",
-                delete=False,
-            ) as candidate_file:
-                candidate_path = Path(candidate_file.name)
-            try:
-                _write_golden(
-                    golden_path=candidate_path,
-                    build_module=build_module,
-                    build_input=build_input,
-                    seed=seed,
-                    run=runner,
-                )
-                _replay_golden(
-                    golden_path=candidate_path,
-                    build_module=build_module,
-                    seed=seed,
-                    run=runner,
-                )
-                candidate_path.replace(golden_path)
-            finally:
-                candidate_path.unlink(missing_ok=True)
-            if missing:
-                raise _MissingGoldenError(
-                    f"Missing golden regenerated at {golden_path}; inspect it, "
-                    "then rerun the test.",
-                )
-            return
-
-        # Replay runs the stored input, so without this a test whose
-        # ``build_input`` changed would keep passing against the stale record.
-        _seed_bfb(seed)
-        build_module()
         with host_agnostic_numerics():
-            live_input = _to_cpu(build_input())
-        _assert_same_input(
-            live_input,
-            load_golden(golden_path)["input"],
-            label="input",
-        )
-        _replay_golden(
-            golden_path=golden_path,
-            build_module=build_module,
-            seed=seed,
-            run=runner,
-        )
+            _assert_bfb(
+                golden_dir=golden_dir,
+                golden_name=golden_name,
+                build_module=build_module,
+                build_input=build_input,
+                seed=seed,
+                run=_default_runner if run is None else run,
+            )
     finally:
         _restore_torch_process_state(state)
 
@@ -635,6 +595,34 @@ def load_golden(path: Path) -> _Golden:
     return payload
 
 
+def stale_post_states(paths: Iterable[Path]) -> list[Path]:
+    """Return the bfb goldens whose post-run state repeats an unchanged tensor.
+
+    Replay reads an absent post-run entry as "equal to the pre-run state", so a
+    stored copy of an unchanged tensor asserts nothing and only costs bytes.
+
+    Args:
+      paths: Candidate ``.pt`` files; ones that are not bfb goldens are skipped.
+
+    Returns:
+      stale: The goldens storing at least one unchanged post-run tensor.
+
+    """
+    stale: list[Path] = []
+    for path in paths:
+        raw = DictCodec.coerce(
+            cast(object, torch.load(path, map_location="cpu", weights_only=False)),
+            default=None,
+        )
+        if "post_state" not in raw or "state_dict" not in raw:
+            continue
+        payload = load_golden(path)
+        post = payload.get("post_state", {})
+        if len(changed_state(payload["state_dict"], post)) < len(post):
+            stale.append(path)
+    return stale
+
+
 def changed_state(
     before: Mapping[str, Tensor],
     after: Mapping[str, Tensor],
@@ -694,10 +682,9 @@ def _replay_golden[InputT](
     payload = load_golden(golden_path)
     module.load_state_dict(payload["state_dict"])
     inp = cast(InputT, move_to_device(payload["input"], device))
-    with host_agnostic_numerics():
-        output = run(module, inp)
+    output = run(module, inp)
     # Checked on replay too, not only at mint: a runner changed to return float64
-    # after the golden was minted is reported by cause, not as an opaque digest
+    # after the golden was minted is reported by cause, not as a last-bit
     # mismatch on someone else's host.
     _assert_portable_output_dtype(output)
     _assert_equal(output, payload["output"], label="output")
@@ -1261,21 +1248,17 @@ def _write_golden[InputT](
     seed: int,
     run: Callable[[nn.Module, InputT], Tensor],
 ) -> None:
-    """Build, randomize, run; store the pre-run state and digest the rest."""
+    """Build, randomize, run; store the pre-run state, input, output, and changes."""
     torch.use_deterministic_algorithms(True)
     _seed_bfb(seed)
     module = build_module()
     device = _module_device(module)
     if device != "cpu":
         raise ValueError("The BFB harness is CPU-only.")
-    # A float32 ``randn`` draws through ISA-dependent kernels, so a natively
-    # built input would not match its rebuild on another host.
-    with host_agnostic_numerics():
-        inp = build_input()
+    inp = build_input()
     randomize_parameters(module, seed=seed)
     pre_state = _cpu_state_dict(module.state_dict())
-    with host_agnostic_numerics():
-        output = run(module, inp)
+    output = run(module, inp)
     _assert_portable_output_dtype(output)
     payload: _Golden = {
         "state_dict": pre_state,
@@ -1288,3 +1271,65 @@ def _write_golden[InputT](
     if post_state := changed_state(pre_state, module.state_dict()):
         payload["post_state"] = post_state
     save_golden(golden_path, payload)
+
+
+def _assert_bfb[InputT](
+    *,
+    golden_dir: Path,
+    golden_name: str,
+    build_module: Callable[[], nn.Module],
+    build_input: Callable[[], InputT],
+    seed: int,
+    run: Callable[[nn.Module, InputT], Tensor],
+) -> None:
+    """Mint or replay a golden; the caller holds ``host_agnostic_numerics``."""
+    golden_dir.mkdir(parents=True, exist_ok=True)
+    golden_path = golden_dir / f"{golden_name}.pt"
+    missing = not golden_path.exists()
+    if missing or os.environ.get(_ENV_REGENERATE, "0") == "1":
+        with tempfile.NamedTemporaryFile(
+            dir=golden_dir,
+            prefix=f".{golden_name}.",
+            suffix=".pt",
+            delete=False,
+        ) as candidate_file:
+            candidate_path = Path(candidate_file.name)
+        try:
+            _write_golden(
+                golden_path=candidate_path,
+                build_module=build_module,
+                build_input=build_input,
+                seed=seed,
+                run=run,
+            )
+            _replay_golden(
+                golden_path=candidate_path,
+                build_module=build_module,
+                seed=seed,
+                run=run,
+            )
+            candidate_path.replace(golden_path)
+        finally:
+            candidate_path.unlink(missing_ok=True)
+        if missing:
+            raise _MissingGoldenError(
+                f"Missing golden regenerated at {golden_path}; inspect it, "
+                "then rerun the test.",
+            )
+        return
+
+    # Replay runs the stored input, so without this a test whose
+    # ``build_input`` changed would keep passing against the stale record.
+    _seed_bfb(seed)
+    build_module()
+    _assert_same_input(
+        _to_cpu(build_input()),
+        load_golden(golden_path)["input"],
+        label="input",
+    )
+    _replay_golden(
+        golden_path=golden_path,
+        build_module=build_module,
+        seed=seed,
+        run=run,
+    )

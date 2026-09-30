@@ -456,16 +456,15 @@ def _constructor_rng_and_forward(config: SwiGLU.Config) -> Tensor:
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         module = config.make()
-        state_values = list(module.state_dict().values())
-        # A parameter's leading elements pin its init; the RNG fingerprint pins how
-        # many draws that init consumed, in 8 values rather than the 5 KB state.
+        # The RNG fingerprint pins how many draws the init consumed, in 8 values
+        # rather than the 5 KB state.
         values = [
-            golden.heads(state_values, count=8),
+            golden.joined(module.state_dict().values()),
             golden.rng_fingerprint().float(),
         ]
         x = torch.randn(2, 3, config.channels_in)
-        values.extend([golden.spread(x), golden.spread(module(x).float())])
-        return torch.cat(values)
+        values.extend([x, module(x).float()])
+        return golden.joined(values)
 
 
 @pytest.mark.parametrize("config_type", [SwiGLU.Config, SwiGLUReluSquared.Config])

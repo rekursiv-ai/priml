@@ -35,6 +35,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.testing.bfb import (
     _ENV_REGENERATE,
     _EXACT_F32_OPS,
+    _RANDOM_FACTORIES,
     _assert_equal,
     _assert_portable_output_dtype,
     _downcast_f64,
@@ -55,6 +56,8 @@ from priml.testing.bfb import (
     portable_half_precision,
     randomize_parameters,
     regenerate_golden,
+    save_golden,
+    stale_post_states,
 )
 from priml.testing.golden import expect_golden_mismatch
 
@@ -966,11 +969,7 @@ def test_param_mutating_runner_captures_post_state(tmp_path: Path) -> None:
 
 
 def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
-    """A golden's post-run state must hold only tensors the run changed.
-
-    ``_write_golden`` stores only changed entries and ``_replay_golden`` reads
-    an absent one as "equal to ``state_dict``", so a stored copy of an
-    unchanged tensor asserts exactly what no entry asserts.
+    """Every priml golden's post-run state holds only tensors the run changed.
 
     Gated rather than trusted because the omission arrived as a WRITER change
     with no migration: nineteen goldens minted before it kept the copy, the
@@ -980,18 +979,27 @@ def test_no_checked_in_golden_stores_an_unchanged_post_state() -> None:
     """
     goldens = sorted(_CWD.parent.rglob("*.pt"))
     assert goldens, "no goldens found; the glob no longer matches the layout"
-    stale: list[Path] = []
-    for path in goldens:
-        payload = _loaded_golden(path)
-        post = payload.get("post_state")
-        if post is not None and len(changed_state(payload["state_dict"], post)) < len(
-            post,
-        ):
-            stale.append(path)
-    assert not stale, (
-        f"{len(stale)} golden(s) store a post-state equal to their pre-state: "
-        f"{[str(p) for p in stale]}"
+    stale = stale_post_states(goldens)
+    assert not stale, f"goldens storing an unchanged post-state: {stale}"
+
+
+def test_stale_post_states_reports_then_clears_a_synthetic_golden(
+    tmp_path: Path,
+) -> None:
+    regenerate_golden(
+        golden_dir=tmp_path,
+        golden_name="buffer_mutating",
+        build_module=_BufferMutatingModule,
+        build_input=_build_min_input,
     )
+    path = tmp_path / "buffer_mutating.pt"
+    assert stale_post_states([path]) == []
+    payload = load_golden(path)
+    post = payload.get("post_state")
+    assert post is not None
+    payload["post_state"] = {**post, "lin.bias": payload["state_dict"]["lin.bias"]}
+    save_golden(path, payload)
+    assert stale_post_states([path]) == [path]
 
 
 # Only the state entries are returned: a golden also holds an input, an output digest,
@@ -1448,8 +1456,15 @@ def test_no_allowlisted_op_is_width_divergent() -> None:
 # still seeing a float32 argument here ran native float32 without being upcast -- a
 # cross-host-divergence leak (the failure mode the flash-attention kernel exhibited
 # before the SDPA-math pin).
-def _f32_leaking_ops(run: Callable[[], object]) -> set[str]:
-    """Names of non-allowlisted ops that still receive float32 under the harness."""
+# A tensorless sampler (``randn``) has no float32 argument to see, so it is caught by
+# its float32 result instead. ``wrap=False`` traces a call that is responsible for
+# entering ``host_agnostic_numerics`` itself.
+def _f32_leaking_ops(
+    run: Callable[[], object],
+    *,
+    wrap: bool = True,
+) -> set[str]:
+    """Names of non-allowlisted ops that still compute in float32 under the harness."""
     leaks: set[str] = set()
 
     def has_f32(value: object) -> bool:
@@ -1472,12 +1487,20 @@ def _f32_leaking_ops(run: Callable[[], object]) -> set[str]:
         ) -> object:
             name = _op_name(func)
             values = (*args, *(kwargs or {}).values())
-            if name not in _EXACT_F32_OPS and any(has_f32(value) for value in values):
+            result = func(*args, **(kwargs or {}))
+            if name not in _EXACT_F32_OPS and (
+                any(has_f32(value) for value in values)
+                or (name in _RANDOM_FACTORIES and has_f32(result))
+            ):
                 leaks.add(name)
-            return func(*args, **(kwargs or {}))
+            return result
 
-    with _Trace(), host_agnostic_numerics():
-        run()
+    with _Trace():
+        if wrap:
+            with host_agnostic_numerics():
+                run()
+        else:
+            run()
     return leaks
 
 
@@ -1510,6 +1533,58 @@ def test_no_unvetted_f32_op_in_transformer_forward_backward() -> None:
         "non-allowlisted ops ran on float32 (not upcast; cross-host-divergent): "
         f"{sorted(leaks)}"
     )
+
+
+class _DrawsAtConstruction(nn.Module):
+    """Initializes, fills an unsaved buffer, and draws, all while being built.
+
+    Replay rebuilds the unsaved buffer instead of loading it, and the module's
+    initializer consumes the generator ``build_input`` draws from next, so both
+    reach the golden. A float32 ``randn`` of 16+ elements and a ``sin`` each
+    land on vector-ISA-specific bits unless computed host-agnostically.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 3)
+        self.register_buffer(
+            "phase",
+            torch.randn(18)[:3].sin(),
+            persistent=False,
+        )
+
+    @override
+    def forward(self, input: Tensor) -> Tensor:
+        return self.lin(input) + cast(Tensor, self.phase)
+
+
+def test_the_harness_computes_nothing_natively_in_float32(tmp_path: Path) -> None:
+    """Building, input, randomization, and the run are all host-agnostic.
+
+    A golden is portable only if EVERY value it stores or replays was computed
+    under ``host_agnostic_numerics``. Wrapping the run alone left the module's
+    construction, its unsaved buffers, the parameter randomization, and the
+    input outside it, so a golden minted natively failed replay under
+    ``ATEN_CPU_CAPABILITY=default``.
+    """
+
+    def check() -> None:
+        with pytest.raises(AssertionError, match="Missing golden regenerated"):
+            assert_bfb_against_golden(
+                golden_dir=tmp_path,
+                golden_name="draws",
+                build_module=_DrawsAtConstruction,
+                build_input=lambda: torch.randn(2, 4),
+            )
+        assert_bfb_against_golden(
+            golden_dir=tmp_path,
+            golden_name="draws",
+            build_module=_DrawsAtConstruction,
+            build_input=lambda: torch.randn(2, 4),
+        )
+
+    leaks = _f32_leaking_ops(check, wrap=False)
+    assert not leaks, f"ran natively in float32 outside the harness: {sorted(leaks)}"
 
 
 def _fused_operands() -> tuple[Tensor, Tensor, Tensor]:

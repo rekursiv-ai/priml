@@ -32,11 +32,8 @@ def test_mmdit_constructor_golden(cond_dim: int) -> None:
             torch.manual_seed(0)
             module = config.make()
             state = module.state_dict()
-            return torch.cat(
-                [
-                    golden.heads(state.values(), count=8),
-                    golden.rng_fingerprint().float(),
-                ],
+            return golden.joined(
+                [*state.values(), golden.rng_fingerprint().float()],
             )
 
     assert_bfb_against_golden(

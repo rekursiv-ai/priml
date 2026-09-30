@@ -27,7 +27,7 @@ from priml.baselines.sudoku.prefix import SparsePuzzleEmbedding
 from priml.model.attention.self_attention import SelfAttention
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import heads, mismatches, put_steps
+from priml.testing.golden import joined, mismatches, put_steps
 from priml.train.parallelism import NoParallel
 
 
@@ -191,9 +191,9 @@ def record_trajectory(
     """Record three updates, an evaluation, and a resumed update from seed 0.
 
     Recorded per update, stacked on a step axis: output probe, loss, the
-    leading elements of every reduced and clipped dense gradient and of the
-    unreduced sparse rows, the finite clipping norm, and the leading elements
-    of every dense parameter and of the sparse table. Then a one-valid-row
+    every reduced and clipped dense gradient and the unreduced sparse rows,
+    the finite clipping norm, and every dense parameter and the sparse table,
+    all whole. Then a one-valid-row
     evaluation, and one update of a step restored from the state dict.
 
     Args:
@@ -230,13 +230,13 @@ def record_trajectory(
                 result = subject.train_step(**batch)
                 step = {"model": result["model"], "loss": result["loss"]}
                 sparse_grad = gradients.pop("sparse")
-                step["grad"] = heads(gradients.values())
+                step["grad"] = joined(gradients.values())
                 step["grad/sparse"] = rows(sparse_grad)
                 if math.isfinite(clip):
                     norm = result.get("metrics", {})["grad_norm"]
                     assert isinstance(norm, Tensor)
                     step["grad_norm"] = norm
-                step["param"] = heads(subject.model.parameters())
+                step["param"] = joined(subject.model.parameters())
                 step["sparse"] = rows(subject.sparse_table)
                 steps.append(step)
         finally:
@@ -249,7 +249,7 @@ def record_trajectory(
         after = resumed.train_step(**batch)
         out["resumed/loss"] = after["loss"]
         out["resumed/model"] = after["model"]
-        out["resumed/param"] = heads(resumed.model.parameters())
+        out["resumed/param"] = joined(resumed.model.parameters())
     record = reduce(out)
     put_steps(record, "step", [reduce(step) for step in steps])
     return record

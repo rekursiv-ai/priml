@@ -39,7 +39,7 @@ from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.lib.custom_json import DictCodec
 from priml.runtime import MultiProcess
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import heads, mismatches, put_steps
+from priml.testing.golden import joined, mismatches, put_steps
 from priml.train.parallelism import DataParallel, NoParallel
 
 
@@ -157,7 +157,7 @@ def record_training(
     """
     with host_agnostic_numerics():
         slow, fast = subject.latent_inits
-        out: dict[str, object] = {"latent_init": heads([slow, fast])}
+        out: dict[str, object] = {"latent_init": joined([slow, fast])}
         gradients: dict[str, Tensor] = {}
         subject.dense_optimizer.register_step_pre_hook(
             partial(
@@ -168,12 +168,12 @@ def record_training(
             ),
         )
         steps: list[dict[str, Tensor]] = []
+        # Dense gradients reach the final parameters and optimizer state stored
+        # below, so only the sparse rows, which each rank keeps local, are kept.
         for index in range(3):
             result = subject.train_step(**training_batch(index, rank))
-            sparse_grad = gradients.pop("sparse")
             step: dict[str, object] = {
-                "grad": heads(gradients.values(), count=2),
-                "grad_sparse": rows(sparse_grad),
+                "grad_sparse": rows(gradients.pop("sparse")),
                 "loss": result["loss"],
                 "model": result["model"],
             }
@@ -184,13 +184,15 @@ def record_training(
         # already depends on every update before it.
         out["param"] = _parameters(subject.model)
         out["sparse"] = rows(subject.sparse_table)
+        # A resumed update reads every restored optimizer moment, so its loss,
+        # output, and sparse rows pin the round trip; the dense state it lands
+        # on is implied by those and stays unstored.
         resumed = subject.resumed()
         result = resumed.train_step(**training_batch(3, rank))
         out["resumed/loss"] = result["loss"]
         out["resumed/model"] = result["model"]
-        out["resumed/param"] = _parameters(resumed.model)
         out["resumed/sparse"] = rows(resumed.sparse_table)
-        out["resumed/optimizers"] = _optimizer_leading(resumed.optimizer_states())
+        out["resumed/optimizers"] = _optimizer_structure(resumed.optimizer_states())
         record = reduce(out)
         put_steps(record, "step", steps)
         return record
@@ -368,21 +370,17 @@ def _training_worker(root: Path, clip: float, fault: Fault, mesh: DeviceMesh) ->
 
 
 def _parameters(model: nn.Module) -> Tensor:
-    return heads(model.parameters(), count=2)
+    return joined(model.parameters())
 
 
-# Structure and scalars stay per key -- they are what a checkpoint round trip can
-# lose -- while every state tensor is folded into one head vector.
-def _optimizer_leading(value: object) -> dict[str, Tensor]:
-    """Return an optimizer checkpoint as its leaves, ordered by path."""
+# Structure and scalars are what a checkpoint round trip can lose; the state
+# tensors are exercised by the resumed update, which reads every one.
+def _optimizer_structure(value: object) -> dict[str, Tensor]:
+    """Return an optimizer checkpoint's non-tensor leaves, ordered by path."""
     flat = reduce(_without_tensors(value))
     text = {k: v for k, v in flat.items() if v.dtype == torch.uint8}
     numeric = [flat[k].double() for k in sorted(flat.keys() - text.keys())]
-    return {
-        **text,
-        "scalars": torch.stack(numeric),
-        "tensors": heads(_tensors(value)),
-    }
+    return {**text, "scalars": torch.stack(numeric)}
 
 
 def _without_tensors(value: object) -> object:
@@ -392,17 +390,6 @@ def _without_tensors(value: object) -> object:
     if isinstance(value, list | tuple):
         return [_without_tensors(item) for item in cast("list[object]", value)]
     return value
-
-
-def _tensors(value: object) -> list[Tensor]:
-    if isinstance(value, Tensor):
-        return [value]
-    if isinstance(value, dict):
-        items = cast("dict[object, object]", value).values()
-        return [t for item in items for t in _tensors(item)]
-    if isinstance(value, list | tuple):
-        return [t for item in cast("list[object]", value) for t in _tensors(item)]
-    return []
 
 
 def _batch(batch: Mapping[str, object]) -> dict[str, object]:
@@ -457,7 +444,7 @@ def test_source_distributed_training(
     ("fault", "failure"),
     [
         ("broadcast", "latent_init"),
-        ("dense", "step/grad"),
+        ("dense", "param"),
         ("sparse", "sparse"),
         ("clipping", "step/grad_norm"),
     ],

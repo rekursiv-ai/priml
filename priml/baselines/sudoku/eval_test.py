@@ -26,8 +26,9 @@ import torch
 
 from priml.baselines.sudoku import trainer, trm
 from priml.baselines.sudoku.eval import Reproduction
+from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import leading, mismatches, read_tensors, stored
+from priml.testing.golden import mismatches, read_tensors, stored
 
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
         View,
     )
     from priml.baselines.sudoku.puzzle_data import PuzzleDataset
+    from priml.model.transformer.block import TransformerBlock
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -80,6 +82,11 @@ class Stack(Protocol):
     @property
     def eval(self) -> ModuleType:
         """Return the eval module."""
+        ...
+
+    @property
+    def model(self) -> ModuleType:
+        """Return the module defining the TRM and its ``recipe_block``."""
         ...
 
 
@@ -149,6 +156,7 @@ class PrimlStack:
 
     trainer = trainer
     eval = importlib.import_module("priml.baselines.sudoku.eval")
+    model = trm
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -164,6 +172,7 @@ class _Harness:
     def __init__(self, stack: Stack, scratch: Path) -> None:
         self.trainer = cast("_TrainerModule", stack.trainer)
         self.eval = cast("_EvalModule", stack.eval)
+        self.recipe_block = cast("_ModelModule", stack.model).recipe_block
         self.scratch = scratch
         self.data = scratch / "data"
 
@@ -182,6 +191,10 @@ class _Harness:
         cfg.puzzle_emb_len = 2
         cfg.compile = False
         cfg.dtype = None
+        cfg.block = self.recipe_block()
+        assert isinstance(cfg.block.ffn, SwiGLU.Config)
+        cfg.block.ffn.expansion = 1
+        cfg.block.ffn.round_to = 1
         return cfg
 
     def search(self) -> HpsSearch.Config:
@@ -292,6 +305,10 @@ class _TrainerModule(Protocol):
     Trainer: type[trainer.Trainer]
 
 
+class _ModelModule(Protocol):
+    def recipe_block(self) -> TransformerBlock.Config: ...
+
+
 class _EvalModule(Protocol):
     TRM: type[trm.TRM]
     HpsSearch: type[HpsSearch]
@@ -320,8 +337,8 @@ _PipelineConfig = Reproduction.Config
 
 
 def _weights(prefix: str, state: Mapping[str, Tensor]) -> dict[str, Tensor]:
-    """Return the first 4 elements of every trained tensor under ``prefix``."""
-    return {f"{prefix}/{k}": v for k, v in leading(state).items()}
+    """Return every trained tensor under ``prefix``, whole."""
+    return {f"{prefix}/{k}": v.detach().clone() for k, v in state.items()}
 
 
 def _metrics(values: Mapping[str, object]) -> dict[str, Tensor]:

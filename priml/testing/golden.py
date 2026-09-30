@@ -305,49 +305,21 @@ def rng_fingerprint() -> Tensor:
     return torch.randint(0, 2**31 - 1, (8,), generator=generator)
 
 
-# A trained weight is the product of every step before it, so its bits already pin the
-# whole trajectory; a few elements per tensor catch any divergence without storing the
-# model.
-def leading(state: Mapping[str, Tensor], *, count: int = 4) -> dict[str, Tensor]:
-    """Return detached copies of the first ``count`` elements of every tensor."""
-    return {k: v.detach().flatten()[:count].clone() for k, v in state.items()}
-
-
-# Evenly spaced rather than leading: an output's regions come from different code
-# (a prefix, the grid, a padded tail), and the first elements see only one of them.
-def spread(value: Tensor, *, count: int = 128) -> Tensor:
-    """Return ``value`` flattened, or ``count`` evenly spaced samples of it.
-
-    Args:
-      value: A recorded tensor.
-      count: Most elements kept.
-
-    Returns:
-      sample: Every element when there are at most ``count``, else elements
-        ``0, n/count, 2n/count, ...`` of the flattened tensor.
-
-    """
-    flat = value.detach().reshape(-1)
-    if flat.numel() <= count:
-        return flat.clone()
-    index = torch.arange(count, device=flat.device) * flat.numel() // count
-    return flat[index].clone()
-
-
-def heads(tensors: Iterable[Tensor], *, count: int = 4) -> Tensor:
-    """Return the first ``count`` elements of each tensor, joined into one.
+# Every element, never a sample: a check that keeps the first few, or evenly spaced
+# ones, cannot see a regression confined to the elements it dropped.
+def joined(tensors: Iterable[Tensor]) -> Tensor:
+    """Return every element of each tensor, flattened and joined into one.
 
     One key instead of one per tensor keeps a golden's index short.
 
     Args:
       tensors: Tensors in a fixed order.
-      count: Elements kept from each.
 
     Returns:
-      joined: The kept elements in order, under ``torch.cat`` type promotion.
-        Floats widen exactly; an integer joined with a float is converted,
-        which is lossy past the float's mantissa, so join like dtypes.
+      joined: A detached copy of every element in order, under ``torch.cat``
+        type promotion. Floats widen exactly; an integer joined with a float is
+        converted, which is lossy past the float's mantissa, so join like dtypes.
 
     """
-    parts = [t.detach().flatten()[:count] for t in tensors]
+    parts = [t.detach().reshape(-1) for t in tensors]
     return torch.cat(parts) if parts else torch.zeros(0)

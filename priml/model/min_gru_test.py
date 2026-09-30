@@ -566,7 +566,12 @@ def test_the_triton_kernels_keep_a_slow_units_updates_in_an_fp32_carry() -> None
     assert torch.equal(frozen.final, ones.bfloat16())
     carry = ones.clone()
     for time in range(combined.shape[1]):
-        scan.step(combined[:, time], inputs[:, time], carry, carry=carry)
+        scan.step(
+            combined[:, time].contiguous(),
+            inputs[:, time].contiguous(),
+            carry,
+            carry=carry,
+        )
     torch.testing.assert_close(carry[0, 0].double(), expected[-1], rtol=0, atol=1e-5)
 
 

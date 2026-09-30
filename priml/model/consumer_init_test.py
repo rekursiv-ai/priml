@@ -304,24 +304,21 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         cfg_nano.block.attn.gate_channels = 2
         model = cfg_nano.make()
     state = DictCodec.coerce(model.state_dict(), Tensor)
-    # Leading elements pin each parameter's init; the fingerprint pins the draw
-    # count in 8 values instead of the 5 KB Mersenne state.
+    # The fingerprint pins the draw count in 8 values instead of the 5 KB
+    # Mersenne state.
     values: list[Tensor] = [
-        golden.heads(state.values(), count=8),
+        golden.joined(state.values()),
         golden.rng_fingerprint().float(),
     ]
     x = torch.randn(3, 2, 4)
     if isinstance(model, MMDiTBlock):
-        outputs = model([x, x])
-        values.extend(golden.spread(value.float()) for value in outputs)
+        values.extend(value.float() for value in model([x, x]))
     elif kind in ("nanochat", "qwen", "kimi"):
-        values.append(
-            golden.spread(model(torch.tensor([[0, 1], [1, 0]])).float()),
-        )
+        values.append(model(torch.tensor([[0, 1], [1, 0]])).float())
     else:
-        values.append(golden.spread(model(x).float()))
+        values.append(model(x).float())
     values.append(golden.rng_fingerprint().float())
-    return torch.cat(values)
+    return golden.joined(values)
 
 
 if __name__ == "__main__":

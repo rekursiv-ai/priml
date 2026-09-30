@@ -5,15 +5,13 @@ through :func:`record`; this module imports none of the implementation it
 reproduces. Every recipe uses one compact CPU configuration while retaining
 its architectural, optimizer, precision, and recurrence branches.
 
-Recorded per recipe, all compared with ``torch.equal``: the leading elements
-of every parameter and persistent buffer after init and a fingerprint of the
-global RNG; one forward and one single-core step; an evaluation rollout
-before and after training (loss, packed output, every metric, and the rollout
-logits); three train steps (loss, probe, every metric, the ACT pool, and its
-final latents); the leading elements of gradients and post-update state, EMA
-shadow included, after the first and third. A weight is the product of every
-step before it, so its first elements catch a divergence anywhere upstream,
-and the goldens stay a few KB each.
+Recorded per recipe, all compared whole with ``torch.equal``: every parameter
+and persistent buffer after init and a fingerprint of the global RNG; one
+forward and one single-core step; an evaluation rollout before and after
+training (loss, packed output, every metric, and the rollout logits); three
+train steps (loss, probe, every metric, the ACT pool, and its final latents);
+gradients and post-update state, EMA shadow included, after the first and
+third.
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ from priml.model.norm import RMSNorm
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
-    heads,
+    joined,
     mismatches,
     put_steps,
     read_tensors,
@@ -297,7 +295,7 @@ def record(subject: Subject) -> dict[str, Tensor]:
 
     """
     out: dict[str, Tensor] = {"rng": rng_fingerprint()}
-    states = [{"heads": _heads(subject.state())}]
+    states = [{"state": _joined(subject.state())}]
     data = batches()
     tokens = cast(Tensor, data[0]["media"])
     ids = cast(Tensor, data[0]["puzzle_identifiers"])
@@ -331,9 +329,9 @@ def record(subject: Subject) -> dict[str, Tensor]:
                 {k: v for k, v in subject.pool().items() if not k.startswith("z_")},
             )
             if index in (1, 3):
-                grads.append({"heads": _heads(gradients)})
-                states.append({"heads": _heads(subject.state())})
-                emas.append({"heads": _heads(subject.ema())})
+                grads.append({"state": _joined(gradients)})
+                states.append({"state": _joined(subject.state())})
+                emas.append({"state": _joined(subject.ema())})
     finally:
         for handle in handles:
             handle.remove()
@@ -486,17 +484,15 @@ def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> N
         out[f"{prefix}/{key}"] = stored(value)
 
 
-# The latents feed the logits, so a divergence in them already shows there; their
-# leading elements localize it without storing them whole.
 def _forward_record(outputs: tuple[Tensor, ...]) -> dict[str, Tensor]:
-    """Logits and halt whole, the returned latents as their leading elements."""
+    """Logits, halt, and the returned latents, all whole."""
     logits, halt, *latents = outputs
-    return {"logits": logits, "halt": halt, "latents": heads(latents, count=16)}
+    return {"logits": logits, "halt": halt, "latents": joined(latents)}
 
 
-def _heads(state: Mapping[str, Tensor]) -> Tensor:
-    """Return every tensor's leading elements, in name order, as one tensor."""
-    return heads(state[name] for name in sorted(state))
+def _joined(state: Mapping[str, Tensor]) -> Tensor:
+    """Return every tensor, in name order, joined into one."""
+    return joined(state[name] for name in sorted(state))
 
 
 def _capture(store: dict[str, Tensor], name: str) -> Callable[[Tensor], None]:

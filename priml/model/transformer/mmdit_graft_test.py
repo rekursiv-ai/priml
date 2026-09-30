@@ -92,13 +92,8 @@ def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
     del module, input
     model = _golden_config().make()
     state = DictCodec.coerce(model.state_dict(), Tensor)
-    # Leading elements pin initialization; the fingerprint pins the draw count.
-    return torch.cat(
-        [
-            golden.heads(state.values(), count=8),
-            golden.rng_fingerprint().float(),
-        ],
-    )
+    # The fingerprint pins the draw count.
+    return golden.joined([*state.values(), golden.rng_fingerprint().float()])
 
 
 def test_graft_constructor_bfb() -> None:
