@@ -58,12 +58,13 @@ def _cfg(
 
 
 def _canonical_adaln_config() -> AdaLNZero.Config:
-    return AdaLNZero.Config(channels_in=8, cond_dim=4)
+    return AdaLNZero.Config(channels_in=4, cond_dim=2)
 
 
 def _canonical_mmdit_config() -> MMDiTBlock.Config:
-    config = MMDiTBlock.Config(channels_in=8, num_streams=2)
-    config.attn = MultiStreamAttention.Config(num_heads=2, channels_head=4)
+    config = MMDiTBlock.Config(channels_in=4, num_streams=2)
+    config.attn = MultiStreamAttention.Config(num_heads=2, channels_head=2)
+    config.ffn = SwiGLU.Config(channels_hidden=4, round_to=1)
     return config
 
 
@@ -79,8 +80,8 @@ def test_adaln_zero_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="ada_ln_zero",
-        build_module=lambda: _canonical_adaln_config().make(),
-        build_input=lambda: torch.randn(2, 4),
+        build_module=_canonical_adaln_config().make,
+        build_input=lambda: torch.randn(3, 2),
         seed=0,
         run=_run_adaln,
     )
@@ -121,13 +122,13 @@ def test_2_streams():
 
 def test_3_streams():
     m = _cfg(num_streams=3).make()
-    x0 = torch.randn(1, 4, 64)
-    x1 = torch.randn(1, 8, 64)
-    x2 = torch.randn(1, 6, 64)
+    x0 = torch.randn(2, 4, 64)
+    x1 = torch.randn(2, 8, 64)
+    x2 = torch.randn(2, 6, 64)
     y0, y1, y2 = m([x0, x1, x2])
-    assert y0.shape == (1, 4, 64)
-    assert y1.shape == (1, 8, 64)
-    assert y2.shape == (1, 6, 64)
+    assert y0.shape == (2, 4, 64)
+    assert y1.shape == (2, 8, 64)
+    assert y2.shape == (2, 6, 64)
 
 
 def test_1_stream():
@@ -162,9 +163,9 @@ def test_per_stream_conditioning():
 def test_identity_at_init():
     """With adaLN zero-init, block should be near-identity."""
     m = _cfg(cond_dim=32).make()
-    x0 = torch.randn(1, 8, 64)
-    x1 = torch.randn(1, 12, 64)
-    c = torch.randn(1, 32)
+    x0 = torch.randn(2, 8, 64)
+    x1 = torch.randn(2, 12, 64)
+    c = torch.randn(2, 32)
     with torch.no_grad():
         y0, y1 = m([x0, x1], c=c)
     assert torch.allclose(y0, x0, atol=1e-5)
@@ -178,15 +179,15 @@ def test_conditioning_is_required_when_adaln_is_configured():
     """
     m = _cfg(cond_dim=32).make()
     with pytest.raises(ValueError, match="conditioning"):
-        m([torch.randn(1, 8, 64), torch.randn(1, 12, 64)])
+        m([torch.randn(2, 8, 64), torch.randn(2, 12, 64)])
 
 
 def test_conditioning_count_must_match_the_streams():
     """One conditioning short leaves the last stream silently unmodulated."""
     m = _cfg(cond_dim=32, num_streams=3).make()
-    xs = [torch.randn(1, 4, 64), torch.randn(1, 4, 64), torch.randn(1, 4, 64)]
+    xs = [torch.randn(2, 4, 64), torch.randn(2, 4, 64), torch.randn(2, 4, 64)]
     with pytest.raises(ValueError, match="conditioning"):
-        m(xs, c=[torch.randn(1, 32), torch.randn(1, 32)])
+        m(xs, c=[torch.randn(2, 32), torch.randn(2, 32)])
 
 
 def test_no_adaln():
@@ -291,24 +292,14 @@ def test_extra_batch_dims():
     assert y1.shape == (2, 3, 12, 64)
 
 
-# The harness stores the randomized state_dict, so the golden's size is the parameter
-# count -- dominated by each stream's default 256-wide FFN. Narrowing the hidden width
-# leaves every numerical path intact.
-def _bfb_mmdit_config() -> MMDiTBlock.Config:
-    """Canonical MMDiT block with the per-stream FFNs narrowed by size only."""
-    config = _canonical_mmdit_config()
-    config.ffn = SwiGLU.Config(channels_hidden=4, round_to=1)
-    return config
-
-
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_mmdit_block_bfb(device: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="mmdit_block",
-        build_module=lambda: _bfb_mmdit_config().make().to(device),
+        build_module=lambda: _canonical_mmdit_config().make().to(device),
         build_input=lambda: move_to_device(
-            [torch.randn(2, 3, 8), torch.randn(2, 2, 8)],
+            [torch.randn(2, 3, 4), torch.randn(2, 3, 4)],
             device,
         ),
         seed=0,
@@ -352,7 +343,7 @@ def test_native_stream_loading_matches_transformer_and_freezes_independently() -
     cfg.streams = [stream]
     model = cfg.make()
     model.load_stream(0, source=source)
-    x = torch.randn(1, 3, 8)
+    x = torch.randn(2, 3, 8)
     with host_agnostic_numerics():
         assert torch.equal(model([x])[0], source(x))
     cfg.streams = [stream, stream.copy_tree()]
@@ -369,8 +360,9 @@ def test_native_stream_loading_matches_transformer_and_freezes_independently() -
         module.requires_grad_(False)
     state = mixed.state_dict()
     before: dict[str, Tensor] = {k: v.clone() for k, v in state.items()}
-    other = torch.randn(1, 2, 8)
-    mask = torch.cat((torch.zeros(3, 3), torch.full((3, 2), float("-inf"))), -1)
+    other = torch.randn(2, 3, 8)
+    # A mask is [..., S_i, sum(S_j)]; one stream makes it square.
+    mask = torch.cat((torch.zeros(3, 3), torch.full((3, 3), float("-inf"))), -1)
     with host_agnostic_numerics():
         assert torch.equal(mixed([x, other], attn_mask=[mask, None])[0], source(x))
     y = mixed([x, other])[1]
@@ -405,8 +397,8 @@ def test_mixed_conditioning_has_no_unconditioned_parameters() -> None:
     cfg.streams[1].norm1 = RMSNorm.Config()
     cfg.streams[1].norm1.elementwise_affine = True
     model = cfg.make()
-    xs = [torch.randn(1, 2, 8), torch.randn(1, 3, 8)]
-    actual = model(xs, c=[torch.randn(1, 4), None])
+    xs = [torch.randn(2, 4, 8), torch.randn(2, 3, 8)]
+    actual = model(xs, c=[torch.randn(2, 4), None])
     assert torch.equal(actual[0], xs[0])
     assert not torch.equal(actual[1], xs[1])
     assert not any(name.startswith("adalns.1.") for name, _ in model.named_parameters())
@@ -423,9 +415,10 @@ def test_mixed_conditioning_has_no_unconditioned_parameters() -> None:
 
 def test_default_block_forwards_per_query_masks() -> None:
     model = _cfg(channels_in=8, num_heads=2).make()
-    xs = [torch.randn(1, 2, 8), torch.randn(1, 3, 8)]
+    xs = [torch.randn(2, 3, 8), torch.randn(2, 4, 8)]
     masks = [
-        torch.cat((torch.zeros(2, 2), torch.full((2, 3), float("-inf"))), -1),
+        # A mask is [..., S_i, sum(S_j)]; one stream makes it square.
+        torch.cat((torch.zeros(3, 3), torch.full((3, 4), float("-inf"))), -1),
         None,
     ]
     expected = model(xs, attn_mask=masks)[0]
@@ -459,7 +452,7 @@ def test_stream_attention_geometry_finalizes_before_stream_norm() -> None:
     assert isinstance(finalized.streams[0].attn.norm_qk, RMSNorm.Config)
     assert finalized.streams[0].attn.norm_qk.channels_in == 4
     assert finalized.streams[0].attn.channels_head == 4
-    finalized.make()([torch.randn(1, 2, 8)])
+    finalized.make()([torch.randn(2, 3, 8)])
 
 
 @pytest.mark.parametrize("index", [-1, 1])
@@ -502,13 +495,13 @@ def test_native_loading_rejects_shapes_atomically_and_postnorm() -> None:
 def test_adaln_zero_cost_matches_torch() -> None:
     config = AdaLNZero.Config()
     config.channels_in = 8
-    config.cond_dim = 4
+    config.cond_dim = 5
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 4, 4, requires_grad=True),
+        build_input=lambda: torch.randn(3, 4, 5, requires_grad=True),
         run=_run_adaln,
         seq_len=4,
-        batch_size=2,
+        batch_size=3,
         dtype=None,
     )
 
@@ -683,10 +676,10 @@ def test_block_cost_matches_torch_without_conditioning() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: tuple(
-            torch.randn(1, 4, 8, requires_grad=True) for _ in range(2)
+            torch.randn(2, 4, 8, requires_grad=True) for _ in range(2)
         ),
         seq_len=4,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
         run=lambda module, xs: _run_mmdit(module, list(xs)).sum(),
     )

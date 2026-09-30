@@ -1,1 +1,1 @@
-PCAWhiteningConv2d(1, 8, kernel_size=(2, 2), stride=(1, 1), bias=False)
+PCAWhiteningConv2d(2, 16, kernel_size=(2, 2), stride=(1, 1), bias=False)

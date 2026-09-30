@@ -146,7 +146,7 @@ def test_log_stablemax_survives_logits_that_overflow_the_sum() -> None:
     Normalizing in log space keeps the answer exact where forming ``s(x)`` and
     dividing yields ``-inf`` everywhere.
     """
-    x = torch.full((1, 3), 2e38, dtype=torch.float32)
+    x = torch.full((2, 3), 2e38, dtype=torch.float32)
     logp = log_stablemax(x)
     assert torch.isfinite(logp).all(), logp
     # Three equal logits: each gets a third of the mass.

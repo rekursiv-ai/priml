@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from pathlib import Path
 from typing import Final, cast, override
 
@@ -31,37 +30,57 @@ def tiny_step() -> ImageNetTrainStep.Config:
     config = ImageNetTrainStep.Config()
     model = config.model = TorchvisionResNet.Config()
     model.arch = PartialConfig(strided_net)
-    model.channels_out = 10
+    model.channels_out = 3
     config.parallelism = NoParallel.Config(device="cpu")
     config.compile = None
     # CPU has no float16 autocast worth testing; the scaler is then disabled.
     config.dtype_autocast = None
     config.train_budget_steps = 8
-    config.resolution_min = 32
-    config.resolution_max = 64
+    config.resolution_min = 16
+    config.resolution_max = 16
+    config.resize_start = 1.0
+    config.resize_end = 1.0
     return config
 
 
-def tiny_batch(*, size: int = 4, image: int = 48, seed: int = 0) -> dict[str, Tensor]:
+def tiny_batch(
+    *,
+    size: int = 2,
+    image: int = 16,
+    classes: int = 3,
+    uint8: bool = False,
+    seed: int = 0,
+) -> dict[str, Tensor]:
     """Return a batch shaped as the pipeline emits it, after ``preprocess_batch``."""
     generator = torch.Generator().manual_seed(seed)
+    images = (
+        torch.randint(
+            0,
+            256,
+            (size, 3, image, image),
+            generator=generator,
+            dtype=torch.uint8,
+        )
+        if uint8
+        else torch.randn(size, 3, image, image, generator=generator)
+    )
     return {
-        "image": torch.randn(size, 3, image, image, generator=generator),
-        "label": torch.randint(0, 10, (size,), generator=generator),
+        "image": images,
+        "label": torch.randint(0, classes, (size,), generator=generator),
     }
 
 
 def test_train_step_returns_per_example_loss_and_logits() -> None:
     out = tiny_step().make().train_step(**tiny_batch())
-    assert out["loss"].shape == (4,)
-    assert out["model"].shape == (4, 10)
+    assert out["loss"].shape == (2,)
+    assert out["model"].shape == (2, 3)
 
 
 def test_batchnorm_parameters_escape_weight_decay() -> None:
     """ffcv-imagenet decays every parameter whose name lacks ``bn``."""
     config = tiny_step()
     model = config.model = TorchvisionResNet.Config()
-    model.channels_out = 10
+    model.channels_out = 2
     with torch.device("meta"):
         step_model = model.make()
     optimizer = config.optimizer.make()(step_model)
@@ -100,6 +119,11 @@ def test_resolution_matches_ffcv_get_resolution(epoch: float, expected: int) -> 
     """Ffcv's ramp over epochs 11..13, 32->64, rounded to a multiple of 32."""
     config = tiny_step()
     config.train_budget_steps = 160
+    config.resolution_min = 32
+    config.resolution_max = 64
+    # Exercise the progressive-resize transition points.
+    config.resize_start = 11 / 16
+    config.resize_end = 13 / 16
     step = config.make()
     step.timer_step.global_count = round(epoch * 10)
     assert step.resolution == expected
@@ -111,8 +135,8 @@ def test_train_step_resizes_to_the_scheduled_resolution() -> None:
     model = step.model
     assert isinstance(model, TorchvisionResNet)
     step._model = _Recorder(model, seen)
-    _ = step.train_step(**tiny_batch(image=48))
-    assert seen == [32]
+    _ = step.train_step(**tiny_batch(image=8))
+    assert seen == [16]
 
 
 def test_tta_sums_the_image_and_its_mirror() -> None:
@@ -132,12 +156,13 @@ def test_tta_sums_the_image_and_its_mirror() -> None:
 def test_preprocess_drops_the_frame_axis_and_goes_channels_last() -> None:
     step = tiny_step().make()
     batch: dict[str, object] = {
-        "image": torch.randn(2, 3, 1, 8, 8),
+        # ImageNetTrainStep.preprocess_batch squeezes the unit frame axis.
+        "image": torch.randn(2, 3, 1, 4, 5),
         "label": torch.zeros(2),
     }
     image = step.preprocess_batch(batch)["image"]
     assert isinstance(image, Tensor)
-    assert image.shape == (2, 3, 8, 8)
+    assert image.shape == (2, 3, 4, 5)
     assert image.is_contiguous(memory_format=torch.channels_last)
 
 
@@ -151,43 +176,15 @@ def test_state_dict_round_trip_restores_progress_and_scaler() -> None:
     assert "scaler" in step.state_dict()
 
 
-# The blur rewrite needs a stride-2 conv of at least 16 input channels to fire, so
-# ``conv2`` keeps 16 inputs; only its output and the head narrow.
-def _golden_net(num_classes: int) -> nn.Module:
-    """Narrowed ``strided_net`` for the golden: 3->16->4 rather than 3->16->8."""
-    return nn.Sequential(
-        OrderedDict(
-            conv1=nn.Conv2d(3, 16, 3, stride=2, padding=1, bias=False),
-            bn1=nn.BatchNorm2d(16),
-            relu=nn.ReLU(),
-            conv2=nn.Conv2d(16, 4, 3, stride=2, padding=1, bias=False),
-            pool=nn.AdaptiveAvgPool2d(1),
-            flatten=nn.Flatten(),
-            fc=nn.Linear(4, num_classes),
-        ),
-    )
-
-
-# Pin the resolution to its 32 floor (the schedule rounds to a multiple of 32, so 32 is
-# the smallest it resizes to) rather than ramping to 64, and narrow the head net. The
-# resize, the blur rewrite, the fused loss, and the optimizer split all still run.
-def _golden_step() -> ImageNetTrainStep.Config:
-    """Return ``tiny_step`` shrunk for the golden by size only."""
-    config = tiny_step()
-    config.model = TorchvisionResNet.Config()
-    config.model.arch = PartialConfig(_golden_net)
-    config.model.channels_out = 10
-    config.resolution_min = 32
-    config.resolution_max = 32
-    return config
-
-
+# The resize, blur rewrite, fused loss, and optimizer split remain active at the
+# compact defaults. ``resolution`` returns ``low`` before /32 rounding while
+# progress is before ``start``; fixed 16 is the smallest scheduled output.
 def test_three_train_steps_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="three_steps",
-        build_module=lambda: _TrainStepModule(_golden_step()),
-        build_input=lambda: tiny_batch(size=1, image=32),
+        build_module=lambda: _TrainStepModule(tiny_step()),
+        build_input=lambda: tiny_batch(image=8, uint8=True),
         seed=42,
     )
 
@@ -202,8 +199,9 @@ class _TrainStepModule(nn.Module):
 
     @override
     def forward(self, image: Tensor, label: Tensor) -> Tensor:
+        batch = self.step.preprocess_batch({"image": image, "label": label})
         return torch.stack(
-            [self.step.train_step(image=image, label=label)["loss"] for _ in range(3)],
+            [self.step.train_step(**batch)["loss"] for _ in range(3)],
         )
 
 
@@ -239,6 +237,8 @@ def test_gradient_is_ffcvs_fused_label_smoothed_mean() -> None:
     config.model.channels_out = 13
     config.optimizer = PartialConfig(torch.optim.SGD, lr=1.0)
     config.schedule = PartialConfig(constant)
+    config.resolution_min = 32
+    config.resolution_max = 32
     step = config.make()
     reference = copy.deepcopy(step.model)
     batch = tiny_batch(size=7, image=32, seed=1)

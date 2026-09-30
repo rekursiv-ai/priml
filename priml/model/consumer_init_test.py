@@ -69,10 +69,10 @@ def test_native_reference_norm_defaults(kind: str) -> None:
 @pytest.mark.parametrize("std", [0.02, 0.07])
 def test_reference_initialization(kind: str, std: float) -> None:
     if kind == "qwen":
-        config = Qwen3.Config.from_hf(qwen3_test._hf_config(initializer_range=std))
+        config = Qwen3.Config.from_hf(qwen3_test.hf_config(initializer_range=std))
     else:
         config = KimiK2.Config.from_hf(
-            kimi_k2_test._hf_config(initializer_range=std, q_lora_rank=16),
+            kimi_k2_test.hf_config(initializer_range=std, q_lora_rank=16),
         )
     torch.manual_seed(13)
     model = config.make()
@@ -123,9 +123,9 @@ def test_reference_initialization(kind: str, std: float) -> None:
 @pytest.mark.parametrize("tie", [False, True])
 def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -> None:
     config = (
-        qwen3_test._canonical_config()
+        qwen3_test.canonical_config()
         if kind == "qwen"
-        else kimi_k2_test._canonical_config()
+        else kimi_k2_test.canonical_config()
     )
     assert isinstance(config.proj_in, Embedding.Config)
     config.proj_in.init_weight = nn.init.ones_
@@ -174,7 +174,10 @@ def test_reference_leaf_overrides_survive_make_and_reset(kind: str, tie: bool) -
         else:
             assert isinstance(built_head, Linear)
             assert torch.equal(built_head.weight, torch.ones_like(built_head.weight))
-        assert model(torch.tensor([[1, 2]])).shape == (1, 2, config.channels_out)
+        tokens = (
+            torch.tensor([[0, 1], [1, 0]]) if kind == "qwen" else torch.tensor([[1, 2]])
+        )
+        assert model(tokens).shape == (*tokens.shape, config.channels_out)
     assert "proj_in.weight" in model.state_dict()
     assert ("proj_out.1.weight" in model.state_dict()) is not tie
 
@@ -196,20 +199,21 @@ def test_legacy_composite_constructor_bfb(kind: str) -> None:
 def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
     del module, inp
     legacy_ffn = SwiGLU.Config(
+        channels_hidden=2,
         init_weight=kaiming_uniform,
         init_weight_out=kaiming_uniform,
     )
     if kind == "transformer":
-        cfg = TransformerBlock.Config(channels_in=8, ffn=legacy_ffn)
-        cfg.attn = SelfAttention.Config(num_heads=2, channels_head=4)
+        cfg = TransformerBlock.Config(channels_in=4, ffn=legacy_ffn)
+        cfg.attn = SelfAttention.Config(num_heads=2, channels_head=2)
         model = cfg.make()
     elif kind == "mmdit":
-        cfg_mmdit = MMDiTBlock.Config(channels_in=8, num_streams=2, ffn=legacy_ffn)
-        cfg_mmdit.attn = MultiStreamAttention.Config(num_heads=2, channels_head=4)
+        cfg_mmdit = MMDiTBlock.Config(channels_in=4, num_streams=2, ffn=legacy_ffn)
+        cfg_mmdit.attn = MultiStreamAttention.Config(num_heads=2, channels_head=2)
         model = cfg_mmdit.make()
     elif kind == "moe":
         cfg_moe = MoE.Config(
-            channels_in=8,
+            channels_in=4,
             num_shared_experts=1,
             expert=legacy_ffn,
             shared_expert=legacy_ffn.copy_tree(),
@@ -218,17 +222,41 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         model = cfg_moe.make()
     elif kind == "mixer":
         model = MLPMixerBlock.Config(
-            channels_in=8,
-            seq_len=3,
+            channels_in=4,
+            seq_len=2,
             token_mixer=legacy_ffn,
             channel_mixer=legacy_ffn.copy_tree(),
         ).make()
     elif kind in ("qwen", "kimi"):
-        config = (
-            qwen3_test._canonical_config()
-            if kind == "qwen"
-            else kimi_k2_test._canonical_config()
-        )
+        if kind == "qwen":
+            config = Qwen3.Config.from_hf(
+                qwen3_test.hf_config(
+                    vocab_size=2,
+                    hidden_size=8,
+                    intermediate_size=8,
+                    num_hidden_layers=1,
+                    num_attention_heads=4,
+                    num_key_value_heads=2,
+                    head_dim=2,
+                ),
+            )
+        else:
+            config = KimiK2.Config.from_hf(
+                kimi_k2_test.hf_config(
+                    vocab_size=2,
+                    hidden_size=4,
+                    num_hidden_layers=2,
+                    num_attention_heads=2,
+                    qk_nope_head_dim=2,
+                    qk_rope_head_dim=2,
+                    v_head_dim=2,
+                    kv_lora_rank=2,
+                    intermediate_size=4,
+                    moe_intermediate_size=4,
+                    n_routed_experts=2,
+                    num_experts_per_tok=1,
+                ),
+            )
         config.proj_in = Embedding.Config(shard="vocab")
         config.proj_out = Sequential.Config(
             elements=[
@@ -268,12 +296,12 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
                 ffn.init_weight_out = kaiming_uniform
         model = config.make()
     else:
-        cfg_nano = NanoChatLM.Config(vocab_size=16, channels_in=8, num_layers=1)
-        cfg_nano.max_seq_len = 3
+        cfg_nano = NanoChatLM.Config(vocab_size=2, channels_in=4, num_layers=1)
+        cfg_nano.max_seq_len = 2
         assert isinstance(cfg_nano.block, TransformerBlock.Config)
         assert isinstance(cfg_nano.block.attn, ValueGatedAttention.Config)
-        cfg_nano.block.attn.channels_head = 4
-        cfg_nano.block.attn.gate_channels = 4
+        cfg_nano.block.attn.channels_head = 2
+        cfg_nano.block.attn.gate_channels = 2
         model = cfg_nano.make()
     state = DictCodec.coerce(model.state_dict(), Tensor)
     # Leading elements pin each parameter's init; the fingerprint pins the draw
@@ -282,12 +310,14 @@ def _constructor_values(module: nn.Module, inp: Tensor, *, kind: str) -> Tensor:
         golden.heads(state.values(), count=8),
         golden.rng_fingerprint().float(),
     ]
-    x = torch.randn(1, 3, 8)
+    x = torch.randn(3, 2, 4)
     if isinstance(model, MMDiTBlock):
         outputs = model([x, x])
         values.extend(golden.spread(value.float()) for value in outputs)
     elif kind in ("nanochat", "qwen", "kimi"):
-        values.append(golden.spread(model(torch.tensor([[0, 1, 2]])).float()))
+        values.append(
+            golden.spread(model(torch.tensor([[0, 1], [1, 0]])).float()),
+        )
     else:
         values.append(golden.spread(model(x).float()))
     values.append(golden.rng_fingerprint().float())

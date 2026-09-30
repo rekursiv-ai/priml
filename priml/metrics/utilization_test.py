@@ -175,8 +175,8 @@ def test_compute_averages_over_the_updates_since_reset() -> None:
     meter.update(torch.empty(0), media=torch.zeros(4, 8), step_sec=3.0)
     assert meter.compute()["tokens_per_sec"] == 64 / 4.0
     meter.reset()
-    meter.update(torch.empty(0), media=torch.zeros(1, 8), step_sec=1.0)
-    assert meter.compute()["tokens_per_sec"] == 8.0
+    meter.update(torch.empty(0), media=torch.zeros(2, 8), step_sec=1.0)
+    assert meter.compute()["tokens_per_sec"] == 16.0
 
 
 def test_compute_without_an_update_is_empty() -> None:
@@ -191,12 +191,12 @@ def test_cost_is_priced_once_per_sequence_length_and_batch_size() -> None:
     meter = Utilization(Utilization.Config())
     meter.bind(_root(costed))
 
-    meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
-    meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(2, 8), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(2, 8), step_sec=1.0)
     assert costed.calls == 1
     meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
     assert costed.calls == 2
-    meter.update(torch.empty(0), input_ids=torch.zeros(1, 16), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(2, 16), step_sec=1.0)
     assert costed.calls == 3
 
 
@@ -257,10 +257,10 @@ def test_parameter_reductions_use_each_updates_actual_token_count() -> None:
     meter = Utilization(config)
     meter.bind(_root(model.finalize()))
 
-    meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
+    meter.update(torch.empty(0), input_ids=torch.zeros(2, 8), step_sec=1.0)
     meter.update(torch.empty(0), input_ids=torch.zeros(3, 8), step_sec=1.0)
 
-    assert meter.compute()["utilization_reduction"] == 3 * (7 + 23) / 2 / 1_000
+    assert meter.compute()["utilization_reduction"] == 3 * (15 + 23) / 2 / 1_000
 
 
 def test_bind_rejects_evaluation_placement() -> None:
@@ -288,7 +288,7 @@ def test_bind_rejects_a_root_without_a_model_config() -> None:
 def test_update_before_bind_fails_loudly() -> None:
     meter = Utilization(Utilization.Config())
     with pytest.raises(RuntimeError, match="bind"):
-        meter.update(torch.empty(0), input_ids=torch.zeros(1, 8), step_sec=1.0)
+        meter.update(torch.empty(0), input_ids=torch.zeros(2, 8), step_sec=1.0)
 
 
 def test_update_rejects_a_non_tensor_token_field() -> None:
@@ -305,7 +305,7 @@ def test_update_requires_step_sec() -> None:
     meter = Utilization(Utilization.Config())
     meter.bind(_root(_Counted.Config()))
     with pytest.raises(TypeError, match="step_sec"):
-        meter.update(torch.empty(0), input_ids=torch.zeros(1, 8))
+        meter.update(torch.empty(0), input_ids=torch.zeros(2, 8))
 
 
 if __name__ == "__main__":

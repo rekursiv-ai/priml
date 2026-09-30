@@ -21,7 +21,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_patchify_config_pprint() -> None:
-    config = Patchify.Config(channels_in=2, patch_size=[2, 2])
+    config = Patchify.Config(channels_in=2, patch_size=[2, 3])
     assert_pprint_golden(
         test_file=__file__,
         name="patchify",
@@ -30,7 +30,7 @@ def test_patchify_config_pprint() -> None:
 
 
 def test_unpatchify_config_pprint() -> None:
-    config = Unpatchify.Config(channels_out=2, patch_size=[2, 2])
+    config = Unpatchify.Config(channels_out=2, patch_size=[2, 3])
     assert_pprint_golden(
         test_file=__file__,
         name="unpatchify",
@@ -44,9 +44,9 @@ def test_patchify_bfb() -> None:
         golden_name="patchify",
         build_module=lambda: Patchify.Config(
             channels_in=2,
-            patch_size=[2, 2],
+            patch_size=[2, 3],
         ).make(),
-        build_input=lambda: torch.randn(1, 2, 4, 4),
+        build_input=lambda: torch.randn(2, 3, 4, 6),
         seed=0,
     )
 
@@ -57,45 +57,45 @@ def test_unpatchify_bfb() -> None:
         golden_name="unpatchify",
         build_module=lambda: Unpatchify.Config(
             channels_out=2,
-            patch_size=[2, 2],
+            patch_size=[2, 3],
         ).make(),
-        build_input=lambda: torch.randn(1, 8, 2, 2),
+        build_input=lambda: torch.randn(2, 12, 3, 5),
         seed=0,
     )
 
 
 def test_patchify_2d():
-    m = Patchify.Config(channels_in=3, patch_size=[4, 4]).make()
-    x = torch.randn(2, 3, 32, 32)
+    m = Patchify.Config(channels_in=3, patch_size=[2, 3]).make()
+    x = torch.randn(2, 3, 4, 6)
     out = m(x)
-    assert out.shape == (2, 48, 8, 8)
+    assert out.shape == (2, 18, 2, 2)
 
 
 def test_unpatchify_2d():
-    m = Unpatchify.Config(channels_out=3, patch_size=[4, 4]).make()
-    x = torch.randn(2, 48, 8, 8)
+    m = Unpatchify.Config(channels_out=3, patch_size=[2, 3]).make()
+    x = torch.randn(2, 18, 4, 5)
     out = m(x)
-    assert out.shape == (2, 3, 32, 32)
+    assert out.shape == (2, 3, 8, 15)
 
 
 def test_patchify_roundtrip():
-    p = Patchify.Config(channels_in=3, patch_size=[4, 4]).make()
-    u = Unpatchify.Config(channels_out=3, patch_size=[4, 4]).make()
-    x = torch.randn(2, 3, 32, 32)
+    p = Patchify.Config(channels_in=3, patch_size=[2, 3]).make()
+    u = Unpatchify.Config(channels_out=3, patch_size=[2, 3]).make()
+    x = torch.randn(2, 3, 4, 6)
     assert torch.allclose(u(p(x)), x)
 
 
 def test_patchify_channels():
-    cfg = Patchify.Config(channels_in=3, patch_size=[4, 4]).finalize()
-    assert cfg.channels_out == 48
-    reverse = Patchify.Config(channels_out=48, patch_size=[4, 4]).finalize()
+    cfg = Patchify.Config(channels_in=3, patch_size=[2, 3]).finalize()
+    assert cfg.channels_out == 18
+    reverse = Patchify.Config(channels_out=18, patch_size=[2, 3]).finalize()
     assert reverse.channels_in == 3
 
-    ucfg = Unpatchify.Config(channels_out=3, patch_size=[4, 4]).finalize()
-    assert ucfg.channels_in == 48
+    ucfg = Unpatchify.Config(channels_out=3, patch_size=[2, 3]).finalize()
+    assert ucfg.channels_in == 18
     reverse_unpatch = Unpatchify.Config(
-        channels_in=48,
-        patch_size=[4, 4],
+        channels_in=18,
+        patch_size=[2, 3],
     ).finalize()
     assert reverse_unpatch.channels_out == 3
 
@@ -105,20 +105,20 @@ def test_patchify_rejects_inconsistent_channel_boundaries() -> None:
         Patchify.Config(
             channels_in=3,
             channels_out=47,
-            patch_size=[4, 4],
+            patch_size=[2, 3],
         ).finalize()
     with pytest.raises(ValueError, match="channels_in=47 must equal"):
         Unpatchify.Config(
             channels_in=47,
             channels_out=3,
-            patch_size=[4, 4],
+            patch_size=[2, 3],
         ).finalize()
 
 
 def test_patchify_forward_accepts_messages_and_rejects_positional_extras():
-    m = Patchify.Config(channels_in=3, patch_size=[2, 2]).make()
-    x = torch.randn(2, 3, 8, 8)
-    assert m(x, key="val").shape == (2, 12, 4, 4)
+    m = Patchify.Config(channels_in=3, patch_size=[2, 3]).make()
+    x = torch.randn(2, 3, 4, 6)
+    assert m(x, key="val").shape == (2, 18, 2, 2)
     with pytest.raises(TypeError):
         cast(Callable[..., object], m)(x, "extra")
 
@@ -141,8 +141,8 @@ def test_patchify_rejects_degenerate_patch_size():
 @pytest.mark.parametrize(
     ("config", "shape"),
     [
-        (Patchify.Config(channels_in=3, patch_size=[4, 4]), (2, 3, 8, 8)),
-        (Unpatchify.Config(channels_out=3, patch_size=[4, 4]), (2, 48, 2, 2)),
+        (Patchify.Config(channels_in=3, patch_size=[2, 3]), (2, 3, 4, 6)),
+        (Unpatchify.Config(channels_out=3, patch_size=[2, 3]), (2, 18, 2, 2)),
     ],
     ids=["patchify", "unpatchify"],
 )
@@ -158,7 +158,7 @@ def test_patchify_cost_counts_payload_reordering(
         batch_size=2,
         dtype=None,
     )
-    moved_elements = 2 * 4 * 2 * 48
+    moved_elements = 2 * 144
     f32 = torch.float32
     moved_bytes = moved_elements * f32.itemsize
     assert analytical == Cost(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import hashlib
 import logging
@@ -17,7 +18,7 @@ from priml.baselines.sudoku.scripts.download_checkpoints import (
 )
 
 
-_FILES = [
+_FILES: Final = [
     "README.md",
     "generator_s44/step_10000/model.pt",
     "generator_s44/step_19500/full_state.pt",
@@ -49,18 +50,17 @@ def fake_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     return downloads
 
 
-def _blob_digest(filename: str) -> str:
-    """SHA-256 of the fake hub's deterministic file content."""
-    return hashlib.sha256(f"blob:{filename}".encode()).hexdigest()
-
-
 @pytest.fixture
 def fake_hub_with_sums(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> dict[str, str]:
     """Fake hub publishing SHA256SUMS; returns the mutable digest map."""
-    sums: dict[str, str] = {f: _blob_digest(f) for f in _FILES if f.endswith(".pt")}
+    sums: dict[str, str] = {
+        f: hashlib.sha256(f"blob:{f}".encode()).hexdigest()
+        for f in _FILES
+        if f.endswith(".pt")
+    }
 
     def fake_list_repo_files(repo_id: str) -> list[str]:
         del repo_id

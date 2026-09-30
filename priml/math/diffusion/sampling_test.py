@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 import torch
 
-from priml.math.diffusion import SampleOneStepResult
 from priml.math.diffusion.sampling import (
     SampleResult,
     ddpm,
@@ -25,69 +24,13 @@ from priml.math.diffusion.schedule import (
     log_sigma_from_log_snr_per_rectified_flow,
 )
 from priml.math.diffusion.target import (
-    TargetFn,
     target_rectified_flow,
 )
 from priml.memory import convert_to_tensor
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
-
-    from priml.math.custom_types import Tensorable
-
-
-# Direct implementation of Song et al. 2020 Eq 12 to validate the numerically stable
-# log-space version.
-def _reference_ddpm_step(
-    model: Tensor,
-    x_curr: Tensorable,
-    log_snr_curr: Tensorable,
-    log_snr_next: Tensorable,
-    *,
-    corruption_fn: Callable[
-        [Tensorable],
-        Tensor,
-    ] = log_sigma_from_log_snr_per_rectified_flow,
-    target_fn: TargetFn = target_rectified_flow,
-    eta: float = 1,
-) -> SampleOneStepResult:
-    """Compute the reference DDPM/DDIM step in linear space."""
-    model, x_t, snr_t, snr_s = convert_to_tensor(
-        model,
-        x_curr,
-        log_snr_curr,
-        log_snr_next,
-    )
-    # ``s`` = next (less noisy), t = curr (noisier)
-    log_sig_s = corruption_fn(snr_s)
-    log_sig_t = corruption_fn(snr_t)
-    sigma_s = torch.exp(log_sig_s)
-    sigma_t = torch.exp(log_sig_t)
-    alpha_s = torch.exp(compute_log_alpha(snr_s, log_sig_s))
-    alpha_t = torch.exp(compute_log_alpha(snr_t, log_sig_t))
-    predicted_x, predicted_eps = target_fn(model, x_t, snr_t, log_sig_t)[-2:]
-
-    # DDPM posterior variance.
-    snr_ratio = (alpha_t / sigma_t) ** 2 / (alpha_s / sigma_s) ** 2
-    sigma_ddpm = sigma_s * (1 - snr_ratio).clamp(min=0) ** 0.5
-
-    # η interpolation.
-    sigma_stoch = eta * sigma_ddpm
-    sigma_determ = (sigma_s**2 - sigma_stoch**2).clamp(min=0) ** 0.5
-    posterior_mean = alpha_s * predicted_x + sigma_determ * predicted_eps
-
-    log_std = torch.where(
-        sigma_stoch > 0,
-        torch.log(sigma_stoch),
-        torch.tensor(
-            -math.inf,
-            dtype=posterior_mean.dtype,
-            device=posterior_mean.device,
-        ),
-    )
-
-    return SampleOneStepResult(predicted_x, posterior_mean, log_std)
+    from collections.abc import Iterable
 
 
 @pytest.fixture(autouse=True)
@@ -127,8 +70,9 @@ def test_ddpm(eta: float) -> None:
     _mx = torch.randn(size=(2, *x_shape))
     model: Tensor = _mx[0]
     x1: Tensor = _mx[1]
-    log_snr_curr = torch.tensor([-4.0, 0.5, 2.3, 1.0]).reshape(-1, 1, 1, 1)
-    log_snr_next = torch.tensor([-0.5, 3.5, 5.0, 4.2]).reshape(-1, 1, 1, 1)
+    # Production broadcasts one value per batch item across C, H, and W.
+    log_snr_curr = torch.tensor([-4.0, 0.5, 2.3, 1.0])[:, None, None, None]
+    log_snr_next = torch.tensor([-0.5, 3.5, 5.0, 4.2])[:, None, None, None]
     assert torch.all(log_snr_curr < log_snr_next)
     new_x0, new_mean, new_log_std = ddpm(
         model,
@@ -137,12 +81,28 @@ def test_ddpm(eta: float) -> None:
         log_snr_next,
         eta=eta,
     )
-    ref_x0, ref_mean, ref_log_std = _reference_ddpm_step(
-        model,
-        x1,
-        log_snr_curr,
-        log_snr_next,
-        eta=eta,
+    # Direct implementation of Song et al. 2020 Eq 12 to validate the numerically
+    # stable log-space version; ``s`` = next (less noisy), t = curr (noisier).
+    log_sig_s = log_sigma_from_log_snr_per_rectified_flow(log_snr_next)
+    log_sig_t = log_sigma_from_log_snr_per_rectified_flow(log_snr_curr)
+    sigma_s = torch.exp(log_sig_s)
+    sigma_t = torch.exp(log_sig_t)
+    alpha_s = torch.exp(compute_log_alpha(log_snr_next, log_sig_s))
+    alpha_t = torch.exp(compute_log_alpha(log_snr_curr, log_sig_t))
+    ref_x0, predicted_eps = target_rectified_flow(model, x1, log_snr_curr, log_sig_t)[
+        -2:
+    ]
+    # DDPM posterior variance.
+    snr_ratio = (alpha_t / sigma_t) ** 2 / (alpha_s / sigma_s) ** 2
+    sigma_ddpm = sigma_s * (1 - snr_ratio).clamp(min=0) ** 0.5
+    # η interpolation.
+    sigma_stoch = eta * sigma_ddpm
+    sigma_determ = (sigma_s**2 - sigma_stoch**2).clamp(min=0) ** 0.5
+    ref_mean = alpha_s * ref_x0 + sigma_determ * predicted_eps
+    ref_log_std = torch.where(
+        sigma_stoch > 0,
+        torch.log(sigma_stoch),
+        torch.tensor(-math.inf),
     )
     assert torch.isfinite(ref_mean).all(), ref_mean
     assert torch.isfinite(new_mean).all(), new_mean
@@ -495,8 +455,8 @@ def test_rescale_cfg_nonzero_rho():
 
 def test_rescale_cfg_custom_dim():
     """Test rescale_classifier_free_guidance with custom dimensions."""
-    guided = torch.randn(4, 8, 16, 16)
-    unguided = torch.randn(4, 8, 16, 16)
+    guided = torch.randn(4, 5, 6, 7)
+    unguided = torch.randn(4, 5, 6, 7)
 
     result = rescale_classifier_free_guidance(
         guided,

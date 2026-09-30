@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import math
 
@@ -26,6 +26,7 @@ from priml.math.probability import (
     log_cdf_truncated_normal,
     log_gamma_correction,
     log_gamma_difference,
+    log_prob_discretized_logistic,
     ndtr,
     ndtri,
     pdf_logit_distribution,
@@ -64,7 +65,7 @@ class _ScipySpecial(Protocol):
 # is an optional test dependency. The lazy proxy defers the real import to
 # first attribute access, which only happens inside a parity test body -- and
 # those are skipped (not errored) when scipy is absent.
-_HAS_SCIPY = find_spec("scipy") is not None
+_HAS_SCIPY: Final = find_spec("scipy") is not None
 requires_scipy = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
 scipy_special = cast(_ScipySpecial, lazy_import("scipy.special"))
 
@@ -567,6 +568,57 @@ def test_lbeta_is_symmetric() -> None:
     x = torch.tensor([0.5, 50.0, 3.0], dtype=torch.float64)
     y = torch.tensor([200.0, 2.0, 9.0], dtype=torch.float64)
     torch.testing.assert_close(lbeta(x, y), lbeta(y, x), rtol=1e-13, atol=1e-13)
+
+
+@pytest.mark.parametrize(
+    ("loc", "log_scale"),
+    [(0.3, -3.0), (-0.99, -5.0), (0.0, 1.0), (1.4, -6.0)],
+)
+def test_discretized_logistic_masses_sum_to_one(loc: float, log_scale: float) -> None:
+    values = torch.arange(256)
+    log_prob = log_prob_discretized_logistic(values, loc, log_scale)
+    torch.testing.assert_close(
+        torch.logsumexp(log_prob.double(), 0),
+        torch.tensor(0.0, dtype=torch.float64),
+        atol=1e-4,
+        rtol=0,
+    )
+
+
+def test_discretized_logistic_matches_the_cdf_difference() -> None:
+    x = torch.tensor([0, 100, 255])
+    loc = torch.tensor([0.1, -0.2, 0.5], dtype=torch.float64)
+    scale = torch.tensor([-2.0, -1.0, -3.0], dtype=torch.float64).exp()
+    centre = x.double() / 127.5 - 1
+    upper = torch.sigmoid((centre + 1 / 255 - loc) / scale)
+    lower = torch.sigmoid((centre - 1 / 255 - loc) / scale)
+    mass = torch.stack([upper[0], upper[1] - lower[1], 1 - lower[2]])
+    torch.testing.assert_close(
+        log_prob_discretized_logistic(x, loc, scale.log()),
+        mass.log(),
+    )
+
+
+def test_discretized_logistic_is_accurate_far_in_the_tail() -> None:
+    """A bin 40 scales above the location: the naive CDF difference is 0."""
+    loc, log_scale = torch.tensor(-0.5), torch.tensor(-4.0)
+    log_prob = log_prob_discretized_logistic(torch.tensor(100), loc, log_scale)
+    centre, half, scale = 100 / 127.5 - 1, 1 / 255, math.exp(-4.0)
+    # log(σ(-l) - σ(-u)) with -l, -u < 0, where σ(z) ≈ e^z to 1e-17.
+    upper, lower = (centre + half + 0.5) / scale, (centre - half + 0.5) / scale
+    expected = -lower + math.log1p(-math.exp(lower - upper))
+    torch.testing.assert_close(log_prob, torch.tensor(expected), rtol=1e-5, atol=0)
+
+
+def test_discretized_logistic_gradient_is_finite_in_the_tails() -> None:
+    x = torch.tensor([0, 3, 128, 252, 255])
+    loc = torch.tensor([5.0, -5.0, 0.0, 5.0, -5.0], requires_grad=True)
+    log_scale = torch.full((5,), -6.0, requires_grad=True)
+    log_prob_discretized_logistic(x, loc, log_scale).sum().backward()
+    assert loc.grad is not None
+    assert log_scale.grad is not None
+    assert torch.isfinite(loc.grad).all()
+    assert torch.isfinite(log_scale.grad).all()
 
 
 if __name__ == "__main__":

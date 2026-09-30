@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, cast
 import functools
 import math
 
-from torch import Tensor, distributions
+from torch import Tensor, distributions, nn
 
 import torch
 
-from priml.math.numeric import logsubexp
+from priml.math.numeric import log1mexp, logsubexp
 from priml.memory import convert_to_tensor
 
 
@@ -153,6 +153,65 @@ def quantile_uniform(
     if not torch.all((p >= 0) & (p <= 1)):
         raise ValueError("quantile_uniform requires p in [0, 1].")
     return p * (high - low) + low
+
+
+def log_prob_discretized_logistic(
+    x: Tensorable,
+    loc: Tensorable,
+    log_scale: Tensorable,
+    *,
+    num_bins: int = 256,
+) -> Tensor:
+    """Log mass of integer pixels under a logistic discretized onto ``[-1, 1]``.
+
+    Value ``v`` in ``0..num_bins-1`` maps to the bin centred at
+    ``2 v / (num_bins - 1) - 1`` with half-width ``1 / (num_bins - 1)``; the two
+    end bins absorb the tails, so the masses sum to one.
+
+    Args:
+      x: Integer values in ``[0, num_bins)``, any integer or float dtype.
+      loc: Logistic location, in ``[-1, 1]`` units.
+      log_scale: Logistic log scale.
+      num_bins: Number of values; 256 for 8-bit pixels.
+
+    Returns:
+      log_prob: Elementwise log mass, broadcast over the arguments.
+
+    References:
+      https://arxiv.org/abs/1701.05517
+        Salimans et al. 2017, "PixelCNN++."
+
+    Derivation:
+      For an interior bin with standardized edges ``u > l``, the mass is
+      ``σ(u) - σ(l)``. On whichever side of the location keeps both CDFs at
+      most one half (reflect ``(u, l) -> (-l, -u)`` above it),
+
+          log(σ(a) - σ(b)) = log σ(a) + log1mexp(log σ(b) - log σ(a)),
+
+      so the difference never cancels between two numbers near one.
+
+    """
+    x, loc, log_scale = convert_to_tensor(x, loc, log_scale)
+    half = 1 / (num_bins - 1)
+    centre = x * (2 * half) - 1
+    inverse = torch.exp(-log_scale)
+    upper = (centre - loc + half) * inverse
+    lower = (centre - loc - half) * inverse
+    above = upper + lower > 0
+    a = torch.where(above, -lower, upper)
+    b = torch.where(above, -upper, lower)
+    log_a = nn.functional.logsigmoid(a)
+    # Clamped only where both edges round to one tail value in float32.
+    gap = (nn.functional.logsigmoid(b) - log_a).clamp_max(-1e-30)
+    return torch.where(
+        x <= 0,
+        nn.functional.logsigmoid(upper),
+        torch.where(
+            x >= num_bins - 1,
+            nn.functional.logsigmoid(-lower),
+            log_a + log1mexp(gap),
+        ),
+    )
 
 
 def pdf_logit_normal(

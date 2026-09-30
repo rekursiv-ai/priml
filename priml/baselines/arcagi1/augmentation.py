@@ -8,9 +8,9 @@ color permutation that fixes 0. :func:`inverse_aug` decodes it for voting.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Self, cast, override
 
 import functools
 import hashlib
@@ -31,33 +31,34 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-@dataclass(slots=True, kw_only=True, frozen=True)
-class ArcSpec:
-    """The ARC token format, grouped into one named scope."""
-
-    puzzle_id_separator: str = "|||"
-    """Delimiter joining ``{name}``, ``t{tid}``, and the color permutation."""
+class ArcSpec(Fig["ArcSpec"]):
+    """The dataset-owned ARC token format and packed grid geometry."""
 
     max_grid: int = 30
-    """Square side an ARC grid is packed/padded to (the real 900-token grid)."""
+    """Square side of a packed ARC grid."""
 
     vocab_pad: int = 0
     """Pad token id."""
 
     vocab_eos: int = 1
-    """End-of-sequence token id (content boundary marker)."""
+    """End-of-sequence token id."""
 
     vocab_color_offset: int = 2
     """First color token id; colors occupy ``[offset, offset + 10)``."""
 
+    puzzle_id_separator: str = "|||"
+    """Delimiter joining the name, dihedral transform, and color permutation."""
+
     @property
     def vocab_size(self) -> int:
-        """Total token count: pad + eos + 10 colors (12 for the default offset)."""
+        """Total token count, including ten colors."""
         return self.vocab_color_offset + 10
 
+    @property
+    def grid_shape(self) -> tuple[int, ...]:
+        """Flat packed token-row shape."""
+        return (self.max_grid**2,)
 
-ARC: Final = ArcSpec()
-"""The ARC token format shared by builders, loaders, and pass@K voting."""
 
 NO_TRAIN_SCALE_WEIGHTS: Final[Mapping[int, float]] = MappingProxyType({1: 1.0})
 """Identity scale distribution (factor 1): the scale gate never changes a grid."""
@@ -73,8 +74,8 @@ class ColorDihedral:
         colors: tuple[int, ...] = tuple(range(1, 10))
         """Colors to permute; unlisted colors remain fixed."""
 
-        separator: str = "|||"
-        """Separator encoding the transform in a prepared puzzle identifier."""
+        separator: str = ""
+        """Identifier delimiter; filled by the owning ARC augmentation."""
 
     def __init__(self, config: Config) -> None:
         if not config.transforms or any(t < 0 or t > 7 for t in config.transforms):
@@ -83,8 +84,6 @@ class ColorDihedral:
             c < 0 or c > 9 for c in config.colors
         ):
             raise ValueError("colors must contain distinct identifiers in 0..9.")
-        if not config.separator:
-            raise ValueError("separator must be nonempty.")
         self.config = config
 
     def sample(
@@ -104,6 +103,8 @@ class ColorDihedral:
           transform: Callable applying that same view to inputs and labels.
 
         """
+        if not self.config.separator:
+            raise ValueError("identifier separator must be filled before sampling.")
         tid = self.config.transforms[int(rng.integers(0, len(self.config.transforms)))]
         mapping = np.arange(10, dtype=np.uint8)
         colors = np.array(self.config.colors, dtype=np.uint8)
@@ -131,6 +132,8 @@ class ColorDihedral:
 
         """
         separator = self.config.separator
+        if not separator:
+            raise ValueError("identifier separator must be filled before decoding.")
         if separator not in name:
             return name, lambda grid: grid
         tid_text, permutation = name.split(separator)[-2:]
@@ -212,8 +215,8 @@ class SpatialAugmentation:
     """Scale and translate paired grids, then encode them as square token rows."""
 
     class Config(Fig["SpatialAugmentation"]):
-        max_grid: int = 30
-        """Side length of the padded token grid."""
+        spec: ArcSpec | None = None
+        """Dataset-owned token vocabulary and packed grid geometry."""
 
         train_scale_weights: dict[int, float] = field(default_factory=lambda: {1: 1.0})
         """Relative sampling weights for integer training scales."""
@@ -225,8 +228,11 @@ class SpatialAugmentation:
         """Probability of sampling a scale for an eligible training example."""
 
     def __init__(self, config: Config) -> None:
-        if config.max_grid < 1:
+        if config.spec is None:
+            raise ValueError("Spatial augmentation spec must be filled by its owner.")
+        if config.spec.max_grid < 1:
             raise ValueError("max_grid must be positive.")
+        self.spec = config.spec
         for name, probability in (
             ("translation_prob", config.translation_prob),
             ("scale_prob", config.scale_prob),
@@ -293,7 +299,7 @@ class SpatialAugmentation:
           tag: Shared ``(scale, row_offset, col_offset)``.
 
         """
-        side = self.config.max_grid
+        side = self.spec.max_grid
         if max(*inp.shape, *out.shape) > side:
             raise ValueError(
                 f"grid shape exceeds max_grid={side}: inp={inp.shape}, out={out.shape}.",
@@ -336,7 +342,7 @@ class SpatialAugmentation:
           rows: Input and target token rows under the same transform.
 
         """
-        side = self.config.max_grid
+        side = self.spec.max_grid
         scale, pad_r, pad_c = tag
         if scale < 1 or pad_r < 0 or pad_c < 0:
             raise ValueError(f"tag needs scale >= 1 and offsets >= 0; got {tag}.")
@@ -362,15 +368,15 @@ class SpatialAugmentation:
         for grid in (inp, out):
             nrow, ncol = grid.shape
             padded = np.pad(
-                grid + 2,
+                grid + self.spec.vocab_color_offset,
                 ((pad_r, side - pad_r - nrow), (pad_c, side - pad_c - ncol)),
-                constant_values=0,
+                constant_values=self.spec.vocab_pad,
             )
             eos_row, eos_col = pad_r + nrow, pad_c + ncol
             if eos_row < side:
-                padded[eos_row, pad_c:eos_col] = 1
+                padded[eos_row, pad_c:eos_col] = self.spec.vocab_eos
             if eos_col < side:
-                padded[pad_r:eos_row, eos_col] = 1
+                padded[pad_r:eos_row, eos_col] = self.spec.vocab_eos
             result.append(padded.flatten())
         return result
 
@@ -391,6 +397,9 @@ class ArcAugmentation:
         transform: Makeable[ColorDihedral] = field(default_factory=ColorDihedral.Config)
         """Color and symmetry policy shared by a puzzle's input/output examples."""
 
+        spec: ArcSpec | None = None
+        """Token vocabulary and packed grid geometry of this dataset."""
+
         spatial: SpatialAugmentation.Config = field(
             default_factory=SpatialAugmentation.Config,
         )
@@ -402,9 +411,21 @@ class ArcAugmentation:
         spatial_eval_scale: int = 2
         """Integer scale of the spatial evaluation views."""
 
+        @override
+        def finalize(self) -> Self:
+            """Push the dataset's geometry into its transform and spatial packer."""
+            self.spatial.spec = self.spec
+            assert isinstance(self.transform, ColorDihedral.Config)
+            if self.spec is not None and not self.transform.separator:
+                self.transform.separator = self.spec.puzzle_id_separator
+            return super().finalize()
+
     def __init__(self, config: Config) -> None:
+        if config.spec is None:
+            raise ValueError("ARC augmentation spec must be filled by its dataset.")
         if config.num_aug < 0 or config.retries_factor < 1:
             raise ValueError("num_aug must be nonnegative and retries_factor positive.")
+        self.spec = config.spec
         self.config = config
         self.transform = config.transform.make()
         self.spatial = config.spatial.make()
@@ -452,11 +473,14 @@ def inverse_dihedral_transform[T: np.generic](
 
 def inverse_aug(
     name: str,
+    *,
+    spec: ArcSpec,
 ) -> tuple[str, Callable[[NDArray[np.uint8]], NDArray[np.uint8]]]:
     """Decode an augmented identifier into its original name and inverse view.
 
     Args:
       name: Encoded identifier like ``"abc|||t3|||0123456789"``, or a bare name.
+      spec: Dataset token layout and identifier separator.
 
     Returns:
       name: The portion before the first separator.
@@ -464,7 +488,7 @@ def inverse_aug(
         inverse dihedral first, then the inverse color permutation.
 
     """
-    separator = ARC.puzzle_id_separator
+    separator = spec.puzzle_id_separator
     if separator not in name:
         return name, lambda x: x
     tid_str, perm_str = name.split(separator)[-2:]
@@ -488,6 +512,7 @@ def canonicalize_arc_grid(
     *,
     name: str,
     spatial_tags: Tensor,
+    spec: ArcSpec,
     transform: ColorDihedral | None = None,
 ) -> tuple[str, Tensor]:
     """Undo a view's spatial tag, crop to its colors, and invert its color/symmetry.
@@ -496,6 +521,7 @@ def canonicalize_arc_grid(
       tokens: Flattened square input or predicted token grid.
       name: Augmented puzzle identifier encoding the color/dihedral view.
       spatial_tags: ``(scale, row_offset, col_offset)`` of this view.
+      spec: Dataset token layout and identifier separator.
       transform: Policy that encoded ``name``; ``None`` is the default one.
 
     Returns:
@@ -508,8 +534,15 @@ def canonicalize_arc_grid(
     if len(tag) != 3:
         raise ValueError(f"spatial tags hold (scale, row, col); got {tag}.")
     scale, pad_r, pad_c = tag
-    colors = crop_grid(untranslate_unscale(flat, scale=scale, pad_r=pad_r, pad_c=pad_c))
-    policy = transform if transform is not None else ColorDihedral.Config().make()
+    colors = crop_grid(
+        untranslate_unscale(flat, scale=scale, pad_r=pad_r, pad_c=pad_c),
+        spec=spec,
+    )
+    if transform is None:
+        policy_config = ColorDihedral.Config()
+        policy_config.separator = spec.puzzle_id_separator
+        transform = policy_config.make()
+    policy = transform
     original_name, inverse = policy.inverse(name)
     canonical = np.array(inverse(colors), copy=True)
     return original_name, torch.from_numpy(canonical).to(tokens.device)
@@ -648,7 +681,7 @@ def sample_scale_factor(
     train_scale_weights: Mapping[int, float],
     rng: np.random.Generator,
     *,
-    max_grid: int = ARC.max_grid,
+    max_grid: int,
 ) -> int:
     """Sample a scale factor that fits both grids of a pair in ``max_grid``.
 
@@ -683,11 +716,12 @@ def sample_scale_factor(
     return int(rng.choice(scales, p=weights / weights.sum()))
 
 
-def crop_grid(flat: NDArray[np.uint8]) -> NDArray[np.uint8]:
+def crop_grid(flat: NDArray[np.uint8], *, spec: ArcSpec) -> NDArray[np.uint8]:
     """Recover the largest top-left all-color rectangle from a flat token grid.
 
     Args:
       flat: Square flat token grid; the side is inferred from its length.
+      spec: Dataset token vocabulary.
 
     Returns:
       grid: Color grid with values 0..9.
@@ -701,12 +735,12 @@ def crop_grid(flat: NDArray[np.uint8]) -> NDArray[np.uint8]:
     for num_r in range(1, side + 1):
         row = values[(num_r - 1) * side : num_r * side]
         for c in range(1, num_c + 1):
-            if row[c - 1] < ARC.vocab_color_offset or row[c - 1] >= ARC.vocab_size:
+            if row[c - 1] < spec.vocab_color_offset or row[c - 1] >= spec.vocab_size:
                 num_c = c - 1
                 break
         if num_r * num_c > max_area:
             max_area, max_nr, max_nc = num_r * num_c, num_r, num_c
-    return (grid[:max_nr, :max_nc] - ARC.vocab_color_offset).astype(np.uint8)
+    return (grid[:max_nr, :max_nc] - spec.vocab_color_offset).astype(np.uint8)
 
 
 def square_side(length: int, *, who: str) -> int:
@@ -732,9 +766,9 @@ def arc_grid_to_np(grid: list[list[int]], *, max_grid: int) -> NDArray[np.uint8]
     if arr.ndim != 2:
         raise ValueError("Expected arr.ndim == 2.")
     if arr.shape[0] > max_grid:
-        raise ValueError("Expected arr.shape[0] <= ARC.max_grid.")
+        raise ValueError(f"Expected arr.shape[0] <= max_grid={max_grid}.")
     if arr.shape[1] > max_grid:
-        raise ValueError("Expected arr.shape[1] <= ARC.max_grid.")
+        raise ValueError(f"Expected arr.shape[1] <= max_grid={max_grid}.")
     # Checked on the wide dtype, so 256 is rejected rather than wrapping to a color.
     if not np.all((arr >= 0) & (arr <= 9)):
         raise ValueError("ARC grid colors must be in 0..9.")

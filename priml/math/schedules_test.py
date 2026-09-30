@@ -8,7 +8,7 @@ where it lands, and what it does to the run in between.
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import itertools
 
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-DECAYS: list[tuple[str, Schedule[float]]] = [
+DECAYS: Final[list[tuple[str, Schedule[float]]]] = [
     ("linear", linear),
     ("polynomial", polynomial),
     ("cosine", cosine),
@@ -45,7 +45,7 @@ DECAYS: list[tuple[str, Schedule[float]]] = [
     ("cyclic", partial(cyclic, peak=0.0)),
 ]
 
-EVERY: list[tuple[str, Schedule[float]]] = [
+EVERY: Final[list[tuple[str, Schedule[float]]]] = [
     *DECAYS,
     ("constant", constant),
     ("staircase", staircase),
@@ -53,7 +53,7 @@ EVERY: list[tuple[str, Schedule[float]]] = [
     ("cosine_restarts", cosine_restarts),
 ]
 
-IDS = [name for name, _ in EVERY]
+IDS: Final = [name for name, _ in EVERY]
 
 
 @pytest.mark.parametrize(("name", "schedule"), EVERY, ids=IDS)

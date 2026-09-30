@@ -99,9 +99,9 @@ def test_naive_matches_fused_causal():
 def test_naive_causal_masking() -> None:
     """Verify future tokens don't influence past positions."""
     kernel = SdpaNaive()
-    q = torch.randn(1, 4, 1, 8)
-    k = torch.randn(1, 4, 1, 8)
-    v = torch.randn(1, 4, 1, 8)
+    q = torch.randn(2, 4, 3, 8)
+    k = torch.randn(2, 4, 3, 8)
+    v = torch.randn(2, 4, 3, 8)
     out_full = kernel(q, k, v, is_causal=True)
     # Changing k/v at position 3 shouldn't affect output at position 0.
     k2, v2 = k.clone(), v.clone()
@@ -114,12 +114,12 @@ def test_naive_causal_masking() -> None:
 def test_naive_matches_fused_causal_non_square() -> None:
     """Match SdpaFused's non-square causal masking against SdpaNaive's reference.
 
-    Asserts a 1-token query against a 5-token key cache produces numerically
+    Asserts a 3-token query against a 5-token key cache produces numerically
     close output for both kernels under ``is_causal=True``.
     """
     torch.manual_seed(0)
-    q = torch.randn(2, 1, 4, 16)  # One new query token...
-    k = torch.randn(2, 5, 4, 16)  # ...against a 5-token cache.
+    q = torch.randn(2, 3, 4, 16)
+    k = torch.randn(2, 5, 4, 16)
     v = torch.randn(2, 5, 4, 16)
     sdp = SdpaFused()(q, k, v, is_causal=True)
     eager = SdpaNaive()(q, k, v, is_causal=True)
@@ -132,12 +132,12 @@ def test_naive_matches_fused_causal_non_square() -> None:
 @pytest.mark.parametrize(
     ("query_length", "window", "expected"),
     [
-        (1, -1, (8.0,)),
-        (1, 0, (20.0,)),
-        (1, 1, (16.0,)),
         (2, -1, (4.0, 8.0)),
         (2, 0, (12.0, 20.0)),
         (2, 1, (6.0, 16.0)),
+        (3, -1, (0.0, 4.0, 8.0)),
+        (3, 0, (0.0, 12.0, 20.0)),
+        (3, 1, (0.0, 6.0, 16.0)),
     ],
 )
 def test_cached_kernel_matches_independent_prefix_means(
@@ -147,12 +147,19 @@ def test_cached_kernel_matches_independent_prefix_means(
     expected: tuple[float, ...],
 ) -> None:
     # Zero scores give uniform weights over the permitted cached suffix/prefix.
-    values = torch.tensor([0.0, 0.0, 12.0, 20.0]).reshape(1, 4, 1, 1)
-    queries = torch.zeros(1, query_length, 1, 1)
+    values = (
+        torch.stack(
+            [torch.full((3, 5), value) for value in (0.0, 0.0, 12.0, 20.0)],
+        )
+        .unsqueeze(0)
+        .expand(2, -1, -1, -1)
+    )
+    queries = torch.zeros(2, query_length, 3, 5)
     keys = torch.zeros_like(values)
     with sdpa_kernel(SDPBackend.MATH):
         actual = config.make()(queries, keys, values, is_causal=True, window=window)
-    assert torch.equal(actual, torch.tensor(expected).reshape(1, query_length, 1, 1))
+    expected_output = torch.tensor(expected)[:, None, None].expand(2, -1, 3, 5)
+    assert torch.equal(actual, expected_output)
 
 
 def test_the_kernels_agree_when_causality_and_a_mask_are_both_supplied() -> None:
@@ -163,7 +170,7 @@ def test_the_kernels_agree_when_causality_and_a_mask_are_both_supplied() -> None
     two are one algorithm: both fold causality into the mask.
     """
     torch.manual_seed(0)
-    q, k, v = (torch.randn(2, 6, 2, 8) for _ in range(3))
+    q, k, v = (torch.randn(2, 6, 3, 8) for _ in range(3))
     # A padding mask that fills only INSIDE the causal cone and trusts
     # ``is_causal`` for the rest -- the Qwen 3.5 shape. Key 1, not key 0, so
     # every query keeps at least one admissible key.
@@ -418,20 +425,20 @@ def test_kernel_cost_matches_torch(
         analytical = assert_cost_matches_torch(
             config,
             build_input=lambda: tuple(
-                torch.randn(1, 8, 2, 4, requires_grad=True) for _ in range(3)
+                torch.randn(2, 8, 3, 5, requires_grad=True) for _ in range(3)
             ),
-            batch_size=1,
+            batch_size=2,
             seq_len=8,
             dtype=None,
-            num_heads=2,
-            channels_head=4,
+            num_heads=3,
+            channels_head=5,
             window=window,
             run=lambda module, inputs: cast(
                 Tensor,
                 module(*inputs, is_causal=True, window=window),
             ),
         )
-    assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 4 * 8 * 8
+    assert analytical["flops", "primal", "matmul"].sum() == 4 * 2 * 3 * 5 * 8 * 8
 
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
@@ -445,7 +452,7 @@ def test_kernel_bfb(device: str, name: str, kernel: object) -> None:
         golden_dir=_CWD / "testdata",
         golden_name=name,
         build_module=lambda: _Kernel(kernel.make()).to(device),
-        build_input=lambda: tuple(torch.randn(1, 4, 2, 8) for _ in range(3)),
+        build_input=lambda: tuple(torch.randn(2, 3, 4, 5) for _ in range(3)),
         seed=0,
     )
 

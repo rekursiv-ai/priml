@@ -94,9 +94,9 @@ def test_gated_delta_net_single_token():
         channels_k_head=8,
         channels_v_head=8,
     ).make()
-    x = torch.randn(1, 1, 32)
+    x = torch.randn(2, 3, 32)
     out = m(x)
-    assert out.shape == (1, 1, 32)
+    assert out.shape == (2, 3, 32)
 
 
 def test_gated_delta_net_arbitrary_leading_dims():
@@ -168,16 +168,19 @@ def test_gated_delta_net_bfb(device: str) -> None:
         golden_name="gated_delta_net",
         build_module=lambda: (
             GatedDeltaNet.Config(
-                channels_in=16,
+                channels_in=8,
                 num_heads_k=2,
                 num_heads_v=2,
-                channels_k_head=8,
-                channels_v_head=8,
+                channels_k_head=2,
+                channels_v_head=2,
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
+        build_input=lambda: move_to_device(
+            torch.randn(size=(2, 3, 8)),
+            device=device,
+        ),
         seed=0,
         run=lambda m, x: first_tensor(m(x)),  # pyright: ignore[reportAny] -- the test helper accepts the model's untyped tuple output.
     )

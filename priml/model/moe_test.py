@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from configgle.testing import assert_pprint_golden
+from torch import Tensor
 
 import pytest
 import torch
@@ -355,7 +356,7 @@ def test_router_bfb(device: str) -> None:
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(4, 4), device),
+        build_input=lambda: move_to_device(torch.randn(2, 4), device),
         seed=0,
         run=_first_tensor,
     )
@@ -376,13 +377,13 @@ def test_moe_bfb(device: str) -> None:
             MoE.Config(
                 channels_in=4,
                 router=SoftmaxRouter.Config(num_experts=2, top_k=1),
-                # Size only: the default ``round_to`` makes each expert 256 wide.
-                expert=SwiGLU.Config(round_to=8),
+                # The expert retains a two-channel gated projection.
+                expert=SwiGLU.Config(channels_hidden=2, round_to=1),
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(2, 2, 4), device),
+        build_input=lambda: move_to_device(torch.randn(3, 2, 4), device),
         seed=0,
         run=_first_tensor,
     )
@@ -553,9 +554,9 @@ def test_moe_cost_sums_realized_expert_rows() -> None:
     ].sum() + 4 * expert["flops", "adjoint", "reduction"].sum() + 8 * 2 * (4 - 1)
 
 
-def _first_tensor(module: torch.nn.Module, value: object) -> torch.Tensor:
+def _first_tensor(module: torch.nn.Module, value: object) -> Tensor:
     """Call a module after narrowing the harness input to its tensor contract."""
-    assert isinstance(value, torch.Tensor)
+    assert isinstance(value, Tensor)
     assert isinstance(module, (MoE, Router))
     return first_tensor(module(value))
 

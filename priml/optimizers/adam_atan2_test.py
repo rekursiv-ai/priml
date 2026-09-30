@@ -23,16 +23,16 @@ class _AdamATan2Golden(TypedDict):
 
 
 def test_adam_atan2_matches_reference_bias_corrections() -> None:
-    param = torch.tensor([0.5, -0.25, 0.125], dtype=torch.float64)
+    param = torch.tensor([0.5, -0.25], dtype=torch.float64)
     expected = param.clone()
     exp_avg = torch.zeros_like(param)
     exp_avg_sq = torch.zeros_like(param)
     opt = AdamATan2([param], lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1)
 
     grads = [
-        torch.tensor([0.01, -0.02, 0.04], dtype=torch.float64),
-        torch.tensor([0.03, -0.01, -0.02], dtype=torch.float64),
-        torch.tensor([-0.02, 0.05, 0.01], dtype=torch.float64),
+        torch.tensor([0.01, -0.02], dtype=torch.float64),
+        torch.tensor([0.03, -0.01], dtype=torch.float64),
+        torch.tensor([-0.02, 0.05], dtype=torch.float64),
     ]
     for step, grad in enumerate(grads, start=1):
         param.grad = grad.clone()

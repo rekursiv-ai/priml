@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+from typing import Self, override
 
 from configgle import Makes
 
@@ -11,6 +12,7 @@ from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.model import PuzzleEmbedding, RotaryBlock
 from priml.baselines.arcagi2.train_step import ArcDataParallel, ArcTrainStep
 from priml.baselines.sudoku.act import ActPool
+from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import DeepRecurrence
 from priml.model.attention.rope import RoPE
 from priml.model.attention.self_attention import SelfAttention
@@ -32,6 +34,19 @@ class ArcTrainLoop(
 
     dataset: Arc2Data.Config = field(default_factory=Arc2Data.Config)
     """Prepared ARC2 tasks, four shuffled passes per loader iteration."""
+
+    @override
+    def finalize(self) -> Self:
+        self.dataset.spec.finalize()
+        spec = self.dataset.spec
+        model = self.step.model
+        model.vocab_size = spec.vocab_size
+        embedding = model.embedding
+        assert isinstance(embedding, GridEmbedding.Config)
+        embedding.grid_shape = spec.grid_shape
+        if model.rope is not None:
+            model.rope_grid_shape = spec.grid_shape
+        return super().finalize()
 
 
 def exp000() -> ArcTrainLoop:

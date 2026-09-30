@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import override
 
 import functools
 
@@ -11,7 +11,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
-from priml.cost import MEASURES, Cost, Kernel, Phase, cost
+from priml.cost import Cost, cost
 from priml.loss.diffusion import DiffusionLoss
 from priml.math.diffusion.schedule import (
     log_sigma_from_log_snr_per_variance_preserving,
@@ -31,29 +31,6 @@ from priml.math.diffusion.target import (
 from priml.testing.cost import assert_cost_matches_torch
 
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-
-def _fp32(
-    *,
-    primal: Mapping[str, Mapping[Kernel, int]] | None = None,
-    adjoint: Mapping[str, Mapping[Kernel, int]] | None = None,
-    **fields: int,
-) -> Cost:
-    """Build a ``Cost`` from whole-invocation fp32 FLOPs and bytes."""
-    cells: dict[tuple[object, ...], int] = {}
-    phases: tuple[tuple[Phase, Mapping[str, Mapping[Kernel, int]] | None], ...] = (
-        ("primal", primal),
-        ("adjoint", adjoint),
-    )
-    for phase, silos in phases:
-        for measure in MEASURES:
-            for kernel, value in (silos or {}).get(measure, {}).items():
-                cells[(measure, phase, kernel, torch.float32)] = value
-    return Cost(cells=cells, **fields)
-
-
 def _per_sample(config: DiffusionLoss.Config) -> Cost:
     """Sum one sample's scalar work and each schedule child's own cost."""
     schedules = [config.logsnr_fn, config.corruption_fn]
@@ -70,20 +47,16 @@ def _per_sample(config: DiffusionLoss.Config) -> Cost:
 
 def _per_element(target_fn: TargetFn, *, elements: int, samples: int) -> Cost:
     """Sum one loss invocation and the target's own cost."""
-    own = _fp32(
-        primal={
-            "flops": {"elementwise": 5 * elements, "reduction": elements - samples},
-            "bytes": {
-                "elementwise": 4 * 13 * elements,
-                "reduction": 4 * (elements + samples),
-            },
-        },
-        adjoint={
-            "flops": {"elementwise": 3 * elements},
-            "bytes": {
-                "elementwise": 28 * elements,
-                "reduction": 4 * (elements + samples),
-            },
+    f32 = torch.float32
+    own = Cost(
+        cells={
+            ("flops", "primal", "elementwise", f32): 5 * elements,
+            ("flops", "primal", "reduction", f32): elements - samples,
+            ("bytes", "primal", "elementwise", f32): 4 * 13 * elements,
+            ("bytes", "primal", "reduction", f32): 4 * (elements + samples),
+            ("flops", "adjoint", "elementwise", f32): 3 * elements,
+            ("bytes", "adjoint", "elementwise", f32): 28 * elements,
+            ("bytes", "adjoint", "reduction", f32): 4 * (elements + samples),
         },
     )
     return own + cost(target_fn, dtype=None, elements=elements, samples=samples)
@@ -111,7 +84,7 @@ def test_diffusion_loss_forward_basic() -> None:
         return torch.zeros_like(x)
 
     # Input: [B, C, F, H, W].
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
 
@@ -136,7 +109,7 @@ def test_diffusion_loss_forward_2d() -> None:
         return x * 0.5
 
     # Input: [B, C, H, W].
-    x0 = torch.randn(4, 3, 16, 16)
+    x0 = torch.randn(4, 3, 5, 6)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
 
@@ -173,7 +146,7 @@ def test_diffusion_loss_custom_logsnr() -> None:
         del sigma
         return torch.zeros_like(x)
 
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
     result = loss_fn(denoiser=denoiser, x0=x0)
 
     assert result["loss"].shape == (2,)
@@ -190,7 +163,7 @@ def test_diffusion_loss_custom_target() -> None:
         del sigma
         return x
 
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
     result = loss_fn(denoiser=denoiser, x0=x0)
 
     assert result["loss"].shape == (2,)
@@ -207,7 +180,7 @@ def test_diffusion_loss_custom_corruption() -> None:
         del sigma
         return torch.zeros_like(x)
 
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
     result = loss_fn(denoiser=denoiser, x0=x0)
 
     assert result["loss"].shape == (2,)
@@ -225,7 +198,7 @@ def test_diffusion_loss_variance_preserving() -> None:
         del sigma
         return torch.randn_like(x) * 0.1
 
-    x0 = torch.randn(4, 3, 8, 8)
+    x0 = torch.randn(4, 3, 5, 6)
     result = loss_fn(denoiser=denoiser, x0=x0)
 
     assert result["loss"].shape == (4,)
@@ -243,7 +216,7 @@ def test_diffusion_loss_eps_prediction() -> None:
         del sigma
         return torch.randn_like(x)
 
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
     result = loss_fn(denoiser=denoiser, x0=x0)
 
     assert result["loss"].shape == (2,)
@@ -258,7 +231,7 @@ def test_diffusion_loss_deterministic() -> None:
         del sigma
         return x * 0.5
 
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
 
     # Run twice with same seed.
     torch.manual_seed(42)
@@ -279,7 +252,7 @@ def test_diffusion_loss_batch_independence() -> None:
         del sigma
         return x * 0.9
 
-    x0 = torch.randn(4, 3, 4, 8, 8)
+    x0 = torch.randn(4, 3, 2, 5, 6)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
 
@@ -298,7 +271,7 @@ def test_diffusion_loss_perfect_denoiser() -> None:
         del sigma
         return x
 
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
     result = loss_fn(denoiser=perfect_denoiser, x0=x0)
 
     # Loss should be finite and non-negative.
@@ -315,7 +288,7 @@ def test_diffusion_loss_gradient_flow() -> None:
     class LearnableDenoiser(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.ones(1))
+            self.weight = torch.nn.Parameter(torch.ones(()))
 
         @override
         def forward(self, x: Tensor, sigma: Tensor) -> Tensor:
@@ -323,7 +296,7 @@ def test_diffusion_loss_gradient_flow() -> None:
             return x * self.weight
 
     denoiser = LearnableDenoiser()
-    x0 = torch.randn(2, 3, 4, 8, 8)
+    x0 = torch.randn(2, 3, 4, 5, 6)
 
     result = loss_fn(denoiser=denoiser.forward, x0=x0)
     loss = result["loss"].mean()
@@ -343,7 +316,7 @@ def test_diffusion_loss_large_batch() -> None:
         del sigma
         return x * 0.8
 
-    x0 = torch.randn(32, 3, 4, 8, 8)
+    x0 = torch.randn(32, 3, 4, 5, 6)
 
     result = loss_fn(denoiser=denoiser, x0=x0)
 
@@ -361,12 +334,12 @@ def test_diffusion_loss_different_dtypes() -> None:
         return x
 
     # Test with float32.
-    x0_f32 = torch.randn(2, 3, 4, 8, 8, dtype=torch.float32)
+    x0_f32 = torch.randn(2, 3, 4, 5, 6, dtype=torch.float32)
     result_f32 = loss_fn(denoiser=denoiser, x0=x0_f32)
     assert result_f32["loss"].dtype == torch.float32
 
     # Test with float64.
-    x0_f64 = torch.randn(2, 3, 4, 8, 8, dtype=torch.float64)
+    x0_f64 = torch.randn(2, 3, 4, 5, 6, dtype=torch.float64)
     result_f64 = loss_fn(denoiser=denoiser, x0=x0_f64)
     assert result_f64["loss"].dtype == torch.float64
 
@@ -379,7 +352,7 @@ def test_diffusion_loss_min_snr_gamma() -> None:
         del sigma
         return x * 0.5
 
-    x0 = torch.randn(64, 3, 8, 8)
+    x0 = torch.randn(64, 3, 5, 6)
 
     # Without Min-SNR.
     loss_fn_plain = DiffusionLoss.Config(snr_gamma=0.0).make()
@@ -405,7 +378,7 @@ def test_diffusion_loss_min_snr_gamma_gradient_flow() -> None:
     class Denoiser(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.w = torch.nn.Parameter(torch.ones(1))
+            self.w = torch.nn.Parameter(torch.ones(()))
 
         @override
         def forward(self, x: Tensor, sigma: Tensor) -> Tensor:
@@ -414,7 +387,7 @@ def test_diffusion_loss_min_snr_gamma_gradient_flow() -> None:
 
     model = Denoiser()
     loss_fn = DiffusionLoss.Config(snr_gamma=5.0).make()
-    result = loss_fn(denoiser=model.forward, x0=torch.randn(4, 3, 8, 8))
+    result = loss_fn(denoiser=model.forward, x0=torch.randn(4, 3, 5, 6))
     result["loss"].mean().backward()
     assert model.w.grad is not None
 
@@ -427,18 +400,22 @@ def test_diffusion_loss_cost_counts_the_complete_batch() -> None:
         del sigma
         return x * scale
 
+    def run(module: nn.Module, x0: Tensor) -> Tensor:
+        assert isinstance(module, DiffusionLoss)
+        return module(denoiser=denoiser, x0=x0)["loss"]
+
     config = DiffusionLoss.Config()
     measured = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 4, 4),
-        seq_len=48,
+        build_input=lambda: torch.randn(2, 3, 4, 5),
+        seq_len=3 * 4 * 5,
         batch_size=2,
         dtype=None,
-        run=lambda module, x0: _loss(module, denoiser=denoiser, x0=x0),
+        run=run,
     )
     expected = _per_element(
         target_rectified_flow,
-        elements=96,
+        elements=2 * 3 * 4 * 5,
         samples=2,
     ) + _per_sample(
         config,
@@ -545,17 +522,6 @@ def test_diffusion_loss_operand_traffic(dtype: torch.dtype) -> None:
     assert costed["flops"].sum() == fp32["flops"].sum()
     assert costed["bytes"].sum() == fp32["bytes"].sum() * dtype.itemsize // 4
     assert {key[-1] for key in costed.cells} == {dtype}
-
-
-def _loss(
-    module: nn.Module,
-    *,
-    denoiser: Callable[[Tensor, Tensor], Tensor],
-    x0: Tensor,
-) -> Tensor:
-    """Run the diffusion loss and return its ``loss`` tensor."""
-    assert isinstance(module, DiffusionLoss)
-    return module(denoiser=denoiser, x0=x0)["loss"]
 
 
 if __name__ == "__main__":

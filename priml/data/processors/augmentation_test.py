@@ -101,7 +101,7 @@ def test_center_crop_box_takes_the_centered_square() -> None:
 
 
 def test_random_horizontal_flip_mirrors_the_last_axis_with_probability_p() -> None:
-    x = torch.arange(6.0).reshape(1, 2, 3)
+    x = torch.arange(24.0).reshape(2, 3, 4)
     always: list[RandomHorizontalFlip.Input] = [{"media_tensor": x}, {}]
     never: list[RandomHorizontalFlip.Input] = [{"media_tensor": x}]
 
@@ -114,11 +114,11 @@ def test_random_horizontal_flip_mirrors_the_last_axis_with_probability_p() -> No
 
 
 def test_color_jitter_and_random_erasing_transform_only_present_media() -> None:
-    x = torch.randint(0, 256, (3, 8, 8), dtype=torch.uint8)
+    x = torch.randint(0, 256, (3, 8, 9), dtype=torch.uint8)
     jitter = ColorJitter.Config(brightness=0.0, contrast=0.0, saturation=0.0, hue=0.0)
     erase = RandomErasing.Config(p=1.0, scale=(0.5, 0.5), ratio=(1.0, 1.0), value=0.0)
     to_jitter: list[ColorJitter.Input] = [{"media_tensor": x}, {}]
-    to_erase: list[RandomErasing.Input] = [{"media_tensor": torch.ones(3, 8, 8)}, {}]
+    to_erase: list[RandomErasing.Input] = [{"media_tensor": torch.ones(3, 8, 9)}, {}]
 
     jittered = list(jitter.make()(iter(to_jitter)))
     erased = list(erase.make()(iter(to_erase)))
@@ -135,7 +135,7 @@ def test_color_jitter_and_random_erasing_transform_only_present_media() -> None:
 def test_rand_augment_applies_num_ops_and_every_op_preserves_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    x = torch.randint(0, 256, (3, 8, 8), dtype=torch.uint8)
+    x = torch.randint(0, 256, (3, 8, 9), dtype=torch.uint8)
     applied: list[float] = []
 
     def spy(img: Tensor, magnitude: float) -> Tensor:
@@ -166,11 +166,12 @@ def test_rand_augment_applies_num_ops_and_every_op_preserves_shape(
 
 def test_normalize_matches_the_mean_std_formula_and_rejects_floats() -> None:
     processor = Normalize.Config().make()
-    x = torch.randint(0, 256, (3, 1, 4, 4), dtype=torch.uint8)
+    x = torch.randint(0, 256, (3, 2, 4, 5), dtype=torch.uint8)
     samples: list[Normalize.Input] = [{"media_tensor": x}, {}]
 
     results = list(processor(iter(samples)))
 
+    # Normalize broadcasts ImageNet channel statistics over spatial dimensions.
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1, 1)
     torch.testing.assert_close(_media(results[0]), (x.float() / 255 - mean) / std)
@@ -187,7 +188,7 @@ def _media(sample: RandomHorizontalFlip.Output) -> Tensor:
 
 
 def _mixup_batch() -> MixupCutmix.Input:
-    images = torch.zeros(2, 3, 4, 4)
+    images = torch.zeros(2, 3, 4, 5)
     images[1] = 1.0
     return {"image": images, "label": torch.tensor([0, 1])}
 
@@ -195,7 +196,10 @@ def _mixup_batch() -> MixupCutmix.Input:
 def _single_label_batch() -> MixupCutmix.Input:
     # The label is a list on purpose: ``_one_hot_with_smoothing`` accepts the
     # pre-tensorized form even though ``Input`` declares a Tensor.
-    batch: dict[str, object] = {"image": torch.zeros(1, 3, 4, 4), "label": [1]}
+    batch: dict[str, object] = {
+        "image": torch.zeros(2, 3, 4, 5),
+        "label": torch.tensor([1, 1]),
+    }
     return cast(MixupCutmix.Input, batch)
 
 
@@ -223,8 +227,8 @@ def test_mixup_cutmix_mixes_images_and_labels_by_the_same_lambda(
     result = next(iter(config.make()(iter([_mixup_batch()]))))
 
     image, label = _mixed(result)
-    torch.testing.assert_close(image[0], torch.full((3, 4, 4), 0.25))
-    torch.testing.assert_close(image[1], torch.full((3, 4, 4), 0.75))
+    torch.testing.assert_close(image[0], torch.full((3, 4, 5), 0.25))
+    torch.testing.assert_close(image[1], torch.full((3, 4, 5), 0.75))
     expected = torch.tensor([[0.75, 0.25, 0, 0], [0.25, 0.75, 0, 0]])
     torch.testing.assert_close(label, expected)
 
@@ -232,14 +236,6 @@ def test_mixup_cutmix_mixes_images_and_labels_by_the_same_lambda(
 def _constant_draw(value: float) -> Callable[[float, float], float]:
     def draw(alpha: float, beta: float) -> float:
         del alpha, beta
-        return value
-
-    return draw
-
-
-def _constant_int(value: int) -> Callable[[int, int], int]:
-    def draw(low: int, high: int) -> int:
-        del low, high
         return value
 
     return draw
@@ -253,7 +249,12 @@ def test_cutmix_pastes_a_box_and_rescales_lambda_to_its_area(
     # sqrt(1 - 0.7) * 4 truncates to a 2x2 cut; the label lambda must then be
     # the box's true 12/16, not the 0.7 that was drawn.
     monkeypatch.setattr(random, "betavariate", _constant_draw(0.7))
-    monkeypatch.setattr(random, "randint", _constant_int(1))  # Box [0:2, 0:2].
+
+    def draw_box(low: int, high: int) -> int:
+        del low, high
+        return 1
+
+    monkeypatch.setattr(random, "randint", draw_box)  # Box [0:2, 0:2].
     monkeypatch.setattr(torch, "randperm", _swap_pair)
 
     result = next(iter(config.make()(iter([_mixup_batch()]))))
@@ -263,7 +264,7 @@ def test_cutmix_pastes_a_box_and_rescales_lambda_to_its_area(
     assert image[0, :, 2:, 2:].sum() == 0
     assert image[1, :, :2, :2].sum() == 0
     # 4 of 16 pixels came from the partner: lambda = 0.75.
-    torch.testing.assert_close(label, torch.tensor([[0.75, 0.25], [0.25, 0.75]]))
+    torch.testing.assert_close(label, torch.tensor([[0.8, 0.2], [0.2, 0.8]]))
 
 
 def test_mixup_cutmix_only_smooths_labels_when_not_mixing(
@@ -282,14 +283,17 @@ def test_mixup_cutmix_only_smooths_labels_when_not_mixing(
     )
     image, label = _mixed(skipped)
     torch.testing.assert_close(label, smoothed)
-    assert image.sum() == 3 * 16
+    assert image.sum() == 3 * 20
 
     # A single-sample batch has no partner to mix with.
     monkeypatch.setattr(random, "random", lambda: 0.0)
     alone = next(
         iter(MixupCutmix.Config(num_classes=4).make()(iter([_single_label_batch()]))),
     )
-    torch.testing.assert_close(_mixed(alone)[1], smoothed[1:])
+    torch.testing.assert_close(
+        _mixed(alone)[1],
+        torch.tensor([[0.025, 0.925, 0.025, 0.025]] * 2),
+    )
 
     # Both alphas zero: mixing is disabled outright.
     disabled = MixupCutmix.Config(num_classes=4, mixup_alpha=0.0, cutmix_alpha=0.0)
@@ -298,18 +302,18 @@ def test_mixup_cutmix_only_smooths_labels_when_not_mixing(
 
     # Missing fields pass through, and the stream continues past every branch.
     partial: list[MixupCutmix.Input] = [
-        {"image": torch.zeros(2, 3, 4, 4)},
+        {"image": torch.zeros(2, 3, 4, 5)},
         {},
         _mixup_batch(),
         _single_label_batch(),
         _mixup_batch(),
     ]
-    draws = iter([0.9, 0.0, 0.0, 0.0])  # Skip the first batch by prob only.
+    draws = iter([0.9, 0.0, 0.0, 0.0, 0.0])  # Skip the first batch by prob only.
     monkeypatch.setattr(random, "random", lambda: next(draws))
     streamed = list(MixupCutmix.Config(num_classes=4, prob=0.5).make()(iter(partial)))
     assert streamed[:2] == partial[:2]
     shapes = [tuple(_mixed(s)[1].shape) for s in streamed[2:]]
-    assert shapes == [(2, 4), (1, 4), (2, 4)]
+    assert shapes == [(2, 4), (2, 4), (2, 4)]
 
 
 if __name__ == "__main__":

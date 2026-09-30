@@ -20,34 +20,32 @@ _CWD: Final = Path(__file__).resolve().parent
 @pytest.mark.parametrize("cond_dim", [0, 4])
 def test_mmdit_constructor_golden(cond_dim: int) -> None:
     config = MMDiTBlock.Config()
-    config.channels_in = 8
+    config.channels_in = 4
     config.cond_dim = cond_dim
     config.attn = MultiStreamAttention.Config()
     config.attn.num_heads = 2
-    config.attn.channels_head = 4
+    config.attn.channels_head = 2
+
+    def constructor_values(module: nn.Module, input: Tensor) -> Tensor:
+        del module, input
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            module = config.make()
+            state = module.state_dict()
+            return torch.cat(
+                [
+                    golden.heads(state.values(), count=8),
+                    golden.rng_fingerprint().float(),
+                ],
+            )
+
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name=f"mmdit_constructor_cond_{cond_dim}",
         build_module=nn.Identity,
-        build_input=lambda: torch.zeros(1),
-        run=lambda _module, _input: _constructor_state(config),
+        build_input=lambda: torch.zeros(()),
+        run=constructor_values,
     )
-
-
-def _constructor_state(config: MMDiTBlock.Config) -> Tensor:
-    """Build inside the runner so golden replay cannot overwrite initialization."""
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(0)
-        module = config.make()
-        state = module.state_dict()
-        # Leading elements pin each parameter's init; the fingerprint pins the draw
-        # count in 8 values instead of the 5 KB Mersenne state.
-        return torch.cat(
-            [
-                golden.heads(state.values(), count=8),
-                golden.rng_fingerprint().float(),
-            ],
-        )
 
 
 if __name__ == "__main__":

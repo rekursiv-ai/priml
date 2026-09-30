@@ -22,9 +22,9 @@ def test_it_converts_nats_per_byte_to_bits() -> None:
     """
     metric = _metric()
     metric.update(
-        torch.full((1, 2), math.log(2)),
-        label=torch.tensor([[1, 1]]),
-        token_bytes=torch.tensor([0, 1]),
+        torch.full((2, 3), math.log(2)),
+        label=torch.ones(2, 3, dtype=torch.int64),
+        token_bytes=torch.tensor([0, 1, 2]),
     )
     assert metric.compute()["bpb"] == pytest.approx(1.0)
 
@@ -39,8 +39,8 @@ def test_a_longer_token_lowers_the_score() -> None:
     def score(*, token_bytes: list[int]) -> float:
         metric = _metric()
         metric.update(
-            torch.full((1, 2), math.log(2)),
-            label=torch.tensor([[1, 1]]),
+            torch.full((2, 3), math.log(2)),
+            label=torch.ones(2, 3, dtype=torch.int64),
             token_bytes=torch.tensor(token_bytes),
         )
         return metric.compute()["bpb"]
@@ -59,7 +59,7 @@ def test_zero_byte_tokens_leave_both_sums() -> None:
     metric.update(
         torch.tensor([[math.log(2), 1e6]]),
         label=torch.tensor([[1, 0]]),
-        token_bytes=torch.tensor([0, 1]),
+        token_bytes=torch.tensor([0, 1, 2]),
     )
     assert metric.compute()["bpb"] == pytest.approx(1.0)
 
@@ -73,17 +73,17 @@ def test_counts_accumulate_across_batches() -> None:
     metric = _metric()
     token_bytes = torch.tensor([0, 1])
     metric.update(
-        torch.full((1, 4), math.log(2)),
-        label=torch.ones(1, 4, dtype=torch.int64),
+        torch.full((2, 4), math.log(2)),
+        label=torch.ones(2, 4, dtype=torch.int64),
         token_bytes=token_bytes,
     )
     metric.update(
-        torch.full((1, 1), 3 * math.log(2)),
-        label=torch.ones(1, 1, dtype=torch.int64),
+        torch.full((2, 3), 3 * math.log(2)),
+        label=torch.ones(2, 3, dtype=torch.int64),
         token_bytes=token_bytes,
     )
     # (4 + 3) bits over 5 bytes, not the mean of 1.0 and 3.0.
-    assert metric.compute()["bpb"] == pytest.approx(7 / 5)
+    assert metric.compute()["bpb"] == pytest.approx(13 / 7)
 
 
 def test_padding_rows_leave_both_sums() -> None:
@@ -97,7 +97,7 @@ def test_padding_rows_leave_both_sums() -> None:
     metric.update(
         torch.full((3, 2), math.log(2)),
         label=torch.tensor([[1, 1], [1, 1], [-1, -1]]),
-        token_bytes=torch.tensor([0, 1]),
+        token_bytes=torch.tensor([0, 1, 2]),
         valid_count=2,
     )
     # Four scored tokens of one byte each, and the padded row absent.
@@ -110,9 +110,9 @@ def test_a_valid_count_outside_the_batch_is_rejected(valid_count: int) -> None:
     metric = _metric()
     with pytest.raises(ValueError, match="outside the batch"):
         metric.update(
-            torch.zeros(2, 2),
-            label=torch.ones(2, 2, dtype=torch.int64),
-            token_bytes=torch.tensor([0, 1]),
+            torch.zeros(2, 3),
+            label=torch.ones(2, 3, dtype=torch.int64),
+            token_bytes=torch.tensor([0, 1, 2]),
             valid_count=valid_count,
         )
 
@@ -135,11 +135,11 @@ def test_compute_sums_across_ranks_before_dividing(
     monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
     metric = _metric()
     metric.update(
-        torch.full((1, 2), math.log(2)),
-        label=torch.tensor([[1, 2]]),
-        token_bytes=torch.tensor([0, 1, 4]),
+        torch.full((2, 3), math.log(2)),
+        label=torch.ones(2, 3, dtype=torch.int64),
+        token_bytes=torch.tensor([0, 1, 2, 4]),
     )
-    assert metric.compute()["bpb"] == pytest.approx(5 / 8)
+    assert metric.compute()["bpb"] == pytest.approx(1.0)
 
 
 def test_a_shape_disagreement_is_rejected() -> None:
@@ -147,9 +147,9 @@ def test_a_shape_disagreement_is_rejected() -> None:
     metric = _metric()
     with pytest.raises(ValueError, match="targets"):
         metric.update(
-            torch.zeros(1, 3),
-            label=torch.ones(1, 2, dtype=torch.int64),
-            token_bytes=torch.tensor([0, 1]),
+            torch.zeros(2, 3),
+            label=torch.ones(3, 2, dtype=torch.int64),
+            token_bytes=torch.tensor([0, 1, 2]),
         )
 
 
@@ -167,9 +167,9 @@ def test_an_empty_eval_refuses_rather_than_scoring_zero() -> None:
 def test_state_round_trips() -> None:
     metric = _metric()
     metric.update(
-        torch.full((1, 2), math.log(2)),
-        label=torch.ones(1, 2, dtype=torch.int64),
-        token_bytes=torch.tensor([0, 1]),
+        torch.full((2, 3), math.log(2)),
+        label=torch.ones(2, 3, dtype=torch.int64),
+        token_bytes=torch.tensor([0, 1, 2]),
     )
     restored = _metric()
     restored.load_state_dict(metric.state_dict())
@@ -180,9 +180,9 @@ def test_reset_clears_both_sums() -> None:
     """After a reset the metric holds nothing, so it refuses to score."""
     metric = _metric()
     metric.update(
-        torch.full((1, 2), math.log(2)),
-        label=torch.ones(1, 2, dtype=torch.int64),
-        token_bytes=torch.tensor([0, 1]),
+        torch.full((2, 3), math.log(2)),
+        label=torch.ones(2, 3, dtype=torch.int64),
+        token_bytes=torch.tensor([0, 1, 2]),
     )
     metric.reset()
     assert metric.state_dict() == {"nats": 0.0, "bytes": 0}

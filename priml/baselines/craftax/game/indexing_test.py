@@ -21,31 +21,31 @@ from priml.baselines.craftax.game.indexing import (
 
 
 def _grid() -> Tensor:
-    return torch.arange(2 * 4 * 4, dtype=torch.int32).reshape(2, 4, 4)
+    return torch.arange(2 * 3 * 4, dtype=torch.int32).reshape(2, 3, 4)
 
 
 def test_gather_reads_the_addressed_tile() -> None:
     values = gather_tiles(_grid(), torch.tensor([[1, 2], [0, 3]]))
-    assert values.tolist() == [6, 19]
+    assert values.tolist() == [6, 15]
 
 
 def test_gather_wraps_a_negative_index_like_python() -> None:
     # Measured against the reference: row -1 is the last row, not row 0. A
     # creature stepping off the top edge reads the bottom one.
     values = gather_tiles(_grid(), torch.tensor([[-1, 0], [0, -3]]))
-    assert values.tolist() == [12, 17]
+    assert values.tolist() == [8, 13]
 
 
 def test_gather_past_the_end_reads_the_nearest_edge() -> None:
     values = gather_tiles(_grid(), torch.tensor([[4, 0], [99, 99]]))
-    assert values.tolist() == [12, 31]
+    assert values.tolist() == [8, 23]
 
 
 def test_gather_wraps_once_then_clamps_on_a_rectangular_grid() -> None:
     # Three rows, five columns, so a helper that mixed up the two extents reads
     # the wrong tile. A negative wraps ONCE: -4 rows is -1 after the wrap, which
     # then clamps to the first row rather than wrapping again.
-    grid = torch.arange(15, dtype=torch.int32).reshape(1, 3, 5)
+    grid = torch.arange(2 * 3 * 5, dtype=torch.int32).reshape(2, 3, 5)
     positions = [(-4, -6), (-3, -5), (-1, -2), (2, 7), (5, 3)]
     values = [
         int(gather_tiles(grid, torch.tensor([position]))[0]) for position in positions
@@ -82,7 +82,7 @@ def test_scatter_wraps_a_negative_index_rather_than_dropping_it() -> None:
         torch.tensor([[-1, 0], [0, -3]]),
         torch.tensor([99, 88], dtype=torch.int32),
     )
-    assert int(updated[0, 3, 0]) == 99
+    assert int(updated[0, 2, 0]) == 99
     assert int(updated[1, 0, 1]) == 88
 
 
@@ -105,7 +105,7 @@ def test_masked_scatter_writes_only_where_asked() -> None:
         torch.tensor([True, False]),
     )
     assert int(updated[0, 0, 0]) == 99
-    assert int(updated[1, 0, 0]) == 16
+    assert int(updated[1, 0, 0]) == 12
 
 
 def test_masked_scatter_still_drops_writes_past_the_end() -> None:
@@ -129,10 +129,10 @@ def test_local_view_reads_a_centered_window() -> None:
 def test_local_view_keeps_its_shape_at_a_corner() -> None:
     # A shrinking window would change the observation size depending on where
     # the player stands, which no downstream layer could consume.
-    view = local_view(_grid(), torch.tensor([[0, 0], [3, 3]]), (3, 3))
+    view = local_view(_grid(), torch.tensor([[0, 0], [2, 4]]), (3, 3))
     assert view.shape == (2, 3, 3)
     assert view[0].tolist() == [[0, 0, 0], [0, 0, 1], [0, 4, 5]]
-    assert view[1].tolist() == [[26, 27, 0], [30, 31, 0], [0, 0, 0]]
+    assert view[1].tolist() == [[19, 0, 0], [23, 0, 0], [0, 0, 0]]
 
 
 def test_local_view_pads_beyond_the_grid_with_zero() -> None:
@@ -154,8 +154,8 @@ def test_local_view_honors_the_requested_window(size: tuple[int, int]) -> None:
 
 
 def test_local_view_matches_a_manual_slice_away_from_the_edges() -> None:
-    grid = torch.arange(1 * 8 * 8, dtype=torch.int32).reshape(1, 8, 8)
-    view = local_view(grid, torch.tensor([[4, 4]]), (3, 3))
+    grid = torch.arange(2 * 7 * 8, dtype=torch.int32).reshape(2, 7, 8)
+    view = local_view(grid, torch.tensor([[4, 4], [4, 4]]), (3, 3))
     assert torch.equal(view[0], grid[0, 3:6, 3:6])
 
 

@@ -268,7 +268,7 @@ class _WeightedEvalStep:
     def train_step(self, **preprocessed_batch: object) -> TrainStepOutput:
         """Unused train step."""
         del preprocessed_batch
-        return {"loss": torch.zeros(1), "model": torch.zeros(1, 1)}
+        return {"loss": torch.zeros(1), "model": torch.zeros(2, 3)}
 
     def call_eval(self, **preprocessed_batch: object) -> object:
         """Return the batch media."""
@@ -324,7 +324,7 @@ class _WarmupStep:
         del preprocessed_batch
         self.global_step += 1
         self.local_step += 1
-        return {"loss": torch.zeros(1), "model": torch.zeros(1, 1)}
+        return {"loss": torch.zeros(1), "model": torch.zeros(2, 3)}
 
     def call_eval(self, **preprocessed_batch: object) -> object:
         """Return eval logits placeholder."""
@@ -1844,7 +1844,7 @@ def test_logged_train_loss_is_all_reduced_before_rank_zero_gate(
         step.timer_step.global_count += 1
         return {
             "loss": torch.tensor([1.0]),
-            "model": torch.zeros(1, 2),
+            "model": torch.zeros(2, 3),
             "metrics": {
                 "grad_norm": torch.tensor(2.0),
                 "param_norm": torch.tensor(3.0),

@@ -71,14 +71,13 @@ def _sparse_group(
 
 def test_sign_sgd_updates_sparse_embedding_buffers() -> None:
     weights = torch.arange(20, dtype=torch.float32).reshape(5, 4) / 10
-    local_weights = torch.zeros(4, 4, requires_grad=True)
-    local_ids = torch.tensor([2, 2, 4, 1], dtype=torch.int32)
+    local_weights = torch.zeros(3, 4, requires_grad=True)
+    local_ids = torch.tensor([2, 4, 1], dtype=torch.int32)
     local_weights.grad = torch.tensor(
         [
             [0.1, -0.2, 0.0, 0.4],
             [0.3, 0.2, 0.0, -0.1],
             [-0.5, 0.0, 0.7, 0.2],
-            [0.0, 0.9, -0.8, 0.0],
         ],
     )
     expected = weights.clone()
@@ -151,13 +150,13 @@ def test_aggregate_distributed_defaults_true_and_is_settable() -> None:
     it False the sparse step is purely local; the actual update is identical to
     the single-process case (no distributed init here), which this exercises.
     """
-    assert SignSGD([torch.zeros(2, 2)]).aggregate_distributed is True
+    assert SignSGD([torch.zeros(2, 3)]).aggregate_distributed is True
 
     weights = torch.arange(8, dtype=torch.float32).reshape(2, 4) / 10
-    local_weights = torch.zeros(1, 4, requires_grad=True)
-    local_ids = torch.zeros(1, dtype=torch.int32)
-    grad_rows = torch.tensor([[0.1, -0.2, 0.0, 0.4]])
-    grad_ids = torch.tensor([1], dtype=torch.int32)
+    local_weights = torch.zeros(2, 4, requires_grad=True)
+    local_ids = torch.zeros(2, dtype=torch.int32)
+    grad_rows = torch.tensor([[0.1, -0.2, 0.0, 0.4], [0.2, 0.0, -0.1, 0.3]])
+    grad_ids = torch.tensor([1, 1], dtype=torch.int32)
     opt = SignSGD(
         [weights, local_weights, local_ids],
         lr=0.1,
@@ -170,7 +169,7 @@ def test_aggregate_distributed_defaults_true_and_is_settable() -> None:
     opt.step_sparse_embedding(grad_rows, grad_ids)
 
     # Local SignSGD applied to row 1 only: p[1] -= lr * sign(grad).
-    expected = before - 0.1 * torch.sign(grad_rows[0])
+    expected = before - 0.1 * torch.sign(grad_rows.sum(dim=0))
     torch.testing.assert_close(weights[1], expected)
     torch.testing.assert_close(weights[0], torch.arange(4, dtype=torch.float32) / 10)
 
@@ -342,7 +341,7 @@ def test_sparse_parts_need_both_ids_and_weights() -> None:
 def test_step_sparse_embedding_ignores_a_plain_dense_group() -> None:
     p = torch.nn.Parameter(torch.ones(2, 3))
     opt = SignSGD([p], lr=0.1)
-    opt.step_sparse_embedding(torch.ones(1, 3), torch.zeros(1, dtype=torch.int32))
+    opt.step_sparse_embedding(torch.ones(2, 3), torch.zeros(2, dtype=torch.int32))
     torch.testing.assert_close(p, torch.ones(2, 3))
 
 
@@ -413,10 +412,10 @@ def test_distributed_dense_step_without_decay_only_signs(
 ) -> None:
     del single_rank_group
     _world_of_two(monkeypatch)
-    p = torch.nn.Parameter(torch.ones(2, 2))
-    p.grad = torch.tensor([[1.0, -1.0], [0.0, 0.0]])
+    p = torch.nn.Parameter(torch.ones(2, 3))
+    p.grad = torch.tensor([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0]])
     SignSGD([p], lr=0.1, weight_decay=0.0).step()
-    torch.testing.assert_close(p, torch.tensor([[0.9, 1.1], [1.0, 1.0]]))
+    torch.testing.assert_close(p, torch.tensor([[0.9, 1.1, 1.0], [1.0, 1.0, 1.0]]))
 
 
 def test_distributed_dense_step_with_no_touched_rows_is_a_noop(
@@ -425,10 +424,10 @@ def test_distributed_dense_step_with_no_touched_rows_is_a_noop(
 ) -> None:
     del single_rank_group
     _world_of_two(monkeypatch)
-    p = torch.nn.Parameter(torch.ones(2, 2))
-    p.grad = torch.zeros(2, 2)
+    p = torch.nn.Parameter(torch.ones(2, 3))
+    p.grad = torch.zeros(2, 3)
     SignSGD([p], lr=0.1, weight_decay=0.5).step()
-    torch.testing.assert_close(p, torch.ones(2, 2))
+    torch.testing.assert_close(p, torch.ones(2, 3))
 
 
 def test_sparse_distributed_step_rejects_noncontiguous_params() -> None:

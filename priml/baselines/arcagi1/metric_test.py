@@ -12,7 +12,11 @@ import numpy as np
 import pytest
 import torch
 
-from priml.baselines.arcagi1.augmentation import ColorDihedral, SpatialAugmentation
+from priml.baselines.arcagi1.augmentation import (
+    ArcSpec,
+    ColorDihedral,
+    SpatialAugmentation,
+)
 from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
     PassK,
@@ -122,22 +126,22 @@ def test_valid_count_truncates_before_voting() -> None:
 def test_votes_accumulate_across_batches() -> None:
     """Views of one puzzle arrive in different batches and must still group."""
     metric = _metric()
-    labels = torch.full((1, 9), 3, dtype=torch.int64)
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
     wrong = labels.clone()
-    wrong[0, 0] = 7
-    identifiers = torch.zeros(1, dtype=torch.int64)
+    wrong[:, 0] = 7
+    identifiers = torch.zeros(2, dtype=torch.int64)
     metric.update(
-        _packed(wrong, torch.zeros(1)),
+        _packed(wrong, torch.zeros(2)),
         label=labels,
         puzzle_identifiers=identifiers,
     )
     metric.update(
-        _packed(wrong, torch.zeros(1)),
+        _packed(wrong, torch.zeros(2)),
         label=labels,
         puzzle_identifiers=identifiers,
     )
     metric.update(
-        _packed(labels.clone(), torch.zeros(1)),
+        _packed(labels.clone(), torch.zeros(2)),
         label=labels,
         puzzle_identifiers=identifiers,
     )
@@ -148,12 +152,12 @@ def test_votes_accumulate_across_batches() -> None:
 def test_grid_is_read_from_the_end() -> None:
     """Diagnostic columns between the halt logit and the grid are ignored."""
     metric = _metric()
-    labels = torch.full((1, 9), 3, dtype=torch.int64)
-    padded = torch.cat([torch.zeros(1, 6), labels.float()], dim=-1)
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
+    padded = torch.cat([torch.zeros(2, 6), labels.float()], dim=-1)
     metric.update(
         padded,
         label=labels,
-        puzzle_identifiers=torch.zeros(1, dtype=torch.int64),
+        puzzle_identifiers=torch.zeros(2, dtype=torch.int64),
     )
     assert metric.compute()["pass@1"] == 1.0
 
@@ -164,11 +168,11 @@ def test_empty_metric_reports_zero() -> None:
 
 def test_state_round_trips() -> None:
     metric = _metric()
-    labels = torch.full((1, 9), 3, dtype=torch.int64)
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(
-        _packed(labels.clone(), torch.zeros(1)),
+        _packed(labels.clone(), torch.zeros(2)),
         label=labels,
-        puzzle_identifiers=torch.zeros(1, dtype=torch.int64),
+        puzzle_identifiers=torch.zeros(2, dtype=torch.int64),
     )
     restored = _metric()
     restored.load_state_dict(metric.state_dict())
@@ -183,8 +187,13 @@ def test_canonical_votes_restore_augmented_views_and_cap_by_confidence(
     answer = np.array([[5]], dtype=np.uint8)
     wrong = np.array([[6]], dtype=np.uint8)
     rng = np.random.default_rng(7)
-    name, transform = ColorDihedral.Config().make().sample("task", rng=rng)
-    pack = SpatialAugmentation.Config(max_grid=3).make()
+    transform_config = ColorDihedral.Config()
+    transform_config.separator = ArcSpec().puzzle_id_separator
+    name, transform = transform_config.make().sample("task", rng=rng)
+    pack_config = SpatialAugmentation.Config(spec=ArcSpec())
+    assert isinstance(pack_config.spec, ArcSpec)
+    pack_config.spec.max_grid = 3
+    pack = pack_config.make()
     original_media, original_answer = pack.pack(
         source,
         answer,
@@ -228,10 +237,12 @@ def test_canonical_votes_restore_augmented_views_and_cap_by_confidence(
     capped.update(_packed(predictions, torch.tensor([-4.0, 4.0])), **batch)
     assert _pass_at(capped.compute()) == {"pass@1": 0.0, "pass@2": 0.0}
 
+    # SpatialAugmentation packs grids into its square max_grid.
     translated_media = np.pad(
         augmented_media.reshape(3, 3)[:2, :2],
         ((1, 0), (1, 0)),
     ).reshape(-1)
+    # SpatialAugmentation packs grids into its square max_grid.
     translated_wrong = np.pad(
         augmented_wrong.reshape(3, 3)[:2, :2],
         ((1, 0), (1, 0)),
@@ -270,7 +281,10 @@ def test_canonical_votes_use_configured_transform_separator(tmp_path: Path) -> N
         "task",
         rng=np.random.default_rng(7),
     )
-    pack = SpatialAugmentation.Config(max_grid=3).make()
+    pack_config = SpatialAugmentation.Config(spec=ArcSpec())
+    assert isinstance(pack_config.spec, ArcSpec)
+    pack_config.spec.max_grid = 3
+    pack = pack_config.make()
     media, prediction = pack.pack(
         transform(source),
         transform(answer),
@@ -303,7 +317,10 @@ def test_canonical_equal_votes_keep_first_view_order(
 ) -> None:
     source = np.array([[2]], dtype=np.uint8)
     answer = np.array([[8]], dtype=np.uint8)
-    pack = SpatialAugmentation.Config(max_grid=2).make()
+    pack_config = SpatialAugmentation.Config(spec=ArcSpec())
+    assert isinstance(pack_config.spec, ArcSpec)
+    pack_config.spec.max_grid = 2
+    pack = pack_config.make()
     media = pack.pack(source, answer, training=False, rng=np.random.default_rng(0))[0]
     predictions = [
         pack.pack(
@@ -337,7 +354,10 @@ def test_canonical_equal_votes_keep_first_view_order(
 # ``[[6]]``. So ``a`` is half solved and ``b`` fully solved.
 def _two_input_tree(tmp_path: Path) -> dict[str, object]:
     """Tasks ``a`` (two test inputs) and ``b`` (one); every view answers ``[[5]]``."""
-    pack = SpatialAugmentation.Config(max_grid=2).make()
+    pack_config = SpatialAugmentation.Config(spec=ArcSpec())
+    assert isinstance(pack_config.spec, ArcSpec)
+    pack_config.spec.max_grid = 2
+    pack = pack_config.make()
     inputs = [
         np.array([[2]], dtype=np.uint8),
         np.array([[3]], dtype=np.uint8),

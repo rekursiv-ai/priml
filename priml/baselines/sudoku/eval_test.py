@@ -84,7 +84,7 @@ class Stack(Protocol):
 
 
 def write_dataset(root: Path) -> Path:
-    """Write a solvable-shaped fixture: 16 train groups x 3 views, 6 test rows.
+    """Write a solvable-shaped fixture: 3 train groups x 3 views, 2 test rows.
 
     Inputs keep ~35% of the solution as givens and blank the rest, and cell 0 is
     always blank, so harvest unstuck starts and search pins have cells to act
@@ -99,8 +99,8 @@ def write_dataset(root: Path) -> Path:
     """
     rng = np.random.default_rng(0)
     for split, rows, groups in (
-        ("train", 48, np.arange(0, 49, 3)),
-        ("test", 6, np.arange(7)),
+        ("train", 9, np.arange(0, 10, 3)),
+        ("test", 2, np.arange(3)),
     ):
         labels = rng.integers(2, 11, (rows, 81))
         inputs = np.where(rng.random((rows, 81)) < 0.35, labels, 1)
@@ -159,7 +159,7 @@ def test_golden_replays_bit_for_bit(case: str, tmp_path: Path) -> None:
 
 
 class _Harness:
-    """Tiny, size-only configs of one port's runners, rooted at ``scratch``."""
+    """Configurations of one port's runners, rooted at ``scratch``."""
 
     def __init__(self, stack: Stack, scratch: Path) -> None:
         self.trainer = cast("_TrainerModule", stack.trainer)
@@ -168,10 +168,14 @@ class _Harness:
         self.data = scratch / "data"
 
     def model(self) -> trm.TRM.Config:
-        """Return the generator architecture, shrunk by size."""
+        """Return the generator architecture."""
         cfg = self.eval.TRM.Config()
+        cfg.vocab_size = 11
+        cfg.puzzle_grid_shape = (81,)
+        cfg.pos2d_grid_shape = (9, 9)
+        cfg.pos2d_box_shape = (3, 3)
         cfg.channels_in = 4
-        cfg.num_heads = 1
+        cfg.num_heads = 2
         cfg.num_layers = 1
         cfg.slow_cycles = 1
         cfg.fast_cycles = 1
@@ -181,28 +185,28 @@ class _Harness:
         return cfg
 
     def search(self) -> HpsSearch.Config:
-        """Return the search policy, shrunk by tree size and ACT depth."""
+        """Return the search policy."""
         cfg = self.eval.HpsSearch.Config()
-        cfg.max_act_steps = 3
-        cfg.acceptance_checkpoints = (2, 3)
+        cfg.max_act_steps = 2
+        cfg.acceptance_checkpoints = (1,)
         cfg.dtype_autocast = None
-        cfg.search_depth = 2
+        cfg.search_depth = 1
         cfg.search_candidates = 2
         cfg.search_cell_attempts = 1
-        cfg.search_budget = 8
-        cfg.search_max_rows = 64
+        cfg.search_budget = 2
+        cfg.search_max_rows = 16
         return cfg
 
     def verifier_model(self) -> SudokuVerifier.Config:
-        """Return the verifier architecture, shrunk by size."""
+        """Return the verifier architecture."""
         cfg = self.eval.SudokuVerifier.Config()
         cfg.width = 4
         cfg.depth = 1
-        cfg.heads = 1
+        cfg.heads = 2
         return cfg
 
     def generator(self, name: str, seed: int) -> str:
-        """Train a two-step generator; return its logical checkpoint path."""
+        """Train a three-step generator; return its logical checkpoint path."""
         cfg = self.trainer.Trainer.Config()
         cfg.experiment_name = name
         cfg.base_dir = self.scratch
@@ -210,14 +214,14 @@ class _Harness:
         cfg.runtime.device = "cpu"
         cfg.model = self.model()
         cfg.dataset.working_dir = self.data
-        cfg.dataset.batch_size = 4
-        cfg.max_steps = 2
-        cfg.max_act_steps = 3
+        cfg.dataset.batch_size = 2
+        cfg.max_steps = 3
+        cfg.max_act_steps = 2
         cfg.num_steps_eval = float("inf")
         cfg.eval_warmup_batches = 0
         cfg.dtype_autocast = None
         cfg.make().run()
-        return f"/runs/{name}/checkpoints/step_00000002.pt"
+        return f"/runs/{name}/checkpoints/step_00000003.pt"
 
     def harvest(self, checkpoint: str) -> Path:
         """Harvest a tiny corpus from ``checkpoint``; return its directory."""
@@ -226,15 +230,15 @@ class _Harness:
         cfg.harvest_source_checkpoint = checkpoint
         cfg.model = self.model()
         cfg.working_dir = "/data"
-        cfg.group_count = 16
+        cfg.group_count = 3
         cfg.views_per_group = 1
         cfg.max_act_steps = 2
-        cfg.checkpoints = (1, 2)
+        cfg.checkpoints = (1,)
         cfg.search_depth = 1
         cfg.search_candidates = 2
         cfg.search_cell_attempts = 1
         cfg.search_budget = 2
-        cfg.random_corruption_strengths = (1, 2)
+        cfg.random_corruption_strengths = (1,)
         cfg.random_starts_per_strength = 1
         cfg.dtype_autocast = None
         cfg.device = "cpu"
@@ -250,15 +254,15 @@ class _Harness:
         cfg.dataset.working_dir = "/data"
         cfg.dataset.harvest_dir = "/runs/harvest/harvest"
         cfg.dataset.node_corpus = "/runs/harvest/harvest/node_corpus.npz"
-        cfg.dataset.batch_size = 20
-        cfg.dataset.steps_per_epoch = 2
-        cfg.dataset.train_group_end = 10
-        cfg.dataset.calibration_group_end = 13
-        cfg.dataset.holdout_group_end = 16
-        cfg.dataset.dev_puzzles = 6
+        cfg.dataset.batch_size = 2
+        cfg.dataset.steps_per_epoch = 1
+        cfg.dataset.train_group_end = 1
+        cfg.dataset.calibration_group_end = 2
+        cfg.dataset.holdout_group_end = 3
+        cfg.dataset.dev_puzzles = 2
         cfg.device = "cpu"
         cfg.dtype = None
-        cfg.max_steps = 4
+        cfg.max_steps = 3
         return cfg.make().run()
 
     def dumps(self, name: str) -> dict[str, Tensor]:
@@ -338,10 +342,10 @@ def _record_hps(h: _Harness) -> dict[str, Tensor]:
     cfg.checkpoint_path = checkpoint
     cfg.model = h.model()
     cfg.dataset.working_dir = h.data
-    cfg.dataset.batch_size = 4
+    cfg.dataset.batch_size = 2
     cfg.search = h.search()
-    cfg.evaluation_count = 6
-    # A two-step generator's halt logits sit near its -5 init, far below the
+    cfg.evaluation_count = 2
+    # A three-step generator's halt logits sit near its -5 init, far below the
     # recipe's 7.875. A probe pass that accepts every root reads them; the
     # thresholds are then placed among them -- the root one at the median, the
     # node one a quartile lower -- so the golden records root accepts, search
@@ -365,9 +369,9 @@ def _record_lock(h: _Harness) -> dict[str, Tensor]:
     cfg.runtime.device = "cpu"
     cfg.model = h.model()
     cfg.dataset.working_dir = h.data
-    cfg.dataset.batch_size = 4
+    cfg.dataset.batch_size = 2
     cfg.search = h.search()
-    cfg.evaluation_count = 6
+    cfg.evaluation_count = 2
     views = h.eval.NINE_VIEWS
     cfg.members = (
         h.eval.Member(gen_a, views[0]),
@@ -402,15 +406,15 @@ def _record_sieve(h: _Harness) -> dict[str, Tensor]:
     cfg.checkpoint_path = checkpoint
     cfg.model = h.model()
     cfg.dataset.working_dir = h.data
-    cfg.dataset.batch_size = 4
+    cfg.dataset.batch_size = 2
     cfg.search = h.search()
-    cfg.views = h.eval.NINE_VIEWS[:2]
-    cfg.tail_search = (2, 2, 1, 8)
-    cfg.evaluation_count = 6
+    cfg.views = h.eval.NINE_VIEWS[:1]
+    cfg.tail_search = (1, 1, 1, 1)
+    cfg.evaluation_count = 2
     cfg.verifier_checkpoints = members
     acceptor = h.eval.VerifierAcceptor.Config()
     acceptor.model = h.verifier_model()
-    # Four-step verifiers score every grid near zero, so the recipe's 0 locks
+    # Three-step verifiers score every grid near zero, so the recipe's 0 locks
     # nothing. The threshold is the median committee score on the test
     # puzzles' givens-only boards, so each round both locks and defers.
     acceptor.threshold = _committee_median(h, acceptor, members)
@@ -447,26 +451,26 @@ def _record_node_corpus(h: _Harness) -> dict[str, Tensor]:
     cfg.harvest_source_checkpoint = checkpoint
     cfg.model = h.model()
     cfg.working_dir = "/data"
-    cfg.group_count = 16
+    cfg.group_count = 3
     cfg.max_act_steps = 2
-    cfg.checkpoints = (1, 2)
-    cfg.search_max_rows = 64
+    cfg.checkpoints = (1,)
+    cfg.search_max_rows = 16
     cfg.dtype_autocast = None
     cfg.device = "cpu"
     # Every root enters the frontier: a tiny model's q never clears 0.
     cfg.make().regenerate_node_corpus(
-        dev_puzzles=6,
-        batch_size=4,
-        search_depth=2,
+        dev_puzzles=2,
+        batch_size=2,
+        search_depth=1,
         search_candidates=2,
         search_cell_attempts=1,
-        search_budget=6,
+        search_budget=2,
     )
     return h.dumps("harvest")
 
 
 def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
-    """Return a tiny from-scratch pipeline: 4 steps in 2-step segments."""
+    """Return a 4-step pipeline with 2-step evaluation segments."""
     cfg = h.eval.Reproduction.Config()
     cfg.study_name = "sudoku"
     cfg.experiment_name = name
@@ -475,7 +479,7 @@ def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
     generator = h.trainer.Trainer.Config()
     generator.model = h.model()
     generator.dataset.working_dir = h.data
-    generator.dataset.batch_size = 4
+    generator.dataset.batch_size = 2
     generator.dataset.augment = True  # The recipe's; draws from the segment seed.
     generator.max_steps = 4
     generator.max_act_steps = 3
@@ -484,7 +488,7 @@ def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
     cfg.generator = generator
     cfg.generator_names = (f"{name}_generator",)
     cfg.eval_every_steps = 2
-    cfg.dev_screen_count = 4
+    cfg.dev_screen_count = 2
     # A two-step model never reaches the recipe's 0.98 gate; opening it makes
     # every boundary run its dev screen.
     cfg.screen_gate_det_accuracy = 0.0
@@ -492,12 +496,12 @@ def _pipeline(h: _Harness, name: str) -> _PipelineConfig:
 
 
 def _full_eval_defaults(h: _Harness, full_eval: _ProtocolConfig) -> None:
-    """Shrink a pipeline's full-set protocol by size."""
+    """Configure a pipeline's full-set protocol for the shrunk fixture."""
     full_eval.model = h.model()
     full_eval.dataset.working_dir = h.data
-    full_eval.dataset.batch_size = 4
+    full_eval.dataset.batch_size = 2
     full_eval.search = h.search()
-    full_eval.evaluation_count = 4
+    full_eval.evaluation_count = 2
 
 
 def _run_pipeline(
@@ -544,35 +548,35 @@ def _record_repro_sieve(h: _Harness) -> dict[str, Tensor]:
     cfg.harvest = h.eval.Harvest.Config()
     cfg.harvest.model = h.model()
     cfg.harvest.working_dir = "/data"
-    cfg.harvest.group_count = 16
+    cfg.harvest.group_count = 3
     cfg.harvest.views_per_group = 1
     cfg.harvest.max_act_steps = 2
-    cfg.harvest.checkpoints = (1, 2)
+    cfg.harvest.checkpoints = (1,)
     cfg.harvest.search_depth = 1
     cfg.harvest.search_candidates = 2
     cfg.harvest.search_cell_attempts = 1
     cfg.harvest.search_budget = 2
-    cfg.harvest.random_corruption_strengths = (1, 2)
+    cfg.harvest.random_corruption_strengths = (1,)
     cfg.harvest.random_starts_per_strength = 1
     cfg.harvest.dtype_autocast = None
     cfg.verifier_names = tuple(f"repro_verifier_s{s}" for s in range(3))
     cfg.verifier.model = h.verifier_model()
     cfg.verifier.dataset.working_dir = "/data"
-    cfg.verifier.dataset.batch_size = 20
-    cfg.verifier.dataset.steps_per_epoch = 2
-    cfg.verifier.dataset.train_group_end = 10
-    cfg.verifier.dataset.calibration_group_end = 13
-    cfg.verifier.dataset.holdout_group_end = 16
-    cfg.verifier.dataset.dev_puzzles = 6
+    cfg.verifier.dataset.batch_size = 2
+    cfg.verifier.dataset.steps_per_epoch = 1
+    cfg.verifier.dataset.train_group_end = 1
+    cfg.verifier.dataset.calibration_group_end = 2
+    cfg.verifier.dataset.holdout_group_end = 3
+    cfg.verifier.dataset.dev_puzzles = 2
     cfg.verifier.dtype = None
-    cfg.verifier.max_steps = 4
+    cfg.verifier.max_steps = 3
     sieve = h.eval.SieveEval.Config()
     _full_eval_defaults(h, sieve)
-    sieve.views = h.eval.NINE_VIEWS[:2]
-    sieve.tail_search = (2, 2, 1, 8)
+    sieve.views = h.eval.NINE_VIEWS[:1]
+    sieve.tail_search = (1, 1, 1, 1)
     acceptor = cast("VerifierAcceptor.Config", sieve.acceptor)
     acceptor.model = h.verifier_model()
-    # The recipe's 0 locks nothing on a four-step committee (see
+    # The recipe's 0 locks nothing on a three-step committee (see
     # _record_sieve), which _record_sieve already covers; locking everything
     # instead drives the pipeline's committee screens and the sieve's lock.
     acceptor.threshold = -1e9
@@ -582,7 +586,7 @@ def _record_repro_sieve(h: _Harness) -> dict[str, Tensor]:
         state = cast(
             "dict[str, dict[str, dict[str, Tensor]]]",
             torch.load(
-                h.scratch / "runs" / name / "checkpoints" / "step_00000004.pt",
+                h.scratch / "runs" / name / "checkpoints" / "step_00000003.pt",
                 weights_only=True,
             ),
         )

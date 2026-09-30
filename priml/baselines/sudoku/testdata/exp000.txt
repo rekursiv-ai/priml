@@ -147,6 +147,11 @@ SudokuTrainLoop(
                 │       ema_warmup_steps=0
                 ),
                 dataset=SudokuData.Config(
+                        spec=SudokuSpec(
+                                grid_shape=(9, 9),
+                                box_shape=(3, 3),
+                                vocab_size=11
+                        ),
                         base_dir='/opt/scratch',
                         working_dir=PosixPath('/opt/scratch/datasets/sudoku-extreme'),
                         batch_size=384,

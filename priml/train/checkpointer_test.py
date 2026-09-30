@@ -1745,7 +1745,7 @@ class _Tiny(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.fc = nn.Linear(2, 2)
+        self.fc = nn.Linear(3, 2)
 
     def reset_parameters(self) -> None:
         self.fc.reset_parameters()
@@ -1766,7 +1766,7 @@ def _shard_and_step(mesh: DeviceMesh) -> tuple[nn.Module, torch.optim.Optimizer]
     model = _Tiny()
     fully_shard(model, mesh=mesh)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
-    model(torch.randn(1, 2)).sum().backward()
+    model(torch.randn(2, 3)).sum().backward()
     optimizer.step()
     return model, optimizer
 

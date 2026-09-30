@@ -40,6 +40,7 @@ from priml.baselines.cifar10.experiments import (
 )
 from priml.baselines.cifar10.model import ConvBlock, ResNet, SpeedNet
 from priml.baselines.cifar10.train_step import Cifar10TrainStep
+from priml.lib.absent import ABSENT
 from priml.metrics.topk import TopK
 from priml.optimizers import CompositeOptimizer
 from priml.testing.experiments import ExperimentFactory
@@ -50,7 +51,7 @@ from priml.train.train_loop import TrainLoop
 _CWD: Final = Path(__file__).resolve().parent
 
 
-ALL_EXPERIMENTS: list[ExperimentFactory[Cifar10TrainLoop]] = [
+ALL_EXPERIMENTS: Final[list[ExperimentFactory[Cifar10TrainLoop]]] = [
     exp000,
     exp001,
     exp002,
@@ -326,7 +327,7 @@ def _deltas(parent: Cifar10TrainLoop, child: Cifar10TrainLoop) -> set[str]:
     return {
         name
         for name in flat_parent.keys() | flat_child.keys()
-        if flat_parent.get(name, _MISSING) != flat_child.get(name, _MISSING)
+        if flat_parent.get(name, ABSENT) != flat_child.get(name, ABSENT)
     }
 
 
@@ -357,10 +358,6 @@ def _flatten(config: DataclassInstance, prefix: str = "") -> dict[str, object]:
         else:
             flat[dotted] = value
     return flat
-
-
-_MISSING = object()
-"""Sentinel for a field only one of the two configs has."""
 
 
 def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:

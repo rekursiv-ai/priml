@@ -5,7 +5,7 @@ Hermetic: every test feeds local CSV text, so nothing here touches the network.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import json
 
@@ -30,7 +30,7 @@ def _load_array(path: Path) -> NDArray[np.int64]:
     return cast("NDArray[np.int64]", np.load(path))
 
 
-SOLUTION = (
+SOLUTION: Final = (
     "534678912672195348198342567859761423426853791713924856961537284287419635345286179"
 )
 """One valid solved grid, used to synthesize puzzles."""

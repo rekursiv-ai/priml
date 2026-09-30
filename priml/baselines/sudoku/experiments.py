@@ -25,7 +25,9 @@ a number measured against it stays comparable. Run any of them::
 from __future__ import annotations
 
 from dataclasses import field
-from typing import Final
+from typing import Self, override
+
+import math
 
 from configgle import Makes
 
@@ -52,10 +54,6 @@ from priml.runtime import SingleProcess
 from priml.train.train_loop import TrainLoop
 
 
-GRID_LEN: Final = 81
-"""Cells in a sudoku grid, fixed by the puzzle."""
-
-
 class SudokuTrainLoop(
     Makes["TrainLoop"],
     TrainLoop.Config[SudokuTrainStep.Config, SudokuData.Config],
@@ -72,6 +70,23 @@ class SudokuTrainLoop(
 
     dataset: SudokuData.Config = field(default_factory=SudokuData.Config)
     """Prepared sudoku puzzles, served from device memory."""
+
+    @override
+    def finalize(self) -> Self:
+        self.dataset.spec.finalize()
+        spec = self.dataset.spec
+        model = self.step.model
+        model.vocab_size = spec.vocab_size
+        embedding = model.embedding
+        assert isinstance(embedding, GridEmbedding.Config)
+        embedding.grid_shape = (math.prod(spec.grid_shape),)
+        for channel in embedding.channels:
+            if isinstance(channel, FactoredPositions.Config):
+                channel.grid_shape = spec.grid_shape
+                channel.box_shape = spec.box_shape
+        if isinstance(model.block, MLPMixerBlock.Config):
+            model.block.seq_len = model.total_seq_len
+        return super().finalize()
 
 
 def exp000() -> SudokuTrainLoop:
@@ -299,7 +314,7 @@ def exp005() -> Trainer.Config:
     """
     cfg = exp004()
     cfg.experiment_name = "exp005"
-    cfg.model.pos2d_grid_shape = (9, 9)
+    cfg.model.pos2d_grid_shape = (0, 0)
     return cfg
 
 
@@ -492,7 +507,7 @@ def exp011() -> HpsEval.Config:
     cfg = HpsEval.Config()
     cfg.experiment_name = "exp011"
     cfg.checkpoint_path = _final_checkpoint(parent)
-    cfg.model = parent.model
+    cfg.model = parent.copy_tree().finalize().model
     return cfg
 
 
@@ -643,7 +658,7 @@ def _final_checkpoint(parent: Trainer.Config) -> str:
 def _mixer_block() -> MLPMixerBlock.Config:
     """Return an MLP-mixer block shaped for the sudoku grid."""
     return MLPMixerBlock.Config(
-        seq_len=GRID_LEN,
+        seq_len=-1,
         prenorm=False,
         token_mixer=SwiGLU.Config(
             norm=RMSNorm.Config(),

@@ -25,16 +25,16 @@ def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
     config = CraftaxRNNTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 2
+    config.env.num_envs = 4
     config.env.optimistic_reset_ratio = 1
     # A 3x3 view, not the benchmark's 9x11: these test the UPDATE, and a
     # 8,268-wide observation makes the first layer dominate every one.
-    config.env.view = (3, 3)
-    config.rollout_steps = 2
+    config.env.view = (3, 5)
+    config.rollout_steps = 3
     config.num_epochs = 1
     config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.channels_in = 4
+    config.model.channels_in = 5
     for name, value in overrides.items():
         setattr(config, name, value)
     if "seed" in overrides:
@@ -69,7 +69,7 @@ def test_the_network_is_sized_from_the_environment() -> None:
 
 
 def test_one_step_consumes_the_declared_interactions() -> None:
-    assert _step().steps_per_update == 2 * 2
+    assert _step().steps_per_update == 4 * 3
 
 
 def test_the_loops_batch_passes_through_untouched() -> None:
@@ -116,9 +116,9 @@ def test_a_rollout_records_the_state_it_began_from() -> None:
     # there is no per-layer cache to rebuild.
     step = _step()
     rollout = step.collect()
-    assert rollout.initial_state.shape == (2, 4)
-    assert rollout.observation.shape == (2, 2, step.env.observation_size)
-    assert rollout.previous_done.shape == (2, 2)
+    assert rollout.initial_state.shape == (4, 5)
+    assert rollout.observation.shape == (3, 4, step.env.observation_size)
+    assert rollout.previous_done.shape == (3, 4)
 
 
 def test_memory_carries_across_updates() -> None:
@@ -134,8 +134,8 @@ def test_minibatches_split_workers_and_never_time() -> None:
     minibatches = list(rollout.minibatches(count=2))
     assert len(minibatches) == 2
     for minibatch in minibatches:
-        assert minibatch["observation"].shape[:2] == (2, 1)
-        assert minibatch["initial_state"].shape == (1, 4)
+        assert minibatch["observation"].shape[:2] == (3, 2)
+        assert minibatch["initial_state"].shape == (2, 5)
 
 
 def test_a_replayed_trajectory_reproduces_the_rollout_exactly() -> None:

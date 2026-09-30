@@ -695,6 +695,34 @@ config.optimizer = plain_sgd  # Bad -- recipe, not size
 Touching the recipe (optimizer, schedule, loss, init) means the test no longer
 covers the experiment. Changing size never does that.
 
+### Test shapes: distinct, never 1, smallest
+
+Two axes of the same size hide a transposed axis; a 1 broadcasts against
+anything. So every test tensor dim is at least 2, dims that meet differ
+(`torch.randn(2, 3, 4)`, never `(2, 2, 4)` or `(1, 4)`), and each is the
+smallest value that keeps it distinct: `(64, 64)` becomes `(2, 3)`, never
+`(64, 128)` or `(32, 33)`. Watch the fixed dims: batch 3 ties RGB 3.
+
+A 1 or a tie stays only with a comment naming one of: the production
+function that forces it (not the test's own helper or a docstring), a
+`pytest.raises` degenerate input, or a golden recorded from a reference
+implementation (check `git log` -- one we minted is re-minted).
+
+A shape change is a coupled edit. In the same change, update the cost call's
+`batch_size`/`seq_len`, any capacity the new size must fit (cache `max_seq`,
+pooling floors), labels that must stay in range, and expected values -- as
+arithmetic from the shape, never a pasted float. Re-mint goldens we minted.
+A test that goes red after a shape change needs its dependents fixed; going
+back to the square or the 1 is never the fix.
+
+### Module constants
+
+Every module-level constant is `UPPER_CASE` and `Final`
+(`WIDTH: Final = 4`). Shape constants shared across a module's tests stay
+globals. Inline a constant only when a config field already labels its one or
+two uses (`ffn.round_to = 1`). Mirror a production value by importing it,
+never by copying the number.
+
 ### Pprint golden tests
 
 Use the public Configgle harness when a config's defaults and finalized

@@ -13,7 +13,7 @@ reference itself; these run without a corpus or a network.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import json
 import math
@@ -37,32 +37,38 @@ from priml.lib.custom_json import DictCodec, ListCodec, loads
 from priml.metrics.bits_per_byte import BitsPerByte
 
 
-SEQ = 16
-BOS = "<|reserved_0|>"
-RESERVED = tuple(f"<|reserved_{index}|>" for index in range(16))
-VOCAB = 256 + len(RESERVED)
+SEQ: Final = 16
+BOS: Final = "<|reserved_0|>"
+RESERVED: Final = tuple(f"<|reserved_{index}|>" for index in range(16))
+VOCAB: Final = 256 + len(RESERVED)
 
 
 # Byte-level so a document's token count is its byte count, which is what lets a test
 # say which document the packer should have chosen.
-# set.
-def _encoding() -> tiktoken.Encoding:
-    """Return a byte-level vocabulary: every token is one byte, plus the reserved."""
+def _write_shard(root: Path, index: int, documents: list[str]) -> None:
+    """Write one parquet shard holding the given documents, in order."""
+    parquet.write_table(
+        pa.table({"text": documents}),
+        root / f"shard_{index:05d}.parquet",
+    )
+
+
+@pytest.fixture
+def corpus(tmp_path: Path) -> Path:
+    """Return a two-shard corpus of documents whose lengths are distinguishable."""
     ranks = {bytes([value]): value for value in range(256)}
-    return tiktoken.Encoding(
+    encoding = tiktoken.Encoding(
         name="test",
         pat_str=r".",
         mergeable_ranks=ranks,
         special_tokens={
-            name: len(ranks) + index for index, name in enumerate(RESERVED)
+            name: len(ranks) + index
+            for index, name in enumerate(
+                RESERVED,
+            )
         },
     )
-
-
-def _write_tokenizer(root: Path) -> tiktoken.Encoding:
-    """Write the vocabulary in the layout the loader reads."""
-    encoding = _encoding()
-    directory = root / "tokenizer"
+    directory = tmp_path / "tokenizer"
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "tokenizer.pkl").open("wb") as file:
         pickle.dump(encoding, file)
@@ -83,21 +89,6 @@ def _write_tokenizer(root: Path) -> tiktoken.Encoding:
             },
         ),
     )
-    return encoding
-
-
-def _write_shard(root: Path, index: int, documents: list[str]) -> None:
-    """Write one parquet shard holding the given documents, in order."""
-    parquet.write_table(
-        pa.table({"text": documents}),
-        root / f"shard_{index:05d}.parquet",
-    )
-
-
-@pytest.fixture
-def corpus(tmp_path: Path) -> Path:
-    """Return a two-shard corpus of documents whose lengths are distinguishable."""
-    _write_tokenizer(tmp_path)
     # Lengths 1..8 encoded as repeated distinct characters, so a row states
     # which documents it took and in what order.
     _write_shard(tmp_path, 0, [chr(ord("a") + n) * (n + 1) for n in range(8)])
@@ -152,7 +143,7 @@ def test_the_largest_fitting_document_is_taken_first(corpus: Path) -> None:
     text = data.tokenizer.encoding.decode(
         [int(token) for token in row if int(token) < 256],
     )
-    # Documents are 'a', 'bb', ... 'hhhhhhhh'; each carries a BOS the decode
+    # Documents are 'a', 'bb', ... 'hhhhhhhh'; each carries a BOS marker the decode
     # above drops. A row of 17 slots takes the 8-token document first.
     assert text.startswith("hhhhhhhh")
 
@@ -166,7 +157,7 @@ def test_a_row_is_filled_by_cropping_the_shortest_document(corpus: Path) -> None
     data = _data(corpus)
     batch = next(iter(data.train_dataloader()))
     # A padded position would be a zero the vocabulary never emits here, since
-    # every document contributes its own byte and a BOS.
+    # every document contributes its own byte and a BOS marker.
     assert batch["media"].shape == (2, SEQ)
     assert int(batch["media"].min()) >= 0
     assert not bool((batch["media"] == batch["media"][0, 0]).all())
@@ -285,7 +276,12 @@ def test_the_byte_table_travels_with_the_batch(corpus: Path) -> None:
     assert batch["token_bytes"].shape == (VOCAB,)
     # Reserved tokens carry no bytes, which is what keeps document boundaries
     # out of the denominator.
-    assert int(batch["token_bytes"][-len(RESERVED) :].sum()) == 0
+    assert (
+        int(
+            batch["token_bytes"][-len(RESERVED) :].sum(),
+        )
+        == 0
+    )
 
 
 def test_an_evaluation_extent_that_is_not_whole_batches_is_rejected(
@@ -356,7 +352,7 @@ def test_a_recipe_without_a_fingerprint_is_rejected(corpus: Path) -> None:
     exists to prevent.
     """
     (corpus / "tokenizer" / "tokenizer_recipe.json").write_text(
-        json.dumps({"bos_token": BOS}),
+        json.dumps({"bos_token": "<|reserved_0|>"}),
     )
     with pytest.raises(ValueError, match="token_bytes_sha256"):
         _data(corpus)
@@ -492,7 +488,7 @@ def prepared_config(tmp_path: Path) -> NanoChatData.Config:
         "byte_tables": {
             "primary": {
                 "file": "token_bytes_primary.npy",
-                "total_on_eval_y": 16,
+                "total_on_eval_y": SEQ,
             },
             "literal": {
                 "file": "token_bytes_literal.npy",
@@ -579,9 +575,9 @@ def test_prepared_evaluation_replays_packed_rows_and_primary_byte_rule(
             )
             metric.update(torch.ones_like(batch["label"], dtype=torch.float32), **batch)
         assert seen == [[2, 0, 4, 1], [1, 2, 3, 0]]
-        assert metric.bytes == 16
+        assert metric.bytes == SEQ
         assert metric.nats == 7
-        assert metric.compute()["bpb"] == pytest.approx(7 / (math.log(2) * 16))
+        assert metric.compute()["bpb"] == pytest.approx(7 / (math.log(2) * SEQ))
 
 
 @pytest.mark.parametrize(

@@ -69,12 +69,13 @@ def test_one_layer_pretrained_qwen3_graft(tmp_path: Path) -> None:
     for block in graft.blocks:
         block.attn.attn_kernel = SdpaNaive.Config().make()
     _assert_transferred(source, graft)
-    tokens = torch.tensor([[1, 2, 3]], device="cuda")
-    other = torch.randn(1, 2, config.channels_in, device="cuda")
+    tokens = torch.tensor([[1, 2, 3], [4, 5, 6]], device="cuda")
+    other = torch.randn(2, 3, config.channels_in, device="cuda")
+    # A mask is [..., S_i, sum(S_j)]; one stream makes it square.
     mask = torch.cat(
         (
             torch.full((3, 3), float("-inf"), device="cuda").triu(1),
-            torch.full((3, 2), float("-inf"), device="cuda"),
+            torch.full((3, 3), float("-inf"), device="cuda"),
         ),
         -1,
     )
@@ -106,7 +107,12 @@ def test_full_depth_pretrained_qwen3_graft() -> None:
     torch.cuda.reset_peak_memory_stats()
     source = Qwen3.load(repo, device="cuda", dtype=torch.bfloat16).eval()
     graft = Qwen3MMDiTGraft.load(repo, device="cuda", dtype=torch.bfloat16).eval()
-    _use_naive_attention(source, graft=graft)
+    for block in source.blocks:
+        assert isinstance(block, TransformerBlock)
+        assert isinstance(block.attn, SelfAttention)
+        block.attn.attn_kernel = SdpaNaive.Config().make()
+    for block in graft.blocks:
+        block.attn.attn_kernel = SdpaNaive.Config().make()
     assert len(graft.blocks) == source.num_layers
     assert source.num_layers == 28
     _assert_transferred(source, graft=graft)
@@ -129,16 +135,6 @@ def test_full_depth_pretrained_qwen3_graft() -> None:
         peak,
     )
     assert peak < 8 * 1024**3
-
-
-def _use_naive_attention(source: Qwen3, *, graft: Qwen3MMDiTGraft) -> None:
-    """Put both stacks on the unfused kernel so they issue identical primitives."""
-    for block in source.blocks:
-        assert isinstance(block, TransformerBlock)
-        assert isinstance(block.attn, SelfAttention)
-        block.attn.attn_kernel = SdpaNaive.Config().make()
-    for block in graft.blocks:
-        block.attn.attn_kernel = SdpaNaive.Config().make()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Final
 
 from configgle.testing import assert_pprint_golden
+from torch import Tensor
 
 import pytest
 import torch
@@ -22,7 +23,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_embedding_config_pprint() -> None:
-    config = Embedding.Config(8, 4)
+    config = Embedding.Config(2, 4)
     assert_pprint_golden(
         test_file=__file__,
         name="embedding",
@@ -34,8 +35,8 @@ def test_embedding_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="embedding",
-        build_module=lambda: Embedding.Config(8, 4).make(),
-        build_input=lambda: torch.tensor([[0, 3, 7]]),
+        build_module=Embedding.Config(2, 4).make,
+        build_input=lambda: torch.tensor([[0, 1, 0], [1, 0, 1]]),
         seed=0,
     )
 
@@ -123,7 +124,7 @@ def test_embedding_cost_is_a_gather() -> None:
 
 def test_a_multi_hot_embedding_is_as_wide_as_its_layout() -> None:
     config = _small_layout()
-    assert config.observation_size == 3 * 3 + 2
+    assert config.observation_size == 3 * 4 + 2
     assert config.channels_concat == 3 * 2 + 2
 
 
@@ -142,7 +143,7 @@ def test_multi_hot_embedding_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="multi_hot_embedding",
         build_module=config.make,
-        build_input=lambda: _draw_packed(config, batch=2),
+        build_input=lambda: _draw_packed(config),
         seed=0,
     )
 
@@ -154,14 +155,14 @@ def test_a_multi_hot_embedding_sums_each_cells_rows_then_appends_scalars() -> No
     features = embedding(rows)
     assert features.shape == (2, config.channels_concat)
     assert features.dtype == torch.bfloat16
-    ids = rows[:, :9].reshape(2, 3, 3).long() + torch.tensor(config.offsets)
+    ids = rows[:, :12].reshape(2, 3, 4).long() + torch.tensor(config.offsets)
     for row in range(2):
         for cell in range(3):
             total = torch.zeros(2)
-            for field in range(3):
+            for field in range(4):
                 total = total + embedding.weight[ids[row, cell, field]].float()
             assert torch.equal(features[row, 2 * cell : 2 * cell + 2], total.bfloat16())
-    assert torch.equal(features[:, 6:], rows[:, 9:].bfloat16())
+    assert torch.equal(features[:, 6:], rows[:, 12:].bfloat16())
 
 
 def test_a_multi_hot_backward_is_fixed_point_rounded_to_the_table_dtype() -> None:
@@ -170,16 +171,16 @@ def test_a_multi_hot_backward_is_fixed_point_rounded_to_the_table_dtype() -> Non
     rows = _draw_packed(config, batch=2)
     grad = torch.randn(2, config.channels_concat).bfloat16()
     result = embedding.backward(rows, grad)
-    assert result.shape == (9, 2)
+    assert result.shape == (8, 2)
     assert result.dtype == torch.bfloat16
     # Every value is a multiple of 2^-24 rounded once to bf16, and the scalar
     # columns contribute nothing.
     zero = embedding.backward(rows, grad * 0)
-    assert torch.equal(zero, torch.zeros(9, 2).bfloat16())
-    ids = rows[:, :9].reshape(-1, 3).long() + torch.tensor(config.offsets)
+    assert torch.equal(zero, torch.zeros(8, 2).bfloat16())
+    ids = rows[:, :12].reshape(-1, 4).long() + torch.tensor(config.offsets)
     fixed = (grad[:, :6].float().reshape(-1, 2) * 2.0**24).round().to(torch.int64)
-    total = torch.zeros(9, 2, dtype=torch.int64)
-    for field in range(3):
+    total = torch.zeros(8, 2, dtype=torch.int64)
+    for field in range(4):
         total.index_add_(0, ids[:, field], fixed)
     assert torch.equal(result, (total.double() * 2.0**-24).float().bfloat16())
 
@@ -187,8 +188,8 @@ def test_a_multi_hot_backward_is_fixed_point_rounded_to_the_table_dtype() -> Non
 def test_autograd_reaches_the_table_through_the_fixed_point_backward() -> None:
     config = _small_layout()
     embedding = config.make()
-    rows = _draw_packed(config, batch=4).reshape(2, 2, -1)
-    grad = torch.randn(2, 2, config.channels_concat).bfloat16()
+    rows = _draw_packed(config, batch=6).reshape(2, 3, -1)
+    grad = torch.randn(2, 3, config.channels_concat).bfloat16()
     embedding(rows).backward(grad)
     assert embedding.weight.grad is not None
     assert torch.equal(embedding.weight.grad, embedding.backward(rows, grad))
@@ -282,11 +283,11 @@ def test_an_embedding_of_any_width_runs_on_cuda_as_the_reference_does() -> None:
 
 
 def _small_layout() -> MultiHotEmbedding.Config:
-    """Return three cells of three fields (vocabularies 3, 2 and 4), 2 lanes, 2 scalars."""
+    """Return three cells of four fields, 2 lanes, and 2 scalars."""
     config = MultiHotEmbedding.Config()
-    config.channels_in = 9
+    config.channels_in = 8
     config.channels_out = 2
-    config.offsets = (0, 3, 5)
+    config.offsets = (0, 2, 4, 6)
     config.num_cells = 3
     config.num_scalars = 2
     config.dtype = torch.bfloat16
@@ -308,9 +309,9 @@ def _eight_field_layout() -> MultiHotEmbedding.Config:
 def _draw_packed(
     config: MultiHotEmbedding.Config,
     *,
-    batch: int,
+    batch: int = 2,
     time: int = 1,
-) -> torch.Tensor:
+) -> Tensor:
     """Draw packed rows, ``[batch, time, size]`` or ``[batch, size]``: ids, then scalars."""
     generator = torch.Generator().manual_seed(0)
     offsets = torch.tensor(config.offsets)

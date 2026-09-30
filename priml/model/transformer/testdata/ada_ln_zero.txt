@@ -1,9 +1,9 @@
 AdaLNZero.Config(
-                channels_in=8,
-                cond_dim=4,
+                channels_in=4,
+                cond_dim=2,
                 proj=Linear.Config(
-                        channels_in=4,
-                        channels_out=48,
+                        channels_in=2,
+                        channels_out=24,
                         bias=True,
                         depth_index=(),
                         device=None,

@@ -1,7 +1,7 @@
 """Qwen3.5 delta-layer parity, cache continuation, and serialization."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, TypeGuard, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import inspect
 
@@ -86,7 +86,7 @@ def test_delta_reference_forward_and_gradients(dtype: torch.dtype) -> None:
     reference = _reference().to(dtype=dtype)
     native = _native().to(dtype=dtype)
     native.load_state_dict(reference.state_dict(), strict=True)
-    input_ref = torch.randn(1, 5, 8, dtype=dtype, requires_grad=True)
+    input_ref = torch.randn(2, 5, 8, dtype=dtype, requires_grad=True)
     input_native = input_ref.detach().clone().requires_grad_()
     with portable_half_precision():
         expected_output = cast(object, reference(input_ref))
@@ -114,12 +114,12 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
         layer_types=["linear_attention", "full_attention"],
     )
     reference_cache = DynamicCache(config=config)
-    cache = native.alloc_kv_cache(batch=1, max_seq=9)
+    cache = native.alloc_kv_cache(batch=2, max_seq=9)
     assert not cache
     reference_layer = reference_cache.layers[0]
     assert isinstance(reference_layer, LinearAttentionCacheLayerMixin)
     for length in (2, 1, 3, 1):
-        x = torch.randn(1, length, 8)
+        x = torch.randn(2, length, 8)
         expected_output = cast(object, reference(x, cache_params=reference_cache))
         expected = hf_tensor(expected_output)
         actual, returned = native.forward_cached(x, cache=cache)
@@ -135,10 +135,16 @@ def test_delta_cache_continuation_and_serialization(tmp_path: Path) -> None:
     path = tmp_path / "delta.pt"
     torch.save(cache, path)
     reloaded = cast(object, torch.load(path, weights_only=True))
-    assert _is_tensor_cache(reloaded)
-    x = torch.randn(1, 1, 8)
+    assert isinstance(reloaded, dict)
+    raw_cache = cast(dict[object, object], reloaded)
+    assert all(
+        isinstance(name, str) and isinstance(tensor, torch.Tensor)
+        for name, tensor in raw_cache.items()
+    )
+    tensor_cache = cast(dict[str, torch.Tensor], reloaded)
+    x = torch.randn(2, 3, 8)
     expected, _ = native.forward_cached(x, cache=cache)
-    actual, _ = native.forward_cached(x, cache=reloaded)
+    actual, _ = native.forward_cached(x, cache=tensor_cache)
     assert torch.equal(actual, expected)
 
 
@@ -161,16 +167,16 @@ def test_delta_masking_and_arbitrary_batch_shape() -> None:
 def test_delta_rejects_non_tensor_attention_mask(attention_mask: object) -> None:
     native = _native()
     with pytest.raises(TypeError, match="attention_mask must be a Tensor or None"):
-        native(torch.randn(1, 1, 8), attention_mask=attention_mask)
+        native(torch.randn(2, 3, 8), attention_mask=attention_mask)
 
 
 @pytest.mark.parametrize("state_name", ["conv_state", "recurrent_state"])
 def test_delta_rejects_partial_cache_without_mutation(state_name: str) -> None:
     native = _native()
-    cache = {state_name: torch.randn(1, 2, 4, 3)}
+    cache = {state_name: torch.randn(2, 3, 4, 5)}
     original = cache[state_name].clone()
     with pytest.raises(TypeError, match="cache must be empty or contain"):
-        native.forward_cached(torch.randn(1, 1, 8), cache=cache)
+        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
     assert cache.keys() == {state_name}
     assert torch.equal(cache[state_name], original)
 
@@ -215,8 +221,8 @@ def test_delta_rejects_incompatible_cache_state_without_mutation(
     device: torch.device | None,
 ) -> None:
     native = _native()
-    cache = native.alloc_kv_cache(batch=2, max_seq=2)
-    native.forward_cached(torch.randn(2, 1, 8), cache=cache)
+    cache = native.alloc_kv_cache(batch=2, max_seq=3)
+    native.forward_cached(torch.randn(2, 3, 8), cache=cache)
     state = cache[state_name]
     if axis is not None:
         cache[state_name] = state.narrow(axis, start=0, length=1).clone()
@@ -235,7 +241,7 @@ def test_delta_rejects_incompatible_cache_state_without_mutation(
         if tensor.device.type != "meta"
     }
     with pytest.raises(ValueError, match="cache state is incompatible with input"):
-        native.forward_cached(torch.randn(2, 1, 8), cache=cache)
+        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
     assert cache.keys() == original.keys()
     for name, tensor in cache.items():
         assert tensor is original[name]
@@ -251,8 +257,8 @@ def test_delta_cache_matches_projection_and_recurrence_dtypes(autocast: bool) ->
     native = _native()
     cache = native.alloc_kv_cache(batch=1, max_seq=2)
     with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
-        native.forward_cached(torch.randn(1, 1, 8), cache=cache)
-        native.forward_cached(torch.randn(1, 1, 8), cache=cache)
+        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
+        native.forward_cached(torch.randn(2, 3, 8), cache=cache)
     expected_conv_dtype = torch.bfloat16 if autocast else torch.float32
     assert cache["conv_state"].dtype == expected_conv_dtype
     assert cache["recurrent_state"].dtype == torch.float32
@@ -274,7 +280,7 @@ def test_delta_norm_slot_defaults_to_gated_transform_and_accepts_ordinary_norm()
     None
 ):
     """The injected norm replaces the complete post-delta transform."""
-    x = torch.ones(1, 3)
+    x = torch.ones(2, 3)
     gate = torch.ones_like(x)
     gated_config = Qwen35RMSNormGated.Config()
     gated_config.channels_in = x.shape[-1]
@@ -347,7 +353,7 @@ def test_delta_ordinary_norm_omits_gate_projection() -> None:
         - ordinary_cost["flops", "adjoint", "matmul"].sum()
         == 4 * projection_products
     )
-    assert ordinary(torch.randn(1, 2, 8)).shape == (1, 2, 8)
+    assert ordinary(torch.randn(3, 2, 8)).shape == (3, 2, 8)
 
 
 def test_delta_norm_cost_is_an_affine_rms_norm_and_a_silu_gate() -> None:
@@ -437,17 +443,6 @@ def test_qwen_delta_cost_does_not_repeat_the_norm_owned_output_gate() -> None:
     )
     assert reference.params == actual.params
     assert reference["flops", "matmul"].sum() == actual["flops", "matmul"].sum()
-
-
-def _is_tensor_cache(value: object) -> TypeGuard[dict[str, torch.Tensor]]:
-    """Return whether a restored delta cache has native tensor entries."""
-    if not isinstance(value, dict):
-        return False
-    cache = cast(dict[object, object], value)
-    return all(
-        isinstance(name, str) and isinstance(tensor, torch.Tensor)
-        for name, tensor in cache.items()
-    )
 
 
 if __name__ == "__main__":

@@ -523,7 +523,7 @@ class SudokuNet(nn.Module):
         logits, and one that overcounts strips nothing and shifts every
         position. No prefix means 0."""
 
-        vocab_size: int = 11
+        vocab_size: int = -1
         """Output vocabulary; must match the embedding's."""
 
         halt_outputs: int = 2
@@ -685,6 +685,14 @@ class SudokuNet(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.vocab_size < 1:
+            raise ValueError("SudokuNet requires vocab_size from the dataset.")
+        if config.embedding.grid_len < 1:
+            raise ValueError(
+                "SudokuNet requires embedding grid_shape from the dataset.",
+            )
+        if config.rope is not None and not config.rope_grid_shape:
+            raise ValueError("SudokuNet requires rope_grid_shape from the dataset.")
         self.config = config
         c = config.channels_in
         # Registered first, filled after the blocks: parameter ORDER follows

@@ -6,7 +6,8 @@ objective, and its outputs and gradients against a golden on any CPU.
 
 from __future__ import annotations
 
-from typing import TypedDict, Unpack
+from pathlib import Path
+from typing import Final, TypedDict, Unpack
 
 import math
 
@@ -23,12 +24,15 @@ from priml.loss.policy_gradient import (
 )
 from priml.math.advantage import observation_aligned_advantage
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import assert_text_golden
+from priml.testing.golden import assert_tensor_golden
 from priml.testing.policy_gradient import (
     portable_minibatch,
     random_minibatch,
-    rule_entries,
+    rule_outputs,
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 class _TermsOverrides(TypedDict, total=False):
@@ -126,24 +130,27 @@ def test_entropy_matches_closed_form_for_a_uniform_distribution() -> None:
 
 
 def test_entropy_of_a_deterministic_distribution_is_zero() -> None:
-    logits = torch.tensor([[0.0, -math.inf, -math.inf]])
+    logits = torch.tensor([[0.0, -math.inf, -math.inf], [-math.inf, -math.inf, 0.0]])
     entropy = categorical_entropy(torch.log_softmax(logits, dim=-1))
-    assert float(entropy) == pytest.approx(0.0)
+    assert entropy.tolist() == pytest.approx([0.0, 0.0])
 
 
 def test_masked_actions_do_not_poison_entropy() -> None:
     # exp(-inf) * -inf is NaN, so a masked action must be dropped, not summed.
-    logits = torch.tensor([[0.0, 0.0, -math.inf]])
+    logits = torch.tensor([[0.0, 0.0, -math.inf], [-math.inf, 0.0, 0.0]])
     entropy = categorical_entropy(torch.log_softmax(logits, dim=-1))
-    assert float(entropy) == pytest.approx(math.log(2.0))
+    assert entropy.tolist() == pytest.approx([math.log(2.0)] * 2)
 
 
 def test_masked_entropy_has_finite_gradients() -> None:
-    logits = torch.tensor([[0.0, 1.0, -math.inf]], requires_grad=True)
+    logits = torch.tensor(
+        [[0.0, 1.0, -math.inf], [1.0, 0.0, -math.inf]],
+        requires_grad=True,
+    )
     entropy = categorical_entropy(torch.log_softmax(logits, dim=-1))
     entropy.sum().backward()
 
-    unmasked_logits = torch.tensor([[0.0, 1.0]], requires_grad=True)
+    unmasked_logits = torch.tensor([[0.0, 1.0], [1.0, 0.0]], requires_grad=True)
     torch.distributions.Categorical(logits=unmasked_logits).entropy().sum().backward()
 
     assert logits.grad is not None
@@ -152,12 +159,14 @@ def test_masked_entropy_has_finite_gradients() -> None:
     torch.testing.assert_close(logits.grad[:, :2], unmasked_logits.grad)
     torch.testing.assert_close(
         logits.grad,
-        torch.tensor([[0.19661193, -0.19661193, 0.0]]),
+        torch.tensor(
+            [[0.19661193, -0.19661193, 0.0], [-0.19661193, 0.19661193, 0.0]],
+        ),
     )
 
 
 def test_fully_masked_logits_remain_nonfinite() -> None:
-    logits = torch.full((1, 3), -math.inf)
+    logits = torch.full((2, 3), -math.inf)
     entropy = categorical_entropy(torch.log_softmax(logits, dim=-1))
 
     assert torch.isnan(entropy).all()
@@ -165,9 +174,11 @@ def test_fully_masked_logits_remain_nonfinite() -> None:
 
 @pytest.mark.parametrize("corrupt", [float("nan"), float("inf")])
 def test_corrupt_entropy_inputs_remain_nonfinite(corrupt: float) -> None:
-    entropy = categorical_entropy(torch.tensor([[0.0, corrupt, float("-inf")]]))
+    entropy = categorical_entropy(
+        torch.tensor([[0.0, corrupt, -math.inf], [corrupt, 0.0, -math.inf]]),
+    )
 
-    assert torch.isnan(entropy).any() or torch.isinf(entropy).any()
+    assert (torch.isnan(entropy) | torch.isinf(entropy)).all()
 
 
 @pytest.mark.parametrize(
@@ -271,39 +282,6 @@ def test_the_advantages_take_the_dtype_the_values_and_rewards_promote_to() -> No
         assert not torch.equal(ours, theirs.float())
 
 
-def _objective(
-    logits: Tensor,
-    value_pred: Tensor,
-    batch: dict[str, Tensor],
-    advantages: Tensor,
-    returns: Tensor,
-) -> Tensor:
-    """Compute the objective in float64 for autograd: the mean per row."""
-    coefficients = TorchPPO.Config()
-    clip = coefficients.clip_epsilon
-    masked = torch.where(
-        batch["action_mask"] != 0,
-        logits,
-        TorchPPO.Config.MASKED_LOGIT,
-    )
-    logps = masked.log_softmax(-1)
-    new_lp = logps.gather(-1, batch["actions"].long()[..., None])[..., 0]
-    ratio = torch.exp(new_lp - batch["old_logprobs"].double())
-    adv = advantages.double()
-    policy = torch.maximum(-adv * ratio, -adv * ratio.clamp(1 - clip, 1 + clip))
-    val = batch["values"].double()
-    ret = returns.double()
-    value_clip = coefficients.value_clip_epsilon
-    clipped = val + (value_pred - val).clamp(-value_clip, value_clip)
-    value = 0.5 * torch.maximum((value_pred - ret) ** 2, (clipped - ret) ** 2)
-    entropy = -(logps.exp() * logps).sum(-1)
-    return (
-        policy
-        + coefficients.value_coefficient * value
-        - coefficients.entropy_coefficient * entropy
-    ).mean()
-
-
 def test_loss_gradients_agree_with_autograd_of_the_objective() -> None:
     batch = random_minibatch(rows=4, horizon=8, seed=1)
     config = TorchPPO.Config()
@@ -329,7 +307,27 @@ def test_loss_gradients_agree_with_autograd_of_the_objective() -> None:
     )
     logits = batch["decoded"][..., :43].double().requires_grad_()
     value_pred = batch["decoded"][..., 43].double().requires_grad_()
-    _objective(logits, value_pred, batch, advantages, returns).backward()
+    # The objective in float64 for autograd: the mean per row.
+    clip = config.clip_epsilon
+    masked = torch.where(
+        batch["action_mask"] != 0,
+        logits,
+        TorchPPO.Config.MASKED_LOGIT,
+    )
+    logps = masked.log_softmax(-1)
+    new_lp = logps.gather(-1, batch["actions"].long()[..., None])[..., 0]
+    ratio = torch.exp(new_lp - batch["old_logprobs"].double())
+    adv = advantages.double()
+    policy = torch.maximum(-adv * ratio, -adv * ratio.clamp(1 - clip, 1 + clip))
+    val = batch["values"].double()
+    ret = returns.double()
+    value_clip = config.value_clip_epsilon
+    clipped = val + (value_pred - val).clamp(-value_clip, value_clip)
+    value = 0.5 * torch.maximum((value_pred - ret) ** 2, (clipped - ret) ** 2)
+    entropy = -(logps.exp() * logps).sum(-1)
+    (
+        policy + config.value_coefficient * value - config.entropy_coefficient * entropy
+    ).mean().backward()
     assert logits.grad is not None
     assert value_pred.grad is not None
     torch.testing.assert_close(
@@ -415,21 +413,16 @@ def test_calling_the_rule_runs_its_stages_and_backpropagates_their_gradient() ->
     assert torch.equal(decoded.grad, (2 * closed_form).bfloat16())
 
 
-def test_the_reference_rule_matches_its_golden(request: pytest.FixtureRequest) -> None:
-    """The torch rule on 4 rows of 16 steps with the default coefficients, frozen.
+def test_the_reference_rule_matches_its_golden() -> None:
+    """The torch rule on 2 rows of 3 steps with the default coefficients, frozen.
 
     Portable inputs inside ``host_agnostic_numerics``: every CPU computes the
     same bits.
     """
-    batch = portable_minibatch(rows=4, horizon=16)
+    batch = portable_minibatch(rows=2, horizon=3)
     with host_agnostic_numerics():
-        lines = rule_entries(TorchPPO.Config().make(), batch)
-    assert_text_golden(
-        request,
-        test_file=__file__,
-        name="torch_ppo",
-        rendered="\n".join(lines),
-    )
+        outputs = rule_outputs(TorchPPO.Config().make(), batch)
+    assert_tensor_golden(_CWD / "testdata" / "torch_ppo.pt", outputs)
 
 
 if __name__ == "__main__":

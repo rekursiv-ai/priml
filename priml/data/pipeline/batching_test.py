@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Final, cast
 
 from torch import Tensor
 
@@ -28,9 +28,9 @@ def test_batcher_basic():
 
     # Create samples with same shape.
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(1, 8, 8, 3)},
-        {"id": 1, "media_tensor": torch.randn(1, 8, 8, 3)},
-        {"id": 2, "media_tensor": torch.randn(1, 8, 8, 3)},
+        {"id": 0, "media_tensor": torch.randn(2, 4, 5, 3)},
+        {"id": 1, "media_tensor": torch.randn(2, 4, 5, 3)},
+        {"id": 2, "media_tensor": torch.randn(2, 4, 5, 3)},
     ]
 
     results = list(batcher(iter(samples)))
@@ -39,13 +39,13 @@ def test_batcher_basic():
     assert len(results) == 2
 
     # First batch.
-    assert _tensor(results[0], "media_tensor").shape == (2, 1, 8, 8, 3)
+    assert _tensor(results[0], "media_tensor").shape == (2, 2, 4, 5, 3)
     assert len(_raw(results[0])) == 2
     assert _raw(results[0])[0]["id"] == 0
     assert _raw(results[0])[1]["id"] == 1
 
     # Second batch (flush remainder)
-    assert _tensor(results[1], "media_tensor").shape == (1, 1, 8, 8, 3)
+    assert _tensor(results[1], "media_tensor").shape == (1, 2, 4, 5, 3)
     assert len(_raw(results[1])) == 1
     assert _raw(results[1])[0]["id"] == 2
 
@@ -75,10 +75,10 @@ def test_batcher_multi_aspect_ratio():
 
     # Create samples with different shapes.
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(1, 8, 8, 3)},
-        {"id": 1, "media_tensor": torch.randn(1, 16, 16, 3)},
-        {"id": 2, "media_tensor": torch.randn(1, 8, 8, 3)},
-        {"id": 3, "media_tensor": torch.randn(1, 16, 16, 3)},
+        {"id": 0, "media_tensor": torch.randn(2, 4, 5, 3)},
+        {"id": 1, "media_tensor": torch.randn(2, 6, 7, 3)},
+        {"id": 2, "media_tensor": torch.randn(2, 4, 5, 3)},
+        {"id": 3, "media_tensor": torch.randn(2, 6, 7, 3)},
     ]
 
     results = list(batcher(iter(samples)))
@@ -95,15 +95,15 @@ def test_batcher_multi_aspect_ratio():
         batches_by_shape[shape] = batch
 
     # Verify 8x8 batch.
-    assert (2, 1, 8, 8, 3) in batches_by_shape
-    batch_8x8 = batches_by_shape[(2, 1, 8, 8, 3)]
+    assert (2, 2, 4, 5, 3) in batches_by_shape
+    batch_8x8 = batches_by_shape[(2, 2, 4, 5, 3)]
     assert isinstance(_raw(batch_8x8), list)
     assert len(_raw(batch_8x8)) == 2
     assert {s["id"] for s in _raw(batch_8x8)} == {0, 2}
 
     # Verify 16x16 batch.
-    assert (2, 1, 16, 16, 3) in batches_by_shape
-    batch_16x16 = batches_by_shape[(2, 1, 16, 16, 3)]
+    assert (2, 2, 6, 7, 3) in batches_by_shape
+    batch_16x16 = batches_by_shape[(2, 2, 6, 7, 3)]
     assert isinstance(_raw(batch_16x16), list)
     assert len(_raw(batch_16x16)) == 2
     assert {s["id"] for s in _raw(batch_16x16)} == {1, 3}
@@ -115,9 +115,9 @@ def test_batcher_filter_reasons():
     batcher = Batcher(config)
 
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(1, 8, 8, 3)},
+        {"id": 0, "media_tensor": torch.randn(2, 4, 5, 3)},
         {"id": 1, "filter_reasons": ["too_small"]},
-        {"id": 2, "media_tensor": torch.randn(1, 8, 8, 3)},
+        {"id": 2, "media_tensor": torch.randn(2, 4, 5, 3)},
     ]
 
     results = list(batcher(iter(samples)))
@@ -128,7 +128,7 @@ def test_batcher_filter_reasons():
     assert "raw" not in results[0]
 
     # Second result should be the batched samples (flush remainder)
-    assert _tensor(results[1], "media_tensor").shape == (2, 1, 8, 8, 3)
+    assert _tensor(results[1], "media_tensor").shape == (2, 2, 4, 5, 3)
     assert len(_raw(results[1])) == 2
 
 
@@ -138,9 +138,9 @@ def test_batcher_missing_field_names():
     batcher = Batcher(config)
 
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(1, 8, 8, 3)},
+        {"id": 0, "media_tensor": torch.randn(2, 4, 5, 3)},
         {"id": 1, "caption": "no tensor here"},
-        {"id": 2, "media_tensor": torch.randn(1, 8, 8, 3)},
+        {"id": 2, "media_tensor": torch.randn(2, 4, 5, 3)},
     ]
 
     results = list(batcher(iter(samples)))
@@ -150,7 +150,7 @@ def test_batcher_missing_field_names():
     assert "raw" not in results[0]
 
     # Second result should be the batched samples (flush remainder)
-    assert _tensor(results[1], "media_tensor").shape == (2, 1, 8, 8, 3)
+    assert _tensor(results[1], "media_tensor").shape == (2, 2, 4, 5, 3)
     assert len(_raw(results[1])) == 2
 
 
@@ -160,16 +160,16 @@ def test_batcher_drop_remainder():
     batcher = Batcher(config)
 
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(1, 8, 8, 3)},
-        {"id": 1, "media_tensor": torch.randn(1, 8, 8, 3)},
-        {"id": 2, "media_tensor": torch.randn(1, 8, 8, 3)},
+        {"id": 0, "media_tensor": torch.randn(2, 4, 5, 3)},
+        {"id": 1, "media_tensor": torch.randn(2, 4, 5, 3)},
+        {"id": 2, "media_tensor": torch.randn(2, 4, 5, 3)},
     ]
 
     results = list(batcher(iter(samples)))
 
     # Should only produce 1 batch (drop the remainder)
     assert len(results) == 1
-    assert _tensor(results[0], "media_tensor").shape == (2, 1, 8, 8, 3)
+    assert _tensor(results[0], "media_tensor").shape == (2, 2, 4, 5, 3)
     assert len(_raw(results[0])) == 2
 
 
@@ -179,14 +179,14 @@ def test_batcher_custom_field_names():
     batcher = Batcher(config)
 
     samples: list[dict[str, object]] = [
-        {"id": 0, "image": torch.randn(3, 224, 224), "label": 5},
-        {"id": 1, "image": torch.randn(3, 224, 224), "label": 7},
+        {"id": 0, "image": torch.randn(3, 4, 5), "label": 5},
+        {"id": 1, "image": torch.randn(3, 4, 5), "label": 7},
     ]
 
     results = list(batcher(iter(samples)))
 
     assert len(results) == 1
-    assert _tensor(results[0], "image").shape == (2, 3, 224, 224)
+    assert _tensor(results[0], "image").shape == (2, 3, 4, 5)
     # Label is not a tensor, so it should be a list.
     assert results[0]["label"] == [5, 7]
     assert len(_raw(results[0])) == 2
@@ -208,15 +208,15 @@ def test_batcher_stacks_3d_tensors():
 
     # Create image samples without frame dimension (H, W, C)
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(224, 224, 3)},
-        {"id": 1, "media_tensor": torch.randn(224, 224, 3)},
+        {"id": 0, "media_tensor": torch.randn(4, 5, 3)},
+        {"id": 1, "media_tensor": torch.randn(4, 5, 3)},
     ]
 
     results = list(batcher(iter(samples)))
 
     # Should produce 1 batch with shape (B, H, W, C)
     assert len(results) == 1
-    assert _tensor(results[0], "media_tensor").shape == (2, 224, 224, 3)
+    assert _tensor(results[0], "media_tensor").shape == (2, 4, 5, 3)
     assert len(_raw(results[0])) == 2
 
     # Verify raw samples exclude batched fields (media_tensor)
@@ -236,7 +236,7 @@ def test_unbatcher_basic():
 
     # Create a batched sample (raw excludes batched fields)
     batch: dict[str, object] = {
-        "media_tensor": torch.randn(2, 1, 8, 8, 3),
+        "media_tensor": torch.randn(2, 3, 4, 5, 6),
         "embeddings": torch.randn(2, 512),
         "raw": [
             {"id": 0},
@@ -349,8 +349,8 @@ def test_batcher_unbatcher_roundtrip():
 
     # Original samples.
     samples: list[dict[str, object]] = [
-        {"id": 0, "media_tensor": torch.randn(1, 8, 8, 3), "caption": "cat"},
-        {"id": 1, "media_tensor": torch.randn(1, 8, 8, 3), "caption": "dog"},
+        {"id": 0, "media_tensor": torch.randn(2, 4, 5, 3), "caption": "cat"},
+        {"id": 1, "media_tensor": torch.randn(2, 4, 5, 3), "caption": "dog"},
     ]
 
     # Batch.
@@ -441,8 +441,8 @@ def test_batcher_unbatcher_roundtrip_splits_tagged_list_field():
     unbatcher = Unbatcher(Unbatcher.Config())
 
     samples: list[dict[str, object]] = [
-        {"id": 0, "image": torch.randn(3, 4, 4), "label": 5},
-        {"id": 1, "image": torch.randn(3, 4, 4), "label": 7},
+        {"id": 0, "image": torch.randn(3, 4, 5), "label": 5},
+        {"id": 1, "image": torch.randn(3, 4, 5), "label": 7},
     ]
 
     batches = list(batcher(iter(samples)))
@@ -464,10 +464,10 @@ def test_batcher_is_reentrant_across_calls():
     batcher = Batcher(config)
 
     samples_a: list[dict[str, object]] = [
-        {"id": i, "media_tensor": torch.randn(1, 8, 8, 3)} for i in range(3)
+        {"id": i, "media_tensor": torch.randn(2, 4, 5, 3)} for i in range(3)
     ]
     samples_b: list[dict[str, object]] = [
-        {"id": i, "media_tensor": torch.randn(1, 8, 8, 3)} for i in range(3)
+        {"id": i, "media_tensor": torch.randn(2, 4, 5, 3)} for i in range(3)
     ]
 
     gen_a = batcher(iter(samples_a))
@@ -510,14 +510,14 @@ def test_batcher_moves_the_stacked_tensor_to_the_configured_device():
     batcher = Batcher(Batcher.Config(size=2, device="cpu"))
 
     samples: list[dict[str, object]] = [
-        {"id": i, "media_tensor": torch.randn(2, 2)} for i in range(2)
+        {"id": i, "media_tensor": torch.randn(2, 3)} for i in range(2)
     ]
 
     results = list(batcher(iter(samples)))
 
     stacked = _tensor(results[0], "media_tensor")
     assert stacked.device == torch.device("cpu")
-    assert stacked.shape == (2, 2, 2)
+    assert stacked.shape == (2, 2, 3)
 
 
 def test_batcher_omits_raw_when_the_stacked_fields_were_everything():
@@ -556,7 +556,7 @@ def test_batcher_logs_a_slow_stack(
     assert "stack=200.0ms" in caplog.text
 
 
-_MALFORMED_BATCHES: list[tuple[dict[str, object], str]] = [
+_MALFORMED_BATCHES: Final[list[tuple[dict[str, object], str]]] = [
     ({"raw": "nope"}, "raw must be a list"),
     ({"raw": ["nope"]}, "raw must be a list"),
     ({"raw": [{}], "_batch_size": "1"}, "_batch_size must be an integer"),
@@ -603,7 +603,7 @@ def test_unbatcher_replicates_dict_values_that_carry_no_batch_axis():
 
     batch: dict[str, object] = {
         "_batch_size": 2,
-        "scores": {"per_sample": torch.arange(4.0).reshape(2, 2), "scale": 0.5},
+        "scores": {"per_sample": torch.arange(6.0).reshape(2, 3), "scale": 0.5},
         "raw": [{"id": 0}, {"id": 1}],
     }
 
@@ -614,7 +614,7 @@ def test_unbatcher_replicates_dict_values_that_carry_no_batch_axis():
     assert first["scale"] == 0.5
     assert second["scale"] == 0.5
     assert isinstance(second["per_sample"], Tensor)
-    assert second["per_sample"].tolist() == [2.0, 3.0]
+    assert second["per_sample"].tolist() == [3.0, 4.0, 5.0]
 
 
 def test_unbatcher_has_batch_dimension_rejects_non_arrays():
@@ -622,7 +622,7 @@ def test_unbatcher_has_batch_dimension_rejects_non_arrays():
 
     assert not unbatcher._has_batch_dimension([1, 2], 2)
     assert not unbatcher._has_batch_dimension(torch.zeros(2), 2)
-    assert unbatcher._has_batch_dimension(torch.zeros(2, 1), 2)
+    assert unbatcher._has_batch_dimension(torch.zeros(2, 3), 2)
 
 
 # PrefetchBuffer Tests

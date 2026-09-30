@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Final, cast
 
 import copy
 
@@ -97,7 +97,7 @@ def _gtrxl() -> CraftaxStep:
     return config.make()
 
 
-_CASES = (
+_CASES: Final = (
     _Case(
         name="ppo",
         build=_ppo,

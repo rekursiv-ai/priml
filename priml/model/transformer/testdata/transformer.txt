@@ -1,10 +1,10 @@
 Transformer.Config(
-                channels_in=16,
-                channels_out=32,
+                channels_in=4,
+                channels_out=4,
                 num_layers=1,
                 proj_in=Embedding.Config(
-                        channels_in=32,
-                        channels_out=16,
+                        channels_in=2,
+                        channels_out=4,
                         padding_idx=None,
                         device=None,
                         dtype=None,
@@ -14,13 +14,13 @@ Transformer.Config(
                 ),
                 block=[
                 │       TransformerBlock.Config(
-                │               channels_in=16,
-                │               channels_out=16,
+                │               channels_in=4,
+                │               channels_out=4,
                 │               attn=SelfAttention.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=4,
+                │                       channels_out=4,
                 │                       num_heads=2,
-                │                       channels_head=8,
+                │                       channels_head=2,
                 │                       num_heads_kv=2,
                 │                       bias=False,
                 │                       dropout=0.0,
@@ -35,11 +35,11 @@ Transformer.Config(
                 │                       attn_kernel=SdpaFused.Config()
                 │               ),
                 │               ffn=SwiGLU.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
-                │                       channels_hidden=256,
+                │                       channels_in=4,
+                │                       channels_out=4,
+                │                       channels_hidden=2,
                 │                       expansion=2.6666666666666665,
-                │                       round_to=256,
+                │                       round_to=1,
                 │                       gate=True,
                 │                       bias=False,
                 │                       split_gate_projection=False,
@@ -51,16 +51,16 @@ Transformer.Config(
                 │                       shard='colwise'
                 │               ),
                 │               norm1=RMSNorm.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=4,
+                │                       channels_out=4,
                 │                       eps=1e-06,
                 │                       elementwise_affine=False,
                 │                       device=None,
                 │                       dtype=None
                 │               ),
                 │               norm2=RMSNorm.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=4,
+                │                       channels_out=4,
                 │                       eps=1e-06,
                 │                       elementwise_affine=False,
                 │                       device=None,
@@ -72,20 +72,20 @@ Transformer.Config(
                 │       )
                 ],
                 proj_out=Sequential.Config(
-                        channels_in=16,
-                        channels_out=32,
+                        channels_in=4,
+                        channels_out=4,
                         elements=[
                                 RMSNorm.Config(
-                                        channels_in=16,
-                                        channels_out=16,
+                                        channels_in=4,
+                                        channels_out=4,
                                         eps=1e-06,
                                         elementwise_affine=False,
                                         device=None,
                                         dtype=None
                                 ),
                                 Linear.Config(
-                                        channels_in=16,
-                                        channels_out=32,
+                                        channels_in=4,
+                                        channels_out=4,
                                         bias=False,
                                         depth_index=(),
                                         device=None,

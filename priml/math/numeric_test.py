@@ -561,7 +561,7 @@ def test_kahan_sum_keepdim_all_dims_preserves_rank():
     """dim=None with keepdim=True must restore the full rank as size-1 dims."""
     result = kahan_sum(torch.ones(2, 3), keepdim=True)
     assert result.shape == (1, 1)
-    torch.testing.assert_close(result, torch.full((1, 1), 6.0))
+    torch.testing.assert_close(result, torch.full_like(result, 6.0))
 
 
 def test_smootherstep_boundaries():
@@ -946,7 +946,7 @@ def test_matrix_signum_preserves_singular_vectors() -> None:
     the singular values, so the output stays aligned with ``U V^T``.
     """
     torch.manual_seed(0)
-    x = torch.randn(1, 8, 4)
+    x = torch.randn(2, 8, 4)
     q = matrix_signum_via_newtonschulz(x).float()
     u, _, vh = torch.linalg.svd(x, full_matrices=False)
     polar = u @ vh

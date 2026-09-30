@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 
-LADDER: list[tuple[str, Callable[[], SudokuTrainLoop]]] = [
+LADDER: Final[list[tuple[str, Callable[[], SudokuTrainLoop]]]] = [
     ("exp000", experiments.exp000),
     ("exp001", experiments.exp001),
     ("exp002", experiments.exp002),
@@ -87,6 +87,29 @@ def test_the_lattice_is_two_independent_axes() -> None:
         ("TransformerBlock", True),
         ("MLPMixerBlock", True),
     }
+
+
+def test_solver_geometry_follows_the_dataset_spec() -> None:
+    default = experiments.exp000().finalize()
+    default_embedding = default.step.model.embedding
+    assert isinstance(default_embedding, GridEmbedding.Config)
+    assert default_embedding.grid_shape == (81,)
+    assert default.step.model.vocab_size == 11
+
+    config = experiments.exp000()
+    config.dataset.spec.grid_shape = (4, 4)
+    config.dataset.spec.box_shape = (2, 2)
+    config.dataset.spec.vocab_size = 6
+    finalized = config.finalize()
+    model = finalized.step.model
+    assert model.vocab_size == 6
+    embedding = model.embedding
+    assert isinstance(embedding, GridEmbedding.Config)
+    assert embedding.grid_shape == (16,)
+    positions = embedding.channels[0]
+    assert isinstance(positions, FactoredPositions.Config)
+    assert positions.grid_shape == (4, 4)
+    assert positions.box_shape == (2, 2)
 
 
 def test_exp001_changes_only_the_block() -> None:

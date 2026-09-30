@@ -69,13 +69,14 @@ def _tiny_config(tie: bool = False) -> Transformer.Config:
 
 def _canonical_config() -> Transformer.Config:
     return Transformer.Config(
-        proj_in=Embedding.Config(channels_in=32, shard="vocab"),
+        proj_in=Embedding.Config(channels_in=2, shard="vocab"),
         proj_out=_head(),
-        channels_in=16,
-        channels_out=32,
+        channels_in=4,
+        channels_out=4,
         num_layers=1,
         block=TransformerBlock.Config(
-            attn=SelfAttention.Config(num_heads=2, channels_head=8, causal=True),
+            attn=SelfAttention.Config(num_heads=2, channels_head=2, causal=True),
+            ffn=SwiGLU.Config(channels_hidden=2, round_to=1),
         ),
     )
 
@@ -105,26 +106,12 @@ def test_load_state_dict_absorbs_legacy_projection_keys() -> None:
         assert torch.equal(fresh.state_dict()[k], v)
 
 
-# The harness stores the randomized state_dict, so the golden's size is the parameter
-# count -- dominated by the default 256-wide FFN. Narrowing the hidden width leaves
-# every numerical path (init, norms, attention, forward) intact while keeping the golden
-# small.
-def _bfb_config() -> Transformer.Config:
-    """Canonical config with the FFN narrowed by size only."""
-    config = _canonical_config()
-    assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.ffn, SwiGLU.Config)
-    config.block.ffn.channels_hidden = 8
-    config.block.ffn.round_to = 1
-    return config
-
-
 def test_transformer_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="transformer",
-        build_module=lambda: _bfb_config().make(),
-        build_input=lambda: torch.tensor([[0, 1, 2, 3]]),
+        build_module=_canonical_config().make,
+        build_input=lambda: torch.tensor([[0, 1], [1, 0]]),
         seed=0,
     )
 
@@ -150,7 +137,7 @@ def test_model_forwards_the_open_message_bus_to_every_block() -> None:
     config.block.attn.attn_kernel = PartialConfig(kernel)
     message = object()
 
-    config.make()(torch.randint(0, 128, (1, 4)), message=message)
+    config.make()(torch.randint(0, 128, (2, 4)), message=message)
 
     assert messages == [message, message]
 
@@ -181,7 +168,7 @@ def test_model_forwards_the_open_message_bus_through_output_layers() -> None:
     head[1] = RecordingLayer(proj)
     message = object()
 
-    model(torch.randint(0, 128, (1, 4)), message=message)
+    model(torch.randint(0, 128, (2, 4)), message=message)
 
     assert messages == [message, message]
 
@@ -198,9 +185,9 @@ def test_tied_embeddings():
     assert isinstance(m.proj_out, Sequential)
     assert isinstance(m.proj_out[1], TiedLinear)
     assert [n for n, _ in m.named_parameters() if n.startswith("proj_out.")] == []
-    toks = torch.randint(0, 128, (1, 4))
+    toks = torch.randint(0, 128, (2, 4))
     out = m(toks)
-    assert out.shape == (1, 4, 128)
+    assert out.shape == (2, 4, 128)
 
 
 def test_separate_proj_out():
@@ -282,10 +269,10 @@ def test_explicit_block_list_gets_global_depth_indices() -> None:
 def test_generate_interop():
     m = _tiny_config().make()
     m.eval()
-    prompt = torch.randint(0, 128, (1, 4))
+    prompt = torch.randint(0, 128, (2, 4))
     gen = generate(m, prompt, max_new_tokens=3, temperature=0.0, max_seq_len=16)
     # Prompt + 3 generated.
-    assert gen.shape == (1, 7)
+    assert gen.shape == (2, 7)
 
 
 def test_generate_rejects_prompt_longer_than_cache():
@@ -296,7 +283,7 @@ def test_generate_rejects_prompt_longer_than_cache():
     """
     m = _tiny_config().make()
     m.eval()
-    prompt = torch.randint(0, 128, (1, 8))
+    prompt = torch.randint(0, 128, (2, 8))
     with pytest.raises(ValueError, match="prompt length"):
         generate(m, prompt, max_new_tokens=1, max_seq_len=4)
 
@@ -456,13 +443,18 @@ def test_transformer_cost_matches_torch_through_a_naive_kernel() -> None:
     assert isinstance(config.block, TransformerBlock.Config)
     assert isinstance(config.block.attn, SelfAttention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
+
+    def logits_float(module: nn.Module, tokens: Tensor) -> Tensor:
+        assert isinstance(module, Transformer)
+        return module(tokens).float()
+
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randint(0, 128, (1, 8)),
+        build_input=lambda: torch.randint(0, 128, (2, 8)),
         seq_len=8,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
-        run=_logits_float,
+        run=logits_float,
     )
 
 
@@ -525,12 +517,6 @@ def test_transformer_cost_rejects_an_unpriced_slot() -> None:
     config.proj_out = _Uncosted.Config()
     with pytest.raises(TypeError, match=r"_Uncosted\.Config has no cost"):
         config.copy_tree().finalize().cost(seq_len=8, batch_size=1, dtype=None)
-
-
-def _logits_float(module: nn.Module, tokens: Tensor) -> Tensor:
-    """Run the stack and widen its logits for the harness's reduction."""
-    assert isinstance(module, Transformer)
-    return module(tokens).float()
 
 
 def test_channels_in_is_read_from_proj_in_or_falls_back_to_channels_out() -> None:

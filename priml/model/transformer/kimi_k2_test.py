@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from priml import hub
+from priml.lib.absent import ABSENT
 from priml.lib.custom_json import DictCodec
 from priml.model.attention.mla import MultiHeadLatentAttention
 from priml.model.attention.rope import HuggingFaceFrequencies, RoPE, YarnScaling
@@ -43,22 +44,22 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _hf_config(**overrides: object) -> dict[str, object]:
+def hf_config(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "model_type": "kimi_k2",
-        "vocab_size": 128,
-        "hidden_size": 64,
-        "num_hidden_layers": 3,
-        "num_attention_heads": 4,
-        "qk_nope_head_dim": 16,
-        "qk_rope_head_dim": 8,
-        "v_head_dim": 16,
+        "vocab_size": 2,
+        "hidden_size": 4,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "qk_nope_head_dim": 2,
+        "qk_rope_head_dim": 2,
+        "v_head_dim": 2,
         "q_lora_rank": None,
-        "kv_lora_rank": 32,
-        "intermediate_size": 128,
-        "moe_intermediate_size": 64,
-        "n_routed_experts": 4,
-        "num_experts_per_tok": 2,
+        "kv_lora_rank": 2,
+        "intermediate_size": 4,
+        "moe_intermediate_size": 2,
+        "n_routed_experts": 2,
+        "num_experts_per_tok": 1,
         "n_shared_experts": 1,
         "first_k_dense_replace": 1,
         "scoring_func": "sigmoid",
@@ -73,9 +74,9 @@ def _hf_config(**overrides: object) -> dict[str, object]:
     return base
 
 
-def _canonical_config() -> KimiK2.Config:
+def canonical_config() -> KimiK2.Config:
     return KimiK2.Config.from_hf(
-        _hf_config(
+        hf_config(
             vocab_size=32,
             hidden_size=16,
             num_hidden_layers=2,
@@ -97,31 +98,7 @@ def test_kimi_k2_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
         name="kimi_k2",
-        config=_canonical_config(),
-    )
-
-
-# The harness stores the randomized state_dict, so the golden's size is the parameter
-# count -- dominated by the dense and per-expert FFNs. Narrowing the intermediate widths
-# leaves every numerical path (MLA, routing, shared and routed experts, both dense and
-# MoE layers) intact.
-def _bfb_config() -> KimiK2.Config:
-    """Canonical Kimi with the dense and MoE FFN widths narrowed by size only."""
-    return KimiK2.Config.from_hf(
-        _hf_config(
-            vocab_size=16,
-            hidden_size=8,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            qk_nope_head_dim=4,
-            qk_rope_head_dim=4,
-            v_head_dim=4,
-            kv_lora_rank=8,
-            intermediate_size=8,
-            moe_intermediate_size=4,
-            n_routed_experts=2,
-            num_experts_per_tok=1,
-        ),
+        config=canonical_config(),
     )
 
 
@@ -129,8 +106,8 @@ def test_kimi_k2_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="kimi_k2",
-        build_module=lambda: _bfb_config().make(),
-        build_input=lambda: torch.tensor([[0, 1, 2]]),
+        build_module=lambda: KimiK2.Config.from_hf(hf_config()).make(),
+        build_input=lambda: torch.tensor([[0, 1]]),
         seed=0,
     )
 
@@ -143,7 +120,7 @@ def test_kimi_k2_cost_requires_realized_routing(q_lora_rank: int | None) -> None
     top-k alone does not identify which routed experts executed.
     """
     config = KimiK2.Config.from_hf(
-        _hf_config(
+        hf_config(
             vocab_size=32,
             hidden_size=16,
             num_hidden_layers=2,
@@ -272,13 +249,13 @@ class TestConfig:
     @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
     def test_parse_router_variant(self, scoring_func: str) -> None:
         cfg = KimiK2.Config.from_hf(
-            _hf_config(scoring_func=scoring_func, norm_topk_prob=False),
+            hf_config(scoring_func=scoring_func, norm_topk_prob=False),
         ).finalize()
         router = _router(cfg)
         assert router.norm_topk_prob is False
         assert router.channels_in == cfg.channels_in
-        assert router.num_experts == 4
-        assert router.top_k == 2
+        assert router.num_experts == 2
+        assert router.top_k == 1
         if scoring_func == "sigmoid":
             assert isinstance(router, SigmoidRouter.Config)
             assert router.routed_scaling_factor == 2.0
@@ -287,31 +264,31 @@ class TestConfig:
         assert router.make().scoring_func == scoring_func
 
     def test_parse_kimi_k2(self):
-        cfg = KimiK2.Config.from_hf(_hf_config())
+        cfg = KimiK2.Config.from_hf(hf_config())
         attn = _attn(cfg)
-        assert attn.kv_lora_rank == 32
+        assert attn.kv_lora_rank == 2
         assert attn.q_lora_rank is None
         assert cfg.first_k_dense_replace == 1
-        assert attn.channels_qk_nope_head == 16
-        assert attn.channels_qk_rope_head == 8
-        assert attn.channels_v_head == 16
+        assert attn.channels_qk_nope_head == 2
+        assert attn.channels_qk_rope_head == 2
+        assert attn.channels_v_head == 2
 
     def test_parse_deepseek_v3(self):
         cfg = KimiK2.Config.from_hf(
-            _hf_config(model_type="deepseek_v3", q_lora_rank=16),
+            hf_config(model_type="deepseek_v3", q_lora_rank=16),
         )
         assert _attn(cfg).q_lora_rank == 16
 
     def test_wrong_model_type(self):
         with pytest.raises(ValueError, match="model_type"):
-            KimiK2.Config.from_hf(_hf_config(model_type="qwen3"))
+            KimiK2.Config.from_hf(hf_config(model_type="qwen3"))
 
     def test_wrong_scoring_function(self):
         with pytest.raises(ValueError, match="scoring_func"):
-            KimiK2.Config.from_hf(_hf_config(scoring_func="linear"))
+            KimiK2.Config.from_hf(hf_config(scoring_func="linear"))
 
     def test_rope_scaling_without_type_uses_base_frequencies(self):
-        cfg = KimiK2.Config.from_hf(_hf_config(rope_scaling={"factor": 2.0}))
+        cfg = KimiK2.Config.from_hf(hf_config(rope_scaling={"factor": 2.0}))
         rope = _attn(cfg).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
@@ -322,27 +299,27 @@ class TestConfig:
         """An explicit width names its own field instead of silently defaulting."""
         with pytest.raises(ValueError, match="moe_intermediate_size must be > 0"):
             KimiK2.Config.from_hf(
-                _hf_config(moe_intermediate_size=moe_intermediate_size),
+                hf_config(moe_intermediate_size=moe_intermediate_size),
             )
 
     def test_absent_moe_width_falls_back_to_dense_width(self):
         """Only a MISSING key defaults; the fallback itself must survive."""
-        config = _hf_config()
+        config = hf_config()
         del config["moe_intermediate_size"]
         cfg = KimiK2.Config.from_hf(config)
-        assert cfg.channels_hidden_expert == cfg.channels_hidden_dense == 128
+        assert cfg.channels_hidden_expert == cfg.channels_hidden_dense == 4
 
     @pytest.mark.compute_large_fixture
     def test_nonpositive_channels_still_print(self) -> None:
         """The degenerate config is the one worth rendering; torch rejects it."""
-        config = KimiK2.Config.from_hf(_hf_config(hidden_size=0))
+        config = KimiK2.Config.from_hf(hf_config(hidden_size=0))
 
         assert "KimiK2.Config" in config.pformat(hide_default_values=False)
 
     def test_yarn_scaling_wired(self):
         """YaRN params land on the rope slot's frequency builder."""
         cfg = KimiK2.Config.from_hf(
-            _hf_config(
+            hf_config(
                 rope_scaling={
                     "type": "yarn",
                     "factor": 32.0,
@@ -371,7 +348,7 @@ class TestSlots:
         The parent used to redeclare Router's fields and rebuild the child in
         ``finalize``, so this edit was silently discarded.
         """
-        cfg = KimiK2.Config.from_hf(_hf_config())
+        cfg = KimiK2.Config.from_hf(hf_config())
         template = cfg.block
         assert isinstance(template, TransformerBlock.Config)
         assert isinstance(template.ffn, MoE.Config)
@@ -387,7 +364,7 @@ class TestSlots:
 
     def test_a_norm_edit_reaches_every_norm(self):
         """One template, so an epsilon set once applies throughout."""
-        cfg = KimiK2.Config.from_hf(_hf_config())
+        cfg = KimiK2.Config.from_hf(hf_config())
         template = cfg.block
         assert isinstance(template, TransformerBlock.Config)
         assert isinstance(template.norm1, RMSNorm.Config)
@@ -403,7 +380,7 @@ class TestSlots:
 
     def test_each_layer_gets_its_own_norm_object(self):
         """Templates are copied, so one layer's finalize cannot edit another."""
-        cfg = KimiK2.Config.from_hf(_hf_config()).copy_tree().finalize()
+        cfg = KimiK2.Config.from_hf(hf_config()).copy_tree().finalize()
         assert isinstance(cfg.block, list)
         first, second = cfg.block[0], cfg.block[1]
         assert isinstance(first, TransformerBlock.Config)
@@ -414,21 +391,21 @@ class TestSlots:
     def test_non_yarn_scaling_rejected(self):
         with pytest.raises(ValueError, match="only yarn"):
             KimiK2.Config.from_hf(
-                _hf_config(rope_scaling={"type": "linear", "factor": 2.0}),
+                hf_config(rope_scaling={"type": "linear", "factor": 2.0}),
             )
 
     def test_make_returns_kimik2_instance(self):
-        model = KimiK2.Config.from_hf(_hf_config()).make()
+        model = KimiK2.Config.from_hf(hf_config()).make()
         assert isinstance(model, KimiK2)
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
-        cfg = KimiK2.Config.from_hf(_hf_config())
+        cfg = KimiK2.Config.from_hf(hf_config())
         block = RMSNorm.Config()
         cfg._size_block(block, 0)
         assert block.channels_in == cfg.channels_in
 
     def test_custom_nondense_ffn_survives_sizing(self):
-        cfg = KimiK2.Config.from_hf(_hf_config(first_k_dense_replace=0))
+        cfg = KimiK2.Config.from_hf(hf_config(first_k_dense_replace=0))
         block = cfg.block
         assert isinstance(block, TransformerBlock.Config)
         block.ffn = SwiGLU.Config(channels_hidden=17)
@@ -442,10 +419,10 @@ class TestLoad:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        hf_config = _hf_config(num_hidden_layers=1)
-        cfg = KimiK2.Config.from_hf(hf_config).finalize()
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = KimiK2.Config.from_hf(config_dict).finalize()
         hf_model = Mock()
-        hf_model.config.to_dict.return_value = hf_config
+        hf_model.config.to_dict.return_value = config_dict
         hf_model.state_dict.return_value = _synth_hf(cfg)
         load_transformers_model = Mock(return_value=hf_model)
         monkeypatch.setattr(
@@ -476,7 +453,7 @@ class TestRemap:
         correction_bias: bool,
     ) -> None:
         cfg = KimiK2.Config.from_hf(
-            _hf_config(scoring_func=scoring_func),
+            hf_config(scoring_func=scoring_func),
         )
         router = _router(cfg)
         if isinstance(router, SigmoidRouter.Config):
@@ -490,21 +467,23 @@ class TestRemap:
         assert model(torch.tensor([[0, 1]])).shape == (1, 2, cfg.channels_out)
 
     def test_end_to_end_no_q_lora(self):
-        cfg = KimiK2.Config.from_hf(_hf_config()).finalize()
+        cfg = KimiK2.Config.from_hf(hf_config()).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf(cfg), cfg), strict=True)
-        logits = model(torch.randint(0, cfg.channels_out, (1, 4)))
-        assert logits.shape == (1, 4, cfg.channels_out)
+        logits = model(torch.randint(0, cfg.channels_out, (2, 4)))
+        assert logits.shape == (2, 4, cfg.channels_out)
 
     def test_end_to_end_with_q_lora(self):
-        cfg = KimiK2.Config.from_hf(_hf_config(q_lora_rank=24)).finalize()
+        cfg = KimiK2.Config.from_hf(hf_config(q_lora_rank=24)).finalize()
         model = cfg.make()
         model.load_state_dict(remap_hf_state_dict(_synth_hf(cfg), cfg), strict=True)
-        logits = model(torch.randint(0, cfg.channels_out, (1, 3)))
-        assert logits.shape == (1, 3, cfg.channels_out)
+        logits = model(torch.randint(0, cfg.channels_out, (2, 3)))
+        assert logits.shape == (2, 3, cfg.channels_out)
 
     def test_dense_then_moe_layers(self):
-        cfg = KimiK2.Config.from_hf(_hf_config(first_k_dense_replace=2)).finalize()
+        cfg = KimiK2.Config.from_hf(
+            hf_config(first_k_dense_replace=2, num_hidden_layers=3),
+        ).finalize()
         model = cfg.make()
         remapped = remap_hf_state_dict(_synth_hf(cfg), cfg)
         model.load_state_dict(remapped, strict=True)
@@ -516,7 +495,7 @@ class TestRemap:
 
     def test_missing_bias_defaults_zero(self):
         """HF checkpoints may omit e_score_correction_bias; remap defaults it."""
-        cfg = KimiK2.Config.from_hf(_hf_config()).finalize()
+        cfg = KimiK2.Config.from_hf(hf_config()).finalize()
         sd = _synth_hf(cfg)
         for i in range(cfg.first_k_dense_replace, cfg.num_layers):
             sd.pop(f"model.layers.{i}.mlp.gate.e_score_correction_bias")
@@ -527,7 +506,7 @@ class TestRemap:
             assert torch.all(remapped[key] == 0)
 
     def test_multiple_shared_experts_keep_their_indices(self):
-        cfg = KimiK2.Config.from_hf(_hf_config(n_shared_experts=2)).finalize()
+        cfg = KimiK2.Config.from_hf(hf_config(n_shared_experts=2)).finalize()
         sd = _synth_hf(cfg)
         expected: dict[str, Tensor] = {}
         for layer in range(cfg.first_k_dense_replace, cfg.num_layers):
@@ -549,7 +528,7 @@ class TestRemap:
 
     @pytest.mark.parametrize("bad_part", ["block", "attention", "ffn"])
     def test_remap_rejects_incompatible_layer_configs(self, bad_part: str):
-        cfg = KimiK2.Config.from_hf(_hf_config(num_hidden_layers=1))
+        cfg = KimiK2.Config.from_hf(hf_config(num_hidden_layers=1))
         block = cfg.block
         assert isinstance(block, TransformerBlock.Config)
         if bad_part == "block":
@@ -647,9 +626,8 @@ def test_transformers_compat_shims_restore_module_state(
         monkeypatch.setitem(sys.modules, module.__name__, module)
 
     # Inspect owner namespaces directly so inherited attributes cannot hide leaks.
-    absent = object()
-    fx_before: object = vars(import_utils).get("is_torch_fx_available", absent)  # pyright: ignore[reportAny] -- vars() exposes dynamic module state as Any.
-    legacy_before: object = vars(DynamicCache).get("from_legacy_cache", absent)  # pyright: ignore[reportAny] -- vars() exposes dynamic class state as Any.
+    fx_before: object = vars(import_utils).get("is_torch_fx_available", ABSENT)  # pyright: ignore[reportAny] -- vars() exposes dynamic module state as Any.
+    legacy_before: object = vars(DynamicCache).get("from_legacy_cache", ABSENT)  # pyright: ignore[reportAny] -- vars() exposes dynamic class state as Any.
 
     error = (
         pytest.raises(RuntimeError, match="inside shims")
@@ -662,8 +640,8 @@ def test_transformers_compat_shims_restore_module_state(
         if raise_inside:
             raise RuntimeError("inside shims")
 
-    assert vars(import_utils).get("is_torch_fx_available", absent) is fx_before
-    assert vars(DynamicCache).get("from_legacy_cache", absent) is legacy_before
+    assert vars(import_utils).get("is_torch_fx_available", ABSENT) is fx_before
+    assert vars(DynamicCache).get("from_legacy_cache", ABSENT) is legacy_before
 
 
 @contextmanager

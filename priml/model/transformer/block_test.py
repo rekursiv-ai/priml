@@ -104,10 +104,10 @@ def test_transformer_block_cached_rejects_attention_without_cached_path() -> Non
         channels_in=16,
         attn=Linear.Config(16, 16),
     ).make()
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=1, channels_head=1)
+    cache = KVCache.alloc(batch=2, num_heads=4, max_seq=3, channels_head=5)
 
     with pytest.raises(TypeError, match="cached attention"):
-        model.forward_cached(torch.randn(1, 1, 16), cache=cache)
+        model.forward_cached(torch.randn(2, 3, 16), cache=cache)
 
 
 def test_transformer_block_reset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,24 +275,23 @@ def test_block_checkpoint_wraps_under_grad():
 
 
 # The harness stores the randomized state_dict, so the golden's size is the parameter
-# count -- dominated by the default 256-wide FFN. Narrowing the hidden width leaves
-# every numerical path intact and keeps the golden small.
-def _bfb_config() -> TransformerBlock.Config:
-    """Canonical block with the FFN narrowed by size only."""
-    config = _canonical_config()
-    assert isinstance(config.ffn, SwiGLU.Config)
-    config.ffn.channels_hidden = 8
-    config.ffn.round_to = 1
-    return config
-
-
+# count. Narrowing the residual, attention, and FFN widths leaves every numerical
+# path intact and keeps the golden small.
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_transformer_block_bfb(device: str) -> None:
+    config = _canonical_config()
+    config.channels_in = 4
+    assert isinstance(config.attn, SelfAttention.Config)
+    config.attn.channels_in = 4
+    config.attn.channels_head = 2
+    assert isinstance(config.ffn, SwiGLU.Config)
+    config.ffn.channels_hidden = 2
+    config.ffn.round_to = 1
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="transformer_block",
-        build_module=lambda: _bfb_config().make().to(device),
-        build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
+        build_module=lambda: config.make().to(device),
+        build_input=lambda: move_to_device(torch.randn(2, 3, 4), device),
         seed=0,
     )
 
@@ -310,23 +309,23 @@ def test_block_cost_sums_its_four_children() -> None:
     )
     model_cost = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        build_input=lambda: torch.randn(2, 8, 16, requires_grad=True),
         seq_len=8,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
     children = (finalized.attn, finalized.ffn, finalized.norm1, finalized.norm2)
     f32 = torch.float32
     expected = sum(
-        (cost(child, seq_len=8, batch_size=1, dtype=None) for child in children),
+        (cost(child, seq_len=8, batch_size=2, dtype=None) for child in children),
         Cost(),
     ) + Cost(
         cells={
-            ("flops", "primal", "elementwise", f32): 8 * 2 * 16,
-            ("flops", "adjoint", "elementwise", f32): 8 * 2 * 16,
-            ("bytes", "primal", "elementwise", f32): 4 * 8 * 2 * 3 * 16,
-            ("bytes", "adjoint", "elementwise", f32): 4 * 8 * 2 * 3 * 16,
+            ("flops", "primal", "elementwise", f32): 8 * 2 * 16 * 2,
+            ("flops", "adjoint", "elementwise", f32): 8 * 2 * 16 * 2,
+            ("bytes", "primal", "elementwise", f32): 4 * 8 * 2 * 3 * 16 * 2,
+            ("bytes", "adjoint", "elementwise", f32): 4 * 8 * 2 * 3 * 16 * 2,
         },
     )
     assert model_cost == expected

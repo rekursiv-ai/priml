@@ -9,7 +9,7 @@ the identifiers stops being a config discrepancy and becomes an ``IndexError``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import json
 
@@ -26,12 +26,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-TASKS = 3
-PUZZLES_PER_TASK = 2
-VIEWS_PER_PUZZLE = 2
-GRID = 900
-NUM_PUZZLE_IDENTIFIERS = TASKS * PUZZLES_PER_TASK + 1
-"""Ids the synthetic build assigns: one per puzzle, plus 0 for the blank."""
+TASKS: Final = 3
+PUZZLES_PER_TASK: Final = 2
+VIEWS_PER_PUZZLE: Final = 2
+GRID: Final = 900
 
 
 @pytest.fixture
@@ -46,17 +44,17 @@ def dataset_dir(tmp_path: Path) -> Path:
     for split in ("train", "test"):
         directory = tmp_path / split
         directory.mkdir()
-        rows = puzzles * VIEWS_PER_PUZZLE
+        rows = puzzles * 2
         grids = np.full((rows, GRID), 2, dtype=np.int32)
         np.save(directory / "all__inputs.npy", grids)
         np.save(directory / "all__labels.npy", grids)
         np.save(
             directory / "all__puzzle_indices.npy",
-            np.arange(puzzles + 1, dtype=np.int32) * VIEWS_PER_PUZZLE,
+            np.arange(puzzles + 1, dtype=np.int32) * 2,
         )
         np.save(
             directory / "all__group_indices.npy",
-            np.arange(TASKS + 1, dtype=np.int32) * PUZZLES_PER_TASK,
+            np.arange(TASKS + 1, dtype=np.int32) * VIEWS_PER_PUZZLE,
         )
         np.save(
             directory / "all__puzzle_identifiers.npy",
@@ -68,7 +66,7 @@ def dataset_dir(tmp_path: Path) -> Path:
                     "vocab_size": 12,
                     "seq_len": GRID,
                     "ignore_label_id": 0,
-                    "num_puzzle_identifiers": NUM_PUZZLE_IDENTIFIERS,
+                    "num_puzzle_identifiers": 7,
                 },
             ),
         )
@@ -127,7 +125,7 @@ def test_a_real_batch_indexes_the_table_in_bounds(dataset_dir: Path) -> None:
 
 
 def test_smoke_keeps_the_full_table_despite_its_task_cap() -> None:
-    """Capping TASKS does not cap the ids those tasks carry.
+    """Capping the task count does not cap the ids those tasks carry.
 
     The tempting shrink -- a table sized to ``num_tasks`` -- is wrong: ids are
     assigned once across the whole build, so a loaded task carries whatever id

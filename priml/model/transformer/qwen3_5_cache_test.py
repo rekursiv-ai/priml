@@ -112,8 +112,8 @@ def test_cache_state_rejects_invalid_native_metadata() -> None:
             [
                 {
                     "kind": "full_attention",
-                    "k": torch.zeros(1, 1, 2, 4),
-                    "v": torch.zeros(1, 1, 2, 4),
+                    "k": torch.zeros(2, 3, 4, 5),
+                    "v": torch.zeros(2, 3, 4, 5),
                     "length": 2,
                     "seen": 1,
                 },
@@ -123,7 +123,7 @@ def test_cache_state_rejects_invalid_native_metadata() -> None:
 
 def test_full_attention_restores_own_independent_snapshot_tensors() -> None:
     """Restoring twice must not share full-attention tensors with the snapshot."""
-    k = torch.zeros(1, 1, 2, 4)
+    k = torch.zeros(2, 3, 4, 5)
     v = torch.zeros_like(k)
     state = [{"kind": "full_attention", "k": k, "v": v, "length": 0, "seen": 0}]
 
@@ -144,8 +144,8 @@ def test_full_attention_restores_own_independent_snapshot_tensors() -> None:
 
 def test_linear_attention_restores_own_independent_snapshot_tensors() -> None:
     """Restoring twice must not share delta-attention tensors with the snapshot."""
-    conv_state = torch.zeros(1, 2, 3)
-    recurrent_state = torch.zeros(1, 2, 3, 4)
+    conv_state = torch.zeros(2, 3, 4)
+    recurrent_state = torch.zeros(2, 3, 4, 5)
     state = [
         {
             "kind": "linear_attention",
@@ -179,8 +179,8 @@ def test_linear_attention_restores_own_independent_snapshot_tensors() -> None:
 
 def test_frozen_view_serializes_as_independent_mutable_cache() -> None:
     """A frozen view captures progress while persistence clones its tensors."""
-    source = KVCache.alloc(batch=1, num_heads=1, max_seq=2, channels_head=4)
-    source.update(torch.ones(1, 1, 1, 4), torch.ones(1, 1, 1, 4))
+    source = KVCache.alloc(batch=2, num_heads=3, max_seq=8, channels_head=5)
+    source.update(torch.ones(2, 3, 4, 5), torch.ones(2, 3, 4, 5))
     state = cache_state_dict([source.freeze()])
     saved_k = state[0]["k"]
     assert isinstance(saved_k, torch.Tensor)
@@ -188,17 +188,17 @@ def test_frozen_view_serializes_as_independent_mutable_cache() -> None:
 
     source.k.fill_(3)
     frozen = source.freeze()
-    source.update(torch.full((1, 1, 1, 4), 4), torch.full((1, 1, 1, 4), 4))
+    source.update(torch.full((2, 3, 4, 5), 4), torch.full((2, 3, 4, 5), 4))
     assert torch.equal(frozen.k, source.k)
-    assert frozen.length == 1
-    assert frozen.seen == 1
+    assert frozen.length == 4
+    assert frozen.seen == 4
 
     first = cache_from_state_dict(state)
     second = cache_from_state_dict(state)
     first_cache, second_cache = first[0], second[0]
     assert type(first_cache) is KVCache
     assert isinstance(second_cache, KVCache)
-    first_cache.update(torch.full((1, 1, 1, 4), 2), torch.full((1, 1, 1, 4), 2))
+    first_cache.update(torch.full((2, 3, 4, 5), 2), torch.full((2, 3, 4, 5), 2))
 
     assert torch.equal(saved_k, expected_k)
     assert torch.equal(second_cache.k, expected_k)
@@ -262,8 +262,8 @@ def test_cache_restore_rejects_bool_full_attention_metadata(name: str) -> None:
     state: list[dict[str, object]] = [
         {
             "kind": "full_attention",
-            "k": torch.zeros(1, 1, 2, 4),
-            "v": torch.zeros(1, 1, 2, 4),
+            "k": torch.zeros(2, 3, 4, 5),
+            "v": torch.zeros(2, 3, 4, 5),
             "length": 0,
             "seen": 0,
         },
@@ -277,7 +277,7 @@ def test_cache_restore_rejects_bool_full_attention_metadata(name: str) -> None:
 @pytest.mark.parametrize("name", ["length", "seen"])
 def test_cache_state_rejects_bool_full_attention_metadata(name: str) -> None:
     """Bool is not valid full-attention progress metadata at serialization time."""
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=2, channels_head=4)
+    cache = KVCache.alloc(batch=2, num_heads=3, max_seq=4, channels_head=5)
     if name == "length":
         cache.length = True
     else:
@@ -291,10 +291,10 @@ def test_cache_state_rejects_bool_full_attention_metadata(name: str) -> None:
     ("k", "v"),
     [
         (torch.zeros(2, 4), torch.zeros(2, 4)),
-        (torch.zeros(1, 1, 2, 4), torch.zeros(1, 1, 3, 4)),
+        (torch.zeros(2, 3, 4, 5), torch.zeros(2, 3, 5, 6)),
         (
-            torch.zeros(1, 1, 2, 4, dtype=torch.float32),
-            torch.zeros(1, 1, 2, 4, dtype=torch.float64),
+            torch.zeros(2, 3, 4, 5, dtype=torch.float32),
+            torch.zeros(2, 3, 4, 5, dtype=torch.float64),
         ),
     ],
 )

@@ -45,7 +45,7 @@ def test_working_dir_propagates_through_imagenet_pipelines(tmp_path: Path) -> No
 
 def _fake_jpeg() -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (256, 256), color="red").save(buffer, format="JPEG")
+    Image.new("RGB", (256, 255), color="red").save(buffer, format="JPEG")
     return buffer.getvalue()
 
 

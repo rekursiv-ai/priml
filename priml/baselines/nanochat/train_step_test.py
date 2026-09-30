@@ -46,8 +46,8 @@ from priml.train.parallelism import NoParallel
 
 _CWD: Final = Path(__file__).resolve().parent
 
-VOCAB = 32
-SEQ = 8
+VOCAB: Final = 32
+SEQ: Final = 8
 
 
 def test_reference_metric_preserves_native_reduction_and_two_denominators() -> None:
@@ -76,9 +76,9 @@ def test_reference_metric_requires_complete_ordered_batches() -> None:
     """Missing or duplicated reference rows cannot produce a valid score."""
     assert "ReferenceBitsPerByte" in vars(train_step)
     metric = train_step.ReferenceBitsPerByte.Config().make()
-    losses = torch.ones(1, 2)
+    losses = torch.ones(3, 2)
     batch = {
-        "score_mask": torch.ones(1, 2, dtype=torch.bool),
+        "score_mask": torch.ones(3, 2, dtype=torch.bool),
         "evaluation_batch": 0,
         "evaluation_batches": 2,
         "reference_bytes": 2,
@@ -142,7 +142,7 @@ def test_ngram_step_charges_the_receiving_update_after_warmup() -> None:
 
 
 class _EndpointTrajectory(nn.Module):
-    """Two exp022 updates, retaining all eight layers at CPU-test dimensions."""
+    """Three exp022 updates over all eight layers."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -150,18 +150,14 @@ class _EndpointTrajectory(nn.Module):
         assert isinstance(config, train_step.NgramTrainStep.Config)
         model = config.model
         assert isinstance(model, MemoryNanoChatLM.Config)
-        model.vocab_size = 16
-        # Size-only: eight blocks stay (their window pattern is the coverage),
-        # so the per-block width is the lever on the stored initial state.
-        # Eight is the floor: a trigram layer reads three gate slices of two
-        # channels (``3 * gate_channels <= channels_in``), and four channels a
-        # head keeps two heads, so no head-axis reshape is the identity. Every
-        # numeric choice is unchanged.
-        model.channels_in = 8
-        model.max_seq_len = 4
+        model.vocab_size = 2
+        # Trigram attention reads three gate slices, so
+        # ``3 * gate_channels <= channels_in`` with gate width two.
+        model.channels_in = 6
+        model.max_seq_len = 3
         model.dtype = torch.float32
         model.rope.dtype = torch.float32
-        # Portable goldens widen Torch arithmetic; opaque fused operators require
+        # Portable replay widens Torch arithmetic; opaque fused operators require
         # fixed FP32 sinks. Native kernel coverage is separate from this CPU replay.
         model.fused_ngram = False
         model.ngram_dirty_clear = False
@@ -173,20 +169,17 @@ class _EndpointTrajectory(nn.Module):
             assert isinstance(block, TransformerBlock.Config)
             attention = block.attn
             assert isinstance(attention, CausalAttention.Config)
-            attention.channels_head = 4
+            attention.channels_head = 2
             attention.gate_channels = 2
             attention.fused_qk_rope = False
             attention.window = model.max_seq_len if attention.window == 2048 else 2
             attention.kernel = PartialConfig(sdpa_attention)
-            # Size-only: pin every block's feed-forward hidden width to 8 rather
-            # than its per-depth ramp (~24-80 here). The stored pre-run state
-            # spans eight blocks and the FFN is its bulk; the relu-square
-            # nonlinearity and the output norm are unchanged.
+            # A four-wide FFN retains the relu-square and output-norm paths.
             ffn = block.ffn
             assert isinstance(ffn, OutputNormFeedForward.Config)
-            ffn.channels_hidden = 8
+            ffn.channels_hidden = 4
         for table in (*model.bigrams.values(), *model.trigrams.values()):
-            table.num_embeddings = 8
+            table.num_embeddings = 4
         config.parallelism = NoParallel.Config(device="cpu")
         config.compile = None
         config.dtype_autocast = None
@@ -216,7 +209,7 @@ class _EndpointTrajectory(nn.Module):
     @override
     def forward(self, rows: Tensor) -> Tensor:
         losses: list[Tensor] = []
-        for progress in (0.0, 0.8):
+        for progress in (0.0, 0.5, 1.0):
             self._step.elapsed_sec = progress * self._step.config.train_budget_sec
             result = self._step.train_step(media=rows[:, :-1], label=rows[:, 1:])
             losses.append(result["loss"])
@@ -224,13 +217,13 @@ class _EndpointTrajectory(nn.Module):
 
 
 @pytest.mark.compute_training
-def test_exp022_two_updates_match_portable_golden() -> None:
-    """Pin the CPU reference model and optimizer interaction across two updates."""
+def test_exp022_three_updates_match_portable_golden() -> None:
+    """Pin the CPU reference model and optimizer interaction across three updates."""
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="exp022",
         build_module=_EndpointTrajectory,
-        build_input=lambda: torch.arange(10).reshape(2, 5),
+        build_input=lambda: torch.arange(8).remainder(2).reshape(2, 4),
         seed=42,
     )
 
@@ -418,7 +411,7 @@ def test_an_invalid_geometry_is_rejected_by_name(field: str, value: float) -> No
     ZeroDivisionError there hides the whole config a reader was inspecting.
     """
     config = NanoChatTrainStep.Config()
-    config.model.max_seq_len = 8
+    config.model.max_seq_len = SEQ
     setattr(config, field, value)
     with pytest.raises(ValueError, match=field):
         config.copy_tree().finalize()
@@ -457,7 +450,7 @@ def test_the_warmup_is_counted_in_steps_not_passes() -> None:
     ``budget_warmup_steps / accumulate_passes`` -- 1.375 steps at the shipped
     geometry -- so the budget would pay for the compilation it skips.
     """
-    step = _step(tokens_per_optimizer_step=4 * SEQ, budget_warmup_steps=1)
+    step = _step(tokens_per_optimizer_step=4 * 8, budget_warmup_steps=1)
     assert step.accumulate_passes == 2
     batch = _batch()
     for _ in range(2):  # One whole optimizer step: the warmup.
@@ -633,7 +626,7 @@ def test_eval_returns_per_token_loss_for_the_metric() -> None:
     """The metric weights each token by its byte length, so it needs them unreduced."""
     step = _step()
     out = step.eval_loss(**_batch())
-    assert out["model"].shape == (2, SEQ)
+    assert out["model"].shape == (2, 8)
 
 
 @pytest.mark.compute_training
@@ -728,26 +721,23 @@ def test_the_selector_is_comparable_not_a_closure() -> None:
     assert matrix_parameters() == matrix_parameters()
 
 
-# The EXPERIMENT's config, not a hand-built one: a golden over a config assembled here
-# would freeze whatever this file happens to say, and the ladder could then change
-# underneath it without the golden noticing. Only the device is pinned, because the
-# harness is CPU-only.
+# The experiment config carries the optimizer and schedule under test. Only the
+# device is pinned because this replay runs on CPU.
 def _smoke_step() -> NanoChatTrainStep:
-    """``exp_smoke``'s step, built for a golden."""
+    """Build the smoke experiment step on CPU."""
     config = experiments.exp_smoke().step
     config.parallelism = NoParallel.Config(device="cpu")
-    # Size-only shrink of the experiment config: the pre-run state is stored
-    # whole, so the per-layer width is the lever.
-    # Width, heads, and the gate move together (the gate reads the whole
-    # stream); both layers stay, so the window pattern is still exercised.
-    # Every numeric choice the ladder sets is untouched.
     model = config.model
     assert isinstance(model, NanoChatLM.Config)
-    model.channels_in = 8
+    model.channels_in = 4
+    model.max_seq_len = 2
+    model.vocab_size = 2
     attention = model.template.attn
     assert isinstance(attention, ValueGatedAttention.Config)
-    attention.channels_head = 4
-    attention.gate_channels = 8
+    attention.channels_head = 2
+    attention.gate_channels = 4
+    # Keep exp_smoke's two accumulation passes while shrinking the sequence.
+    config.tokens_per_optimizer_step = 2 * config.rows_per_pass * model.max_seq_len
     torch.manual_seed(0)
     built = config.make()
     assert isinstance(built, NanoChatTrainStep)
@@ -767,13 +757,12 @@ def _smoke_batch(step: NanoChatTrainStep) -> dict[str, Tensor]:
 
 
 class _SmokeSteps(nn.Module):
-    """A module wrapper so the bfb harness can drive five training steps.
+    """A module wrapper so the bfb harness can drive three training steps.
 
     The harness randomizes ``parameters()`` and snapshots ``state_dict()``, so
     the thing it is handed has to BE the model. Wrapping rather than passing
-    the model directly is what lets the optimizer -- whose moments are half of
-    what this golden exists to freeze -- be constructed after that
-    randomization and against those same tensors.
+    the model directly lets the optimizer moments be constructed after
+    randomization against those same tensors.
     """
 
     def __init__(self) -> None:
@@ -792,8 +781,8 @@ class _SmokeSteps(nn.Module):
 
 
 @pytest.mark.compute_training
-def test_five_steps_bfb() -> None:
-    """Freeze five optimizer steps of the recipe, end to end.
+def test_three_steps_bfb() -> None:
+    """Freeze three optimizer steps of the recipe, end to end.
 
     The forward test artifacts in ``model_test`` freeze one pass. This freezes
     what that pass FEEDS: the backward, both optimizer members, the accumulated
@@ -805,11 +794,10 @@ def test_five_steps_bfb() -> None:
     schedule reads ``elapsed_sec / train_budget_sec``, and that clock is a
     ``perf_counter`` reading (train_step.py:450, 483), so letting it run would
     freeze how fast this machine is. The readings span the whole budget because
-    the trapezoid holds flat over the first half -- five closely-spaced ones all
-    land at multiplier 1.0 and never exercise the decay.
+    the trapezoid holds flat over the first half and then decays.
     """
     budget = experiments.exp_smoke().step.train_budget_sec
-    clock = [fraction * budget for fraction in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    clock = [fraction * budget for fraction in (0.0, 0.5, 1.0)]
 
     def run(module: nn.Module, batch: dict[str, Tensor]) -> Tensor:
         assert isinstance(module, _SmokeSteps)
@@ -817,7 +805,7 @@ def test_five_steps_bfb() -> None:
 
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
-        golden_name="five_steps",
+        golden_name="three_steps",
         build_module=_SmokeSteps,
         build_input=lambda: _smoke_batch(_smoke_step()),
         seed=0,

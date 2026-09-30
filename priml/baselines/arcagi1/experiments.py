@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, Self, override
 
 from configgle import Makes
 
@@ -90,12 +90,6 @@ from priml.train.tracker import TrackerList, WandbTracker
 from priml.train.train_loop import TrainLoop
 
 
-GRID_LEN: Final = 900
-"""Cells in the 30x30 grid every ARC task is padded to."""
-
-VOCAB_SIZE: Final = 12
-"""Tokens: pad, the content-boundary EOS, and the ten ARC colors."""
-
 NUM_PUZZLE_IDENTIFIERS: Final = 876_403
 """Distinct puzzle ids in ``arc1concept-aug-1000``: 876,402 puzzles plus blank.
 
@@ -122,6 +116,21 @@ class ArcTrainLoop(
 
     dataset: ArcData.Config = field(default_factory=ArcData.Config)
     """Augmented ARC tasks, grouped so a batch draws whole tasks."""
+
+    @override
+    def finalize(self) -> Self:
+        self.dataset.spec.finalize()
+        spec = self.dataset.spec
+        model = self.step.model
+        model.vocab_size = spec.vocab_size
+        embedding = model.embedding
+        assert isinstance(embedding, GridEmbedding.Config)
+        embedding.grid_shape = spec.grid_shape
+        if isinstance(model.block, MLPMixerBlock.Config):
+            model.block.seq_len = model.total_seq_len
+        if self.step.act is not None:
+            self.step.act.given_high = spec.vocab_size - 1
+        return super().finalize()
 
 
 def exp000() -> ArcTrainLoop:
@@ -164,13 +173,7 @@ def exp000() -> ArcTrainLoop:
         init_weight=kaiming_uniform,
         init_weight_out=kaiming_uniform,
     )
-    model.vocab_size = VOCAB_SIZE
-
-    # Same embedding class as sudoku, a different grid: ARC pads every task to
-    # 30x30, and its colors have no row/column/box structure to factor.
-    embedding = GridEmbedding.Config()
-    embedding.grid_shape = (GRID_LEN,)
-    model.embedding = embedding
+    model.embedding = GridEmbedding.Config()
 
     # A per-task vector plus one register token. The task embedding comes
     # first, so it owns position 0 -- where the halt head reads.
@@ -231,7 +234,7 @@ def exp001() -> ArcTrainLoop:
     """
     cfg = exp000()
     cfg.experiment_name = "exp001"
-    cfg.step.model.block = _mixer_block(cfg.step.model.total_seq_len)
+    cfg.step.model.block = _mixer_block(-1)
     return cfg
 
 
@@ -270,8 +273,6 @@ def exp002() -> ArcTrainLoop:
         max_steps=16,
         halt_weight=0.5,
     )
-    # ARC's colors run to the end of the vocabulary, unlike sudoku's digits.
-    cfg.step.act.given_high = VOCAB_SIZE - 1
     return cfg
 
 
@@ -294,7 +295,7 @@ def exp003() -> ArcTrainLoop:
     """
     cfg = exp002()
     cfg.experiment_name = "exp003"
-    cfg.step.model.block = _mixer_block(cfg.step.model.total_seq_len)
+    cfg.step.model.block = _mixer_block(-1)
     return cfg
 
 
@@ -345,6 +346,19 @@ class TrmTrainLoop(
 
     dataset: PuzzleData.Config = field(default_factory=PuzzleData.Config)
     """Rank-sharded Philox sampling of the prepared ARC tree."""
+
+    @override
+    def finalize(self) -> Self:
+        self.dataset.spec.finalize()
+        spec = self.dataset.spec
+        model = self.step.model
+        model.vocab_size = spec.vocab_size
+        embedding = model.embedding
+        assert isinstance(embedding, GridEmbedding.Config)
+        embedding.grid_shape = spec.grid_shape
+        if model.rope is not None:
+            model.rope_grid_shape = spec.grid_shape
+        return super().finalize()
 
 
 def exp004() -> TrmTrainLoop:
@@ -599,8 +613,7 @@ def _reference_model(batch_size: int) -> SudokuNet.Config:
     model = SudokuNet.Config()
     model.channels_in = 512
     model.num_layers = 2
-    model.vocab_size = VOCAB_SIZE
-    model.embedding = GridEmbedding.Config(grid_shape=(GRID_LEN,))
+    model.embedding = GridEmbedding.Config()
     model.block = RotaryBlock.Config(
         attn=SelfAttention.Config(
             num_heads=8,

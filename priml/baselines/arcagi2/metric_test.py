@@ -69,7 +69,8 @@ def record_votes(
 
     """
     permutation = np.array([0, 2, 1, 3, 4, 5, 6, 7, 8, 9], dtype=np.uint8)
-    media = torch.zeros(8, 4, 4, dtype=torch.int32)
+    # Eight views are required to cover every dihedral transform.
+    media = torch.zeros(8, 2, 2, dtype=torch.int32)
     predictions = torch.zeros_like(media)
     for index in range(8):
         for storage, grid in ((media, [[1, 2]]), (predictions, [[2], [1]])):
@@ -77,6 +78,7 @@ def record_votes(
             transformed_tensor = torch.from_numpy(transformed)
             rows, cols = transformed_tensor.shape
             storage[index, :rows, :cols] = transformed_tensor + 2
+    # PassK reserves one leading halt-logit column in packed scores.
     packed = torch.cat([torch.zeros(8, 1), predictions.flatten(1).float()], dim=1)
     batch = {"media": media.flatten(1), "puzzle_identifiers": torch.arange(1, 9)}
     metric = build(root)

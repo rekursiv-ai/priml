@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Final
 
-import hashlib
 import json
 
 from torch import Tensor
@@ -14,11 +14,12 @@ import pytest
 import torch
 
 from priml.baselines.sudoku.data import SudokuData, augment_sudoku
+from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.lib.custom_json import ListCodec
+from priml.testing.golden import assert_tensor_golden, stored
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
+_CWD: Final = Path(__file__).resolve().parent
 
 
 @pytest.fixture
@@ -143,34 +144,50 @@ def test_seed_and_epoch_are_distinct_named_stream_inputs(dataset_dir: Path) -> N
     )
 
 
-@pytest.mark.parametrize(
-    ("seed", "expected"),
-    [
-        (0, "846bc363e691de304fd95723895e393a7d25a8cc3f0d1baa1765e641c153587a"),
-        (3, "ba140011e7add6ed1cf7da5a859dca94e537c61f7aa8d07821aeacfb71a00b00"),
-        (42, "1524afa19fa2574bc96d1c43dca02d6e1c0e1dabdde89fe6a291230712897f35"),
-    ],
-)
-def test_augmentation_preserves_original_outputs_and_rng(
-    seed: int,
-    expected: str,
-) -> None:
-    # Captured from the original Sudoku implementation before sharing ARC transforms.
-    grid = torch.arange(5 * 81).reshape(5, 81) % 11
-    generator = torch.Generator().manual_seed(seed)
-    inputs, labels = augment_sudoku(grid, grid.flip(0), generator=generator)
-    payload = b"".join(
-        value.numpy().tobytes() for value in (inputs, labels, generator.get_state())
+def test_augmentation_preserves_original_outputs_and_rng() -> None:
+    """Preserve paired augmentation and the generator's subsequent draws."""
+    grid = torch.arange(2 * 4).reshape(2, 4) % 11
+    record: dict[str, Tensor] = {}
+    for seed in (0, 3, 42):
+        generator = torch.Generator().manual_seed(seed)
+        inputs, labels = augment_sudoku(
+            grid,
+            grid.flip(0),
+            spec=SudokuSpec(),
+            generator=generator,
+        )
+        record[f"{seed}/inputs"] = stored(inputs)
+        record[f"{seed}/labels"] = stored(labels)
+        # The next draws pin the generator's position without its 5 KB state.
+        record[f"{seed}/rng"] = torch.randint(
+            0,
+            2_147_483_647,
+            (2,),
+            generator=generator,
+        )
+    assert_tensor_golden(_CWD / "testdata" / "augmentation.pt", record)
+
+
+def test_augmentation_uses_the_dataset_spec() -> None:
+    spec = SudokuSpec(grid_shape=(4, 4), box_shape=(2, 2), vocab_size=6)
+    grid = torch.arange(32).reshape(2, 16) % 4 + 2
+    actual, labels = augment_sudoku(
+        grid,
+        grid.clone(),
+        spec=spec,
+        generator=torch.Generator().manual_seed(0),
     )
-    assert hashlib.sha256(payload).hexdigest() == expected
+    assert actual.shape == (2, 16)
+    assert torch.equal(actual, labels)
+    assert set(ListCodec.coerce(actual.flatten().tolist(), int)) == {2, 3, 4, 5}
 
 
 def test_augmentation_moves_the_label_with_the_input() -> None:
     """A transformed puzzle must keep a correct solution, or it teaches noise."""
     torch.manual_seed(0)
     # A solved grid: input equals label, so the invariant is checkable directly.
-    grid = torch.arange(81).reshape(1, 81) % 9 + 2
-    inputs, labels = augment_sudoku(grid, grid.clone())
+    grid = torch.arange(162).reshape(2, 81) % 9 + 2
+    inputs, labels = augment_sudoku(grid, grid.clone(), spec=SudokuSpec())
     assert torch.equal(inputs, labels)
 
 
@@ -179,19 +196,24 @@ def test_augmentation_preserves_empties_and_padding() -> None:
     torch.manual_seed(0)
     grid = torch.full((2, 81), 1, dtype=torch.long)  # Every cell empty.
     grid[:, :5] = 0  # Padding.
-    inputs, _ = augment_sudoku(grid, grid.clone())
+    inputs, _ = augment_sudoku(grid, grid.clone(), spec=SudokuSpec())
     assert set(ListCodec.coerce(inputs.flatten().tolist(), int)) <= {0, 1}
 
 
 def test_augmentation_is_seedable() -> None:
     """A dedicated generator makes the stream independent of ambient draws."""
-    grid = torch.arange(81).reshape(1, 81) % 9 + 2
+    grid = torch.arange(162).reshape(2, 81) % 9 + 2
 
     def once(disturb: bool) -> Tensor:
         generator = torch.Generator().manual_seed(3)
         if disturb:
             torch.rand(11)
-        return augment_sudoku(grid, grid.clone(), generator=generator)[0]
+        return augment_sudoku(
+            grid,
+            grid.clone(),
+            spec=SudokuSpec(),
+            generator=generator,
+        )[0]
 
     assert torch.equal(once(disturb=False), once(disturb=True))
 

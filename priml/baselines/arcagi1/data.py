@@ -47,7 +47,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from priml.baselines.arcagi1.augmentation import ArcAugmentation
+from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.scripts.build_dataset import ensure_arc_dataset
 from priml.lib.custom_json import DictCodec, IntCodec, ListCodec, loads
 from priml.math.basic import ceil_div
@@ -407,6 +407,9 @@ class ArcData:
         )
         """Offline recipe consumed by the preparer; never reapplied to loaded rows."""
 
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Dataset-owned packed-grid and token vocabulary configuration."""
+
         base_dir: Path | str | None = None
         """Resource root supplied during parent finalization."""
 
@@ -456,6 +459,7 @@ class ArcData:
 
         @override
         def finalize(self) -> Self:
+            self.augmentation.spec = self.spec
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
@@ -999,6 +1003,9 @@ class PuzzleData:
         )
         """Offline recipe the tree is built with when missing."""
 
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Dataset-owned packed-grid and token vocabulary configuration."""
+
         base_dir: Path | str | None = None
         """Resource root supplied during parent finalization."""
 
@@ -1054,6 +1061,7 @@ class PuzzleData:
 
         @override
         def finalize(self) -> Self:
+            self.augmentation.spec = self.spec
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 

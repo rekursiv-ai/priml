@@ -50,7 +50,7 @@ def temp_dir():
 @pytest.fixture
 def mock_image():
     """Create a mock PIL image."""
-    return Image.new("RGB", (100, 100), color="red")
+    return Image.new("RGB", (100, 101), color="red")
 
 
 def create_test_tar(path: Path, files: dict[str, bytes]):
@@ -69,7 +69,7 @@ def create_nested_tar(path: Path, class_name: str, num_images: int = 2):
     with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
         for i in range(num_images):
             # Create a simple image.
-            img = Image.new("RGB", (10, 10), color="red")
+            img = Image.new("RGB", (10, 12), color="red")
             img_buffer = io.BytesIO()
             img.save(img_buffer, format="JPEG")
             img_bytes = img_buffer.getvalue()
@@ -90,7 +90,7 @@ def create_flat_tar(path: Path, num_images: int = 2):
     """Create a flat tar structure for ImageNet val/test."""
     with tarfile.open(path, "w") as tar:
         for i in range(num_images):
-            img = Image.new("RGB", (10, 10), color="blue")
+            img = Image.new("RGB", (10, 12), color="blue")
             img_buffer = io.BytesIO()
             img.save(img_buffer, format="JPEG")
             img_bytes = img_buffer.getvalue()
@@ -343,7 +343,7 @@ class TestImageNetIteration:
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
                 for i in range(2):
-                    img = Image.new("RGB", (10, 10))
+                    img = Image.new("RGB", (10, 12))
                     img_buffer = io.BytesIO()
                     img.save(img_buffer, format="JPEG")
                     info = tarfile.TarInfo(name=f"{class_id}_{i}.JPEG")
@@ -385,7 +385,7 @@ class TestImageNetIteration:
             class_id = f"n0144{i:04d}"
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
-                img = Image.new("RGB", (10, 10))
+                img = Image.new("RGB", (10, 12))
                 img_buffer = io.BytesIO()
                 img.save(img_buffer, format="JPEG")
                 info = tarfile.TarInfo(name=f"{class_id}_0.JPEG")
@@ -417,7 +417,7 @@ class TestImageNetIteration:
             class_id = f"n0144{i:04d}"
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
-                img = Image.new("RGB", (10, 10))
+                img = Image.new("RGB", (10, 12))
                 img_buffer = io.BytesIO()
                 img.save(img_buffer, format="JPEG")
                 info = tarfile.TarInfo(name=f"{class_id}_0.JPEG")
@@ -450,7 +450,7 @@ class TestImageNetIteration:
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
                 for j in range(2):
-                    img = Image.new("RGB", (10, 10))
+                    img = Image.new("RGB", (10, 12))
                     img_buffer = io.BytesIO()
                     img.save(img_buffer, format="JPEG")
                     info = tarfile.TarInfo(name=f"{class_id}_{j}.JPEG")
@@ -481,7 +481,7 @@ class TestImageNetIteration:
             class_id = f"n0144{i:04d}"
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
-                img = Image.new("RGB", (10, 10))
+                img = Image.new("RGB", (10, 12))
                 img_buffer = io.BytesIO()
                 img.save(img_buffer, format="JPEG")
                 info = tarfile.TarInfo(name=f"{class_id}_0.JPEG")
@@ -513,7 +513,7 @@ class TestImageNetIteration:
             class_id = f"n0144{i:04d}"
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
-                img = Image.new("RGB", (10, 10))
+                img = Image.new("RGB", (10, 12))
                 img_buffer = io.BytesIO()
                 img.save(img_buffer, format="JPEG")
                 info = tarfile.TarInfo(name=f"{class_id}_0.JPEG")
@@ -712,7 +712,7 @@ class TestImageNetReshuffle:
             class_id = f"n0144{i:04d}"
             class_tar_buffer = io.BytesIO()
             with tarfile.open(fileobj=class_tar_buffer, mode="w") as class_tar:
-                img = Image.new("RGB", (10, 10))
+                img = Image.new("RGB", (10, 12))
                 img_buffer = io.BytesIO()
                 img.save(img_buffer, format="JPEG")
                 info = tarfile.TarInfo(name=f"{class_id}_0.JPEG")
@@ -819,7 +819,7 @@ class TestImageNetLength:
                 # First tar has 1 image, others have 2.
                 num_images = 1 if i == 0 else 2
                 for j in range(num_images):
-                    img = Image.new("RGB", (10, 10))
+                    img = Image.new("RGB", (10, 12))
                     img_buffer = io.BytesIO()
                     img.save(img_buffer, format="JPEG")
                     info = tarfile.TarInfo(name=f"{class_id}_{j}.JPEG")

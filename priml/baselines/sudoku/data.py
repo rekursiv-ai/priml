@@ -26,10 +26,12 @@ move with the input, which the train step never sees.
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, Self, TypedDict, cast, override
 
 import logging
+import math
 
 from configgle import Fig
 from numpy.typing import NDArray
@@ -39,6 +41,7 @@ import numpy as np
 import torch
 
 from priml.baselines.arcagi1.augmentation import ColorDihedral
+from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.lib.custom_json import DictCodec, IntCodec, loads
 from priml.math.basic import ceil_div
 from priml.math.seed import salt
@@ -71,7 +74,7 @@ def augment_sudoku(
     inputs: Tensor,
     labels: Tensor,
     *,
-    vocab_size: int = 11,
+    spec: SudokuSpec,
     generator: torch.Generator | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Relabel digits and reflect the grid, preserving the puzzle's solution.
@@ -88,7 +91,7 @@ def augment_sudoku(
     Args:
       inputs: ``[B, 81]`` input tokens.
       labels: ``[B, 81]`` solution tokens.
-      vocab_size: Token table size; the permutation covers the digits within it.
+      spec: Dataset-owned grid geometry and token vocabulary.
       generator: RNG for the draws. ``None`` uses the ambient global stream.
 
     Returns:
@@ -97,12 +100,13 @@ def augment_sudoku(
 
     """
     config = ColorDihedral.Config()
+    config.colors = tuple(range(1, spec.vocab_size - 1))
     # Preserve the original rotation/flip ordering so seeded batches stay identical.
     config.transforms = (0, 4, 1, 7, 2, 5, 3, 6)
     return config.make().augment_tokens(
         inputs,
         labels,
-        vocab_size=vocab_size,
+        vocab_size=spec.vocab_size,
         token_offset=1,
         generator=generator,
     )
@@ -124,6 +128,7 @@ class _SudokuBatches:
         epoch: int,
         augment: bool,
         augment_seed: int | None,
+        spec: SudokuSpec,
     ) -> None:
         if epoch < 0:
             raise ValueError(f"epoch must be non-negative; got {epoch}.")
@@ -139,7 +144,11 @@ class _SudokuBatches:
         self.inputs: Tensor = data["inputs"][:rows].to(self.device)
         self.labels: Tensor = data["labels"][:rows].to(self.device)
         self.bounds: Tensor = bounds.to(self.device)
-        self.vocab_size = int(data["vocab_size"])
+        if data["vocab_size"] != spec.vocab_size:
+            raise ValueError("Prepared vocabulary does not match dataset spec.")
+        if data["inputs"].shape[1] != math.prod(spec.grid_shape):
+            raise ValueError("Prepared grid does not match dataset spec.")
+        self.spec = spec
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -193,7 +202,7 @@ class _SudokuBatches:
                 inputs, labels = augment_sudoku(
                     inputs,
                     labels,
-                    vocab_size=self.vocab_size,
+                    spec=self.spec,
                     generator=self._augmentation_generator(
                         active_epoch,
                         batch_index,
@@ -312,6 +321,9 @@ class SudokuData:
     class Config(Fig["SudokuData"]):
         """Where the prepared arrays live, and how batches are drawn."""
 
+        spec: SudokuSpec = field(default_factory=SudokuSpec)
+        """Puzzle geometry and token vocabulary."""
+
         base_dir: Path | str | None = None
         """Resource root supplied during parent finalization."""
 
@@ -406,6 +418,7 @@ class SudokuData:
             epoch=self._epochs,
             augment=self.config.augment,
             augment_seed=self.config.augment_seed,
+            spec=self.config.spec,
         )
         if self._pending_loader_state is not None:
             stream.load_state_dict(self._pending_loader_state)
@@ -435,6 +448,7 @@ class SudokuData:
             epoch=0,
             augment=False,
             augment_seed=None,
+            spec=self.config.spec,
         )
 
     class StateDict(TypedDict):

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final, cast
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -26,16 +28,17 @@ _CWD: Final = Path(__file__).resolve().parent
 
 def tiny_resnet() -> ResNet.Config:
     """Return the smallest ResNet that still exercises every code path."""
-    config = ResNet.Config(channels_in=3, channels_out=10)
-    config.channels_hidden = (8, 16)
+    config = ResNet.Config(channels_in=3, channels_out=2)
+    config.channels_hidden = (2, 4)
     config.blocks_per_stage = 1
     return config
 
 
 def tiny_speednet() -> SpeedNet.Config:
     """Return the smallest SpeedNet that still exercises every code path."""
-    config = SpeedNet.Config(channels_in=3, channels_out=10)
-    config.channels_hidden = (8, 16, 24)
+    config = SpeedNet.Config(channels_in=3, channels_out=2)
+    config.image_size = (7, 8)
+    config.channels_hidden = (4,)
     block = config.block = ConvBlock.Config()
     block.num_convs = 1
     return config
@@ -43,23 +46,23 @@ def tiny_speednet() -> SpeedNet.Config:
 
 def test_resnet_forward_shape() -> None:
     model = tiny_resnet().make()
-    assert model(torch.randn(2, 3, 32, 32)).shape == (2, 10)
+    assert model(torch.randn(2, 3, 4, 5)).shape == (2, 2)
 
 
 def test_resnet_downsamples_once_per_stage_after_the_first() -> None:
     config = tiny_resnet()
-    config.channels_hidden = (8, 16, 32)
+    config.channels_hidden = (2, 3, 4)
     model = config.make()
-    x = model.stem(torch.randn(1, 3, 32, 32))
+    x = model.stem(torch.randn(2, 3, 31, 32))
     for stage in model.stages:
-        x = cast(torch.Tensor, stage(x))
+        x = cast(Tensor, stage(x))
     # Three stages, the first at full resolution: 32 -> 32 -> 16 -> 8.
     assert x.shape[-1] == 8
 
 
 def test_resnet_residual_path_is_identity_when_shape_is_preserved() -> None:
     config = tiny_resnet()
-    config.channels_hidden = (8,)
+    config.channels_hidden = (2,)
     block = config.make().stages[0]
     assert isinstance(block, ResidualBlock)
     assert isinstance(block.shortcut, torch.nn.Identity)
@@ -81,8 +84,8 @@ def test_resnet_rejects_zero_blocks() -> None:
 
 def test_speednet_forward_shape() -> None:
     model = tiny_speednet().make()
-    model.init_whiten(torch.randn(8, 3, 32, 32))
-    assert model(torch.randn(2, 3, 32, 32)).shape == (2, 10)
+    model.init_whiten(torch.randn(6, 3, 7, 8))
+    assert model(torch.randn(2, 3, 7, 8)).shape == (2, 2)
 
 
 def test_speednet_whitening_weights_are_frozen() -> None:
@@ -94,7 +97,7 @@ def test_speednet_whitening_is_rank_doubled() -> None:
     config = tiny_speednet()
     config.whiten_kernel = 2
     model = config.make()
-    model.init_whiten(torch.randn(8, 3, 32, 32))
+    model.init_whiten(torch.randn(8, 3, 25, 26))
     kernel = model.whiten.weight.data
     half = kernel.shape[0] // 2
     # The layer emits each eigenvector and its negation, so a following
@@ -105,7 +108,7 @@ def test_speednet_whitening_is_rank_doubled() -> None:
 def test_speednet_block_list_must_match_the_stage_count() -> None:
     config = tiny_speednet()
     config.block = [ConvBlock.Config(), ConvBlock.Config()]
-    with pytest.raises(ValueError, match="block list must hold 3 configs"):
+    with pytest.raises(ValueError, match="block list must hold 1 configs"):
         _ = config.make()
 
 
@@ -125,8 +128,8 @@ def test_speednet_three_convs_add_a_residual() -> None:
     block = config.block = ConvBlock.Config()
     block.num_convs = 3
     model = config.make()
-    model.init_whiten(torch.randn(8, 3, 32, 32))
-    assert model(torch.randn(2, 3, 32, 32)).shape == (2, 10)
+    model.init_whiten(torch.randn(6, 3, 7, 8))
+    assert model(torch.randn(2, 3, 7, 8)).shape == (2, 2)
 
 
 def test_speednet_two_convs_omit_the_residual() -> None:
@@ -134,8 +137,8 @@ def test_speednet_two_convs_omit_the_residual() -> None:
     block = config.block = ConvBlock.Config()
     block.num_convs = 2
     model = config.make()
-    model.init_whiten(torch.randn(8, 3, 32, 32))
-    assert model(torch.randn(2, 3, 32, 32)).shape == (2, 10)
+    model.init_whiten(torch.randn(6, 3, 7, 8))
+    assert model(torch.randn(2, 3, 7, 8)).shape == (2, 2)
 
 
 def test_speednet_rejects_invalid_num_convs() -> None:
@@ -148,7 +151,7 @@ def test_speednet_rejects_invalid_num_convs() -> None:
 
 def test_speednet_dirac_init_passes_input_through_each_block() -> None:
     config = tiny_speednet()
-    config.channels_hidden = (8, 8, 8)
+    config.channels_hidden = (2, 2, 2)
     config.init_conv = dirac
     model = config.make()
     block = model.blocks[1]
@@ -159,52 +162,28 @@ def test_speednet_dirac_init_passes_input_through_each_block() -> None:
     assert torch.equal(weight, torch.nn.init.dirac_(torch.empty_like(weight)))
 
 
-# Every path -- residual shortcut, the affine norms, the init -- still runs; only the
-# convolution tensors are smaller.
-def _golden_resnet() -> ResNet.Config:
-    """Return ``tiny_resnet`` at golden width: stage widths ``(2, 4)``, size only."""
-    config = tiny_resnet()
-    config.channels_hidden = (2, 4)
-    return config
-
-
 def test_resnet_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="resnet",
-        build_module=lambda: _golden_resnet().make(),
-        build_input=lambda: torch.randn(2, 3, 8, 8),
+        build_module=tiny_resnet().make,
+        build_input=lambda: torch.randn(2, 3, 4, 5),
         seed=0,
     )
 
 
-# The whitening, every pool, and the residual still run; only the convolution tensors
-# shrink.
-def _golden_speednet() -> SpeedNet.Config:
-    """Return ``tiny_speednet`` at golden width: stages ``(2, 4, 6)``, size only."""
-    config = tiny_speednet()
-    config.channels_hidden = (2, 4, 6)
-    return config
-
-
 def test_speednet_bfb() -> None:
-    # 32x32, not the 8x8 the ResNet golden uses: three pooling blocks and the
-    # final MaxPool2d(3) reduce 32 -> 31 -> 15 -> 7 -> 3 -> 1, and anything
-    # smaller pools away to nothing. ``init_whiten`` is deliberately not called
-    # -- the harness overwrites every parameter, the whitening kernel included,
-    # so the golden pins the forward arithmetic rather than the PCA fit.
-    #
-    # ONE image, because that 32x32 floor makes the input the largest thing in
-    # the file. A second row would double it while re-checking arithmetic the
-    # first row already covers -- there is no cross-batch interaction here to
-    # catch, since BatchNorm runs with ``affine=False`` and the harness never
-    # reaches training mode.
+    # Whitening gives 6x7, the block pool gives 3x3, and the final 3x3 pool gives 1x1.
+    # ``init_whiten`` is deliberately not called -- the harness overwrites every
+    # parameter, the whitening kernel included, so the golden pins the forward
+    # arithmetic rather than the PCA fit.
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="speednet",
-        build_module=lambda: _golden_speednet().make(),
-        build_input=lambda: torch.randn(1, 3, 32, 32),
+        build_module=tiny_speednet().make,
+        build_input=lambda: torch.randint(0, 256, (2, 3, 7, 8), dtype=torch.uint8),
         seed=0,
+        run=lambda module, image: cast(SpeedNet, module)(image.float()),
     )
 
 
@@ -235,15 +214,15 @@ def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> No
             channels_in=4,
             channels_out=6,
             stride=2,
-            image_size=(8, 8),
+            image_size=(6, 8),
         ),
-        build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
-        seq_len=8 * 8,
+        build_input=lambda: torch.randn(2, 4, 6, 8, requires_grad=True),
+        seq_len=6 * 8,
         batch_size=2,
         dtype=None,
     )
     conv1, conv2, shortcut = 6 * 4 * 9, 6 * 6 * 9, 6 * 4
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * 4 * 4 * (
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * 3 * 4 * (
         conv1 + conv2 + shortcut
     )
     assert analytical.params == conv1 + conv2 + shortcut + 2 * 4 + 2 * 6
@@ -252,105 +231,107 @@ def test_residual_block_cost_prices_the_convolutions_at_the_strided_grid() -> No
     # output grid. The adjoint adds one accumulation per input channel where the
     # shortcut's and the branch's gradients meet.
     norm1 = BatchNorm2d.Config(4, elementwise_affine=True).cost(
-        seq_len=128,
+        seq_len=96,
         batch_size=1,
         dtype=None,
     )
     norm2 = BatchNorm2d.Config(6, elementwise_affine=True).cost(
-        seq_len=32,
+        seq_len=24,
         batch_size=1,
         dtype=None,
     )
     assert analytical["flops", "primal", "elementwise"].sum() == (
         norm1["flops", "primal", "elementwise"].sum()
-        + 4 * 128
+        + 4 * 96
         + norm2["flops", "primal", "elementwise"].sum()
-        + 6 * 32
-        + 6 * 32
+        + 6 * 24
+        + 6 * 24
     )
     assert analytical["flops", "adjoint", "elementwise"].sum() == (
         norm1["flops", "adjoint", "elementwise"].sum()
-        + 4 * 128
-        + 4 * 128
+        + 4 * 96
+        + 4 * 96
         + norm2["flops", "adjoint", "elementwise"].sum()
-        + 6 * 32
+        + 6 * 24
     )
 
 
 def test_residual_block_cost_omits_the_shortcut_when_shape_is_preserved() -> None:
+    # ResidualBlock cost resolves a missing image_size through _block_grids, which requires a square grid.
     analytical = assert_cost_matches_torch(
-        ResidualBlock.Config(channels_in=4, channels_out=4),
-        build_input=lambda: torch.randn(2, 4, 4, 4, requires_grad=True),
+        ResidualBlock.Config(channels_in=5, channels_out=5),
+        build_input=lambda: torch.randn(2, 5, 4, 4, requires_grad=True),
         seq_len=4 * 4,
         batch_size=2,
         dtype=None,
     )
-    assert analytical.params == 2 * (4 * 4 * 9) + 2 * (2 * 4)
+    assert analytical.params == 2 * (5 * 5 * 9) + 2 * (2 * 5)
 
 
 def test_conv_block_cost_pools_after_the_first_convolution() -> None:
     """The first convolution runs at the input grid, the other two at a quarter of it."""
     block = ConvBlock.Config(channels_in=4, channels_out=6)
     block.num_convs = 3
+    block.image_size = (6, 8)
     analytical = assert_cost_matches_torch(
         block,
-        build_input=lambda: torch.randn(2, 4, 8, 8, requires_grad=True),
-        seq_len=8 * 8,
+        build_input=lambda: torch.randn(2, 4, 6, 8, requires_grad=True),
+        seq_len=6 * 8,
         batch_size=2,
         dtype=None,
     )
     first, later = 6 * 4 * 9, 6 * 6 * 9
     assert (
         analytical["flops", "primal", "matmul"].sum()
-        == 2 * first * 128 + 2 * 2 * later * 32
+        == 2 * first * 96 + 2 * 2 * later * 24
     )
     # ``affine=False`` norms own nothing.
     assert analytical.params == first + 2 * later
     # The 2x2 max pool is three compares per pooled channel forward and one
     # gradient element routed back to the argmax; the norms add their own sums.
-    norm = BatchNorm2d.Config(6).cost(seq_len=16, batch_size=2, dtype=None)
+    norm = BatchNorm2d.Config(6).cost(seq_len=12, batch_size=2, dtype=None)
     assert analytical["flops", "primal", "reduction"].sum() == (
-        6 * 3 * 32 + 3 * norm["flops", "primal", "reduction"].sum()
+        6 * 3 * 24 + 3 * norm["flops", "primal", "reduction"].sum()
     )
-    assert analytical["flops", "adjoint", "selection"].sum() == 6 * 32
+    assert analytical["flops", "adjoint", "selection"].sum() == 6 * 24
 
 
 def test_resnet_cost_counts_each_stage_for_the_complete_batch() -> None:
     """Every matmul the forward issues is in the cost, and every parameter."""
     config = tiny_resnet()
-    config.image_size = (8, 8)
+    config.image_size = (6, 8)
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 8, 8, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 6, 8, requires_grad=True),
         batch_size=2,
         dtype=None,
     )
-    stem, stage0 = 8 * 3 * 9, 2 * (8 * 8 * 9)
-    stage1 = 16 * 8 * 9 + 16 * 16 * 9 + 16 * 8
-    head = 16 * 10
+    stem, stage0 = 2 * 3 * 9, 2 * (2 * 2 * 9)
+    stage1 = 4 * 2 * 9 + 4 * 4 * 9 + 4 * 2
+    head = 4 * 2
     assert analytical["flops", "primal", "matmul"].sum() == 2 * (
-        stem * 128 + stage0 * 128 + stage1 * 32 + head * 2
+        stem * 96 + stage0 * 96 + stage1 * 24 + head * 2
     )
-    # Five affine norms: three of width 8, two of width 16; the head owns a bias.
+    # Five affine norms: three of width 2, two of width 4; the head owns a bias.
     assert analytical.params == (
-        stem + stage0 + stage1 + head + 3 * (2 * 8) + 2 * (2 * 16) + 10
+        stem + stage0 + stage1 + head + 3 * (2 * 2) + 2 * (2 * 4) + 2
     )
     # Global average pooling sums 4x4 positions per channel once per image; the
     # four norms sum at their own grids.
-    norm8 = BatchNorm2d.Config(8, elementwise_affine=True).cost(
-        seq_len=64,
+    norm2 = BatchNorm2d.Config(2, elementwise_affine=True).cost(
+        seq_len=48,
         batch_size=2,
         dtype=None,
     )
-    norm16 = BatchNorm2d.Config(16, elementwise_affine=True).cost(
-        seq_len=16,
+    norm4 = BatchNorm2d.Config(4, elementwise_affine=True).cost(
+        seq_len=12,
         batch_size=2,
         dtype=None,
     )
     assert analytical["flops", "primal", "reduction"].sum() == (
-        3 * norm8["flops", "primal", "reduction"].sum()
-        + 2 * norm16["flops", "primal", "reduction"].sum()
-        + 16 * 2 * (16 - 1)
+        3 * norm2["flops", "primal", "reduction"].sum()
+        + 2 * norm4["flops", "primal", "reduction"].sum()
+        + 4 * 2 * (12 - 1)
     )
 
 
@@ -360,29 +341,28 @@ def test_speednet_cost_prices_the_frozen_whitening_and_every_pool() -> None:
     The whitening weight is frozen but owned: ``parameters()`` lists it, so
     it counts, while its adjoint forms only the input gradient.
     """
+    config = tiny_speednet()
+    config.image_size = (7, 8)
     analytical = assert_cost_matches_torch(
-        tiny_speednet(),
-        build_input=lambda: torch.randn(1, 3, 32, 32, requires_grad=True),
-        batch_size=1,
+        config,
+        build_input=lambda: torch.randn(2, 3, 7, 8, requires_grad=True),
+        batch_size=2,
         dtype=None,
     )
     whiten = 24 * 3 * 4
-    blocks = (8 * 24 * 9, 16 * 8 * 9, 24 * 16 * 9)
-    head = 10 * 24
-    assert analytical.params == whiten + sum(blocks) + head
-    # 32 -> 31 (whiten) -> 15 -> 7 -> 3 (block pools) -> 1 (final pool).
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * (
-        whiten * 961 + blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head
+    block = 4 * 24 * 9
+    head = 2 * 4
+    assert analytical.params == whiten + block + head
+    # 7x8 -> 6x7 (whiten) -> 3x3 (block pool) -> 1x1 (final pool).
+    assert analytical["flops", "primal", "matmul"].sum() == 2 * 2 * (
+        whiten * 6 * 7 + block * 6 * 7 + head
     )
-    assert analytical["flops", "adjoint", "matmul"].sum() == 2 * (
-        whiten * 961 + 2 * (blocks[0] * 961 + blocks[1] * 225 + blocks[2] * 49 + head)
+    assert analytical["flops", "adjoint", "matmul"].sum() == 2 * 2 * (
+        whiten * 6 * 7 + 2 * (block * 6 * 7 + head)
     )
-    # One gradient element routed back per pooled channel: three block pools
-    # and the final 3x3 pool.
-    assert (
-        analytical["flops", "adjoint", "selection"].sum()
-        == 8 * 225 + 16 * 49 + 24 * 9 + 24 * 1
-    )
+    # One gradient element routed back per pooled channel: the block pool and
+    # the final 3x3 pool.
+    assert analytical["flops", "adjoint", "selection"].sum() == 2 * (4 * 3 * 3 + 4 * 1)
 
 
 @pytest.mark.parametrize("speednet", [False, True])

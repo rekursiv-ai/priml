@@ -35,9 +35,11 @@ __all__ = [
     "log_sigma_from_log_snr_per_variance_preserving",
     "log_snr_from_log_sigma_per_rectified_flow",
     "log_snr_from_log_sigma_per_variance_preserving",
+    "log_snr_from_log_time_per_linear",
     "log_snr_from_log_time_per_logit",
     "log_snr_from_log_time_per_logtan",
     "log_snr_from_log_time_per_truncnormicdf",
+    "log_time_from_log_snr_per_linear",
     "log_time_from_log_snr_per_logit",
     "log_time_from_log_snr_per_logtan",
     "log_time_from_log_snr_per_truncnormicdf",
@@ -324,6 +326,84 @@ def log_time_from_log_snr_per_logit(log_snr: Tensorable) -> Tensor:
     """
     log_snr = convert_to_tensor(log_snr)
     return nn.functional.logsigmoid(-0.5 * log_snr)
+
+
+# Per sample, scalar: exp, subtract-multiply (two). No gradient reaches a drawn time, so
+# the adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=3,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
+def log_snr_from_log_time_per_linear(
+    log_t: Tensorable,
+    *,
+    low: Tensorable = -10,
+    high: Tensorable = +6,
+) -> Tensor:
+    """log_snr linear in t: uniform times give log SNR uniform on [low, high].
+
+    The schedule of the continuous-time VDM ELBO: with log SNR uniform, the
+    ELBO's diffusion term is ``½ (high - low) E‖ε - ε̂‖²`` with no per-sample
+    weight, so the ε-MSE of a uniform draw is an unbiased codelength.
+
+    Args:
+      log_t: Log timestep (≤ 0). log_t=-∞ → high, log_t=0 → low.
+      low: Log SNR at t = 1.
+      high: Log SNR at t = 0.
+
+    Returns:
+      log_snr: Log signal-to-noise ratio.
+
+    References:
+      https://arxiv.org/abs/2107.00630
+        Kingma et al. 2021, "Variational Diffusion Models."
+
+    Derivation:
+
+        logsnr(t) = high - t (high - low),  t = exp(log_t).
+
+    """
+    log_t, low, high = convert_to_tensor(log_t, low, high)
+    return high - log_t.exp() * (high - low)
+
+
+# Per sample, scalar: subtract, divide, log. No gradient reaches a drawn time, so the
+# adjoint is zero.
+@set_cost(
+    map_cost(
+        primal=4,
+        adjoint=0,
+        adjoint_inputs=0,
+        adjoint_outputs=0,
+    ),
+)
+def log_time_from_log_snr_per_linear(
+    log_snr: Tensorable,
+    *,
+    low: Tensorable = -10,
+    high: Tensorable = +6,
+) -> Tensor:
+    """Inverse of log_snr_from_log_time_per_linear.
+
+    Args:
+      log_snr: Log signal-to-noise ratio in [low, high].
+      low: Log SNR at t = 1 (must match forward).
+      high: Log SNR at t = 0 (must match forward).
+
+    Returns:
+      log_t: Log timestep (≤ 0).
+
+    Derivation:
+
+        t = (high - logsnr) / (high - low).
+
+    """
+    log_snr, low, high = convert_to_tensor(log_snr, low, high)
+    return safe_log((high - log_snr) / (high - low))
 
 
 # Regarding shift: rule of thumb for images ≥ 64×64: shift = log((64 × 64) / (H × W)).

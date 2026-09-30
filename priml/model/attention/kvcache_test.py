@@ -29,7 +29,12 @@ class _Cache(nn.Module):
 
 
 def _cache_contract(x: Tensor) -> Tensor:
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=3, channels_head=2)
+    cache = KVCache.alloc(
+        batch=x.shape[0],
+        num_heads=x.shape[1],
+        max_seq=3,
+        channels_head=x.shape[-1],
+    )
     _ = cache.update(x[..., :2, :], -x[..., :2, :])
     k, v = cache.update(x[..., 2:, :], -x[..., 2:, :])
     frozen = cache.freeze()
@@ -51,34 +56,34 @@ def test_kv_cache_basic():
 
 
 def test_kv_cache_fifo_rolling():
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=4, channels_head=2)
+    cache = KVCache.alloc(batch=2, num_heads=4, max_seq=4, channels_head=5)
     for i in range(4):
-        k = torch.full((1, 1, 1, 2), float(i))
-        v = torch.full((1, 1, 1, 2), float(i))
+        k = torch.full((2, 4, 3, 5), float(i))
+        v = torch.full((2, 4, 3, 5), float(i))
         cache.update(k, v)
     assert cache.length == 4
     # One more should FIFO.
-    k = torch.full((1, 1, 1, 2), 99.0)
-    v = torch.full((1, 1, 1, 2), 99.0)
+    k = torch.full((2, 4, 3, 5), 99.0)
+    v = torch.full((2, 4, 3, 5), 99.0)
     k_out, _v_out = cache.update(k, v)
     assert cache.length == 4
     assert k_out[0, 0, -1, 0].item() == 99.0
-    assert k_out[0, 0, 0, 0].item() == 1.0
+    assert k_out[0, 0, 0, 0].item() == 3.0
 
 
 def test_kv_cache_freeze():
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=8, channels_head=2)
-    k = torch.randn(1, 1, 3, 2)
-    v = torch.randn(1, 1, 3, 2)
+    cache = KVCache.alloc(batch=2, num_heads=3, max_seq=8, channels_head=5)
+    k = torch.randn(2, 3, 4, 5)
+    v = torch.randn(2, 3, 4, 5)
     cache.update(k, v)
-    assert cache.length == 3
+    assert cache.length == 4
 
     frozen = cache.freeze()
-    k2 = torch.randn(1, 1, 1, 2)
-    v2 = torch.randn(1, 1, 1, 2)
+    k2 = torch.randn(2, 3, 6, 5)
+    v2 = torch.randn(2, 3, 6, 5)
     k_out, _v_out = frozen.update(k2, v2)
-    assert frozen.length == 3
-    assert k_out.shape == (1, 1, 3, 2)
+    assert frozen.length == 4
+    assert k_out.shape == (2, 3, 4, 5)
 
 
 def test_kv_cache_seen_tracks_absolute_position():
@@ -88,13 +93,13 @@ def test_kv_cache_seen_tracks_absolute_position():
     ``max_seq``), so absolute positions saturated/repeated once the
     cache filled. ``seen`` must keep counting past capacity.
     """
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=2, channels_head=2)
+    cache = KVCache.alloc(batch=2, num_heads=4, max_seq=4, channels_head=5)
     seen: list[int] = []
     for i in range(4):
         seen.append(cache.seen)
-        k = torch.full((1, 1, 1, 2), float(i))
+        k = torch.full((2, 4, 3, 5), float(i))
         cache.update(k, k)
-    assert seen == [0, 1, 2, 3]
+    assert seen == [0, 3, 6, 9]
 
 
 def test_kv_cache_freeze_preserves_seen():
@@ -104,16 +109,16 @@ def test_kv_cache_freeze_preserves_seen():
     the (FIFO-capped) length, dropping the true total so RoPE would reuse
     absolute positions after the freeze. The snapshot must carry ``seen``.
     """
-    cache = KVCache.alloc(batch=1, num_heads=1, max_seq=2, channels_head=2)
+    cache = KVCache.alloc(batch=2, num_heads=4, max_seq=4, channels_head=5)
     for i in range(4):
         cache.update(
-            torch.full((1, 1, 1, 2), float(i)),
-            torch.full((1, 1, 1, 2), float(i)),
+            torch.full((2, 4, 3, 5), float(i)),
+            torch.full((2, 4, 3, 5), float(i)),
         )
-    assert cache.length == 2
-    assert cache.seen == 4
+    assert cache.length == 4
+    assert cache.seen == 4 * 3
     frozen = cache.freeze()
-    assert frozen.seen == 4
+    assert frozen.seen == 4 * 3
 
 
 def test_kv_cache_update_larger_than_capacity_raises():
@@ -123,7 +128,7 @@ def test_kv_cache_update_larger_than_capacity_raises():
     ``length`` produced a negative ``keep`` and corrupt slices.
     """
     cache = KVCache.alloc(batch=1, num_heads=1, max_seq=2, channels_head=2)
-    k = torch.randn(1, 1, 3, 2)
+    k = torch.randn(2, 3, 4, 5)
     with pytest.raises(ValueError, match="exceeds cache capacity"):
         cache.update(k, k)
 
@@ -136,7 +141,7 @@ def test_kv_cache_from_tensors():
 
 
 def test_kv_cache_text(request: pytest.FixtureRequest) -> None:
-    output = _cache_contract(torch.arange(8, dtype=torch.float32).reshape(1, 1, 4, 2))
+    output = _cache_contract(torch.arange(120, dtype=torch.float32).reshape(2, 3, 5, 4))
     assert_text_golden(
         request,
         test_file=__file__,
@@ -151,7 +156,7 @@ def test_kv_cache_bfb(device: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name="kv_cache",
         build_module=lambda: _Cache().to(device),
-        build_input=lambda: torch.randn(1, 1, 4, 2),
+        build_input=lambda: torch.randn(2, 3, 5, 4),
         seed=0,
     )
 

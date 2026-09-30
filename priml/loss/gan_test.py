@@ -43,6 +43,7 @@ def test_adversarial_loss_is_pointwise_over_batch() -> None:
     fake_media = torch.zeros(2, 3, 4)
     result = loss(
         fake_media,
+        # AdversarialLoss production BCE consumes one scalar logit per sample.
         fake_logits=torch.zeros(2, 1),
         fake_media=fake_media,
         real_media=torch.ones(2, 3, 4),
@@ -58,22 +59,27 @@ def test_adversarial_loss_cost_spreads_per_sample_work_over_media() -> None:
     """One logit's BCE and the two weights are per sample; L1 and its mean are per element."""
     config = AdversarialLoss.Config()
     real_media = torch.randn(2, 3, 4)
+
+    def run(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+        assert isinstance(module, WeightedSum)
+        return module(
+            inputs[1],
+            fake_logits=inputs[0],
+            fake_media=inputs[1],
+            real_media=real_media,
+        )["loss"]
+
     measured = assert_cost_matches_torch(
         WeightedSum.Config(fns=[config], weights=[1.0]),
         build_input=lambda: (
+            # AdversarialLoss production BCE consumes one scalar logit per sample.
             torch.randn(2, 1, requires_grad=True),
             torch.randn(2, 3, 4, requires_grad=True),
         ),
         seq_len=12,
         batch_size=2,
         dtype=None,
-        run=lambda module, inputs: _loss(
-            module,
-            inputs[1],
-            fake_logits=inputs[0],
-            fake_media=inputs[1],
-            real_media=real_media,
-        ),
+        run=run,
     )
     expected = _fp32(
         primal={
@@ -108,12 +114,6 @@ def test_adversarial_loss_operand_traffic(dtype: torch.dtype) -> None:
     assert costed["bytes", "primal", "reduction"].sum() == 30 * itemsize
     assert costed["bytes", "adjoint", "elementwise"].sum() == 200 * itemsize
     assert costed["bytes", "adjoint", "reduction"].sum() == 30 * itemsize
-
-
-def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:
-    """Run the wrapped adversarial loss and return its ``loss`` tensor."""
-    assert isinstance(module, WeightedSum)
-    return module(model_output, **batch)["loss"]
 
 
 if __name__ == "__main__":

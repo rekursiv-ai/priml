@@ -122,7 +122,7 @@ def test_identity_reset():
     m.reset_parameters()
 
 
-_SKIP_CONFIG_TYPES = [
+_SKIP_CONFIG_TYPES: Final = [
     Identity.Config,
     GatedDeltaNet.Config,
     MultiHeadLatentAttention.Config,

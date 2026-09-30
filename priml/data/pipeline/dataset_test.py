@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Final, TypedDict, cast
 from unittest.mock import Mock, patch
 
 import multiprocessing as mp
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-_WORKER_CONTEXT = "fork" if "fork" in mp.get_all_start_methods() else None
+_WORKER_CONTEXT: Final = "fork" if "fork" in mp.get_all_start_methods() else None
 
 
 def _add_filter_reason(sample: Sample, reason: str) -> None:

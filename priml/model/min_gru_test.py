@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final, override
 
 from configgle.testing import assert_pprint_golden
-from torch import Tensor, nn
+from torch import Tensor
 
 import pytest
 import torch
@@ -32,16 +32,45 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def test_min_gru_matches_hand_forward_and_returns_layer_state() -> None:
-    model = MinGRU(input_channels=2, channels=2, layers=1)
+    model = MinGRU(input_channels=5, channels=6, layers=2)
     with torch.no_grad():
-        model.layers[0].weight.zero_()
-    inputs = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
-    state = torch.zeros(1, 1, 2)
-    outputs, final = model(inputs, state=state, reset=torch.tensor([[True, False]]))
-    expected = torch.tensor([[[0.625, 1.125], [1.6875, 2.1875]]])
-    assert outputs.shape == inputs.shape
-    assert final.shape == state.shape
+        model.input_projection.weight.zero_()
+        for layer in model.layers:
+            layer.weight.zero_()
+    inputs = torch.arange(60, dtype=torch.float32).reshape(3, 4, 5)
+    state = torch.zeros(2, 3, 6)
+    reset = torch.tensor(
+        [
+            [True, False, False, False],
+            [True, False, False, False],
+            [True, False, False, False],
+        ],
+    )
+    outputs, final = model(inputs, state=state, reset=reset)
+    update = 1 / 2
+    candidate = 1 / 2
+    strength = 1 / 2
+    carry0 = update * candidate
+    carry1 = (1 - update) * carry0 + update * candidate
+    carry2 = (1 - update) * carry1 + update * candidate
+    carry3 = (1 - update) * carry2 + update * candidate
+    layer1_values = [strength * carry for carry in (carry0, carry1, carry2, carry3)]
+    layer2_values = [
+        (1 - strength) * value + strength * carry
+        for value, carry in zip(
+            layer1_values,
+            (carry0, carry1, carry2, carry3),
+            strict=True,
+        )
+    ]
+    expected = torch.tensor(
+        [[[value] * 6 for value in layer2_values]],
+    ).expand(3, -1, -1)
+    expected_final = torch.full((2, 3, 6), carry3)
+    assert outputs.shape == (3, 4, 6)
+    assert final.shape == expected_final.shape
     torch.testing.assert_close(outputs, expected)
+    torch.testing.assert_close(final, expected_final)
 
 
 def test_min_gru_repeated_step_equals_sequence() -> None:
@@ -64,16 +93,17 @@ def test_min_gru_repeated_step_equals_sequence() -> None:
 
 
 def test_min_gru_reset_discards_previous_state() -> None:
-    model = MinGRU(input_channels=2, channels=2, layers=1)
-    inputs = torch.randn(1, 2, 2)
-    reset = torch.tensor([[False, True]])
+    model = MinGRU(input_channels=4, channels=5, layers=1)
+    inputs = torch.randn(3, 2, 4)
+    reset = torch.tensor([[False, True], [False, True], [False, True]])
     outputs, _ = model(inputs, reset=reset)
+    fresh_inputs = inputs[:, 1:].expand(-1, 2, -1)
     fresh, _ = model(
-        inputs[:, 1:],
-        state=model.initial_state(1),
-        reset=torch.ones(1, 1, dtype=torch.bool),
+        fresh_inputs,
+        state=model.initial_state(3),
+        reset=torch.tensor([[True, False], [True, False], [True, False]]),
     )
-    torch.testing.assert_close(outputs[:, 1:], fresh)
+    torch.testing.assert_close(outputs[:, 1:], fresh[:, :1])
 
 
 def test_min_gru_rejects_an_empty_time_dimension() -> None:
@@ -81,12 +111,13 @@ def test_min_gru_rejects_an_empty_time_dimension() -> None:
     model = MinGRU(input_channels=2, channels=2)
 
     with pytest.raises(ValueError, match="time"):
-        model(torch.zeros(1, 0, 2))
+        # Degenerate zero-time input is intentional for this pytest.raises case.
+        model(torch.zeros(2, 0, 3))
 
 
 def test_min_gru_has_gradient_through_inputs_and_parameters() -> None:
-    model = MinGRU(input_channels=2, channels=3, layers=2)
-    inputs = torch.randn(2, 4, 2, requires_grad=True)
+    model = MinGRU(input_channels=3, channels=4, layers=2)
+    inputs = torch.randn(2, 4, 3, requires_grad=True)
     outputs, _ = model(inputs)
     outputs.square().mean().backward()
     assert inputs.grad is not None
@@ -174,21 +205,21 @@ def test_a_sequence_is_the_step_applied_repeatedly() -> None:
 
 
 def test_a_reset_discards_the_carry_before_the_step() -> None:
-    combined, inputs, initial, terminals = _inputs()
+    combined, inputs, initial, terminals = _inputs(batch=3, time=5, width=4)
     scan = TorchScan.Config().make()
     with_reset = scan(combined, inputs, initial, terminals)
-    # Row 2 resets at t=0, so it must match a zero initial state with no reset.
+    # Row 0 resets at t=0, so it must match a zero initial state with no reset.
     fresh = scan(
-        combined[2:3],
-        inputs[2:3],
-        torch.zeros_like(initial[2:3]),
-        torch.zeros_like(terminals[2:3]),
+        combined[0:1],
+        inputs[0:1],
+        torch.zeros_like(initial[0:1]),
+        torch.zeros_like(terminals[0:1]),
     )
-    assert torch.equal(with_reset.outputs[2], fresh.outputs[0])
-    assert torch.equal(with_reset.states[2, 0], torch.zeros_like(initial[0]))
-    # Row 0 never resets, so a nonzero carry must matter.
-    other = scan(combined[0:1], inputs[0:1], initial[0:1] + 1, terminals[0:1])
-    assert not torch.equal(with_reset.outputs[0], other.outputs[0])
+    assert torch.equal(with_reset.outputs[0], fresh.outputs[0])
+    assert torch.equal(with_reset.states[0, 0], torch.zeros_like(initial[0]))
+    # Row 2 never resets, so a nonzero carry must matter.
+    other = scan(combined[2:3], inputs[2:3], initial[2:3] + 1, terminals[2:3])
+    assert not torch.equal(with_reset.outputs[2], other.outputs[0])
 
 
 def test_the_carry_is_rounded_to_the_state_dtype_between_steps() -> None:
@@ -214,8 +245,8 @@ def test_an_fp32_carry_keeps_the_updates_a_bf16_carry_rounds_away() -> None:
     """A slow unit decays in an fp32 carry over bf16 gates and freezes in a bf16 one."""
     combined, inputs, terminals, expected = _slow_unit(time=64)
     scan = TorchScan.Config().make()
-    exact = scan(combined, inputs, torch.ones(1, 1), terminals)
-    frozen = scan(combined, inputs, torch.ones(1, 1, dtype=torch.bfloat16), terminals)
+    exact = scan(combined, inputs, torch.ones(2, 3), terminals)
+    frozen = scan(combined, inputs, torch.ones(2, 3, dtype=torch.bfloat16), terminals)
     assert exact.states.dtype == exact.final.dtype == torch.float32
     # A step moves the carry by 2^-13 at most, 12 times this tolerance.
     torch.testing.assert_close(
@@ -263,7 +294,12 @@ def test_backward_agrees_with_autograd_in_fp32() -> None:
 
 
 def test_the_gradient_is_cut_at_a_reset() -> None:
-    combined, inputs, initial, terminals = _inputs(dtype=torch.float32)
+    combined, inputs, initial, terminals = _inputs(
+        batch=3,
+        time=5,
+        width=4,
+        dtype=torch.float32,
+    )
     scan = TorchScan.Config().make()
     forward = scan(combined, inputs, initial, terminals)
     backward = scan.backward(
@@ -273,11 +309,11 @@ def test_the_gradient_is_cut_at_a_reset() -> None:
         terminals,
         torch.ones_like(forward.outputs),
     )
-    # Row 2 resets at t=0, so nothing reaches its initial carry. Row 1 resets
-    # at the last step only, so the earlier steps still do.
-    assert torch.equal(backward.grad_initial[2], torch.zeros_like(initial[2]))
+    # Row 0 resets at t=0, so nothing reaches its initial carry. Row 1 resets
+    # at the last step only, so the earlier steps still do; row 2 never resets.
+    assert torch.equal(backward.grad_initial[0], torch.zeros_like(initial[0]))
     assert not torch.equal(backward.grad_initial[1], torch.zeros_like(initial[1]))
-    assert not torch.equal(backward.grad_initial[0], torch.zeros_like(initial[0]))
+    assert not torch.equal(backward.grad_initial[2], torch.zeros_like(initial[2]))
 
 
 def test_backward_output_dtypes_follow_the_inputs() -> None:
@@ -512,7 +548,7 @@ def test_the_triton_kernels_keep_a_slow_units_updates_in_an_fp32_carry() -> None
         value.cuda() for value in _slow_unit(time=64)
     )
     scan = _kernels_only()
-    ones = torch.ones(1, 1, device="cuda")
+    ones = torch.ones(2, 3, device="cuda")
     exact = scan(combined, inputs, ones, terminals)
     frozen = scan(combined, inputs, ones.bfloat16(), terminals)
     torch.testing.assert_close(
@@ -558,7 +594,7 @@ def test_a_blocks_gradients_agree_with_float64_autograd_in_fp32() -> None:
     config = MinGRUBlock.Config()
     config.channels_hidden = 4
     block = config.make()
-    _, inputs, initial, terminals = _inputs(dtype=torch.float32)
+    _, inputs, initial, terminals = _inputs(width=4, dtype=torch.float32)
     inputs.requires_grad_()
     outputs, final = block(inputs, initial, terminals)
     assert not final.requires_grad
@@ -591,7 +627,7 @@ def test_a_blocks_scan_gradient_is_the_scans_own_backward() -> None:
     config.channels_hidden = 4
     config.dtype = torch.bfloat16
     block = config.make()
-    _, inputs, initial, terminals = _inputs()
+    _, inputs, initial, terminals = _inputs(width=4)
     inputs.requires_grad_()
     initial.requires_grad_()
     outputs, _ = block(inputs, initial, terminals)
@@ -630,7 +666,7 @@ def test_a_blocks_step_is_its_forward_at_one_time_step() -> None:
     config.channels_hidden = 4
     config.dtype = torch.bfloat16
     block = config.make()
-    _, inputs, initial, _ = _inputs(time=1)
+    _, inputs, initial, _ = _inputs(width=4, time=1)
     with torch.no_grad():
         whole, final = block(inputs, initial, torch.zeros(inputs.shape[:2]))
         outputs, state = block.step(inputs[:, 0], initial)
@@ -646,7 +682,7 @@ def test_min_gru_block_config_pprint() -> None:
 
 def test_min_gru_block_bfb() -> None:
     config = MinGRUBlock.Config()
-    config.channels_hidden = 4
+    config.channels_hidden = 2
     _, inputs, initial, terminals = _inputs(dtype=torch.float32)
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
@@ -654,7 +690,11 @@ def test_min_gru_block_bfb() -> None:
         build_module=config.make,
         build_input=lambda: (inputs, initial, terminals),
         seed=0,
-        run=_block_outputs,
+        run=lambda module, values: (
+            module(*values)[0]
+            if isinstance(module, MinGRUBlock)
+            else (_ for _ in ()).throw(TypeError(type(module).__name__))
+        ),
     )
 
 
@@ -691,9 +731,9 @@ def _sequential_min_gru(
 
 def _inputs(
     *,
-    batch: int = 3,
-    time: int = 5,
-    width: int = 4,
+    batch: int = 2,
+    time: int = 2,
+    width: int = 2,
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -702,8 +742,8 @@ def _inputs(
     inputs = torch.randn(batch, time, width, generator=generator)
     initial = torch.randn(batch, width, generator=generator)
     terminals = torch.zeros(batch, time)
+    terminals[0, 0] = 1.0
     terminals[1, -1] = 1.0
-    terminals[2, 0] = 1.0
     return combined.to(dtype), inputs.to(dtype), initial.to(dtype), terminals.to(dtype)
 
 
@@ -713,14 +753,14 @@ def _inputs(
 # carries are float64, ``[time + 1]``: each step's, then the final one.
 def _slow_unit(*, time: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Return a slow unit's bf16 gates, inputs and terminals, and its exact carries."""
-    combined = torch.zeros(1, time, 3, dtype=torch.bfloat16)
-    combined[..., 1] = -8.3125
+    combined = torch.zeros(2, time, 9, dtype=torch.bfloat16)
+    combined[..., 3:6] = -8.3125
     z = torch.sigmoid(torch.tensor(-8.3125, dtype=torch.float64))
     expected = 0.5 + 0.5 * (1 - z) ** torch.arange(time + 1, dtype=torch.float64)
     return (
         combined,
-        torch.zeros(1, time, 1, dtype=torch.bfloat16),
-        torch.zeros(1, time),
+        torch.zeros(2, time, 3, dtype=torch.bfloat16),
+        torch.zeros(2, time),
         expected,
     )
 
@@ -812,13 +852,6 @@ def _kernels_only() -> TritonScan:
     scan = TritonScan.Config().make()
     scan.reference = _NoFallback(TorchScan.Config())
     return scan
-
-
-def _block_outputs(module: nn.Module, inputs: tuple[Tensor, Tensor, Tensor]) -> Tensor:
-    """Run a block on ``(inputs, initial, terminals)``; return the recurrence's outputs."""
-    assert isinstance(module, MinGRUBlock)
-    outputs, _ = module(*inputs)
-    return outputs
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ bound to ``127.0.0.1`` for the HTTP-resume path. No real network access.
 
 from __future__ import annotations
 
-from typing import IO, TYPE_CHECKING, override
+from typing import IO, TYPE_CHECKING, Final, override
 
 import fcntl
 import functools
@@ -33,11 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-_MARKER = ".ensure_complete"
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+_MARKER: Final = ".ensure_complete"
 
 
 def _write(path: Path, data: bytes) -> None:
@@ -64,7 +60,7 @@ def _copy_fetch(source: Path, calls: list[str]) -> Fetch:
     return fetch
 
 
-_FILES: dict[str, bytes] = {
+_FILES: Final[dict[str, bytes]] = {
     "a.json": b'{"hello": "world"}',
     "sub/b.bin": bytes(range(256)) * 4,
 }
@@ -72,7 +68,7 @@ _FILES: dict[str, bytes] = {
 
 def _manifest(files: dict[str, bytes]) -> list[FileSpec]:
     return [
-        FileSpec(rel_path=rel, size=len(data), sha256=_sha256(data))
+        FileSpec(rel_path=rel, size=len(data), sha256=hashlib.sha256(data).hexdigest())
         for rel, data in files.items()
     ]
 

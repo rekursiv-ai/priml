@@ -61,8 +61,7 @@ from priml.lib.custom_json import DictCodec
 from priml.train.checkpointer import Checkpointer
 
 
-VOCAB = 300  # Above the 16 reserved tokens and the 256 byte-level merges.
-
+VOCAB: Final = 300
 _CWD: Final = Path(__file__).resolve().parent
 
 

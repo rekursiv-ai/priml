@@ -76,8 +76,8 @@ def test_image_shape_statistics_names_an_uncommon_quantile_count(
 def test_subsample_frames_keeps_a_clip_that_already_fits():
     processor = SubsampleFramesViaBisection.Config(max_num_keyframes=5).make()
 
-    x = torch.arange(3 * 3 * 2 * 2).reshape(3, 3, 2, 2).float()
-    still = torch.zeros(3, 1, 2, 2)
+    x = torch.arange(3 * 4 * 5 * 6).reshape(3, 4, 5, 6).float()
+    still = torch.zeros(3, 2, 4, 5)
     samples: list[SubsampleFramesViaBisection.Input] = [
         {"media_tensor": x},
         {"media_tensor": still},
@@ -85,7 +85,7 @@ def test_subsample_frames_keeps_a_clip_that_already_fits():
     ]
     results = list(processor(iter(samples)))
 
-    assert [r.get("keyframes") for r in results] == [[0, 1, 2], [0], [0, 1, 2]]
+    assert [r.get("keyframes") for r in results] == [[0, 1, 2, 3], [0, 1], [0, 1, 2, 3]]
     assert results[0].get("media_tensor") is x
     assert results[1].get("media_tensor") is still
 
@@ -825,7 +825,7 @@ def test_subsample_frames_via_bisection_cfhw_axis():
     processor = config.make()
 
     # Decoder layout (C=3, F=8, H=2, W=2): F is at axis -3, not -4 (channels).
-    x = torch.arange(3 * 8 * 2 * 2).reshape(3, 8, 2, 2).float()
+    x = torch.arange(3 * 8 * 4 * 5).reshape(3, 8, 4, 5).float()
     sample: SubsampleFramesViaBisection.Input = {"media_tensor": x}
     result = next(iter(processor(iter([sample]))))
 
@@ -833,7 +833,7 @@ def test_subsample_frames_via_bisection_cfhw_axis():
     assert "keyframes" in result
     assert "media_tensor" in result
     assert len(result["keyframes"]) == 3
-    assert tuple(result["media_tensor"].shape) == (3, 3, 2, 2)
+    assert tuple(result["media_tensor"].shape) == (3, 3, 4, 5)
 
 
 def test_subsample_frames_via_bisection_single_frame_image():
@@ -841,14 +841,14 @@ def test_subsample_frames_via_bisection_single_frame_image():
     config = SubsampleFramesViaBisection.Config(max_num_keyframes=5)
     processor = config.make()
 
-    x = torch.zeros(3, 1, 4, 4)
+    x = torch.zeros(3, 2, 4, 5)
     sample: SubsampleFramesViaBisection.Input = {"media_tensor": x}
     result = next(iter(processor(iter([sample]))))
 
     assert "keyframes" in result
     assert "media_tensor" in result
-    assert result["keyframes"] == [0]
-    assert tuple(result["media_tensor"].shape) == (3, 1, 4, 4)
+    assert result["keyframes"] == [0, 1]
+    assert tuple(result["media_tensor"].shape) == (3, 2, 4, 5)
 
 
 def test_subsample_frames_via_bisection_batched_cfhw():
@@ -857,14 +857,14 @@ def test_subsample_frames_via_bisection_batched_cfhw():
     processor = config.make()
 
     # (B=2, C=3, F=6, H=2, W=2).
-    x = torch.arange(2 * 3 * 6 * 2 * 2).reshape(2, 3, 6, 2, 2).float()
+    x = torch.arange(2 * 3 * 6 * 4 * 5).reshape(2, 3, 6, 4, 5).float()
     sample: SubsampleFramesViaBisection.Input = {"media_tensor": x}
     result = next(iter(processor(iter([sample]))))
 
     assert "keyframes" in result
     assert "media_tensor" in result
     assert len(result["keyframes"]) == 2
-    assert tuple(result["media_tensor"].shape) == (2, 3, 2, 2, 2)
+    assert tuple(result["media_tensor"].shape) == (2, 3, 2, 4, 5)
 
 
 def test_calc_resize_rejects_empty_buckets_and_zero_compression():

@@ -33,6 +33,7 @@ import numpy as np
 
 from priml.baselines.arcagi1.augmentation import (
     ArcAugmentation,
+    ArcSpec,
     arc_grid_to_np,
     grid_hash,
     normalize_scale_weights,
@@ -326,6 +327,7 @@ def build(
     train_scale_weights: Mapping[int, float] = DEFAULT_SCALE_WEIGHTS,
     num_aug: int = 1_000,
     seed: int = 42,
+    spec: ArcSpec | None = None,
 ) -> None:
     """Ensure an aug-policy ARC tree, defaulting to its slugged scratch path.
 
@@ -337,6 +339,7 @@ def build(
       train_scale_weights: Scale distribution sampled when the gate fires.
       num_aug: Augmentations per puzzle.
       seed: Build seed.
+      spec: Packed-grid geometry; None uses ARC's production geometry.
 
     """
     _validate_prob("translation_prob", translation_prob)
@@ -356,6 +359,7 @@ def build(
         )
     )
     augmentation = ArcAugmentation.Config()
+    augmentation.spec = spec if spec is not None else ArcSpec()
     augmentation.num_aug = num_aug
     augmentation.seed = seed
     augmentation.spatial.train_scale_weights = dict(train_scale_weights)
@@ -546,11 +550,11 @@ def _write_split(
     (split_path / "dataset.json").write_text(
         json.dumps(
             {
-                "pad_id": 0,
-                "ignore_label_id": 0,
+                "pad_id": augmentation.spec.vocab_pad,
+                "ignore_label_id": augmentation.spec.vocab_pad,
                 "blank_identifier_id": 0,
-                "vocab_size": 12,
-                "seq_len": augmentation.spatial.config.max_grid**2,
+                "vocab_size": augmentation.spec.vocab_size,
+                "seq_len": augmentation.spec.grid_shape[0],
                 "num_puzzle_identifiers": len(id_map) + 1,
                 "total_groups": total_groups,
                 "mean_puzzle_examples": total_examples / total_puzzles
@@ -574,7 +578,7 @@ def _spatial_eval_tag(
     shapes = [_shape(grid) for pair in puzzle.examples for grid in pair]
     max_rows = max(rows for rows, _ in shapes)
     max_cols = max(cols for _, cols in shapes)
-    side = augmentation.spatial.config.max_grid
+    side = augmentation.spec.max_grid
     scale = augmentation.config.spatial_eval_scale
     if scale < 1:
         raise ValueError(f"spatial_eval_scale must be positive; got {scale}.")
@@ -614,11 +618,11 @@ def _convert_puzzle(
                 (
                     arc_grid_to_np(
                         _int_grid(example["input"]),
-                        max_grid=augmentation.spatial.config.max_grid,
+                        max_grid=augmentation.spec.max_grid,
                     ),
                     arc_grid_to_np(
                         _int_grid(example["output"]),
-                        max_grid=augmentation.spatial.config.max_grid,
+                        max_grid=augmentation.spec.max_grid,
                     ),
                 )
                 for example in examples

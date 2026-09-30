@@ -9,7 +9,7 @@ measure-only path reports the same norm without mutating grads.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from torch import Tensor
 from torch.distributed.device_mesh import init_device_mesh
@@ -42,7 +42,7 @@ def _test_device() -> torch.device:
 # PyTorch pick the per-device path when the tests run on MPS; keep the fast
 # ``True`` path on CPU/CUDA. This is exactly the knob callers set per backend
 # now that grad_clip no longer auto-sniffs the device.
-_FOREACH: bool | None = None if torch.backends.mps.is_available() else True
+_FOREACH: Final[bool | None] = None if torch.backends.mps.is_available() else True
 
 
 def _params_with_grads(grads: list[Tensor]) -> list[torch.nn.Parameter]:

@@ -41,12 +41,14 @@ else:
     )
 
 
-def _prepared_causal_mask(*, queries: int, keys: int) -> Tensor:
-    """Return a text-only additive mask that never exposes future keys."""
+def _prepared_causal_mask(*, batch: int, queries: int, keys: int) -> Tensor:
+    """Return a text-only additive mask, one per attention head, hiding future keys."""
     causal = torch.arange(keys) <= (
         torch.arange(queries).unsqueeze(-1) + keys - queries
     )
-    return torch.zeros(1, 1, queries, keys).masked_fill(
+    heads = hf_config()["num_attention_heads"]
+    assert isinstance(heads, int)
+    return torch.zeros(batch, heads, queries, keys).masked_fill(
         ~causal,
         torch.finfo(torch.float32).min,
     )
@@ -62,7 +64,7 @@ def test_matching_kernel_model_outputs_and_gradients(dtype: torch.dtype) -> None
     config = native_qwen35_config()
     native = config.make().to(dtype=dtype)
     native.load_state_dict(remap_hf_state_dict(reference.state_dict(), config))
-    tokens = torch.tensor([[1, 3, 5, 7]])
+    tokens = torch.arange(15).reshape(3, 5)
     with portable_half_precision():
         expected = hf_logits(reference(tokens, use_cache=False))
         actual = native(tokens)
@@ -88,9 +90,9 @@ def test_padding_mask_and_positions_match_reference_prefill() -> None:
     config = native_qwen35_config()
     native = config.make()
     native.load_state_dict(remap_hf_state_dict(reference.state_dict(), config))
-    tokens = torch.tensor([[0, 0, 1, 3], [0, 1, 3, 5]])
-    padding = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]])
-    positions = torch.tensor([[0, 0, 0, 1], [0, 0, 1, 2]])
+    tokens = torch.tensor([[0, 0, 1, 3, 5], [0, 1, 3, 5, 7], [1, 3, 5, 7, 9]])
+    padding = torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 1, 1], [1, 1, 1, 1, 1]])
+    positions = torch.tensor([[0, 0, 0, 1, 2], [0, 0, 1, 2, 3], [0, 1, 2, 3, 4]])
     expected = hf_logits(
         reference(
             tokens,
@@ -113,17 +115,17 @@ def test_padding_mask_and_positions_match_reference_cached_continuation() -> Non
     native = config.make()
     native.load_state_dict(remap_hf_state_dict(reference.state_dict(), config))
     reference_cache: object = DynamicCache(config=reference.config)
-    native_cache = native.alloc_cache(batch=2, max_seq=4)
+    native_cache = native.alloc_cache(batch=3, max_seq=5)
     steps = (
         (
-            torch.tensor([[0, 1], [1, 3]]),
-            torch.tensor([[0, 1], [1, 1]]),
-            torch.tensor([[0, 0], [0, 1]]),
+            torch.tensor([[0, 0, 1, 3], [0, 1, 3, 5], [1, 3, 5, 7]]),
+            torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1], [1, 1, 1, 1]]),
+            torch.tensor([[0, 0, 0, 1], [0, 0, 1, 2], [0, 1, 2, 3]]),
         ),
         (
-            torch.tensor([[3], [5]]),
-            torch.tensor([[0, 1, 1], [1, 1, 1]]),
-            torch.tensor([[1], [2]]),
+            torch.tensor([[5], [7], [9]]),
+            torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 1, 1], [1, 1, 1, 1, 1]]),
+            torch.tensor([[2], [3], [4]]),
         ),
     )
     for tokens, padding, positions in steps:
@@ -158,28 +160,28 @@ def test_prepared_causal_mask_matches_reference_prefill_and_cached_continuation(
     native = config.make()
     native.load_state_dict(remap_hf_state_dict(reference.state_dict(), config))
 
-    tokens = torch.tensor([[1, 3, 5]])
-    mask = _prepared_causal_mask(queries=3, keys=3)
+    tokens = torch.arange(15).reshape(3, 5)
+    mask = _prepared_causal_mask(batch=3, queries=5, keys=5)
     expected = hf_logits(reference(tokens, attention_mask=mask, use_cache=False))
     actual = native(tokens, attention_mask=mask)
     assert torch.equal(actual, expected)
 
     reference_cache: object = DynamicCache(config=reference.config)
-    native_cache = native.alloc_cache(batch=1, max_seq=3)
-    for tokens, mask in (
-        (torch.tensor([[1, 3]]), _prepared_causal_mask(queries=2, keys=2)),
-        (torch.tensor([[5]]), _prepared_causal_mask(queries=1, keys=3)),
+    native_cache = native.alloc_cache(batch=3, max_seq=5)
+    for chunk, mask in (
+        (tokens[:, :4], _prepared_causal_mask(batch=3, queries=4, keys=4)),
+        (tokens[:, 4:], _prepared_causal_mask(batch=3, queries=1, keys=5)),
     ):
         expected = hf_logits(
             reference(
-                tokens,
+                chunk,
                 attention_mask=mask,
                 past_key_values=reference_cache,
                 use_cache=True,
             ),
         )
         actual, returned_cache = native.forward_cached(
-            tokens,
+            chunk,
             cache=native_cache,
             attention_mask=mask,
         )
@@ -200,16 +202,16 @@ def test_boolean_prepared_masks_are_rejected_before_prefill_and_cache(
     native = config.make()
     native.load_state_dict(remap_hf_state_dict(reference.state_dict(), config=config))
 
-    boolean = _prepared_causal_boolean_mask(queries=2, keys=2)
+    boolean = _prepared_causal_mask(batch=3, queries=5, keys=5) == 0
     numeric = boolean.to(torch.float32)
-    tokens = torch.tensor([[1, 3]])
+    tokens = torch.arange(15).reshape(3, 5)
     assert torch.equal(
         hf_logits(reference(tokens, attention_mask=boolean)),
         hf_logits(reference(tokens, attention_mask=numeric)),
     )
 
     if cached:
-        cache = native.alloc_cache(batch=1, max_seq=2)
+        cache = native.alloc_cache(batch=3, max_seq=5)
         with pytest.raises(TypeError, match="floating additive"):
             native.forward_cached(tokens, cache=cache, attention_mask=boolean)
     else:
@@ -237,15 +239,6 @@ def test_hf_reference_stub_bodies_are_inert() -> None:
     assert isinstance(descriptor, property)
     assert descriptor.fget is not None
     assert descriptor.fget(stub) is None
-
-
-def _prepared_causal_boolean_mask(*, queries: int, keys: int) -> Tensor:
-    """Return the boolean representation of one text-only causal mask."""
-    return (
-        (torch.arange(keys) <= (torch.arange(queries).unsqueeze(-1) + keys - queries))
-        .unsqueeze(0)
-        .unsqueeze(0)
-    )
 
 
 if __name__ == "__main__":

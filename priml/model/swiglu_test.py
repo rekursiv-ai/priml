@@ -433,9 +433,10 @@ def test_tensor_parallel_style_preserves_the_logical_gate_split(
 @pytest.mark.parametrize("recipe", ["base", "custom", "squared"])
 def test_legacy_constructor_rng_and_forward_bfb(recipe: str) -> None:
     config = SwiGLUReluSquared.Config() if recipe == "squared" else SwiGLU.Config()
-    config.channels_in = 3
+    config.channels_in = 2
+    config.channels_hidden = 2
     config.bias = True
-    config.depth_index = ((2, 3),)
+    config.depth_index = ((0, 1),)
     if recipe == "squared":
         config.round_to = 1
     else:
@@ -445,12 +446,12 @@ def test_legacy_constructor_rng_and_forward_bfb(recipe: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name=f"swiglu_constructor_{recipe}",
         build_module=nn.Identity,
-        build_input=lambda: torch.zeros(1),
+        build_input=lambda: torch.zeros(2),
         run=lambda _module, _input: _constructor_rng_and_forward(config),
     )
 
 
-def _constructor_rng_and_forward(config: SwiGLU.Config) -> torch.Tensor:
+def _constructor_rng_and_forward(config: SwiGLU.Config) -> Tensor:
     # Building inside the runner prevents golden loading from masking init changes.
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
@@ -523,7 +524,7 @@ def test_new_default_projection_init_and_first_gradient(
         unit_fan_in_uniform(expected)
         assert torch.equal(module.up_proj.weight, expected)
         assert torch.count_nonzero(module.down_proj.weight) == 0
-        x = torch.randn(2, 3, 3, requires_grad=True)
+        x = torch.randn(2, 4, 3, requires_grad=True)
         output = module(x)
         assert torch.equal(output, torch.zeros_like(output))
         output.sum().backward()
@@ -696,7 +697,7 @@ class _EmptyResettableNorm(nn.Sequential):
         self.reset_count += 1
 
     @override
-    def forward(self, input: torch.Tensor, **kwargs: object) -> torch.Tensor:
+    def forward(self, input: Tensor, **kwargs: object) -> Tensor:
         del kwargs
         return super().forward(input)
 

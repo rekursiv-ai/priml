@@ -18,9 +18,11 @@ from priml.math.diffusion.schedule import (
     log_sigma_from_log_snr_per_variance_preserving,
     log_snr_from_log_sigma_per_rectified_flow,
     log_snr_from_log_sigma_per_variance_preserving,
+    log_snr_from_log_time_per_linear,
     log_snr_from_log_time_per_logit,
     log_snr_from_log_time_per_logtan,
     log_snr_from_log_time_per_truncnormicdf,
+    log_time_from_log_snr_per_linear,
     log_time_from_log_snr_per_logit,
     log_time_from_log_snr_per_logtan,
     log_time_from_log_snr_per_truncnormicdf,
@@ -149,6 +151,18 @@ def test_log_snr_from_log_time_per_logit_roundtrip() -> None:
     torch.testing.assert_close(log_t_recovered, log_t)
 
 
+def test_linear_schedule_makes_uniform_times_uniform_log_snr() -> None:
+    t = torch.tensor([1.0, 0.75, 0.5, 0.0])
+    log_snr = log_snr_from_log_time_per_linear(t.log(), low=-10, high=6)
+    torch.testing.assert_close(log_snr, torch.tensor([-10.0, -6.0, -2.0, 6.0]))
+
+
+def test_log_time_from_log_snr_per_linear_roundtrip() -> None:
+    log_t = torch.linspace(0.01, 0.99, 10).log()
+    log_snr = log_snr_from_log_time_per_linear(log_t)
+    torch.testing.assert_close(log_time_from_log_snr_per_linear(log_snr), log_t)
+
+
 def test_log_time_from_log_snr_per_logtan_roundtrip() -> None:
     log_t = torch.linspace(0.01, 0.99, 10).log()
     log_snr = log_snr_from_log_time_per_logtan(log_t, low=-100, high=100)
@@ -180,6 +194,8 @@ def test_log_time_from_log_snr_per_truncnormicdf_roundtrip() -> None:
     [
         (log_sigma_from_log_snr_per_variance_preserving, 5),
         (log_sigma_from_log_snr_per_rectified_flow, 4),
+        (log_snr_from_log_time_per_linear, 3),
+        (log_time_from_log_snr_per_linear, 4),
         (log_snr_from_log_time_per_logit, 7),
         (log_time_from_log_snr_per_logit, 4),
         (log_snr_from_log_time_per_logtan, 21),

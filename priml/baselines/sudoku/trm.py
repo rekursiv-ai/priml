@@ -126,10 +126,10 @@ class TRM(nn.Module):
     """
 
     class Config(Fig["TRM"]):
-        vocab_size: int = 11
+        vocab_size: int = -1
         """Tokens: 0=pad, 1=blank, 2-10=digits 1-9."""
 
-        puzzle_grid_shape: tuple[int, ...] = (81,)
+        puzzle_grid_shape: tuple[int, ...] = ()
         """Grid token layout per puzzle (sudoku: a flat 81-token sequence)."""
 
         channels_in: int = 512
@@ -167,11 +167,11 @@ class TRM(nn.Module):
         puzzle_emb_init_std: float = 0.0
         """Stddev for the sparse puzzle embedding init. Reference uses 0."""
 
-        pos2d_grid_shape: tuple[int, int] | None = (9, 9)
+        pos2d_grid_shape: tuple[int, int] | None = (0, 0)
         """(rows, cols) factorization of the flat grid for the row/col/box
         positional tables. None disables the tables (the plain-TRM baseline)."""
 
-        pos2d_box_shape: tuple[int, int] = (3, 3)
+        pos2d_box_shape: tuple[int, int] = (0, 0)
         """(rows, cols) of one constraint box tiling the grid (sudoku 3x3)."""
 
         pos2d_init_std: float = 1.0
@@ -354,6 +354,12 @@ class TRM(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if config.vocab_size < 1 or not config.puzzle_grid_shape:
+            raise ValueError("TRM requires vocabulary and grid shape from the dataset.")
+        if config.pos2d_grid_shape is not None and (
+            min(*config.pos2d_grid_shape, *config.pos2d_box_shape) < 1
+        ):
+            raise ValueError("TRM requires pos2d grid and box shapes from the dataset.")
         self.config = config
         c = config.channels_in
         # Embedding rescale trick: init tables with std=1/sqrt(C), multiply

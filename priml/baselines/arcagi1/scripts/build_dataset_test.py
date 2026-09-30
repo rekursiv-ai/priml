@@ -12,6 +12,7 @@ import torch
 
 from priml.baselines.arcagi1.augmentation import (
     ArcAugmentation,
+    ArcSpec,
     canonicalize_arc_grid,
 )
 from priml.baselines.arcagi1.scripts.build_dataset import build_arc_dataset
@@ -55,7 +56,7 @@ def test_occupied_destination_is_unchanged(tmp_path: Path, source_prefix: Path) 
         build_arc_dataset(
             target_dir=target,
             input_file_prefix=str(source_prefix),
-            augmentation=ArcAugmentation.Config().make(),
+            augmentation=ArcAugmentation.Config(spec=ArcSpec()).make(),
         )
     assert {path.name: path.read_bytes() for path in target.iterdir()} == {
         "existing": b"original",
@@ -67,7 +68,8 @@ def test_spatial_eval_reuses_puzzle_id_and_canonical_answer(
     source_prefix: Path,
 ) -> None:
     """Each spatial view shares its puzzle's id and restores to the same grids."""
-    config = ArcAugmentation.Config()
+    config = ArcAugmentation.Config(spec=ArcSpec())
+    assert isinstance(config.spec, ArcSpec)
     config.num_aug = 0
     config.spatial_eval_views = True
     target = tmp_path / "dataset"
@@ -98,6 +100,7 @@ def test_spatial_eval_reuses_puzzle_id_and_canonical_answer(
                     torch.from_numpy(rows[row : row + 1].reshape(-1)),
                     name=names[id_list[puzzle]],
                     spatial_tags=torch.from_numpy(tags[row : row + 1].reshape(-1)),
+                    spec=config.spec,
                 )
                 for row in (puzzle, puzzle + 1)
             ]
@@ -110,7 +113,7 @@ def test_plain_build_writes_no_spatial_tags(
     source_prefix: Path,
 ) -> None:
     """Without spatial views the tree keeps the reference file set."""
-    config = ArcAugmentation.Config()
+    config = ArcAugmentation.Config(spec=ArcSpec())
     config.num_aug = 0
     target = tmp_path / "dataset"
     build_arc_dataset(
@@ -127,7 +130,7 @@ def test_failed_build_does_not_publish(tmp_path: Path) -> None:
         build_arc_dataset(
             target_dir=target,
             input_file_prefix=str(tmp_path / "absent"),
-            augmentation=ArcAugmentation.Config().make(),
+            augmentation=ArcAugmentation.Config(spec=ArcSpec()).make(),
         )
     assert not target.exists()
     assert list(tmp_path.iterdir()) == []

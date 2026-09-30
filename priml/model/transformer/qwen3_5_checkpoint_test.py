@@ -264,7 +264,7 @@ class _TokenStream:
 
     def train_dataloader(self) -> Iterator[dict[str, Tensor]]:
         while True:
-            media = torch.randint(0, 32, (1, 2))
+            media = torch.randint(0, 32, (2, 3))
             media[0, 0] = self.cursor % 32
             offsets = list(range(1, 8))
             random.shuffle(offsets)

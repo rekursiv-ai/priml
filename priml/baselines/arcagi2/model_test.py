@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 
+import pytest
 import torch
 
 from priml.baselines.arcagi2.model import (
@@ -63,14 +64,14 @@ def record_model(
         for index, parameter in enumerate(model.parameters()):
             out[f"param/{index}"] = parameter.detach().clone()
         out["slow_init"], out["fast_init"] = latents(model)
-        tokens = torch.arange(18).reshape(2, 9) % 12
-        out["logits"] = forward(model, tokens, torch.tensor([1, 2]))
+        tokens = torch.arange(6).reshape(2, 3) % 2 + 2
+        out["logits"] = forward(model, tokens, torch.tensor([0, 1]))
     return reduce(out)
 
 
 def port_token_init() -> Tensor:
     """Build the port's grid embedding sized like the reference and return it."""
-    candidate = GridEmbedding.Config(channels_in=12, channels_out=16, grid_shape=(9,))
+    candidate = GridEmbedding.Config(channels_in=4, channels_out=4, grid_shape=(3,))
     return candidate.make().embed_tokens.weight
 
 
@@ -88,9 +89,14 @@ def port_forward(model: nn.Module, tokens: Tensor, identifiers: Tensor) -> Tenso
 
 def port_model() -> ArcModelConfig:
     """Return the port's miniature model."""
-    candidate = training_config(8, torch.bfloat16).model
+    candidate = training_config(4, torch.bfloat16).model
     assert isinstance(candidate, ArcModelConfig)
     return candidate
+
+
+def test_unfilled_arc_model_vocabulary_is_rejected() -> None:
+    with pytest.raises(ValueError, match="vocab_size"):
+        ArcModelConfig(channels_in=4, num_layers=1).make()
 
 
 def run_port_model() -> dict[str, Tensor]:
@@ -122,27 +128,27 @@ def test_reference_model_bites() -> None:
 
 def test_full_model_cost_matches_torch() -> None:
     """Count the recurrent rotary model and sparse prefix through the common harness."""
-    config = training_config(8, torch.bfloat16).model
+    config = port_model()
     assert isinstance(config.embedding, GridEmbedding.Config)
     assert isinstance(config.block, RotaryBlock.Config)
     assert isinstance(config.block.attn, SelfAttention.Config)
     assert isinstance(config.prefix, PuzzleEmbedding.Config)
-    config.embedding.grid_shape = (4,)
+    config.embedding.grid_shape = (3,)
     config.prefix.num_tokens = 2
     config.block.attn.attn_kernel = SdpaNaive.Config()
+
+    def run(module: nn.Module, tokens: Tensor) -> Tensor:
+        assert isinstance(module, SudokuNet)
+        output = module(tokens, puzzle_identifiers=torch.tensor([0, 1]))
+        return output.logits.sum() + output.halt.sum()
+
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.zeros(2, 4, dtype=torch.int32),
+        build_input=lambda: torch.zeros(2, 3, dtype=torch.int32),
         batch_size=2,
         dtype=None,
-        run=_cost_forward,
+        run=run,
     )
-
-
-def _cost_forward(module: nn.Module, tokens: Tensor) -> Tensor:
-    assert isinstance(module, SudokuNet)
-    output = module(tokens, puzzle_identifiers=torch.tensor([1, 2]))
-    return output.logits.sum() + output.halt.sum()
 
 
 if __name__ == "__main__":

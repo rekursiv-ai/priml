@@ -72,11 +72,11 @@ def test_pad_reflect_replicate_large_padding():
 def test_pad_reflect_replicate_2d():
     """Test reflect_replicate on 2D spatial tensor."""
     # Need 3D input (batch, H, W) to pad 2 dimensions.
-    x = torch.ones(1, 2, 3)
+    x = torch.ones(2, 3, 4)
     # Pad H by 2, W by 1.
     y = pad(x, pad=[1, 1, 2, 2], mode="reflect_replicate")
     # Should work without error.
-    assert y.shape == (1, 6, 5)
+    assert y.shape == (2, 7, 6)
 
 
 def test_pad_1d_tensor_with_flatten():
@@ -125,51 +125,52 @@ def test_warmup_primes_the_compiled_kernel_with_a_uint8_image_batch(
 
     monkeypatch.setattr(tensor, "compiled_scale_and_shift", spy)
     warmup_compiled_scale_and_shift(dtype_out=torch.float16)
+    # The warmup shape is fixed by warmup_compiled_scale_and_shift itself.
     assert seen == [(torch.uint8, (3, 1, 224, 224), torch.float16, torch.float16)]
 
 
 def test_as_batch_tensor_add_one_dim():
     """Test as_batch_tensor adds one dimension when below min_ndim."""
-    x = torch.zeros(224, 224, 3)
+    x = torch.zeros(4, 5, 3)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
-    assert result.shape == (1, 224, 224, 3)
+    assert result.shape == (1, 4, 5, 3)
 
 
 def test_as_batch_tensor_no_change_at_min():
     """Test as_batch_tensor unchanged when at min_ndim."""
-    x = torch.zeros(2, 224, 224, 3)
+    x = torch.zeros(2, 4, 5, 3)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
-    assert result.shape == (2, 224, 224, 3)
+    assert result.shape == (2, 4, 5, 3)
 
 
 def test_as_batch_tensor_no_change_at_max():
     """Test as_batch_tensor unchanged when at max_ndim."""
-    x = torch.zeros(2, 8, 224, 224, 3)
+    x = torch.zeros(2, 8, 4, 5, 3)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
-    assert result.shape == (2, 8, 224, 224, 3)
+    assert result.shape == (2, 8, 4, 5, 3)
 
 
 def test_as_batch_tensor_flatten_above_max():
     """Test as_batch_tensor flattens dimensions above max_ndim."""
-    x = torch.zeros(2, 3, 8, 224, 224, 3)
+    x = torch.zeros(2, 3, 8, 4, 5, 6)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
-    assert result.shape == (6, 8, 224, 224, 3)
+    assert result.shape == (6, 8, 4, 5, 6)
 
 
 def test_as_batch_tensor_add_multiple_dims():
     """Test as_batch_tensor adds multiple dimensions."""
-    x = torch.zeros(224, 3)
+    x = torch.zeros(4, 3)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
     # Adds 2 dims to reach min_ndim=4.
-    assert result.shape == (1, 1, 224, 3)
+    assert result.shape == (1, 1, 4, 3)
 
 
 def test_as_batch_tensor_flatten_many_dims():
     """Test as_batch_tensor flattens many dimensions."""
-    x = torch.zeros(2, 3, 4, 5, 224, 224, 3)
+    x = torch.zeros(2, 3, 4, 5, 6, 7, 8)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5)
     # Flattens first 2 dims, keeps last max_ndim-1=4 dims.
-    assert result.shape == (24, 5, 224, 224, 3)
+    assert result.shape == (24, 5, 6, 7, 8)
 
 
 def test_as_batch_tensor_different_min_max():
@@ -198,14 +199,14 @@ def test_as_batch_tensor_flatten_preserves_values():
 
 def test_as_batch_tensor_with_device():
     """Test as_batch_tensor respects device parameter."""
-    x = torch.zeros(224, 224, 3)
+    x = torch.zeros(4, 5, 3)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5, device="cpu")
     assert result.device.type == "cpu"
 
 
 def test_as_batch_tensor_with_dtype():
     """Test as_batch_tensor respects dtype parameter."""
-    x = torch.zeros(224, 224, 3, dtype=torch.uint8)
+    x = torch.zeros(4, 5, 3, dtype=torch.uint8)
     result = as_batch_tensor(x, min_ndim=4, max_ndim=5, dtype=torch.float32)
     assert result.dtype == torch.float32
 

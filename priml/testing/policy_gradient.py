@@ -3,22 +3,16 @@
 The rule's coefficients are the caller's: priml's tests run its defaults, and a
 study pins its own recipe beside its experiments. The portable minibatch draws
 43 actions per step, as the random one does by default: a fixture size, and the
-one the goldens' inputs were drawn at. A golden entry is a tensor's dtype,
-shape and sha256, or a scalar's fp32 bits.
+one the goldens' inputs were drawn at. A golden stores every output whole.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import hashlib
-import struct
-
 from torch import Tensor
 
 import torch
-
-from priml.loss.policy_gradient import TorchPPO
 
 
 if TYPE_CHECKING:
@@ -118,15 +112,16 @@ def portable_minibatch(*, rows: int, horizon: int) -> dict[str, Tensor]:
     }
 
 
-def rule_entries(rule: PPO, batch: dict[str, Tensor]) -> list[str]:
-    """Run the rule's three stages; digest every output.
+def rule_outputs(rule: PPO, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    """Run the rule's three stages and return every output.
 
     Args:
       rule: The rule under test, with its coefficients.
       batch: A minibatch, as :func:`portable_minibatch` draws it.
 
     Returns:
-      lines: One golden entry per output, then one per loss term.
+      outputs: Each stage's outputs by name, detached on the CPU; ``losses``
+        holds the terms in ``TorchPPO.Config.LOSS_NAMES`` order.
 
     """
     logprobs = rule.log_probs(
@@ -158,11 +153,9 @@ def rule_entries(rule: PPO, batch: dict[str, Tensor]) -> list[str]:
         "grad_values": loss.grad_values,
         "losses": loss.losses,
     }
-    lines = [f"{name} {_digest(value)}" for name, value in outputs.items()]
-    return lines + [
-        f"loss {name} {_fp32(value)}"
-        for name, value in zip(TorchPPO.Config.LOSS_NAMES, loss.losses, strict=True)
-    ]
+    return {
+        name: value.detach().to("cpu", copy=True) for name, value in outputs.items()
+    }
 
 
 # ``torch.rand`` fills multiples of 2^-24 from integer draws, and ``2u - 1`` is exact, so
@@ -176,17 +169,3 @@ def _portable_uniform(
 ) -> Tensor:
     """Draw fp32 ``U(-bound, bound)`` whose bits are the same on every host."""
     return (torch.rand(shape, generator=generator) * 2 - 1) * bound
-
-
-def _digest(value: Tensor) -> str:
-    """Return a tensor's golden entry: its dtype, shape and the sha256 of its bytes."""
-    raw = value.detach().cpu().contiguous().reshape(-1).view(torch.uint8)
-    sha = hashlib.sha256(raw.numpy().tobytes()).hexdigest()
-    return f"{value.dtype} {tuple(value.shape)} {sha}"
-
-
-def _fp32(value: Tensor) -> str:
-    """Return a one-element fp32 tensor's golden entry: its bits, then its decimal."""
-    packed = struct.pack("<f", float(value))
-    single = struct.unpack("<f", packed)[0]
-    return f"0x{struct.unpack('<I', packed)[0]:08x} {single!r}"

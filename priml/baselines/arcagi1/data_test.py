@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import json
 
@@ -20,10 +20,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-TASKS = 4
-PUZZLES_PER_TASK = 2
-VIEWS_PER_PUZZLE = 3
-GRID = 12
+TASKS: Final = 4
+PUZZLES_PER_TASK: Final = 2
+VIEWS_PER_PUZZLE: Final = 3
+GRID: Final = 12
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def dataset_dir(tmp_path: Path) -> Path:
         )
         np.save(
             directory / "all__group_indices.npy",
-            np.arange(TASKS + 1, dtype=np.int32) * PUZZLES_PER_TASK,
+            np.arange(4 + 1, dtype=np.int32) * 2,
         )
         np.save(
             directory / "all__puzzle_identifiers.npy",
@@ -86,7 +86,7 @@ def test_training_draws_whole_tasks(dataset_dir: Path) -> None:
     batch = next(iter(_data(dataset_dir).train_dataloader()))
     puzzle_identifiers_raw = _tensor(batch["puzzle_identifiers"])
     identifiers = puzzle_identifiers_raw.tolist()
-    # 4 slots at 3 views per puzzle: at most two puzzles can appear.
+    # Four slots at three views per puzzle: at most two puzzles can appear.
     assert len(set(identifiers)) <= 2
 
 
@@ -109,7 +109,7 @@ def test_eval_walks_every_row_in_order(dataset_dir: Path) -> None:
 def test_short_final_batch_is_padded(dataset_dir: Path) -> None:
     """Shapes stay constant, and the padding is reported not hidden."""
     batches = list(_data(dataset_dir, batch_size=7).eval_dataloader())
-    assert all(_tensor(b["media"]).shape == (7, GRID) for b in batches)
+    assert all(_tensor(b["media"]).shape == (7, 12) for b in batches)
     assert _int(batches[-1]["valid_count"]) < 7
     tail = batches[-1]
     assert bool((_tensor(tail["label"])[_int(tail["valid_count"]) :] == -100).all())
@@ -211,8 +211,8 @@ def test_sampled_len_handles_variable_puzzle_sizes(dataset_dir: Path) -> None:
     """The sampled pass plan, not one puzzle-size statistic, determines length."""
     train = dataset_dir / "train"
     np.save(train / "all__puzzle_indices.npy", np.array([0, 1, 5, 6, 10]))
-    np.save(train / "all__group_indices.npy", np.arange(TASKS + 1))
-    np.save(train / "all__puzzle_identifiers.npy", np.arange(TASKS))
+    np.save(train / "all__group_indices.npy", np.arange(4 + 1))
+    np.save(train / "all__puzzle_identifiers.npy", np.arange(4))
 
     loader = _data(dataset_dir).train_dataloader()
 

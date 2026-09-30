@@ -42,18 +42,6 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
-_INIT_FUNCTIONS = (
-    call_init,
-    kaiming_uniform,
-    kaiming_normal,
-    xavier_uniform,
-    xavier_normal,
-    normal,
-    truncated_normal,
-    unit_fan_in_uniform,
-    mup_output,
-    dirac,
-)
 
 
 class _InitModule(nn.Module):
@@ -73,6 +61,7 @@ class _InitModule(nn.Module):
             tensor = torch.empty_like(input)
             call_init(initializer, tensor, depth_index=((3, 4),))
             initialized.append(tensor.flatten())
+        # Dirac requires the 3x3 convolution to retain its center pixel.
         convolution = input.new_empty(2, 2, 3, 3)
         call_init(dirac, convolution, depth_index=((3, 4),))
         initialized.append(convolution.flatten())
@@ -86,7 +75,18 @@ def test_init_api_text(request: pytest.FixtureRequest) -> None:
         name="init",
         rendered="\n".join(
             f"{function.__name__}{inspect.signature(function)}"
-            for function in _INIT_FUNCTIONS
+            for function in (
+                call_init,
+                kaiming_uniform,
+                kaiming_normal,
+                xavier_uniform,
+                xavier_normal,
+                normal,
+                truncated_normal,
+                unit_fan_in_uniform,
+                mup_output,
+                dirac,
+            )
         ),
     )
 
@@ -96,13 +96,13 @@ def test_init_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="init",
         build_module=_InitModule,
-        build_input=lambda: torch.arange(16, dtype=torch.float32).reshape(4, 4),
+        build_input=lambda: torch.arange(6, dtype=torch.float32).reshape(2, 3),
         seed=0,
     )
 
 
 def test_call_init_with_depth():
-    w = torch.empty(16, 16)
+    w = torch.empty(16, 17)
     kaiming_uniform(w, depth_index=((3, 4),))
     assert w.std() > 0
 
@@ -133,7 +133,7 @@ def test_call_init_passes_all_kwargs_to_variadic_initializer() -> None:
 
 def test_call_init_without_depth():
     """call_init skips depth kwarg for fns that don't accept it."""
-    w = torch.empty(16, 16)
+    w = torch.empty(16, 17)
     call_init(nn.init.xavier_uniform_, w, depth_index=((3, 4),))
     assert w.std() > 0
 
@@ -154,7 +154,7 @@ def test_call_init_signature_inspection_failure(
         raise ValueError("uninspectable")
 
     monkeypatch.setattr(inspect, "signature", fail_signature)
-    w = torch.empty(4, 4)
+    w = torch.empty(4, 5)
     call_init(initializer, w, depth_index=((2, 3),))
 
     assert called
@@ -171,18 +171,18 @@ def test_all_init_fns():
         truncated_normal,
         mup_output,
     ):
-        w = torch.empty(32, 32)
+        w = torch.empty(32, 33)
         fn(w, depth_index=((2, 3),))
         assert w.std() > 0, f"{fn.__name__} produced zero std"
 
 
 def test_depth_scaling():
     torch.manual_seed(0)
-    w0 = torch.empty(64, 64)
+    w0 = torch.empty(64, 65)
     kaiming_uniform(w0, depth_index=((0, 1),))
 
     torch.manual_seed(0)
-    w3 = torch.empty(64, 64)
+    w3 = torch.empty(64, 65)
     kaiming_uniform(w3, depth_index=((3, 4),))
 
     assert w0.std() > w3.std()
@@ -191,11 +191,11 @@ def test_depth_scaling():
 def test_depth_zero_no_scaling():
     """depth_index=((0, 1),) and depth_index=() should produce no scaling."""
     torch.manual_seed(0)
-    w_neg = torch.empty(64, 64)
+    w_neg = torch.empty(64, 65)
     kaiming_uniform(w_neg, depth_index=())
 
     torch.manual_seed(0)
-    w_zero = torch.empty(64, 64)
+    w_zero = torch.empty(64, 65)
     kaiming_uniform(w_zero, depth_index=((0, 1),))
 
     assert torch.allclose(w_neg, w_zero)
@@ -278,10 +278,10 @@ def test_a_narrow_tensor_holds_the_fp32_draw_rounded_once(
     rounds once too.
     """
     torch.manual_seed(0)
-    wide = torch.empty(64, 64)
+    wide = torch.empty(64, 65)
     call_init(initializer, wide, depth_index=((3, 4),))
     torch.manual_seed(0)
-    narrow = torch.empty(64, 64, dtype=dtype)
+    narrow = torch.empty(64, 65, dtype=dtype)
     call_init(initializer, narrow, depth_index=((3, 4),))
     assert torch.equal(narrow, wide.to(dtype))
 
@@ -318,76 +318,34 @@ def test_a_bf16_linear_holds_the_fp32_linears_init_rounded_once() -> None:
 
 
 def test_dirac_conv2d():
-    w = torch.empty(8, 8, 3, 3)
+    w = torch.empty(8, 10, 3, 5)
     dirac(w)
     # Center pixel of each filter for matching in/out channel should be ~1.
-    center = w[:, :, 1, 1]
-    assert torch.allclose(center, torch.eye(8), atol=1e-6)
+    center = w[:, :, 1, 2]
+    expected = torch.cat((torch.eye(8), torch.zeros(8, 2)), dim=1)
+    assert torch.allclose(center, expected, atol=1e-6)
     # Non-center pixels should be zero.
-    mask = torch.ones(3, 3, dtype=torch.bool)
-    mask[1, 1] = False
-    assert torch.allclose(w[:, :, mask], torch.zeros(8, 8, 8))
+    mask = torch.ones(3, 5, dtype=torch.bool)
+    mask[1, 2] = False
+    assert torch.allclose(w[:, :, mask], torch.zeros(8, 10, 14))
 
 
-_BUILDERS: dict[str, Callable[[], nn.Module]] = {
-    "linear": lambda: Linear.Config(channels_in=16, channels_out=8, bias=True).make(),
-    "ensemble_linear": lambda: EnsembleLinear.Config(
-        channels_in=8,
-        channels_out=8,
-        num_ensemble=2,
-        bias=True,
-    ).make(),
-    "centered_rmsnorm": lambda: CenteredRMSNorm(CenteredRMSNorm.Config(channels_in=8)),
-    "self_attention": lambda: SelfAttention.Config(
-        channels_in=16,
-        num_heads=2,
-        channels_head=8,
-    ).make(),
-    "transformer_block": lambda: TransformerBlock.Config(
-        channels_in=16,
-        attn=SelfAttention.Config(num_heads=2, channels_head=8),
-    ).make(),
-    "gated_delta_net": lambda: GatedDeltaNet.Config(
-        channels_in=16,
-        num_heads_k=2,
-        num_heads_v=2,
-        channels_k_head=8,
-        channels_v_head=8,
-    ).make(),
-    "moe": lambda: MoE.Config(
-        channels_in=16,
-        router=SoftmaxRouter.Config(num_experts=4, top_k=2),
-    ).make(),
-    "mla": lambda: MultiHeadLatentAttention.Config(
-        channels_in=16,
-        num_heads=2,
-        channels_qk_nope_head=8,
-        channels_qk_rope_head=4,
-        channels_v_head=8,
-        kv_lora_rank=8,
-        rope=RoPE.Config(channels_head=4),
-    ).make(),
-    "rope_mixed_learnable": lambda: RoPEMixed(
-        RoPEMixed.Config(channels_head=8, num_heads=2, learnable=True),
-    ),
-    # num_heads=1 takes the directions=None branch (no per-head scaling);
-    # reduction_mode="sum" shares channels across axes. Both are distinct
-    # shape-allocation paths in reset_parameters that must round-trip.
-    "rope_mixed_heads1": lambda: RoPEMixed(
-        RoPEMixed.Config(channels_head=8, num_heads=1, learnable=True),
-    ),
-    "rope_mixed_sum": lambda: RoPEMixed(
-        RoPEMixed.Config(
-            channels_head=8,
-            num_heads=2,
-            reduction_mode="sum",
-            learnable=True,
-        ),
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(_BUILDERS))
+@pytest.mark.parametrize(
+    "name",
+    [
+        "linear",
+        "ensemble_linear",
+        "centered_rmsnorm",
+        "self_attention",
+        "transformer_block",
+        "gated_delta_net",
+        "moe",
+        "mla",
+        "rope_mixed_learnable",
+        "rope_mixed_heads1",
+        "rope_mixed_sum",
+    ],
+)
 def test_reset_parameters_reinitializes_every_param(name: str) -> None:
     """After wiping every param and float buffer to NaN.
 
@@ -399,7 +357,66 @@ def test_reset_parameters_reinitializes_every_param(name: str) -> None:
         mirrors the production ``materialize_meta`` audit, which poisons and checks
         params AND float buffers (integer buffers cannot hold NaN and are skipped).
     """
-    model = _BUILDERS[name]()
+    builders: dict[str, Callable[[], nn.Module]] = {
+        "linear": lambda: Linear.Config(
+            channels_in=16,
+            channels_out=8,
+            bias=True,
+        ).make(),
+        "ensemble_linear": lambda: EnsembleLinear.Config(
+            channels_in=8,
+            channels_out=8,
+            num_ensemble=2,
+            bias=True,
+        ).make(),
+        "centered_rmsnorm": lambda: CenteredRMSNorm(
+            CenteredRMSNorm.Config(channels_in=8),
+        ),
+        "self_attention": lambda: SelfAttention.Config(
+            channels_in=16,
+            num_heads=2,
+            channels_head=8,
+        ).make(),
+        "transformer_block": lambda: TransformerBlock.Config(
+            channels_in=16,
+            attn=SelfAttention.Config(num_heads=2, channels_head=8),
+        ).make(),
+        "gated_delta_net": lambda: GatedDeltaNet.Config(
+            channels_in=16,
+            num_heads_k=2,
+            num_heads_v=2,
+            channels_k_head=8,
+            channels_v_head=8,
+        ).make(),
+        "moe": lambda: MoE.Config(
+            channels_in=16,
+            router=SoftmaxRouter.Config(num_experts=4, top_k=2),
+        ).make(),
+        "mla": lambda: MultiHeadLatentAttention.Config(
+            channels_in=16,
+            num_heads=2,
+            channels_qk_nope_head=8,
+            channels_qk_rope_head=4,
+            channels_v_head=8,
+            kv_lora_rank=8,
+            rope=RoPE.Config(channels_head=4),
+        ).make(),
+        "rope_mixed_learnable": lambda: RoPEMixed(
+            RoPEMixed.Config(channels_head=8, num_heads=2, learnable=True),
+        ),
+        "rope_mixed_heads1": lambda: RoPEMixed(
+            RoPEMixed.Config(channels_head=8, num_heads=1, learnable=True),
+        ),
+        "rope_mixed_sum": lambda: RoPEMixed(
+            RoPEMixed.Config(
+                channels_head=8,
+                num_heads=2,
+                reduction_mode="sum",
+                learnable=True,
+            ),
+        ),
+    }
+    model = builders[name]()
     # Name -> tensor over params + buffers, matching the materialize audit.
     state = [*model.named_parameters(), *model.named_buffers()]
     with torch.no_grad():

@@ -39,7 +39,7 @@ def test_conv1d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv1d",
         build_module=lambda: Conv1d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(1, 2, 4),
+        build_input=lambda: torch.randn(3, 2, 4),
         seed=0,
     )
 
@@ -58,7 +58,7 @@ def test_conv2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv2d",
         build_module=lambda: Conv2d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(1, 2, 3, 3),
+        build_input=lambda: torch.randn(3, 2, 4, 5),
         seed=0,
     )
 
@@ -77,7 +77,7 @@ def test_conv3d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="conv3d",
         build_module=lambda: Conv3d.Config(2, 3).make(),
-        build_input=lambda: torch.randn(1, 2, 3, 3, 3),
+        build_input=lambda: torch.randn(3, 2, 4, 5, 6),
         seed=0,
     )
 
@@ -95,8 +95,8 @@ def test_conv1d_channels_infer():
 
 def test_conv2d():
     m = Conv2d.Config(3, 16, kernel_size=3, padding=1).make()
-    x = torch.randn(2, 3, 32, 32)
-    assert m(x).shape == (2, 16, 32, 32)
+    x = torch.randn(2, 3, 8, 12)
+    assert m(x).shape == (2, 16, 8, 12)
 
 
 def test_conv2d_channels_infer():
@@ -106,8 +106,8 @@ def test_conv2d_channels_infer():
 
 def test_conv3d():
     m = Conv3d.Config(3, 16, kernel_size=3, padding=1).make()
-    x = torch.randn(2, 3, 8, 8, 8)
-    assert m(x).shape == (2, 16, 8, 8, 8)
+    x = torch.randn(2, 3, 4, 5, 6)
+    assert m(x).shape == (2, 16, 4, 5, 6)
 
 
 def test_conv3d_channels_infer():
@@ -117,8 +117,8 @@ def test_conv3d_channels_infer():
 
 def test_conv_forward_accepts_messages_and_rejects_positional_extras():
     m = Conv2d.Config(3, 16, kernel_size=3, padding=1).make()
-    x = torch.randn(2, 3, 32, 32)
-    assert m(x, key="val").shape == (2, 16, 32, 32)
+    x = torch.randn(2, 3, 8, 12)
+    assert m(x, key="val").shape == (2, 16, 8, 12)
     with pytest.raises(TypeError):
         m(x, "extra")
 
@@ -137,14 +137,14 @@ def test_conv2d_cost_is_a_matmul_over_the_receptive_field() -> None:
     """
     analytical = assert_cost_matches_torch(
         Conv2d.Config(2, 3, kernel_size=(3, 5), bias=True),
-        build_input=lambda: torch.randn(1, 2, 4, 6, requires_grad=True),
+        build_input=lambda: torch.randn(5, 2, 4, 6, requires_grad=True),
         input_grid=(4, 6),
-        batch_size=1,
+        batch_size=5,
         dtype=None,
     )
     weights = 3 * 2 * 15
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * 24 * weights
-    assert analytical["flops", "adjoint", "matmul"].sum() == 4 * 24 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 5 * 2 * 24 * weights
+    assert analytical["flops", "adjoint", "matmul"].sum() == 5 * 4 * 24 * weights
     assert analytical.params == weights + 3
     assert analytical["bytes", "primal", "elementwise"].sum() == 4 * 3
 
@@ -153,28 +153,28 @@ def test_conv1d_cost_divides_the_fan_in_by_groups() -> None:
     """Grouped convolution counts only its connected input channels in both passes."""
     analytical = assert_cost_matches_torch(
         Conv1d.Config(4, 6, kernel_size=3, groups=2),
-        build_input=lambda: torch.randn(1, 4, 7, requires_grad=True),
+        build_input=lambda: torch.randn(3, 4, 7, requires_grad=True),
         input_grid=(7,),
-        batch_size=1,
+        batch_size=3,
         dtype=None,
     )
     weights = 6 * (4 // 2) * 3
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * 7 * weights
+    assert analytical["flops", "primal", "matmul"].sum() == 3 * 2 * 7 * weights
     assert analytical.params == weights
     assert analytical["bytes", "primal", "matmul"].sum() == 4 * (
-        7 * 4 + 7 * 6 + weights
+        3 * 7 * 4 + 3 * 7 * 6 + weights
     )
 
 
 def test_conv3d_cost_cubes_a_scalar_kernel() -> None:
     analytical = assert_cost_matches_torch(
         Conv3d.Config(2, 3, kernel_size=3),
-        build_input=lambda: torch.randn(1, 2, 3, 4, 5, requires_grad=True),
+        build_input=lambda: torch.randn(6, 2, 3, 4, 5, requires_grad=True),
         input_grid=(3, 4, 5),
-        batch_size=1,
+        batch_size=6,
         dtype=None,
     )
-    assert analytical["flops", "primal", "matmul"].sum() == 2 * (3 * 4 * 5) * (
+    assert analytical["flops", "primal", "matmul"].sum() == 6 * 2 * (3 * 4 * 5) * (
         3 * 2 * 27
     )
 

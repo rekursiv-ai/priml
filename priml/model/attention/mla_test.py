@@ -164,9 +164,9 @@ def test_forward_shape():
 
 def test_forward_with_q_lora():
     m = _tiny(q_lora_rank=64)
-    x = torch.randn(1, 5, 128)
+    x = torch.randn(2, 3, 128)
     out = m(x)
-    assert out.shape == (1, 5, 128)
+    assert out.shape == (2, 3, 128)
     # Sanity: proj_q is disabled, LoRA path is active.
     assert m.proj_q is None
     assert m.proj_q_a is not None
@@ -204,10 +204,10 @@ def test_prealloc_cache_decode():
     assert out.shape == (2, 5, 128)
     assert cache.length == 5
     for _ in range(3):
-        step = torch.randn(2, 1, 128)
+        step = torch.randn(2, 3, 128)
         out, cache = m.forward_cached(step, cache=cache)
-        assert out.shape == (2, 1, 128)
-    assert cache.length == 8
+        assert out.shape == (2, 3, 128)
+    assert cache.length == 5 + 3 * 3
 
 
 def test_decode_equivalent_to_full_reforward():
@@ -215,8 +215,8 @@ def test_decode_equivalent_to_full_reforward():
     torch.manual_seed(0)
     m = _tiny()
     m.eval()
-    prompt = torch.randn(1, 4, 128)
-    steps = [torch.randn(1, 1, 128) for _ in range(3)]
+    prompt = torch.randn(2, 3, 128)
+    steps = [torch.randn(2, 3, 128) for _ in range(3)]
 
     # Path A: full forward over [prompt + steps].
     full_input = torch.cat([prompt, *steps], dim=1)
@@ -224,7 +224,7 @@ def test_decode_equivalent_to_full_reforward():
         full_out = m(full_input)
 
     # Path B: prefill + 3 decode steps via cache.
-    cache = m.alloc_kv_cache(batch=1, max_seq=16)
+    cache = m.alloc_kv_cache(batch=2, max_seq=16)
     with torch.no_grad():
         _, cache = m.forward_cached(prompt, cache=cache)
         decode_outs: list[Tensor] = []
@@ -232,7 +232,7 @@ def test_decode_equivalent_to_full_reforward():
             out, cache = m.forward_cached(step, cache=cache)
             decode_outs.append(out)
     cached_tail = torch.cat(decode_outs, dim=1)
-    assert torch.allclose(full_out[:, 4:], cached_tail, atol=1e-5, rtol=1e-4)
+    assert torch.allclose(full_out[:, 3:], cached_tail, atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.parametrize("absorb", [False, True], ids=["reexpand", "absorb"])
@@ -493,9 +493,9 @@ def test_mla_cost_matches_torch_over_the_absorbed_contraction() -> None:
     config, _ = _mla_config()
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 8, 32, requires_grad=True),
+        build_input=lambda: torch.randn(2, 8, 32, requires_grad=True),
         seq_len=8,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
 
@@ -677,7 +677,7 @@ def test_mla_forwards_the_open_message_bus_through_both_kernels() -> None:
     latent.attn_kernel = PartialConfig(kernel)
     message = object()
 
-    config.make()(torch.randn(1, 4, config.channels_in), message=message)
+    config.make()(torch.randn(2, 4, config.channels_in), message=message)
 
     assert messages == [message]
 
@@ -689,12 +689,12 @@ def test_latent_attention_bfb(device: str) -> None:
         golden_name="latent_attention",
         build_module=lambda: LatentAttention.Config().make().to(device),
         build_input=lambda: {
-            "q_nope": torch.randn(1, 3, 2, 4),
-            "q_pe": torch.randn(1, 3, 2, 2),
-            "c_kv": torch.randn(1, 3, 5),
-            "k_pe": torch.randn(1, 3, 2),
-            "w_kr": torch.randn(2, 4, 5),
-            "w_uv": torch.randn(2, 6, 5),
+            "q_nope": torch.randn(2, 3, 4, 5),
+            "q_pe": torch.randn(2, 3, 4, 7),
+            "c_kv": torch.randn(2, 3, 6),
+            "k_pe": torch.randn(2, 3, 7),
+            "w_kr": torch.randn(4, 5, 6),
+            "w_uv": torch.randn(4, 8, 6),
         },
         seed=0,
     )
@@ -707,20 +707,20 @@ def test_mla_bfb(device: str) -> None:
         golden_name="multi_head_latent_attention",
         build_module=lambda: (
             MultiHeadLatentAttention.Config(
-                channels_in=16,
+                channels_in=4,
                 num_heads=2,
-                channels_qk_nope_head=8,
-                channels_qk_rope_head=4,
-                channels_v_head=8,
-                kv_lora_rank=8,
+                channels_qk_nope_head=2,
+                channels_qk_rope_head=2,
+                channels_v_head=2,
+                kv_lora_rank=2,
                 rope=RoPE.Config(
-                    channels_head=4,
+                    channels_head=2,
                 ),
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: move_to_device(torch.randn(2, 4, 16), device),
+        build_input=lambda: move_to_device(torch.randn(2, 3, 4), device),
         seed=0,
         run=lambda m, x: cast(MultiHeadLatentAttention, m)(x),
     )
@@ -769,23 +769,23 @@ def test_mla_decode_matches_reference() -> None:
         ),
     ).make()
     module.eval()
-    prompt = torch.randn(1, 4, 64)
-    steps = [torch.randn(1, 1, 64) for _ in range(3)]
+    prompt = torch.randn(2, 3, 64)
+    steps = [torch.randn(2, 3, 64) for _ in range(3)]
     full_input = torch.cat([prompt, *steps], dim=1)
 
     with torch.no_grad():
         reference_full = _reference_mla_forward(module, full_input)
 
-        cache = module.alloc_kv_cache(batch=1, max_seq=16)
+        cache = module.alloc_kv_cache(batch=2, max_seq=16)
         _, cache = module.forward_cached(prompt, cache=cache)
         decoded: list[Tensor] = []
         for step in steps:
             out, cache = module.forward_cached(step, cache=cache)
             decoded.append(out)
     cached_tail = torch.cat(decoded, dim=1)
-    diff = (reference_full[:, 4:] - cached_tail).abs().max().item()
+    diff = (reference_full[:, 3:] - cached_tail).abs().max().item()
     assert torch.allclose(
-        reference_full[:, 4:],
+        reference_full[:, 3:],
         cached_tail,
         atol=5e-5,
         rtol=1e-4,
@@ -881,7 +881,7 @@ def _tensor_parallel_mla(
         rope=RoPE.Config(channels_head=4),
         shard="colwise",
     ).make()
-    return module, torch.randn(1, 3, 16)
+    return module, torch.randn(2, 3, 16)
 
 
 def _record_case(

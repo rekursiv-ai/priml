@@ -302,7 +302,7 @@ def test_resolve_hf_dtype_maps_names_and_defaults_to_float32(
 
 
 def test_load_local_state_dict_merges_pytorch_shards(tmp_path: Path) -> None:
-    torch.save({"a": torch.ones(1)}, tmp_path / "pytorch_model-00001-of-00002.bin")
+    torch.save({"a": torch.ones(3)}, tmp_path / "pytorch_model-00001-of-00002.bin")
     torch.save({"b": torch.zeros(2)}, tmp_path / "pytorch_model-00002-of-00002.bin")
 
     state_dict = load_local_state_dict(tmp_path)

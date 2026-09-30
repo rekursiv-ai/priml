@@ -9,12 +9,12 @@ One baseline package implements the REG/SPRINT recipe from
 | `exp001` | Same model and loss | Float32 position-table computation and the shared rotary and fused Muon arithmetic |
 | `exp_smoke` | `exp000` mechanisms at a tiny width and five updates | Single-process CPU-friendly check |
 
-`source_parity_test.py` checks `exp000`'s initialization, model outputs,
-backward gradients, losses, and five optimizer updates against a golden made
-from that REG commit. `reg_source.pt` contains the source artifact; the test
-does not need the REG repository or `timm` at runtime. The CPU parity test does
-not establish bitwise identity across different GPU kernels or distributed
-launches.
+`source_parity_test.py` checks a tiny `exp000`-mechanism model's forward
+outputs, kept token ids, three losses, and final weights against
+`reg_source.pt`. That golden was minted after the same run of the REG commit's
+own code was shown bit-for-bit equal to it, so the test does not need the REG
+repository or `timm` at runtime. The CPU check does not establish bitwise
+identity across different GPU kernels or distributed launches.
 
 ## Data
 

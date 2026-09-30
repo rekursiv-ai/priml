@@ -23,7 +23,11 @@ if TYPE_CHECKING:
 
 
 def _embedding(*channels: Makeable[GridChannel]) -> GridEmbedding:
-    config = GridEmbedding.Config(channels_in=11, channels_out=8)
+    config = GridEmbedding.Config(channels_in=11, channels_out=8, grid_shape=(81,))
+    for channel in channels:
+        if isinstance(channel, FactoredPositions.Config):
+            channel.grid_shape = (9, 9)
+            channel.box_shape = (3, 3)
     config.channels = list(channels)
     torch.manual_seed(0)
     return config.make()
@@ -37,8 +41,11 @@ def test_plain_embedding_is_token_lookup_only() -> None:
 
 def test_channels_inherit_the_models_width() -> None:
     """A channel left at its sentinel is sized by the parent, not by hand."""
-    config = GridEmbedding.Config(channels_in=11, channels_out=8)
-    config.channels = [FactoredPositions.Config(), PredictionFeedback.Config()]
+    config = GridEmbedding.Config(channels_in=11, channels_out=8, grid_shape=(81,))
+    config.channels = [
+        FactoredPositions.Config(grid_shape=(9, 9), box_shape=(3, 3)),
+        PredictionFeedback.Config(),
+    ]
     final = config.copy_tree().finalize()
     positions, feedback = final.channels
     assert isinstance(positions, FactoredPositions.Config)
@@ -47,6 +54,13 @@ def test_channels_inherit_the_models_width() -> None:
     assert feedback.channels_out == 8
     # The vocabulary reaches the one channel that is sized by it.
     assert feedback.channels_in == config.channels_in
+
+
+def test_unfilled_position_geometry_is_rejected() -> None:
+    with pytest.raises(ValueError, match="grid_shape and box_shape"):
+        FactoredPositions.Config(channels_out=4).make()
+    with pytest.raises(ValueError, match="grid_shape from the dataset"):
+        GridEmbedding.Config(channels_in=6, channels_out=4).make()
 
 
 def test_factored_positions_share_a_row() -> None:
@@ -119,8 +133,8 @@ def test_factored_positions_cost_is_three_gathers_two_adds_and_a_scale() -> None
     analytical = assert_cost_matches_torch(
         FactoredPositions.Config(grid_shape=(4, 4), box_shape=(2, 2), channels_out=8),
         build_input=lambda: (
-            torch.zeros(1, 16, dtype=torch.long),
-            torch.zeros(1, 16, 8),
+            torch.zeros(2, 16, dtype=torch.long),
+            torch.zeros(2, 16, 8),
         ),
         seq_len=16,
         batch_size=1,
@@ -142,7 +156,7 @@ def test_prediction_feedback_cost_is_a_gather_and_a_scale() -> None:
     """Cost the complete grid with a stashed feedback tensor."""
     analytical = assert_cost_matches_torch(
         PredictionFeedback.Config(channels_in=11, channels_out=8),
-        build_input=lambda: (torch.randint(0, 11, (1, 16)), torch.zeros(1, 16, 8)),
+        build_input=lambda: (torch.randint(0, 11, (2, 16)), torch.zeros(2, 16, 8)),
         seq_len=16,
         batch_size=1,
         dtype=None,
@@ -159,11 +173,14 @@ def test_prediction_feedback_cost_is_a_gather_and_a_scale() -> None:
 
 def test_grid_embedding_cost_sums_the_token_table_and_every_channel() -> None:
     """The token gather and its scale, plus each channel and one add per channel."""
-    config = GridEmbedding.Config(channels_in=11, channels_out=8)
-    config.channels = [FactoredPositions.Config(), PredictionFeedback.Config()]
+    config = GridEmbedding.Config(channels_in=11, channels_out=8, grid_shape=(81,))
+    config.channels = [
+        FactoredPositions.Config(grid_shape=(9, 9), box_shape=(3, 3)),
+        PredictionFeedback.Config(),
+    ]
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randint(0, 11, (1, 81)),
+        build_input=lambda: torch.randint(0, 11, (2, 81)),
         seq_len=81,
         batch_size=1,
         dtype=None,
@@ -213,7 +230,7 @@ def test_feedback_cost_scales_with_grid_rows() -> None:
 
 
 def test_factored_position_cost_broadcasts_the_complete_batch() -> None:
-    config = FactoredPositions.Config()
+    config = FactoredPositions.Config(grid_shape=(4, 4), box_shape=(2, 2))
     config.channels_out = 8
     config.grid_shape = (4, 4)
     config.box_shape = (2, 2)
@@ -249,12 +266,12 @@ def _run_with_feedback(module: nn.Module, tokens: Tensor) -> Tensor:
 
 def _ordered(tokens: Tensor, *, swap: bool) -> Tensor:
     """Embed ``tokens`` with the two channels in one order or the other."""
-    positions = FactoredPositions.Config()
+    positions = FactoredPositions.Config(grid_shape=(9, 9), box_shape=(3, 3))
     feedback = PredictionFeedback.Config(init_std=1.0)
     channels: list[Makeable[GridChannel]] = (
         [feedback, positions] if swap else [positions, feedback]
     )
-    config = GridEmbedding.Config(channels_in=11, channels_out=8)
+    config = GridEmbedding.Config(channels_in=11, channels_out=8, grid_shape=(81,))
     config.channels = channels
     torch.manual_seed(0)
     embedding = config.make()

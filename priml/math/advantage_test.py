@@ -14,44 +14,49 @@ from priml.math.advantage import (
 
 
 def test_matches_hand_computed_recursion() -> None:
-    # Two steps, one env, no terminal. Backwards:
+    # Two steps, no terminal; env k scales every input by k, so its outputs
+    # scale by k too. Backwards, for the first env:
     #   delta_1 = 2.0 + 0.5*0.1 - 0.2 = 1.85, trace_1 = 1.85
     #   delta_0 = 1.0 + 0.5*0.2 - 0.4 = 0.70
     #   trace_0 = 0.70 + 0.5*0.5*1.85 = 1.1625.
+    scale = torch.tensor([1.0, 2.0, 3.0])
     advantages, targets = generalized_advantage(
-        rewards=torch.tensor([[1.0], [2.0]]),
-        values=torch.tensor([[0.4], [0.2]]),
-        dones=torch.tensor([[0.0], [0.0]]),
-        last_value=torch.tensor([0.1]),
+        rewards=torch.tensor([[1.0], [2.0]]) * scale,
+        values=torch.tensor([[0.4], [0.2]]) * scale,
+        dones=torch.zeros(2, 3),
+        last_value=0.1 * scale,
         discount=0.5,
         trace_decay=0.5,
     )
-    assert advantages.flatten().tolist() == pytest.approx([1.1625, 1.85])
-    assert targets.flatten().tolist() == pytest.approx([1.5625, 2.05])
+    torch.testing.assert_close(advantages, torch.tensor([[1.1625], [1.85]]) * scale)
+    torch.testing.assert_close(targets, torch.tensor([[1.5625], [2.05]]) * scale)
 
 
 def test_terminal_step_blocks_credit_from_the_future() -> None:
     # Step 0 is terminal, so its bootstrap and carried trace both vanish and
-    # the advantage collapses to the immediate residual 1.0 - 0.4.
+    # the advantage collapses to the immediate residual 1.0 - 0.4. Env k
+    # scales every input by k.
+    scale = torch.tensor([1.0, 2.0, 3.0])
     advantages, _ = generalized_advantage(
-        rewards=torch.tensor([[1.0], [2.0]]),
-        values=torch.tensor([[0.4], [0.2]]),
-        dones=torch.tensor([[1.0], [0.0]]),
-        last_value=torch.tensor([0.1]),
+        rewards=torch.tensor([[1.0], [2.0]]) * scale,
+        values=torch.tensor([[0.4], [0.2]]) * scale,
+        dones=torch.tensor([[1.0], [0.0]]).expand(2, 3),
+        last_value=0.1 * scale,
         discount=0.5,
         trace_decay=0.5,
     )
-    assert advantages.flatten().tolist() == pytest.approx([0.6, 1.85])
+    torch.testing.assert_close(advantages, torch.tensor([[0.6], [1.85]]) * scale)
 
 
 def test_boolean_dones_behave_as_indicators() -> None:
-    rewards = torch.tensor([[1.0], [2.0]])
-    values = torch.tensor([[0.4], [0.2]])
-    last_value = torch.tensor([0.1])
+    rewards = torch.tensor([[1.0, 3.0, 5.0], [2.0, 4.0, 6.0]])
+    values = torch.tensor([[0.4, 0.3, 0.2], [0.2, 0.1, 0.5]])
+    last_value = torch.tensor([0.1, 0.7, 0.9])
+    dones = torch.tensor([[True, False, True], [False, True, True]])
     from_bool, _ = generalized_advantage(
         rewards=rewards,
         values=values,
-        dones=torch.tensor([[True], [False]]),
+        dones=dones,
         last_value=last_value,
         discount=0.5,
         trace_decay=0.5,
@@ -59,7 +64,7 @@ def test_boolean_dones_behave_as_indicators() -> None:
     from_float, _ = generalized_advantage(
         rewards=rewards,
         values=values,
-        dones=torch.tensor([[1.0], [0.0]]),
+        dones=dones.float(),
         last_value=last_value,
         discount=0.5,
         trace_decay=0.5,
@@ -68,33 +73,35 @@ def test_boolean_dones_behave_as_indicators() -> None:
 
 
 def test_trace_decay_one_recovers_the_discounted_return() -> None:
-    rewards = torch.tensor([[1.0], [2.0], [3.0]])
-    values = torch.zeros(3, 1)
+    rewards = torch.tensor([[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]])
+    values = torch.zeros(3, 2)
     _, targets = generalized_advantage(
         rewards=rewards,
         values=values,
-        dones=torch.zeros(3, 1),
-        last_value=torch.zeros(1),
+        dones=torch.zeros(3, 2),
+        last_value=torch.zeros(2),
         discount=0.5,
         trace_decay=1.0,
     )
     # With zero baselines and no truncation the target IS the discounted sum.
-    assert targets.flatten().tolist() == pytest.approx([1 + 0.5 * 2 + 0.25 * 3, 3.5, 3])
+    assert targets[:, 0].tolist() == pytest.approx([1 + 0.5 * 2 + 0.25 * 3, 3.5, 3])
+    assert targets[:, 1].tolist() == pytest.approx([4 + 0.5 * 5 + 0.25 * 6, 8, 6])
 
 
 def test_multiple_environments_are_independent() -> None:
-    # The second env terminates at step 0, the first does not; the columns must
-    # not influence each other.
+    # The second env terminates at step 0, the third at step 1, the first
+    # never; the columns must not influence each other.
     advantages, _ = generalized_advantage(
-        rewards=torch.tensor([[1.0, 1.0], [2.0, 2.0]]),
-        values=torch.tensor([[0.4, 0.4], [0.2, 0.2]]),
-        dones=torch.tensor([[0.0, 1.0], [0.0, 0.0]]),
-        last_value=torch.tensor([0.1, 0.1]),
+        rewards=torch.tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.4, 0.4], [0.2, 0.2, 0.2]]),
+        dones=torch.tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        last_value=torch.tensor([0.1, 0.1, 0.1]),
         discount=0.5,
         trace_decay=0.5,
     )
     assert advantages[:, 0].tolist() == pytest.approx([1.1625, 1.85])
     assert advantages[:, 1].tolist() == pytest.approx([0.6, 1.85])
+    assert advantages[:, 2].tolist() == pytest.approx([1.15, 1.8])
 
 
 def test_observation_aligned_advantage_reads_the_next_steps_reward() -> None:
@@ -102,27 +109,28 @@ def test_observation_aligned_advantage_reads_the_next_steps_reward() -> None:
     # terminal arrived with the first observation and are never read, and the
     # last step, with nothing after it, is left at zero.
     advantages, targets = observation_aligned_advantage(
-        rewards=torch.tensor([[9.0, 1.0, 2.0]]),
-        values=torch.tensor([[0.4, 0.2, 0.1]]),
-        dones=torch.tensor([[1.0, 0.0, 0.0]]),
+        rewards=torch.tensor([[9.0, 1.0, 2.0], [9.0, 1.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.2, 0.1], [0.4, 0.2, 0.1]]),
+        dones=torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
         discount=0.5,
         trace_decay=0.5,
     )
-    assert advantages.flatten().tolist() == pytest.approx([1.1625, 1.85, 0.0])
-    assert targets.flatten().tolist() == pytest.approx([1.5625, 2.05, 0.1])
+    assert advantages.tolist() == [pytest.approx([1.1625, 1.85, 0.0])] * 2
+    assert targets.tolist() == [pytest.approx([1.5625, 2.05, 0.1])] * 2
 
 
 def test_observation_aligned_terminal_blocks_the_bootstrap_before_it() -> None:
     # The transition into the last observation ended an episode: step 1 takes
     # its reward alone, and step 0 carries only that.
     advantages, _ = observation_aligned_advantage(
-        rewards=torch.tensor([[9.0, 1.0, 2.0]]),
-        values=torch.tensor([[0.4, 0.2, 0.1]]),
-        dones=torch.tensor([[False, False, True]]),
+        rewards=torch.tensor([[9.0, 1.0, 2.0], [9.0, 1.0, 2.0]]),
+        values=torch.tensor([[0.4, 0.2, 0.1], [0.4, 0.2, 0.1]]),
+        dones=torch.tensor([[False, False, True], [False, False, False]]),
         discount=0.5,
         trace_decay=0.5,
     )
-    assert advantages.flatten().tolist() == pytest.approx([1.15, 1.8, 0.0])
+    assert advantages[0].tolist() == pytest.approx([1.15, 1.8, 0.0])
+    assert advantages[1].tolist() == pytest.approx([1.1625, 1.85, 0.0])
 
 
 def test_observation_aligned_advantage_rounds_as_a_fused_fp32_walk() -> None:
@@ -189,34 +197,43 @@ def test_q_lambda_bootstraps_from_the_greedy_action() -> None:
     discounted best Q-value available next.
     """
     targets = q_lambda_targets(
-        rewards=torch.tensor([[1.0]]),
-        q_values=torch.tensor([[[0.0, 0.0]], [[2.0, 7.0]]]),
-        dones=torch.tensor([[0.0]]),
+        rewards=torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+        q_values=torch.tensor(
+            [
+                [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+                [[2.0, 7.0, 4.0, 1.0], [5.0, 0.0, 6.0, 3.0], [1.0, 2.0, 3.0, 4.0]],
+                [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+            ],
+        ),
+        dones=torch.zeros(2, 3),
         discount=0.5,
-        trace_decay=0.9,
+        trace_decay=0.0,
     )
-    assert targets.tolist() == [[1.0 + 0.5 * 7.0]]
+    assert targets.tolist() == [
+        [1.0 + 0.5 * 7.0, 2.0 + 0.5 * 6.0, 3.0 + 0.5 * 4.0],
+        [4.0, 5.0, 6.0],
+    ]
 
 
 def test_q_lambda_stops_at_a_terminal_step() -> None:
     # Not merely a zeroed bootstrap: there is no next state to be greedy in,
     # so the target is the reward and nothing else.
     targets = q_lambda_targets(
-        rewards=torch.tensor([[3.0]]),
-        q_values=torch.tensor([[[0.0]], [[100.0]]]),
-        dones=torch.tensor([[1.0]]),
+        rewards=torch.tensor([[3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0]]),
+        q_values=torch.full((3, 4, 5), 100.0),
+        dones=torch.ones(2, 4),
         discount=0.99,
         trace_decay=0.9,
     )
-    assert targets.tolist() == [[3.0]]
+    assert targets.tolist() == [[3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0]]
 
 
 def test_q_lambda_at_zero_decay_is_the_one_step_target() -> None:
     # The endpoints are what make the mixing factor meaningful, so both are
     # pinned rather than assumed.
-    rewards = torch.tensor([[1.0], [2.0]])
-    q_values = torch.tensor([[[1.0]], [[3.0]], [[5.0]]])
-    dones = torch.zeros(2, 1)
+    rewards = torch.arange(8.0).reshape(2, 4)
+    q_values = torch.arange(60.0).reshape(3, 4, 5)
+    dones = torch.zeros(2, 4)
     targets = q_lambda_targets(
         rewards=rewards,
         q_values=q_values,
@@ -224,21 +241,27 @@ def test_q_lambda_at_zero_decay_is_the_one_step_target() -> None:
         discount=0.5,
         trace_decay=0.0,
     )
-    assert targets[0].tolist() == [1.0 + 0.5 * 3.0]
+    # The greedy next Q-values are 24, 29, 34 and 39.
+    assert targets[0].tolist() == [
+        0 + 0.5 * 24,
+        1 + 0.5 * 29,
+        2 + 0.5 * 34,
+        3 + 0.5 * 39,
+    ]
 
 
 def test_q_lambda_credit_does_not_cross_an_episode_boundary() -> None:
     # A reward after a terminal step must not raise the target before it.
-    rewards = torch.tensor([[1.0], [50.0]])
-    q_values = torch.zeros(3, 1, 2)
+    rewards = torch.tensor([[1.0, 2.0, 3.0, 4.0], [50.0, 60.0, 70.0, 80.0]])
+    q_values = torch.zeros(3, 4, 5)
     ended = q_lambda_targets(
         rewards=rewards,
         q_values=q_values,
-        dones=torch.tensor([[1.0], [0.0]]),
+        dones=torch.tensor([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]]),
         discount=0.99,
         trace_decay=1.0,
     )
-    assert ended[0].tolist() == [1.0]
+    assert ended[0].tolist() == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_q_lambda_refuses_a_missing_bootstrap_step() -> None:
@@ -246,9 +269,9 @@ def test_q_lambda_refuses_a_missing_bootstrap_step() -> None:
     # from, and silently truncating would bias every target in the rollout.
     with pytest.raises(ValueError, match="one more Q-value"):
         q_lambda_targets(
-            rewards=torch.zeros(3, 2),
-            q_values=torch.zeros(3, 2, 4),
-            dones=torch.zeros(3, 2),
+            rewards=torch.zeros(2, 3),
+            q_values=torch.zeros(2, 3, 4),
+            dones=torch.zeros(2, 3),
             discount=0.99,
             trace_decay=0.9,
         )
@@ -257,9 +280,9 @@ def test_q_lambda_refuses_a_missing_bootstrap_step() -> None:
 def test_q_lambda_refuses_an_empty_sequence() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         q_lambda_targets(
-            rewards=torch.zeros(0, 2),
-            q_values=torch.zeros(1, 2, 4),
-            dones=torch.zeros(0, 2),
+            rewards=torch.zeros(0, 3),
+            q_values=torch.zeros(2, 3, 4),
+            dones=torch.zeros(0, 3),
             discount=0.99,
             trace_decay=0.9,
         )

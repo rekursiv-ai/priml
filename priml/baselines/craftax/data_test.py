@@ -85,7 +85,7 @@ class _Step:
     """
 
     def __init__(self) -> None:
-        self.model = torch.nn.Linear(1, 1)
+        self.model = torch.nn.Linear(2, 3)
         self.actors: list[object] = []
 
     def make_evaluation_actor(self) -> object:

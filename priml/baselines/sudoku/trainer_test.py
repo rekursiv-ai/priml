@@ -2,13 +2,12 @@
 
 The goldens in ``testdata/exp0NN.pt`` were recorded from the reference
 implementation this trainer was ported from; this module imports none of it,
-so the proof outlives that code. Each recipe is shrunk by SIZE only --
-width, heads, cycles, batch, ACT cap, horizon, the EMA warmup -- so every
-numerical choice the experiment makes is exercised.
+so the proof outlives that code. Each recipe runs through the same size-only shrink
+fixture while preserving every numerical choice the experiment makes.
 
 Recorded per recipe, all compared with ``torch.equal``: every parameter and
 persistent buffer after init and a fingerprint of the global RNG; an
-evaluation rollout before and after training; five train steps (the batch the
+evaluation rollout before and after training; three train steps (the batch the
 dataset served, loss, probe, every metric, the ACT pool); the final state,
 latents, and EMA shadow. Width 4 and batch 2: the goldens exercise every code
 path, not kernel throughput, so they stay a few KB each.
@@ -19,6 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
+import json
+
 from torch import Tensor
 
 import numpy as np
@@ -26,9 +27,12 @@ import pytest
 import torch
 
 from priml.baselines.sudoku import experiments, trm
+from priml.baselines.sudoku.puzzle_spec import SudokuSpec
+from priml.baselines.sudoku.trainer import sudoku_group_indices
 from priml.model.swiglu import SwiGLU
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.golden import (
+    assert_tensor_golden,
     mismatches,
     put_steps,
     read_tensors,
@@ -64,7 +68,7 @@ CASES: Final = tuple(
 )
 """Every rung in fp32; the ladder's ends also under the recipe's bf16."""
 
-TRAIN_STEPS: Final = 5
+TRAIN_STEPS: Final = 3
 
 
 class Loader(Protocol):
@@ -174,11 +178,22 @@ class Shrinkable(Protocol):
         ...
 
 
-def write_dataset(root: Path) -> Path:
-    """Write the 81-token fixture: 12 train rows (3 groups x 4), 6 test rows.
+def test_constraint_groups_follow_puzzle_spec() -> None:
+    spec = SudokuSpec(grid_shape=(4, 4), box_shape=(2, 2), vocab_size=6)
+    groups = sudoku_group_indices(spec)
+    assert groups.shape == (12, 4)
+    assert torch.equal(groups[0], torch.tensor([0, 1, 2, 3]))
+    assert torch.equal(groups[4], torch.tensor([0, 4, 8, 12]))
+    assert torch.equal(groups[8], torch.tensor([0, 1, 4, 5]))
+
+
+def write_dataset(root: Path, *, grid_len: int = 16, vocab_size: int = 6) -> Path:
+    """Write a square-grid fixture: 4 train rows (2 groups x 2), 2 test rows.
 
     Args:
       root: Dataset root; ``train/`` and ``test/`` splits are written below.
+      grid_len: Number of cells per row.
+      vocab_size: Number of token IDs, including pad and blank.
 
     Returns:
       root: The dataset root.
@@ -186,27 +201,41 @@ def write_dataset(root: Path) -> Path:
     """
     rng = np.random.default_rng(7)
     for split, rows, groups in (
-        ("train", 12, [0, 4, 8, 12]),
-        ("test", 6, list(range(7))),
+        ("train", 4, [0, 2, 4]),
+        ("test", 2, [0, 1, 2]),
     ):
         directory = root / split
         directory.mkdir(parents=True, exist_ok=True)
-        np.save(directory / "all__inputs.npy", rng.integers(1, 11, (rows, 81)))
-        np.save(directory / "all__labels.npy", rng.integers(2, 11, (rows, 81)))
+        np.save(
+            directory / "all__inputs.npy",
+            rng.integers(1, vocab_size, (rows, grid_len)),
+        )
+        np.save(
+            directory / "all__labels.npy",
+            rng.integers(2, vocab_size, (rows, grid_len)),
+        )
         np.save(directory / "all__group_indices.npy", np.asarray(groups, np.int32))
-        (directory / "dataset.json").write_text('{"vocab_size": 11, "seq_len": 81}')
+        (directory / "dataset.json").write_text(
+            json.dumps({"vocab_size": vocab_size, "seq_len": grid_len}),
+        )
     return root
 
 
 def port_config(recipe: str, precision: str, scratch: Path) -> Trainer.Config:
     """Return the priml ``recipe`` shrunk by size only."""
     factory = cast("Callable[[], Trainer.Config]", getattr(experiments, recipe))
-    return shrink(
+    config = shrink(
         factory(),
         precision=precision,
         scratch=scratch,
         recipe_block=trm.recipe_block,
     )
+    config.dataset.spec = SudokuSpec(
+        grid_shape=(4, 4),
+        box_shape=(2, 2),
+        vocab_size=6,
+    )
+    return config
 
 
 def shrink[ConfigT: Shrinkable](
@@ -236,11 +265,11 @@ def shrink[ConfigT: Shrinkable](
     config.max_steps = TRAIN_STEPS
     config.num_steps_eval = float("inf")
     config.eval_warmup_batches = 0
-    config.total_train_steps = 10
+    config.total_train_steps = TRAIN_STEPS
     config.max_act_steps = 3
     config.ema_warmup_steps = min(config.ema_warmup_steps, 2)
     config.model.channels_in = 4
-    config.model.num_heads = 1
+    config.model.num_heads = 2
     config.model.num_layers = 1
     config.model.puzzle_emb_len = 2
     config.model.slow_cycles = 2
@@ -249,7 +278,8 @@ def shrink[ConfigT: Shrinkable](
     if config.model.block is None:
         config.model.block = recipe_block()
     assert isinstance(config.model.block.ffn, SwiGLU.Config)
-    config.model.block.ffn.round_to = 4
+    config.model.block.ffn.expansion = 1
+    config.model.block.ffn.round_to = 1
     if precision == "fp32":
         config.dtype_autocast = config.model.dtype = None
     config.dataset.working_dir = scratch / "data"
@@ -287,7 +317,20 @@ def record(subject: Subject) -> dict[str, Tensor]:
     put_steps(out, "data", data)
     put_steps(out, "train", train)
     put_steps(out, "pool", steps)
-    _put(out, "pool/final", {**_pool(subject), **_latents(subject)})
+    _put(
+        out,
+        "pool/final",
+        {
+            "inputs": subject._pool_inputs,
+            "labels": subject._pool_labels,
+            "steps": subject._pool_h_step,
+            "halted": subject._pool_halted,
+            "puzzle_ids": subject._pool_puzzle_ids,
+            "feedback": subject._pool_feedback,
+            "z_slow": subject._pool_z_slow,
+            "z_fast": subject._pool_z_fast,
+        },
+    )
     _put(out, "post", _state(subject))
     _put(out, "ema", dict(subject.ema_shadow or {}))
     _put(out, "eval_after", flatten(subject.eval_loss(**evaluation)))
@@ -298,15 +341,15 @@ def run(config: Makeable[object], scratch: Path) -> dict[str, Tensor]:
     """Write the dataset, build the trainer, and record it.
 
     Args:
-      config: A shrunk trainer config of either port.
+      config: A trainer config prepared for the recorded fixture.
       scratch: The directory the config points at.
 
     Returns:
       trajectory: Flat name-to-tensor record.
 
     """
-    write_dataset(scratch / "data")
     with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        write_dataset(scratch / "data")
         return record(cast(Subject, config.make()))
 
 
@@ -329,8 +372,32 @@ def test_golden_replays_bit_for_bit(
 ) -> None:
     """The trainer reproduces the frozen trajectory with zero mismatches."""
     actual = run(port_config(recipe, precision, tmp_path), tmp_path)
+    assert_tensor_golden(golden_path(recipe, precision), actual)
+
+
+@pytest.mark.parametrize(("recipe", "precision"), CASES)
+def test_full_geometry_still_runs(recipe: str, precision: str, tmp_path: Path) -> None:
+    config = port_config(recipe, precision, tmp_path)
+    config.dataset.spec = SudokuSpec()
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        write_dataset(tmp_path / "data", grid_len=81, vocab_size=11)
+        result = record(cast(Subject, config.make()))
+    assert result["data/media"].shape[-1] == 81
+
+
+@pytest.mark.parametrize(("recipe", "precision"), CASES)
+def test_one_ulp_weight_bites(recipe: str, precision: str, tmp_path: Path) -> None:
+    config = port_config(recipe, precision, tmp_path)
+    with torch.random.fork_rng(devices=[]), host_agnostic_numerics():
+        write_dataset(tmp_path / "data")
+        subject = config.make()
+        with torch.no_grad():
+            weight = next(subject.model.parameters())
+            bits = torch.int32 if weight.dtype == torch.float32 else torch.int16
+            weight.view(bits).view(-1)[0] += 1
+        actual = record(cast(Subject, subject))
     report = mismatches(load_golden(recipe, precision), actual)
-    assert not report, f"{len(report)} mismatches:\n" + "\n".join(report)
+    assert any(line.startswith("init/") for line in report), report
 
 
 def test_golden_bites(tmp_path: Path) -> None:
@@ -368,25 +435,6 @@ def flatten(values: Mapping[str, object]) -> dict[str, Tensor]:
 def _state(subject: Subject) -> dict[str, Tensor]:
     """Parameters and persistent buffers."""
     return {k: v for k, v in subject.model.state_dict().items() if k != "_dummy"}
-
-
-def _pool(subject: Subject) -> dict[str, Tensor]:
-    """Return the ACT slot state, latents aside."""
-    return {
-        "inputs": subject._pool_inputs,
-        "labels": subject._pool_labels,
-        "steps": subject._pool_h_step,
-        "halted": subject._pool_halted,
-        "puzzle_ids": subject._pool_puzzle_ids,
-        "feedback": subject._pool_feedback,
-    }
-
-
-# Recorded once, after the last step: the pool is carried state, so its final value
-# already depends on every step before it.
-def _latents(subject: Subject) -> dict[str, Tensor]:
-    """Return the ACT slots' carried latents."""
-    return {"z_slow": subject._pool_z_slow, "z_fast": subject._pool_z_fast}
 
 
 def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> None:

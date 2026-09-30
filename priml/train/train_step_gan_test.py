@@ -27,30 +27,34 @@ class SimpleGenerator(nn.Module):
 
     class Config(Fig["SimpleGenerator"], make_with_kwargs=True):
         latent_dim: int = -1
-        image_size: int = -1
+        image_height: int = -1
+        image_width: int = -1
 
-    def __init__(self, latent_dim: int, image_size: int):
+    def __init__(self, latent_dim: int, image_height: int, image_width: int):
         super().__init__()
-        self.fc = nn.Linear(latent_dim, image_size * image_size * 3)
-        self.image_size = image_size
+        self.fc = nn.Linear(latent_dim, image_height * image_width * 3)
+        self.image_height = image_height
+        self.image_width = image_width
 
     @override
     def forward(self, noise: Tensor, **_kwargs: object) -> Tensor:
         """Generate images from noise."""
         x = self.fc(noise)
-        return x.view(-1, 3, self.image_size, self.image_size)
+        return x.view(-1, 3, self.image_height, self.image_width)
 
 
 class SimpleDiscriminator(nn.Module):
     """Simple discriminator: classifies real vs fake images."""
 
     class Config(Fig["SimpleDiscriminator"], make_with_kwargs=True):
-        image_size: int = -1
+        image_height: int = -1
+        image_width: int = -1
 
-    def __init__(self, image_size: int):
+    def __init__(self, image_height: int, image_width: int):
         super().__init__()
-        self.fc = nn.Linear(image_size * image_size * 3, 1)
-        self.image_size = image_size
+        self.fc = nn.Linear(image_height * image_width * 3, 1)
+        self.image_height = image_height
+        self.image_width = image_width
 
     @override
     def forward(self, media: Tensor, **_kwargs: object) -> Tensor:
@@ -66,14 +70,14 @@ def test_gan_train_step_basic():
     # Create GAN config.
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(adversarial_weight=1.0, content_weight=10.0),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -84,8 +88,8 @@ def test_gan_train_step_basic():
 
     # Create batch.
     batch = {
-        "noise": torch.randn(4, 10),
-        "media": torch.randn(4, 3, 8, 8),
+        "noise": torch.randn(2, 10),
+        "media": torch.randn(2, 3, 4, 5),
     }
 
     # Run train step.
@@ -93,8 +97,8 @@ def test_gan_train_step_basic():
 
     assert "loss" in result
     assert "model" in result
-    assert result["loss"].shape == (4,)  # Per-sample loss.
-    assert result["model"].shape == (4, 3, 8, 8)  # Generated images.
+    assert result["loss"].shape == (2,)  # Per-sample loss.
+    assert result["model"].shape == (2, 3, 4, 5)  # Generated images.
 
 
 def test_gan_train_loss():
@@ -103,14 +107,14 @@ def test_gan_train_loss():
 
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -119,15 +123,15 @@ def test_gan_train_loss():
     gan = config.make()
 
     batch = {
-        "noise": torch.randn(4, 10),
-        "media": torch.randn(4, 3, 8, 8),
+        "noise": torch.randn(2, 10),
+        "media": torch.randn(2, 3, 4, 5),
     }
 
     result = gan.train_loss(**batch)
 
     assert "loss" in result
     assert "model" in result
-    assert result["loss"].shape == (4,)  # Per-sample loss.
+    assert result["loss"].shape == (2,)  # Per-sample loss.
     assert result["loss"].mean().item() > 0
 
 
@@ -137,14 +141,14 @@ def test_gan_eval_loss():
 
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -153,15 +157,15 @@ def test_gan_eval_loss():
     gan = config.make()
 
     batch = {
-        "noise": torch.randn(4, 10),
-        "media": torch.randn(4, 3, 8, 8),
+        "noise": torch.randn(2, 10),
+        "media": torch.randn(2, 3, 4, 5),
     }
 
     result = gan.eval_loss(**batch)
 
     assert "loss" in result
     assert "model" in result
-    assert result["loss"].shape == (4,)  # Per-sample loss.
+    assert result["loss"].shape == (2,)  # Per-sample loss.
     assert result["loss"].mean().item() > 0
 
 
@@ -171,14 +175,14 @@ def test_gan_checkpointing():
 
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -187,8 +191,8 @@ def test_gan_checkpointing():
     gan1 = config.make()
 
     batch = {
-        "noise": torch.randn(4, 10),
-        "media": torch.randn(4, 3, 8, 8),
+        "noise": torch.randn(2, 10),
+        "media": torch.randn(2, 3, 4, 5),
     }
 
     # Train for a few steps.
@@ -243,14 +247,14 @@ def test_gan_train_step_disc_loss_no_per_step_item(
 
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -264,7 +268,7 @@ def test_gan_train_step_disc_loss_no_per_step_item(
         _counting_train_step(item_calls),
     )
 
-    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    batch = {"noise": torch.randn(2, 10), "media": torch.randn(2, 3, 4, 5)}
     gan.train_step(**batch)
 
     # 5 disc steps: a correct impl syncs the accumulated tensor exactly once.
@@ -279,14 +283,14 @@ def test_gan_preprocess_batch_forwards_to_generator() -> None:
 
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -295,8 +299,8 @@ def test_gan_preprocess_batch_forwards_to_generator() -> None:
     gan = config.make()
 
     raw: dict[str, object] = {
-        "noise": torch.randn(4, 10),
-        "media": torch.randn(4, 3, 8, 8),
+        "noise": torch.randn(2, 10),
+        "media": torch.randn(2, 3, 4, 5),
     }
     out = gan.preprocess_batch(raw)
 
@@ -314,7 +318,7 @@ def _make_gan(
 ) -> GANTrainStep:
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
@@ -322,7 +326,7 @@ def _make_gan(
         accumulate_grad_batches=accumulate_grad_batches,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         optimizer=PartialConfig(torch.optim.Adam, lr=0.001),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
@@ -335,7 +339,7 @@ def _make_gan(
 def test_gan_checkpoint_refuses_pending_substep_accumulation() -> None:
     """A GAN checkpoint composes both sub-steps' resumability boundaries."""
     gan = _make_gan(accumulate_grad_batches=2)
-    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    batch = {"noise": torch.randn(2, 10), "media": torch.randn(2, 3, 4, 5)}
     gan.train_step(**batch)
 
     with pytest.raises(RuntimeError, match="incomplete gradient accumulation"):
@@ -353,7 +357,7 @@ def test_gan_generator_phase_does_not_pollute_discriminator_grads() -> None:
     """
     torch.manual_seed(42)
     gan = _make_gan()
-    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    batch = {"noise": torch.randn(2, 10), "media": torch.randn(2, 3, 4, 5)}
 
     gan.train_step(**batch)
 
@@ -383,7 +387,7 @@ def test_gan_generator_phase_preserves_user_frozen_discriminator_params() -> Non
     frozen_name, frozen_param = next(iter(gan.discriminator.model.named_parameters()))
     frozen_param.requires_grad_(False)
 
-    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    batch = {"noise": torch.randn(2, 10), "media": torch.randn(2, 3, 4, 5)}
     gan.train_step(**batch)
 
     restored = dict(gan.discriminator.model.named_parameters())
@@ -420,7 +424,7 @@ def test_gan_discriminator_receives_media_under_consistent_key() -> None:
 
     gan.discriminator.model.register_forward_pre_hook(record, with_kwargs=True)
 
-    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    batch = {"noise": torch.randn(2, 10), "media": torch.randn(2, 3, 4, 5)}
     gan.train_step(**batch)
 
     assert "media" in seen_keys, (
@@ -433,13 +437,13 @@ def test_gan_n_discriminator_steps_zero_rejected() -> None:
     """#337(3): n_discriminator_steps=0 would divide by zero; reject at init."""
     config = GANTrainStep.Config()
     config.generator = TrainStep.Config(
-        model=SimpleGenerator.Config(latent_dim=10, image_size=8),
+        model=SimpleGenerator.Config(latent_dim=10, image_height=4, image_width=5),
         loss=AdversarialLoss.Config(),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
     config.discriminator = TrainStep.Config(
-        model=SimpleDiscriminator.Config(image_size=8),
+        model=SimpleDiscriminator.Config(image_height=4, image_width=5),
         parallelism=NoParallel.Config(device="cpu"),
         compile=None,
     )
@@ -466,7 +470,7 @@ def test_gan_train_step_preserves_generator_aux_losses() -> None:
 
     gan.generator.loss = loss_with_aux
 
-    batch = {"noise": torch.randn(4, 10), "media": torch.randn(4, 3, 8, 8)}
+    batch = {"noise": torch.randn(2, 10), "media": torch.randn(2, 3, 4, 5)}
     result = gan.train_step(**batch)
 
     assert "adversarial" in result, "generator auxiliary loss key dropped"

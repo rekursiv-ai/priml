@@ -32,11 +32,11 @@ def test_softcap_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="soft_cap",
-        build_module=lambda: SoftCap.Config(
+        build_module=SoftCap.Config(
             cap=2.0,
             channels_in=4,
             channels_out=4,
-        ).make(),
+        ).make,
         build_input=lambda: torch.randn(2, 3, 4),
         seed=0,
     )

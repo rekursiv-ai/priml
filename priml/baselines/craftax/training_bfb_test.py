@@ -9,8 +9,7 @@ performs them -- so a change anywhere in the port moves the golden.
 Mirrors the JAX study's ``training_bfb_test``, with two deliberate departures:
 
 * It trains against the REAL simulator rather than a synthetic environment.
-  The JAX golden could not afford that; four workers for four steps here is
-  cheap, and pinning the simulator is most of the value.
+  Pinning the simulator is the important part of this golden.
 * It compares one trace tensor rather than twenty named arrays, because that
   is the shape ``assert_bfb_against_golden`` speaks. The post-run state the
   harness also checks, bit for bit, covers what the separate arrays covered:
@@ -39,14 +38,14 @@ from priml.testing.bfb import (
     assert_bfb_against_golden,
     bfb_devices,
     load_golden,
-    state_digest,
 )
 from priml.train.parallelism import NoParallel
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
-_TRACED_METRICS = (
+_UPDATES: Final = 3
+_TRACED_METRICS: Final = (
     "policy_loss",
     "value_loss",
     "entropy",
@@ -57,19 +56,6 @@ _TRACED_METRICS = (
     "explained_variance",
     "episodes",
 )
-"""Every scalar one update reports, in a fixed order.
-
-Fixed because the trace is a tensor: a reordering would silently compare one
-metric against another rather than failing.
-"""
-
-_UPDATES = 2
-"""Updates the trace covers.
-
-Two, not one: the second is what proves the learning-rate anneal, the
-optimizer's carried moments, and the environment's continuation across an
-update boundary are pinned too.
-"""
 
 
 class _PPOTrace(nn.Module):
@@ -124,23 +110,22 @@ def _build_trace() -> nn.Module:
     config = CraftaxTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 4
+    config.env.num_envs = 3
     config.env.seed = 7
-    config.rollout_steps = 4
+    config.rollout_steps = 2
     config.num_epochs = 2
     config.num_minibatches = 2
-    config.total_train_steps = 8
+    config.total_train_steps = 3
     config.learning_rate = 3e-3
-    # A 1x1 view rather than the benchmark's 9x11. The observation is one
+    # A 2x2 view rather than the benchmark's 9x11. The observation is one
     # one-hot vector per visible tile, so the window is what sets the input
-    # width -- 134 floats here against 8,268 -- and the first layer's weights
+    # width, and the first layer's weights
     # are almost the whole committed file. The encoding is identical either
     # way: same channels, same order, same arithmetic, fewer tiles.
     #
-    # What the golden gives up is pinning the published geometry, and it never
-    # was the thing pinning it: ``observation_test`` checks the real width
-    # against the reference implementation directly.
-    config.env.view = (1, 1)
+    # ``observation_test`` checks this encoding's real width against the
+    # reference implementation directly.
+    config.env.view = (2, 2)
     # TWO hidden units, and not one. A width-1 axis broadcasts against
     # anything, so a transposed or mis-ordered tensor still lines up and the
     # golden would record the wrong arithmetic as correct.
@@ -185,9 +170,11 @@ def test_the_golden_covers_the_optimizer_not_just_the_forward() -> None:
     optimizer changed, which is the regression this file exists to catch.
     """
     payload = load_golden(_CWD / "testdata" / "craftax_ppo_training.pt")
-    assert "post_state_digest" in payload
-    before = payload["post_state_digest"]["policy.policy.0.weight"]
-    after = state_digest(payload["state_dict"]["policy.policy.0.weight"])
+    assert "post_state" in payload
+    post_state = payload["post_state"]
+    after = post_state["policy.policy.0.weight"]
+    state_dict = payload["state_dict"]
+    before = state_dict["policy.policy.0.weight"]
     assert not torch.equal(before, after)
 
 

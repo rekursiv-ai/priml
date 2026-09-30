@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import cast
+from typing import Final, cast
 
 from torch import Tensor
 
@@ -31,7 +31,7 @@ def test_the_update_is_approximately_orthogonal() -> None:
     polynomial iteration were wrong the optimizer would silently become a
     poorly-tuned SGD.
     """
-    params = _parameters((16, 16))
+    params = _parameters((16, 17))
     before = params[0].detach().clone()
     # Eager: these assertions are about the update's algebra, which holds at
     # either, and tracing the step costs 11s per process and is never cached.
@@ -59,7 +59,7 @@ def test_it_is_invariant_to_the_gradient_scale() -> None:
     """
     steps: list[Tensor] = []
     for scale in (1.0, 1000.0):
-        params = _parameters((8, 8))
+        params = _parameters((8, 9))
         assert params[0].grad is not None
         params[0].grad *= scale
         before = params[0].detach().clone()
@@ -77,7 +77,7 @@ def test_same_shape_parameters_step_together() -> None:
     Every parameter must move, and one shape's update must not leak into
     another's -- which a wrong stacking would silently do.
     """
-    params = _parameters((8, 8), (8, 8), (4, 16))
+    params = _parameters((8, 9), (8, 9), (4, 16))
     before = [p.detach().clone() for p in params]
     NorMuon(params, lr=0.1, momentum=0.0, weight_decay=0.0, compile=False).step()
     for original, updated in zip(before, params, strict=True):
@@ -95,9 +95,9 @@ def test_weight_decay_is_cautious() -> None:
     """
 
     def step(*, weight_decay: float) -> Tensor:
-        params = _parameters((8, 8))
+        params = _parameters((8, 9))
         with torch.no_grad():
-            params[0].copy_(torch.ones(8, 8))
+            params[0].copy_(torch.ones(8, 9))
         before = params[0].detach().clone()
         NorMuon(
             params,
@@ -133,7 +133,7 @@ def test_row_rescaling_redistributes_without_resizing() -> None:
     """
 
     def update(*, skew: bool) -> Tensor:
-        params = _parameters((16, 16))
+        params = _parameters((16, 17))
         before = params[0].detach().clone()
         optimizer = NorMuon(
             params,
@@ -171,7 +171,7 @@ def test_a_vector_is_rejected() -> None:
 
 def test_eligibility_names_the_rank_rule() -> None:
     """The recipe routes by this, so it states the algorithm's own constraint."""
-    matrix = torch.nn.Parameter(torch.zeros(4, 4))
+    matrix = torch.nn.Parameter(torch.zeros(4, 5))
     vector = torch.nn.Parameter(torch.zeros(4))
     assert NorMuon.eligible_tensor("w", matrix)
     assert not NorMuon.eligible_tensor("b", vector)
@@ -179,7 +179,7 @@ def test_eligibility_names_the_rank_rule() -> None:
 
 _Build = Callable[[list[torch.nn.Parameter]], NorMuon]
 
-_INVALID: list[tuple[str, _Build, str]] = [
+_INVALID: Final[list[tuple[str, _Build, str]]] = [
     ("lr", lambda p: NorMuon(p, lr=-1.0), "learning rate"),
     ("momentum", lambda p: NorMuon(p, momentum=1.0), "momentum"),
     ("beta2", lambda p: NorMuon(p, beta2=1.0), "beta2"),
@@ -276,7 +276,7 @@ def test_a_prefix_of_the_coefficients_is_a_shorter_iteration() -> None:
     """
     updates: list[Tensor] = []
     for ns_steps in (1, 5):
-        params = _parameters((16, 16))
+        params = _parameters((16, 17))
         before = params[0].detach().clone()
         NorMuon(
             params,

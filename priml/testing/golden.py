@@ -8,11 +8,14 @@ one storage and :func:`put_steps` stacks per-step values under one key.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from re import Pattern
 from typing import TYPE_CHECKING, Final, cast
 
 import math
 import os
+import re
 import zlib
 
 from torch import Tensor
@@ -23,7 +26,7 @@ from priml.lib.custom_json import DictCodec
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Generator, Iterable, Mapping
 
     import pytest
 
@@ -182,6 +185,33 @@ def mismatches(
         elif not torch.equal(want, got):
             report.append(f"{key}: {(want != got).sum().item()}/{want.numel()} differ")
     return report
+
+
+@contextmanager
+def expect_golden_mismatch(match: str | Pattern[str]) -> Generator[None]:
+    """Require a matching golden assertion failure without regeneration.
+
+    Args:
+      match: Regular expression matched against the assertion message.
+
+    Yields:
+      nothing: No value; used as a context manager around a golden assertion.
+
+    """
+    prior = os.environ.pop("BFB_REGENERATE", None)
+    mismatch = False
+    try:
+        try:
+            yield
+        except AssertionError as error:
+            if not re.search(match, str(error)):
+                raise
+            mismatch = True
+    finally:
+        if prior is not None:
+            os.environ["BFB_REGENERATE"] = prior
+    if not mismatch:
+        raise AssertionError("Expected a golden mismatch, but the comparison passed.")
 
 
 def assert_tensor_golden(path: Path, record: Mapping[str, Tensor]) -> None:

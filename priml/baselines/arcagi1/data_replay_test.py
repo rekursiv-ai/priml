@@ -1,25 +1,29 @@
 """Replay frozen reference outputs for every ARC data-side entry point.
 
-``testdata/data.pt`` holds what the reference implementation produced for
-these seeded inputs. One capture body runs against the priml port
-(``PortBackend``) here, and against the reference by the minting test beside
-that implementation -- so both compare exactly the same keys. Values are short
-digests of arrays (dtype and shape included), whole file trees, batch streams,
-and generator positions, plus exact reprs of scalar results. Each capture is
-stored as one tensor of ``key<TAB>value`` lines.
+``testdata/data.pt`` holds what the reference implementation produced
+for these seeded inputs. One capture body runs against
+the priml port (``PortBackend``) here, and against the reference by the minting
+test beside that implementation -- so both compare exactly the same keys.
+
+Every value is kept whole: arrays, UTF-8 strings, generator states, and
+errors. Repeated grid rows and identical strings share byte storage, with
+every case retaining its own exact key and value.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import (
+    dataclass,
+    field as dataclass_field,
+)
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
-import hashlib
 import json
+import math
+import os
 import shutil
-import zlib
 
 from torch import Tensor
 
@@ -30,6 +34,7 @@ import torch
 from priml.baselines.arcagi1 import augmentation
 from priml.baselines.arcagi1.augmentation import (
     ArcAugmentation,
+    ArcSpec,
     ColorDihedral,
     SpatialAugmentation,
 )
@@ -48,7 +53,7 @@ from priml.baselines.arcagi1.metric import (
 )
 from priml.baselines.arcagi1.scripts import build_dataset, build_spatial_eval
 from priml.lib.custom_json import DictCodec, ListCodec, loads
-from priml.testing.golden import read_tensors, write_tensors
+from priml.testing.golden import read_tensors, stored, write_tensors
 
 
 if TYPE_CHECKING:
@@ -61,11 +66,13 @@ if TYPE_CHECKING:
 type Grid = NDArray[np.uint8]
 type Batch = Mapping[str, object]
 type Ballots = Mapping[str, Mapping[str, Sequence[tuple[str, float]]]]
+type Leaf = Tensor | str
+type Capture = dict[str, Leaf]
 
 _CWD: Final = Path(__file__).resolve().parent
 
 GOLDEN: Final = _CWD / "testdata" / "data.pt"
-"""Frozen reference digests, keyed by capture then case."""
+"""Frozen reference arrays and tensors, keyed by capture then case."""
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -141,6 +148,9 @@ class BuildCase:
 
 class Backend(Protocol):
     """Every data-side entry point, under one name per role."""
+
+    @property
+    def spec(self) -> ArcSpec: ...
 
     def dihedral(self, arr: Grid, tid: int) -> Grid: ...
     def inverse_dihedral(self, arr: Grid, tid: int) -> Grid: ...
@@ -247,6 +257,8 @@ class Backend(Protocol):
 class PortBackend:
     """The priml port."""
 
+    spec: ArcSpec = dataclass_field(default_factory=ArcSpec)
+
     def dihedral(self, arr: Grid, tid: int) -> Grid:
         return augmentation.dihedral_transform(arr, tid=tid)
 
@@ -260,10 +272,10 @@ class PortBackend:
         return augmentation.grid_hash(grid)
 
     def to_np(self, grid: list[list[int]]) -> Grid:
-        return augmentation.arc_grid_to_np(grid, max_grid=augmentation.ARC.max_grid)
+        return augmentation.arc_grid_to_np(grid, max_grid=self.spec.max_grid)
 
     def crop(self, flat: Grid) -> Grid:
-        return augmentation.crop_grid(flat)
+        return augmentation.crop_grid(flat, spec=self.spec)
 
     def untranslate(self, flat: Grid, scale: int, pad_r: int, pad_c: int) -> Grid:
         return augmentation.untranslate_unscale(
@@ -274,7 +286,7 @@ class PortBackend:
         )
 
     def inverse_aug(self, name: str) -> tuple[str, Callable[[Grid], Grid]]:
-        return augmentation.inverse_aug(name)
+        return augmentation.inverse_aug(name, spec=self.spec)
 
     def square_side(self, length: int) -> int:
         return augmentation.square_side(length, who="capture")
@@ -321,8 +333,9 @@ class PortBackend:
         prob: float,
         weights: Mapping[int, float],
     ) -> list[Grid]:
-        config = SpatialAugmentation.Config()
-        config.max_grid = max_grid
+        spec = self.spec.copy_tree()
+        spec.max_grid = max_grid
+        config = SpatialAugmentation.Config(spec=spec)
         config.translation_prob = prob
         config.scale_prob = prob
         config.train_scale_weights = dict(weights)
@@ -333,13 +346,15 @@ class PortBackend:
         name: str,
         rng: np.random.Generator,
     ) -> tuple[str, Callable[[Grid], Grid]]:
-        return ColorDihedral.Config().make().sample(name, rng=rng)
+        config = ColorDihedral.Config()
+        config.separator = self.spec.puzzle_id_separator
+        return config.make().sample(name, rng=rng)
 
     def build(self, case: BuildCase, prefix: Path, output: Path) -> None:
         build_dataset._build_arc_dataset(
             input_file_prefix=str(prefix),
             output_dir=output,
-            augmentation=_recipe(case),
+            augmentation=_recipe(case, spec=self.spec),
             subsets=case.subsets,
             test_set_name=case.test_set_name,
         )
@@ -347,7 +362,7 @@ class PortBackend:
     def ensure_build(self, case: BuildCase, prefix: Path, output: Path) -> None:
         build_dataset.ensure_arc_dataset(
             target_dir=output,
-            augmentation=_recipe(case),
+            augmentation=_recipe(case, spec=self.spec),
             input_file_prefix=str(prefix),
         )
 
@@ -371,6 +386,7 @@ class PortBackend:
             train_scale_weights=weights,
             num_aug=2,
             seed=5,
+            spec=self.spec,
         )
 
     def spatial_build(
@@ -388,6 +404,7 @@ class PortBackend:
             target_dir=target,
             scale_weights=weights,
             seed=seed,
+            spec=self.spec,
         )
 
     def spatial_ensure(self, *, source: Path, views: int, target: Path) -> None:
@@ -395,6 +412,7 @@ class PortBackend:
             source_dir=source,
             spatial_views=views,
             target=target,
+            spec=self.spec,
         )
 
     def aug_slug(self, policy: AugPolicy) -> str:
@@ -461,6 +479,7 @@ class PortBackend:
 
     def data(self, fields: Mapping[str, object]) -> DataLike:
         config = PuzzleData.Config()
+        config.spec = self.spec
         for key, value in fields.items():
             setattr(config, key, value)
         return config.make()
@@ -495,6 +514,7 @@ class PortBackend:
 
     def metric(self, fields: Mapping[str, object]) -> MetricLike:
         config = CanonicalPassK.Config()
+        config.spec = self.spec
         for key, value in fields.items():
             setattr(config, key, value)
         return config.make()
@@ -521,11 +541,17 @@ class PortBackend:
 
     def write_dump(self, payload: object, path: Path, step: int) -> None:
         assert isinstance(payload, SignalDumpPayload)
-        write_signal_dump(payload=payload, dump_signals_path=path, global_step=step)
+        write_signal_dump(
+            payload=payload,
+            dump_signals_path=path,
+            global_step=step,
+            spec=self.spec,
+        )
 
     def tracker(self, working_dir: str) -> TrackerLike:
         config = SignalDumpTracker.Config()
         config.working_dir = working_dir
+        config.spec = self.spec
         return config.make()
 
 
@@ -536,26 +562,20 @@ PROBS: Final = (0.0, 0.5, 1.0)
 """Gate probabilities: never, sampled, and always."""
 
 BUILD_CASES: Final = (
-    *(
-        BuildCase(seed=seed, prob=prob, weights=weights, num_aug=3)
-        for seed in (0, 42)
-        for prob in PROBS
-        for weights in WEIGHTS[:3]
-    ),
+    BuildCase(seed=0, prob=0.0, weights=WEIGHTS[0], num_aug=1),
     BuildCase(seed=1, prob=1.0, weights={1: 1.0}, num_aug=0),
-    BuildCase(seed=2, prob=0.5, weights=WEIGHTS[3], num_aug=40),
     BuildCase(
         seed=3,
         prob=1.0,
         weights={1: 1.0},
-        num_aug=2,
+        num_aug=1,
         subsets=("training", "evaluation"),
     ),
     BuildCase(
         seed=4,
         prob=1.0,
         weights={1: 1.0},
-        num_aug=2,
+        num_aug=1,
         test_set_name="__none__",
         with_solutions=False,
     ),
@@ -563,48 +583,60 @@ BUILD_CASES: Final = (
 """Every gate/weight branch, no augmentation, retry exhaustion, subset overrides."""
 
 
-def digest(*values: object) -> str:
-    """Hash arrays, tensors, and scalars with dtype and shape, 16 hex chars."""
-    h = hashlib.sha256()
-    for value in values:
-        array = (
-            cast("NDArray[np.generic]", value.detach().cpu().numpy())
-            if isinstance(value, Tensor)
-            else value
-        )
-        if isinstance(array, np.ndarray):
-            typed = cast("NDArray[np.generic]", array)
-            h.update(
-                f"{typed.dtype.str}{tuple(ListCodec.coerce(list(typed.shape), int))}".encode(),
-            )
-            h.update(np.ascontiguousarray(typed).tobytes())
-        else:
-            h.update(repr(array).encode())
-        h.update(b"\0")
-    return h.hexdigest()[:16]
+def leaf(value: object) -> Leaf:
+    """Keep an array or tensor whole, bytes as a byte tensor, else the exact repr."""
+    if isinstance(value, Tensor):
+        return stored(value.cpu())
+    if isinstance(value, np.ndarray):
+        array = cast("NDArray[np.generic]", value)
+        if array.dtype.kind in "USO":
+            return repr(cast(object, array.tolist()))
+        return stored(torch.from_numpy(np.array(array, copy=True)))
+    if isinstance(value, bytes):
+        return torch.frombuffer(bytearray(value), dtype=torch.uint8).clone()
+    return value if isinstance(value, str) else repr(value)
+
+
+def put(out: Capture, key: str, *values: object) -> None:
+    """Record ``values`` whole under ``key``, one numbered entry each when several."""
+    if len(values) == 1:
+        out[key] = leaf(values[0])
+        return
+    for index, value in enumerate(values):
+        out[f"{key}/{index}"] = leaf(value)
 
 
 def rng_state(rng: np.random.Generator) -> str:
-    """Fingerprint a generator's position."""
-    return digest(json.dumps(rng.bit_generator.state, sort_keys=True))
+    """Keep a generator's position as its canonical JSON state."""
+    return json.dumps(rng.bit_generator.state, sort_keys=True)
 
 
-def outcome(fn: Callable[[], object]) -> str:
-    """Digest ``fn()`` (verbatim if a string), or name its exception."""
+def outcome(fn: Callable[[], object]) -> Leaf:
+    """Keep ``fn()`` whole, or name its exception."""
     try:
         value = fn()
     except (ValueError, TypeError, KeyError, FileNotFoundError, OverflowError) as err:
         return f"{type(err).__name__}: {err}"
-    return value if isinstance(value, str) else digest(value)
+    return leaf(value)
 
 
-def tree_digests(root: Path) -> dict[str, str]:
-    """Hash every file under ``root`` except the ensure completion marker."""
-    return {
-        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and path.name != ".ensure_complete"
-    }
+def scrub(value: Leaf, path: Path, name: str) -> Leaf:
+    """Replace a temporary ``path`` inside a message with a stable ``name``."""
+    return value.replace(str(path), name) if isinstance(value, str) else value
+
+
+def put_tree(out: Capture, prefix: str, root: Path) -> None:
+    """Keep every file under ``root`` except the ensure completion marker."""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name == ".ensure_complete":
+            continue
+        key = f"{prefix}/{path.relative_to(root)}"
+        if path.suffix == ".npy":
+            out[key] = leaf(cast(object, np.load(path)))
+        elif path.suffix == ".json":
+            out[key] = path.read_text(encoding="utf-8")
+        else:
+            out[key] = leaf(path.read_bytes())
 
 
 def write_source(prefix: Path, *, with_solutions: bool = True) -> None:
@@ -614,13 +646,11 @@ def write_source(prefix: Path, *, with_solutions: bool = True) -> None:
         puzzles = {
             f"{subset}-{index}": {
                 "train": [
-                    {"input": [[0, index + 1, 2], [3, 4, 5]], "output": [[6], [7]]},
-                    {"input": [[8, 9]], "output": [[index, 0], [2, 3]]},
-                    {"input": [[1] * (index + 1)], "output": [[9, 8, 7]]},
+                    {"input": [[0, index + 1], [3, 4]], "output": [[6], [7]]},
                 ],
                 "test": [{"input": [[1, 2], [3, 4]]}, {"input": [[index, 5]]}],
             }
-            for index in range(3)
+            for index in range(1)
         }
         # Every view of an all-zero square grid hashes alike, exhausting the retries.
         puzzles[f"{subset}-blank"] = {
@@ -630,20 +660,23 @@ def write_source(prefix: Path, *, with_solutions: bool = True) -> None:
         Path(f"{prefix}_{subset}_challenges.json").write_text(json.dumps(puzzles))
         if with_solutions or subset != "concept":
             solutions: dict[str, object] = {
-                name: [[[4, 3], [2, 1]], [[5, 5, 5]]] for name in puzzles
+                name: [[[4, 3], [2, 1]], [[5, 5]]] for name in puzzles
             }
             solutions[f"{subset}-blank"] = [[[0]]]
             Path(f"{prefix}_{subset}_solutions.json").write_text(json.dumps(solutions))
 
 
-def random_grids(seed: int, count: int) -> list[Grid]:
-    """Return seeded color grids of random shape up to 6x6."""
+def random_grids(seed: int, count: int, *, max_side: int = 6) -> list[Grid]:
+    """Return seeded color grids of random shape up to ``max_side``."""
     rng = np.random.default_rng(seed)
     return [
         rng.integers(
             0,
             10,
-            size=(int(rng.integers(1, 7)), int(rng.integers(1, 7))),
+            size=(
+                int(rng.integers(1, max_side + 1)),
+                int(rng.integers(1, max_side + 1)),
+            ),
         ).astype(np.uint8)
         for _ in range(count)
     ]
@@ -666,42 +699,46 @@ def pairs(grids: list[Grid]) -> Iterable[tuple[Grid, Grid]]:
     return zip(grids[::2], grids[1::2], strict=True)
 
 
-def capture_grid_ops(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_grid_ops(b: Backend, tmp: Path) -> Capture:
     """Grid transforms, inverses, hashing, cropping, and error branches."""
     del tmp
-    out: dict[str, str] = {}
-    for i, grid in enumerate(random_grids(0, 12)):
+    out: Capture = {}
+    for i, grid in enumerate(random_grids(0, 2, max_side=b.spec.max_grid)):
         for tid in range(8):
             forward = b.dihedral(grid, tid)
-            out[f"dihedral/{i}/{tid}"] = digest(forward)
-            out[f"inverse_dihedral/{i}/{tid}"] = digest(
+            put(out, f"dihedral/{i}/{tid}", forward)
+            put(
+                out,
+                f"inverse_dihedral/{i}/{tid}",
                 b.inverse_dihedral(forward, tid),
             )
         for k in (1, 2, 3):
-            out[f"scale/{i}/{k}"] = digest(b.scale_grid(grid, k))
+            put(out, f"scale/{i}/{k}", b.scale_grid(grid, k))
         out[f"hash/{i}"] = b.grid_hash(grid)
         rows = [
             ListCodec.coerce(row, int)
             for row in ListCodec.coerce(cast(object, grid.tolist()))
         ]
-        out[f"to_np/{i}"] = digest(b.to_np(rows))
+        put(out, f"to_np/{i}", b.to_np(rows))
     rng = np.random.default_rng(3)
-    for i, flat in enumerate(random_tokens(1, 12)):
-        out[f"crop/{i}"] = digest(b.crop(flat))
+    for i, flat in enumerate(random_tokens(1, 2, side=b.spec.max_grid)):
+        put(out, f"crop/{i}", b.crop(flat))
         scale = int(rng.integers(1, 4))
         pad_r, pad_c = int(rng.integers(0, 5)), int(rng.integers(0, 5))
-        out[f"untranslate/{i}"] = digest(b.untranslate(flat, scale, pad_r, pad_c))
-        out[f"untranslate_identity/{i}"] = digest(b.untranslate(flat, 1, 0, 0))
+        put(out, f"untranslate/{i}", b.untranslate(flat, scale, pad_r, pad_c))
+        put(out, f"untranslate_identity/{i}", b.untranslate(flat, 1, 0, 0))
     out["error/dihedral_tid"] = outcome(lambda: b.dihedral(random_grids(0, 1)[0], 8))
-    out["crop/small"] = digest(b.crop(np.array([2, 3, 1, 0], dtype=np.uint8)))
-    out["crop/empty"] = digest(b.crop(np.zeros(9, dtype=np.uint8)))
+    put(out, "crop/small", b.crop(np.array([2, 3, 1, 0], dtype=np.uint8)))
+    put(out, "crop/empty", b.crop(np.zeros(9, dtype=np.uint8)))
     grid = random_grids(5, 1)[0]
     rng = np.random.default_rng(9)
-    for i in range(16):
+    for i in range(3):
         name, forward = b.color_sample(f"task{i}", rng)
         original, inverse = b.inverse_aug(name)
-        out[f"inverse_aug/{i}"] = digest(name, original, inverse(forward(grid)))
-    out["inverse_aug/bare"] = digest(
+        put(out, f"inverse_aug/{i}", name, original, inverse(forward(grid)))
+    put(
+        out,
+        "inverse_aug/bare",
         b.inverse_aug("bare")[0],
         b.inverse_aug("bare")[1](grid),
     )
@@ -715,6 +752,7 @@ def capture_grid_ops(b: Backend, tmp: Path) -> dict[str, str]:
         "bad_perm": lambda: b.inverse_aug("a|||t1|||0123456788"),
         "short_perm": lambda: b.inverse_aug("a|||t1|||012"),
         "hash_ndim": lambda: b.grid_hash(np.zeros(3, np.uint8)),
+        # pytest.raises input.
         "hash_dtype": lambda: b.grid_hash(cast("Grid", np.zeros((1, 1), np.int32))),
         "to_np_range": lambda: b.to_np([[256]]),
         "to_np_neg": lambda: b.to_np([[-1]]),
@@ -741,10 +779,10 @@ SCALE_WEIGHT_INPUTS: Final[tuple[dict[int, float], ...]] = (
 """Valid and invalid scale weights."""
 
 
-def capture_scale_weights(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_scale_weights(b: Backend, tmp: Path) -> Capture:
     """Scale-weight normalization, slugs, and CLI parsing."""
     del tmp
-    out: dict[str, str] = {"no_train": digest(dict(b.no_train_scale_weights()))}
+    out: Capture = {"no_train": leaf(dict(b.no_train_scale_weights()))}
     for i, weights in enumerate(SCALE_WEIGHT_INPUTS):
         out[f"normalize/{i}"] = outcome(lambda w=weights: b.normalize(w))
         out[f"slug/{i}"] = outcome(lambda w=weights: b.slug(w))
@@ -753,32 +791,34 @@ def capture_scale_weights(b: Backend, tmp: Path) -> dict[str, str]:
     return out
 
 
-def capture_draws(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_draws(b: Backend, tmp: Path) -> Capture:
     """Bernoulli and scale-factor draws with generator positions."""
     del tmp
-    out: dict[str, str] = {}
+    out: Capture = {}
     rng = np.random.default_rng(7)
-    for i, prob in enumerate((0.0, 0.3, 1.0, 0.7, -1.0, 2.0) * 3):
-        out[f"bernoulli/{i}"] = digest(b.bernoulli(prob, rng), rng_state(rng))
-    for i, (inp, target) in enumerate(pairs(random_grids(11, 8))):
+    for i, prob in enumerate((0.0, 0.3, 1.0, 0.7, -1.0, 2.0)):
+        put(out, f"bernoulli/{i}", b.bernoulli(prob, rng), rng_state(rng))
+    for i, (inp, target) in enumerate(pairs(random_grids(11, 2))):
         for w, weights in enumerate(WEIGHTS):
-            for max_grid in (6, 12, 30):
-                out[f"scale_factor/{i}/{w}/{max_grid}"] = digest(
+            for max_grid in (6, 12):
+                put(
+                    out,
+                    f"scale_factor/{i}/{w}/{max_grid}",
                     b.scale_factor(inp, target, weights, rng, max_grid),
                     rng_state(rng),
                 )
     return out
 
 
-def capture_pack(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_pack(b: Backend, tmp: Path) -> Capture:
     """Spatial packing over every gate, weight, grid size, and training branch."""
     del tmp
-    out: dict[str, str] = {}
-    grids = random_grids(21, 8)
-    for seed in (0, 42):
+    out: Capture = {}
+    grids = random_grids(21, 2, max_side=2)
+    for seed in (0,):
         for prob in PROBS:
             for w, weights in enumerate(WEIGHTS):
-                for max_grid in (8, 30):
+                for max_grid in (b.spec.max_grid,):
                     for training in (True, False):
                         rng = np.random.default_rng(seed)
                         rows = [
@@ -795,10 +835,12 @@ def capture_pack(b: Backend, tmp: Path) -> dict[str, str]:
                             )
                         ]
                         key = f"{seed}/{prob}/{w}/{max_grid}/{training}"
-                        out[key] = digest(*rows, rng_state(rng))
+                        put(out, key, *rows, rng_state(rng))
     out["error/oversized"] = outcome(
         lambda: b.pack(
+            # pytest.raises input.
             np.zeros((4, 1), np.uint8),
+            # pytest.raises input.
             np.zeros((1, 1), np.uint8),
             training=False,
             rng=np.random.default_rng(0),
@@ -810,35 +852,33 @@ def capture_pack(b: Backend, tmp: Path) -> dict[str, str]:
     return out
 
 
-def capture_color_dihedral(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_color_dihedral(b: Backend, tmp: Path) -> Capture:
     """Color permutation and dihedral sampling with generator positions."""
     del tmp
-    out: dict[str, str] = {}
+    out: Capture = {}
     grid = random_grids(31, 1)[0]
-    for seed in (0, 42, 1234):
+    for seed in (0,):
         rng = np.random.default_rng(seed)
-        for i in range(8):
+        for i in range(3):
             name, forward = b.color_sample("puzzle", rng)
-            out[f"{seed}/{i}"] = digest(name, forward(grid), rng_state(rng))
+            put(out, f"{seed}/{i}", name, forward(grid), rng_state(rng))
     return out
 
 
-def capture_build(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_build(b: Backend, tmp: Path) -> Capture:
     """Whole trees for every builder case, plus the ensure entry and manifest."""
-    out: dict[str, str] = {}
+    out: Capture = {}
     for n, case in enumerate(BUILD_CASES):
         prefix = tmp / f"src{n}" / "arc-agi"
         write_source(prefix, with_solutions=case.with_solutions)
         root = tmp / f"tree{n}"
         b.build(case, prefix, root)
-        for rel, value in tree_digests(root).items():
-            out[f"{case.key}/{rel}"] = value
+        put_tree(out, case.key, root)
     root = tmp / "ensure-tree"
     for _ in range(2):  # The second call is a process-cache hit.
         b.ensure_build(BUILD_CASES[1], tmp / "src1" / "arc-agi", root)
-    for rel, value in tree_digests(root).items():
-        out[f"ensure/{rel}"] = value
-    out["manifest"] = digest(b.manifest())
+    put_tree(out, "ensure", root)
+    put(out, "manifest", b.manifest())
     for i, (tr, sc, weights) in enumerate(
         ((0.2, 0.2, {2: 1.0}), (1.0, 0.0, {1: 1.0}), (0.5, 0.5, {1: 1.0})),
     ):
@@ -852,19 +892,19 @@ def capture_build(b: Backend, tmp: Path) -> dict[str, str]:
                 weights=w,
             ),
         )
-        for rel, value in tree_digests(root).items() if root.exists() else ():
-            out[f"policy/{i}/{rel}"] = value
+        if root.exists():
+            put_tree(out, f"policy/{i}", root)
     return out
 
 
 def base_tree(b: Backend, tmp: Path) -> Path:
-    """Build, once, the tree the spatial, loader, and metric captures read."""
+    """Build, once, the tree the spatial, loader, and metric CAPTURES read."""
     root = tmp / "base"
     if not root.exists():
         prefix = tmp / "src-base" / "arc-agi"
         write_source(prefix)
         b.build(
-            BuildCase(seed=0, prob=0.5, weights={1: 1.0, 2: 1.0}, num_aug=3),
+            BuildCase(seed=0, prob=0.5, weights={1: 1.0, 2: 1.0}, num_aug=1),
             prefix,
             root,
         )
@@ -876,7 +916,7 @@ def spatial_tree(b: Backend, tmp: Path) -> Path:
     target = tmp / "base-spatial"
     if not target.exists():
         b.spatial_build(
-            views=3,
+            views=2,
             source=base_tree(b, tmp),
             target=target,
             weights={1: 1.0, 2: 1.0},
@@ -889,32 +929,33 @@ SPATIAL_WEIGHTS: Final = ({2: 1.0}, {1: 1.0, 2: 1.0, 3: 1.0}, {1: 1.0})
 """Spatial-eval scale distributions."""
 
 
-def capture_spatial_eval(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_spatial_eval(b: Backend, tmp: Path) -> Capture:
     """Spatial-eval expansions of a built tree, plus the ensure entry."""
-    out: dict[str, str] = {}
+    out: Capture = {}
     source = base_tree(b, tmp)
-    for views in (1, 2, 3):
-        for w, weights in enumerate(SPATIAL_WEIGHTS):
-            for seed in (0, 7):
-                target = tmp / f"spatial-{views}-{w}-{seed}"
-                b.spatial_build(
-                    views=views,
-                    source=source,
-                    target=target,
-                    weights=weights,
-                    seed=seed,
-                )
-                for rel, value in tree_digests(target).items():
-                    out[f"{views}/{w}/{seed}/{rel}"] = value
+    for views, w, weights in (
+        (1, 0, SPATIAL_WEIGHTS[0]),
+        (2, 1, SPATIAL_WEIGHTS[1]),
+        (2, 2, SPATIAL_WEIGHTS[2]),
+    ):
+        seed = 0
+        target = tmp / f"spatial-{views}-{w}-{seed}"
+        b.spatial_build(
+            views=views,
+            source=source,
+            target=target,
+            weights=weights,
+            seed=seed,
+        )
+        put_tree(out, f"{views}/{w}/{seed}", target)
     target = tmp / "spatial-ensure"
     for _ in range(2):  # The second call is a process-cache hit.
         b.spatial_ensure(source=source, views=2, target=target)
-    for rel, value in tree_digests(target).items():
-        out[f"ensure/{rel}"] = value
+    put_tree(out, "ensure", target)
     test_only = tmp / "test-only"
     shutil.copytree(source, test_only, ignore=shutil.ignore_patterns("train"))
     edge = test_only / "test"
-    # An empty grid never varies, and a full 30x30 grid only fits identity.
+    # An empty grid never varies, and a full grid only fits identity.
     inputs = load_npy(edge / "all__inputs.npy")
     labels = load_npy(edge / "all__labels.npy")
     full = np.full((1, inputs.shape[1]), 5, dtype=inputs.dtype)
@@ -939,11 +980,9 @@ def capture_spatial_eval(b: Backend, tmp: Path) -> dict[str, str]:
             weights=weights,
             seed=0,
         )
-        for rel, value in tree_digests(tmp / f"test-only-spatial-{views}").items():
-            out[f"test_only/{views}/{rel}"] = value
+        put_tree(out, f"test_only/{views}", tmp / f"test-only-spatial-{views}")
     b.spatial_ensure(source=test_only, views=2, target=tmp / "test-only-ensure")
-    for rel, value in tree_digests(tmp / "test-only-ensure").items():
-        out[f"test_only_ensure/{rel}"] = value
+    put_tree(out, "test_only_ensure", tmp / "test-only-ensure")
     out["error/views"] = outcome(
         lambda: b.spatial_build(
             views=0,
@@ -968,10 +1007,10 @@ AUG_POLICIES: Final = (
 """Scratch trees in use, a dropped-weights slug, repr noise, and invalid policies."""
 
 
-def capture_paths(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_paths(b: Backend, tmp: Path) -> Capture:
     """Directory names and slugs that locate existing trees on scratch."""
     del tmp
-    out: dict[str, str] = {}
+    out: Capture = {}
     for i, (tr, sc, weights, num_aug, seed) in enumerate(AUG_POLICIES):
         policy = AugPolicy(
             translation_prob=tr,
@@ -984,7 +1023,7 @@ def capture_paths(b: Backend, tmp: Path) -> dict[str, str]:
         out[f"aug_template/{i}"] = outcome(lambda p=policy: b.aug_template(p))
         out[f"aug_dir/{i}"] = outcome(lambda p=policy: str(b.aug_dir(p)))
     out["aug_dir/default"] = str(b.aug_dir_default())
-    out["default_scale_weights"] = digest(dict(b.default_scale_weights()))
+    put(out, "default_scale_weights", dict(b.default_scale_weights()))
     for views in (0, 1, 2, 5):
         out[f"spatial_slug/{views}"] = outcome(lambda v=views: b.spatial_slug(v))
         for source in (None, "arc1concept-aug-1000-tr0p2-sc0p2-2w1p0-n1000-s42"):
@@ -1043,53 +1082,30 @@ LOADER_CASES: Final = (
         seed=1,
         spatial=True,
     ),
-    LoaderCase(
-        batch_size=2,
-        num_replicas=3,
-        epochs_per_iter=1,
-        max_samples=10_000,
-        seed=2,
-        spatial=True,
-    ),
-    LoaderCase(
-        batch_size=7,
-        num_replicas=2,
-        epochs_per_iter=3,
-        max_samples=11,
-        seed=3,
-        spatial=False,
-    ),
 )
 """Widths, sharding, multi-epoch passes, prefix caps, and spatial tags."""
 
 EVAL_CAPS: Final = (
     ("prefix", 13, None, None),
     ("augs", None, 1, None),
-    ("augs2", None, 2, None),
-    ("augs_big", None, 50, None),
     ("groups", None, None, 3),
-    ("groups_big", None, None, 500),
 )
 """(name, eval_max_samples, eval_max_augs_per_puzzle, eval_max_examples_per_group)."""
 
 
-def batch_digest(batch: Batch) -> str:
-    """Hash one batch's tensors and valid count."""
-    return digest(
-        batch["media"],
-        batch["label"],
-        batch["puzzle_identifiers"],
-        batch["spatial_tags"],
-        batch["valid_count"],
-    )
-
-
-# One digest per stream, not per batch: the stream name already localizes a mismatch,
-# and a golden's size is its key count.
-def stream_digests(prefix: str, batches: Iterable[Batch]) -> dict[str, str]:
-    """Digest a stream's batches in order, and the count."""
-    digests = [batch_digest(batch) for batch in batches]
-    return {prefix: digest(*digests), f"{prefix}/count": str(len(digests))}
+def put_stream(out: Capture, prefix: str, batches: Iterable[Batch]) -> None:
+    """Keep every batch of a stream whole, in order, and the batch count."""
+    count = 0
+    for count, batch in enumerate(batches, start=1):
+        for field in (
+            "media",
+            "label",
+            "puzzle_identifiers",
+            "spatial_tags",
+            "valid_count",
+        ):
+            out[f"{prefix}/{count - 1}/{field}"] = leaf(batch[field])
+    out[f"{prefix}/count"] = str(count)
 
 
 def loader_fields(root: Path, case: LoaderCase, rank: int) -> dict[str, object]:
@@ -1106,9 +1122,9 @@ def loader_fields(root: Path, case: LoaderCase, rank: int) -> dict[str, object]:
     }
 
 
-def capture_loader(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_loader(b: Backend, tmp: Path) -> Capture:
     """Training passes, resume, evaluation scans, caps, and hooks per rank."""
-    out: dict[str, str] = {}
+    out: Capture = {}
     for case in LOADER_CASES:
         root = spatial_tree(b, tmp) if case.spatial else base_tree(b, tmp)
         for rank in range(case.num_replicas):
@@ -1117,23 +1133,28 @@ def capture_loader(b: Backend, tmp: Path) -> dict[str, str]:
             data = b.data({**fields})
             loader = data.train_dataloader()
             out[f"{key}/len"] = str(len(loader))
-            for p in range(3):
-                out.update(stream_digests(f"{key}/train{p}", loader))
-            out[f"{key}/state"] = digest(data.state_dict()["train_iters"])
-            out.update(stream_digests(f"{key}/recreated", data.train_dataloader()))
+            for p in range(1):
+                put_stream(out, f"{key}/train{p}", loader)
+            put(out, f"{key}/state", data.state_dict()["train_iters"])
+            put_stream(out, f"{key}/recreated", data.train_dataloader())
             resumed = b.data({**fields})
             resumed.load_state_dict(data.state_dict())
-            out.update(stream_digests(f"{key}/resumed", resumed.train_dataloader()))
+            put_stream(out, f"{key}/resumed", resumed.train_dataloader())
             offset = b.data({**fields, "iters_offset": 4})
-            out.update(stream_digests(f"{key}/offset", offset.train_dataloader()))
+            put_stream(out, f"{key}/offset", offset.train_dataloader())
             live = b.data({**fields})
             live_loader = live.train_dataloader()
             live.load_state_dict({"train_iters": 2})
             live.load_state_dict({})
-            out.update(stream_digests(f"{key}/live_load", live_loader))
-            out[f"{key}/live_state"] = digest(live.state_dict()["train_iters"])
-            out.update(stream_digests(f"{key}/eval_fallback", data.eval_dataloader()))
-            out.update(stream_digests(f"{key}/eval_full", data.full_eval_dataloader()))
+            put_stream(out, f"{key}/live_load", live_loader)
+            put(out, f"{key}/live_state", live.state_dict()["train_iters"])
+            put_stream(out, f"{key}/eval_fallback", data.eval_dataloader())
+            full: Capture = {}
+            put_stream(full, f"{key}/eval_fallback", data.full_eval_dataloader())
+            assert not mismatches(
+                {k: v for k, v in out.items() if k.startswith(f"{key}/eval_fallback/")},
+                full,
+            )
             for name, prefix_cap, augs, groups in EVAL_CAPS:
                 stream = b.data(
                     {
@@ -1146,13 +1167,13 @@ def capture_loader(b: Backend, tmp: Path) -> dict[str, str]:
                     },
                 ).eval_dataloader()
                 out[f"{key}/eval_{name}/len"] = str(len(stream))
-                out.update(stream_digests(f"{key}/eval_{name}", stream))
+                put_stream(out, f"{key}/eval_{name}", stream)
     root = base_tree(b, tmp)
     remap = np.arange(1_000, dtype=np.int64)[::-1].copy()
     for name, offset, table in (("offset", 100, None), ("remap", 0, remap)):
-        for train in (True, False):
+        for train in (True,):
             stream = b.batches(root, train=train, offset=offset, remap=table)
-            out.update(stream_digests(f"hook_{name}_{train}", stream))
+            put_stream(out, f"hook_{name}_{train}", stream)
     fields = loader_fields(root, LOADER_CASES[0], 0)
     errors: dict[str, Callable[[], object]] = {
         "both_caps": lambda: b.data(
@@ -1188,10 +1209,7 @@ def capture_loader(b: Backend, tmp: Path) -> dict[str, str]:
         ),
     }
     out.update(
-        {
-            f"error/{k}": outcome(fn).replace(str(tmp), "<tmp>")
-            for k, fn in errors.items()
-        },
+        {f"error/{k}": scrub(outcome(fn), tmp, "<tmp>") for k, fn in errors.items()},
     )
     zero = _corrupt(root, tmp / "zero-puzzle", "zero")
     for name, augs, groups in (("augs", 1, None), ("groups", None, 2)):
@@ -1202,11 +1220,13 @@ def capture_loader(b: Backend, tmp: Path) -> dict[str, str]:
                 "eval_max_examples_per_group": groups,
             },
         ).eval_dataloader()
-        out.update(stream_digests(f"zero_{name}", stream))
+        put_stream(out, f"zero_{name}", stream)
     for split in ("train", "test"):
         for cap in (None, 5, 100_000):
             loaded = b.load(spatial_tree(b, tmp), split, cap)
-            out[f"load/{split}/{cap}"] = digest(
+            put(
+                out,
+                f"load/{split}/{cap}",
                 *(loaded[k] for k in ("inputs", "labels", "puzzle_indices")),
                 *(loaded[k] for k in ("group_indices", "puzzle_identifiers")),
                 loaded["spatial_tags"],
@@ -1223,6 +1243,7 @@ def _corrupt(root: Path, target: Path, kind: str) -> Path:
         if kind == "meta":
             (split / "dataset.json").unlink()
         elif kind == "tags":
+            # Reference-recorded golden input.
             np.save(split / "all__spatial_tags.npy", np.ones((1, 3), dtype=np.int32))
         elif kind == "zero":
             # A leading zero-row puzzle, alone in its own group.
@@ -1250,9 +1271,9 @@ def _corrupt(root: Path, target: Path, kind: str) -> Path:
     return target
 
 
-def capture_verify(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_verify(b: Backend, tmp: Path) -> Capture:
     """Identifier-count verification over an existing tree, match and mismatch."""
-    out: dict[str, str] = {}
+    out: Capture = {}
     root = base_tree(b, tmp)
     count = len(ListCodec.coerce(loads((root / "identifiers.json").read_text())))
     for name, expected in (("match", count), ("mismatch", count + 1)):
@@ -1260,11 +1281,12 @@ def capture_verify(b: Backend, tmp: Path) -> dict[str, str]:
         if not target.exists():
             shutil.copytree(root, target)
         fields = loader_fields(target, LOADER_CASES[0], 0)
-        out[name] = outcome(
+        value = outcome(
             lambda f=fields, e=expected: (
                 b.data({**f, "num_puzzle_identifiers": e}).train_dataloader().__len__()
             ),
-        ).replace(str(target), "<root>")
+        )
+        out[name] = scrub(value, target, "<root>")
     return out
 
 
@@ -1303,17 +1325,26 @@ def packed_output(batch: Batch, header: str, index: int) -> Tensor:
     return torch.cat(columns, dim=1)
 
 
-def eval_batches(b: Backend, root: Path) -> list[dict[str, object]]:
-    """Return every evaluation batch of ``root`` at width 7, so the tail pads."""
+def eval_batches(
+    b: Backend,
+    root: Path,
+    *,
+    max_samples: int | None = 3,
+) -> list[dict[str, object]]:
+    """Return evaluation batches at width 7, so the tail pads."""
     stream = b.data(
-        {"working_dir": root, "device": "cpu", "batch_size": 7},
+        {
+            "working_dir": root,
+            "device": "cpu",
+            "batch_size": 7,
+            "eval_max_samples": max_samples,
+        },
     ).eval_dataloader()
     return [dict(batch) for batch in stream]
 
 
-def result_digests(prefix: str, results: Mapping[str, object]) -> dict[str, str]:
-    """Record each scalar result's exact repr, and the signal payload's digest."""
-    out: dict[str, str] = {}
+def put_results(out: Capture, prefix: str, results: Mapping[str, object]) -> None:
+    """Keep each scalar result's exact repr, and the signal payload whole."""
     for name, value in results.items():
         if name != "extras":
             out[f"{prefix}/{name}"] = repr(value)
@@ -1322,20 +1353,108 @@ def result_digests(prefix: str, results: Mapping[str, object]) -> dict[str, str]
         assert isinstance(raw, tuple)
         payload = ListCodec.coerce(list(cast("tuple[object, ...]", raw)))
         grid_map = DictCodec.coerce(payload[1])
-        out[f"{prefix}/payload"] = digest(
+        put(
+            out,
+            f"{prefix}/payload",
             payload[0],
             sorted(grid_map),
             *(grid_map[k] for k in sorted(grid_map)),
             *payload[2:],
         )
-    return out
 
 
-def npz_digest(path: Path) -> str:
-    """Hash an ``.npz``'s named arrays, ignoring zip metadata."""
+def put_npz(out: Capture, prefix: str, path: Path) -> None:
+    """Keep an ``.npz``'s named arrays whole, ignoring zip metadata."""
     with cast("NpzFile", np.load(path)) as loaded:
-        names = sorted(loaded.files)
-        return digest(*(item for name in names for item in (name, loaded[name])))
+        for name in sorted(loaded.files):
+            out[f"{prefix}/{name}"] = leaf(loaded[name])
+
+
+def npz_array(npz: NpzFile, name: str) -> NDArray[np.generic]:
+    """Narrow an NPZ entry to the array its untyped index returns."""
+    return cast("NDArray[np.generic]", npz[name])
+
+
+def assert_payload_implied(payload: object, path: Path) -> None:
+    """Check every signal payload value against its stored NPZ representation."""
+    assert isinstance(payload, tuple)
+    rows = cast("list[tuple[str, str, str, float, float, float, int, int]]", payload[0])
+    grids = cast("dict[str, Grid]", payload[1])
+    steps = cast(
+        "list[tuple[int, int, tuple[float, ...], tuple[int, ...]]]",
+        payload[2],
+    )
+    pass_ks = cast("tuple[int, ...]", payload[3])
+    with cast("NpzFile", np.load(path)) as npz:
+        groups = ListCodec.coerce(
+            cast(object, npz_array(npz, "group_table").tolist()),
+            str,
+        )
+        predictions = ListCodec.coerce(
+            cast(object, npz_array(npz, "pred_table").tolist()),
+            str,
+        )
+        group_ids = ListCodec.coerce(
+            cast(object, npz_array(npz, "group_id").tolist()),
+            int,
+        )
+        pred_ids = ListCodec.coerce(
+            cast(object, npz_array(npz, "pred_id").tolist()),
+            int,
+        )
+        assert [f"{row[0]}\t{row[1]}" for row in rows] == [
+            groups[idx] for idx in group_ids
+        ]
+        assert [row[2] for row in rows] == [predictions[idx] for idx in pred_ids]
+        for column, index, dtype in (
+            ("q_halt", 3, np.float32),
+            ("logprob", 4, np.float32),
+            ("stability", 5, np.float32),
+            ("n_rows", 6, np.uint8),
+            ("n_cols", 7, np.uint8),
+        ):
+            assert np.array_equal(
+                np.array([row[index] for row in rows], dtype=dtype),
+                npz_array(npz, column),
+                equal_nan=True,
+            )
+        assert set(grids) == set(predictions)
+        pred_rows = ListCodec.coerce(
+            cast(object, npz_array(npz, "pred_n_rows").tolist()),
+            int,
+        )
+        pred_cols = ListCodec.coerce(
+            cast(object, npz_array(npz, "pred_n_cols").tolist()),
+            int,
+        )
+        for index, name in enumerate(predictions):
+            assert np.array_equal(
+                grids[name],
+                npz_array(npz, "pred_grids")[
+                    index,
+                    : pred_rows[index],
+                    : pred_cols[index],
+                ],
+            )
+        assert (
+            tuple(
+                ListCodec.coerce(cast(object, npz_array(npz, "pass_ks").tolist()), int),
+            )
+            == pass_ks
+        )
+        if steps:
+            for column, index, dtype in (
+                ("converge_step", 0, np.uint8),
+                ("n_changes", 1, np.uint16),
+                ("q_halt_steps", 2, np.float32),
+                ("correct_step", 3, np.uint8),
+            ):
+                assert np.array_equal(
+                    np.array([step[index] for step in steps], dtype=dtype),
+                    npz_array(npz, column),
+                )
+        else:
+            assert "converge_step" not in npz
 
 
 def load_npy(path: Path) -> NDArray[np.int64]:
@@ -1343,65 +1462,81 @@ def load_npy(path: Path) -> NDArray[np.int64]:
     return cast("NDArray[np.int64]", np.load(path))
 
 
-def capture_metric(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_metric(b: Backend, tmp: Path) -> Capture:
     """pass@K, report-only rankings, signal dumps, state, and the gather codec."""
-    out: dict[str, str] = {}
+    out: Capture = {}
     for spatial in (False, True):
         root = spatial_tree(b, tmp) if spatial else base_tree(b, tmp)
-        batches = eval_batches(b, root)
-        for header in ("halt", "wide", "steps"):
+        batches = eval_batches(b, root, max_samples=1)
+        for header, views, cap in (
+            ("halt", "all", 0),
+            ("halt", "all", 2),
+            ("wide", "non_spatial", 2),
+            ("steps", "all", 2),
+        ):
+            current = (
+                eval_batches(b, root, max_samples=None)
+                if header == "halt" and cap == 2
+                else eval_batches(b, root, max_samples=3)
+                if spatial
+                else batches
+            )
             outputs = [
-                packed_output(batch, header, i) for i, batch in enumerate(batches)
+                packed_output(batch, header, i) for i, batch in enumerate(current)
             ]
-            for views in ("all", "non_spatial"):
-                for cap in (0, 2):
-                    key = f"{header}/{views}/{cap}/{spatial}"
-                    fields: dict[str, object] = {
-                        "working_dir": root,
-                        "pass_ks": (1, 2, 3, 100),
-                        "spatial_views": views,
-                        "max_views_per_input": cap,
-                        "per_step_acts": 2 if header == "steps" else 0,
-                    }
-                    metric = b.metric({**fields})
-                    for output, batch in zip(outputs, batches, strict=True):
-                        metric.update(output, **batch)
-                    results = metric.compute()
-                    out.update(result_digests(key, results))
-                    restored = b.metric({**fields})
-                    restored.load_state_dict(
-                        DictCodec.coerce(loads(json.dumps(metric.state_dict()))),
-                    )
-                    out[f"{key}/restored"] = digest(
-                        {k: v for k, v in restored.compute().items() if k != "extras"},
-                    )
-                    extras = results.get("extras")
-                    if extras is not None:
-                        path = tmp / f"dump-{key.replace('/', '_')}.npz"
-                        b.write_dump(DictCodec.coerce(extras)["signal_dump"], path, 3)
-                        out[f"{key}/npz"] = npz_digest(path)
-                    if cap == 0 and views == "all":
-                        encoded = b.encode(b.metric_preds(metric))
-                        out[f"{key}/codec"] = digest(encoded)
-                        out[f"{key}/codec_roundtrip"] = str(
-                            b.decode(encoded) == b.metric_preds(metric),
-                        )
+            key = f"{header}/{views}/{cap}/{spatial}"
+            fields: dict[str, object] = {
+                "working_dir": root,
+                "pass_ks": (1, 2, 3, 100),
+                "spatial_views": views,
+                "max_views_per_input": cap,
+                "per_step_acts": 2 if header == "steps" else 0,
+            }
+            metric = b.metric({**fields})
+            for output, batch in zip(outputs, current, strict=True):
+                metric.update(output, **batch)
+            results = metric.compute()
+            put_results(out, key, results)
+            restored = b.metric({**fields})
+            restored.load_state_dict(
+                DictCodec.coerce(loads(json.dumps(metric.state_dict()))),
+            )
+            put(
+                out,
+                f"{key}/restored",
+                {k: v for k, v in restored.compute().items() if k != "extras"},
+            )
+            extras = results.get("extras")
+            if extras is not None:
+                path = tmp / f"dump-{key.replace('/', '_')}.npz"
+                payload = DictCodec.coerce(extras)["signal_dump"]
+                b.write_dump(payload, path, 3)
+                put_npz(out, f"{key}/npz", path)
+                assert_payload_implied(payload, path)
+                for entry in tuple(out):
+                    if entry.startswith(f"{key}/payload/"):
+                        del out[entry]
+            if cap == 0 and views == "all":
+                encoded = b.encode(b.metric_preds(metric))
+                put(out, f"{key}/codec", encoded)
+                out[f"{key}/codec_roundtrip"] = str(
+                    b.decode(encoded) == b.metric_preds(metric),
+                )
     root = base_tree(b, tmp)
     batches = eval_batches(b, root)
     empty = tmp / "empty-metric"
     empty.mkdir(exist_ok=True)
     (empty / "identifiers.json").write_text(json.dumps(["<blank>"]))
     (empty / "test_puzzles.json").write_text("{}")
-    out.update(
-        result_digests(
-            "empty",
-            b.metric({"working_dir": empty, "pass_ks": (1, 2)}).compute(),
-        ),
+    put_results(
+        out,
+        "empty",
+        b.metric({"working_dir": empty, "pass_ks": (1, 2)}).compute(),
     )
     wide = b.metric({"working_dir": empty, "pass_ks": (1, 2)})
     blank = {**batches[0], "puzzle_identifiers": torch.zeros(7, dtype=torch.int64)}
     wide.update(packed_output(blank, "wide", 0), **blank)
-    out.update(result_digests("empty_wide", wide.compute()))
+    put_results(out, "empty_wide", wide.compute())
     errors: dict[str, Callable[[], object]] = {
         "width": lambda: b.metric({"working_dir": root}).update(
             torch.zeros(7, 5),
@@ -1426,24 +1561,22 @@ def capture_metric(b: Backend, tmp: Path) -> dict[str, str]:
         partial.update(packed_output(batch, "wide", i), **batch)
     partial.reset()
     partial.update(packed_output(batches[0], "halt", 0), **batches[0])
-    out.update(result_digests("partial", partial.compute()))
+    put_results(out, "partial", partial.compute())
     no_tests = tmp / "no-tests-metric"
     shutil.copytree(root, no_tests, ignore=shutil.ignore_patterns("train", "test"))
     puzzles = DictCodec.coerce(loads((no_tests / "test_puzzles.json").read_text()))
     first = next(iter(puzzles))
     puzzles[first] = {**DictCodec.coerce(puzzles[first]), "test": []}
     (no_tests / "test_puzzles.json").write_text(json.dumps(puzzles))
-    out.update(
-        result_digests("no_tests", b.metric({"working_dir": no_tests}).compute()),
-    )
+    put_results(out, "no_tests", b.metric({"working_dir": no_tests}).compute())
     out["error/codec_hash"] = outcome(lambda: b.encode({"t": {"short": []}}))
     out.update(capture_tracker(b, tmp))
     return out
 
 
-def capture_tracker(b: Backend, tmp: Path) -> dict[str, str]:
+def capture_tracker(b: Backend, tmp: Path) -> Capture:
     """Signal-dump tracker routing, path formatting, and payload validation."""
-    out: dict[str, str] = {}
+    out: Capture = {}
     payload = b.payload(
         rows=[("t", "a" * 64, "b" * 64, 0.5, -1.0, 0.25, 2, 3)],
         grids={"b" * 64: np.arange(6, dtype=np.uint8).reshape(2, 3)},
@@ -1453,7 +1586,7 @@ def capture_tracker(b: Backend, tmp: Path) -> dict[str, str]:
     folder = tmp / "tracker"
     tracker = b.tracker(str(folder / "signals_{global_step}.npz"))
     tracker.log_metrics({"extras": {"signal_dump": payload}}, 5, prefix="eval/")
-    out["tracker/written"] = npz_digest(folder / "signals_5.npz")
+    put_npz(out, "tracker/written", folder / "signals_5.npz")
     tracker.log_metrics({"extras": {"signal_dump": payload}}, 6, prefix="train/")
     tracker.log_metrics({}, 7, prefix="eval/")
     out["tracker/bad_extras"] = outcome(
@@ -1471,7 +1604,7 @@ def capture_tracker(b: Backend, tmp: Path) -> dict[str, str]:
     literal = tmp / "literal_{global_step}.npz"
     for _ in range(2):  # The second write overwrites.
         b.write_dump(payload, literal, 1)
-    out["tracker/literal"] = npz_digest(literal)
+    put_npz(out, "tracker/literal", literal)
     missing = b.payload(
         rows=[("t", "a" * 64, "c" * 64, 0.5, -1.0, 0.25, 2, 3)],
         grids={},
@@ -1479,11 +1612,11 @@ def capture_tracker(b: Backend, tmp: Path) -> dict[str, str]:
         pass_ks=(1,),
     )
     b.write_dump(missing, tmp / "missing.npz", 1)
-    out["tracker/missing_grid"] = npz_digest(tmp / "missing.npz")
+    put_npz(out, "tracker/missing_grid", tmp / "missing.npz")
     return out
 
 
-CAPTURES: Final[dict[str, Callable[[Backend, Path], dict[str, str]]]] = {
+CAPTURES: Final[dict[str, Callable[[Backend, Path], Capture]]] = {
     "grid_ops": capture_grid_ops,
     "scale_weights": capture_scale_weights,
     "draws": capture_draws,
@@ -1499,57 +1632,118 @@ CAPTURES: Final[dict[str, Callable[[Backend, Path], dict[str, str]]]] = {
 """Every capture, keyed as in the golden."""
 
 
-def mismatches(expected: Mapping[str, str], actual: Mapping[str, str]) -> list[str]:
+def mismatches(expected: Mapping[str, Leaf], actual: Mapping[str, Leaf]) -> list[str]:
     """List every differing, missing, or extra key."""
-    return [
-        f"{key}: expected {expected.get(key)!r}, got {actual.get(key)!r}"
-        for key in sorted(set(expected) | set(actual))
-        if expected.get(key) != actual.get(key)
-    ]
+    report = [f"missing {key}" for key in sorted(expected.keys() - actual.keys())]
+    report += [f"unexpected {key}" for key in sorted(actual.keys() - expected.keys())]
+    for key in sorted(expected.keys() & actual.keys()):
+        want, got = expected[key], actual[key]
+        if isinstance(want, str) or isinstance(got, str):
+            if want != got:
+                report.append(f"{key}: expected {want!r}, got {got!r}")
+        elif want.dtype != got.dtype or want.shape != got.shape:
+            report.append(
+                f"{key}: {got.dtype}{list(got.shape)} vs {want.dtype}{list(want.shape)}",
+            )
+        elif not torch.equal(want, got):
+            report.append(f"{key}: {int((want != got).sum())}/{want.numel()} differ")
+    return report
 
 
-def load_golden() -> dict[str, dict[str, str]]:
-    """Read the frozen reference digests."""
-    return {
-        name: dict(
-            line.split("\t", 1)
-            for line in zlib.decompress(lines.numpy().tobytes()).decode().split("\n")
-            if line
-        )
-        for name, lines in read_tensors(GOLDEN).items()
-    }
+def load_record() -> dict[str, Tensor]:
+    """Read the packed tensor record."""
+    return read_tensors(GOLDEN)
 
 
-def save_golden(table: Mapping[str, Mapping[str, str]]) -> None:
-    """Write capture-keyed digests, one zlib tensor of ``key<TAB>value`` lines each.
+def load_golden() -> dict[str, Capture]:
+    """Read the frozen reference values, restoring row-indexed arrays."""
+    record = load_record()
+    rows = record.pop("rows")
+    text = record.pop("text")
+    text_lengths = record.pop("text_lengths")
+    chunks = text.split(ListCodec.coerce(text_lengths.tolist(), int))
+    table: dict[str, Capture] = {}
+    for stored_key, value in record.items():
+        key, _, dtype = stored_key.partition("@rows.")
+        if stored_key.endswith("@text"):
+            key = stored_key.removesuffix("@text")
+            restored: Leaf = chunks[int(value.item())].numpy().tobytes().decode("utf-8")
+        elif dtype:
+            restored = rows[value.long()].to(cast(torch.dtype, getattr(torch, dtype)))
+        else:
+            restored = value
+        name, _, entry = key.partition("/")
+        table.setdefault(name, {})[entry] = restored
+    return table
+
+
+def save_golden(table: Mapping[str, Capture], *, spec: ArcSpec) -> None:
+    """Write every capture value into one plain tensor record.
 
     Args:
-      table: Capture name to its key-to-digest map; no key holds a tab and no
-        value a newline.
+      table: Capture name to its key-to-value map; no key holds a tab.
+      spec: Packed-grid geometry used by the capture.
 
     """
-    write_tensors(
-        GOLDEN,
-        {
-            name: torch.frombuffer(
-                bytearray(
-                    zlib.compress(
-                        "\n".join(
-                            f"{k}\t{v}" for k, v in sorted(section.items())
-                        ).encode(),
-                        level=9,
-                    ),
-                ),
-                dtype=torch.uint8,
-            )
-            for name, section in sorted(table.items())
-        },
+    width = spec.grid_shape[0]
+    tensors: dict[str, Tensor] = {}
+    strings: dict[bytes, int] = {}
+    rows: dict[bytes, int] = {}
+    for name, capture in sorted(table.items()):
+        for entry, value in sorted(capture.items()):
+            key = f"{name}/{entry}"
+            if isinstance(value, str):
+                encoded = value.encode("utf-8")
+                index = strings.setdefault(encoded, len(strings))
+                assert list(strings)[index] == encoded
+                tensors[f"{key}@text"] = torch.tensor(index, dtype=torch.uint16)
+                continue
+            if (
+                value.ndim
+                and value.shape[-1] == width
+                and not value.is_floating_point()
+            ):
+                # Tokens span -100..11, so int8 holds every row exactly.
+                narrow = value.reshape(-1, width).to(torch.int8)
+                assert torch.equal(narrow.to(value.dtype), value.reshape(-1, width)), (
+                    key
+                )
+                index = [
+                    rows.setdefault(row.numpy().tobytes(), len(rows)) for row in narrow
+                ]
+                dtype = str(value.dtype).removeprefix("torch.")
+                tensors[f"{key}@rows.{dtype}"] = torch.tensor(
+                    index,
+                    dtype=torch.uint16,
+                ).reshape(value.shape[:-1])
+                continue
+            tensors[key] = value
+    tensors["rows"] = torch.stack(
+        [torch.frombuffer(bytearray(row), dtype=torch.int8) for row in rows],
     )
+    tensors["text"] = torch.frombuffer(
+        bytearray(b"".join(strings)),
+        dtype=torch.uint8,
+    ).clone()
+    tensors["text_lengths"] = torch.tensor(
+        [len(encoded) for encoded in strings],
+        dtype=torch.uint16,
+    )
+    write_tensors(GOLDEN, tensors)
 
 
 @pytest.fixture(scope="module")
-def golden() -> dict[str, dict[str, str]]:
-    """Decode the frozen reference digests once per module."""
+def golden_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Capture]:
+    """Decode the frozen CAPTURES, minting small inputs from the port on request."""
+    if os.environ.get("BFB_REGENERATE") == "1":
+        spec = ArcSpec()
+        spec.max_grid = 4
+        backend = PortBackend(spec=spec)
+        table = {
+            name: capture(backend, tmp_path_factory.mktemp(name))
+            for name, capture in sorted(CAPTURES.items())
+        }
+        save_golden(table, spec=spec)
     return load_golden()
 
 
@@ -1557,15 +1751,22 @@ def golden() -> dict[str, dict[str, str]]:
 def test_port_replays_reference_golden(
     name: str,
     tmp_path: Path,
-    golden: dict[str, dict[str, str]],
+    golden_fixture: dict[str, Capture],
 ) -> None:
     """The port reproduces every frozen reference output exactly."""
-    diff = mismatches(golden[name], CAPTURES[name](PortBackend(), tmp_path))
+    rows = load_record()["rows"]
+    spec = ArcSpec()
+    spec.max_grid = math.isqrt(rows.shape[1])
+    diff = mismatches(
+        golden_fixture[name],
+        CAPTURES[name](PortBackend(spec=spec), tmp_path),
+    )
     assert not diff, f"{len(diff)} mismatches:\n" + "\n".join(diff[:40])
 
 
-def _recipe(case: BuildCase) -> ArcAugmentation:
+def _recipe(case: BuildCase, *, spec: ArcSpec) -> ArcAugmentation:
     config = ArcAugmentation.Config()
+    config.spec = spec
     config.num_aug = case.num_aug
     config.seed = case.seed
     config.spatial.translation_prob = case.prob

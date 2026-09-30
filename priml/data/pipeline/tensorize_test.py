@@ -175,11 +175,11 @@ class TestAsTensor:
         config = AsTensor.Config(device="cpu")
         processor = _make_processor(config)
 
-        sample = {"box": [[0, 0], [1, 1]]}
+        sample = {"box": [[0, 0, 0], [1, 1, 1]]}
         result = next(processor(iter([sample])))
 
         assert isinstance(result["box"], Tensor)
-        assert _tensor(result, "box").shape == (2, 2)
+        assert _tensor(result, "box").shape == (2, 3)
 
     def test_include_and_exclude_may_not_overlap(self):
         with pytest.raises(ValueError, match="cannot overlap"):

@@ -50,7 +50,7 @@ class ExtractedImageNetSource:
         """``(worker_id, num_workers)`` partition, injected by the loader."""
 
         shuffle: bool = False
-        """Shuffle class order before slicing, so every worker agrees on it."""
+        """Shuffle image order before slicing, so every worker agrees on it."""
 
         epoch_seed: int = 0
         """Seed folded into the shuffle; the loader sets it per epoch."""
@@ -121,27 +121,32 @@ class ExtractedImageNetSource:
 
     def _iter_train(self) -> Iterator[Sample]:
         """Iterate training split (class directories)."""
-        # Fold the loader-injected epoch seed into the shuffle so each epoch
-        # reshuffles while all workers share the permutation.
-        class_dirs = shard_and_shuffle(
-            sorted([d for d in self.split_dir.iterdir() if d.is_dir()]),
+        # Images, not classes, are shuffled: shuffling classes left every batch
+        # drawn from one or two classes. Sorted first so the permutation is the
+        # same on every worker and filesystem; the loader-injected epoch seed
+        # reshuffles each epoch.
+        image_paths = shard_and_shuffle(
+            [
+                str(image_path)
+                for class_dir in sorted(
+                    d for d in self.split_dir.iterdir() if d.is_dir()
+                )
+                for image_path in sorted(class_dir.glob("*.JPEG"))
+            ],
             worker_slice=self.worker_slice,
             shuffle=self.shuffle,
             epoch_seed=self.epoch_seed,
         )
-
-        for class_dir in class_dirs:
-            synset = class_dir.name
-            # Sort for deterministic, reproducible ordering across runs/filesystems.
-            for image_path in sorted(class_dir.glob("*.JPEG")):
-                sample: Sample = {
-                    "key": image_path.stem,
-                    "file_path": str(image_path),
-                    "format": "jpg",
-                    "label": synset,
-                    "frames": 1,
-                }
-                yield sample
+        for file_path in image_paths:
+            image_path = Path(file_path)
+            sample: Sample = {
+                "key": image_path.stem,
+                "file_path": file_path,
+                "format": "jpg",
+                "label": image_path.parent.name,
+                "frames": 1,
+            }
+            yield sample
 
     def _iter_val(self) -> Iterator[Sample]:
         """Iterate validation split (flat directory)."""

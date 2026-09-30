@@ -131,12 +131,7 @@ class PuzzleEmbedding(SparsePuzzleEmbedding):
 class ArcModelConfig(Makes["SudokuNet"], SudokuNet.Config):
     """Reference TRM assembled from the shared puzzle solver's slots."""
 
-    vocab_size: int = 12
-    """Pad, the content-boundary EOS, and ten colors."""
-
-    embedding: GridConfig = field(
-        default_factory=lambda: GridEmbedding.Config(grid_shape=(900,)),
-    )
+    embedding: GridConfig = field(default_factory=GridEmbedding.Config)
     """Token embeddings without additional position or feedback channels."""
 
     block: Makeable[TensorModule] = field(default_factory=RotaryBlock.Config)

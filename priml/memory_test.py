@@ -22,16 +22,6 @@ if TYPE_CHECKING:
     from priml.math.custom_types import Tensorable
 
 
-_TRACE_ONLY = "eager"
-"""Dynamo backend for tests that assert TRACING, not generated-kernel output.
-
-Inductor codegen is 1505ms of a 1533ms first compile; ``"eager"`` runs the
-traced graph with torch ops instead, at 28ms. ``fullgraph=True`` is enforced
-either way -- a graph break still raises ``Unsupported`` -- so a test whose
-subject is "does this reach the compiler in one graph" loses nothing.
-"""
-
-
 def test_single_python_scalar():
     result = convert_to_tensor(42)
     assert result.item() == 42
@@ -264,7 +254,7 @@ def test_a_scalar_argument_survives_a_fullgraph_compile() -> None:
     a patched ``is_compiling``, because a patch cannot observe a graph break.
     """
 
-    @torch.compile(fullgraph=True, backend=_TRACE_ONLY)
+    @torch.compile(fullgraph=True, backend="eager")
     def scale(x: Tensor) -> Tensor:
         a, b = convert_to_tensor(x, 2.0)
         return a * b
@@ -481,7 +471,7 @@ def test_shares_storage_for_compile_matches_eager_under_fullgraph() -> None:
     compiled = torch.compile(
         shares_storage_for_compile,
         fullgraph=True,
-        backend=_TRACE_ONLY,
+        backend="eager",
     )
     for name, (x, y) in cases.items():
         assert bool(compiled(x, y)) is shares_storage(x, y), name
@@ -514,7 +504,7 @@ def test_shares_storage_for_compile_branches_without_a_graph_break() -> None:
     # trace cost onto whichever test runs next, which is worse than paying it
     # here (measured: dropping this moved 0.7s onto an unrelated test).
     torch._dynamo.reset()
-    compiled = torch.compile(branchy, fullgraph=True, backend=_TRACE_ONLY)
+    compiled = torch.compile(branchy, fullgraph=True, backend="eager")
     torch.testing.assert_close(
         compiled(parent[2:5], parent),
         torch.tensor([3.0, 4.0, 5.0]),
@@ -627,7 +617,7 @@ def test_is_private_conversion_traces_under_fullgraph_compile() -> None:
     assert explained.graph_break_count == 0, explained.break_reasons
 
     torch._dynamo.reset()
-    compiled = torch.compile(convert_then_check, fullgraph=True, backend=_TRACE_ONLY)
+    compiled = torch.compile(convert_then_check, fullgraph=True, backend="eager")
     torch.testing.assert_close(compiled(x), convert_then_check(x))
 
 

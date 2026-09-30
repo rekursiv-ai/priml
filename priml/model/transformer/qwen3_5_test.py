@@ -40,12 +40,14 @@ else:
     )
 
 
-def _prepared_causal_mask(*, queries: int, keys: int) -> torch.Tensor:
-    """Return a text-only additive mask that never exposes future keys."""
+def _prepared_causal_mask(*, batch: int, queries: int, keys: int) -> torch.Tensor:
+    """Return a text-only additive mask, one per attention head, hiding future keys."""
     causal = torch.arange(keys) <= (
         torch.arange(queries).unsqueeze(-1) + keys - queries
     )
-    return torch.zeros(1, 1, queries, keys).masked_fill(
+    heads = hf_config()["num_attention_heads"]
+    assert isinstance(heads, int)
+    return torch.zeros(batch, heads, queries, keys).masked_fill(
         ~causal,
         torch.finfo(torch.float32).min,
     )
@@ -70,8 +72,8 @@ def test_hybrid_config_preserves_injected_blocks() -> None:
     assert isinstance(finalized.block[0], TransformerBlock.Config)
     assert finalized.block[0].checkpoint
     model = config.make()
-    assert model(torch.tensor([[1, 2, 3]])).shape == (1, 3, 32)
-    assert model.hidden_states(torch.tensor([[1, 2, 3]])).shape == (1, 3, 16)
+    assert model(torch.arange(15).reshape(3, 5)).shape == (3, 5, 32)
+    assert model.hidden_states(torch.arange(15).reshape(3, 5)).shape == (3, 5, 16)
 
 
 def test_hidden_states_rejects_token_ids_without_input_embedding() -> None:
@@ -80,14 +82,14 @@ def test_hidden_states_rejects_token_ids_without_input_embedding() -> None:
     model = config.make()
 
     with pytest.raises(ValueError, match="Token IDs require an input embedding"):
-        model.hidden_states(torch.tensor([[1, 2, 3]]))
+        model.hidden_states(torch.arange(15).reshape(3, 5))
 
 
 def test_hidden_states_rejects_a_cache_with_the_wrong_number_of_entries() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
 
     with pytest.raises(ValueError, match="one entry per transformer block"):
-        model.hidden_states(torch.tensor([[1, 2, 3]]), cache=[])
+        model.hidden_states(torch.arange(15).reshape(3, 5), cache=[])
 
 
 def test_hidden_states_rejects_positions_and_position_ids_together() -> None:
@@ -95,9 +97,9 @@ def test_hidden_states_rejects_positions_and_position_ids_together() -> None:
 
     with pytest.raises(ValueError, match="Pass either positions or position_ids"):
         model(
-            torch.tensor([[1, 2, 3]]),
-            positions=torch.arange(3),
-            position_ids=torch.arange(3).reshape(1, 3),
+            torch.arange(15).reshape(3, 5),
+            positions=torch.arange(5),
+            position_ids=torch.arange(15).reshape(3, 5),
         )
 
 
@@ -105,14 +107,14 @@ def test_forward_rejects_a_non_list_cache() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
 
     with pytest.raises(TypeError, match="cache must be a list or None"):
-        model(torch.tensor([[1, 2, 3]]), cache="not-a-list")
+        model(torch.arange(15).reshape(3, 5), cache="not-a-list")
 
 
 def test_hidden_states_rejects_an_attention_mask_that_is_neither_2d_nor_4d() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
 
     with pytest.raises(ValueError, match="2-D padding mask or 4-D mask"):
-        model(torch.tensor([[1, 2, 3]]), attention_mask=torch.zeros(1, 3, 3))
+        model(torch.arange(15).reshape(3, 5), attention_mask=torch.zeros(3, 5, 4))
 
 
 def test_final_norm_width_inference_respects_explicit_configuration() -> None:
@@ -249,15 +251,15 @@ def test_reset_parameters_reinitializes_the_final_norm_and_the_backbone() -> Non
 def test_hidden_states_rejects_a_non_tensor_message_field() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
     with pytest.raises(TypeError, match="positions must be a Tensor or None"):
-        model(torch.tensor([[1, 2, 3]]), positions=[0, 1, 2])
+        model(torch.arange(15).reshape(3, 5), positions=[0, 1, 2, 3, 4])
 
 
 def test_hidden_states_rejects_an_integer_4d_attention_mask() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make()
     with pytest.raises(TypeError, match="floating additive when it is 4-D"):
         model(
-            torch.tensor([[1, 2, 3]]),
-            attention_mask=torch.zeros(1, 1, 3, 3, dtype=torch.long),
+            torch.arange(15).reshape(3, 5),
+            attention_mask=torch.zeros(3, 2, 5, 4, dtype=torch.long),
         )
 
 
@@ -273,7 +275,7 @@ def test_load_reads_a_local_checkpoint_onto_the_requested_dtype(
     loaded = Qwen35.load(tmp_path, dtype=torch.bfloat16)
 
     assert next(loaded.parameters()).dtype == torch.bfloat16
-    assert loaded(torch.tensor([[1, 2, 3]])).shape == (1, 3, 32)
+    assert loaded(torch.arange(15).reshape(3, 5)).shape == (3, 5, 32)
 
 
 def test_unsupported_delta_head_ratio_is_rejected() -> None:
@@ -303,11 +305,11 @@ def test_hybrid_forwards_messages_to_injected_attention() -> None:
         recorder = _MessageRecorder()
         block.attn = recorder
         recorders.append(recorder)
-    attention_mask = torch.tensor([[0, 1, 1]])
-    position_ids = torch.tensor([[0, 0, 1]])
+    attention_mask = torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 1, 1], [1, 1, 1, 1, 1]])
+    position_ids = torch.tensor([[0, 0, 0, 1, 2], [0, 0, 1, 2, 3], [0, 1, 2, 3, 4]])
 
     model(
-        torch.tensor([[1, 2, 3]]),
+        torch.arange(15).reshape(3, 5),
         attention_mask=attention_mask,
         position_ids=position_ids,
     )
@@ -323,10 +325,11 @@ def test_hybrid_forwards_messages_to_injected_output_head_and_cache() -> None:
     model.proj_out = recorder
     message = torch.tensor([7])
 
-    model(torch.tensor([[1, 2]]), marker=message)
-    cache = model.alloc_cache(batch=1, max_seq=2)
-    model.forward_cached(torch.tensor([[1, 2]]), cache=cache, marker=message)
-    model.project_to_logits(torch.ones(1, 1, 16), marker=message)
+    tokens = torch.arange(15).reshape(3, 5)
+    model(tokens, marker=message)
+    cache = model.alloc_cache(batch=3, max_seq=5)
+    model.forward_cached(tokens, cache=cache, marker=message)
+    model.project_to_logits(torch.ones(3, 5, 16), marker=message)
 
     assert len(recorder.messages) == 3
     assert recorder.messages[0] is message
@@ -350,17 +353,17 @@ def test_prepared_causal_mask_reaches_injected_self_attention_prefill_and_cache(
     block.attn = attention
     model = config.make().eval()
 
-    prompt = torch.tensor([[1, 3, 5]])
-    prompt_mask = _prepared_causal_mask(queries=3, keys=3)
+    prompt = torch.arange(15).reshape(3, 5)
+    prompt_mask = _prepared_causal_mask(batch=3, queries=5, keys=5)
     assert not torch.equal(
         model(prompt),
         model(prompt, attention_mask=prompt_mask),
     )
 
-    plain_cache = model.alloc_cache(batch=1, max_seq=3)
-    masked_cache = model.alloc_cache(batch=1, max_seq=3)
-    prefix = torch.tensor([[1, 3]])
-    prefix_mask = _prepared_causal_mask(queries=2, keys=2)
+    plain_cache = model.alloc_cache(batch=3, max_seq=5)
+    masked_cache = model.alloc_cache(batch=3, max_seq=5)
+    prefix = prompt[:, :4]
+    prefix_mask = _prepared_causal_mask(batch=3, queries=4, keys=4)
     plain_prefix, _ = model.forward_cached(prefix, cache=plain_cache)
     masked_prefix, _ = model.forward_cached(
         prefix,
@@ -369,9 +372,9 @@ def test_prepared_causal_mask_reaches_injected_self_attention_prefill_and_cache(
     )
     assert not torch.equal(plain_prefix, masked_prefix)
 
-    continuation_mask = _prepared_causal_mask(queries=1, keys=3)
+    continuation_mask = _prepared_causal_mask(batch=3, queries=1, keys=5)
     continuation_mask[..., 0] = torch.finfo(continuation_mask.dtype).min
-    continuation = torch.tensor([[5]])
+    continuation = prompt[:, 4:]
     plain_continuation, _ = model.forward_cached(
         continuation,
         cache=plain_cache,
@@ -393,10 +396,11 @@ def test_hybrid_preserves_caller_attn_mask_precedence() -> None:
         recorder = _MaskMessageRecorder()
         block.attn = recorder
         recorders.append(recorder)
-    padding = torch.tensor([[0, 1, 1]])
-    explicit = torch.full((1, 1, 3, 3), -7.0)
+    padding = torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 1, 1], [1, 1, 1, 1, 1]])
+    # Qwen35.forward passes this full-sequence mask to self-attention.
+    explicit = torch.full((3, 2, 5, 5), -7.0)
 
-    model(torch.tensor([[1, 2, 3]]), attention_mask=padding, attn_mask=explicit)
+    model(torch.arange(15).reshape(3, 5), attention_mask=padding, attn_mask=explicit)
 
     for recorder in recorders:
         assert recorder.messages == [(padding, explicit)]
@@ -404,7 +408,7 @@ def test_hybrid_preserves_caller_attn_mask_precedence() -> None:
 
 def test_native_generation_uses_hybrid_cache() -> None:
     model = Qwen35.Config.from_hf(hf_config()).make().eval()
-    prompt = torch.tensor([[1, 2, 3]])
+    prompt = torch.arange(15).reshape(3, 5)
     output = generate(model, prompt, max_new_tokens=2, temperature=0, max_seq_len=8)
     expected = prompt
     with torch.no_grad():
@@ -420,12 +424,12 @@ def test_hybrid_cached_dispatch_accepts_injected_cached_block() -> None:
     assert isinstance(config.block, list)
     config.block[0] = _CachedIdentityBlock.Config()
     model = config.make().eval()
-    tokens = torch.tensor([[1, 2]])
+    tokens = torch.arange(15).reshape(3, 5)
 
-    cache = model.alloc_cache(batch=1, max_seq=tokens.shape[-1])
+    cache = model.alloc_cache(batch=3, max_seq=tokens.shape[-1])
     actual, returned = model.forward_cached(tokens, cache=cache)
 
-    assert actual.shape == (1, 2, 32)
+    assert actual.shape == (3, 5, 32)
     assert returned is cache
     assert cache[0] == {}
 
@@ -435,10 +439,10 @@ def test_forward_cached_rejects_a_block_without_forward_cached() -> None:
     assert isinstance(config.block, list)
     config.block[0] = _AttnOnlyBlock.Config()
     model = config.make().eval()
-    cache = model.alloc_cache(batch=1, max_seq=2)
+    cache = model.alloc_cache(batch=3, max_seq=5)
 
     with pytest.raises(TypeError, match="forward_cached method"):
-        model.forward_cached(torch.tensor([[1, 2]]), cache=cache)
+        model.forward_cached(torch.arange(15).reshape(3, 5), cache=cache)
 
 
 def test_alloc_cache_rejects_a_block_without_an_attn_submodule() -> None:
@@ -448,7 +452,7 @@ def test_alloc_cache_rejects_a_block_without_an_attn_submodule() -> None:
     model = config.make()
 
     with pytest.raises(TypeError, match="attn submodule"):
-        model.alloc_cache(batch=1, max_seq=2)
+        model.alloc_cache(batch=3, max_seq=5)
 
 
 def test_alloc_cache_rejects_attn_without_alloc_kv_cache() -> None:
@@ -458,7 +462,7 @@ def test_alloc_cache_rejects_attn_without_alloc_kv_cache() -> None:
     model = config.make()
 
     with pytest.raises(TypeError, match="alloc_kv_cache method"):
-        model.alloc_cache(batch=1, max_seq=2)
+        model.alloc_cache(batch=3, max_seq=5)
 
 
 class _CachedIdentityAttention(torch.nn.Module):

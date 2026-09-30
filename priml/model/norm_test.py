@@ -73,23 +73,23 @@ def test_batchnorm2d():
     cfg = BatchNorm2d.Config(64)
     m = cfg.make()
     m.train()
-    x = torch.randn(2, 64, 8, 8)
-    assert m(x).shape == (2, 64, 8, 8)
+    x = torch.randn(2, 64, 8, 9)
+    assert m(x).shape == (2, 64, 8, 9)
     assert cfg.channels_in == 64
 
 
 def test_groupnorm2d():
     cfg = GroupNorm2d.Config(64, num_groups=4)
     m = cfg.make()
-    x = torch.randn(2, 64, 8, 8)
-    assert m(x).shape == (2, 64, 8, 8)
+    x = torch.randn(2, 64, 8, 9)
+    assert m(x).shape == (2, 64, 8, 9)
     assert cfg.channels_in == 64
 
 
 def test_groupnorm2d_eval_matches_train():
     """Batch-independent: no running stats, train/eval outputs identical."""
     m = GroupNorm2d.Config(8, num_groups=2).make()
-    x = torch.randn(3, 8, 4, 4)
+    x = torch.randn(3, 8, 4, 5)
     m.train()
     out_train = m(x)
     m.eval()
@@ -454,7 +454,7 @@ def test_batch_norm2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="batch_norm2d",
         build_module=lambda: BatchNorm2d.Config(4).make(),
-        build_input=lambda: torch.randn(2, 4, 2, 2),
+        build_input=lambda: torch.randn(2, 4, 3, 5),
         seed=0,
     )
 
@@ -464,7 +464,7 @@ def test_group_norm2d_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="group_norm2d",
         build_module=lambda: GroupNorm2d.Config(4, num_groups=2).make(),
-        build_input=lambda: torch.randn(2, 4, 2, 2),
+        build_input=lambda: torch.randn(2, 4, 3, 5),
         seed=0,
     )
 
@@ -484,7 +484,7 @@ def _rows() -> torch.Tensor:
 
 
 def _image() -> torch.Tensor:
-    return torch.randn(2, 8, 3, 1, requires_grad=True)
+    return torch.randn(2, 8, 3, 4, requires_grad=True)
 
 
 def _norm_flops(model_cost: Cost) -> tuple[int, int, int, int]:

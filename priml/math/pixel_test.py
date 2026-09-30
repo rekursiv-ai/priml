@@ -39,19 +39,6 @@ from priml.math.pixel import (
 )
 
 
-_TRACE_ONLY = "eager"
-"""Dynamo backend for tests that assert TRACING, not generated-kernel output.
-
-Inductor codegen is 1505ms of a 1533ms first compile; ``"eager"`` runs the
-traced graph with torch ops instead, at 28ms. ``fullgraph=True`` is enforced
-either way -- a graph break still raises ``Unsupported`` -- so a test whose
-subject is "does this trace in one graph" loses nothing. A test asserting the
-NUMERICS of the fused kernel must keep the default: the eager backend does not
-fuse, so it reproduces eager's rounding (247 of 4096 samples wrong against
-Inductor's 0).
-"""
-
-
 def test_rgb2float():
     x = torch.tensor([0, 127, 255], dtype=torch.uint8).to(torch.float16)
     result = rgb2float(x)
@@ -122,20 +109,20 @@ def test_the_round_trip_survives_compilation_and_repetition() -> None:
     # assert something no arithmetic can break. The eager sweep below still
     # covers all four widths, where a trace is not involved.
     #
-    # ``_TRACE_ONLY`` for the same reason the docstring gives: if the fused
-    # kernel could move a lattice value, the claim above would be false. So
+    # The trace-only backend serves the same purpose: if the fused kernel
+    # could move a lattice value, the claim above would be false. So
     # Inductor has nothing to contribute here and costs 2525ms against 77ms.
     widened = levels.to(torch.bfloat16)
     torch._dynamo.reset()
     # Each leg compiled alone, then both fused into one graph: the fusion is
     # what changes the intermediate width, so it needs its own case.
-    compiled_rgb2float = torch.compile(rgb2float, fullgraph=True, backend=_TRACE_ONLY)
-    compiled_float2rgb = torch.compile(float2rgb, fullgraph=True, backend=_TRACE_ONLY)
+    compiled_rgb2float = torch.compile(rgb2float, fullgraph=True, backend="eager")
+    compiled_float2rgb = torch.compile(float2rgb, fullgraph=True, backend="eager")
     assert torch.equal(compiled_float2rgb(compiled_rgb2float(widened)), levels)
 
     torch._dynamo.reset()
     assert torch.equal(
-        torch.compile(trip, fullgraph=True, backend=_TRACE_ONLY)(widened),
+        torch.compile(trip, fullgraph=True, backend="eager")(widened),
         levels,
     )
 
@@ -524,11 +511,11 @@ def test_reconstruction_diffs():
 
 
 def test_patchify():
-    x = torch.randn(1, 4, 8, 12, 24)
+    x = torch.randn(2, 4, 8, 12, 24)
     patch = (2, 4, 6)
     z = patchify(x, patch)
     # c_out = 4 * 2 * 4 * 6 = 192, spatial = (4, 3, 4)
-    assert z.shape == (1, 192, 4, 3, 4), z.shape
+    assert z.shape == (2, 192, 4, 3, 4), z.shape
     # Verify roundtrip recovers original.
     x_back = unpatchify(z, patch)
     torch.testing.assert_close(x_back, x, rtol=0, atol=0)
@@ -557,14 +544,14 @@ def test_unpatchify():
 
 def test_unpatchify_2d():
     # Test with 2D patches.
-    x = torch.randn(2, 384, 2, 2)
+    x = torch.randn(3, 384, 4, 8)
     patch = (4, 8)
     z = unpatchify(x, patch)
-    assert z.shape == (2, 12, 8, 16)
+    assert z.shape == (3, 12, 16, 64)
 
 
 def test_patchify_unpatchify_roundtrip():
-    x = torch.randn(1, 6, 12, 16, 24)
+    x = torch.randn(2, 6, 12, 16, 24)
     patch = (3, 4, 8)
     z = patchify(x, patch)
     x_recovered = unpatchify(z, patch)
@@ -572,74 +559,74 @@ def test_patchify_unpatchify_roundtrip():
 
 
 def test_interpolate_nearest():
-    x = torch.randn(2, 3, 8, 8)
+    x = torch.randn(2, 3, 4, 5)
     result = interpolate(x, mode="nearest", scale_factor=2, rank=2)
-    assert result.shape == (2, 3, 16, 16)
+    assert result.shape == (2, 3, 8, 10)
 
 
 def test_interpolate_bilinear():
-    x = torch.randn(2, 3, 8, 8)
-    result = interpolate(x, mode="bilinear", size=(16, 16), align_corners=False)
-    assert result.shape == (2, 3, 16, 16)
+    x = torch.randn(2, 3, 4, 5)
+    result = interpolate(x, mode="bilinear", size=(16, 17), align_corners=False)
+    assert result.shape == (2, 3, 16, 17)
 
 
 def test_interpolate_trilinear():
-    x = torch.randn(2, 3, 4, 8, 8)
+    x = torch.randn(2, 3, 4, 5, 6)
     result = interpolate(x, mode="trilinear", scale_factor=2, align_corners=False)
-    assert result.shape == (2, 3, 8, 16, 16)
+    assert result.shape == (2, 3, 8, 10, 12)
 
 
 def test_interpolate_area():
-    x = torch.randn(2, 3, 16, 16)
-    result = interpolate(x, mode="area", size=(8, 8))
-    assert result.shape == (2, 3, 8, 8)
+    x = torch.randn(2, 3, 4, 5)
+    result = interpolate(x, mode="area", size=(8, 9))
+    assert result.shape == (2, 3, 8, 9)
 
 
 def test_interpolate_area_variance_preserving():
-    x = torch.randn(1, 2, 8, 8)
-    result = interpolate(x, mode="area-variance-preserving", size=(4, 4), rank=2)
-    assert result.shape == (1, 2, 4, 4)
+    x = torch.randn(2, 3, 4, 5)
+    result = interpolate(x, mode="area-variance-preserving", size=(4, 5), rank=2)
+    assert result.shape == (2, 3, 4, 5)
 
 
 def test_interpolate_area_variance_preserving_3d():
-    x = torch.randn(1, 2, 8, 8, 8)
-    result = interpolate(x, mode="area-variance-preserving", size=(4, 4, 4), rank=3)
-    assert result.shape == (1, 2, 4, 4, 4)
+    x = torch.randn(2, 3, 4, 5, 6)
+    result = interpolate(x, mode="area-variance-preserving", size=(4, 5, 6), rank=3)
+    assert result.shape == (2, 3, 4, 5, 6)
 
 
 def test_interpolate_with_rank():
     # Test interpolation with explicit rank.
-    x = torch.randn(2, 3, 4, 8, 8)
+    x = torch.randn(2, 3, 4, 5, 6)
     result = interpolate(x, mode="linear", scale_factor=2, rank=2)
-    assert result.shape == (2, 3, 4, 16, 16)
+    assert result.shape == (2, 3, 4, 10, 12)
 
 
 def test_interpolate_channels_last():
     # Test with channels_last format.
-    x = torch.randn(2, 8, 8, 3)
+    x = torch.randn(2, 4, 5, 3)
     result = interpolate(x, mode="nearest", scale_factor=2, rank=2, channels_last=True)
-    assert result.shape == (2, 16, 16, 3)
+    assert result.shape == (2, 8, 10, 3)
 
 
 def test_interpolate_linear_to_bilinear():
     # Test that "linear" mode gets converted to "bilinear" for 2D.
-    x = torch.randn(2, 3, 8, 8)
+    x = torch.randn(2, 3, 4, 5)
     result = interpolate(x, mode="linear", scale_factor=2, rank=2)
-    assert result.shape == (2, 3, 16, 16)
+    assert result.shape == (2, 3, 8, 10)
 
 
 def test_interpolate_linear_to_trilinear():
     # Test that "linear" mode gets converted to "trilinear" for 3D.
-    x = torch.randn(2, 3, 4, 8, 8)
+    x = torch.randn(2, 3, 4, 5, 6)
     result = interpolate(x, mode="linear", scale_factor=2, rank=3)
-    assert result.shape == (2, 3, 8, 16, 16)
+    assert result.shape == (2, 3, 8, 10, 12)
 
 
 def test_interpolate_cubic_to_bicubic():
     # Test that "cubic" mode gets converted to "bicubic" for 2D.
-    x = torch.randn(2, 3, 8, 8)
+    x = torch.randn(2, 3, 4, 5)
     result = interpolate(x, mode="cubic", scale_factor=2, rank=2)
-    assert result.shape == (2, 3, 16, 16)
+    assert result.shape == (2, 3, 8, 10)
 
 
 def test_patchify_insufficient_dimensions():
@@ -672,7 +659,7 @@ def test_patchify_rejects_a_non_divisible_spatial_dim():
 def test_unpatchify_rejects_channels_that_are_not_a_patch_multiple():
     """The channel axis must divide by the patch volume it will unfold into."""
     with pytest.raises(ValueError, match="divisible"):
-        unpatchify(torch.randn(2, 7, 4, 4), (2, 2))
+        unpatchify(torch.randn(2, 7, 4, 5), (2, 2))
 
 
 def test_interpolate_insufficient_dimensions():
@@ -693,16 +680,16 @@ def test_interpolate_rank_padding():
 
 def test_interpolate_area_variance_preserving_scale_factor():
     """Test area-variance-preserving mode with scale_factor."""
-    x = torch.randn(1, 2, 16, 16)
+    x = torch.randn(2, 3, 4, 5)
     result = interpolate(x, mode="area-variance-preserving", scale_factor=0.5, rank=2)
-    assert result.shape == (1, 2, 8, 8)
+    assert result.shape == (2, 3, 2, 2)
 
 
 def test_interpolate_area_variance_preserving_scale_factor_3d():
     """Test area-variance-preserving mode with scale_factor in 3D."""
-    x = torch.randn(1, 2, 8, 8, 8)
+    x = torch.randn(2, 3, 4, 5, 6)
     result = interpolate(x, mode="area-variance-preserving", scale_factor=0.5, rank=3)
-    assert result.shape == (1, 2, 4, 4, 4)
+    assert result.shape == (2, 3, 2, 2, 3)
 
 
 def test_interpolate_linear_1d():
@@ -714,7 +701,7 @@ def test_interpolate_linear_1d():
 
 def test_interpolate_unable_to_infer_rank():
     """Test interpolate raises ValueError when unable to infer output rank."""
-    x = torch.randn(2, 3, 8, 8)
+    x = torch.randn(2, 3, 4, 5)
     # No explicit rank, no size/scale_factor, mode doesn't specify rank.
     with pytest.raises(ValueError, match="Unable to infer the output rank"):
         interpolate(x, mode="area")
@@ -722,7 +709,7 @@ def test_interpolate_unable_to_infer_rank():
 
 def test_interpolate_size_scalar():
     """Test interpolate with scalar size (non-sequence)."""
-    x = torch.randn(2, 3, 8, 8)
+    x = torch.randn(2, 3, 4, 5)
     result = interpolate(x, mode="nearest", size=16, rank=2)
     assert result.shape == (2, 3, 16, 16)
 
@@ -730,7 +717,7 @@ def test_interpolate_size_scalar():
 def test_interpolate_rank_greater_than_output_rank():
     """Test interpolate with rank > output_rank (lines 288, 339)."""
     # 3D input (rank=3) interpolated to 2D output (output_rank=2)
-    x = torch.randn(2, 3, 4, 8, 8)  # [batch, channels, depth, height, width].
+    x = torch.randn(2, 3, 4, 5, 6)  # [batch, channels, depth, height, width].
     result = interpolate(x, mode="bilinear", size=(16, 16), rank=3)
     # Should interpolate spatial dims and reshape.
     assert result.shape == (2, 3, 4, 16, 16)
@@ -738,10 +725,10 @@ def test_interpolate_rank_greater_than_output_rank():
 
 def test_interpolate_infer_from_scale_factor():
     """Test interpolate infers output_rank from scale_factor (line 372)."""
-    x = torch.randn(2, 3, 8, 8, 8)
+    x = torch.randn(2, 3, 4, 5, 6)
     # scale_factor as sequence infers output_rank.
     result = interpolate(x, mode="nearest", scale_factor=(2, 2, 2))
-    assert result.shape == (2, 3, 16, 16, 16)
+    assert result.shape == (2, 3, 8, 10, 12)
 
 
 def test_interpolate_linear_1d_fallback():
@@ -755,7 +742,7 @@ def test_interpolate_linear_1d_fallback():
 def test_interpolate_rank_greater_output_rank_channels_last():
     """Test interpolate with rank > output_rank and channels_last (line 339)."""
     # 3D input with channels last.
-    x = torch.randn(2, 4, 8, 8, 3)  # [batch, depth, height, width, channels].
+    x = torch.randn(2, 4, 8, 9, 3)  # [batch, depth, height, width, channels].
     result = interpolate(x, mode="bilinear", size=(16, 16), rank=3, channels_last=True)
     # Should handle permutation correctly.
     assert result.shape == (2, 4, 16, 16, 3)
@@ -764,7 +751,7 @@ def test_interpolate_rank_greater_output_rank_channels_last():
 def test_decode_jpeg_turbojpeg_success():
     """Test decode_jpeg_turbojpeg successful decode."""
     mock_turbo = MagicMock()
-    mock_bgr = np.ones((100, 100, 3), dtype=np.uint8) * 128
+    mock_bgr = np.ones((2, 4, 3), dtype=np.uint8) * 128
     mock_turbo.decode.return_value = mock_bgr
 
     image_bytes = b"fake_jpeg_bytes"
@@ -776,14 +763,14 @@ def test_decode_jpeg_turbojpeg_success():
     )
 
     assert tensor is not None
-    assert tensor.shape == (3, 100, 100)
+    assert tensor.shape == (3, 2, 4)
     assert tensor.dtype == torch.uint8
 
 
 def test_decode_jpeg_turbojpeg_channels_last():
     """Test decode_jpeg_turbojpeg with channels_first=False."""
     mock_turbo = MagicMock()
-    mock_bgr = np.ones((100, 100, 3), dtype=np.uint8) * 128
+    mock_bgr = np.ones((2, 4, 3), dtype=np.uint8) * 128
     mock_turbo.decode.return_value = mock_bgr
 
     image_bytes = b"fake_jpeg_bytes"
@@ -796,7 +783,7 @@ def test_decode_jpeg_turbojpeg_channels_last():
     )
 
     assert tensor is not None
-    assert tensor.shape == (100, 100, 3)
+    assert tensor.shape == (2, 4, 3)
     assert tensor.dtype == torch.uint8
 
 
@@ -821,7 +808,7 @@ def test_decode_jpeg_turbojpeg_with_crop():
 def test_decode_jpeg_turbojpeg_bgr_to_rgb():
     """Test decode_jpeg_turbojpeg converts BGR to RGB."""
     mock_turbo = MagicMock()
-    mock_bgr = np.zeros((10, 10, 3), dtype=np.uint8)
+    mock_bgr = np.zeros((2, 4, 3), dtype=np.uint8)
     mock_bgr[:, :, 0] = 255  # Blue channel.
     mock_bgr[:, :, 1] = 128  # Green channel.
     mock_bgr[:, :, 2] = 64  # Red channel.
@@ -1060,12 +1047,12 @@ def test_patchify_pair_requires_a_channel_axis_beyond_the_patch_rank():
     guard and failed as a bare ``RuntimeError`` from ``permute``.
     """
     with pytest.raises(ValueError, match="at least"):
-        _ = patchify(torch.zeros(4, 4), [2, 2])
+        _ = patchify(torch.zeros(4, 5), [2, 2])
     with pytest.raises(ValueError, match="at least"):
-        _ = unpatchify(torch.zeros(4, 4), [2, 2])
+        _ = unpatchify(torch.zeros(4, 5), [2, 2])
 
     # One more axis is the minimum, and it round-trips.
-    x = torch.arange(3 * 4 * 4).reshape(3, 4, 4).float()
+    x = torch.arange(3 * 4 * 6).reshape(3, 4, 6).float()
     torch.testing.assert_close(unpatchify(patchify(x, [2, 2]), [2, 2]), x)
 
 
@@ -1077,9 +1064,9 @@ def test_patchify_rejects_a_degenerate_patch():
     """
     for bad in ([0, 0], [-2, -2], [2, 0], []):
         with pytest.raises(ValueError, match="patch_size"):
-            _ = patchify(torch.zeros(2, 3, 8, 8), bad)
+            _ = patchify(torch.zeros(2, 3, 4, 5), bad)
         with pytest.raises(ValueError, match="patch_size"):
-            _ = unpatchify(torch.zeros(2, 12, 4, 4), bad)
+            _ = unpatchify(torch.zeros(2, 12, 4, 5), bad)
 
 
 def test_compute_video_shapes_validates_its_own_arguments():
@@ -1339,7 +1326,7 @@ def test_rgb2float_compiles_without_a_graph_break() -> None:
     assert explained.graph_break_count == 0, explained.break_reasons
 
     torch._dynamo.reset()
-    compiled = torch.compile(rgb2float, fullgraph=True, backend=_TRACE_ONLY)
+    compiled = torch.compile(rgb2float, fullgraph=True, backend="eager")
     torch.testing.assert_close(compiled(x), rgb2float(x))
     torch.testing.assert_close(
         compiled(x, unit_interval=True),
@@ -1365,7 +1352,7 @@ def test_float2rgb_is_exact_when_compiled_at_reduced_precision() -> None:
 
     Marked because it is the only test in this package that must run the REAL
     Inductor backend -- the fused kernel's numerics are the subject, so
-    ``_TRACE_ONLY`` would assert nothing. Its codegen dominates the package's
+    the trace-only backend would assert nothing. Its codegen dominates the package's
     unit tier, and the marker's ``slow`` alias moves it to the pre-push tier
     rather than deleting the coverage.
     """
@@ -1413,7 +1400,7 @@ def test_float2rgb_compiles_without_a_graph_break() -> None:
     torch._dynamo.reset()
     # Trace-only backend: the subject here is whether Dynamo captures ONE
     # graph, and the fused kernel's numerics have their own test above.
-    compiled = torch.compile(float2rgb, fullgraph=True, backend=_TRACE_ONLY)
+    compiled = torch.compile(float2rgb, fullgraph=True, backend="eager")
     # float32 input, so no cast intervenes and the traced graph runs the same
     # arithmetic eager does -- any difference would be a tracing defect.
     assert torch.equal(compiled(x), float2rgb(x))

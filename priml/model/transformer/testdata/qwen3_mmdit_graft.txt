@@ -1,11 +1,11 @@
 Qwen3MMDiTGraft.Config(
                 backbone=Qwen3.Config(
-                │       channels_in=16,
-                │       channels_out=32,
+                │       channels_in=8,
+                │       channels_out=9,
                 │       num_layers=1,
                 │       proj_in=Embedding.Config(
-                │               channels_in=32,
-                │               channels_out=16,
+                │               channels_in=9,
+                │               channels_out=8,
                 │               padding_idx=None,
                 │               device=None,
                 │               dtype=None,
@@ -15,19 +15,19 @@ Qwen3MMDiTGraft.Config(
                 │       ),
                 │       block=[
                 │       │       TransformerBlock.Config(
-                │       │               channels_in=16,
-                │       │               channels_out=16,
+                │       │               channels_in=8,
+                │       │               channels_out=8,
                 │       │               attn=SelfAttention.Config(
-                │       │                       channels_in=16,
-                │       │                       channels_out=16,
-                │       │                       num_heads=2,
-                │       │                       channels_head=8,
-                │       │                       num_heads_kv=1,
+                │       │                       channels_in=8,
+                │       │                       channels_out=8,
+                │       │                       num_heads=4,
+                │       │                       channels_head=6,
+                │       │                       num_heads_kv=2,
                 │       │                       bias=False,
                 │       │                       dropout=0.0,
                 │       │                       causal=True,
                 │       │                       rope=RoPE.Config(
-                │       │                               channels_head=8,
+                │       │                               channels_head=6,
                 │       │                               reduction_mode='cat',
                 │       │                               frequencies=HuggingFaceFrequencies.Config(
                 │       │                                       base=1000000.0
@@ -35,8 +35,8 @@ Qwen3MMDiTGraft.Config(
                 │       │                               dtype=None
                 │       │                       ),
                 │       │                       norm_qk=RMSNorm.Config(
-                │       │                               channels_in=8,
-                │       │                               channels_out=8,
+                │       │                               channels_in=6,
+                │       │                               channels_out=6,
                 │       │                               eps=1e-06,
                 │       │                               elementwise_affine=True,
                 │       │                               device=None,
@@ -50,9 +50,9 @@ Qwen3MMDiTGraft.Config(
                 │       │                       attn_kernel=SdpaFused.Config()
                 │       │               ),
                 │       │               ffn=SwiGLU.Config(
-                │       │                       channels_in=16,
-                │       │                       channels_out=16,
-                │       │                       channels_hidden=32,
+                │       │                       channels_in=8,
+                │       │                       channels_out=8,
+                │       │                       channels_hidden=7,
                 │       │                       expansion=2.6666666666666665,
                 │       │                       round_to=256,
                 │       │                       gate=True,
@@ -66,16 +66,16 @@ Qwen3MMDiTGraft.Config(
                 │       │                       shard='colwise'
                 │       │               ),
                 │       │               norm1=RMSNorm.Config(
-                │       │                       channels_in=16,
-                │       │                       channels_out=16,
+                │       │                       channels_in=8,
+                │       │                       channels_out=8,
                 │       │                       eps=1e-06,
                 │       │                       elementwise_affine=True,
                 │       │                       device=None,
                 │       │                       dtype=None
                 │       │               ),
                 │       │               norm2=RMSNorm.Config(
-                │       │                       channels_in=16,
-                │       │                       channels_out=16,
+                │       │                       channels_in=8,
+                │       │                       channels_out=8,
                 │       │                       eps=1e-06,
                 │       │                       elementwise_affine=True,
                 │       │                       device=None,
@@ -87,20 +87,20 @@ Qwen3MMDiTGraft.Config(
                 │       │       )
                 │       ],
                 │       proj_out=Sequential.Config(
-                │               channels_in=16,
-                │               channels_out=32,
+                │               channels_in=8,
+                │               channels_out=9,
                 │               elements=[
                 │                       RMSNorm.Config(
-                │                               channels_in=16,
-                │                               channels_out=16,
+                │                               channels_in=8,
+                │                               channels_out=8,
                 │                               eps=1e-06,
                 │                               elementwise_affine=True,
                 │                               device=None,
                 │                               dtype=None
                 │                       ),
                 │                       Linear.Config(
-                │                               channels_in=16,
-                │                               channels_out=32,
+                │                               channels_in=8,
+                │                               channels_out=9,
                 │                               bias=False,
                 │                               depth_index=(),
                 │                               device=None,
@@ -116,7 +116,7 @@ Qwen3MMDiTGraft.Config(
                 ),
                 streams=[
                 │       MMDiTStream.Config(
-                │               channels_in=16,
+                │               channels_in=8,
                 │               attn=AttentionProjections.Config(
                 │                       channels_in=-1,
                 │                       channels_out=-1,
@@ -135,24 +135,24 @@ Qwen3MMDiTGraft.Config(
                 │                       depth_index=()
                 │               ),
                 │               norm1=LayerNorm.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=8,
+                │                       channels_out=8,
                 │                       eps=1e-05,
                 │                       elementwise_affine=False,
                 │                       device=None,
                 │                       dtype=None
                 │               ),
                 │               norm2=LayerNorm.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=8,
+                │                       channels_out=8,
                 │                       eps=1e-05,
                 │                       elementwise_affine=False,
                 │                       device=None,
                 │                       dtype=None
                 │               ),
                 │               ffn=SwiGLU.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=8,
+                │                       channels_out=8,
                 │                       channels_hidden=256,
                 │                       expansion=2.6666666666666665,
                 │                       round_to=256,
@@ -172,25 +172,25 @@ Qwen3MMDiTGraft.Config(
                 ],
                 block=[
                 │       MMDiTBlock.Config(
-                │               channels_in=16,
-                │               channels_out=16,
+                │               channels_in=8,
+                │               channels_out=8,
                 │               num_streams=2,
                 │               attn=MultiStreamAttention.Config(
-                │               │       channels_in=16,
-                │               │       channels_out=16,
+                │               │       channels_in=8,
+                │               │       channels_out=8,
                 │               │       num_streams=2,
                 │               │       streams=[
                 │               │       │       AttentionProjections.Config(
-                │               │       │               channels_in=16,
-                │               │       │               channels_out=16,
-                │               │       │               num_heads=2,
-                │               │       │               channels_head=8,
-                │               │       │               num_heads_kv=1,
+                │               │       │               channels_in=8,
+                │               │       │               channels_out=8,
+                │               │       │               num_heads=4,
+                │               │       │               channels_head=6,
+                │               │       │               num_heads_kv=2,
                 │               │       │               bias=False,
                 │               │       │               dropout=0.0,
                 │               │       │               causal=False,
                 │               │       │               rope=RoPE.Config(
-                │               │       │                       channels_head=8,
+                │               │       │                       channels_head=6,
                 │               │       │                       reduction_mode='cat',
                 │               │       │                       frequencies=HuggingFaceFrequencies.Config(
                 │               │       │                               base=1000000.0
@@ -198,8 +198,8 @@ Qwen3MMDiTGraft.Config(
                 │               │       │                       dtype=None
                 │               │       │               ),
                 │               │       │               norm_qk=RMSNorm.Config(
-                │               │       │                       channels_in=8,
-                │               │       │                       channels_out=8,
+                │               │       │                       channels_in=6,
+                │               │       │                       channels_out=6,
                 │               │       │                       eps=1e-06,
                 │               │       │                       elementwise_affine=True,
                 │               │       │                       device=None,
@@ -212,11 +212,11 @@ Qwen3MMDiTGraft.Config(
                 │               │       │               depth_index=((0, 1),)
                 │               │       │       ),
                 │               │       │       AttentionProjections.Config(
-                │               │       │               channels_in=16,
-                │               │       │               channels_out=16,
-                │               │       │               num_heads=2,
-                │               │       │               channels_head=8,
-                │               │       │               num_heads_kv=1,
+                │               │       │               channels_in=8,
+                │               │       │               channels_out=8,
+                │               │       │               num_heads=4,
+                │               │       │               channels_head=6,
+                │               │       │               num_heads_kv=2,
                 │               │       │               bias=False,
                 │               │       │               dropout=0.0,
                 │               │       │               causal=False,
@@ -229,9 +229,9 @@ Qwen3MMDiTGraft.Config(
                 │               │       │               depth_index=((0, 1),)
                 │               │       │       )
                 │               │       ],
-                │               │       num_heads=2,
-                │               │       channels_head=8,
-                │               │       num_heads_kv=1,
+                │               │       num_heads=4,
+                │               │       channels_head=6,
+                │               │       num_heads_kv=2,
                 │               │       bias=False,
                 │               │       dropout=0.0,
                 │               │       causal=False,
@@ -245,18 +245,18 @@ Qwen3MMDiTGraft.Config(
                 │               ),
                 │               streams=[
                 │               │       MMDiTStream.Config(
-                │               │               channels_in=16,
+                │               │               channels_in=8,
                 │               │               attn=AttentionProjections.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
-                │               │                       num_heads=2,
-                │               │                       channels_head=8,
-                │               │                       num_heads_kv=1,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
+                │               │                       num_heads=4,
+                │               │                       channels_head=6,
+                │               │                       num_heads_kv=2,
                 │               │                       bias=False,
                 │               │                       dropout=0.0,
                 │               │                       causal=False,
                 │               │                       rope=RoPE.Config(
-                │               │                               channels_head=8,
+                │               │                               channels_head=6,
                 │               │                               reduction_mode='cat',
                 │               │                               frequencies=HuggingFaceFrequencies.Config(
                 │               │                                       base=1000000.0
@@ -264,8 +264,8 @@ Qwen3MMDiTGraft.Config(
                 │               │                               dtype=None
                 │               │                       ),
                 │               │                       norm_qk=RMSNorm.Config(
-                │               │                               channels_in=8,
-                │               │                               channels_out=8,
+                │               │                               channels_in=6,
+                │               │                               channels_out=6,
                 │               │                               eps=1e-06,
                 │               │                               elementwise_affine=True,
                 │               │                               device=None,
@@ -278,25 +278,25 @@ Qwen3MMDiTGraft.Config(
                 │               │                       depth_index=((0, 1),)
                 │               │               ),
                 │               │               norm1=RMSNorm.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
                 │               │                       eps=1e-06,
                 │               │                       elementwise_affine=True,
                 │               │                       device=None,
                 │               │                       dtype=None
                 │               │               ),
                 │               │               norm2=RMSNorm.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
                 │               │                       eps=1e-06,
                 │               │                       elementwise_affine=True,
                 │               │                       device=None,
                 │               │                       dtype=None
                 │               │               ),
                 │               │               ffn=SwiGLU.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
-                │               │                       channels_hidden=32,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
+                │               │                       channels_hidden=7,
                 │               │                       expansion=2.6666666666666665,
                 │               │                       round_to=256,
                 │               │                       gate=True,
@@ -313,13 +313,13 @@ Qwen3MMDiTGraft.Config(
                 │               │               depth_index=((0, 1),)
                 │               │       ),
                 │               │       MMDiTStream.Config(
-                │               │               channels_in=16,
+                │               │               channels_in=8,
                 │               │               attn=AttentionProjections.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
-                │               │                       num_heads=2,
-                │               │                       channels_head=8,
-                │               │                       num_heads_kv=1,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
+                │               │                       num_heads=4,
+                │               │                       channels_head=6,
+                │               │                       num_heads_kv=2,
                 │               │                       bias=False,
                 │               │                       dropout=0.0,
                 │               │                       causal=False,
@@ -332,24 +332,24 @@ Qwen3MMDiTGraft.Config(
                 │               │                       depth_index=((0, 1),)
                 │               │               ),
                 │               │               norm1=LayerNorm.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
                 │               │                       eps=1e-05,
                 │               │                       elementwise_affine=False,
                 │               │                       device=None,
                 │               │                       dtype=None
                 │               │               ),
                 │               │               norm2=LayerNorm.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
                 │               │                       eps=1e-05,
                 │               │                       elementwise_affine=False,
                 │               │                       device=None,
                 │               │                       dtype=None
                 │               │               ),
                 │               │               ffn=SwiGLU.Config(
-                │               │                       channels_in=16,
-                │               │                       channels_out=16,
+                │               │                       channels_in=8,
+                │               │                       channels_out=8,
                 │               │                       channels_hidden=256,
                 │               │                       expansion=2.6666666666666665,
                 │               │                       round_to=256,

@@ -49,28 +49,34 @@ def test_extracted_imagenet_train_walks_sorted_synsets(tmp_path: Path) -> None:
     assert len(source) == 1_281_167
 
 
-def test_extracted_imagenet_train_shards_and_shuffles_synsets(tmp_path: Path) -> None:
+def test_extracted_imagenet_train_shards_and_shuffles_images(tmp_path: Path) -> None:
     _write_extracted_imagenet(tmp_path)
     config = ExtractedImageNetSource.Config(working_dir=tmp_path)
     config.shuffle = True
 
     config.worker_slice = (0, 2)
     config.epoch_seed = 0
-    first = [s.get("label") for s in config.make()]
+    first = [s.get("key") for s in config.make()]
     config.worker_slice = (1, 2)
-    second = [s.get("label") for s in config.make()]
+    second = [s.get("key") for s in config.make()]
 
-    # Both workers share one permutation, so their slices partition the classes.
-    assert sorted({str(label) for label in (*first, *second)}) == [
-        "n01440764",
-        "n01443537",
+    # Both workers share one permutation, so their slices partition the images.
+    assert sorted(str(key) for key in (*first, *second)) == [
+        "n01440764_0",
+        "n01440764_1",
+        "n01443537_0",
     ]
     assert set(first).isdisjoint(second)
-    # A later epoch reshuffles: with two classes, seed 1 flips their order.
+    # Images, not classes, are permuted: seed 1 splits the first class's two.
     config.worker_slice = None
     config.epoch_seed = 1
-    reshuffled = [s.get("label") for s in config.make()]
-    assert reshuffled == ["n01443537", "n01440764", "n01440764"]
+    reshuffled = [s.get("key") for s in config.make()]
+    assert reshuffled == ["n01440764_1", "n01443537_0", "n01440764_0"]
+    assert [s.get("label") for s in config.make()] == [
+        "n01440764",
+        "n01443537",
+        "n01440764",
+    ]
 
 
 def test_extracted_imagenet_val_reads_labels_relative_to_the_dataset(

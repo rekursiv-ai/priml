@@ -6,6 +6,7 @@ from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.flop_counter import FlopCounterMode
 
+import pytest
 import torch
 
 from priml.baselines.sudoku.eval import SudokuVerifier
@@ -16,8 +17,17 @@ from priml.model.attention.self_attention import SelfAttention
 from priml.testing.cost import assert_cost_matches_torch
 
 
-def _tiny_trm() -> TRM.Config:
+def test_unfilled_trm_geometry_is_rejected() -> None:
+    with pytest.raises(ValueError, match="vocabulary and grid shape"):
+        TRM.Config().make()
+
+
+def test_trm_cost_matches_torch() -> None:
     config = TRM.Config(
+        vocab_size=11,
+        puzzle_grid_shape=(81,),
+        pos2d_grid_shape=(9, 9),
+        pos2d_box_shape=(3, 3),
         channels_in=16,
         num_layers=1,
         num_heads=2,
@@ -28,37 +38,26 @@ def _tiny_trm() -> TRM.Config:
         puzzle_emb_batch_size=2,
         compile=False,
         dtype=None,
-    )
-    config = config.finalize()
+    ).finalize()
     assert config.block is not None
     assert isinstance(config.block.attn, SelfAttention.Config)
     config.block.attn.attn_kernel = SdpaNaive.Config()
-    return config
 
+    def run(module: nn.Module, tokens: Tensor) -> Tensor:
+        assert isinstance(module, TRM)
+        z_slow, z_fast = module.init_z(2)
+        out = module(tokens, z_slow, z_fast, torch.tensor([1, 2]), feedback_ids=tokens)
+        logits, q_halt = out["logits"], out["q_halt"]
+        assert isinstance(logits, Tensor)
+        assert isinstance(q_halt, Tensor)
+        return logits.sum() + q_halt.sum()
 
-def _run_trm(module: nn.Module, tokens: Tensor) -> Tensor:
-    assert isinstance(module, TRM)
-    z_slow, z_fast = module.init_z(2)
-    out = module(
-        tokens,
-        z_slow,
-        z_fast,
-        torch.tensor([1, 2]),
-        feedback_ids=tokens,
-    )
-    logits, q_halt = out["logits"], out["q_halt"]
-    assert isinstance(logits, Tensor)
-    assert isinstance(q_halt, Tensor)
-    return logits.sum() + q_halt.sum()
-
-
-def test_trm_cost_matches_torch() -> None:
     assert_cost_matches_torch(
-        _tiny_trm(),
+        config,
         build_input=lambda: torch.randint(0, 11, (2, 81)),
         batch_size=2,
         dtype=None,
-        run=_run_trm,
+        run=run,
     )
 
 

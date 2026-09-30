@@ -29,9 +29,6 @@ if TYPE_CHECKING:
     from priml.baselines.craftax.game.state import EnvState
 
 
-_DEVICE = torch.device("cpu")
-
-
 def _world(num_envs: int = 2, seed: int = 0) -> EnvState:
     return generated_world(num_envs=num_envs, seed=seed)
 
@@ -107,7 +104,7 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
         config=world_config.OVERWORLD,
         player_position=torch.tensor([24, 24]),
         generator=torch.Generator().manual_seed(0),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
     assert int(BlockType.GRASS) in present
@@ -119,12 +116,12 @@ def test_the_overworld_grows_the_blocks_its_recipe_names() -> None:
 
 def test_empty_tile_weights_select_the_origin() -> None:
     position = _sample_tile(
-        torch.zeros((1, 4)),
+        torch.zeros((2, 4)),
         (2, 2),
         generator=torch.Generator().manual_seed(17),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
-    assert position.tolist() == [[0, 0]]
+    assert position.tolist() == [[0, 0], [0, 0]]
 
 
 def test_graveyard_sampled_stone_and_ladder_light_quirks() -> None:
@@ -133,7 +130,7 @@ def test_graveyard_sampled_stone_and_ladder_light_quirks() -> None:
         config=world_config.GRAVEYARD,
         player_position=torch.tensor([24, 24]),
         generator=torch.Generator().manual_seed(9),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     # Upstream writes STONE with always_diamond=False (world_gen.py:483-504).
     # The candidate is still lit without an ascent (world_gen.py:549-555).
@@ -153,7 +150,7 @@ def test_water_and_mountains_keep_clear_of_the_spawn() -> None:
         config=world_config.OVERWORLD,
         player_position=torch.tensor([24, 24]),
         generator=torch.Generator().manual_seed(1),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     around = blocks[:, 23:26, 23:26]
     assert not (around == int(BlockType.WATER)).all()
@@ -164,7 +161,7 @@ def test_a_dungeon_is_rooms_joined_by_corridors() -> None:
         num_envs=4,
         config=world_config.DUNGEON,
         generator=torch.Generator().manual_seed(0),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
     assert int(BlockType.PATH) in present
@@ -191,7 +188,7 @@ def test_fixed_dungeon_seed_pins_room_layout() -> None:
         num_envs=1,
         config=world_config.DUNGEON,
         generator=torch.Generator().manual_seed(431),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     corners = torch.nonzero(items[0] == int(ItemType.TORCH), as_tuple=False)
     assert corners[:4].tolist() == [[0, 4], [0, 10], [7, 4], [7, 10]]
@@ -202,7 +199,7 @@ def test_dungeon_walls_out_of_sight_read_as_darkness() -> None:
         num_envs=2,
         config=world_config.DUNGEON,
         generator=torch.Generator().manual_seed(2),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     assert (blocks == int(BlockType.DARKNESS)).any()
 
@@ -212,7 +209,7 @@ def test_the_sewers_use_their_own_materials() -> None:
         num_envs=4,
         config=world_config.SEWERS,
         generator=torch.Generator().manual_seed(0),
-        device=_DEVICE,
+        device=torch.device("cpu"),
     )
     present = set(ListCodec.coerce(blocks.flatten().tolist(), int))
     assert int(BlockType.ENCHANTMENT_TABLE_ICE) in present

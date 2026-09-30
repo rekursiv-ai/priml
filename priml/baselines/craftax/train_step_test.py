@@ -31,8 +31,8 @@ def _config(**overrides: object) -> CraftaxTrainStep.Config:
     config = CraftaxTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 2
-    config.rollout_steps = 2
+    config.env.num_envs = 4
+    config.rollout_steps = 3
     config.num_epochs = 1
     config.num_minibatches = 1
     config.total_train_steps = 10
@@ -92,7 +92,7 @@ def test_eval_scores_without_advancing_the_training_environment() -> None:
 
 def test_one_step_consumes_the_declared_interactions() -> None:
     step = _step()
-    assert step.steps_per_update == 2 * 2
+    assert step.steps_per_update == 4 * 3
 
 
 def test_the_loops_batch_passes_through_untouched() -> None:
@@ -156,10 +156,10 @@ def test_annealing_can_be_switched_off() -> None:
 def test_a_rollout_has_the_declared_shape() -> None:
     step = _step()
     rollout = step.collect()
-    assert rollout.observation.shape == (2, 2, step.env.observation_size)
-    assert rollout.action.shape == (2, 2)
-    assert rollout.advantage.shape == (2, 2)
-    assert rollout.target.shape == (2, 2)
+    assert rollout.observation.shape == (3, 4, step.env.observation_size)
+    assert rollout.action.shape == (3, 4)
+    assert rollout.advantage.shape == (3, 4)
+    assert rollout.target.shape == (3, 4)
 
 
 def test_a_rollout_is_collected_without_gradients() -> None:
@@ -174,7 +174,7 @@ def test_minibatches_partition_the_rollout_exactly() -> None:
     step = _step()
     rollout = step.collect()
     seen = [minibatch["action"].shape[0] for minibatch in rollout.minibatches(count=4)]
-    assert sum(seen) == 2 * 2
+    assert sum(seen) == 4 * 3
     assert len(seen) == 4
 
 

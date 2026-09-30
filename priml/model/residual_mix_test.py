@@ -48,34 +48,28 @@ def test_residual_mix_forward_and_open_kwargs() -> None:
 
 
 def test_residual_mix_bfb() -> None:
+    def run(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
+        assert isinstance(module, ResidualMix)
+        return module(inputs[0], original=inputs[1], layer=1, message=object())
+
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="residual_mix",
         build_module=lambda: ResidualMix.Config(num_layers=2).make(),
-        build_input=lambda: (
-            torch.randn(2, 3, 4),
-            torch.randn(2, 3, 4),
-        ),
+        build_input=lambda: (torch.randn(2, 3, 4), torch.randn(2, 3, 4)),
         seed=0,
-        run=_run_residual,
-    )
-
-
-def _run_residual(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
-    """Run the residual module for the golden harness."""
-    residual = module
-    assert isinstance(residual, ResidualMix)
-    return residual(
-        inputs[0],
-        original=inputs[1],
-        layer=1,
-        message=object(),
+        run=run,
     )
 
 
 def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
     """Two learned scalar weights per layer contribute only elementwise work."""
     config = ResidualMix.Config(num_layers=3, channels_in=4)
+
+    def run(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+        assert isinstance(module, ResidualMix)
+        return module(inputs[0], original=inputs[1], layer=1)
+
     cost = assert_cost_matches_torch(
         config,
         build_input=lambda: (
@@ -85,7 +79,7 @@ def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
         seq_len=2,
         batch_size=1,
         dtype=None,
-        run=_mix_layer_one,
+        run=run,
     )
     assert cost["flops", "matmul"].sum() == 0
     assert cost["flops", "primal", "elementwise"].sum() == 3 * 4 * 3 * 2
@@ -100,12 +94,6 @@ def test_residual_mix_cost_is_two_scalars_per_layer() -> None:
     assert cost["bytes", "adjoint", "reduction"].sum() == 4 * (
         2 * (4 + 1) * 3 * 2 + 6 * (2 + 1)
     )
-
-
-def _mix_layer_one(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
-    """Mix layer one of the running and original streams."""
-    assert isinstance(module, ResidualMix)
-    return module(inputs[0], original=inputs[1], layer=1)
 
 
 if __name__ == "__main__":

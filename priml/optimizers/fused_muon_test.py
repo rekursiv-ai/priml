@@ -9,10 +9,8 @@ reference inside ``host_agnostic_numerics`` so every CPU computes its bits.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, cast
-
-import hashlib
-import struct
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 import torch
@@ -28,16 +26,19 @@ from priml.optimizers.fused_muon import (
 )
 from priml.optimizers.lr import lr_scale
 from priml.testing.bfb import host_agnostic_numerics
-from priml.testing.golden import assert_text_golden
+from priml.testing.golden import assert_tensor_golden
 
 
 if TYPE_CHECKING:
     from torch import Tensor
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
+
 def _parameter(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Parameter:
     generator = torch.Generator().manual_seed(sum(shape))
-    return torch.nn.Parameter(torch.randn(shape, generator=generator).to(dtype))
+    return torch.nn.Parameter(torch.randn(*shape, generator=generator).to(dtype))
 
 
 def test_the_config_makes_a_constructor_awaiting_parameters() -> None:
@@ -52,10 +53,10 @@ def test_the_config_makes_a_constructor_awaiting_parameters() -> None:
 
 def test_the_norm_spans_every_tensor_and_returns_fp32() -> None:
     optimizer = FusedMuon.Config().make()([_parameter(4, 2)])
-    norm = optimizer.norm([torch.tensor([3.0], dtype=torch.bfloat16), torch.ones(4, 4)])
+    norm = optimizer.norm([torch.tensor([3.0], dtype=torch.bfloat16), torch.ones(4, 5)])
     assert norm.dtype == torch.float32
     assert norm.shape == ()
-    assert float(norm) == 5.0
+    assert float(norm) == pytest.approx(29.0**0.5)
     # bf16 would round sqrt(3) to 1.734375; one matrix's norm accumulates in fp32.
     ones = torch.ones(3, dtype=torch.bfloat16)
     assert float(optimizer.norm([ones])) == float(torch.tensor(3.0).sqrt())
@@ -97,7 +98,7 @@ def test_newton_schulz_moves_a_matrix_toward_its_polar_factor(
     shape: tuple[int, int],
 ) -> None:
     generator = torch.Generator().manual_seed(3)
-    draws = torch.randn(shape, generator=generator)
+    draws = torch.randn(*shape, generator=generator)
     matrix = normalize(draws, norm=torch.linalg.vector_norm(draws), eps=1e-7)
     result = newton_schulz(matrix, FusedMuon.Config().ns_coefficients)
     singular = torch.linalg.svdvals(result)
@@ -202,13 +203,13 @@ def test_the_fused_cuda_step_matches_the_torch_stages() -> None:
     shapes = ((300, 70), (70, 300), (64, 64), (1000,))
     generator = torch.Generator().manual_seed(5)
     parameters = [
-        torch.nn.Parameter(torch.randn(shape, generator=generator).bfloat16().cuda())
+        torch.nn.Parameter(torch.randn(*shape, generator=generator).bfloat16().cuda())
         for shape in shapes
     ]
     optimizer = config.make()(parameters)
     masters = [parameter.detach().float().clone() for parameter in parameters]
     momenta = [
-        torch.randn(shape, generator=generator).cuda() * 0.01 for shape in shapes
+        torch.randn(*shape, generator=generator).cuda() * 0.01 for shape in shapes
     ]
     for target, source in zip(optimizer.momentum_buffers, momenta, strict=True):
         target.copy_(source)
@@ -217,8 +218,8 @@ def test_the_fused_cuda_step_matches_the_torch_stages() -> None:
     for rate in rates:
         gradients = [
             (
-                torch.randn(shape, generator=generator)
-                * 10.0 ** torch.randint(-6, 2, shape, generator=generator)
+                torch.randn(*shape, generator=generator)
+                * 10.0 ** torch.randint(-6, 2, size=shape, generator=generator)
             )
             .bfloat16()
             .cuda()
@@ -280,8 +281,8 @@ def test_the_state_round_trips_fp32_masters_for_bf16_parameters() -> None:
     assert restored.master_weights[0].dtype == torch.float32
 
 
-def test_a_tiny_stack_matches_its_golden(request: pytest.FixtureRequest) -> None:
-    """A two-layer recurrent policy's five weights: three steps from fp32 masters.
+def test_a_tiny_stack_matches_its_golden() -> None:
+    """A five-weight stack: three steps from fp32 masters.
 
     The masters are portable draws that the bf16 parameters only round, as a
     checkpoint's are, and reach the optimizer through ``load_state_dict``. The
@@ -290,11 +291,11 @@ def test_a_tiny_stack_matches_its_golden(request: pytest.FixtureRequest) -> None
     and last steps' gradients are clipped and the second's are not.
     """
     shapes = {
-        "embedding.weight": (154, 2),
-        "proj_in.weight": (8, 249),
-        "blocks.0.proj_gates.weight": (24, 8),
-        "blocks.1.proj_gates.weight": (24, 8),
-        "proj_out.weight": (44, 8),
+        "embedding.weight": (2, 2),
+        "proj_in.weight": (3, 2),
+        "blocks.0.proj_gates.weight": (2, 3),
+        "blocks.1.proj_gates.weight": (2, 2),
+        "proj_out.weight": (2, 2),
     }
     generator = torch.Generator().manual_seed(0)
     masters = {
@@ -333,16 +334,11 @@ def test_a_tiny_stack_matches_its_golden(request: pytest.FixtureRequest) -> None
         for scale in (2**-4, 2**-7, 2**-4)
     ]
     with host_agnostic_numerics():
-        lines = _step_entries(optimizer, parameters, order=order, steps=steps)
-    assert_text_golden(
-        request,
-        test_file=__file__,
-        name="fused_muon_tiny",
-        rendered="\n".join(lines),
-    )
+        record = _step_record(optimizer, parameters, order=order, steps=steps)
+    assert_tensor_golden(_CWD / "testdata" / "fused_muon_tiny.pt", record)
 
 
-def _two_steps(rate: float | torch.Tensor, *, device: str = "cpu") -> FusedMuon:
+def _two_steps(rate: float | Tensor, *, device: str = "cpu") -> FusedMuon:
     """Two steps of random gradients at ``rate``, a float or a tensor."""
     parameters = [
         torch.nn.Parameter(_parameter(*shape).detach().to(device))
@@ -353,7 +349,7 @@ def _two_steps(rate: float | torch.Tensor, *, device: str = "cpu") -> FusedMuon:
     generator = torch.Generator().manual_seed(7)
     for _ in range(2):
         for parameter in parameters:
-            parameter.grad = torch.randn(parameter.shape, generator=generator).to(
+            parameter.grad = torch.randn(*parameter.shape, generator=generator).to(
                 device=device,
                 dtype=parameter.dtype,
             )
@@ -367,35 +363,35 @@ def _rate(epoch: int) -> float:
     return float(rate)
 
 
-def _step_entries(
+# Only the last step's state is stored: every earlier step's masters and momentum feed
+# it, and the per-step clips say which step broke. The bf16 parameters are the masters
+# rounded, which is asserted rather than stored.
+def _step_record(
     optimizer: FusedMuon,
     parameters: dict[str, torch.nn.Parameter],
     *,
     order: list[str],
     steps: list[dict[str, Tensor]],
-) -> list[str]:
-    """Step once per gradient set; digest the clip, masters, momentum and weights."""
-    lines: list[str] = []
-    for index, gradients in enumerate(steps):
+) -> dict[str, Tensor]:
+    """Step once per gradient set; return each clip and the final masters and momentum."""
+    clips: list[Tensor] = []
+    for gradients in steps:
         for name, parameter in parameters.items():
             parameter.grad = gradients[name]
         clip = clip_coefficient(
             optimizer.norm([gradients[name] for name in order]),
             optimizer.max_grad_norm,
         )
-        lines += [f"step {index} clip {_fp32_entry(float(clip))}"]
+        clips.append(torch.as_tensor(clip, dtype=torch.float32).reshape(()))
         optimizer.step()
-        state = cast("dict[int, dict[str, Tensor]]", optimizer.state_dict()["state"])
-        for key in ("master_weight", "momentum_buffer"):
-            lines += [
-                f"step {index} {key} {name} {_digest(state[position][key])}"
-                for position, name in enumerate(order)
-            ]
-        lines += [
-            f"step {index} parameter {name} {_digest(parameter)}"
-            for name, parameter in parameters.items()
-        ]
-    return lines
+    state = cast("dict[int, dict[str, Tensor]]", optimizer.state_dict()["state"])
+    record = {"clip": torch.stack(clips)}
+    for position, name in enumerate(order):
+        master = state[position]["master_weight"]
+        assert torch.equal(parameters[name].detach(), master.bfloat16())
+        record[f"master_weight/{name}"] = master.detach().clone()
+        record[f"momentum_buffer/{name}"] = state[position]["momentum_buffer"].clone()
+    return record
 
 
 def _portable_uniform(
@@ -408,21 +404,7 @@ def _portable_uniform(
     # ``torch.rand`` fills multiples of 2^-24 and ``2u - 1`` is exact, so only the
     # product with ``bound`` rounds. ``randn`` would not port: its transform runs a
     # vectorized ``log``/``cos`` on some hosts and libm's on others.
-    return (torch.rand(shape, generator=generator) * 2 - 1) * bound
-
-
-def _digest(value: Tensor) -> str:
-    """Return a tensor's dtype, shape and the sha256 of its bytes."""
-    raw = value.detach().cpu().contiguous().reshape(-1).view(torch.uint8)
-    digest = hashlib.sha256(raw.numpy().tobytes()).hexdigest()
-    return f"{value.dtype} {tuple(value.shape)} {digest}"
-
-
-def _fp32_entry(value: float) -> str:
-    """Return an fp32 value's bits, then its decimal."""
-    single = struct.unpack("<f", struct.pack("<f", value))[0]
-    bits = struct.unpack("<I", struct.pack("<f", value))[0]
-    return f"0x{bits:08x} {single!r}"
+    return (torch.rand(*shape, generator=generator) * 2 - 1) * bound
 
 
 if __name__ == "__main__":

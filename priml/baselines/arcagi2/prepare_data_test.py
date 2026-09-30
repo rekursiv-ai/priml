@@ -39,11 +39,11 @@ def test_stage_preserves_bytes_and_rejects_overwrite(tmp_path: Path) -> None:
             '{"ignore_label_id": 0, "blank_identifier_id": 0}',
         )
         for name, array in {
-            "inputs": np.full((1, 9), 2, dtype=np.int32),
-            "labels": np.full((1, 9), 2, dtype=np.int32),
-            "puzzle_identifiers": np.array([1], dtype=np.int32),
-            "puzzle_indices": np.array([0, 1], dtype=np.int64),
-            "group_indices": np.array([0, 1], dtype=np.int64),
+            "inputs": np.full((2, 9), 2, dtype=np.int32),
+            "labels": np.full((2, 9), 2, dtype=np.int32),
+            "puzzle_identifiers": np.array([1, 2], dtype=np.int32),
+            "puzzle_indices": np.array([0, 1, 2], dtype=np.int64),
+            "group_indices": np.array([0, 1, 2], dtype=np.int64),
         }.items():
             np.save(directory / f"all__{name}.npy", array)
 

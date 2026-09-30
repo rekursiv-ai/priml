@@ -228,7 +228,7 @@ def test_tp2_applier_leaves_a_model_with_no_shard_declarations_alone(
         return module
 
     monkeypatch.setattr(tensor_parallel, "parallelize_module", record)
-    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    model = nn.Sequential(nn.Linear(4, 5), nn.ReLU())
 
     assert apply_tensor_parallel(model, cast(DeviceMesh, _TpTwoMesh())) is model
     assert calls == []

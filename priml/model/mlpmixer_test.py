@@ -60,8 +60,13 @@ def test_mlp_mixer_block_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="mlp_mixer_block",
-        build_module=lambda: MLPMixerBlock.Config(channels_in=4, seq_len=2).make(),
-        build_input=lambda: torch.randn(2, 2, 4),
+        build_module=lambda: MLPMixerBlock.Config(
+            channels_in=4,
+            seq_len=3,
+            token_mixer=SwiGLU.Config(channels_hidden=4, round_to=1),
+            channel_mixer=SwiGLU.Config(channels_hidden=4, round_to=1),
+        ).make(),
+        build_input=lambda: torch.randn(2, 3, 4),
         seed=0,
     )
 
@@ -81,9 +86,9 @@ def test_mlp_mixer_block_cost_uses_each_childs_concrete_rows() -> None:
     )
     model_cost = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
+        build_input=lambda: torch.randn(3, 2, 4, requires_grad=True),
         seq_len=2,
-        batch_size=1,
+        batch_size=3,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
@@ -106,16 +111,19 @@ def test_mlp_mixer_block_cost_uses_each_childs_concrete_rows() -> None:
     )
     token = 2 * (2 * 3) + 3 * 2  # up_proj is twice the hidden width when gated.
     channel = 4 * (2 * 5) + 5 * 4
-    assert model_cost["flops", "primal", "matmul"].sum() == 2 * (
+    assert model_cost["flops", "primal", "matmul"].sum() == 3 * 2 * (
         4 * token + 2 * channel
     )
-    assert model_cost["flops", "adjoint", "matmul"].sum() == 4 * (
+    assert model_cost["flops", "adjoint", "matmul"].sum() == 3 * 4 * (
         4 * token + 2 * channel
     )
     assert model_cost["flops", "primal", "elementwise"].sum() == (
-        over_tokens["flops", "primal", "elementwise"].sum()
-        + over_channels["flops", "primal", "elementwise"].sum()
-        + 2 * 2 * 4
+        3
+        * (
+            over_tokens["flops", "primal", "elementwise"].sum()
+            + over_channels["flops", "primal", "elementwise"].sum()
+            + 2 * 2 * 4
+        )
     )
     assert model_cost.params == token + channel + 2
 

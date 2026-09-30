@@ -317,14 +317,14 @@ def documented_experiment() -> Makeable[_StampedJob]:
     return config
 
 
-def _skip_setup_logging(level: str) -> None:
-    del level
-
-
 @pytest.fixture
 def keep_caplog_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     """``setup_logging`` clears the root handlers, which would drop caplog's."""
-    monkeypatch.setattr(launch, "setup_logging", _skip_setup_logging)
+
+    def keep_handlers(level: str = "INFO") -> None:
+        del level
+
+    monkeypatch.setattr(launch, "setup_logging", keep_handlers)
 
 
 @pytest.mark.usefixtures("keep_caplog_handler")

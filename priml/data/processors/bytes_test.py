@@ -15,7 +15,7 @@ instead of merely producing differently-shaped noise.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import io
 import os
@@ -43,9 +43,9 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-_FRAMES = 8
-_SOURCE_HEIGHT = 64
-_SOURCE_WIDTH = 128
+_FRAMES: Final = 8
+_SOURCE_HEIGHT: Final = 64
+_SOURCE_WIDTH: Final = 128
 
 
 def _encode_video(path: Path, *, height: int, width: int, frames: int) -> None:
@@ -115,9 +115,9 @@ def _run(archive: Path, **overrides: object) -> list[DecodeVideo.Output]:
                 "_tar_handle": tar,
                 "key": "clip",
                 "format": "mp4",
-                "frames": _FRAMES,
-                "height": _SOURCE_HEIGHT,
-                "width": _SOURCE_WIDTH,
+                "frames": 8,
+                "height": 64,
+                "width": 128,
                 **overrides,
             },
         )
@@ -151,7 +151,7 @@ def test_decode_video_resizes_to_the_requested_size(video_tar: Path) -> None:
     tensor = out[0].get("media_tensor")
     assert isinstance(tensor, torch.Tensor)
     assert tensor.shape == (3, _FRAMES, 16, 48)
-    assert (_SOURCE_HEIGHT, _SOURCE_WIDTH) != (16, 48)
+    assert (64, 128) != (16, 48)
 
 
 @pytest.mark.cli_python_subprocess
@@ -207,9 +207,9 @@ def test_decode_video_pads_a_short_clip_to_target_frames(video_tar: Path) -> Non
 
     tensor = out[0].get("media_tensor")
     assert isinstance(tensor, torch.Tensor)
-    assert tensor.shape[1] == _FRAMES + 4
+    assert tensor.shape[1] == 8 + 4
     # The padding repeats the final decoded frame.
-    torch.testing.assert_close(tensor[:, -1], tensor[:, _FRAMES - 1])
+    torch.testing.assert_close(tensor[:, -1], tensor[:, 8 - 1])
 
 
 @pytest.mark.cli_python_subprocess
@@ -323,10 +323,10 @@ def test_decode_video_media_bytes_roundtrip(video_tar: Path) -> None:
         "media": payload,
         "key": "clip",
         "format": "mp4",
-        "frames": _FRAMES,
-        "height": _SOURCE_HEIGHT,
-        "width": _SOURCE_WIDTH,
-        "target_frames": _FRAMES,
+        "frames": 8,
+        "height": 64,
+        "width": 128,
+        "target_frames": 8,
         "target_height": 32,
         "target_width": 32,
     }
@@ -368,9 +368,9 @@ def test_decode_video_refuses_a_format_outside_known_formats(video_tar: Path) ->
                 "_tar_handle": tar,
                 "key": "clip",
                 "format": "mp4",
-                "frames": _FRAMES,
-                "height": _SOURCE_HEIGHT,
-                "width": _SOURCE_WIDTH,
+                "frames": 8,
+                "height": 64,
+                "width": 128,
             },
         )
         out = list(processor(_as_stream([sample])))
@@ -400,9 +400,9 @@ def test_decode_video_checks_the_format_even_when_the_bytes_are_in_hand(
             "key": "clip",
             "format": "mp4",
             "media": payload,
-            "frames": _FRAMES,
-            "height": _SOURCE_HEIGHT,
-            "width": _SOURCE_WIDTH,
+            "frames": 8,
+            "height": 64,
+            "width": 128,
         },
     )
     out = list(processor(_as_stream([sample])))
@@ -423,9 +423,9 @@ def test_decode_video_accepts_bytes_without_a_tar_key(video_tar: Path) -> None:
         {
             "format": "mp4",
             "media": payload,
-            "frames": _FRAMES,
-            "height": _SOURCE_HEIGHT,
-            "width": _SOURCE_WIDTH,
+            "frames": 8,
+            "height": 64,
+            "width": 128,
         },
     )
     out = list(DecodeVideo(DecodeVideo.Config())(_as_stream([sample])))
@@ -453,9 +453,9 @@ def test_decode_video_executable_is_instance_local(
             {
                 "format": "mp4",
                 "media": extracted.read(),
-                "frames": _FRAMES,
-                "height": _SOURCE_HEIGHT,
-                "width": _SOURCE_WIDTH,
+                "frames": 8,
+                "height": 64,
+                "width": 128,
             },
         )
     out = list(processor(_as_stream([sample])))
@@ -810,7 +810,7 @@ def test_video_decode_returns_none_on_a_clip_it_cannot_read() -> None:
     first's output.
     """
     processor = CropDuringDecodeImage(CropDuringDecodeImage.Config())
-    existing = torch.zeros(3, 1, 4, 4, dtype=torch.uint8)
+    existing = torch.zeros(3, 2, 4, 5, dtype=torch.uint8)
 
     out = list(
         processor(

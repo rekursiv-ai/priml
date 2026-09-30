@@ -23,7 +23,7 @@ def tiny_dataset(directory: Path, *, count: int = 8) -> Cifar10Data.Config:
     for split in ("train", "test"):
         torch.save(
             {
-                "media": torch.randn(count, 3, 8, 8, generator=generator),
+                "media": torch.randn(count, 3, 4, 5, generator=generator),
                 "label": torch.randint(0, 10, (count,), generator=generator),
             },
             directory / f"{split}.pt",
@@ -41,7 +41,7 @@ def test_batches_carry_media_and_label(tmp_path: Path) -> None:
     data = tiny_dataset(tmp_path).make()
     batch = next(iter(data.train_dataloader()))
     assert set(batch) == {"media", "label"}
-    assert batch["media"].shape == (3, 3, 8, 8)
+    assert batch["media"].shape == (3, 3, 4, 5)
     assert batch["label"].shape == (3,)
 
 
@@ -171,7 +171,7 @@ def test_prepare_normalizes_and_writes_both_splits(
         )
         # (N, H, W, C) uint8 becomes (N, C, H, W) float: the stub's 255 scales
         # to 1.0 then normalizes to (1 - 0.5) / 0.5 = 1.0, and its 0 to -1.0.
-        assert payload["media"].shape == (2, 3, 4, 4)
+        assert payload["media"].shape == (2, 3, 4, 5)
         values = ListCodec.coerce(payload["media"].unique().tolist(), float)
         labels = ListCodec.coerce(payload["label"].tolist(), int)
         assert values == pytest.approx([expected])
@@ -187,7 +187,7 @@ class _StubCifar10:
     def __init__(self, root: str, *, train: bool, download: bool) -> None:
         del root, download
         value = 255 if train else 0
-        self.data = np.full((2, 4, 4, 3), value, dtype=np.uint8)
+        self.data = np.full((2, 4, 5, 3), value, dtype=np.uint8)
         self.targets = [0, 1]
 
 

@@ -161,36 +161,56 @@ ArcTrainLoop(
                 │       ema_warmup_steps=2_000
                 ),
                 dataset=ArcData.Config(
-                        augmentation=ArcAugmentation.Config(
-                                num_aug=1_000,
-                                seed=42,
-                                retries_factor=5,
-                                transform=ColorDihedral.Config(
-                                        transforms=(0, 1, 2, 3, 4, 5, 6, 7),
-                                        colors=(1, 2, 3, 4, 5, 6, 7, 8, 9),
-                                        separator='|||'
-                                ),
-                                spatial=SpatialAugmentation.Config(
-                                        max_grid=30,
-                                        train_scale_weights={1: 1.0},
-                                        translation_prob=1.0,
-                                        scale_prob=1.0
-                                ),
-                                spatial_eval_views=False,
-                                spatial_eval_scale=2
-                        ),
-                        base_dir='/opt/scratch',
-                        working_dir=PosixPath('/opt/scratch/datasets/arcagi1'),
-                        batch_size=256,
-                        eval_batch_size=256,
-                        device='auto',
-                        seed=0,
-                        num_tasks=None,
-                        num_eval_tasks=None,
-                        rank=-1,
-                        num_replicas=-1,
-                        epochs_per_iter=1,
-                        device_resident=True
+                │       augmentation=ArcAugmentation.Config(
+                │               num_aug=1_000,
+                │               seed=42,
+                │               retries_factor=5,
+                │               transform=ColorDihedral.Config(
+                │                       transforms=(0, 1, 2, 3, 4, 5, 6, 7),
+                │                       colors=(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                │                       separator='|||'
+                │               ),
+                │               spec=ArcSpec(
+                │                       max_grid=30,
+                │                       vocab_pad=0,
+                │                       vocab_eos=1,
+                │                       vocab_color_offset=2,
+                │                       puzzle_id_separator='|||'
+                │               ),
+                │               spatial=SpatialAugmentation.Config(
+                │                       spec=ArcSpec(
+                │                               max_grid=30,
+                │                               vocab_pad=0,
+                │                               vocab_eos=1,
+                │                               vocab_color_offset=2,
+                │                               puzzle_id_separator='|||'
+                │                       ),
+                │                       train_scale_weights={1: 1.0},
+                │                       translation_prob=1.0,
+                │                       scale_prob=1.0
+                │               ),
+                │               spatial_eval_views=False,
+                │               spatial_eval_scale=2
+                │       ),
+                │       spec=ArcSpec(
+                │               max_grid=30,
+                │               vocab_pad=0,
+                │               vocab_eos=1,
+                │               vocab_color_offset=2,
+                │               puzzle_id_separator='|||'
+                │       ),
+                │       base_dir='/opt/scratch',
+                │       working_dir=PosixPath('/opt/scratch/datasets/arcagi1'),
+                │       batch_size=256,
+                │       eval_batch_size=256,
+                │       device='auto',
+                │       seed=0,
+                │       num_tasks=None,
+                │       num_eval_tasks=None,
+                │       rank=-1,
+                │       num_replicas=-1,
+                │       epochs_per_iter=1,
+                │       device_resident=True
                 ),
                 metrics_train={},
                 metrics_eval={       'pass': PassK.Config(

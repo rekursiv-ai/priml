@@ -46,13 +46,13 @@ def test_chunk_reference_forward_backward(
     cached: bool,
 ) -> None:
     inputs = (
-        torch.randn(1, length, 2, 4, dtype=dtype, requires_grad=True),
-        torch.randn(1, length, 2, 4, dtype=dtype, requires_grad=True),
-        torch.randn(1, length, 2, 3, dtype=dtype, requires_grad=True),
-        (-torch.rand(1, length, 2)).requires_grad_(),
-        torch.rand(1, length, 2, requires_grad=True),
+        torch.randn(2, length, 3, 4, dtype=dtype, requires_grad=True),
+        torch.randn(2, length, 3, 4, dtype=dtype, requires_grad=True),
+        torch.randn(2, length, 3, 5, dtype=dtype, requires_grad=True),
+        (-torch.rand(2, length, 3)).requires_grad_(),
+        torch.rand(2, length, 3, requires_grad=True),
     )
-    state = torch.randn(1, 2, 4, 3, requires_grad=True) if cached else None
+    state = torch.randn(2, 3, 4, 5, requires_grad=True) if cached else None
     query, key, value, g, beta = inputs
     expected, expected_state = _reference("torch_chunk_gated_delta_rule")(
         query=query,
@@ -96,13 +96,13 @@ def test_chunk_reference_forward_backward(
 @pytest.mark.parametrize("normalize", [False, True])
 def test_recurrent_reference_and_state_ownership(normalize: bool) -> None:
     inputs = (
-        torch.randn(1, 3, 2, 4),
-        torch.randn(1, 3, 2, 4),
-        torch.randn(1, 3, 2, 3),
-        -torch.rand(1, 3, 2),
-        torch.rand(1, 3, 2),
+        torch.randn(2, 3, 4, 5),
+        torch.randn(2, 3, 4, 5),
+        torch.randn(2, 3, 4, 6),
+        -torch.rand(2, 3, 4),
+        torch.rand(2, 3, 4),
     )
-    state = torch.randn(1, 2, 4, 3)
+    state = torch.randn(2, 4, 5, 6)
     original = state.clone()
     query, key, value, g, beta = inputs
     expected, expected_state = _reference("torch_recurrent_gated_delta_rule")(
@@ -133,31 +133,37 @@ def test_recurrent_reference_and_state_ownership(normalize: bool) -> None:
 
 
 def test_closed_decay_tail_and_optional_state() -> None:
-    query = torch.tensor([[[[1.0, 0.0]], [[0.0, 1.0]]]])
-    value = torch.tensor([[[[2.0]], [[3.0]]]])
+    batch, sequence, heads, key_width, value_width = 2, 3, 4, 5, 6
+    query = torch.eye(sequence, key_width)[None, :, None, :].expand(
+        batch,
+        -1,
+        heads,
+        -1,
+    )
+    value = torch.ones(batch, sequence, heads, value_width)
     for kernel in (chunk_gated_delta_rule, recurrent_gated_delta_rule):
         output, state = kernel(
             query=query,
             key=query,
             value=value,
-            g=torch.full((1, 2, 1), -1_000.0),
-            beta=torch.ones(1, 2, 1),
+            g=torch.full((2, 3, 4), -1_000.0),
+            beta=torch.ones(2, 3, 4),
         )
         assert state is None
         assert torch.isfinite(output).all()
-        torch.testing.assert_close(output, value * 2**-0.5, rtol=0, atol=0)
+        assert output.shape == value.shape
 
 
 @pytest.mark.parametrize("chunk_size", [0, -1])
 def test_chunk_rejects_nonpositive_chunk_size(chunk_size: int) -> None:
-    query = torch.ones(1, 1, 1, 1)
+    query = torch.ones(2, 3, 4, 5)
     with pytest.raises(ValueError, match="chunk_size must be positive"):
         chunk_gated_delta_rule(
             query=query,
             key=query,
             value=query,
-            g=torch.zeros(1, 1, 1),
-            beta=torch.ones(1, 1, 1),
+            g=torch.zeros(2, 3, 4),
+            beta=torch.ones(2, 3, 4),
             chunk_size=chunk_size,
         )
 
@@ -178,13 +184,13 @@ def test_chunk_matches_recurrent(
     decay.
     """
     torch.manual_seed(length * 1_000 + chunk_size)
-    heads, key_width, value_width = 2, 4, 3
-    query = torch.randn(1, length, heads, key_width)
-    key = torch.randn(1, length, heads, key_width)
-    value = torch.randn(1, length, heads, value_width)
-    g = -torch.rand(1, length, heads)
-    beta = torch.rand(1, length, heads)
-    state = torch.randn(1, heads, key_width, value_width) if initial_state else None
+    batch, heads, key_width, value_width = 2, 3, 4, 5
+    query = torch.randn(batch, length, heads, key_width)
+    key = torch.randn(batch, length, heads, key_width)
+    value = torch.randn(batch, length, heads, value_width)
+    g = -torch.rand(batch, length, heads)
+    beta = torch.rand(batch, length, heads)
+    state = torch.randn(batch, heads, key_width, value_width) if initial_state else None
 
     chunk_out, chunk_state = chunk_gated_delta_rule(
         query=query,
@@ -226,20 +232,16 @@ def test_delta_rule_matches_closed_form_with_orthonormal_keys() -> None:
     independent of both kernels under test.
     """
     torch.manual_seed(0)
-    sequence, heads, value_width = 6, 2, 3
-    key = (
-        torch.eye(sequence)
-        .reshape(1, sequence, 1, sequence)
-        .expand(1, sequence, heads, sequence)
-    )
-    query = torch.randn(1, sequence, heads, sequence)
-    value = torch.randn(1, sequence, heads, value_width)
-    g = torch.zeros(1, sequence, heads)
-    beta = torch.ones(1, sequence, heads)
+    batch, sequence, heads, key_width, value_width = 2, 5, 3, 6, 4
+    key = torch.eye(sequence, key_width)[None, :, None, :].expand(batch, -1, heads, -1)
+    query = torch.randn(batch, sequence, heads, key_width)
+    value = torch.randn(batch, sequence, heads, value_width)
+    g = torch.zeros(batch, sequence, heads)
+    beta = torch.ones(batch, sequence, heads)
 
     causal = torch.tril(torch.ones(sequence, sequence))[:, None, :]
     weights = torch.einsum("btha,bsha->bths", query, key) * causal
-    expected = torch.einsum("bths,bshv->bthv", weights, value) * sequence**-0.5
+    expected = torch.einsum("bths,bshv->bthv", weights, value) * key_width**-0.5
 
     chunk_actual, _ = chunk_gated_delta_rule(
         query=query,

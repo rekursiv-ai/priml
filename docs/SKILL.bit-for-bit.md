@@ -171,25 +171,129 @@ absorbs it. Two consequences:
 - Non-torch stacks. JAX/XLA has no dispatch-mode upcast, so none of this
   applies there.
 
-### When to key the golden on the host instead
+### No host-keyed or device-keyed goldens
 
-Some divergence cannot be normalized and has to be named. For a JAX/XLA
-golden, measured: capping the vector ISA changes nothing (`AVX2`, `AVX512`,
-and unpinned hash identically on an AVX-512 host), while Intel and AMD differ
-by one float32 ULP at any cap. Integer and PRNG arrays still match exactly --
-that asymmetry means codegen, not logic.
-
-So the golden filename keys on `(system, machine, cpu_vendor, backend)`, and a
-host with no archive skips. A missing golden means nobody minted one for that
-machine. Do not invent a tolerance, and do not pin an env var that measurement
-shows is inert.
+A golden runs on any CPU and passes under `ATEN_CPU_CAPABILITY=default`,
+`avx2`, and native. A golden keyed on host, vendor, or GPU model skips
+everywhere it was not minted, so it tests nothing there; do not write one.
+Put everything that computes -- model construction included, since
+initializers draw through ISA-dependent kernels -- inside
+`host_agnostic_numerics()`. A stack the upcast cannot reach (JAX/XLA, a
+native GPU kernel) gets exact-match tests on the code paths that can be
+made portable, not a per-host golden.
 
 ## Goldens: small, scoped, conventionally named
 
-A golden proves the code path, not kernel throughput. Every checked-in `.pt`
-stays at most 28,000 bytes, and most are far smaller (`golden_test.py`
-enforces the ceiling). SIMD width is not what the test pins; touching every line of Python
+A golden proves the code path, not kernel throughput. Every binary file under
+every `testdata/` stays at most 32,768 bytes; the golden size test enforces
+it as an error, with no per-file ceilings and no exemptions. Text goldens (`.txt`) are reviewed as
+diffs and have no ceiling. Fixtures live in
+`testdata/`, never `goldens/`, `fixtures/`, or a sibling `data/` a test
+reads. SIMD width is not what the test pins; touching every line of Python
 is.
+
+### Minimal means configured small
+
+Shrink through the config, not the record. Geometry and sizes belong to the
+dataset config; `finalize()` pushes them into the model, so a tiny dataset
+spec makes a tiny model. Every dimension stays at least 2 (width, heads,
+batch, sequence, vocab, board side), with 3 training steps. Prove it: the
+tiny config's line+branch coverage equals the real config's, measured with
+coverage.py JSON, 0 lost.
+
+### Distinct sizes, never 1
+
+Broadcasting hides a transposed or misaligned axis when two axes have the
+same size, and size 1 broadcasts against anything. So every axis of a test
+tensor gets a different size, and axes that meet (batch, sequence, heads,
+head width, channels in and out, vocab) differ from each other too:
+`torch.randn(2, 3, 4)`, never `(2, 2, 4)` or `(1, 4)`. A wrong axis then
+fails with a shape error at mint time instead of being recorded into the
+golden.
+
+Distinct AND small, both at once -- one rule, not two:
+
+- Pick the smallest distinct values the code allows. Break a tie by
+  shrinking one side (`(64, 64)` becomes `(2, 3)`), never by growing it
+  (`(64, 128)`, `(32, 33)`, `(224, 225)`, `(100, 101)`). Bigger only burns
+  compute.
+- Never go back to a square or a 1 to make a test pass. A red test after a
+  shape change means a dependent value was not updated (below), not that the
+  old shape was right.
+- Check the fixed dims too: batch 3 against RGB 3, batch 2 against action
+  width 2, a context length against channels.
+
+A 1 or a repeat stays only with one of three reasons, written in a comment
+at the line:
+
+1. PRODUCTION code forces it: a check that raises, a reshape, or a hard-coded
+   shape (a standalone block cost rejects a non-square image). The comment
+   names that function; the review cites its `file.py:line`. A line number
+   in a comment goes stale. Not the test's own helper, not a docstring, not
+   "the API contract", not "decode is one token" when `forward_cached`
+   accepts any length.
+2. The shape is the degenerate input of a `pytest.raises`.
+3. The golden was recorded from a reference implementation. Check `git log`
+   on the `.pt` first: one minted by our own code is re-minted, not cited.
+   Re-minting a real reference golden from the port would swap the parity
+   proof for a self-snapshot.
+
+### Changing a test shape changes everything that depends on it
+
+Every shape edit is a coupled edit. Update in the same change:
+
+- `batch_size=` / `seq_len=` passed to `assert_cost_matches_torch` or
+  `.cost(...)`. An input batch 2 priced at `batch_size=1` reports exactly
+  half of torch's FLOPs.
+- Capacities the new length must fit: a KV cache `max_seq`, a pool that must
+  not reduce to 0 (`floor((H - 1) / 2**blocks) >= 3` for SpeedNet), a window.
+- Labels and indices that must stay in range: labels `< num_classes`.
+- Expected values, written as arithmetic from the shape
+  (`3 * (15 + 23) / 2 / 1_000`, `cache.length == 5 + 3 * 3`), never a float
+  pasted from the run (`0.057`). The expression is the specification.
+- Goldens minted by our code: re-mint with `BFB_REGENERATE=1`, then run
+  without it.
+
+Then rescan: a tie removed on one line must not create one on the next.
+
+### Inline one-use helpers; name only what a label cannot
+
+A private helper called once (`_config()`, `_inputs()`, a `run=` callback)
+is indirection: put its body at the call site. Share a helper only when two
+or more tests use it.
+
+A module constant earns its name when the name says something the call
+site cannot:
+
+- Keep it when the value recurs in arithmetic or across tests
+  (`TASKS * PUZZLES_PER_TASK * VIEWS_PER_PUZZLE`, `WIDTH // HEADS`), when
+  another module imports it (`CASES`), or when it duplicates a production
+  constant (`experiments.NUM_PUZZLE_IDENTIFIERS` -- never copy its value).
+- Inline it when a config field already labels the value and it has one or
+  two uses: `ffn.round_to = 1`, not `ffn.round_to = FFN_ROUND_TO`.
+- Constants stay `UPPER_CASE`. Lowercasing a global is not removing it.
+- Every module constant is `Final` (`WIDTH: Final = 4`). Shape and size
+  constants shared across a test module stay globals.
+
+### Every shortcut below has been tried; each is a failure
+
+A number that meets the ceiling by removing what the ceiling protects:
+
+- Splitting one golden into parts, shards, or a directory joined at load.
+- Whole-file compression (lzma, xz, gzip).
+- A digest in place of values.
+- Sampling or truncating a compared tensor (`[:4]`), or casting it to a
+  narrower dtype.
+- A shallower pprint depth for a config snapshot, or a squeezed `indent=`/
+  `width=`. Config goldens use `assert_pprint_golden` with its defaults; one
+  over the ceiling is a question for the user, not a new format.
+- An emptied fixture (`[]`) under an assertion that can no longer fail.
+- A production guard deleted so a small fixture loads. Move the guard to
+  the production entry point and test it there.
+- Moving the file to a directory the gate does not scan.
+
+One golden, one file. Over the ceiling means shrink the config or the
+inputs, never the record.
 
 ### Store only what the check needs
 
@@ -253,6 +357,11 @@ Apply in order; re-mint and confirm zero source mismatches after each.
 
 Prove each shrunk golden still bites: perturb one weight by one ULP, or one
 constant, and require a reported mismatch.
+
+A stale golden is not a refactor regression until measured: run the test
+against the committed code in a scratch copy. If it fails identically there,
+re-mint from the live source after source and port agree exactly; otherwise
+the change broke numerics, and the fix goes in the source.
 
 ### Order is numerics
 

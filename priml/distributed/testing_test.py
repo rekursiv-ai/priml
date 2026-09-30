@@ -242,11 +242,10 @@ def test_enter_recovers_from_a_port_collision(
     assert len(ports) >= 2
 
 
-def _acking_context() -> tuple[MagicMock, list[MagicMock]]:
-    """Build a spawn context whose every child acks readiness on start."""
+def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
     started: list[MagicMock] = []
 
-    def _make_process(
+    def make_process(
         *,
         target: object,
         args: tuple[object, ...],
@@ -266,13 +265,8 @@ def _acking_context() -> tuple[MagicMock, list[MagicMock]]:
         return proc
 
     ctx = MagicMock()
-    ctx.Process = _make_process
+    ctx.Process = make_process
     ctx.Queue = queue_mod.Queue
-    return ctx, started
-
-
-def test_enter_spawns_every_rank_and_exit_tears_them_down() -> None:
-    ctx, started = _acking_context()
     pool = _pool(3)
     with patch("priml.distributed.testing.tm.get_context", return_value=ctx):
         entered = pool.__enter__()

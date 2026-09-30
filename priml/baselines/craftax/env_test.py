@@ -176,9 +176,9 @@ def test_a_long_rollout_stays_finite_and_rectangular() -> None:
     function of how many tiles the player can see, and the full 9x11 window
     makes every one of these steps render 8,268 floats to check that.
     """
-    env = _env(view=(3, 3))
+    env = _env(view=(3, 5))
     env.reset()
-    width = observation.observation_size((3, 3))
+    width = observation.observation_size((3, 5))
     for index in range(24):
         transition = env.step(_actions(env, 4, index))
         assert transition.observation.shape == (4, width)
@@ -420,7 +420,7 @@ def test_cuda_graphs_step_bit_for_bit_like_eager(
 def _reserve_env(*, seed: int = 0) -> CraftaxEnv:
     """Four workers sharing a pool of four worlds dealt from a reserve."""
     config = CraftaxEnv.Config()
-    config.view = (3, 3)
+    config.view = (3, 5)
     config.num_envs = 4
     config.device = "cpu"
     config.seed = seed

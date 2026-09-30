@@ -33,7 +33,7 @@ from priml.model.transformer.block import TransformerBlock
 from priml.model.transformer.mmdit import AdaLNZero, MMDiTStream
 from priml.model.transformer.mmdit_graft import MMDiTGraft
 from priml.model.transformer.qwen3 import Qwen3
-from priml.model.transformer.qwen3_test import _canonical_config, _hf_config
+from priml.model.transformer.qwen3_test import canonical_config, hf_config
 from priml.model.transformer.transformer import Transformer, head_is_tied
 from priml.testing import golden
 from priml.testing.bfb import (
@@ -48,7 +48,7 @@ _CWD: Final = Path(__file__).resolve().parent
 
 
 def _backbone(*, depth: int = 1, tie: bool = False) -> Qwen3.Config:
-    config = _canonical_config()
+    config = canonical_config()
     config.num_layers = depth
     if tie:
         assert isinstance(config.proj_out, Sequential.Config)
@@ -69,6 +69,9 @@ def _config(
     config = MMDiTGraft.Config()
     config.backbone = _backbone(depth=depth, tie=tie)
     stream = MMDiTStream.Config()
+    stream.attn.num_heads = 4
+    stream.attn.channels_head = 2
+    stream.attn.num_heads_kv = 2
     stream.ffn = SwiGLU.Config(channels_hidden=24)
     if conditioned:
         stream.adaln = AdaLNZero.Config(cond_dim=4)
@@ -87,10 +90,9 @@ def test_graft_config_pprint() -> None:
 
 def _constructor_state(module: nn.Module, input: Tensor) -> Tensor:
     del module, input
-    model = _config(conditioned=True).make()
+    model = _golden_config().make()
     state = DictCodec.coerce(model.state_dict(), Tensor)
-    # Leading elements pin each parameter's init; the fingerprint pins the draw
-    # count in 8 values instead of the 5 KB Mersenne state.
+    # Leading elements pin initialization; the fingerprint pins the draw count.
     return torch.cat(
         [
             golden.heads(state.values(), count=8),
@@ -110,23 +112,27 @@ def test_graft_constructor_bfb() -> None:
 
 
 def _golden_config() -> MMDiTGraft.Config:
-    """Shrink ``_config`` by size only: width 8, one KV head of 4, smaller hiddens."""
+    """Shrink residual, vocabulary, attention, FFN, and conditioning dimensions."""
     config = _config(conditioned=True)
     config.backbone = Qwen3.Config.from_hf(
-        _hf_config(
-            vocab_size=16,
-            hidden_size=8,
-            intermediate_size=8,
+        hf_config(
+            vocab_size=2,
+            hidden_size=4,
+            intermediate_size=4,
             num_hidden_layers=1,
             num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=4,
+            num_key_value_heads=2,
+            head_dim=2,
         ),
     )
     assert isinstance(config.backbone.block, TransformerBlock.Config)
     assert isinstance(config.backbone.block.attn, SelfAttention.Config)
     config.backbone.block.attn.attn_kernel = SdpaNaive.Config()
-    config.streams[0].ffn = SwiGLU.Config(channels_hidden=8)
+    config.streams[0].attn.num_heads = 2
+    config.streams[0].attn.channels_head = 2
+    config.streams[0].attn.num_heads_kv = 2
+    config.streams[0].ffn = SwiGLU.Config(channels_hidden=4, round_to=1)
+    config.streams[0].adaln = AdaLNZero.Config(cond_dim=2)
     return config
 
 
@@ -135,14 +141,18 @@ def test_graft_forward_bfb() -> None:
         golden_dir=_CWD / "testdata",
         golden_name="mmdit_graft_forward",
         build_module=lambda: _golden_config().make(),
-        build_input=lambda: _graft_batch(width=8),
+        build_input=lambda: _graft_batch(width=4),
         run=_run_graft_forward,
     )
 
 
 def _graft_batch(*, width: int = 16) -> tuple[Tensor, Tensor, Tensor]:
     """Draw tokens, one modality stream, and its conditioning from the seeded RNG."""
-    return torch.tensor([[1, 2, 3]]), torch.randn(1, 2, width), torch.randn(1, 4)
+    return (
+        torch.tensor([[1, 0], [0, 1], [1, 0]]),
+        torch.randn(3, 2, width),
+        torch.randn(3, 2),
+    )
 
 
 def _run_graft_forward(
@@ -156,7 +166,7 @@ def _run_graft_forward(
         tokens,
         [modality],
         c=[None, conditioning],
-        attn_mask=_language_only_masks(3, modality=2),
+        attn_mask=_language_only_masks(2, modality=2),
     )
     return torch.cat([logits.flatten(), streams[0].flatten()])
 
@@ -180,9 +190,6 @@ def _language_only_masks(
     return [mask, None]
 
 
-_FROZEN_CHANNELS: Final = 8
-
-
 def test_graft_frozen_step_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
@@ -195,8 +202,8 @@ def test_graft_frozen_step_bfb() -> None:
 
 def _frozen_batch() -> tuple[Tensor, Tensor, Tensor]:
     """Draw a narrow-width batch: tokens, one modality stream, its conditioning."""
-    tokens = torch.tensor([[1, 2, 3]])
-    return tokens, torch.randn(1, 2, _FROZEN_CHANNELS), torch.randn(1, 4)
+    tokens = torch.tensor([[1, 0], [0, 1], [1, 0]])
+    return tokens, torch.randn(3, 2, 4), torch.randn(3, 2)
 
 
 # The harness stores this model's pre-step state_dict whole, so the golden's size is
@@ -206,23 +213,27 @@ def _frozen_batch() -> tuple[Tensor, Tensor, Tensor]:
 def _frozen_graft() -> MMDiTGraft:
     """Build the conditioned graft with only its modality stream trainable."""
     backbone = _backbone()
-    backbone.channels_in = _FROZEN_CHANNELS
-    backbone.channels_out = 8
+    backbone.channels_in = 4
+    backbone.channels_out = 4
     assert isinstance(backbone.proj_in, Embedding.Config)
-    backbone.proj_in.channels_in = 8
+    backbone.proj_in.channels_in = 2
     backbone_block = backbone.block
     assert isinstance(backbone_block, TransformerBlock.Config)
     assert isinstance(backbone_block.attn, SelfAttention.Config)
     backbone_block.attn.num_heads = 2
-    backbone_block.attn.channels_head = 4
+    backbone_block.attn.channels_head = 2
     assert isinstance(backbone_block.ffn, SwiGLU.Config)
-    backbone_block.ffn.channels_hidden = 4
+    backbone_block.ffn.channels_hidden = 2
     backbone_block.ffn.round_to = 1
     config = MMDiTGraft.Config()
     config.backbone = backbone
     stream = MMDiTStream.Config()
-    stream.ffn = SwiGLU.Config(channels_hidden=6, round_to=1)
-    stream.adaln = AdaLNZero.Config(cond_dim=4)
+    stream.attn.num_heads = 2
+    stream.attn.channels_head = 2
+    # Frozen-step golden uses one KV head to exercise grouped-query transfer.
+    stream.attn.num_heads_kv = 1
+    stream.ffn = SwiGLU.Config(channels_hidden=4, round_to=1)
+    stream.adaln = AdaLNZero.Config(cond_dim=2)
     config.streams = [stream]
     graft = config.make()
     graft.freeze_backbone()
@@ -248,7 +259,7 @@ def _run_frozen_step(
         tokens,
         [modality],
         c=[None, conditioning],
-        attn_mask=_language_only_masks(3, modality=2),
+        attn_mask=_language_only_masks(2, modality=2),
     )
     loss = logits.square().mean() + streams[0].square().mean()
     loss.backward()
@@ -320,9 +331,9 @@ def test_language_only_causal_mask_reproduces_standalone_logits(
     graft = _config(depth=depth, tie=tie).make().eval()
     randomize_parameters(source, seed=7, std=0.2)
     graft.load_backbone(source)
-    tokens = torch.tensor([[1, 2, 3]])
-    other = torch.randn(1, 2, 16)
-    masks = _language_only_masks(3, modality=2)
+    tokens = torch.tensor([[1, 0, 1], [0, 1, 0]])
+    other = torch.randn(2, 3, 8)
+    masks = _language_only_masks(3, modality=3)
     with torch.no_grad(), host_agnostic_numerics():
         expected = source(tokens)
         logits, streams = graft(tokens, [other], attn_mask=masks)
@@ -337,9 +348,9 @@ def test_wider_language_visibility_changes_logits(visibility: str) -> None:
     graft = _config().make().eval()
     randomize_parameters(source, seed=7, std=0.2)
     graft.load_backbone(source)
-    tokens = torch.tensor([[1, 2, 3]])
-    other = torch.randn(1, 2, 16)
-    recipe = _language_only_masks(3, modality=2)[0]
+    tokens = torch.tensor([[1, 0, 1], [0, 1, 0]])
+    other = torch.randn(2, 3, 8)
+    recipe = _language_only_masks(3, modality=3)[0]
     assert recipe is not None
     if visibility == "unmasked":
         mask = None
@@ -372,13 +383,20 @@ def test_continuous_backbone_projections(projected: bool) -> None:
     config.backbone = backbone
     source, graft = backbone.make(), config.make()
     graft.load_backbone(source)
-    inputs = torch.randn(1, 3, backbone.channels_in)
-    other = torch.randn(1, 2, 16)
-    mask = torch.cat((torch.zeros(3, 3), torch.full((3, 2), float("-inf"))), -1)
+    inputs = torch.randn(2, 3, backbone.channels_in)
+    # Modality width follows the projected hidden width, not token input width.
+    if projected:
+        assert isinstance(backbone.proj_in, Linear.Config)
+        stream_width = backbone.proj_in.channels_out
+    else:
+        stream_width = backbone.channels_in
+    other = torch.randn(2, 4, stream_width)
+    # A mask is [..., S_i, sum(S_j)]; one stream makes it square.
+    mask = torch.cat((torch.zeros(3, 3), torch.full((3, 4), float("-inf"))), -1)
     with host_agnostic_numerics():
         output, streams = graft(inputs, [other], attn_mask=[mask, None])
         assert torch.equal(output, source(inputs))
-    assert output.shape == (1, 3, 3 if projected else 16)
+    assert output.shape == (2, 3, 3 if projected else 16)
     assert streams[0].shape == other.shape
 
 
@@ -394,13 +412,13 @@ def test_freezing_preserves_language_weights_while_new_stream_learns() -> None:
         if not parameter.requires_grad
     }
     assert frozen
-    tokens = torch.tensor([[1, 2, 3]])
-    other = torch.randn(1, 2, 16)
+    tokens = torch.tensor([[1, 0, 1], [0, 1, 0]])
+    other = torch.randn(2, 3, 8)
     logits, streams = graft(
         tokens,
         [other],
-        c=[None, torch.randn(1, 4)],
-        attn_mask=_language_only_masks(3, modality=2),
+        c=[None, torch.randn(2, 4)],
+        attn_mask=_language_only_masks(3, modality=3),
     )
     streams[0].square().sum().backward()
     ffn = graft.blocks[0].ffns[1]
@@ -418,7 +436,10 @@ def test_freezing_preserves_language_weights_while_new_stream_learns() -> None:
     for name, parameter in graft.named_parameters():
         if name in frozen:
             assert torch.equal(parameter, frozen[name])
-    assert logits.shape == (1, 3, 32)
+    assert isinstance(graft.proj_out, Sequential)
+    head = graft.proj_out[-1]
+    assert isinstance(head, Linear)
+    assert logits.shape == (2, 3, head.weight.shape[0])
 
 
 def test_loading_preflights_every_layer_before_copying() -> None:
@@ -505,11 +526,11 @@ def test_graft_cost_matches_torch(tie: bool) -> None:
     assert_cost_matches_torch(
         _config(depth=2, tie=tie),
         build_input=lambda: (
-            torch.randint(0, 32, (1, 3)),
-            torch.randn(1, 3, 16, requires_grad=True),
+            torch.randint(0, 2, (2, 3)),
+            torch.randn(2, 3, 8, requires_grad=True),
         ),
         seq_len=3,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
         run=run_graft,
     )
@@ -562,7 +583,8 @@ def test_reset_parameters_redraws_every_owned_module() -> None:
 def test_forward_rejects_the_wrong_stream_count() -> None:
     graft = _config().make()
     with pytest.raises(ValueError, match="Expected 1 modality streams, got 0"):
-        graft(torch.zeros(1, 4, dtype=torch.long), [], attn_mask=torch.ones(4, 4))
+        # Degenerate wrong-stream input is intentional for this pytest.raises case.
+        graft(torch.zeros(2, 4, dtype=torch.long), [], attn_mask=torch.ones(4, 4))
 
 
 def test_load_backbone_state_accepts_transformer_named_weights() -> None:

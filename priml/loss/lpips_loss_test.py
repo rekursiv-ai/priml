@@ -40,16 +40,16 @@ def _make_loss_with_mocked_lpips(
 def lpips_loss() -> LPIPSLoss:
     """Create LPIPSLoss with mocked lpips criterion."""
     return _make_loss_with_mocked_lpips(
-        lambda x, _: torch.rand(x.shape[0], 1, 1, 1),
+        lambda x, _: torch.rand(x.shape[0], 2, 3, 4).mean(dim=(1, 2, 3)),
         max_num_random_frames=10,
     )
 
 
 def test_lpips_loss_basic(lpips_loss: LPIPSLoss) -> None:
     """Test LPIPSLoss basic functionality."""
-    x = torch.randn(2, 3, 4, 64, 64)
-    xhat = torch.randn(2, 3, 4, 64, 64)
-    dummy_model_output = torch.randn(2, 3, 4, 64, 64)
+    x = torch.randn(2, 3, 4, 5, 6)
+    xhat = torch.randn(2, 3, 4, 5, 6)
+    dummy_model_output = torch.randn(2, 3, 4, 5, 6)
 
     result = lpips_loss(dummy_model_output, x=x, xhat=xhat)
 
@@ -59,9 +59,9 @@ def test_lpips_loss_basic(lpips_loss: LPIPSLoss) -> None:
 
 def test_lpips_loss_scalar(lpips_loss: LPIPSLoss) -> None:
     """Test LPIPSLoss returns per-sample losses."""
-    x = torch.randn(2, 3, 4, 64, 64)
-    xhat = torch.randn(2, 3, 4, 64, 64)
-    dummy_model_output = torch.randn(2, 3, 4, 64, 64)
+    x = torch.randn(2, 3, 4, 5, 6)
+    xhat = torch.randn(2, 3, 4, 5, 6)
+    dummy_model_output = torch.randn(2, 3, 4, 5, 6)
 
     result = lpips_loss(dummy_model_output, x=x, xhat=xhat)
 
@@ -72,41 +72,41 @@ def test_lpips_loss_scalar(lpips_loss: LPIPSLoss) -> None:
 def test_lpips_loss_perfect_reconstruction() -> None:
     """Test LPIPSLoss with perfect reconstruction (mocked to return near-zero)."""
     loss = _make_loss_with_mocked_lpips(
-        lambda x, _: torch.zeros(x.shape[0], 1, 1, 1),
+        lambda x, _: torch.zeros(x.shape[0], 2, 3, 4).mean(dim=(1, 2, 3)),
         max_num_random_frames=2,
     )
 
-    x = torch.randn(1, 3, 2, 64, 64)
+    x = torch.randn(4, 3, 2, 5, 6)
     xhat = x.clone()
     dummy_model_output = x.clone()
 
     result = loss(dummy_model_output, x=x, xhat=xhat)
 
-    assert result["loss"].shape == (1,)
-    assert result["loss"].item() < 0.01
+    assert result["loss"].shape == (4,)
+    assert (result["loss"] < 0.01).all()
 
 
 def test_lpips_loss_frame_sampling(lpips_loss: LPIPSLoss) -> None:
     """Test LPIPSLoss frame sampling."""
-    x = torch.randn(1, 3, 10, 64, 64)
-    xhat = torch.randn(1, 3, 10, 64, 64)
-    dummy_model_output = torch.randn(1, 3, 10, 64, 64)
+    x = torch.randn(2, 3, 10, 5, 6)
+    xhat = torch.randn(2, 3, 10, 5, 6)
+    dummy_model_output = torch.randn(2, 3, 10, 5, 6)
 
     result = lpips_loss(dummy_model_output, x=x, xhat=xhat)
 
-    assert result["loss"].shape == (1,)
+    assert result["loss"].shape == (2,)
 
 
 def test_lpips_loss_returns_one_loss_per_input_sample() -> None:
     """LOSSOPT-009: output is pointwise [B] over all input samples, not sliced."""
     loss = _make_loss_with_mocked_lpips(
-        lambda x, _: torch.rand(x.shape[0], 1, 1, 1),
+        lambda x, _: torch.rand(x.shape[0], 2, 3, 4).mean(dim=(1, 2, 3)),
         max_num_random_frames=2,
     )
 
-    x = torch.randn(4, 3, 2, 8, 8)
-    xhat = torch.randn(4, 3, 2, 8, 8)
-    dummy_model_output = torch.randn(4, 3, 2, 8, 8)
+    x = torch.randn(4, 3, 2, 5, 6)
+    xhat = torch.randn(4, 3, 2, 5, 6)
+    dummy_model_output = torch.randn(4, 3, 2, 5, 6)
 
     result = loss(dummy_model_output, x=x, xhat=xhat)
 
@@ -115,28 +115,34 @@ def test_lpips_loss_returns_one_loss_per_input_sample() -> None:
 
 def test_lpips_loss_fewer_frames(lpips_loss: LPIPSLoss) -> None:
     """Test LPIPSLoss when video has fewer frames than max."""
-    x = torch.randn(1, 3, 2, 64, 64)
-    xhat = torch.randn(1, 3, 2, 64, 64)
-    dummy_model_output = torch.randn(1, 3, 2, 64, 64)
+    x = torch.randn(4, 3, 2, 5, 6)
+    xhat = torch.randn(4, 3, 2, 5, 6)
+    dummy_model_output = torch.randn(4, 3, 2, 5, 6)
 
     result = lpips_loss(dummy_model_output, x=x, xhat=xhat)
 
-    assert result["loss"].shape == (1,)
+    assert result["loss"].shape == (4,)
 
 
-@pytest.mark.parametrize("shape", [(1, 2, 4, 4), (2, 1, 5, 7), (2, 3, 8, 6)])
+@pytest.mark.parametrize("shape", [(5, 2, 4, 6), (2, 4, 5, 7), (2, 6, 8, 5)])
 def test_lpips_cost_matches_torch_for_tiny_trunk(
     shape: tuple[int, int, int, int],
 ) -> None:
     """Count both frozen-trunk input gradients and the trainable head's gradients."""
+
+    def run(module: nn.Module, inputs: tuple[Tensor, ...]) -> Tensor:
+        assert isinstance(module, LPIPSLoss)
+        return module(inputs[0], x=inputs[0], xhat=inputs[1])["loss"]
+
     b, t, h, w = shape
-    scored = min(t, LPIPSLoss.Config().max_num_random_frames)
+    config = LPIPSLoss.Config(image_size=(h, w), max_num_random_frames=4)
+    scored = min(t, config.max_num_random_frames)
     with (
         patch("torch.hub.get_dir", side_effect=AssertionError("Weight cache accessed")),
         patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips),
     ):
         analytical = assert_cost_matches_torch(
-            LPIPSLoss.Config(image_size=(h, w)),
+            config,
             build_input=lambda: (
                 torch.randn(b, 3, t, h, w, requires_grad=True),
                 torch.randn(b, 3, t, h, w, requires_grad=True),
@@ -144,12 +150,7 @@ def test_lpips_cost_matches_torch_for_tiny_trunk(
             seq_len=scored,
             batch_size=b,
             dtype=None,
-            run=lambda module, inputs: _loss(
-                module,
-                inputs[0],
-                x=inputs[0],
-                xhat=inputs[1],
-            ),
+            run=run,
         )
     assert analytical.params == 58
 
@@ -157,20 +158,22 @@ def test_lpips_cost_matches_torch_for_tiny_trunk(
 def test_lpips_cost_prices_the_frozen_trunk_twice_and_the_head_once() -> None:
     """Cost a frozen 3x3 convolution, 2x2 max pool, and trainable 1x1 head."""
     with patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips):
-        analytical = LPIPSLoss.Config(image_size=(4, 4)).cost(
-            seq_len=1,
-            batch_size=1,
+        analytical = LPIPSLoss.Config(image_size=(4, 6)).cost(
+            seq_len=2,
+            batch_size=3,
             dtype=None,
         )
-    trunk_products = 3 * 9 * 2 * 16
-    head_products = 2 * 1 * 1 * 4
+    frames = 3 * 2
+    pooled = 2 * 3
+    trunk_products = frames * 3 * 9 * 2 * 4 * 6
+    head_products = frames * 2 * 1 * 1 * pooled
     assert analytical["flops", "primal", "matmul"].sum() == (
         2 * 2 * trunk_products + 2 * head_products
     )
     assert analytical["flops", "adjoint", "matmul"].sum() == (
         2 * 2 * trunk_products + 4 * head_products
     )
-    assert analytical["flops", "adjoint", "selection"].sum() == 2 * 2 * 4
+    assert analytical["flops", "adjoint", "selection"].sum() == 2 * 2 * frames * pooled
     assert analytical.bytes_state == 0
 
 
@@ -193,13 +196,14 @@ def test_lpips_operand_traffic(dtype: torch.dtype) -> None:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
 def test_lpips_frame_selection_traffic(dtype: torch.dtype) -> None:
     with patch("priml.loss.lpips_loss._lpips", side_effect=_tiny_lpips):
-        costed = LPIPSLoss.Config(image_size=(4, 4)).cost(
-            seq_len=1,
-            batch_size=1,
+        costed = LPIPSLoss.Config(image_size=(4, 6)).cost(
+            seq_len=2,
+            batch_size=3,
             dtype=dtype,
         )
     itemsize = dtype.itemsize
-    positions = 16
+    frames = 3 * 2
+    positions = frames * 4 * 6
     # Two frame gathers of the RGB pixels at ``dtype``; the shared frame index
     # is one int64 read per branch.
     assert costed["bytes", "primal", "selection", dtype] == (
@@ -208,8 +212,8 @@ def test_lpips_frame_selection_traffic(dtype: torch.dtype) -> None:
     assert costed["bytes", "primal", "selection", torch.int64] == 8 * 2
     # Back: the pool's dense routing (values at dtype, argmax int64) and the
     # two branches' pixel scatters.
-    pool_values = 2 * 2 * (4 + 1) * 4
-    pool_index = 2 * 2 * 4
+    pool_index = 2 * 2 * frames * 2 * 3
+    pool_values = pool_index * (4 + 1)
     assert costed["bytes", "adjoint", "selection", dtype] == itemsize * (
         pool_values + 2 * 3 * 3 * positions
     )
@@ -257,12 +261,6 @@ def _tiny_lpips(net: str, *, pretrained: bool) -> _TinyLPIPS:
     """Replace heavyweight LPIPS construction on both CPU and meta devices."""
     del net, pretrained
     return _TinyLPIPS()
-
-
-def _loss(module: nn.Module, model_output: Tensor, **batch: Tensor) -> Tensor:
-    """Run the perceptual loss and return its ``loss`` tensor."""
-    assert isinstance(module, LPIPSLoss)
-    return module(model_output, **batch)["loss"]
 
 
 if __name__ == "__main__":

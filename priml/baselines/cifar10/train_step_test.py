@@ -39,13 +39,13 @@ def tiny_step(
     """Return the smallest train-step config that still runs every branch."""
     config = Cifar10TrainStep.Config()
     if model_kind == "resnet":
-        model = ResNet.Config(channels_in=3, channels_out=10)
-        model.channels_hidden = (8, 16)
+        model = ResNet.Config(channels_in=3, channels_out=2)
+        model.channels_hidden = (2, 3)
         model.blocks_per_stage = 1
         config.model = model
     else:
-        speed = SpeedNet.Config(channels_in=3, channels_out=10)
-        speed.channels_hidden = (8, 16, 24)
+        speed = SpeedNet.Config(channels_in=3, channels_out=2)
+        speed.channels_hidden = (2, 3, 4)
         block = speed.block = ConvBlock.Config()
         block.num_convs = 1
         config.model = speed
@@ -55,12 +55,6 @@ def tiny_step(
     config.translate_pad = 1
     config.whiten_num_images = 4
     return config
-
-
-def _constant_half(progress: float) -> float:
-    """Return a schedule holding the learning rate at half its peak."""
-    del progress
-    return 0.5
 
 
 def muon_optimizer() -> CompositeOptimizer.Config:
@@ -77,20 +71,20 @@ def muon_optimizer() -> CompositeOptimizer.Config:
     return split
 
 
-def tiny_batch(*, size: int = 4, image: int = 8, seed: int = 0) -> dict[str, Tensor]:
+def tiny_batch(*, size: int = 2, image: int = 4, seed: int = 0) -> dict[str, Tensor]:
     """Return a deterministic batch of noise images and labels."""
     generator = torch.Generator().manual_seed(seed)
     return {
         "media": torch.randn(size, 3, image, image, generator=generator),
-        "label": torch.randint(0, 10, (size,), generator=generator),
+        "label": torch.randint(0, 2, (size,), generator=generator),
     }
 
 
 def test_train_step_returns_per_example_loss_and_logits() -> None:
     step = tiny_step().make()
     out = step.train_step(**tiny_batch())
-    assert out["loss"].shape == (4,)
-    assert out["model"].shape == (4, 10)
+    assert out["loss"].shape == (2,)
+    assert out["model"].shape == (2, 2)
 
 
 def test_train_step_advances_the_step_counters() -> None:
@@ -210,7 +204,12 @@ def test_an_arbitrary_callable_serves_as_a_schedule() -> None:
     """A schedule is injected, so it need not come from the library at all."""
     config = tiny_step()
     config.warmup_fraction = 0.0
-    config.schedule = PartialConfig(_constant_half)
+
+    def constant_half(progress: float) -> float:
+        del progress
+        return 0.5
+
+    config.schedule = PartialConfig(constant_half)
     step = config.make()
     _ = step.train_step(**tiny_batch())
     group = step.optimizer.param_groups[0]
@@ -336,7 +335,7 @@ def test_train_loss_scores_without_backward() -> None:
     step = tiny_step().make()
     before: Tensor = _head(step).weight.detach().clone()
     out = step.train_loss(**tiny_batch())
-    assert out["loss"].shape == (4,)
+    assert out["loss"].shape == (2,)
     assert torch.equal(before, _head(step).weight)
     assert step.global_step == 0
 
@@ -457,12 +456,6 @@ def _assert_train_bfb(
 
     def build() -> nn.Module:
         config = tiny_step()
-        # Size-only shrink for the golden: the ResNet stage widths drop to
-        # (2, 4). The pre-run state is stored whole, so the weights are the
-        # lever. Every recipe choice is untouched.
-        model = config.model
-        assert isinstance(model, ResNet.Config)
-        model.channels_hidden = (2, 4)
         if optimizer is not None:
             config.optimizer = optimizer
         return _TrainStepModule(config)
@@ -504,18 +497,6 @@ def _model(step: Cifar10TrainStep) -> ResNet | SpeedNet:
     return model
 
 
-def _resnet(step: Cifar10TrainStep) -> ResNet:
-    model = _model(step)
-    assert isinstance(model, ResNet)
-    return model
-
-
-def _speednet(step: Cifar10TrainStep) -> SpeedNet:
-    model = _model(step)
-    assert isinstance(model, SpeedNet)
-    return model
-
-
 class _CountingModel(nn.Module):
     """Records how many forward passes an evaluation issues."""
 
@@ -526,7 +507,7 @@ class _CountingModel(nn.Module):
     @override
     def forward(self, media: Tensor) -> Tensor:
         self.calls += 1
-        return torch.zeros(len(media), 10)
+        return torch.zeros(len(media), 2)
 
     @override
     def eval(self) -> _CountingModel:
@@ -538,7 +519,7 @@ class _ConstantModel(nn.Module):
 
     @override
     def forward(self, media: Tensor) -> Tensor:
-        return torch.ones(len(media), 10)
+        return torch.ones(len(media), 2)
 
     @override
     def eval(self) -> _ConstantModel:
@@ -546,15 +527,17 @@ class _ConstantModel(nn.Module):
 
 
 def _head(step: Cifar10TrainStep) -> nn.Linear:
-    model = _resnet(step)
+    model = _model(step)
+    assert isinstance(model, ResNet)
     head = model.head
     assert isinstance(head, nn.Linear)
     return head
 
 
 def _whitening_weight(step: Cifar10TrainStep) -> Tensor:
-    whiten = _speednet(step).whiten
-    return whiten.weight
+    model = _model(step)
+    assert isinstance(model, SpeedNet)
+    return model.whiten.weight
 
 
 def _group_parameters(group: dict[str, object]) -> list[nn.Parameter]:

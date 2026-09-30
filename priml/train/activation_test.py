@@ -495,10 +495,10 @@ def test_quantized_module_conv_fp32_backward_regression() -> None:
         module_types=(nn.Conv2d,),
         min_size=4,
     )
-    conv = nn.Conv2d(2, 2, kernel_size=3, padding=1)
+    conv = nn.Conv2d(3, 4, kernel_size=3, padding=1)
     config.make()(conv)
 
-    x = torch.randn(1, 2, 8, 8, requires_grad=True)
+    x = torch.randn(2, 3, 4, 5, requires_grad=True)
     conv(x).sum().backward()
 
     assert conv.weight.grad is not None
@@ -518,7 +518,7 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
         module_types=(nn.Conv2d,),
         min_size=4,
     )
-    conv = nn.Conv2d(2, 2, kernel_size=3, padding=1).to(torch.bfloat16)
+    conv = nn.Conv2d(3, 4, kernel_size=3, padding=1).to(torch.bfloat16)
     config.make()(conv)
 
     captured: dict[str, object] = {}
@@ -533,7 +533,7 @@ def test_quantized_module_conv_dequant_matches_input_dtype() -> None:
         assert isinstance(args[0], torch.dtype)
         return orig_to(self, args[0])
 
-    x = torch.randn(1, 2, 8, 8, dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(2, 3, 4, 5, dtype=torch.bfloat16, requires_grad=True)
     out = conv(x)
     Tensor.to = spy_to  # ty: ignore[invalid-assignment] -- test spy replaces an overloaded bound method.
     try:

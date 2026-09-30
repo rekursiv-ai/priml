@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, TypedDict, cast, override
 
 from configgle import Fig
 
+from priml.baselines.arcagi1.augmentation import ArcAugmentation, ArcSpec
 from priml.baselines.arcagi1.data import ArcData
 from priml.lib.custom_json import DictCodec, IntCodec, ListCodec
 from priml.paths import resolve_working_dir
@@ -168,6 +170,14 @@ class Arc2Data:
     class Config(Fig["Arc2Data"]):
         """Prepared-data reader and reference iteration grouping."""
 
+        augmentation: ArcAugmentation.Config = field(
+            default_factory=ArcAugmentation.Config,
+        )
+        """Offline recipe used by the prepared-data reader."""
+
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Dataset-owned packed-grid and token vocabulary configuration."""
+
         base_dir: Path | str | None = None
         """Resource root supplied by the training loop."""
 
@@ -197,12 +207,15 @@ class Arc2Data:
 
         @override
         def finalize(self) -> Self:
+            self.augmentation.spec = self.spec
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
     def __init__(self, config: Config) -> None:
         self.config = config
         prepared = ArcData.Config()
+        prepared.spec = config.spec
+        prepared.augmentation = config.augmentation
         prepared.working_dir = config.working_dir
         prepared.batch_size = config.batch_size
         prepared.eval_batch_size = config.eval_batch_size

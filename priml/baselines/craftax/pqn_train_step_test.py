@@ -25,16 +25,16 @@ def _config(**overrides: object) -> CraftaxPQNTrainStep.Config:
     config = CraftaxPQNTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
     config.env.device = "cpu"
-    config.env.num_envs = 2
+    config.env.num_envs = 4
     config.env.optimistic_reset_ratio = 1
     # A 3x3 view, not the benchmark's 9x11: these test the UPDATE, and a
     # 8,268-wide observation makes the first layer dominate every one.
-    config.env.view = (3, 3)
-    config.rollout_steps = 2
+    config.env.view = (3, 5)
+    config.rollout_steps = 3
     config.num_epochs = 1
     config.num_minibatches = 1
     config.total_train_steps = 10
-    config.model.channels_in = 4
+    config.model.channels_in = 5
     for name, value in overrides.items():
         setattr(config, name, value)
     if "seed" in overrides:
@@ -62,7 +62,7 @@ def test_the_network_is_sized_from_the_environment() -> None:
 
 
 def test_one_step_consumes_the_declared_interactions() -> None:
-    assert _step().steps_per_update == 2 * 2
+    assert _step().steps_per_update == 4 * 3
 
 
 def test_the_loops_batch_passes_through_untouched() -> None:
@@ -136,9 +136,9 @@ def test_targets_are_built_once_before_optimizing() -> None:
 def test_a_rollout_records_both_recurrent_tensors() -> None:
     step = _step()
     rollout = step.collect()
-    assert rollout.hidden.shape == (2, 4)
-    assert rollout.cell.shape == (2, 4)
-    assert rollout.previous_action.shape == (2, 2)
+    assert rollout.hidden.shape == (4, 5)
+    assert rollout.cell.shape == (4, 5)
+    assert rollout.previous_action.shape == (3, 4)
 
 
 def test_exploration_decays_across_the_run() -> None:

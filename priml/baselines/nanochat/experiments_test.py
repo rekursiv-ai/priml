@@ -18,7 +18,6 @@ import math
 import pickle
 
 from configgle import PartialConfig
-from configgle.pprinting import pformat
 from configgle.testing import assert_pprint_golden
 from pyarrow import parquet
 
@@ -133,11 +132,7 @@ def test_experiment_ladder_has_twenty_three_rungs() -> None:
 
 @pytest.mark.compute_large_fixture
 def test_exp022_matches_its_full_config_golden() -> None:
-    assert_pprint_golden(
-        test_file=__file__,
-        name="exp022",
-        config=experiments.exp022(),
-    )
+    assert_pprint_golden(test_file=__file__, name="exp022", config=experiments.exp022())
 
 
 @pytest.mark.parametrize(
@@ -206,7 +201,7 @@ def test_memory_experiments_finalize_without_runtime_io(
     assert config.dataset.max_seq_len == config.step.model.max_seq_len
 
 
-LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
+LADDER: Final[list[tuple[str, Callable[[], NanoChatLoop.Config]]]] = [
     ("exp000", experiments.exp000),
     ("exp001", experiments.exp001),
     ("exp002", experiments.exp002),
@@ -217,7 +212,7 @@ LADDER: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = [
 # exp000 pins a kernel that builds only for SM90, so anything CONSTRUCTING a
 # model excludes it: the rung is unbuildable on a laptop and on most CI, which
 # is the point of exp001 existing. Its config-level fields are still checked.
-PORTABLE: list[tuple[str, Callable[[], NanoChatLoop.Config]]] = LADDER[1:]
+PORTABLE: Final[list[tuple[str, Callable[[], NanoChatLoop.Config]]]] = LADDER[1:]
 
 
 def _pattern(cfg: NanoChatLoop.Config) -> str:
@@ -676,37 +671,8 @@ def test_the_models_compile_switch_leaves_the_optimizers_alone() -> None:
 
 
 @pytest.mark.compute_large_fixture
-def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:
-    """Pin the WHOLE finalized ``exp000`` as readable text.
-
-    ``exp000`` is the control every fork is measured against, so a change to
-    it invalidates published numbers. A digest would say only that something
-    moved; this golden says WHICH field, from what, to what.
-    ``hide_default_values=False`` so a field that changes only because a
-    library default changed still shows up here.
-
-    Marked rather than shrunk: the claim IS the whole tree, so every lever that
-    would bring the render under the unit budget -- a narrower model, fewer
-    layers, hiding defaults -- pins a config no experiment runs. Measured 0.25s
-    on a CPU host, essentially all of it inside ``pformat``, which walks the
-    finalized tree and tokenizes each rendered node to find replacements
-    outside string literals.
-
-    Refresh ``testdata/exp000.txt`` with ``--golden-overwrite`` after reading
-    the diff.
-    """
-    golden = _CWD / "testdata" / "exp000.txt"
-    rendered = pformat(
-        experiments.exp000().copy_tree().finalize(),
-        hide_default_values=False,
-    )
-    if request.config.getoption("--golden-overwrite", default=False):
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        _ = golden.write_text(rendered + "\n", encoding="utf-8")
-    assert golden.read_text(encoding="utf-8") == rendered + "\n", (
-        "exp000 changed; read the diff, then rerun with --golden-overwrite "
-        "if the change is intended."
-    )
+def test_exp000_matches_its_golden_config() -> None:
+    assert_pprint_golden(test_file=__file__, name="exp000", config=experiments.exp000())
 
 
 if __name__ == "__main__":

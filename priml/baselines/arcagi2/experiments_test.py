@@ -16,6 +16,7 @@ from priml.baselines.arcagi2.experiments import exp000, exp_smoke
 from priml.baselines.arcagi2.metric import PassK
 from priml.baselines.arcagi2.train_step import ArcDataParallel, ArcTrainStep
 from priml.baselines.arcagi2.train_step_test import training_config
+from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.runtime import MultiProcess, SingleProcess
 from priml.train.checkpointer import Checkpointer
 from priml.train.parallelism import NoParallel
@@ -38,6 +39,22 @@ def test_finalized_reference_recipe() -> None:
     metric = config.metrics_eval[""]
     assert isinstance(metric, PassK.Config)
     assert metric.working_dir == config.dataset.working_dir
+
+
+def test_model_geometry_follows_the_dataset_spec() -> None:
+    default = exp000().finalize()
+    default_embedding = default.step.model.embedding
+    assert isinstance(default_embedding, GridEmbedding.Config)
+    assert default_embedding.grid_shape == (900,) == default.dataset.spec.grid_shape
+    assert default.step.model.vocab_size == 12 == default.dataset.spec.vocab_size
+
+    config = exp000()
+    config.dataset.spec.max_grid = 2
+    finalized = config.finalize()
+    embedding = finalized.step.model.embedding
+    assert isinstance(embedding, GridEmbedding.Config)
+    assert embedding.grid_shape == (4,)
+    assert finalized.step.model.vocab_size == config.dataset.spec.vocab_size
 
 
 def test_resource_paths_follow_base_dir(tmp_path: Path) -> None:
@@ -81,8 +98,8 @@ def test_train_loop_evaluation_checkpoint_and_resume(tmp_path: Path) -> None:
             '{"ignore_label_id": 0, "blank_identifier_id": 0}',
         )
         for name, array in {
-            "inputs": np.full((3, 9), 2, dtype=np.int32),
-            "labels": np.full((3, 9), 2, dtype=np.int32),
+            "inputs": np.full((3, 9), 1, dtype=np.int32),
+            "labels": np.full((3, 9), 1, dtype=np.int32),
             "puzzle_identifiers": np.array([1], dtype=np.int32),
             "puzzle_indices": np.array([0, 3], dtype=np.int64),
             "group_indices": np.array([0, 1], dtype=np.int64),
@@ -90,7 +107,9 @@ def test_train_loop_evaluation_checkpoint_and_resume(tmp_path: Path) -> None:
             np.save(directory / f"all__{name}.npy", array)
     config = exp_smoke()
     config.base_dir = tmp_path
-    config.step = training_config(8, torch.bfloat16)
+    config.step = training_config(4, torch.bfloat16)
+    assert isinstance(config.step.model.embedding, GridEmbedding.Config)
+    config.dataset.spec.max_grid = 3
     config.runtime = SingleProcess.Config(device="cpu")
     config.dataset.device = "cpu"
     config.max_steps = 1

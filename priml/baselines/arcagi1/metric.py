@@ -48,7 +48,7 @@ import torch
 import torch.distributed as dist
 
 from priml.baselines.arcagi1.augmentation import (
-    ARC,
+    ArcSpec,
     ColorDihedral,
     arc_grid_to_np,
     crop_grid,
@@ -319,6 +319,9 @@ class CanonicalPassK:
         per_step_acts: int = 0
         """Per-ACT-step signal columns in a wide model output; 0 for none."""
 
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Prepared dataset's packed-grid geometry and vocabulary."""
+
         transform: Makeable[ColorDihedral] = field(default_factory=ColorDihedral.Config)
         """Color/dihedral policy that encoded the prepared identifiers."""
 
@@ -332,6 +335,11 @@ class CanonicalPassK:
 
         @override
         def finalize(self) -> Self:
+            if (
+                isinstance(self.transform, ColorDihedral.Config)
+                and not self.transform.separator
+            ):
+                self.transform.separator = self.spec.puzzle_id_separator
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
             return super().finalize()
 
@@ -467,6 +475,7 @@ class CanonicalPassK:
                         pad_r=pad_r,
                         pad_c=pad_c,
                     ),
+                    spec=self.config.spec,
                 ),
             )
             input_h = grid_hash(input_canon)
@@ -478,6 +487,7 @@ class CanonicalPassK:
                         pad_r=pad_r,
                         pad_c=pad_c,
                     ),
+                    spec=self.config.spec,
                 ),
             )
             pred_h = grid_hash(pred_canon)
@@ -544,8 +554,8 @@ class CanonicalPassK:
             }
             task_had_preds = False
             for pair in pairs:
-                input_h = grid_hash(_json_grid(pair["input"]))
-                label_h = grid_hash(_json_grid(pair["output"]))
+                input_h = grid_hash(_json_grid(pair["input"], spec=self.config.spec))
+                label_h = grid_hash(_json_grid(pair["output"], spec=self.config.spec))
                 records = preds.get(name, {}).get(input_h, [])
                 cap = self.config.max_views_per_input
                 if cap > 0 and len(records) > cap:
@@ -736,6 +746,9 @@ class SignalDumpTracker:
         working_dir: Path | str = "/signals_{global_step}.npz"
         """Logical destination; ``{global_step}`` is formatted at write time."""
 
+        spec: ArcSpec = field(default_factory=ArcSpec)
+        """Prepared dataset's packed-grid geometry."""
+
         @override
         def finalize(self) -> Self:
             self.working_dir = resolve_working_dir(self.base_dir, self.working_dir)
@@ -787,6 +800,7 @@ class SignalDumpTracker:
             payload=payload,
             dump_signals_path=str(self.config.working_dir),
             global_step=step,
+            spec=self.config.spec,
         )
 
     def log_images(self, key: str, images: list[object], step: int) -> None:
@@ -806,6 +820,7 @@ def write_signal_dump(
     payload: SignalDumpPayload,
     dump_signals_path: str | Path,
     global_step: int,
+    spec: ArcSpec,
 ) -> None:
     """Gather every rank's dump and write it as one ``.npz`` from rank 0.
 
@@ -813,6 +828,7 @@ def write_signal_dump(
       payload: This rank's rows, unique prediction grids, and step rows.
       dump_signals_path: A ``Path`` is literal; a ``str`` formats ``{global_step}``.
       global_step: Step substituted into a ``str`` path.
+      spec: Dataset-owned packed-grid geometry.
 
     """
     if isinstance(dump_signals_path, Path):
@@ -861,7 +877,7 @@ def write_signal_dump(
         n_rows[j] = nr
         n_cols[j] = nc
     n_pred = len(pred_table)
-    pred_grids = np.zeros((n_pred, ARC.max_grid, ARC.max_grid), dtype=np.uint8)
+    pred_grids = np.zeros((n_pred, spec.max_grid, spec.max_grid), dtype=np.uint8)
     pred_n_rows = np.zeros(n_pred, dtype=np.uint8)
     pred_n_cols = np.zeros(n_pred, dtype=np.uint8)
     for pid, pred_h in enumerate(pred_table):
@@ -1023,9 +1039,9 @@ def _floats(values: Tensor) -> list[float]:
     return ListCodec.coerce(values.tolist(), float)
 
 
-def _json_grid(value: object) -> NDArray[np.uint8]:
+def _json_grid(value: object, *, spec: ArcSpec) -> NDArray[np.uint8]:
     rows = [ListCodec.coerce(row, int) for row in ListCodec.coerce(value)]
-    return arc_grid_to_np(rows, max_grid=ARC.max_grid)
+    return arc_grid_to_np(rows, max_grid=spec.max_grid)
 
 
 def _shape(grid: NDArray[np.uint8]) -> tuple[int, int]:

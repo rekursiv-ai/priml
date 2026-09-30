@@ -128,13 +128,13 @@ def test_output_gate_bfb(device: str) -> None:
         golden_name="output_gate",
         build_module=lambda: (
             OutputGate.Config(
-                channels_in=16,
-                inner=SelfAttention.Config(num_heads=2, channels_head=8),
+                channels_in=4,
+                inner=SelfAttention.Config(num_heads=2, channels_head=2),
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: torch.randn(2, 4, 16),
+        build_input=lambda: torch.randn(2, 3, 4),
         seed=0,
     )
 
@@ -151,15 +151,15 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
     )
     model_cost = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
-        seq_len=8,
-        batch_size=1,
+        build_input=lambda: torch.randn(2, 3, 16, requires_grad=True),
+        seq_len=3,
+        batch_size=2,
         dtype=None,
     )
     inner = cost(
         config.copy_tree().finalize().inner,
-        seq_len=8,
-        batch_size=1,
+        seq_len=3,
+        batch_size=2,
         dtype=None,
     )
     gate = 16 * 16
@@ -170,7 +170,7 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
             "primal",
             "matmul",
         ].sum()
-        + 2 * 8 * gate
+        + 4 * 3 * gate
     )
     assert (
         model_cost["flops", "adjoint", "matmul"].sum()
@@ -179,7 +179,7 @@ def test_output_gate_cost_is_the_inner_plus_a_square_gate_matmul() -> None:
             "adjoint",
             "matmul",
         ].sum()
-        + 4 * 8 * gate
+        + 8 * 3 * gate
     )
     assert model_cost.params == inner.params + gate
     assert model_cost.bytes_state == inner.bytes_state

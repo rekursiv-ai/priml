@@ -26,10 +26,11 @@ def _prepared_pair(root: Path, name: str, label: int) -> None:
     latent_dir = root / "vae-in" / "00000"
     image_dir.mkdir(parents=True, exist_ok=True)
     latent_dir.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (4, 4), color=(label, 0, 0)).save(image_dir / f"img{name}.png")
+    Image.new("RGB", (4, 3), color=(label, 0, 0)).save(image_dir / f"img{name}.png")
+    # The loader strips the leading axis and requires 32 INVAE channels.
     np.save(
         latent_dir / f"img-latents-{name}.npy",
-        np.full((1, 32, 2, 2), label, dtype=np.float32),
+        np.full((1, 32, 2, 3), label, dtype=np.float32),
     )
 
 
@@ -42,7 +43,7 @@ def test_reference_names_and_tensor_values(tmp_path: Path) -> None:
     (tmp_path / "vae-in" / "dataset.json").write_text(json.dumps({"labels": labels}))
     dataset = PairedImageLatentDataset.Config(working_dir=tmp_path).make()
     assert len(dataset) == 10
-    assert torch.equal(dataset[0]["latent"], torch.full((32, 2, 2), 5.0))
+    assert torch.equal(dataset[0]["latent"], torch.full((32, 2, 3), 5.0))
     assert dataset[0]["image"][0, 0, 0] == 5
     assert dataset[0]["label"] == 5
 

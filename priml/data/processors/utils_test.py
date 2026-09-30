@@ -147,37 +147,37 @@ def test_sample_frame_indices_middle_frame_even_total():
 
 def test_as_image_batch_tensor_cfhw_to_fchw():
     """Test as_image_batch_tensor converts (C, F, H, W) to (F, C, H, W)."""
-    x = torch.zeros(3, 8, 224, 224)  # (C, F, H, W)
+    x = torch.zeros(3, 8, 4, 5)  # (C, F, H, W)
     result = as_image_batch_tensor(x)
-    assert result.shape == (8, 3, 224, 224)  # (F, C, H, W)
+    assert result.shape == (8, 3, 4, 5)  # (F, C, H, W)
 
 
 def test_as_image_batch_tensor_image_f1():
     """Test as_image_batch_tensor with F=1 (image case)."""
-    x = torch.zeros(3, 1, 224, 224)  # (C, F=1, H, W)
+    x = torch.zeros(3, 2, 4, 5)  # (C, F, H, W)
     result = as_image_batch_tensor(x)
-    assert result.shape == (1, 3, 224, 224)  # (F=1, C, H, W)
+    assert result.shape == (2, 3, 4, 5)  # (F, C, H, W)
 
 
 def test_as_image_batch_tensor_batched():
     """Test as_image_batch_tensor with batched input (B, C, F, H, W)."""
-    x = torch.zeros(4, 3, 8, 224, 224)  # (B, C, F, H, W)
+    x = torch.zeros(2, 3, 6, 4, 5)  # (B, C, F, H, W)
     result = as_image_batch_tensor(x)
-    assert result.shape == (4, 8, 3, 224, 224)  # (B, F, C, H, W)
+    assert result.shape == (2, 6, 3, 4, 5)  # (B, F, C, H, W)
 
 
 def test_as_image_batch_tensor_flatten_leading_dims():
     """Test as_image_batch_tensor flattens leading dimensions beyond 5D."""
-    x = torch.zeros(2, 3, 3, 8, 224, 224)  # (*, *, C, F, H, W)
+    x = torch.zeros(2, 7, 3, 8, 4, 5)  # (*, *, C, F, H, W)
     result = as_image_batch_tensor(x)
-    assert result.shape == (6, 8, 3, 224, 224)  # (B=6, F, C, H, W)
+    assert result.shape == (2 * 7, 8, 3, 4, 5)  # (B, F, C, H, W)
 
 
 def test_as_image_batch_tensor_preserves_values():
     """Test as_image_batch_tensor preserves tensor values."""
-    x = torch.arange(3 * 2 * 4 * 4).reshape(3, 2, 4, 4).float()  # (C, F, H, W)
+    x = torch.arange(3 * 2 * 4 * 5).reshape(3, 2, 4, 5).float()  # (C, F, H, W)
     result = as_image_batch_tensor(x)
-    assert result.shape == (2, 3, 4, 4)  # (F, C, H, W)
+    assert result.shape == (2, 3, 4, 5)  # (F, C, H, W)
     # Verify values preserved by checking a few elements.
     assert torch.all(result[0, 0] == x[0, 0])  # First channel, first frame.
     assert torch.all(result[1, 2] == x[2, 1])  # Third channel, second frame.
@@ -185,54 +185,54 @@ def test_as_image_batch_tensor_preserves_values():
 
 def test_as_image_batch_tensor_with_dtype():
     """Test as_image_batch_tensor respects dtype parameter."""
-    x = torch.zeros(3, 1, 224, 224, dtype=torch.uint8)
+    x = torch.zeros(3, 2, 4, 5, dtype=torch.uint8)
     result = as_image_batch_tensor(x, dtype=torch.float32)
     assert result.dtype == torch.float32
-    assert result.shape == (1, 3, 224, 224)
+    assert result.shape == (2, 3, 4, 5)
 
 
 def test_as_image_batch_tensor_with_device():
     """Test as_image_batch_tensor respects device parameter."""
-    x = torch.zeros(3, 1, 224, 224)
+    x = torch.zeros(3, 2, 4, 5)
     result = as_image_batch_tensor(x, device="cpu")
     assert result.device.type == "cpu"
-    assert result.shape == (1, 3, 224, 224)
+    assert result.shape == (2, 3, 4, 5)
 
 
 def test_as_image_batch_tensor_too_few_dims_raises():
     """Test as_image_batch_tensor raises on tensors with < 4 dimensions."""
-    x = torch.zeros(3, 224, 224)  # Only 3D.
+    x = torch.zeros(3, 4, 5)  # Only 3D.
     with pytest.raises(ValueError, match="Too few dimensions"):
         as_image_batch_tensor(x)
 
 
 def test_preprocess_images_area_ignores_align_corners():
     """align_corners must be dropped for area mode (PyTorch rejects it)."""
-    x = torch.rand(1, 3, 8, 8)
+    x = torch.rand(2, 3, 4, 5)
     # Area does not support align_corners; passing it must not raise.
-    out = preprocess_images(x, size=(4, 4), mode="area", align_corners=True)
-    assert out.shape == (1, 3, 4, 4)
+    out = preprocess_images(x, size=(3, 4), mode="area", align_corners=True)
+    assert out.shape == (2, 3, 3, 4)
 
 
 def test_preprocess_images_nearest_ignores_align_corners():
     """align_corners must be dropped for nearest mode."""
-    x = torch.rand(1, 3, 8, 8)
-    out = preprocess_images(x, size=(4, 4), mode="nearest", align_corners=True)
-    assert out.shape == (1, 3, 4, 4)
+    x = torch.rand(2, 3, 4, 5)
+    out = preprocess_images(x, size=(3, 4), mode="nearest", align_corners=True)
+    assert out.shape == (2, 3, 3, 4)
 
 
 def test_preprocess_images_hybrid_downsample_ignores_align_corners():
     """Hybrid downsampling resolves to area, so align_corners must be dropped."""
-    x = torch.rand(1, 3, 16, 16)
-    out = preprocess_images(x, size=(4, 4), mode="hybrid", align_corners=True)
-    assert out.shape == (1, 3, 4, 4)
+    x = torch.rand(2, 3, 4, 5)
+    out = preprocess_images(x, size=(3, 4), mode="hybrid", align_corners=True)
+    assert out.shape == (2, 3, 3, 4)
 
 
 def test_preprocess_images_bilinear_uses_align_corners():
     """align_corners must still take effect for bilinear (different results)."""
-    x = torch.rand(1, 3, 8, 8)
-    out_true = preprocess_images(x, size=(4, 4), mode="bilinear", align_corners=True)
-    out_false = preprocess_images(x, size=(4, 4), mode="bilinear", align_corners=False)
+    x = torch.rand(2, 3, 4, 5)
+    out_true = preprocess_images(x, size=(2, 3), mode="bilinear", align_corners=True)
+    out_false = preprocess_images(x, size=(2, 3), mode="bilinear", align_corners=False)
     assert not torch.allclose(out_true, out_false)
 
 
@@ -258,45 +258,49 @@ def test_progressive_bisection_adds_endpoints_then_splits_the_widest_gap(
 
 def test_preprocess_images_rejects_integer_and_non_nchw_inputs() -> None:
     with pytest.raises(TypeError, match="float type"):
-        preprocess_images(torch.zeros(1, 3, 4, 4, dtype=torch.uint8), size=(2, 2))
+        preprocess_images(torch.zeros(2, 3, 4, 5, dtype=torch.uint8), size=(2, 3))
+    # preprocess_images rejects this deliberately invalid rank-3 input.
     with pytest.raises(TypeError, match="NCHW"):
-        preprocess_images(torch.zeros(3, 4, 4), size=(2, 2))
+        preprocess_images(torch.zeros(3, 4, 5), size=(2, 3))
 
 
 def test_preprocess_images_lanczos_resizes_through_pil_and_rejects_align_corners():
-    x = torch.linspace(-1, 1, 3 * 8 * 8).view(1, 3, 8, 8)
-    out = preprocess_images(x, size=(4, 4), mode="lanczos", dtype=torch.float64)
-    assert out.shape == (1, 3, 4, 4)
+    x = torch.linspace(-1, 1, 2 * 3 * 4 * 5).view(2, 3, 4, 5)
+    out = preprocess_images(x, size=(2, 3), mode="lanczos", dtype=torch.float64)
+    assert out.shape == (2, 3, 2, 3)
     assert out.dtype == torch.float64
     assert out.min() >= -1
     assert out.max() <= 1
     with pytest.raises(ValueError, match="align_corners is not supported"):
-        preprocess_images(x, size=(4, 4), mode="lanczos", align_corners=False)
+        preprocess_images(x, size=(2, 3), mode="lanczos", align_corners=False)
 
 
 def test_preprocess_images_casts_when_no_resize_is_needed_and_normalizes() -> None:
-    x = torch.full((1, 2, 4, 4), 0.5)
+    x = torch.full((2, 3, 4, 5), 0.5)
     out = preprocess_images(
         x,
-        size=(4, 4),
-        mean=[0.5, 0.25],
-        std=[0.5, 0.25],
+        size=(3, 4),
+        mean=[0.5, 0.25, 0.0],
+        std=[0.5, 0.25, 0.5],
         dtype=torch.float64,
     )
     assert out.dtype == torch.float64
-    assert torch.equal(out[0, 0], torch.zeros(4, 4, dtype=torch.float64))
-    assert torch.equal(out[0, 1], torch.ones(4, 4, dtype=torch.float64))
+    assert torch.equal(out[0, 0], torch.zeros(3, 4, dtype=torch.float64))
+    assert torch.equal(out[0, 1], torch.ones(3, 4, dtype=torch.float64))
 
 
 def test_image_batch_to_pil_list_rejects_bad_inputs_and_maps_the_range() -> None:
     with pytest.raises(TypeError, match="float type"):
-        image_batch_to_pil_list(torch.zeros(1, 3, 2, 2, dtype=torch.uint8))
+        image_batch_to_pil_list(torch.zeros(2, 3, 4, 5, dtype=torch.uint8))
+    # image_batch_to_pil_list rejects this deliberately invalid rank-3 input.
     with pytest.raises(TypeError, match="NCHW"):
-        image_batch_to_pil_list(torch.zeros(3, 2, 2))
-    images = image_batch_to_pil_list(torch.tensor([[[[-1.0, 1.0]]]]).expand(2, 3, 1, 2))
+        image_batch_to_pil_list(torch.zeros(3, 4, 5))
+    images = image_batch_to_pil_list(
+        torch.tensor([[[[-1.0, -0.5, 0.0, 0.5, 1.0]]]]).expand(2, 3, 4, 5),
+    )
     assert len(images) == 2
     assert images[0].getpixel((0, 0)) == (0, 0, 0)
-    assert images[0].getpixel((1, 0)) == (255, 255, 255)
+    assert images[0].getpixel((4, 0)) == (255, 255, 255)
 
 
 if __name__ == "__main__":

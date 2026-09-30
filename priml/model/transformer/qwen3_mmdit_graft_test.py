@@ -20,10 +20,11 @@ from priml.model.transformer.mmdit_graft_test import (
 from priml.model.transformer.qwen3 import Qwen3
 from priml.model.transformer.qwen3_mmdit_graft import Qwen3MMDiTGraft
 from priml.model.transformer.qwen3_test import (
-    _attn,
-    _canonical_config,
-    _hf_config,
-    _synth_hf_state_dict,
+    attn,
+    canonical_config,
+    ffn,
+    hf_config,
+    synth_hf_state_dict,
 )
 from priml.testing.bfb import host_agnostic_numerics
 from priml.testing.cost import assert_cost_matches_torch
@@ -32,7 +33,7 @@ from priml.testing.cost import assert_cost_matches_torch
 def test_config_defaults_and_make() -> None:
     config = Qwen3MMDiTGraft.Config()
     assert isinstance(config.backbone, Qwen3.Config)
-    config.backbone = _canonical_config()
+    config.backbone = canonical_config()
     assert isinstance(config.make(), Qwen3MMDiTGraft)
     assert_pprint_golden(test_file=__file__, name="qwen3_mmdit_graft", config=config)
 
@@ -42,17 +43,19 @@ def test_config_defaults_and_make() -> None:
 def test_load_local_checkpoint(tmp_path: Path, tie: bool, dtype: torch.dtype) -> None:
     _write_synthetic_checkpoint(tmp_path, tie=tie)
     config = Qwen3MMDiTGraft.Config()
+    backbone = canonical_config()
+    stream_width = backbone.channels_in
     config.streams = [MMDiTStream.Config(), MMDiTStream.Config()]
-    config.streams[1].ffn = SwiGLU.Config(channels_hidden=24)
+    config.streams[1].ffn = SwiGLU.Config(channels_hidden=stream_width)
     before = config.pformat(finalize=False)
     graft = Qwen3MMDiTGraft.load(tmp_path, config=config, dtype=dtype, device="cpu")
     source = Qwen3.load(tmp_path, dtype=dtype)
     _assert_transferred(source, graft)
     assert graft.num_streams == 3
     assert isinstance(graft.blocks[0].ffns[2], SwiGLU)
-    ffn = graft.blocks[0].ffns[2]
-    assert isinstance(ffn, SwiGLU)
-    assert ffn.up_proj.weight.shape[-2] == 48
+    built_ffn = graft.blocks[0].ffns[2]
+    assert isinstance(built_ffn, SwiGLU)
+    assert built_ffn.up_proj.weight.shape[-2] == 2 * stream_width
     assert all(parameter.dtype == dtype for parameter in graft.parameters())
     assert config.pformat(finalize=False) == before
 
@@ -64,19 +67,21 @@ def _write_synthetic_checkpoint(
     tie: bool = False,
 ) -> None:
     """Write a random tiny Qwen3 checkpoint in the HF on-disk layout."""
-    hf = _hf_config(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
+    config = canonical_config()
+    attention = attn(config)
+    hf = hf_config(
+        vocab_size=config.channels_out,
+        hidden_size=config.channels_in,
+        intermediate_size=ffn(config).channels_hidden,
         num_hidden_layers=layers,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=8,
+        num_attention_heads=attention.num_heads,
+        num_key_value_heads=attention.num_heads_kv,
+        head_dim=attention.channels_head,
         tie_word_embeddings=tie,
     )
     (directory / "config.json").write_text(json.dumps(hf))
     torch.save(
-        _synth_hf_state_dict(Qwen3.Config.from_hf(hf)),
+        synth_hf_state_dict(Qwen3.Config.from_hf(hf)),
         directory / "pytorch_model.bin",
     )
 
@@ -95,9 +100,13 @@ def test_load_freeze_and_step_recipe(tmp_path: Path) -> None:
     }
     assert frozen
     assert len(frozen) < len(before)
-    tokens = torch.tensor([[1, 2, 3]])
-    modality = torch.randn(1, 2, 16)
-    masks = _language_only_masks(3, modality=2)
+    config = canonical_config()
+    tokens = torch.tensor([[1, 0], [0, 1]])
+    modality = torch.randn(2, 3, config.channels_in)
+    masks = _language_only_masks(
+        tokens.shape[1],
+        modality=modality.shape[1],
+    )
     optimizer = torch.optim.SGD(graft.parameters(), lr=0.1)
     # Two steps, not one: the fresh modality FFN starts with a zero down
     # projection, so its up projection receives an exactly zero gradient until
@@ -119,7 +128,7 @@ def test_load_freeze_and_step_recipe(tmp_path: Path) -> None:
 
 def test_load_rejects_other_qwen_families(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text(
-        json.dumps(_hf_config(model_type="qwen3_moe")),
+        json.dumps(hf_config(model_type="qwen3_moe")),
     )
     torch.save({}, tmp_path / "pytorch_model.bin")
     with pytest.raises(ValueError, match="model_type"):
@@ -134,17 +143,18 @@ def test_cost_is_inherited_and_matches_torch() -> None:
     in (``mmdit_graft_test``).
     """
     config = Qwen3MMDiTGraft.Config()
-    config.backbone = _canonical_config()
-    _attn(config.backbone).attn_kernel = SdpaNaive.Config()
-    config.streams[0].ffn = SwiGLU.Config(channels_hidden=24)
+    backbone = canonical_config()
+    config.backbone = backbone
+    attn(backbone).attn_kernel = SdpaNaive.Config()
+    config.streams[0].ffn = SwiGLU.Config(channels_hidden=backbone.channels_in)
     assert_cost_matches_torch(
         config,
         build_input=lambda: (
-            torch.randint(0, 32, (1, 3)),
-            torch.randn(1, 3, 16, requires_grad=True),
+            torch.randint(0, backbone.channels_out, (2, 3)),
+            torch.randn(2, 3, backbone.channels_in, requires_grad=True),
         ),
         seq_len=3,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
         run=run_graft,
     )

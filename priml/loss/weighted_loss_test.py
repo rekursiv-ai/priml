@@ -136,19 +136,24 @@ def test_weighted_sum_cost_sums_children_plus_weighting() -> None:
     regression = SimpleLoss.Config(loss_fn=mse)
     config = WeightedSum.Config(fns=[bce, regression], weights=[0.5, 0.5])
     label = torch.rand(4, 3)
+
+    def run(module: nn.Module, prediction: Tensor) -> Tensor:
+        assert isinstance(module, WeightedSum)
+        return module(prediction, label=label)["loss"]
+
     measured = assert_cost_matches_torch(
         config,
         build_input=lambda: torch.randn(4, 3, requires_grad=True),
-        seq_len=12,
-        batch_size=1,
+        seq_len=3,
+        batch_size=4,
         dtype=None,
-        run=lambda module, prediction: _loss(module, prediction, label=label),
+        run=run,
     )
     f32 = torch.float32
-    assert measured == cost(bce, seq_len=12, batch_size=1, dtype=None) + cost(
+    assert measured == cost(bce, seq_len=3, batch_size=4, dtype=None) + cost(
         regression,
-        seq_len=12,
-        batch_size=1,
+        seq_len=3,
+        batch_size=4,
         dtype=None,
     ) + Cost(
         cells={
@@ -168,7 +173,7 @@ def test_weighted_sum_cost_rejects_unpriced_child() -> None:
     """A child without ``cost`` raises instead of costing zero."""
     config = WeightedSum.Config(fns=[DummyLoss.Config()], weights=[1.0])
     with pytest.raises(TypeError, match=r"DummyLoss\.Config has no cost"):
-        cost(config, seq_len=1, batch_size=1, dtype=None)
+        cost(config, seq_len=3, batch_size=2, dtype=None)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.float64])
@@ -177,8 +182,8 @@ def test_weighted_sum_operand_traffic(dtype: torch.dtype) -> None:
     config.fns = [SimpleLoss.Config(), SimpleLoss.Config()]
     config.weights = [0.5, 0.5]
     itemsize = dtype.itemsize
-    costed = cost(config, seq_len=6, batch_size=1, dtype=dtype)
-    child = cost(config.fns[0], seq_len=6, batch_size=1, dtype=dtype)
+    costed = cost(config, seq_len=3, batch_size=2, dtype=dtype)
+    child = cost(config.fns[0], seq_len=3, batch_size=2, dtype=dtype)
     assert (
         costed["bytes", "primal", "elementwise"].sum()
         == 2 * child["bytes", "primal", "elementwise"].sum() + 48 * itemsize
@@ -189,12 +194,6 @@ def test_weighted_sum_operand_traffic(dtype: torch.dtype) -> None:
         == 2 * child["bytes", "adjoint", "elementwise"].sum() + 24 * itemsize
     )
     assert costed["bytes", "adjoint", "reduction"].sum() == 18 * itemsize
-
-
-def _loss(module: nn.Module, prediction: Tensor, **batch: Tensor) -> Tensor:
-    """Run the weighted-sum wrapper and return its ``loss`` tensor."""
-    assert isinstance(module, WeightedSum)
-    return module(prediction, **batch)["loss"]
 
 
 class _TensorLoss(nn.Module):

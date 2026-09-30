@@ -17,7 +17,7 @@ asserted separately. MLA is covered here only while replicated.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import functools
 import tempfile
@@ -299,7 +299,7 @@ def _mla_replicated() -> tuple[nn.Module, Tensor]:
     return mla, torch.randn(2, 6, 32)
 
 
-_CASES: dict[str, Callable[[], tuple[nn.Module, Tensor]]] = {
+_CASES: Final[dict[str, Callable[[], tuple[nn.Module, Tensor]]]] = {
     "swiglu": _swiglu,
     "self_attention": _self_attention,
     "moe": _moe,
@@ -308,11 +308,9 @@ _CASES: dict[str, Callable[[], tuple[nn.Module, Tensor]]] = {
     "mla_replicated": _mla_replicated,
 }
 
+
 # Control cases that are SUPPOSED to stay replicated (shard="none"); the
 # silent-replication guard must not fire on them.
-_REPLICATED_CASES = frozenset({"mla_replicated"})
-
-
 # Each ``WorkerPool`` spawn is expensive and repeated spawns in a single process corrupt
 # the multiprocessing forkserver, so all cases share one pool. ``result_dir_str`` is
 # bound via ``functools.partial`` and pickled with the worker, so it survives a
@@ -351,7 +349,7 @@ def _record_case(
         # sharded==dense is vacuous if the plan was a no-op. At least one
         # parameter must be a real DTensor for the equality to mean anything.
         # Replicated control cases (shard="none") are exempt by design.
-        sharding_expected = case not in _REPLICATED_CASES
+        sharding_expected = case != "mla_replicated"
         has_dtensor = any(isinstance(p, DTensor) for p in sharded.parameters())
         if sharding_expected and not has_dtensor:
             target.write_text("FAIL:no-dtensor-param (silently replicated?)")

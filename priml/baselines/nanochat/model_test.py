@@ -50,23 +50,24 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
-
-VOCAB = 32
-SEQ = 16
+VOCAB: Final = 5
+SEQ: Final = 3
+GOLDEN_VOCAB: Final = 3
+GOLDEN_SEQ: Final = 2
 
 
 def _config(**overrides: object) -> NanoChatLM.Config:
     config = NanoChatLM.Config()
     config.vocab_size = VOCAB
     config.max_seq_len = SEQ
-    config.channels_in = 16
-    config.num_layers = 2
+    config.channels_in = 4
+    config.num_layers = 1
     long_attn = config.template.attn
     assert isinstance(long_attn, ValueGatedAttention.Config)
     long_attn.window_pattern = "L"
     assert isinstance(config.template.attn, ValueGatedAttention.Config)
-    config.template.attn.channels_head = 8
-    config.template.attn.gate_channels = 4
+    config.template.attn.channels_head = 2
+    config.template.attn.gate_channels = 2
     for name, value in overrides.items():
         setattr(config, name, value)
     return config
@@ -77,37 +78,9 @@ def _model(**overrides: object) -> NanoChatLM:
     return _config(**overrides).make()
 
 
-# Size-only shrink for the forward goldens: the shared ``_config`` above pins
-# shapes ~30 assertion tests depend on, so the goldens get their own narrower
-# geometry. Every numerical choice (init, norm, softcap, value gate) is
-# unchanged, so a refactor still moves the golden; only the tensors are smaller.
-GOLDEN_VOCAB = 16
-GOLDEN_SEQ = 8
-
-
-def _golden_config(**overrides: object) -> NanoChatLM.Config:
-    config = NanoChatLM.Config()
-    config.vocab_size = GOLDEN_VOCAB
-    config.max_seq_len = GOLDEN_SEQ
-    config.channels_in = 8
-    config.num_layers = 1
-    attention = config.template.attn
-    assert isinstance(attention, ValueGatedAttention.Config)
-    attention.window_pattern = "L"
-    attention.channels_head = 4
-    attention.gate_channels = 4
-    for name, value in overrides.items():
-        setattr(config, name, value)
-    return config
-
-
-def _golden_tokens() -> Tensor:
-    return torch.randint(0, GOLDEN_VOCAB, (2, GOLDEN_SEQ))
-
-
 def _memory_config(*, buckets: int = 16) -> MemoryNanoChatLM.Config:
     config = MemoryNanoChatLM.Config()
-    config.vocab_size = VOCAB
+    config.vocab_size = 16
     config.max_seq_len = 4
     config.channels_in = 16
     config.num_layers = 1
@@ -195,28 +168,28 @@ def test_a_window_hides_distant_positions() -> None:
 
     def moved(*, window: int) -> bool:
         config = ValueGatedAttention.Config()
-        config.channels_in = 16
-        config.channels_head = 8
-        config.gate_channels = 4
+        config.channels_in = 4
+        config.channels_head = 2
+        config.gate_channels = 2
         config.window = window
         torch.manual_seed(0)
         attention = config.make()
         randomize_parameters(attention, seed=1, std=0.5)
 
         torch.manual_seed(2)
-        x = torch.randn(2, SEQ, 16)
+        x = torch.randn(2, SEQ, 4)
         perturbed = x.clone()
-        perturbed[:, 0] = torch.randn(2, 16)
-        cos_sin = RoPE.Config(channels_head=8).make()(torch.arange(SEQ))
+        perturbed[:, 0] = torch.randn(2, 4)
+        cos_sin = RoPE.Config(channels_head=2).make()(torch.arange(SEQ))
         with torch.no_grad():
             before = attention(x, cos_sin=cos_sin)[:, -1]
             after = attention(perturbed, cos_sin=cos_sin)[:, -1]
         return not torch.equal(before, after)
 
-    # Position 0 lies SEQ-1 back from the last query: inside a full window,
-    # outside a half one.
+    # Position 0 is two steps back from the last query: inside a full window,
+    # outside a one-step window.
     assert moved(window=-1)
-    assert not moved(window=SEQ // 2)
+    assert not moved(window=1)
 
 
 def test_value_embeddings_add_parameters_only_where_named() -> None:
@@ -228,7 +201,7 @@ def test_value_embeddings_add_parameters_only_where_named() -> None:
     gated = sum(p.numel() for p in _model(value_embedding_stride=2).parameters())
     assert gated > plain
     assert len(_model().value_embeds) == 0
-    assert set(_model(value_embedding_stride=1).value_embeds) == {"0", "1"}
+    assert set(_model(value_embedding_stride=1).value_embeds) == {"0"}
 
 
 def test_the_value_gate_starts_transparent() -> None:
@@ -342,7 +315,7 @@ def test_an_injected_layer_keeps_the_values_it_was_given() -> None:
         assert isinstance(attn, ValueGatedAttention.Config)
         windows.append(attn.window)
     # Layer 0 keeps what it was handed; the last is always the full context.
-    assert windows == [3, SEQ]
+    assert windows == [3, 3]
 
 
 def test_flops_read_the_blocks_real_head_count() -> None:
@@ -365,17 +338,17 @@ def test_flops_read_the_blocks_real_head_count() -> None:
             built.append(variant.make().flops_per_token())
         return built[1] - built[0]
 
-    assert context_growth(num_heads=2) == 2 * 12 * (2 * 8) * SEQ
-    assert context_growth(num_heads=4) == 2 * 12 * (4 * 8) * SEQ
+    assert context_growth(num_heads=2) == 2 * 12 * 2 * SEQ
+    assert context_growth(num_heads=4) == 2 * 12 * 4 * SEQ
 
 
 def test_flops_exclude_lookup_tables() -> None:
     """A gather does no arithmetic, so a bigger vocabulary is not more FLOPs."""
     small = _model().flops_per_token()
-    large = _model(vocab_size=VOCAB * 4).flops_per_token()
+    large = _model(vocab_size=2 * 4).flops_per_token()
     # The head is a matmul and does grow; the embedding tables must not.
     assert large > small
-    assert large - small == 6 * (VOCAB * 4 - VOCAB) * 16
+    assert large - small == 6 * (8 - 5) * 4
 
 
 def test_the_config_prices_itself() -> None:
@@ -419,19 +392,19 @@ def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
     """The token and value tables are parameters that cost one gather each."""
     plain = cost(
         _config().copy_tree().finalize(),
-        seq_len=SEQ,
+        seq_len=3,
         batch_size=1,
         dtype=None,
     )
     gated = cost(
         _config(value_embedding_stride=1).copy_tree().finalize(),
-        seq_len=SEQ,
+        seq_len=3,
         batch_size=1,
         dtype=None,
     )
-    # Two value tables of ``VOCAB x (num_heads * channels_head)`` and one gate
+    # Two value tables of ``2 x (num_heads * channels_head)`` and one gate
     # of ``gate_channels x num_heads`` per layer.
-    assert gated.params - plain.params == 2 * (VOCAB * 16 + 4 * 2)
+    assert gated.params - plain.params == 5 * 4 + 2 * 2
     assert (
         gated["flops", "primal", "selection"].sum()
         == plain["flops", "primal", "selection"].sum()
@@ -441,12 +414,12 @@ def test_cost_counts_every_lookup_table_but_no_lookup_flops() -> None:
     assert (
         gated["bytes", "primal", "selection", torch.int64]
         - plain["bytes", "primal", "selection", torch.int64]
-        == 8 * 2 * SEQ
+        == 4 * 2 * 3
     )
     assert (
         gated["bytes", "primal", "selection", torch.float32]
         - plain["bytes", "primal", "selection", torch.float32]
-        == 4 * 2 * 2 * SEQ * 16
+        == torch.float32.itemsize * 2 * 3 * 4
     )
 
 
@@ -473,8 +446,8 @@ def test_cost_distinguishes_batch_reuse_from_attention_window() -> None:
         )
     assert narrow["bytes", "selection"] == large["bytes", "selection"]
     # Both calls describe complete invocations at their concrete batch sizes.
-    assert small == cost(config, seq_len=SEQ, batch_size=1, dtype=None)
-    assert large == cost(config, seq_len=SEQ, batch_size=4, dtype=None)
+    assert small == cost(config, seq_len=3, batch_size=1, dtype=None)
+    assert large == cost(config, seq_len=3, batch_size=4, dtype=None)
     long = config.cost(seq_len=8192, batch_size=1, dtype=None)
     longer = config.cost(seq_len=32_768, batch_size=1, dtype=None)
 
@@ -673,8 +646,8 @@ def test_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="plain",
-        build_module=lambda: _golden_config().make(),
-        build_input=_golden_tokens,
+        build_module=_config().make,
+        build_input=_tokens,
         seed=0,
     )
 
@@ -688,8 +661,8 @@ def test_value_embedding_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="value_embedding",
-        build_module=lambda: _golden_config(value_embedding_stride=1).make(),
-        build_input=_golden_tokens,
+        build_module=lambda: _config(value_embedding_stride=1).make(),
+        build_input=_tokens,
         seed=0,
     )
 
@@ -708,22 +681,24 @@ def test_the_shipped_experiments_forward_bfb() -> None:
     pairing IS the recipe, so the golden freezes it rather than widening it
     away.
 
-    Narrowed by SIZE only (width, heads, gate, one layer): every shared field
-    -- norm epsilon, the bf16 embedding dtype, the window pattern, the softcap,
-    the value gate -- is left as the ladder sets it, so a change to any of them
-    still lands here. ``gate_channels`` moves with ``channels_in`` because the
+    Shrunk by SIZE only (vocabulary, context, width, heads, gate, one layer).
+    Every shared field -- norm epsilon, the bf16 embedding dtype, the window
+    pattern, the softcap, the value gate -- is left as the ladder sets it, so a
+    change to any of them still lands here. ``gate_channels`` moves with ``channels_in`` because the
     gate reads the whole stream.
     """
 
     def _model() -> NanoChatLM.Config:
         model = experiments.exp_smoke().step.model
         assert isinstance(model, NanoChatLM.Config)
-        model.channels_in = 8
+        model.vocab_size = GOLDEN_VOCAB
+        model.max_seq_len = GOLDEN_SEQ
+        model.channels_in = 4
         model.num_layers = 1
         attention = model.template.attn
         assert isinstance(attention, ValueGatedAttention.Config)
-        attention.channels_head = 4
-        attention.gate_channels = 8
+        attention.channels_head = 2
+        attention.gate_channels = 4
         return model
 
     def build() -> nn.Module:
@@ -854,7 +829,7 @@ def test_memory_table_width_matches_attention_values_not_residual_stream() -> No
     table = finalized.bigrams["0"]
 
     assert table.channels_out == 4 * 8
-    assert finalized.make()(torch.tensor([[1, 2, 3, 4]])).shape == (1, 4, VOCAB)
+    assert finalized.make()(torch.tensor([[1, 2, 3, 4]])).shape == (1, 4, 16)
 
 
 def test_memory_table_capacity_does_not_change_flops() -> None:
@@ -875,8 +850,8 @@ def test_source_reuse_transformer_reads_attention_from_the_saved_source() -> Non
     assert isinstance(block.attn, Linear)
     with torch.no_grad():
         block.attn.weight.copy_(2 * torch.eye(4))
-    current = torch.ones(1, 2, 4, requires_grad=True)
-    source = torch.full((1, 2, 4), 3.0, requires_grad=True)
+    current = torch.ones(3, 2, 4, requires_grad=True)
+    source = torch.full((3, 2, 4), 3.0, requires_grad=True)
     output = block(current, attention_source=source)
     torch.testing.assert_close(output, torch.full_like(current, 14.0))
     output.sum().backward()
@@ -911,8 +886,8 @@ def test_output_norm_feed_forward_cost_matches_torch() -> None:
     config.norm_out = RMSNorm.Config(elementwise_affine=True)
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 4, 4, requires_grad=True),
-        seq_len=4,
+        build_input=lambda: torch.randn(2, 3, 4, requires_grad=True),
+        seq_len=3,
         batch_size=2,
         dtype=None,
     )
@@ -930,10 +905,10 @@ def test_gated_residual_cost_matches_torch() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: tuple(
-            torch.randn(2, 4, 4, requires_grad=True) for _ in range(2)
+            torch.randn(2, 3, 4, requires_grad=True) for _ in range(2)
         ),
         run=run,
-        seq_len=4,
+        seq_len=3,
         batch_size=2,
         dtype=None,
     )
@@ -950,7 +925,7 @@ def test_memory_cost_matches_torch_with_tables_and_pooling() -> None:
     with sdpa_kernel(SDPBackend.MATH):
         assert_cost_matches_torch(
             config,
-            build_input=lambda: torch.randint(0, VOCAB, (2, 4)),
+            build_input=lambda: torch.randint(0, 2, (2, 4)),
             seq_len=4,
             batch_size=2,
             dtype=None,
@@ -1024,18 +999,19 @@ def test_gated_residual_prices_sigmoid_as_one_tensor_operator() -> None:
 def test_memory_cost_counts_pool_parameters_and_extra_tables() -> None:
     config = MemoryNanoChatLM.Config()
     config.update(_config(), skip_missing=True)
+    config.num_layers = 2
     config.num_pool_layers = 2
     config.bigrams = {"0": HashedNgramTables.Config(num_embeddings=7)}
     config = config.finalize()
     base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
-    costed = config.cost(seq_len=SEQ, batch_size=4, dtype=None)
-    plain = base.cost(seq_len=SEQ, batch_size=4, dtype=None)
-    assert costed.params - plain.params == 7 * 16 + 1
+    costed = config.cost(seq_len=3, batch_size=4, dtype=None)
+    plain = base.cost(seq_len=3, batch_size=4, dtype=None)
+    assert costed.params - plain.params == 7 * 4 + 1
     assert costed["flops", "primal", "elementwise"].sum() - plain[
         "flops",
         "primal",
         "elementwise",
-    ].sum() == 2 * (SEQ * 4) * (1 + 16)
+    ].sum() == 2 * (3 * 4) * (1 + 4)
     assert (
         costed["bytes", "primal", "selection"].sum()
         - plain["bytes", "primal", "selection"].sum()
@@ -1051,6 +1027,7 @@ def test_pooling_gradient_temporary_is_written_only_by_width_reduction(
 ) -> None:
     config = MemoryNanoChatLM.Config()
     config.update(_config(), skip_missing=True)
+    config.num_layers = 2
     config.num_pool_layers = 2
     config = config.finalize()
     base = NanoChatLM.Config().update(config, skip_missing=True).finalize()
@@ -1058,7 +1035,7 @@ def test_pooling_gradient_temporary_is_written_only_by_width_reduction(
     plain = base.cost(seq_len=SEQ, batch_size=batch_size, dtype=dtype)
     itemsize = dtype.itemsize
     width = config.channels_in
-    rows = SEQ * batch_size
+    rows = 3 * batch_size
     assert pooled["bytes", "primal", "elementwise"].sum() - plain[
         "bytes",
         "primal",

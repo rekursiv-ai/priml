@@ -99,7 +99,7 @@ def test_conditional_namespace_and_explicit_nontext_policy() -> None:
         name.replace("model.", "model.language_model.", 1): tensor
         for name, tensor in reference.state_dict().items()
     }
-    state["model.visual.patch_embed.proj.weight"] = torch.zeros(2, 2)
+    state["model.visual.patch_embed.proj.weight"] = torch.zeros(2, 3)
     native_config = Qwen35.Config.from_hf(config)
     with pytest.raises(ValueError, match="Unexpected"):
         remap_hf_state_dict(state, native_config)

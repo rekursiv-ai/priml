@@ -317,6 +317,7 @@ from priml.baselines.sudoku.puzzle_data import (
     load_puzzle_dataset,
     resolve_working_dir,
 )
+from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.baselines.sudoku.trainer import (
     EvalTimeLimitError,
     Trainer,
@@ -1063,7 +1064,7 @@ class HpsSearch:
                 media=media,
                 base_logits=root_logits,
                 active=active,
-                groups=sudoku_group_indices().to(device),
+                groups=sudoku_group_indices(SudokuSpec()).to(device),
                 depth=cfg.search_depth,
                 candidates=cfg.search_candidates,
                 cell_attempts=cfg.search_cell_attempts,

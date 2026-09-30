@@ -48,15 +48,15 @@ def test_conv_swiglu_cost_matches_torch(
     )
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 3, 4, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 4, requires_grad=True),
         seq_len=3,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
     base = cost(
         SwiGLU.Config(channels_in=4, channels_hidden=4).finalize(),
         seq_len=3,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
     extra = analytical["flops", "matmul"].sum() - base["flops", "matmul"].sum()
@@ -125,7 +125,7 @@ def test_inner_grad_loops_truncate_the_backward() -> None:
         return z * 2.0
 
     recurrence = UrmRecurrence.Config(fast_cycles=4, inner_grad_loops=1).make()
-    x = torch.ones(1, 2, 3, requires_grad=True)
+    x = torch.ones(2, 3, 4, requires_grad=True)
     recurrence.refine(mix, x, x, x, None)
     assert seen == [False, False, False, True]
 

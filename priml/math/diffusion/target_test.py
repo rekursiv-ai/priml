@@ -49,6 +49,7 @@ def test_target_x(
     x_original: Tensor = _xem[0]
     eps_original: Tensor = _xem[1]
     model_noise: Tensor = _xem[2]
+    # Broadcast singleton axes are required by diffusion target normalization.
     log_snr = torch.tensor([-5.0, 0.0, 2.0]).view(-1, 1, 1, 1, 1, 1)
 
     log_sigma = corrupt_fn(log_snr)

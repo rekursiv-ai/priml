@@ -217,7 +217,7 @@ def test_a_lag_is_encoded_the_same_wherever_the_window_sits() -> None:
     # before them, which is a real difference in history, not in position.
     model = _model(num_layers=1, memory_length=1).double()
     torch.manual_seed(5)
-    context = torch.randn(1, 2, 12, dtype=torch.float64)
+    context = torch.randn(3, 2, 12, dtype=torch.float64)
     probe = torch.randn(2, 12, dtype=torch.float64)
     quiet = torch.zeros(2, dtype=torch.bool)
 
@@ -406,11 +406,11 @@ def test_the_cost_matches_torch_on_a_gradient_window() -> None:
     assert_cost_matches_torch(
         config,
         build_input=lambda: (
-            torch.randn(4, 2, 12, requires_grad=True),
-            torch.randn(2, 8, 2, 16, requires_grad=True),
+            torch.randn(4, 3, 12, requires_grad=True),
+            torch.randn(3, 8, 2, 16, requires_grad=True),
         ),
         seq_len=4,
-        batch_size=2,
+        batch_size=3,
         dtype=None,
         run=_sequenced,
     )

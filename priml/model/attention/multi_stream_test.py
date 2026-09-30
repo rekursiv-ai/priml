@@ -85,11 +85,11 @@ def test_multi_stream_2_streams():
         channels_head=4,
         num_streams=2,
     ).make()
-    x0 = torch.randn(1, 2, 8)
-    x1 = torch.randn(1, 3, 8)
+    x0 = torch.randn(4, 2, 8)
+    x1 = torch.randn(4, 3, 8)
     y0, y1 = m([x0, x1])
-    assert y0.shape == (1, 2, 8)
-    assert y1.shape == (1, 3, 8)
+    assert y0.shape == (4, 2, 8)
+    assert y1.shape == (4, 3, 8)
 
 
 def test_multi_stream_1_stream():
@@ -197,9 +197,9 @@ def test_multi_stream_cache_allocates_for_an_uncached_stream() -> None:
         num_streams=1,
     ).make()
 
-    outputs, caches = m.forward_cached([torch.randn(1, 3, 8)], cache=[None])
+    outputs, caches = m.forward_cached([torch.randn(4, 3, 8)], cache=[None])
 
-    assert outputs[0].shape == (1, 3, 8)
+    assert outputs[0].shape == (4, 3, 8)
     assert caches[0].length == 3
 
 
@@ -276,7 +276,7 @@ def test_multistream_attention_forwards_the_open_message_bus() -> None:
         attn_kernel=PartialConfig(kernel),
     ).make()
     message = object()
-    x = torch.randn(1, 4, 16)
+    x = torch.randn(4, 3, 16)
 
     attention((x, x), message=message)
 
@@ -290,15 +290,15 @@ def test_multi_stream_bfb(device: str) -> None:
         golden_name="multi_stream_attention",
         build_module=lambda: (
             MultiStreamAttention.Config(
-                channels_in=16,
+                channels_in=4,
                 num_heads=2,
-                channels_head=8,
+                channels_head=2,
                 num_streams=2,
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: [torch.randn(2, 3, 16), torch.randn(2, 4, 16)],
+        build_input=lambda: [torch.randn(2, 3, 4), torch.randn(2, 3, 4)],
         seed=0,
         run=lambda module, xs: torch.cat(cast(tuple[Tensor, ...], module(xs)), dim=1),
     )
@@ -327,10 +327,13 @@ def test_explicit_streams_own_norms_and_native_weights() -> None:
     model.load_stream(1, source=model.streams[0])
     assert model.streams[0].norm_q is not model.streams[1].norm_q
     assert model.streams[0].norm_q is not model.streams[0].norm_k
-    x = torch.randn(1, 2, 8)
-    other = torch.randn(1, 3, 8)
+    x = torch.randn(4, 2, 8)
+    other = torch.randn(4, 3, 8)
+    # MultiStreamAttention.forward uses each square block for one stream.
     masks = [
+        # MultiStreamAttention.forward uses a square self-stream mask block.
         torch.cat((torch.zeros(2, 2), torch.full((2, 3), float("-inf"))), -1),
+        # MultiStreamAttention.forward uses a square self-stream mask block.
         torch.cat((torch.full((3, 2), float("-inf")), torch.zeros(3, 3)), -1),
     ]
     with host_agnostic_numerics():
@@ -349,7 +352,8 @@ def test_per_query_masks_isolate_unequal_streams() -> None:
     cfg.channels_in = 8
     cfg.num_heads = 2
     model = cfg.make()
-    x, other = torch.randn(1, 2, 8), torch.randn(1, 3, 8)
+    x, other = torch.randn(4, 2, 8), torch.randn(4, 3, 8)
+    # MultiStreamAttention.forward uses a square self-stream mask block.
     masks = [
         torch.cat((torch.zeros(2, 2), torch.full((2, 3), float("-inf"))), -1),
         None,
@@ -370,7 +374,7 @@ def test_dropout_override_applies_in_training() -> None:
     cfg.num_heads = 2
     cfg.dropout = 0.5
     model = cfg.make().train()
-    xs = [torch.randn(1, 2, 8), torch.randn(1, 3, 8)]
+    xs = [torch.randn(4, 2, 8), torch.randn(4, 3, 8)]
     actual = model(xs, dropout_p=0.0)
     expected = model.eval()(xs)
     assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
@@ -476,17 +480,22 @@ def test_multi_stream_cost_matches_torch_per_stream_token() -> None:
         num_streams=2,
         attn_kernel=SdpaNaive.Config(),
     )
+
     # ``cost`` costs one position -- every stream's token -- so the token
     # count is one stream's length.
+    def run(module: nn.Module, xs: tuple[Tensor, ...]) -> Tensor:
+        assert isinstance(module, MultiStreamAttention)
+        return torch.stack(module(list(xs))).sum()
+
     assert_cost_matches_torch(
         config,
         build_input=lambda: tuple(
-            torch.randn(1, 4, 16, requires_grad=True) for _ in range(2)
+            torch.randn(2, 4, 16, requires_grad=True) for _ in range(2)
         ),
         seq_len=4,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
-        run=_joint_sum,
+        run=run,
     )
 
 
@@ -575,12 +584,6 @@ def test_multistream_independent_qk_norm_scales_are_each_read_once() -> None:
         - shared["bytes", "primal", "elementwise"].sum()
         == torch.bfloat16.itemsize * 4
     )
-
-
-def _joint_sum(module: nn.Module, xs: tuple[Tensor, ...]) -> Tensor:
-    """Attend jointly over every stream and reduce the outputs to a scalar."""
-    assert isinstance(module, MultiStreamAttention)
-    return torch.stack(module(list(xs))).sum()
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ def create_test_tar(path: Path, num_images: int = 2) -> None:
     """Create a test tar file with sample images."""
     with tarfile.open(path, "w") as tar:
         for i in range(num_images):
-            img = Image.new("RGB", (4, 4), color="blue")
+            img = Image.new("RGB", (4, 5), color="blue")
             img_buffer = io.BytesIO()
             img.save(img_buffer, format="JPEG")
             img_bytes = img_buffer.getvalue()

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
+import math
+
 from torch import Tensor, nn
 
 import pytest
@@ -39,32 +41,50 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config:
-    config = SudokuNet.Config(channels_in=16, num_layers=1)
-    config.embedding = GridEmbedding.Config()
-    # The FFN width has to be shrunk EXPLICITLY. ``SwiGLU`` infers it as
-    # ``channels_in * 8/3`` rounded up to ``round_to``, which defaults to 256 --
-    # so a 16-channel model still builds a 512-wide gated hidden layer, and one
-    # tensor ends up thirty times the size of everything else in the golden.
+def test_unfilled_vocabulary_is_rejected() -> None:
+    with pytest.raises(ValueError, match="vocab_size"):
+        SudokuNet.Config(channels_in=4, num_layers=1).make()
+
+
+def _config(
+    *,
+    recurrent: bool = False,
+    mixer: bool = False,
+    channels_in: int = 4,
+    vocab_size: int = 2,
+    grid_shape: tuple[int, ...] = (2,),
+) -> SudokuNet.Config:
+    config = SudokuNet.Config(
+        channels_in=channels_in,
+        vocab_size=vocab_size,
+        num_layers=1,
+    )
+    config.embedding = GridEmbedding.Config(grid_shape=grid_shape)
     config.block = TransformerBlock.Config(
         prenorm=False,
+        attn=SelfAttention.Config(num_heads=2, channels_head=2),
         ffn=SwiGLU.Config(
-            round_to=16,
+            channels_hidden=4,
+            round_to=1,
             init_weight=kaiming_uniform,
             init_weight_out=kaiming_uniform,
         ),
     )
     if mixer:
         config.block = MLPMixerBlock.Config(
-            seq_len=81,
+            seq_len=math.prod(grid_shape),
             prenorm=False,
             token_mixer=SwiGLU.Config(
                 norm=RMSNorm.Config(),
+                channels_hidden=4,
+                round_to=1,
                 init_weight=kaiming_uniform,
                 init_weight_out=kaiming_uniform,
             ),
             channel_mixer=SwiGLU.Config(
                 norm=RMSNorm.Config(),
+                channels_hidden=4,
+                round_to=1,
                 init_weight=kaiming_uniform,
                 init_weight_out=kaiming_uniform,
             ),
@@ -74,9 +94,22 @@ def _config(*, recurrent: bool = False, mixer: bool = False) -> SudokuNet.Config
     return config
 
 
-def _model(**kwargs: bool) -> SudokuNet:
+def _model(
+    *,
+    recurrent: bool = False,
+    mixer: bool = False,
+    channels_in: int = 4,
+    vocab_size: int = 2,
+    grid_shape: tuple[int, ...] = (2,),
+) -> SudokuNet:
     torch.manual_seed(0)
-    return _config(**kwargs).make()
+    return _config(
+        recurrent=recurrent,
+        mixer=mixer,
+        channels_in=channels_in,
+        vocab_size=vocab_size,
+        grid_shape=grid_shape,
+    ).make()
 
 
 @pytest.mark.parametrize("mixer", [False, True])
@@ -84,7 +117,13 @@ def _model(**kwargs: bool) -> SudokuNet:
 @pytest.mark.compute_large_fixture
 def test_every_corner_of_the_lattice_runs(mixer: bool, recurrent: bool) -> None:
     """Architecture and recurrence vary independently, as config values."""
-    model = _model(mixer=mixer, recurrent=recurrent)
+    model = _model(
+        mixer=mixer,
+        recurrent=recurrent,
+        channels_in=16,
+        vocab_size=11,
+        grid_shape=(81,),
+    )
     out = model(torch.randint(0, 11, (2, 81)))
     assert out.logits.shape == (2, 81, 11)
     assert out.halt.shape == (2,)
@@ -125,7 +164,7 @@ def test_prenorm_diverges_under_recurrence() -> None:
 
 def test_latents_carry_between_calls() -> None:
     """A second call from the first call's latents differs from a fresh one."""
-    model = _model(recurrent=True)
+    model = _model(recurrent=True, channels_in=16, vocab_size=11, grid_shape=(81,))
     tokens = torch.randint(0, 11, (2, 81))
     first = model(tokens)
     carried = model(tokens, first.z_slow, first.z_fast)
@@ -134,7 +173,7 @@ def test_latents_carry_between_calls() -> None:
 
 
 def test_intermediates_are_one_per_cycle() -> None:
-    model = _model(recurrent=True)
+    model = _model(recurrent=True, channels_in=16, vocab_size=11, grid_shape=(81,))
     out = model(torch.randint(0, 11, (2, 81)), collect_intermediates=True)
     assert len(out.all_logits) == 2  # slow_cycles.
 
@@ -148,7 +187,7 @@ def test_sequence_length_counts_the_prefix_before_finalize() -> None:
     latent buffers -- is then built to the wrong shape and fails only later,
     deep in a matmul. Measured: 80 against the true 81.
     """
-    config = _config()
+    config = _config(channels_in=16, vocab_size=11, grid_shape=(81,))
     registers = RegisterTokens.Config(num_tokens=4)
     config.prefix = registers
     assert config.num_prefix_tokens == -1  # Not yet finalized.
@@ -161,7 +200,7 @@ def test_sequence_length_counts_the_prefix_before_finalize() -> None:
 
 def test_prefix_tokens_reach_the_sequence() -> None:
     """Prefix logits are stripped, so the output is still one row per cell."""
-    config = _config()
+    config = _config(channels_in=16, vocab_size=11, grid_shape=(81,))
     config.prefix = RegisterTokens.Config(num_tokens=3)
     torch.manual_seed(0)
     out = config.make()(torch.randint(0, 11, (2, 81)))
@@ -202,14 +241,8 @@ def test_cycle_counts_must_be_positive() -> None:
         DeepRecurrence.Config(slow_cycles=0).make()
 
 
-def _golden_config(*, recurrent: bool = False) -> SudokuNet.Config:
-    """Shrink ``_config`` by size only: width 8, the FFN hidden rounded to 8."""
-    config = _config(recurrent=recurrent)
-    config.channels_in = 8
-    assert isinstance(config.block, TransformerBlock.Config)
-    assert isinstance(config.block.ffn, SwiGLU.Config)
-    config.block.ffn.round_to = 8
-    return config
+def _tiny_tokens() -> Tensor:
+    return torch.randint(0, 2, (3, 2))
 
 
 def test_plain_forward_bfb() -> None:
@@ -222,8 +255,8 @@ def test_plain_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="plain",
-        build_module=lambda: _golden_config().make(),
-        build_input=lambda: torch.randint(0, 11, (2, 81)),
+        build_module=_config().make,
+        build_input=_tiny_tokens,
         seed=0,
         run=_logits,
     )
@@ -238,8 +271,8 @@ def test_recurrent_forward_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="recurrent",
-        build_module=lambda: _golden_config(recurrent=True).make(),
-        build_input=lambda: torch.randint(0, 11, (2, 81)),
+        build_module=lambda: _config(recurrent=True).make(),
+        build_input=_tiny_tokens,
         seed=0,
         run=_logits,
     )
@@ -249,7 +282,7 @@ def test_deep_recurrence_cost_is_zero() -> None:
     """The recurrence schedules the core and owns nothing; the model costs its cycles."""
     analytical = assert_cost_matches_torch(
         DeepRecurrence.Config(slow_cycles=2, fast_cycles=2),
-        build_input=lambda: torch.randn(1, 2, 4, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 4, requires_grad=True),
         seq_len=2,
         batch_size=1,
         dtype=None,
@@ -268,8 +301,8 @@ def test_plain_cost_matches_torch(prefix: bool) -> None:
     config = _cost_config(prefix=prefix)
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randint(0, 11, (1, 2)),
-        batch_size=1,
+        build_input=lambda: torch.randint(0, 11, (3, 2)),
+        batch_size=3,
         dtype=None,
         run=_logits_and_halt,
     )
@@ -281,14 +314,14 @@ def test_recurrent_cost_matches_torch() -> None:
     config.recurrence = DeepRecurrence.Config(slow_cycles=2, fast_cycles=2)
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randint(0, 11, (1, 2)),
-        batch_size=1,
+        build_input=lambda: torch.randint(0, 11, (3, 2)),
+        batch_size=3,
         dtype=None,
         run=_logits_and_halt,
     )
     one_cycle = _cost_config(prefix=True)
     one_cycle.recurrence = DeepRecurrence.Config(slow_cycles=1, fast_cycles=2)
-    single = cost(one_cycle.copy_tree().finalize(), batch_size=1, dtype=None)
+    single = cost(one_cycle.copy_tree().finalize(), batch_size=3, dtype=None)
     assert analytical["flops", "adjoint"] == single["flops", "adjoint"]
     assert analytical["bytes", "adjoint"] == single["bytes", "adjoint"]
     assert analytical.params == single.params
@@ -333,7 +366,7 @@ def test_cost_halt_bias_reduction_uses_puzzle_batch_geometry() -> None:
 
 def _cost_config(*, prefix: bool) -> SudokuNet.Config:
     """Build a two-cell solver whose attention torch can count."""
-    config = SudokuNet.Config(channels_in=16, num_layers=1)
+    config = SudokuNet.Config(channels_in=16, num_layers=1, vocab_size=11)
     config.embedding = GridEmbedding.Config(grid_shape=(2,))
     config.block = TransformerBlock.Config(
         prenorm=False,
@@ -393,7 +426,12 @@ class _AutogradNode(Protocol):
 
 def _graph_size(slow_cycles: int) -> int:
     """Count the autograd nodes reachable from one forward's loss."""
-    config = _config(recurrent=True)
+    config = _config(
+        recurrent=True,
+        channels_in=16,
+        vocab_size=11,
+        grid_shape=(81,),
+    )
     assert isinstance(config.recurrence, DeepRecurrence.Config)
     config.recurrence.slow_cycles = slow_cycles
     torch.manual_seed(0)
@@ -419,7 +457,12 @@ def _graph_size(slow_cycles: int) -> int:
 
 def _carried_magnitude(*, prenorm: bool) -> float:
     """Largest carried-latent value after three recurrent steps."""
-    config = _config(recurrent=True)
+    config = _config(
+        recurrent=True,
+        channels_in=16,
+        vocab_size=11,
+        grid_shape=(81,),
+    )
     assert isinstance(config.recurrence, DeepRecurrence.Config)
     config.recurrence.slow_cycles = 4
     config.block = TransformerBlock.Config(prenorm=prenorm)

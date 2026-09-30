@@ -85,7 +85,7 @@ def test_a_window_admits_its_own_position_and_w_before_it() -> None:
     ADDITION to the query's own, so the exclusive form attends to one key fewer
     per row -- a different model rather than a rounding difference.
     """
-    q = k = torch.zeros(1, 8, 1, 4)
+    q = k = torch.zeros(2, 8, 3, 4)
     mask = window_mask(q, k, window=2)
     assert mask is not None
     admitted = torch.isfinite(mask)
@@ -99,8 +99,8 @@ def test_the_package_fill_is_negative_infinity() -> None:
     leave a uniform average, ``-inf`` beside a finite fill makes the finite
     entry win outright. One fill per package, or the combination is a bug.
     """
-    q = torch.zeros(4, 1, 2)
-    k = torch.zeros(8, 1, 2)
+    q = torch.zeros(4, 3, 2)
+    k = torch.zeros(8, 3, 2)
     windowed = window_mask(q, k, window=1)
     chunked = causal_chunk_mask(q, k)
     assert windowed is not None
@@ -125,7 +125,7 @@ def test_fully_masked_row_semantics_differ_by_fill() -> None:
 
 def test_a_window_reaching_the_context_needs_no_mask() -> None:
     """Masking there costs a kernel dispatch and admits exactly the same keys."""
-    q = k = torch.zeros(1, 8, 1, 4)
+    q = k = torch.zeros(2, 8, 3, 4)
     assert window_mask(q, k, window=8) is None
     assert window_mask(q, k, window=-1) is None
 
@@ -143,7 +143,7 @@ def test_a_window_and_is_causal_together_are_accepted() -> None:
     harness among them.
     """
     torch.manual_seed(0)
-    q, k, v = (torch.randn(1, 8, 2, 4) for _ in range(3))
+    q, k, v = (torch.randn(2, 8, 3, 4) for _ in range(3))
     with sdpa_kernel(SDPBackend.MATH):
         windowed = SdpaFused()(q, k, v, is_causal=True, window=3)
         # The mask is causal by construction, so the flag adds nothing.
@@ -156,7 +156,7 @@ def test_a_window_and_is_causal_together_are_accepted() -> None:
 
 
 def test_window_text(request: pytest.FixtureRequest) -> None:
-    output = _window_contract(torch.zeros(1, 4, 1, 2))
+    output = _window_contract(torch.zeros(2, 4, 3, 5))
     assert_text_golden(
         request,
         test_file=__file__,
@@ -171,7 +171,8 @@ def test_window_bfb(device: str) -> None:
         golden_dir=_CWD / "testdata",
         golden_name="window",
         build_module=lambda: _Window().to(device),
-        build_input=lambda: torch.randn(1, 4, 1, 2),
+        # Sequence 4 is required: window=2 must produce a partial mask.
+        build_input=lambda: torch.randn(2, 3, 4, 5),
         seed=0,
     )
 

@@ -37,8 +37,8 @@ def split_optimizer(model: nn.Module) -> CompositeOptimizer:
 
 def backward(model: nn.Module) -> None:
     """Populate gradients on every parameter."""
-    output = cast(Tensor, model(torch.randn(8, 3, 8, 8)))
-    output.sum().backward()
+    output = cast(Tensor, model(torch.randn(4, 3, 5, 6)))
+    output.square().sum().backward()
 
 
 def test_is_an_optimizer() -> None:

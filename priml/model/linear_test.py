@@ -38,14 +38,14 @@ def test_linear_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="linear",
-        build_module=lambda: Linear.Config(4, 3).make(),
-        build_input=lambda: torch.randn(1, 2, 4),
+        build_module=lambda: Linear.Config(3, channels_out=2).make(),
+        build_input=lambda: torch.randn(2, 4, 3),
         seed=0,
     )
 
 
 def test_ensemble_linear_config_pprint() -> None:
-    config = EnsembleLinear.Config(4, 3, num_ensemble=2)
+    config = EnsembleLinear.Config(4, channels_out=3, num_ensemble=2)
     assert_pprint_golden(
         test_file=__file__,
         name="ensemble_linear",
@@ -57,8 +57,12 @@ def test_ensemble_linear_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="ensemble_linear",
-        build_module=lambda: EnsembleLinear.Config(4, 3, num_ensemble=2).make(),
-        build_input=lambda: torch.randn(1, 2, 4),
+        build_module=lambda: EnsembleLinear.Config(
+            3,
+            channels_out=2,
+            num_ensemble=2,
+        ).make(),
+        build_input=lambda: torch.randn(2, 4, 3),
         seed=0,
     )
 
@@ -165,7 +169,7 @@ def test_ensemble_parallel_style_shards_parameters_and_installs_input_hook(
 
     style = module.tensor_parallel_style()
     assert style._apply(module, mesh) is module
-    module(torch.randn(1, 4))
+    module(torch.randn(2, 4))
 
     assert [placements for _, placements in distributed] == [
         [Shard(0)],
@@ -207,7 +211,7 @@ def test_ensemble_parallel_input_is_replicated(
             return self
 
     monkeypatch.setattr(linear, "DTensor", FakeDTensor)
-    local = torch.randn(1, 4)
+    local = torch.randn(2, 4)
 
     replicated, extra = linear._replicate_input(
         mesh,

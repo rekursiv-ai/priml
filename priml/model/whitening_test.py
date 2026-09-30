@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Final
 
 import functools
-import platform
 
 from torch import Tensor, nn
 
@@ -21,26 +20,26 @@ from priml.testing.golden import assert_text_golden
 
 _CWD: Final = Path(__file__).resolve().parent
 
-# ``linalg.eigh`` may choose either sign for each eigenvector. The whitening
-# layer deliberately retains both signs as [V, -V], so Linux AArch64 is
-# mathematically equivalent to the x86 golden but swaps some channel pairs.
-# Keep an exact golden for each observed orientation instead of weakening BFB.
-_GOLDEN_NAME = (
-    "whitening-linux-aarch64"
-    if (platform.system(), platform.machine()) == ("Linux", "aarch64")
-    else "whitening"
-)
-
 
 def _whitening() -> PCAWhiteningConv2d:
-    return PCAWhiteningConv2d(1, 8, kernel_size=2, bias=False)
+    return PCAWhiteningConv2d(2, 16, kernel_size=2, bias=False)
 
 
-def _run_whitening(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
-    assert isinstance(module, PCAWhiteningConv2d)
-    train_images, images = inputs
-    module.init_whiten(train_images)
-    return module(images)
+def test_orientation_undoes_an_eigenvector_sign_flip() -> None:
+    """A per-eigenvector sign flip, as another LAPACK returns, orients identically."""
+    torch.manual_seed(0)
+    reference, flipped = _whitening(), _whitening()
+    train_images = torch.randn(3, 2, 4, 5)
+    reference.init_whiten(train_images)
+
+    def flipped_pca_eigh(x: Tensor) -> tuple[Tensor, Tensor]:
+        eigenvalues, eigenvectors = pca_eigh(x)
+        eigenvectors = eigenvectors.clone()
+        eigenvectors[:, [0, 2]] *= -1
+        return eigenvalues, eigenvectors
+
+    flipped.init_whiten(train_images, decompose=flipped_pca_eigh)
+    assert torch.equal(flipped.weight, reference.weight)
 
 
 def test_init_whiten_rejects_wrong_out_channels():
@@ -51,14 +50,14 @@ def test_init_whiten_rejects_wrong_out_channels():
     on the weight assignment instead of raising a clear error.
     """
     layer = PCAWhiteningConv2d(3, 48, kernel_size=3, padding=1, bias=False)
-    images = torch.randn(16, 3, 8, 8)
+    images = torch.randn(16, 3, 8, 9)
     with pytest.raises(ValueError, match="out_channels"):
         layer.init_whiten(images, decompose=pca_eigh)
 
 
 def test_init_whiten_shape():
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
-    images = torch.randn(100, 3, 8, 8)
+    images = torch.randn(100, 3, 8, 9)
     layer.init_whiten(images, decompose=pca_eigh)
     assert layer.weight.shape == (54, 3, 3, 3)
     assert not layer.weight.requires_grad
@@ -66,16 +65,16 @@ def test_init_whiten_shape():
 
 def test_init_whiten_forward():
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
-    images = torch.randn(100, 3, 8, 8)
+    images = torch.randn(100, 3, 8, 9)
     layer.init_whiten(images, decompose=pca_eigh)
     out = layer(images[:4])
-    assert out.shape == (4, 54, 8, 8)
+    assert out.shape == (4, 54, 8, 9)
 
 
 def test_rank_doubling():
     """Verify [V, -V] structure: second half = negated first half."""
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
-    images = torch.randn(100, 3, 8, 8)
+    images = torch.randn(100, 3, 8, 9)
     layer.init_whiten(images, decompose=pca_eigh)
     first_half = layer.weight.data[:27]
     second_half = layer.weight.data[27:]
@@ -85,7 +84,7 @@ def test_rank_doubling():
 def test_init_whiten_accepts_injected_decompose():
     """The layer forwards an arbitrary decomposer, e.g. the MPS-native one."""
     layer = PCAWhiteningConv2d(3, 54, kernel_size=3, padding=1, bias=False)
-    images = torch.randn(100, 3, 8, 8)
+    images = torch.randn(100, 3, 8, 9)
     layer.init_whiten(images, decompose=functools.partial(pca_power, num_iters=20))
     assert layer.weight.shape == (54, 3, 3, 3)
 
@@ -106,13 +105,19 @@ def test_whitening_text(request: pytest.FixtureRequest) -> None:
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_whitening_bfb(device: str) -> None:
+    def run(module: nn.Module, inputs: tuple[Tensor, Tensor]) -> Tensor:
+        assert isinstance(module, PCAWhiteningConv2d)
+        module.init_whiten(inputs[0])
+        return module(inputs[1])
+
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
-        golden_name=_GOLDEN_NAME,
+        golden_name="whitening",
         build_module=lambda: _whitening().to(device),
-        build_input=lambda: (torch.randn(2, 1, 3, 3), torch.randn(1, 1, 3, 3)),
+        # Kernel size 2 requires spatial inputs at least 2x2.
+        build_input=lambda: (torch.randn(3, 2, 4, 5), torch.randn(3, 2, 4, 5)),
         seed=0,
-        run=_run_whitening,
+        run=run,
     )
 
 

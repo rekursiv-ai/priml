@@ -28,6 +28,7 @@ class _FakeVAE:
     def encode(self, image: torch.Tensor) -> object:
         class Posterior:
             def sample(self) -> torch.Tensor:
+                # encode_image returns the fixed INVAE latent geometry.
                 return torch.ones(image.shape[0], 32, 16, 16)
 
         return Posterior()

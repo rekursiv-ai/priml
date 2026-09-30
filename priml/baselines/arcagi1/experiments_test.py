@@ -1,16 +1,16 @@
-"""Tests for the ARC-AGI experiment ladder.
+"""Tests for the ARC-AGI experiment LADDER.
 
 Each test asserts the DELTA a fork applies, which is what enforces one change
 per experiment: a fork that quietly moved a second knob fails here rather than
 producing a result nobody can attribute.
 
 Every test builds configs only -- no data, no device, no training -- so the
-ladder stays checkable on any machine.
+LADDER stays checkable on any machine.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import inspect
 
@@ -21,12 +21,6 @@ import pytest
 
 from priml.baselines.arcagi1 import experiments
 from priml.baselines.arcagi1.act import AtomicPool
-from priml.baselines.arcagi1.experiments import (
-    GRID_LEN,
-    VOCAB_SIZE,
-    ArcTrainLoop,
-    TrmTrainLoop,
-)
 from priml.baselines.arcagi1.loss import MeanOverBatch
 from priml.baselines.arcagi1.model import ConvSwiGLU, UrmRecurrence
 from priml.baselines.sudoku.embedding import GridEmbedding, PredictionFeedback
@@ -50,8 +44,10 @@ from priml.testing.golden import assert_text_golden
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from priml.baselines.arcagi1.experiments import ArcTrainLoop, TrmTrainLoop
 
-LADDER: list[tuple[str, Callable[[], ArcTrainLoop]]] = [
+
+LADDER: Final[list[tuple[str, Callable[[], ArcTrainLoop]]]] = [
     ("exp000", experiments.exp000),
     ("exp001", experiments.exp001),
     ("exp002", experiments.exp002),
@@ -94,13 +90,28 @@ def test_the_ladder_reuses_the_sudoku_solver() -> None:
     assert isinstance(config.step.model, SudokuNet.Config)
 
 
+def test_unfilled_arc_model_vocabulary_is_rejected() -> None:
+    with pytest.raises(ValueError, match="vocab_size"):
+        experiments.exp000().step.model.make()
+
+
 def test_the_grid_and_vocabulary_are_arcs() -> None:
     """The values that differ from sudoku, stated where a reader can see them."""
     config = experiments.exp000().copy_tree().finalize()
     embedding = config.step.model.embedding
     assert isinstance(embedding, GridEmbedding.Config)
-    assert embedding.grid_len == GRID_LEN
-    assert config.step.model.vocab_size == VOCAB_SIZE
+    assert embedding.grid_shape == (900,) == config.dataset.spec.grid_shape
+    assert config.step.model.vocab_size == 12 == config.dataset.spec.vocab_size
+
+
+def test_small_grid_follows_dataset_spec() -> None:
+    config = experiments.exp000()
+    config.dataset.spec.max_grid = 2
+    finalized = config.finalize()
+    embedding = finalized.step.model.embedding
+    assert isinstance(embedding, GridEmbedding.Config)
+    assert embedding.grid_shape == (4,)
+    assert finalized.step.model.vocab_size == config.dataset.spec.vocab_size
 
 
 def test_the_prefix_carries_a_per_task_vector() -> None:
@@ -117,7 +128,9 @@ def test_the_prefix_carries_a_per_task_vector() -> None:
     # The sequence is grid plus every prefix token, counted automatically.
     expected = table.num_tokens + registers.num_tokens
     assert config.step.model.num_prefix_tokens == expected
-    assert config.step.model.total_seq_len == GRID_LEN + expected
+    assert (
+        config.step.model.total_seq_len == config.dataset.spec.grid_shape[0] + expected
+    )
 
 
 def test_exp001_changes_only_the_block() -> None:
@@ -154,7 +167,7 @@ def test_the_clue_range_matches_arcs_vocabulary() -> None:
     """
     config = experiments.exp002().copy_tree().finalize()
     assert config.step.act is not None
-    assert config.step.act.given_high == VOCAB_SIZE - 1
+    assert config.step.act.given_high == config.dataset.spec.vocab_size - 1
 
 
 def test_exp003_is_exp002_with_the_other_block() -> None:
@@ -209,7 +222,7 @@ def test_smoke_is_small_on_every_costly_axis() -> None:
     assert table.batch_size == smoke.dataset.batch_size
 
 
-REFERENCE: list[tuple[str, Callable[[], TrmTrainLoop]]] = [
+REFERENCE: Final[list[tuple[str, Callable[[], TrmTrainLoop]]]] = [
     ("exp004", experiments.exp004),
     ("exp005", experiments.exp005),
     ("exp006", experiments.exp006),
@@ -223,7 +236,7 @@ def test_reference_recipes_finalize(
     name: str,
     factory: Callable[[], TrmTrainLoop],
 ) -> None:
-    """Each reference recipe builds a config with no data and no device."""
+    """Each REFERENCE recipe builds a config with no data and no device."""
     config = factory().copy_tree().finalize()
     assert config.experiment_name == name
     assert config.max_steps == config.step.total_train_steps

@@ -16,7 +16,7 @@ from priml.optimizers.parameter_filter import (
 
 
 def _weight() -> nn.Parameter:
-    return nn.Parameter(torch.zeros(2, 2))
+    return nn.Parameter(torch.zeros(2, 3))
 
 
 def test_everything_takes_frozen_parameters() -> None:

@@ -28,18 +28,19 @@ def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> Non
     with torch.no_grad():
         built.inner.weight.copy_(torch.arange(26).reshape(13, 2))
 
-    tokens = torch.tensor([[1, 2, 3, 4]])
+    tokens = torch.tensor([[1, 2, 3, 4], [4, 3, 2, 1], [2, 4, 1, 3]])
     output = built(tokens)
-    expected = torch.zeros(1, 4, 2)
+    expected = torch.zeros(3, 4, 2)
     for position in range(2, 4):
-        bucket = (
-            sum(
-                int(tokens[0, position - lag]) * multiplier
-                for lag, multiplier in enumerate(config.multipliers)
+        for row in range(3):
+            bucket = (
+                sum(
+                    int(tokens[row, position - lag]) * multiplier
+                    for lag, multiplier in enumerate(config.multipliers)
+                )
+                % config.channels_in
             )
-            % config.channels_in
-        )
-        expected[0, position] = torch.tensor([2 * bucket, 2 * bucket + 1]) * 0.25
+            expected[row, position] = torch.tensor([2 * bucket, 2 * bucket + 1]) * 0.25
     assert torch.equal(output, expected)
     output.sum().backward()
     assert isinstance(built.inner.weight.grad, Tensor)
@@ -220,10 +221,10 @@ def test_gradient_buffers_follow_placement_without_narrowing() -> None:
 
 def test_fused_mix_accumulates_fp32_sinks_without_weight_gradients() -> None:
     torch.manual_seed(17)
-    values = torch.randn(1, 3, 2, 2, requires_grad=True)
-    gate = torch.randn(1, 3, 2, requires_grad=True)
-    weights = [torch.randn(5, 2, requires_grad=True) for _ in range(2)]
-    indices = [torch.tensor([[1, 1, 3]]) for _ in weights]
+    values = torch.randn(3, 4, 2, 5, requires_grad=True)
+    gate = torch.randn(3, 4, 2, requires_grad=True)
+    weights = [torch.randn(6, 5, requires_grad=True) for _ in range(2)]
+    indices = [torch.tensor([[1, 1, 3, 2]]).expand(3, -1).contiguous() for _ in weights]
     sinks = [torch.zeros_like(weight, dtype=torch.float32) for weight in weights]
     bitmaps = [torch.zeros(weight.shape[0], dtype=torch.uint8) for weight in weights]
 
@@ -235,8 +236,8 @@ def test_fused_mix_accumulates_fp32_sinks_without_weight_gradients() -> None:
     assert all(sink.dtype == torch.float32 for sink in sinks)
     assert all(torch.count_nonzero(sink) > 0 for sink in sinks)
     assert [bitmap.nonzero().flatten().tolist() for bitmap in bitmaps] == [
-        [1, 3],
-        [1, 3],
+        [1, 2, 3],
+        [1, 2, 3],
     ]
 
     before = [weight.detach().clone() for weight in weights]
@@ -260,23 +261,26 @@ def test_cuda_fused_mix_matches_autograd_and_marks_rows(sources: int) -> None:
         pytest.skip("Requires a CUDA device.")
     torch.manual_seed(31)
     values = torch.randn(
-        1,
+        3,
         17,
-        2,
+        4,
         2,
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,
     )
     gates = [
-        torch.randn(1, 17, 2, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        torch.randn(3, 17, 4, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         for _ in range(sources)
     ]
     weights = [
-        torch.randn(32, 2, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        torch.randn(32, 4, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         for _ in range(2 * sources)
     ]
-    indices = [torch.arange(17, device="cuda")[None] % 5 for _ in weights]
+    indices = [
+        (torch.arange(17, device="cuda")[None] % 5).expand(3, -1).contiguous()
+        for _ in weights
+    ]
     sinks = [torch.zeros_like(weight, dtype=torch.float32) for weight in weights]
     bitmaps = [
         torch.zeros(weight.shape[0], device="cuda", dtype=torch.uint8)

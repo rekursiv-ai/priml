@@ -14,7 +14,7 @@ distant mob is not drawn would make every run depend on GitHub being up.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import hashlib
 import os
@@ -36,10 +36,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-TILE = 8
-"""Small tiles: these assert on colour and difference, never on detail."""
-
 pytestmark = pytest.mark.compute_large_fixture
+
+TILE: Final = 8
 
 
 @pytest.fixture(scope="module")
@@ -286,7 +285,7 @@ def test_constructing_a_renderer_requests_the_headless_driver(
     in place the assertion would pass without the renderer doing anything.
     """
     monkeypatch.delenv("SDL_VIDEODRIVER", raising=False)
-    Renderer(block_pixels=8, asset_dir=sprite_dir)
+    Renderer(block_pixels=TILE, asset_dir=sprite_dir)
     assert os.environ["SDL_VIDEODRIVER"] == "dummy"
 
 
@@ -300,7 +299,7 @@ def test_constructing_a_renderer_creates_no_display_surface(
     seconds, and on an operator's desktop it is a window they did not ask
     for. ``play`` calls it deliberately.
     """
-    Renderer(block_pixels=8, asset_dir=sprite_dir)
+    Renderer(block_pixels=TILE, asset_dir=sprite_dir)
     assert pygame.display.get_surface() is None
 
 

@@ -65,13 +65,13 @@ def test_valid_count_truncates_before_scoring() -> None:
 def test_counts_accumulate_across_batches() -> None:
     """Ratios are computed once at the end, not averaged per batch."""
     metric = GridAccuracy.Config().make()
-    labels = torch.full((1, 9), 3, dtype=torch.int64)
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(_packed(labels.clone()), label=labels)  # Solved.
     wrong = labels.clone()
     wrong[0, 0] = 5
     metric.update(_packed(wrong), label=labels)  # Not solved.
     metric.update(_packed(wrong), label=labels)  # Not solved.
-    assert metric.compute()["exact"] == 1 / 3
+    assert metric.compute()["exact"] == 2 / 3
 
 
 def test_empty_metric_reports_zero_not_a_division_error() -> None:
@@ -80,7 +80,7 @@ def test_empty_metric_reports_zero_not_a_division_error() -> None:
 
 def test_state_round_trips() -> None:
     metric = GridAccuracy.Config().make()
-    labels = torch.full((1, 9), 3, dtype=torch.int64)
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(_packed(labels.clone()), label=labels)
     state = metric.state_dict()
 
@@ -91,7 +91,7 @@ def test_state_round_trips() -> None:
 
 def test_reset_clears_every_count() -> None:
     metric = GridAccuracy.Config().make()
-    labels = torch.full((1, 9), 3, dtype=torch.int64)
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
     metric.update(_packed(labels.clone()), label=labels)
     metric.reset()
     assert metric.compute() == {"exact": 0.0, "cell": 0.0}

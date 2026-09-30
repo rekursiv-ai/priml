@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, overload, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, overload, override
 
 import functools
 import math
@@ -861,7 +861,7 @@ def test_load_state_dict_tolerates_a_checkpoint_without_timers() -> None:
     assert target.global_step == 0
 
 
-_MESH_SEAM = "priml.train.train_step.global_device_mesh"
+_MESH_SEAM: Final = "priml.train.train_step.global_device_mesh"
 """Patched by dotted path: a local named ``step`` shadows a module import."""
 
 

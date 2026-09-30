@@ -43,6 +43,7 @@ from priml.baselines.craftax.model import ActorCritic
 from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
+from priml.lib.absent import ABSENT
 from priml.train.parallelism import NoParallel
 from priml.train.train_loop import TrainLoop
 
@@ -58,7 +59,7 @@ type _CraftaxLoop = (
     CraftaxTrainLoop | CraftaxGTrXLTrainLoop | CraftaxRNNTrainLoop | CraftaxPQNTrainLoop
 )
 
-ALL_EXPERIMENTS: list[ExperimentFactory[_CraftaxLoop]] = [
+ALL_EXPERIMENTS: Final[list[ExperimentFactory[_CraftaxLoop]]] = [
     exp000,
     exp001,
     exp002,
@@ -68,7 +69,7 @@ ALL_EXPERIMENTS: list[ExperimentFactory[_CraftaxLoop]] = [
     exp_smoke,
 ]
 
-PUBLISHED_EXPERIMENTS: list[ExperimentFactory[_CraftaxLoop]] = [
+PUBLISHED_EXPERIMENTS: Final[list[ExperimentFactory[_CraftaxLoop]]] = [
     exp000,
     exp001,
     exp002,
@@ -94,7 +95,7 @@ def shrink(config: _CraftaxLoop) -> _CraftaxLoop:
     # against 8,268 -- and every layer, gradient, and optimizer moment scales
     # with it. What is under test is that the RECIPE runs end to end, which a
     # smaller window exercises identically.
-    config.step.env.view = (3, 3)
+    config.step.env.view = (3, 5)
     config.step.compile = None
     config.step.num_minibatches = 1
     config.step.num_epochs = 1
@@ -465,7 +466,7 @@ def _deltas(parent: object, child: object) -> set[str]:
     return {
         name
         for name in flat_parent.keys() | flat_child.keys()
-        if flat_parent.get(name, _MISSING) != flat_child.get(name, _MISSING)
+        if flat_parent.get(name, ABSENT) != flat_child.get(name, ABSENT)
     }
 
 
@@ -490,10 +491,6 @@ def _flatten(config: object, prefix: str = "") -> dict[str, object]:
         else:
             flat[dotted] = value
     return flat
-
-
-_MISSING = object()
-"""Sentinel for a field only one of the two configs has."""
 
 
 def test_exp000_matches_its_golden_config(request: pytest.FixtureRequest) -> None:

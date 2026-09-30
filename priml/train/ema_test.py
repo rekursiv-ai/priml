@@ -461,9 +461,9 @@ def test_ema_param_dict_round_trips_under_dtensor(
     del single_rank_group
     mesh = init_device_mesh("cpu", (1,))
 
-    model = nn.Linear(4, 4, bias=False)
+    model = nn.Linear(3, 2, bias=False)
     with torch.no_grad():
-        model.weight.copy_(torch.arange(16, dtype=torch.float32).reshape(4, 4))
+        model.weight.copy_(torch.arange(6, dtype=torch.float32).reshape(2, 3))
         model.weight = nn.Parameter(
             distribute_tensor(model.weight, mesh, [Shard(0)]),
         )
@@ -481,7 +481,7 @@ def test_ema_param_dict_round_trips_under_dtensor(
         model.weight.copy_(torch.full_like(model.weight, 8.0))
     ema(model)
     # 0.5*orig + 0.5*8 elementwise.
-    expected = 0.5 * torch.arange(16, dtype=torch.float32).reshape(4, 4) + 4.0
+    expected = 0.5 * torch.arange(6, dtype=torch.float32).reshape(2, 3) + 4.0
     torch.testing.assert_close(shadow.to_local(), expected)
 
 

@@ -69,7 +69,7 @@ def test_value_gated_attention_forwards_the_open_message_bus() -> None:
     message = object()
     cos_sin = RoPE.Config(channels_head=8).make()(torch.arange(4))
 
-    attention(torch.randn(1, 4, 16), cos_sin=cos_sin, message=message)
+    attention(torch.randn(2, 4, 16), cos_sin=cos_sin, message=message)
 
     assert messages == [message]
 
@@ -95,7 +95,7 @@ def test_value_gated_attention_preserves_zero_window() -> None:
     config.gate_channels = 4
     config.window = 0
     config.kernel = PartialConfig(kernel)
-    config.make()(torch.randn(1, 4, 16), cos_sin=RoPE.Config(8).make()(torch.arange(4)))
+    config.make()(torch.randn(2, 4, 16), cos_sin=RoPE.Config(8).make()(torch.arange(4)))
     assert windows == [0]
 
 
@@ -108,7 +108,7 @@ def test_value_gated_attention_zero_window_output_is_its_own_value() -> None:
     attention = config.make()
     with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
         attention.proj_out.weight.copy_(torch.eye(16))
-        x = torch.randn(1, 4, 16)
+        x = torch.randn(2, 4, 16)
         expected = attention.proj_v(x)
         actual = attention(x, cos_sin=RoPE.Config(8).make()(torch.arange(4)))
     assert torch.equal(actual, expected)
@@ -136,11 +136,11 @@ def test_value_gated_attention_uses_the_value_embedding() -> None:
         window=4,
     ).make()
     cos_sin = RoPE.Config(channels_head=8).make()(torch.arange(4))
-    x = torch.randn(1, 4, 16)
-    value_embedding = torch.randn(1, 4, 16)
+    x = torch.randn(2, 4, 16)
+    value_embedding = torch.randn(2, 4, 16)
 
     assert attention(x, cos_sin=cos_sin, value_embedding=value_embedding).shape == (
-        1,
+        2,
         4,
         16,
     )
@@ -222,20 +222,20 @@ def test_value_gated_attention_bfb(device: str) -> None:
         golden_name="value_gated_attention",
         build_module=lambda: (
             ValueGatedAttention.Config(
-                channels_in=16,
+                channels_in=4,
                 num_heads=2,
-                channels_head=8,
-                gate_channels=4,
+                channels_head=2,
+                gate_channels=2,
                 window=2,
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: torch.randn(2, 4, 16),
+        build_input=lambda: torch.randn(2, 3, 4),
         seed=0,
         run=lambda module, x: cast(ValueGatedAttention, module)(
             x,
-            cos_sin=RoPE.Config(8).make()(torch.arange(4)),
+            cos_sin=RoPE.Config(2).make()(torch.arange(3)),
             value_embedding=x,
         ),
     )
@@ -298,9 +298,9 @@ def test_value_gated_attention_cost_matches_torch_through_a_naive_kernel() -> No
     )
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        build_input=lambda: torch.randn(2, 8, 16, requires_grad=True),
         seq_len=8,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
         run=lambda module, x: cast(ValueGatedAttention, module)(
             x,

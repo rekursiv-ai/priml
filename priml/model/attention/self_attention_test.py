@@ -108,10 +108,10 @@ def test_self_attention_kv_cache():
     x = torch.randn(2, 8, 64)
     _, cache = m.forward_cached(x, cache=cache)
     assert cache.length == 8
-    x2 = torch.randn(2, 1, 64)
+    x2 = torch.randn(2, 3, 64)
     out2, cache = m.forward_cached(x2, cache=cache)
-    assert out2.shape == (2, 1, 64)
-    assert cache.length == 9
+    assert out2.shape == (2, 3, 64)
+    assert cache.length == 11
 
 
 def test_self_attention_preallocated_cache():
@@ -123,10 +123,10 @@ def test_self_attention_preallocated_cache():
     assert out.shape == (2, 8, 64)
     assert cache.length == 8
     # Second step.
-    x2 = torch.randn(2, 1, 64)
+    x2 = torch.randn(2, 3, 64)
     out2, cache = m.forward_cached(x2, cache=cache)
-    assert out2.shape == (2, 1, 64)
-    assert cache.length == 9
+    assert out2.shape == (2, 3, 64)
+    assert cache.length == 11
 
 
 def test_self_attention_gqa():
@@ -175,9 +175,9 @@ def test_self_attention_with_rope_and_cache():
     x = torch.randn(2, 8, 64)
     cache = m.alloc_kv_cache(batch=2, max_seq=9)
     _, cache = m.forward_cached(x, cache=cache)
-    x2 = torch.randn(2, 1, 64)
+    x2 = torch.randn(2, 3, 64)
     out2, _ = m.forward_cached(x2, cache=cache)
-    assert out2.shape == (2, 1, 64)
+    assert out2.shape == (2, 3, 64)
 
 
 def test_self_attention_with_norm_qk():
@@ -416,16 +416,17 @@ def test_self_attention_explicit_mask_combines_with_implicit_causal():
     """
     torch.manual_seed(0)
     config = SelfAttention.Config(
-        channels_in=32,
-        num_heads=4,
-        channels_head=8,
+        channels_in=30,
+        num_heads=3,
+        channels_head=10,
         causal=True,
         attn_kernel=SdpaNaive.Config(),
     )
     module = config.make()
     module.eval()
-    x = torch.randn(1, 4, 32)
-    permissive_mask = torch.zeros(1, 1, 4, 4)
+    x = torch.randn(2, 5, 30)
+    # SelfAttention._forward receives one sequence, so query/key lengths are square.
+    permissive_mask = torch.zeros(2, 3, 5, 5)
 
     with torch.inference_mode():
         out_causal_no_mask = module(x)
@@ -464,7 +465,7 @@ def test_self_attention_decode_matches_explicit_mask_reference() -> None:
     )
     model = config.make()
     model.eval()
-    prompt = torch.randint(0, 32, (1, 2))
+    prompt = torch.randint(0, 32, (2, 3))
 
     fixed_tokens = _greedy_decode(model, prompt=prompt, num_steps=8, reference=False)
     reference_tokens = _greedy_decode(model, prompt=prompt, num_steps=8, reference=True)
@@ -488,11 +489,11 @@ def test_self_attention_decode_respects_configured_window() -> None:
     )
     module = config.make()
     module.eval()
-    x = torch.randn(1, 6, 16)
+    x = torch.randn(2, 7, 16)
     window = 2
 
     def decode(*, window: int) -> Tensor:
-        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        cache = KVCache.alloc(batch=2, num_heads=2, max_seq=8, channels_head=8)
         _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
         return module.forward_cached(x[:, 5:], cache=cache, window=window)[0]
 
@@ -507,11 +508,11 @@ def test_self_attention_decode_respects_configured_window() -> None:
     )
 
     with torch.inference_mode():
-        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        cache = KVCache.alloc(batch=2, num_heads=2, max_seq=8, channels_head=8)
         _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
         forced_mask = window_mask(
-            torch.empty(1, 1, 1, dtype=x.dtype),
-            torch.empty(cache.seen + 1, 1, 1, dtype=x.dtype),
+            torch.empty(2, 3, 4, dtype=x.dtype),
+            torch.empty(cache.seen + 2, 3, 4, dtype=x.dtype),
             window=window,
         )
         forced, _ = module.forward_cached(
@@ -540,11 +541,11 @@ def test_self_attention_cached_chunk_respects_configured_window() -> None:
     )
     module = config.make()
     module.eval()
-    x = torch.randn(1, 8, 16)
+    x = torch.randn(2, 8, 16)
     window = 2
 
     def decode(*, window: int) -> Tensor:
-        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        cache = KVCache.alloc(batch=2, num_heads=2, max_seq=8, channels_head=8)
         _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
         return module.forward_cached(x[:, 5:], cache=cache, window=window)[0]
 
@@ -559,11 +560,11 @@ def test_self_attention_cached_chunk_respects_configured_window() -> None:
     )
 
     with torch.inference_mode():
-        cache = KVCache.alloc(batch=1, num_heads=2, max_seq=8, channels_head=8)
+        cache = KVCache.alloc(batch=2, num_heads=2, max_seq=8, channels_head=8)
         _, cache = module.forward_cached(x[:, :5], cache=cache, window=window)
         forced_mask = window_mask(
-            torch.empty(3, 1, 1, dtype=x.dtype),
-            torch.empty(cache.seen + 3, 1, 1, dtype=x.dtype),
+            torch.empty(3, 2, 4, dtype=x.dtype),
+            torch.empty(cache.seen + 3, 2, 4, dtype=x.dtype),
             window=window,
         )
         forced, _ = module.forward_cached(
@@ -621,7 +622,7 @@ def test_self_attention_forwards_the_open_message_bus() -> None:
     ).make()
     message = object()
 
-    attention(torch.randn(1, 4, 16), message=message)
+    attention(torch.randn(2, 4, 16), message=message)
 
     assert messages == [message]
 
@@ -658,15 +659,15 @@ def test_self_attention_bfb(device: str) -> None:
         golden_name="self_attention",
         build_module=lambda: (
             SelfAttention.Config(
-                channels_in=16,
+                channels_in=4,
                 num_heads=2,
-                channels_head=8,
+                channels_head=2,
                 causal=True,
             )
             .make()
             .to(device)
         ),
-        build_input=lambda: torch.randn(2, 4, 16),
+        build_input=lambda: torch.randn(3, 2, 4),
         seed=0,
     )
 
@@ -715,9 +716,9 @@ def test_self_attention_cost_is_projections_plus_scores() -> None:
     )
     model_cost = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 32, 16, requires_grad=True),
+        build_input=lambda: torch.randn(2, 32, 16, requires_grad=True),
         seq_len=32,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
     kernel = attention_kernel_cost(seq_len=32, dtype=None, num_heads=2, channels_head=8)
@@ -729,10 +730,10 @@ def test_self_attention_cost_is_projections_plus_scores() -> None:
     assert model_cost.params == qkv + out
     assert (
         model_cost["flops", "primal", "matmul"].sum()
-        == 2 * 32 * (qkv + out) + kernel["flops", "primal", "matmul"].sum()
+        == 4 * 32 * (qkv + out) + 2 * kernel["flops", "primal", "matmul"].sum()
     )
     assert model_cost["flops", "adjoint", "matmul"].sum() == (
-        4 * 32 * (qkv + out) + kernel["flops", "adjoint", "matmul"].sum()
+        8 * 32 * (qkv + out) + 2 * kernel["flops", "adjoint", "matmul"].sum()
     )
     assert model_cost.bytes_state == 4 * 2 * 2 * 8
 
@@ -794,9 +795,9 @@ def test_attention_cost_counts_its_norms_and_rotary() -> None:
     )
     assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        build_input=lambda: torch.randn(2, 8, 16, requires_grad=True),
         seq_len=8,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
 
@@ -906,16 +907,17 @@ def _greedy_decode(
     with torch.inference_mode():
         for _ in range(num_steps):
             next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            tokens.append(int(next_token.item()))
+            tokens.extend(int(token) for token in next_token.flatten())
             x = proj_in(next_token)
             for i, block in enumerate(blocks):
                 extra: dict[str, object] = {}
                 if reference:
                     cache = caches[i]
                     assert isinstance(cache, KVCache)
+                    # Transformer.project_to_logits emits one-token decode queries.
                     mask = causal_chunk_mask(
-                        torch.empty(1, 1, 1, dtype=x.dtype),
-                        torch.empty(cache.seen + 1, 1, 1, dtype=x.dtype),
+                        torch.empty(1, 2, 3, dtype=x.dtype),
+                        torch.empty(cache.seen + 1, 2, 3, dtype=x.dtype),
                     )
                     extra = {"is_causal": False, "attn_mask": mask}
                 x, caches[i] = block.forward_cached(x, cache=caches[i], **extra)

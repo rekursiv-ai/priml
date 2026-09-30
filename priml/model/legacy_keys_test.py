@@ -11,7 +11,7 @@ from priml.model.legacy_keys import absorb_legacy_keys
 
 def test_absorb_legacy_keys() -> None:
     module = nn.Module()
-    projection = nn.Linear(2, 2)
+    projection = nn.Linear(2, 3)
     module.proj_x = projection
     weight, bias = projection.weight, projection.bias
     assert weight is not None

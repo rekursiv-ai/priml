@@ -131,7 +131,7 @@ def test_attention_owns_causality(causal: bool) -> None:
     config.block.attn.causal = causal
     model = config.make().eval()
     randomize_parameters(model, seed=7, std=0.2)
-    hidden = torch.randn(1, 3, 8)
+    hidden = torch.randn(2, 3, 8)
     changed = hidden.clone()
     changed[:, -1] += torch.arange(8)
     before, after = model(hidden), model(changed)

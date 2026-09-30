@@ -211,8 +211,8 @@ def _muon_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
     try:
         runtime._device_mesh = mesh
         torch.manual_seed(0)
-        weight = torch.randn(4, 4)
-        grad = torch.randn(4, 4)
+        weight = torch.randn(4, 5)
+        grad = torch.randn(4, 5)
 
         full_param = nn.Parameter(weight.clone())
         full_param.grad = grad.clone()
@@ -223,7 +223,7 @@ def _muon_shard_worker(result_dir: str, mesh: DeviceMesh) -> None:
         sharded.grad = distribute_tensor(grad.clone(), mesh, [Shard(0)])
         # Guard against a silent world_size=1 (no real shard): each rank must
         # hold exactly 2 of the 4 rows, else the test proves nothing.
-        if tuple(weight_dt.to_local().shape) != (2, 4):
+        if tuple(weight_dt.to_local().shape) != (2, 5):
             (result_path / f"rank_{rank}").write_text(
                 f"FAIL:not-sharded local={tuple(weight_dt.to_local().shape)}",
             )

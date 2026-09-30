@@ -151,7 +151,7 @@ def test_specs_apply_without_processors(
     config = gpu_processor_class.Config()
     config.input_require_tensor = False
     config.output_require_tensor = False
-    config.input_spec = {"a": _add_one}
+    config.input_spec = {"a": lambda value: cast(int, value) + 1}
     config.output_spec = {"a": _times_ten}
 
     with patch("torch.cuda.is_available", return_value=False):
@@ -662,7 +662,7 @@ def test_extraction_to_numpy(
     config = gpu_processor_class.Config()
     config.processors.append(PassthroughProcessor.Config())
     config.input_spec = {"**": lambda x: x}
-    config.output_spec = {"result": _tensor_to_numpy}
+    config.output_spec = {"result": lambda value: cast(Tensor, value).cpu().numpy()}
 
     with patch("torch.cuda.is_available", return_value=False):
         processor = _make(gpu_processor_class, config)
@@ -731,7 +731,7 @@ def test_3stream_gpu_output_spec_preserves_user_transform() -> None:
     config = PipelinedGPUProcessor3Stream.Config()
     config.processors.append(PassthroughProcessor.Config())
     config.input_spec = {"**": lambda x: x}
-    config.output_spec = {"result": _to_float64}
+    config.output_spec = {"result": lambda value: cast(Tensor, value).to(torch.float64)}
 
     with (
         patch("torch.cuda.is_available", return_value=True),
@@ -778,22 +778,11 @@ def test_inference_mode_with_pipelined_processor(
 
         # Wrap with InferenceMode -> then PipelinedGPUProcessor.
         wrapped = inference_mode(iter(samples))
-        result = list(processor(_sample_iterator(wrapped)))
+        result = list(processor(sample for sample in wrapped if _is_sample(sample)))
 
     assert len(result) == 1
     assert result[0]["processed"]
     assert result[0]["value"] == 42
-
-
-def _sample_iterator(samples: Iterator[object]) -> Iterator[Sample]:
-    for sample in samples:
-        assert _is_sample(sample)
-        yield sample
-
-
-def _add_one(value: object) -> object:
-    assert isinstance(value, int)
-    return value + 1
 
 
 def _times_ten(value: object) -> object:
@@ -804,16 +793,6 @@ def _times_ten(value: object) -> object:
 def _tensor_to_list(value: object) -> object:
     assert isinstance(value, Tensor)
     return value.tolist()
-
-
-def _tensor_to_numpy(value: object) -> object:
-    assert isinstance(value, Tensor)
-    return value.cpu().numpy()
-
-
-def _to_float64(value: object) -> object:
-    assert isinstance(value, Tensor)
-    return value.to(torch.float64)
 
 
 if __name__ == "__main__":

@@ -72,8 +72,8 @@ def test_rope_nd():
 def test_rope_rotate():
     q = torch.randn(2, 8, 4, 32)
     k = torch.randn(2, 8, 4, 32)
-    cos = torch.randn(8, 1, 16)
-    sin = torch.randn(8, 1, 16)
+    cos = torch.randn(8, 4, 16)
+    sin = torch.randn(8, 4, 16)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
     assert q_rot.shape == q.shape
     assert k_rot.shape == k.shape
@@ -82,8 +82,8 @@ def test_rope_rotate():
 def test_rope_rotate_interleave():
     q = torch.randn(2, 8, 4, 32)
     k = torch.randn(2, 8, 4, 32)
-    cos = torch.randn(8, 1, 16)
-    sin = torch.randn(8, 1, 16)
+    cos = torch.randn(8, 4, 16)
+    sin = torch.randn(8, 4, 16)
     q_rot, _k_rot = RoPE.rotate(q, k, cos, sin, interleave=True)
     assert q_rot.shape == q.shape
 
@@ -136,11 +136,11 @@ def test_rotate_matches_stack_reference_forward_and_backward(
     """
     torch.manual_seed(0)
     half = head_dim // 2
-    x_ref = torch.randn(2, 5, 3, head_dim, dtype=dtype, requires_grad=True)
+    x_ref = torch.randn(4, 5, 2, head_dim, dtype=dtype, requires_grad=True)
     x = x_ref.detach().clone().requires_grad_()
-    cos_ref = torch.randn(5, 1, half, dtype=dtype, requires_grad=True)
+    cos_ref = torch.randn(5, 2, half, dtype=dtype, requires_grad=True)
     cos = cos_ref.detach().clone().requires_grad_()
-    sin_ref = torch.randn(5, 1, half, dtype=dtype, requires_grad=True)
+    sin_ref = torch.randn(5, 2, half, dtype=dtype, requires_grad=True)
     sin = sin_ref.detach().clone().requires_grad_()
 
     out_ref = _rotate_reference(x_ref, cos_ref, sin_ref, interleave)
@@ -171,9 +171,9 @@ def test_rotate_avoids_stack_materialization(
         raise AssertionError("RoPE._rotate should not call torch.stack")
 
     monkeypatch.setattr(torch, "stack", fail_stack)
-    x = torch.randn(2, 5, 3, 8, dtype=torch.bfloat16, requires_grad=True)
-    cos = torch.randn(5, 1, 4, dtype=torch.bfloat16, requires_grad=True)
-    sin = torch.randn(5, 1, 4, dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(4, 5, 2, 8, dtype=torch.bfloat16, requires_grad=True)
+    cos = torch.randn(5, 2, 4, dtype=torch.bfloat16, requires_grad=True)
+    sin = torch.randn(5, 2, 4, dtype=torch.bfloat16, requires_grad=True)
 
     RoPE._rotate(x, cos, sin, interleave).float().sum().backward()
 
@@ -199,9 +199,9 @@ def test_rotate_does_not_use_empty_like(
         raise AssertionError("RoPE._rotate should not call torch.empty_like")
 
     monkeypatch.setattr(torch, "empty_like", fail_empty_like)
-    x = torch.randn(2, 5, 3, 8, dtype=torch.float32)
-    cos = torch.randn(5, 1, 4, dtype=torch.float32)
-    sin = torch.randn(5, 1, 4, dtype=torch.float32)
+    x = torch.randn(4, 5, 2, 8, dtype=torch.float32)
+    cos = torch.randn(5, 2, 4, dtype=torch.float32)
+    sin = torch.randn(5, 2, 4, dtype=torch.float32)
 
     out = RoPE._rotate(x, cos, sin, interleave)
     assert torch.isfinite(out).all()
@@ -209,10 +209,10 @@ def test_rotate_does_not_use_empty_like(
 
 def test_rope_rotate_padding() -> None:
     """cos/sin shorter than seq_len should be padded with identity."""
-    q = torch.randn(2, 16, 1, 32)
-    k = torch.randn(2, 16, 1, 32)
-    cos = torch.randn(8, 1, 16)  # Shorter than seq_len=16.
-    sin = torch.randn(8, 1, 16)
+    q = torch.randn(2, 16, 3, 32)
+    k = torch.randn(2, 16, 3, 32)
+    cos = torch.randn(8, 3, 16)  # Shorter than seq_len=16.
+    sin = torch.randn(8, 3, 16)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
     assert torch.equal(q_rot[:, 8:], q[:, 8:])
     assert torch.equal(k_rot[:, 8:], k[:, 8:])
@@ -439,10 +439,10 @@ def test_hf_inv_freq_cos_sin_exact():
 
 def test_rope_rotate_partial():
     """Partial rotation: cos/sin covers fewer channels than q/k."""
-    q = torch.randn(2, 8, 4, 32)
-    k = torch.randn(2, 8, 4, 32)
-    cos = torch.randn(8, 1, 4)  # half-dim for rot_dim=8 out of D=32.
-    sin = torch.randn(8, 1, 4)
+    q = torch.randn(2, 8, 3, 32)
+    k = torch.randn(2, 8, 3, 32)
+    cos = torch.randn(8, 3, 4)  # half-dim for rot_dim=8 out of D=32.
+    sin = torch.randn(8, 3, 4)
     q_rot, k_rot = RoPE.rotate(q, k, cos, sin)
     assert q_rot.shape == q.shape
     assert k_rot.shape == k.shape
@@ -455,10 +455,10 @@ def test_rope_rotate_partial():
 
 def test_rope_rotate_partial_interleave():
     """Partial rotation with interleave=True."""
-    q = torch.randn(2, 8, 4, 32)
-    k = torch.randn(2, 8, 4, 32)
-    cos = torch.randn(8, 1, 4)
-    sin = torch.randn(8, 1, 4)
+    q = torch.randn(2, 8, 3, 32)
+    k = torch.randn(2, 8, 3, 32)
+    cos = torch.randn(8, 3, 4)
+    sin = torch.randn(8, 3, 4)
     q_rot, _k_rot = RoPE.rotate(q, k, cos, sin, interleave=True)
     assert q_rot.shape == q.shape
     assert torch.equal(q_rot[..., 8:], q[..., 8:])
@@ -466,10 +466,10 @@ def test_rope_rotate_partial_interleave():
 
 def test_rope_rotate_partial_full_coverage():
     """When cos covers all channels, partial path is not taken."""
-    q = torch.randn(2, 8, 1, 32)
-    k = torch.randn(2, 8, 1, 32)
-    cos = torch.randn(8, 1, 16)  # half-dim = D/2.
-    sin = torch.randn(8, 1, 16)
+    q = torch.randn(2, 8, 3, 32)
+    k = torch.randn(2, 8, 3, 32)
+    cos = torch.randn(8, 3, 16)  # half-dim = D/2.
+    sin = torch.randn(8, 3, 16)
     q_full, _k_full = RoPE.rotate(q, k, cos, sin)
     # No unrotated suffix -- full rotation.
     assert not torch.equal(q_full, q)
@@ -483,10 +483,10 @@ def test_rope_rotate_rejects_cos_longer_than_sequence():
     so a five-position table applied to a one-position query returned a
     five-position result -- a wrong shape produced silently.
     """
-    q = torch.randn(1, 1, 2, 8)
-    k = torch.randn(1, 1, 2, 8)
-    cos = torch.randn(1, 5, 1, 4)
-    sin = torch.randn(1, 5, 1, 4)
+    q = torch.randn(2, 3, 4, 8)
+    k = torch.randn(2, 3, 4, 8)
+    cos = torch.randn(2, 5, 3, 4)
+    sin = torch.randn(2, 5, 3, 4)
     with pytest.raises(ValueError, match="positions"):
         _ = RoPE.rotate(q, k, cos, sin)
 
@@ -718,8 +718,15 @@ def test_frequency_table_bfb(device: str, name: str, frequencies: object) -> Non
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name=name,
-        build_module=lambda: RoPE.Config(8, frequencies=frequencies).make().to(device),
-        build_input=lambda: torch.arange(4),
+        build_module=lambda: (
+            RoPE.Config(
+                2,
+                frequencies=frequencies,
+            )
+            .make()
+            .to(device)
+        ),
+        build_input=lambda: torch.arange(2),
         seed=0,
         run=lambda module, positions: torch.cat(cast(RoPE, module)(positions), dim=-1),
     )
@@ -932,8 +939,8 @@ def test_rope_bfb(device: str) -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="rope",
-        build_module=lambda: RoPE.Config(8).make().to(device),
-        build_input=lambda: torch.arange(4),
+        build_module=lambda: RoPE.Config(2).make().to(device),
+        build_input=lambda: torch.arange(2),
         seed=0,
         run=lambda module, positions: torch.cat(cast(RoPE, module)(positions), dim=-1),
     )
@@ -941,14 +948,14 @@ def test_rope_bfb(device: str) -> None:
 
 @pytest.mark.parametrize("device", bfb_devices(), ids=str)
 def test_rope_mixed_bfb(device: str) -> None:
-    config = RoPEMixed.Config(8)
+    config = RoPEMixed.Config(2)
     config.num_heads = 2
     config.learnable = True
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="rope_mixed",
         build_module=lambda: config.make().to(device),
-        build_input=lambda: torch.arange(4),
+        build_input=lambda: torch.arange(2),
         seed=0,
         run=lambda module, positions: torch.cat(
             cast(RoPEMixed, module)(positions),

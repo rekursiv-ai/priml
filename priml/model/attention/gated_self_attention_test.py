@@ -34,10 +34,10 @@ def test_gated_attention_cache_continuation() -> None:
     config.rope = RoPE.Config(2)
     config.attn_kernel = SdpaNaive.Config()
     model = config.make().eval()
-    x = torch.randn(1, 5, 8)
+    x = torch.randn(2, 5, 8)
     with torch.no_grad():
         expected = model(x)
-        cache = model.alloc_kv_cache(batch=1, max_seq=5)
+        cache = model.alloc_kv_cache(batch=2, max_seq=5)
         prefix, cache = model.forward_cached(x[:, :3], cache=cache)
         suffix, cache = model.forward_cached(x[:, 3:], cache=cache)
     torch.testing.assert_close(torch.cat([prefix, suffix], dim=1), expected)
@@ -51,7 +51,7 @@ def test_gated_attention_parameters_receive_gradients() -> None:
     config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make()
-    model(torch.randn(1, 3, 8)).square().sum().backward()
+    model(torch.randn(2, 3, 8)).square().sum().backward()
     for name, parameter in model.named_parameters():
         assert parameter.grad is not None, name
         assert torch.isfinite(parameter.grad).all(), name
@@ -92,7 +92,7 @@ def test_gated_attention_reset_resets_injected_rope() -> None:
 
 @pytest.mark.parametrize(
     ("batch", "num_heads", "channels_head"),
-    [(2, 1, 4), (1, 2, 4), (1, 1, 5)],
+    [(2, 3, 4), (3, 2, 4), (2, 3, 5)],
 )
 def test_gated_attention_rejects_cache_geometry_before_mutation(
     batch: int,
@@ -114,7 +114,7 @@ def test_gated_attention_rejects_cache_geometry_before_mutation(
     original_k, original_v = cache.k.clone(), cache.v.clone()
 
     with pytest.raises(ValueError, match="cache batch, head, and feature geometry"):
-        model.forward_cached(torch.randn(1, 1, 8), cache=cache)
+        model.forward_cached(torch.randn(2, 3, 8), cache=cache)
 
     assert cache.length == 0
     assert cache.seen == 0
@@ -133,12 +133,12 @@ def test_gated_attention_rejects_rotary_width_larger_than_head() -> None:
     model = config.make()
 
     with pytest.raises(ValueError, match="Rotary width"):
-        model(torch.randn(1, 1, 8))
+        model(torch.randn(2, 3, 8))
 
 
 @pytest.mark.parametrize(
     "positions",
-    [torch.arange(3).reshape(1, 3), torch.arange(6).reshape(1, 3, 2)],
+    [torch.arange(6).reshape(2, 3), torch.arange(24).reshape(4, 3, 2)],
 )
 def test_gated_attention_rejects_non_text_position_layout(
     positions: torch.Tensor,
@@ -153,7 +153,7 @@ def test_gated_attention_rejects_non_text_position_layout(
     model = config.make()
 
     with pytest.raises(ValueError, match="positions must be a text layout"):
-        model(torch.randn(1, 3, 8), positions=positions)
+        model(torch.randn(2, 3, 8), positions=positions)
 
 
 def test_gated_attention_accepts_axis_last_text_positions() -> None:
@@ -165,10 +165,13 @@ def test_gated_attention_accepts_axis_last_text_positions() -> None:
     rope.channels_head = 2
     config.rope = rope
     model = config.make()
-    x = torch.randn(1, 3, 8)
+    x = torch.randn(2, 3, 8)
 
     expected = model(x)
-    actual = model(x, positions=torch.arange(3).reshape(1, 3, 1))
+    actual = model(
+        x,
+        positions=torch.tensor([[[0], [1], [2]], [[0], [1], [2]]]),
+    )
 
     assert torch.equal(actual, expected)
 
@@ -198,7 +201,7 @@ def test_gated_attention_window_restricts_attention() -> None:
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
-    x = torch.randn(1, 8, 8)
+    x = torch.randn(2, 5, 8)
 
     with torch.no_grad():
         windowed = model(x, window=2)
@@ -223,11 +226,11 @@ def test_gated_attention_cached_decode_window_restricts_attention(
     config.channels_head = 4
     config.attn_kernel = kernel_config
     model = config.make().eval()
-    x = torch.randn(1, 6, 8)
+    x = torch.randn(2, 5, 8)
 
     with torch.no_grad():
-        cache_a = model.alloc_kv_cache(batch=1, max_seq=6)
-        cache_b = model.alloc_kv_cache(batch=1, max_seq=6)
+        cache_a = model.alloc_kv_cache(batch=2, max_seq=6)
+        cache_b = model.alloc_kv_cache(batch=2, max_seq=6)
         _, cache_a = model.forward_cached(x[:, :4], cache=cache_a)
         _, cache_b = model.forward_cached(x[:, :4], cache=cache_b)
         windowed, _ = model.forward_cached(x[:, 4:], cache=cache_a, window=0)
@@ -248,11 +251,11 @@ def test_gated_attention_cached_decode_window_zero_pins_to_value_projection() ->
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
-    x = torch.randn(1, 6, 8)
+    x = torch.randn(2, 5, 8)
     decode = x[:, 4:]
 
     with torch.no_grad():
-        cache = model.alloc_kv_cache(batch=1, max_seq=6)
+        cache = model.alloc_kv_cache(batch=2, max_seq=6)
         _, cache = model.forward_cached(x[:, :4], cache=cache)
         actual, _ = model.forward_cached(decode, cache=cache, window=0)
 
@@ -272,11 +275,11 @@ def test_gated_attention_cached_decode_window_zero_pins_to_value_projection() ->
 @pytest.mark.parametrize(
     ("window", "expected"),
     [
-        (0, torch.tensor([[[3.0], [4.0]]])),
-        (3, torch.tensor([[[2.0], [2.5]]])),
-        (4, torch.tensor([[[2.0], [2.5]]])),
-        (5, torch.tensor([[[2.0], [2.5]]])),
-        (-1, torch.tensor([[[2.0], [2.5]]])),
+        (0, torch.tensor([[[3.0], [4.0]], [[3.0], [4.0]]])),
+        (3, torch.tensor([[[2.0], [2.5]], [[2.0], [2.5]]])),
+        (4, torch.tensor([[[2.0], [2.5]], [[2.0], [2.5]]])),
+        (5, torch.tensor([[[2.0], [2.5]], [[2.0], [2.5]]])),
+        (-1, torch.tensor([[[2.0], [2.5]], [[2.0], [2.5]]])),
     ],
 )
 def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
@@ -295,10 +298,13 @@ def test_gated_attention_cached_chunk_keeps_causality_when_window_is_unmasked(
         model.proj_k.weight.zero_()
         model.proj_v.weight.fill_(1)
         model.proj_out.weight.fill_(1)
-        cache = model.alloc_kv_cache(batch=1, max_seq=4)
-        _, cache = model.forward_cached(torch.tensor([[[2.0], [4.0]]]), cache=cache)
+        cache = model.alloc_kv_cache(batch=2, max_seq=4)
+        _, cache = model.forward_cached(
+            torch.tensor([[[2.0], [4.0]], [[2.0], [4.0]]]),
+            cache=cache,
+        )
         actual, _ = model.forward_cached(
-            torch.tensor([[[6.0], [8.0]]]),
+            torch.tensor([[[6.0], [8.0]], [[6.0], [8.0]]]),
             cache=cache,
             window=window,
         )
@@ -314,12 +320,12 @@ def test_gated_attention_consumes_caller_causality_message(is_causal: bool) -> N
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
-    x = torch.randn(1, 4, 4)
+    x = torch.randn(2, 3, 4)
 
     with torch.no_grad():
         expected = model(x)
         direct = model(x, is_causal=is_causal)
-        cache = model.alloc_kv_cache(batch=1, max_seq=4)
+        cache = model.alloc_kv_cache(batch=2, max_seq=4)
         prefix, cache = model.forward_cached(x[:, :2], cache=cache, is_causal=is_causal)
         suffix, _ = model.forward_cached(x[:, 2:], cache=cache, is_causal=is_causal)
 
@@ -339,8 +345,9 @@ def test_gated_attention_window_applies_alongside_an_explicit_mask() -> None:
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
-    x = torch.randn(1, 8, 8)
-    attn_mask = torch.zeros(1, 1, 8, 8)
+    x = torch.randn(2, 5, 8)
+    # GatedSelfAttention.forward broadcasts the singleton head mask dimension.
+    attn_mask = torch.zeros(2, 1, 5, 5)
 
     with torch.no_grad():
         windowed = model(x, window=2, attn_mask=attn_mask)
@@ -364,8 +371,9 @@ def test_gated_attention_window_zero_with_a_no_op_mask_pins_to_value_projection(
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
-    x = torch.randn(1, 6, 8)
-    attn_mask = torch.zeros(1, 1, 6, 6)
+    x = torch.randn(2, 6, 8)
+    # GatedSelfAttention.forward broadcasts the singleton head mask dimension.
+    attn_mask = torch.zeros(2, 1, 6, 6)
 
     with torch.no_grad():
         actual = model(x, window=0, attn_mask=attn_mask)
@@ -394,7 +402,7 @@ def test_gated_attention_window_zero_pins_to_value_projection() -> None:
     config.num_heads = config.num_heads_kv = 1
     config.channels_head = 4
     model = config.make().eval()
-    x = torch.randn(1, 6, 8)
+    x = torch.randn(2, 6, 8)
 
     with torch.no_grad():
         actual = model(x, window=0)
@@ -425,7 +433,7 @@ def test_gated_attention_reaches_causal_fast_path() -> None:
     model.attn_kernel = spy
 
     with torch.no_grad():
-        model(torch.randn(1, 5, 8))
+        model(torch.randn(2, 5, 8))
 
     assert spy.received["attn_mask"] is None
     assert spy.received["is_causal"] is True
@@ -448,9 +456,9 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     config.rope = RoPE.Config(4)
     model_cost = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(1, 8, 16, requires_grad=True),
+        build_input=lambda: torch.randn(2, 8, 16, requires_grad=True),
         seq_len=8,
-        batch_size=1,
+        batch_size=2,
         dtype=None,
     )
     finalized = config.copy_tree().finalize()
@@ -460,25 +468,25 @@ def test_gated_attention_cost_is_projections_norms_rotary_kernel_and_gate() -> N
     norms = 2 * 8  # norm_q and norm_k each own one head-width scale.
     assert model_cost.params == projections + norms
     assert model_cost["flops", "primal", "matmul"].sum() == (
-        2 * 8 * projections + kernel["flops", "primal", "matmul"].sum()
+        2 * (2 * 8 * projections + kernel["flops", "primal", "matmul"].sum())
     )
     assert model_cost["flops", "adjoint", "matmul"].sum() == (
-        4 * 8 * projections + kernel["flops", "adjoint", "matmul"].sum()
+        2 * (4 * 8 * projections + kernel["flops", "adjoint", "matmul"].sum())
     )
     assert model_cost.bytes_state == 4 * 2 * 1 * 8
     assert finalized.rope is not None
     scalar = (
         kernel
         + cost(finalized.norm_qk, seq_len=8, batch_size=2, dtype=None)
-        + cost(finalized.norm_qk, seq_len=8, batch_size=1, dtype=None)
-        + cost(finalized.rope, seq_len=8, batch_size=1, dtype=None)
+        + cost(finalized.norm_qk, seq_len=8, batch_size=2, dtype=None)
+        + cost(finalized.rope, seq_len=8, batch_size=2, dtype=None)
         + rotation_cost(finalized.rope, rows=8, dtype=None, channels_head=8, heads=3)
     )
     assert model_cost["flops", "primal", "elementwise"].sum() == (
-        scalar["flops", "primal", "elementwise"].sum() + 5 * inner * 8
+        scalar["flops", "primal", "elementwise"].sum() + 19 * inner * 8
     )
     assert model_cost["flops", "adjoint", "elementwise"].sum() == (
-        scalar["flops", "adjoint", "elementwise"].sum() + 6 * inner * 8
+        scalar["flops", "adjoint", "elementwise"].sum() + (99 * inner * 8) // 4
     )
 
 

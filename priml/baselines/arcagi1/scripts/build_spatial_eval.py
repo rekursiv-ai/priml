@@ -19,7 +19,7 @@ import shutil
 
 import numpy as np
 
-from priml.baselines.arcagi1.augmentation import ARC, normalize_scale_weights
+from priml.baselines.arcagi1.augmentation import ArcSpec, normalize_scale_weights
 from priml.baselines.arcagi1.scripts.build_dataset import DEFAULT_SCALE_WEIGHTS
 from priml.data.distributed_build import run_rank_zero_build
 from priml.data.ensure import DataSpec, FileSpec, ensure_data
@@ -77,7 +77,7 @@ def spatial_eval_dataset_dir(
     return resolve_working_dir(base_dir, working_dir) / f"{base}-{slug}"
 
 
-_ensure_cache: set[tuple[str, str, int, tuple[tuple[int, float], ...]]] = set()
+_ensure_cache: set[tuple[str, str, int, tuple[tuple[int, float], ...], int]] = set()
 """Per-(source, target, policy) ensures already completed in this process."""
 
 
@@ -88,6 +88,7 @@ def ensure_spatial_eval_data(
     scale_weights: Mapping[int, float] = DEFAULT_SCALE_WEIGHTS,
     seed: int = 42,
     target: Path | None = None,
+    spec: ArcSpec | None = None,
 ) -> Path:
     """Ensure the spatial-eval expansion of an existing ``source_dir``.
 
@@ -100,6 +101,7 @@ def ensure_spatial_eval_data(
       scale_weights: Scale factors sampled per variant (fit-gated).
       seed: Sampler seed.
       target: Destination; ``None`` resolves under ``/opt/scratch``.
+      spec: Dataset-owned grid geometry; ``None`` uses the default ARC spec.
 
     Returns:
       target: The spatial-eval dataset directory.
@@ -111,11 +113,14 @@ def ensure_spatial_eval_data(
             source_name=source_dir.name,
             base_dir="/opt/scratch",
         )
+    if spec is None:
+        spec = ArcSpec()
     key = (
         str(source_dir),
         str(target),
         spatial_views,
         tuple(sorted(scale_weights.items())),
+        spec.max_grid,
     )
     if key in _ensure_cache:
         return target
@@ -138,11 +143,12 @@ def ensure_spatial_eval_data(
         spatial_views=spatial_views,
         scale_weights=scale_weights,
         seed=seed,
+        spec=spec,
     )
-    spec = DataSpec(target_dir=target, manifest=manifest, fetch=fetch)
+    data_spec = DataSpec(target_dir=target, manifest=manifest, fetch=fetch)
 
     def _build() -> None:
-        ensure_data(spec)
+        ensure_data(data_spec)
 
     run_rank_zero_build(name="ensure_spatial_eval_data", build=_build)
     _ensure_cache.add(key)
@@ -156,6 +162,7 @@ def build_spatial_eval(
     target_dir: Path,
     scale_weights: Mapping[int, float] = DEFAULT_SCALE_WEIGHTS,
     seed: int = 42,
+    spec: ArcSpec | None = None,
 ) -> None:
     """Write a spatial-expanded copy of ``source_dir`` to ``target_dir``.
 
@@ -165,10 +172,13 @@ def build_spatial_eval(
       target_dir: Destination.
       scale_weights: Scale factor weights (normalized here).
       seed: Sampler seed.
+      spec: Dataset-owned grid geometry; ``None`` uses the default ARC spec.
 
     """
     if spatial_views < 1:
         raise ValueError(f"spatial_views must be >= 1, got {spatial_views}.")
+    if spec is None:
+        spec = ArcSpec()
     scale_weights = normalize_scale_weights(scale_weights)
     rng = np.random.default_rng(seed)
     src_test = source_dir / "test"
@@ -202,16 +212,28 @@ def build_spatial_eval(
         # One transform covers the whole puzzle, so every row must fit it.
         puzzle_grids = [*inputs[lo:hi], *labels[lo:hi]]
         for _ in range(spatial_views - 1):
-            sampled = _sample_spatial(puzzle_grids, scale_weights, rng)
+            sampled = _sample_spatial(puzzle_grids, scale_weights, rng, spec=spec)
             if sampled is None:
                 continue
             scale, pad_r, pad_c = sampled
             for r in range(lo, hi):
                 new_inputs.append(
-                    _forward_spatial(inputs[r], scale=scale, pad_r=pad_r, pad_c=pad_c),
+                    _forward_spatial(
+                        inputs[r],
+                        scale=scale,
+                        pad_r=pad_r,
+                        pad_c=pad_c,
+                        spec=spec,
+                    ),
                 )
                 new_labels.append(
-                    _forward_spatial(labels[r], scale=scale, pad_r=pad_r, pad_c=pad_c),
+                    _forward_spatial(
+                        labels[r],
+                        scale=scale,
+                        pad_r=pad_r,
+                        pad_c=pad_c,
+                        spec=spec,
+                    ),
                 )
                 example_count += 1
             new_puzzle_indices.append(example_count)
@@ -265,7 +287,9 @@ class _SpatialEvalBuild:
         spatial_views: int,
         scale_weights: Mapping[int, float],
         seed: int,
+        spec: ArcSpec,
     ) -> None:
+        self._spec = spec
         self._source_dir = source_dir
         self._target_dir = target_dir
         self._spatial_views = spatial_views
@@ -283,6 +307,7 @@ class _SpatialEvalBuild:
             target_dir=self._target_dir,
             scale_weights=self._scale_weights,
             seed=self._seed,
+            spec=self._spec,
         )
         self._built = True
 
@@ -299,9 +324,9 @@ def _int_list(array: NDArray[np.int64]) -> list[int]:
     return ListCodec.coerce(cast(object, array.tolist()), int)
 
 
-def _content_shape(flat: NDArray[np.int64]) -> tuple[int, int]:
+def _content_shape(flat: NDArray[np.int64], *, spec: ArcSpec) -> tuple[int, int]:
     """Return the color content's bounding ``(rows, cols)`` from the top-left."""
-    color = flat.reshape(ARC.max_grid, ARC.max_grid) >= ARC.vocab_color_offset
+    color = flat.reshape(spec.max_grid, spec.max_grid) >= spec.vocab_color_offset
     if not color.any():
         return 0, 0
     rows = _int_list(np.nonzero(color.any(axis=1))[0])
@@ -315,18 +340,19 @@ def _forward_spatial(
     scale: int,
     pad_r: int,
     pad_c: int,
+    spec: ArcSpec,
 ) -> NDArray[np.int64]:
     """Crop content, block-upscale, pad to ``(pad_r, pad_c)``, and mark EOS."""
-    nr, nc = _content_shape(flat)
-    content = flat.reshape(ARC.max_grid, ARC.max_grid)[:nr, :nc]
+    nr, nc = _content_shape(flat, spec=spec)
+    content = flat.reshape(spec.max_grid, spec.max_grid)[:nr, :nc]
     scaled = np.repeat(np.repeat(content, scale, axis=0), scale, axis=1)
     sh, sw = nr * scale, nc * scale
-    out = np.zeros((ARC.max_grid, ARC.max_grid), dtype=flat.dtype)
+    out = np.full((spec.max_grid, spec.max_grid), spec.vocab_pad, dtype=flat.dtype)
     out[pad_r : pad_r + sh, pad_c : pad_c + sw] = scaled
-    if pad_r + sh < ARC.max_grid:
-        out[pad_r + sh, pad_c : pad_c + sw] = ARC.vocab_eos
-    if pad_c + sw < ARC.max_grid:
-        out[pad_r : pad_r + sh, pad_c + sw] = ARC.vocab_eos
+    if pad_r + sh < spec.max_grid:
+        out[pad_r + sh, pad_c : pad_c + sw] = spec.vocab_eos
+    if pad_c + sw < spec.max_grid:
+        out[pad_r : pad_r + sh, pad_c + sw] = spec.vocab_eos
     return out.flatten()
 
 
@@ -334,9 +360,11 @@ def _sample_spatial(
     grids: Sequence[NDArray[np.int64]],
     scale_weights: Mapping[int, float],
     rng: np.random.Generator,
+    *,
+    spec: ArcSpec,
 ) -> tuple[int, int, int] | None:
     """Sample ``(scale, pad_r, pad_c)`` fitting every grid; None for identity."""
-    shapes = [_content_shape(grid) for grid in grids]
+    shapes = [_content_shape(grid, spec=spec) for grid in grids]
     max_r = max((r for r, _ in shapes), default=0)
     max_c = max((c for _, c in shapes), default=0)
     if max_r == 0 or max_c == 0:
@@ -344,12 +372,12 @@ def _sample_spatial(
     factors = [
         s
         for s in scale_weights
-        if s * max_r <= ARC.max_grid and s * max_c <= ARC.max_grid
+        if s * max_r <= spec.max_grid and s * max_c <= spec.max_grid
     ]
     weights = np.array([scale_weights[s] for s in factors], dtype=np.float64)
     scale = int(rng.choice(factors, p=weights / weights.sum())) if factors else 1
-    pad_r = int(rng.integers(0, ARC.max_grid - scale * max_r + 1))
-    pad_c = int(rng.integers(0, ARC.max_grid - scale * max_c + 1))
+    pad_r = int(rng.integers(0, spec.max_grid - scale * max_r + 1))
+    pad_c = int(rng.integers(0, spec.max_grid - scale * max_c + 1))
     if scale == 1 and pad_r == 0 and pad_c == 0:
         return None
     return scale, pad_r, pad_c

@@ -81,18 +81,19 @@ def test_rope_leaves_cls_untouched_and_uses_original_positions() -> None:
 
 def test_training_routing_alignment_and_backward() -> None:
     model = tiny_model().train()
-    image = torch.randn(2, 2, 4, 4)
-    labels = torch.tensor([1, 2])
-    teacher = tuple(torch.randn(2, 17, 8) for _ in range(3))
+    # SpeedrunDiT production input_size=4 requires its square spatial grid.
+    image = torch.randn(3, 2, 4, 4)
+    labels = torch.tensor([1, 2, 3])
+    teacher = tuple(torch.randn(3, 17, 8) for _ in range(3))
     objective = SpeedrunObjective(shift_time=False)
-    terms = objective(model, image, labels, teacher, time=torch.full((2,), 0.5))
-    assert terms.loss.shape == (2,)
+    terms = objective(model, image, labels, teacher, time=torch.full((3,), 0.5))
+    assert terms.loss.shape == (3,)
     assert terms.output.velocity.shape == image.shape
-    assert terms.output.cls_velocity.shape == (2, 8)
+    assert terms.output.cls_velocity.shape == (3, 8)
     assert [p.tokens.shape[1] for p in terms.output.projections] == [17, 8, 17]
     kept = terms.output.projections[1].ids_keep
     assert kept is not None
-    assert kept.shape == (2, 8)
+    assert kept.shape == (3, 8)
     terms.loss.mean().backward()
     assert model.final_layer.linear.weight.grad is not None
     assert model.projector[0].weight.grad is not None
@@ -114,11 +115,12 @@ def test_position_table_promotes_bfloat16_tokens_to_float32() -> None:
 
     model.blocks[0].register_forward_pre_hook(capture_input)
     with torch.autocast("cpu", dtype=torch.bfloat16), pytest.raises(StopForwardError):
+        # SpeedrunDiT production input_size=4 requires its square spatial grid.
         model(
-            torch.randn(1, 2, 4, 4),
+            torch.randn(2, 2, 4, 4),
             torch.full((1,), 0.5),
             torch.tensor([1]),
-            torch.randn(1, 8),
+            torch.randn(2, 8),
             route_tokens=False,
         )
     assert captured is not None
@@ -146,13 +148,14 @@ def test_shift_and_sampler_return_expected_latent_shapes() -> None:
         torch.tensor([0.0, 1.0]),
     )
     model = tiny_model().eval()
-    latents = torch.randn(2, 2, 4, 4)
-    cls = torch.randn(2, 8)
+    # SpeedrunDiT production input_size=4 requires its square spatial grid.
+    latents = torch.randn(3, 2, 4, 4)
+    cls = torch.randn(3, 8)
     sampled, sampled_cls = sample_latents(
         model,
         latents,
         cls,
-        torch.tensor([1, 2]),
+        torch.tensor([1, 2, 3]),
         num_steps=3,
         shift_time=False,
     )
@@ -164,7 +167,7 @@ def test_shift_and_sampler_return_expected_latent_shapes() -> None:
         model,
         latents,
         cls,
-        torch.tensor([1, 2]),
+        torch.tensor([1, 2, 3]),
         num_steps=2,
         cfg_scale=2,
         shift_time=False,
@@ -195,9 +198,10 @@ def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:
             return ModelOutput(torch.zeros_like(x), cls_velocity, ())
 
     model = ConstantVelocityModel()
-    latents = torch.zeros(1, 2, 4, 4)
-    cls = torch.zeros(1, 8)
-    labels = torch.tensor([1])
+    # SpeedrunDiT production input_size=4 requires its square spatial grid.
+    latents = torch.zeros(3, 2, 4, 4)
+    cls = torch.zeros(3, 8)
+    labels = torch.tensor([0, 1, 0])
     torch.manual_seed(7)
     _, conditional_cls = sample_latents(
         model,

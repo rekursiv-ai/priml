@@ -1,5 +1,5 @@
 Embedding.Config(
-                channels_in=8,
+                channels_in=2,
                 channels_out=4,
                 padding_idx=None,
                 device=None,

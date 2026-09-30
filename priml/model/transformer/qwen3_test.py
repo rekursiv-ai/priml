@@ -47,12 +47,12 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _hf_config(**overrides: object) -> dict[str, object]:
+def hf_config(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "model_type": "qwen3",
         "vocab_size": 128,
         "hidden_size": 64,
-        "intermediate_size": 128,
+        "intermediate_size": 96,
         "num_hidden_layers": 2,
         "num_attention_heads": 4,
         "num_key_value_heads": 2,
@@ -66,16 +66,16 @@ def _hf_config(**overrides: object) -> dict[str, object]:
     return base
 
 
-def _canonical_config() -> Qwen3.Config:
+def canonical_config() -> Qwen3.Config:
     return Qwen3.Config.from_hf(
-        _hf_config(
-            vocab_size=32,
-            hidden_size=16,
-            intermediate_size=32,
+        hf_config(
+            vocab_size=9,
+            hidden_size=8,
+            intermediate_size=7,
             num_hidden_layers=1,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=8,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=6,
         ),
     )
 
@@ -84,7 +84,7 @@ def test_qwen3_config_pprint() -> None:
     assert_pprint_golden(
         test_file=__file__,
         name="qwen3",
-        config=_canonical_config(),
+        config=canonical_config(),
     )
 
 
@@ -92,8 +92,10 @@ def test_qwen3_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="qwen3",
-        build_module=lambda: _canonical_config().make(),
-        build_input=lambda: torch.tensor([[0, 1, 2]]),
+        build_module=canonical_config().make,
+        build_input=lambda: torch.tensor(
+            [[0, 1, 2, 3, 4], [5, 6, 7, 8, 0], [8, 6, 4, 2, 1]],
+        ),
         seed=0,
     )
 
@@ -106,40 +108,38 @@ def test_qwen3_cost_matches_torch(tie_embeddings: bool) -> None:
     naive kernel makes the same two products countable. A tied head borrows
     the table, so it adds a matmul and no parameters.
     """
-    config = _canonical_config()
+    config = Qwen3.Config.from_hf(
+        hf_config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=24,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            tie_word_embeddings=tie_embeddings,
+        ),
+    )
     config.channels_out = 32
-    if tie_embeddings:
-        config = Qwen3.Config.from_hf(
-            _hf_config(
-                vocab_size=32,
-                hidden_size=16,
-                intermediate_size=32,
-                num_hidden_layers=1,
-                num_attention_heads=2,
-                num_key_value_heads=1,
-                head_dim=8,
-                tie_word_embeddings=True,
-            ),
-        )
-    _attn(config).attn_kernel = SdpaNaive.Config()
+    attn(config).attn_kernel = SdpaNaive.Config()
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randint(0, 32, (2, 5)),
+        build_input=lambda: torch.randint(0, 32, (3, 5)),
         seq_len=5,
-        batch_size=2,
+        batch_size=3,
         dtype=None,
     )
-    assert analytical.bytes_state == 4 * 2 * 1 * 8  # One KV head cached per layer.
+    assert analytical.bytes_state == 4 * 2 * 2 * 8  # Two KV heads cached per layer.
 
 
-def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
+def synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
     """Build a random-weight state_dict in HF Qwen3 layout."""
     h = cfg.channels_in
-    inter = _ffn(cfg).channels_hidden
-    attn = _attn(cfg)
-    n_q = attn.num_heads
-    n_kv = attn.num_heads_kv
-    d = attn.channels_head
+    inter = ffn(cfg).channels_hidden
+    attention = attn(cfg)
+    n_q = attention.num_heads
+    n_kv = attention.num_heads_kv
+    d = attention.channels_head
     sd: dict[str, Tensor] = {
         "model.embed_tokens.weight": torch.randn(cfg.channels_out, h),
         "model.norm.weight": torch.randn(h),
@@ -164,7 +164,7 @@ def _synth_hf_state_dict(cfg: Qwen3.Config) -> dict[str, Tensor]:
 
 # Accepts a template or a finalized per-layer list, so a caller need not know which side
 # of ``finalize`` it is on.
-def _attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
+def attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
     """One layer's attention -- where the head geometry lives now."""
     block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
     assert isinstance(block, TransformerBlock.Config)
@@ -173,7 +173,7 @@ def _attn(cfg: Qwen3.Config, layer: int = 0) -> SelfAttention.Config:
     return attn
 
 
-def _ffn(cfg: Qwen3.Config, layer: int = 0) -> SwiGLU.Config:
+def ffn(cfg: Qwen3.Config, layer: int = 0) -> SwiGLU.Config:
     """One layer's FFN -- where the hidden width lives now."""
     block = cfg.block[layer] if isinstance(cfg.block, list) else cfg.block
     assert isinstance(block, TransformerBlock.Config)
@@ -201,36 +201,36 @@ def _final_norm(cfg: Transformer.Config) -> RMSNorm.Config:
 
 class TestConfig:
     def test_parse_basic(self):
-        cfg = Qwen3.Config.from_hf(_hf_config())
+        cfg = Qwen3.Config.from_hf(hf_config())
         assert cfg.channels_out == 128
         assert cfg.channels_in == 64
-        assert _attn(cfg).channels_head == 16
-        assert _attn(cfg).num_heads_kv == 2
-        rope = _attn(cfg).rope
+        assert attn(cfg).channels_head == 16
+        assert attn(cfg).num_heads_kv == 2
+        rope = attn(cfg).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 1_000_000
 
     def test_wrong_model_type_rejected(self):
         with pytest.raises(ValueError, match="qwen3"):
-            Qwen3.Config.from_hf(_hf_config(model_type="qwen2"))
+            Qwen3.Config.from_hf(hf_config(model_type="qwen2"))
         with pytest.raises(ValueError, match="qwen3"):
-            Qwen3.Config.from_hf(_hf_config(model_type="qwen3_moe"))
+            Qwen3.Config.from_hf(hf_config(model_type="qwen3_moe"))
 
     def test_head_dim_inferred_when_missing(self):
-        cfg = _hf_config()
+        cfg = hf_config()
         cfg.pop("head_dim")
         parsed = Qwen3.Config.from_hf(cfg)
-        assert _attn(parsed).channels_head == (
+        assert attn(parsed).channels_head == (
             IntCodec.coerce(cfg["hidden_size"])
             // IntCodec.coerce(cfg["num_attention_heads"])
         )
 
     def test_num_key_value_heads_inferred_when_missing(self):
-        cfg = _hf_config()
+        cfg = hf_config()
         cfg.pop("num_key_value_heads")
         parsed = Qwen3.Config.from_hf(cfg)
-        assert _attn(parsed).num_heads_kv == IntCodec.coerce(cfg["num_attention_heads"])
+        assert attn(parsed).num_heads_kv == IntCodec.coerce(cfg["num_attention_heads"])
 
     @pytest.mark.parametrize("field_name", ["num_key_value_heads", "head_dim"])
     def test_explicit_zero_head_geometry_rejected(self, field_name: str):
@@ -238,20 +238,20 @@ class TestConfig:
             ValueError,
             match=rf"{field_name} must be > 0, got 0\.",
         ):
-            Qwen3.Config.from_hf(_hf_config(**{field_name: 0}))
+            Qwen3.Config.from_hf(hf_config(**{field_name: 0}))
 
     def test_nested_rope_parameters_accept_numeric_text(self):
-        cfg = _hf_config(rope_theta=None, rope_parameters={"rope_theta": "25000"})
+        cfg = hf_config(rope_theta=None, rope_parameters={"rope_theta": "25000"})
         parsed = Qwen3.Config.from_hf(cfg)
-        rope = _attn(parsed).rope
+        rope = attn(parsed).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 25_000.0
 
     def test_malformed_nested_rope_parameters_use_default(self):
-        cfg = _hf_config(rope_theta=None, rope_parameters=["not", "an", "object"])
+        cfg = hf_config(rope_theta=None, rope_parameters=["not", "an", "object"])
         parsed = Qwen3.Config.from_hf(cfg)
-        rope = _attn(parsed).rope
+        rope = attn(parsed).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, HuggingFaceFrequencies.Config)
         assert rope.frequencies.base == 1_000_000.0
@@ -265,7 +265,7 @@ class TestConfig:
         overrides: dict[str, int],
     ) -> None:
         """A degenerate width renders; building it is torch's to refuse."""
-        config = Qwen3.Config.from_hf(_hf_config(**overrides))
+        config = Qwen3.Config.from_hf(hf_config(**overrides))
 
         assert "Qwen3.Config" in config.pformat(hide_default_values=False)
 
@@ -277,16 +277,16 @@ class TestConfig:
         differs from the residual width.
         """
         cfg = Qwen3.Config.from_hf(
-            _hf_config(hidden_size=32, num_attention_heads=4, head_dim=16),
+            hf_config(hidden_size=32, num_attention_heads=4, head_dim=16),
         ).finalize()
         model = cfg.make()
-        model.load_state_dict(remap_hf_state_dict(_synth_hf_state_dict(cfg), cfg))
-        toks = torch.randint(0, cfg.channels_out, (2, 5))
-        assert model(toks).shape == (2, 5, cfg.channels_out)
+        model.load_state_dict(remap_hf_state_dict(synth_hf_state_dict(cfg), cfg))
+        toks = torch.randint(0, cfg.channels_out, (3, 5))
+        assert model(toks).shape == (3, 5, cfg.channels_out)
 
     def test_make_returns_qwen3_instance(self):
         """Makes[Qwen3] re-narrows .make() to Qwen3, not Transformer."""
-        model = Qwen3.Config.from_hf(_hf_config()).make()
+        model = Qwen3.Config.from_hf(hf_config()).make()
         assert isinstance(model, Qwen3)
 
 
@@ -299,21 +299,21 @@ class TestSlots:
         The parent used to redeclare ``rope_theta`` and ``frequencies`` and
         rebuild the child in ``finalize``, so this edit was discarded.
         """
-        cfg = Qwen3.Config.from_hf(_hf_config())
-        template_rope = _attn(cfg).rope
+        cfg = Qwen3.Config.from_hf(hf_config())
+        template_rope = attn(cfg).rope
         assert isinstance(template_rope, RoPE.Config)
         template_rope.frequencies = GeometricFrequencies.Config(base=12_345.0)
         cfg = cfg.copy_tree().finalize()
-        rope = _attn(cfg).rope
+        rope = attn(cfg).rope
         assert isinstance(rope, RoPE.Config)
         assert isinstance(rope.frequencies, GeometricFrequencies.Config)
         assert rope.frequencies.base == 12_345.0
         # The width still comes from the attention it rotates.
-        assert rope.channels_head == _attn(cfg).channels_head
+        assert rope.channels_head == attn(cfg).channels_head
 
     def test_a_norm_edit_reaches_every_norm(self):
         """One template, so an epsilon set once applies throughout."""
-        cfg = Qwen3.Config.from_hf(_hf_config())
+        cfg = Qwen3.Config.from_hf(hf_config())
         template = _block(cfg)
         assert isinstance(template.norm1, RMSNorm.Config)
         template.norm1.eps = 1e-3
@@ -327,14 +327,14 @@ class TestSlots:
 
     def test_each_norm_is_its_own_object(self):
         """Templates are copied, so one consumer cannot edit another's."""
-        cfg = Qwen3.Config.from_hf(_hf_config()).copy_tree().finalize()
+        cfg = Qwen3.Config.from_hf(hf_config()).copy_tree().finalize()
         block = _block(cfg)
         assert block.norm1 is not block.norm2
         assert block.norm1 is not _final_norm(cfg)
         assert block.norm1 is not _block(cfg, 1).norm1
 
     def test_architecture_specific_sizing_skips_other_blocks(self):
-        cfg = Qwen3.Config.from_hf(_hf_config())
+        cfg = Qwen3.Config.from_hf(hf_config())
         block = RMSNorm.Config()
         cfg._size_block(block)
         assert block.channels_in == cfg.channels_in
@@ -346,10 +346,10 @@ class TestLoad:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        hf_config = _hf_config(num_hidden_layers=1)
-        cfg = Qwen3.Config.from_hf(hf_config).finalize()
-        (tmp_path / "config.json").write_text(json.dumps(hf_config))
-        load_local_state_dict = Mock(return_value=_synth_hf_state_dict(cfg))
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
+        (tmp_path / "config.json").write_text(json.dumps(config_dict))
+        load_local_state_dict = Mock(return_value=synth_hf_state_dict(cfg))
         monkeypatch.setattr(hub, "load_local_state_dict", load_local_state_dict)
 
         model = Qwen3.load(tmp_path, device="cpu", dtype=torch.float32)
@@ -364,11 +364,11 @@ class TestLoad:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        hf_config = _hf_config(num_hidden_layers=1)
-        cfg = Qwen3.Config.from_hf(hf_config).finalize()
+        config_dict = hf_config(num_hidden_layers=1)
+        cfg = Qwen3.Config.from_hf(config_dict).finalize()
         hf_model = Mock()
-        hf_model.config.to_dict.return_value = hf_config
-        hf_model.state_dict.return_value = _synth_hf_state_dict(cfg)
+        hf_model.config.to_dict.return_value = config_dict
+        hf_model.state_dict.return_value = synth_hf_state_dict(cfg)
         load_transformers_model = Mock(return_value=hf_model)
         monkeypatch.setattr(
             hub,
@@ -388,28 +388,28 @@ class TestLoad:
 
 class TestRemap:
     def test_end_to_end_load(self):
-        cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
         model = cfg.make()
-        hf_sd = _synth_hf_state_dict(cfg)
+        hf_sd = synth_hf_state_dict(cfg)
         loop_sd = remap_hf_state_dict(hf_sd, cfg)
         model.load_state_dict(loop_sd, strict=True)
 
     def test_forward_after_load(self):
-        cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
         model = cfg.make()
-        model.load_state_dict(remap_hf_state_dict(_synth_hf_state_dict(cfg), cfg))
-        toks = torch.randint(0, cfg.channels_out, (2, 5))
+        model.load_state_dict(remap_hf_state_dict(synth_hf_state_dict(cfg), cfg))
+        toks = torch.randint(0, cfg.channels_out, (3, 5))
         logits = model(toks)
-        assert logits.shape == (2, 5, cfg.channels_out)
+        assert logits.shape == (3, 5, cfg.channels_out)
 
     def test_qkv_preserves_rows(self):
         """Per-head rows from HF Q/K/V land in the expected ensemble slots."""
-        cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
         h = cfg.channels_in
-        attn = _attn(cfg)
-        d = attn.channels_head
-        n_q, n_kv = attn.num_heads, attn.num_heads_kv
-        hf_sd = _synth_hf_state_dict(cfg)
+        attention = attn(cfg)
+        d = attention.channels_head
+        n_q, n_kv = attention.num_heads, attention.num_heads_kv
+        hf_sd = synth_hf_state_dict(cfg)
         q = hf_sd["model.layers.0.self_attn.q_proj.weight"].view(n_q, d, h)
         k = hf_sd["model.layers.0.self_attn.k_proj.weight"].view(n_kv, d, h)
         v = hf_sd["model.layers.0.self_attn.v_proj.weight"].view(n_kv, d, h)
@@ -422,32 +422,32 @@ class TestRemap:
 
     def test_swiglu_gate_up_order(self):
         """Loop's chunk(2) yields (gate, x); cat must match."""
-        cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
-        hf_sd = _synth_hf_state_dict(cfg)
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        hf_sd = synth_hf_state_dict(cfg)
         gate = hf_sd["model.layers.0.mlp.gate_proj.weight"]
         up = hf_sd["model.layers.0.mlp.up_proj.weight"]
         remapped = remap_hf_state_dict(hf_sd, cfg)
         fused = remapped["blocks.0.ffn.up_proj.weight"]
-        assert fused.shape == (2 * _ffn(cfg).channels_hidden, cfg.channels_in)
-        assert torch.equal(fused[: _ffn(cfg).channels_hidden], gate)
-        assert torch.equal(fused[_ffn(cfg).channels_hidden :], up)
+        assert fused.shape == (2 * ffn(cfg).channels_hidden, cfg.channels_in)
+        assert torch.equal(fused[: ffn(cfg).channels_hidden], gate)
+        assert torch.equal(fused[ffn(cfg).channels_hidden :], up)
 
     def test_tied_embeddings(self):
-        cfg = Qwen3.Config.from_hf(_hf_config(tie_word_embeddings=True)).finalize()
-        hf_sd = _synth_hf_state_dict(cfg)
+        cfg = Qwen3.Config.from_hf(hf_config(tie_word_embeddings=True)).finalize()
+        hf_sd = synth_hf_state_dict(cfg)
         remapped = remap_hf_state_dict(hf_sd, cfg)
         assert "proj_out.1.weight" not in remapped
         model = cfg.make()
         model.load_state_dict(remapped, strict=True)
         assert isinstance(model.proj_out, Sequential)
         assert isinstance(model.proj_out[1], TiedLinear)
-        tokens = torch.tensor([[1, 2, 3]])
-        assert model(tokens).shape == (1, 3, cfg.channels_out)
+        tokens = torch.arange(15).reshape(3, 5)
+        assert model(tokens).shape == (3, 5, cfg.channels_out)
 
     def test_independent_qk_norms(self):
         """q_norm and k_norm weights must be independent after load."""
-        cfg = Qwen3.Config.from_hf(_hf_config()).finalize()
-        hf_sd = _synth_hf_state_dict(cfg)
+        cfg = Qwen3.Config.from_hf(hf_config()).finalize()
+        hf_sd = synth_hf_state_dict(cfg)
         hf_sd["model.layers.0.self_attn.q_norm.weight"].fill_(2.0)
         hf_sd["model.layers.0.self_attn.k_norm.weight"].fill_(3.0)
         model = cfg.make()
@@ -470,7 +470,7 @@ class TestRemap:
 
     @pytest.mark.parametrize("bad_part", ["block", "attention"])
     def test_remap_rejects_incompatible_layer_configs(self, bad_part: str):
-        cfg = Qwen3.Config.from_hf(_hf_config(num_hidden_layers=1))
+        cfg = Qwen3.Config.from_hf(hf_config(num_hidden_layers=1))
         block = cfg.block
         assert isinstance(block, TransformerBlock.Config)
         if bad_part == "block":
@@ -480,7 +480,7 @@ class TestRemap:
             block.attn = RMSNorm.Config()
             match = "not self-attention"
         with pytest.raises(TypeError, match=match):
-            qwen3._attn_of(cfg)
+            qwen3.remap_hf_state_dict({}, cfg)
 
 
 @pytest.mark.compute_torch_compile
@@ -625,24 +625,6 @@ def test_parity_test_restores_process_state_when_setup_fails(
         torch.set_rng_state(rng_state)
 
 
-def _tiny_hf_config() -> dict[str, object]:
-    return {
-        "vocab_size": 128,
-        "hidden_size": 64,
-        "intermediate_size": 128,
-        "num_hidden_layers": 2,
-        "num_attention_heads": 4,
-        "num_key_value_heads": 2,
-        "head_dim": 16,
-        "hidden_act": "silu",
-        "max_position_embeddings": 32,
-        "rms_norm_eps": 1e-6,
-        "tie_word_embeddings": False,
-        "attention_bias": False,
-        "rope_theta": 1_000_000.0,
-    }
-
-
 def _build_qwen3_hf_model(cfg_dict: dict[str, object]) -> Qwen3ForCausalLM:
     pytest.importorskip("transformers")
     from transformers.models.qwen3.configuration_qwen3 import (  # noqa: PLC0415 -- The optional Transformers dependency is loaded only in these tests.
@@ -656,18 +638,23 @@ def _build_qwen3_hf_model(cfg_dict: dict[str, object]) -> Qwen3ForCausalLM:
     return Qwen3ForCausalLM(config).eval().to(dtype=torch.float32)
 
 
-def _hf_state_dict_to_loop_format(
-    hf_model: Qwen3ForCausalLM,
-    config: Qwen3.Config,
-) -> dict[str, Tensor]:
-    raw = {key: value.detach().cpu() for key, value in hf_model.state_dict().items()}
-    return remap_hf_state_dict(raw, config)
-
-
 def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
     """Build HF and loop Qwen3 models with shared weights and inputs."""
-    cfg_dict = _tiny_hf_config()
-    cfg_dict["tie_word_embeddings"] = tie_embeddings
+    cfg_dict: dict[str, object] = {
+        "vocab_size": 128,
+        "hidden_size": 64,
+        "intermediate_size": 96,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 16,
+        "hidden_act": "silu",
+        "max_position_embeddings": 32,
+        "rms_norm_eps": 1e-6,
+        "tie_word_embeddings": tie_embeddings,
+        "attention_bias": False,
+        "rope_theta": 1_000_000.0,
+    }
 
     hf_model = _build_qwen3_hf_model(cfg_dict)
     config = Qwen3.Config.from_hf(
@@ -682,10 +669,15 @@ def _qwen3_parity_outputs(tie_embeddings: bool) -> tuple[Tensor, Tensor]:
         block.ffn.split_gate_projection = True
         block.attn.attn_kernel = SdpaNaive.Config()
     loop_model = config.make()
-    loop_model.load_state_dict(_hf_state_dict_to_loop_format(hf_model, config))
+    loop_model.load_state_dict(
+        remap_hf_state_dict(
+            {key: value.detach().cpu() for key, value in hf_model.state_dict().items()},
+            config,
+        ),
+    )
     loop_model.eval().to(dtype=torch.float32)
 
-    tokens = torch.randint(0, IntCodec.coerce(cfg_dict["vocab_size"]), (2, 5))
+    tokens = torch.randint(0, IntCodec.coerce(cfg_dict["vocab_size"]), (3, 5))
     with torch.no_grad():
         # ``forward`` rather than ``__call__``: the stub's ``__call__`` cannot
         # bind a ``forward`` taking ``**kwargs: Unpack[...]``, and an eval-mode

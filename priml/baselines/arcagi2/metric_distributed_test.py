@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Final, Literal, cast, override
 
 import traceback
 
+from torch import Tensor
+
 import pytest
 import torch
 
@@ -80,7 +82,8 @@ def _local_metric(root: Path) -> PassK:
 def _manifest(root: Path) -> None:
     (root / "identifiers.json").write_text('["<blank>", "puzzle"]')
     (root / "test_puzzles.json").write_text(
-        '{"puzzle": {"test": [{"input": [[0]], "output": [[0]]}]}}',
+        '{"puzzle": {"test": [{"input": [[0]], "output": [[0]]}, '
+        '{"input": [[0]], "output": [[0]]}]}}',
     )
 
 
@@ -153,7 +156,7 @@ def test_source_global_ballots(
                 object,
                 torch.load(tmp_path / f"scores_{rank}.pt", weights_only=True),
             ),
-            torch.Tensor,
+            Tensor,
         )
         report = mismatches(frozen[f"{mode}/rank{rank}"], actual)
         assert not report, "\n".join(report)

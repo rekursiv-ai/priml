@@ -32,9 +32,9 @@ _CWD: Final = Path(__file__).resolve().parent
 def strided_net(num_classes: int) -> nn.Module:
     """Return a conv-BN net whose second conv qualifies for BlurPool.
 
-    torchvision fixes ResNet stage widths at 64-512, so its smallest ResNet
-    is ~3M parameters -- a 12 MB golden. This pins the wrapper and the blur
-    rewrite; torchvision's own ResNet is checked by the ffcv parity script.
+    torchvision fixes ResNet stage widths at 64-512, so the custom net
+    keeps 16 input channels on its blurred convolution. This pins the wrapper
+    and blur rewrite; torchvision's own ResNet is checked by the parity script.
     Named ``bn`` like torchvision's norms, so the recipe's optimizer split
     has a BatchNorm group to route.
     """
@@ -43,27 +43,28 @@ def strided_net(num_classes: int) -> nn.Module:
             conv1=nn.Conv2d(3, 16, 3, stride=2, padding=1, bias=False),
             bn1=nn.BatchNorm2d(16),
             relu=nn.ReLU(),
-            conv2=nn.Conv2d(16, 8, 3, stride=2, padding=1, bias=False),
+            # BlurPool's rule requires child.in_channels >= 16.
+            conv2=nn.Conv2d(16, 4, 3, stride=2, padding=1, bias=False),
             pool=nn.AdaptiveAvgPool2d(1),
             flatten=nn.Flatten(),
-            fc=nn.Linear(8, num_classes),
+            fc=nn.Linear(4, num_classes),
         ),
     )
 
 
 def tiny_resnet() -> TorchvisionResNet.Config:
-    """Return the wrapper around ``strided_net`` over 10 classes."""
+    """Return the wrapper around ``strided_net`` over 3 classes."""
     config = TorchvisionResNet.Config()
     config.arch = PartialConfig(strided_net)
-    config.channels_out = 10
+    config.channels_out = 3
     return config
 
 
 def test_blurpool_wraps_only_strided_convolutions_with_16_or_more_inputs() -> None:
     root = nn.Sequential(
         nn.Conv2d(3, 16, 3, stride=2),  # 3 inputs: the stem stays sharp.
-        nn.Sequential(nn.Conv2d(16, 16, 3, stride=2)),  # Nested, strided: wrapped.
-        nn.Conv2d(16, 16, 3, stride=1),  # Unstrided: left alone.
+        nn.Sequential(nn.Conv2d(16, 24, 3, stride=2)),  # Nested, strided: wrapped.
+        nn.Conv2d(16, 24, 3, stride=1),  # Unstrided: left alone.
     )
     apply_blurpool(root)
     nested = root[1]
@@ -76,8 +77,9 @@ def test_blurpool_wraps_only_strided_convolutions_with_16_or_more_inputs() -> No
 def test_blurpool_filter_is_the_normalized_binomial_kernel() -> None:
     blur = BlurPoolConv2d(nn.Conv2d(4, 4, 3, stride=2))
     assert blur.blur_filter.shape == (4, 1, 3, 3)
+    # Depthwise Conv2d stores one input plane per output channel.
     assert torch.allclose(blur.blur_filter.sum(dim=(-2, -1)), torch.ones(4, 1))
-    x = torch.ones(1, 4, 6, 6)
+    x = torch.ones(2, 4, 6, 8)
     # A constant image passes the blur unchanged away from the zero-padded border.
     assert torch.equal(
         nn.functional.conv2d(x, blur.blur_filter, padding=1, groups=4)[..., 1:-1, 1:-1],
@@ -95,7 +97,7 @@ def test_resnet50_blurpools_the_same_convolutions_ffcv_imagenet_does() -> None:
 
 def test_forward_maps_images_to_logits() -> None:
     model = tiny_resnet().make()
-    assert model.forward(torch.randn(2, 3, 32, 32)).shape == (2, 10)
+    assert model.forward(torch.randn(2, 3, 4, 5)).shape == (2, 3)
     assert isinstance(model.net.get_submodule("conv2"), BlurPoolConv2d)
     assert isinstance(model.net.get_submodule("conv1"), nn.Conv2d)
 
@@ -108,26 +110,19 @@ def test_forward_maps_images_to_logits() -> None:
 def test_cost_matches_what_torch_dispatches(arch: Callable[..., nn.Module]) -> None:
     """Every conv, blur, and head matmul is costed, and every parameter owned."""
     config = TorchvisionResNet.Config()
-    config.channels_out = 10
-    config.image_size = (32, 32)
+    config.channels_out = 3
+    config.image_size = (32, 24)
     config.arch = PartialConfig(arch)
     analytical = assert_cost_matches_torch(
         config,
-        build_input=lambda: torch.randn(2, 3, 32, 32, requires_grad=True),
+        build_input=lambda: torch.randn(2, 3, 32, 24, requires_grad=True),
         batch_size=2,
         dtype=None,
     )
     assert analytical["flops", "primal", "elementwise"].sum() > 0
 
 
-def test_cost_refuses_a_layer_it_cannot_price() -> None:
-    config = tiny_resnet()
-    config.arch = PartialConfig(_with_gelu)
-    with pytest.raises(TypeError, match="GELU"):
-        _ = config.cost(batch_size=1, dtype=None)
-
-
-def _with_gelu(num_classes: int) -> nn.Module:
+def _gelu_arch(num_classes: int) -> nn.Module:
     return nn.Sequential(
         nn.Conv2d(3, 4, 3),
         nn.GELU(),
@@ -136,12 +131,19 @@ def _with_gelu(num_classes: int) -> nn.Module:
     )
 
 
+def test_cost_refuses_a_layer_it_cannot_price() -> None:
+    config = tiny_resnet()
+    config.arch = PartialConfig(_gelu_arch)
+    with pytest.raises(TypeError, match="GELU"):
+        _ = config.cost(batch_size=1, dtype=None)
+
+
 def test_resnet_bfb() -> None:
     assert_bfb_against_golden(
         golden_dir=_CWD / "testdata",
         golden_name="blurpool_net",
         build_module=lambda: tiny_resnet().make().eval(),
-        build_input=lambda: torch.randn(1, 3, 16, 16),
+        build_input=lambda: torch.randn(2, 3, 4, 5),
         seed=0,
     )
 

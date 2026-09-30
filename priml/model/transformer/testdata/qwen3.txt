@@ -1,10 +1,10 @@
 Qwen3.Config(
-                channels_in=16,
-                channels_out=32,
+                channels_in=8,
+                channels_out=9,
                 num_layers=1,
                 proj_in=Embedding.Config(
-                        channels_in=32,
-                        channels_out=16,
+                        channels_in=9,
+                        channels_out=8,
                         padding_idx=None,
                         device=None,
                         dtype=None,
@@ -14,19 +14,19 @@ Qwen3.Config(
                 ),
                 block=[
                 │       TransformerBlock.Config(
-                │               channels_in=16,
-                │               channels_out=16,
+                │               channels_in=8,
+                │               channels_out=8,
                 │               attn=SelfAttention.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
-                │                       num_heads=2,
-                │                       channels_head=8,
-                │                       num_heads_kv=1,
+                │                       channels_in=8,
+                │                       channels_out=8,
+                │                       num_heads=4,
+                │                       channels_head=6,
+                │                       num_heads_kv=2,
                 │                       bias=False,
                 │                       dropout=0.0,
                 │                       causal=True,
                 │                       rope=RoPE.Config(
-                │                               channels_head=8,
+                │                               channels_head=6,
                 │                               reduction_mode='cat',
                 │                               frequencies=HuggingFaceFrequencies.Config(
                 │                                       base=1000000.0
@@ -34,8 +34,8 @@ Qwen3.Config(
                 │                               dtype=None
                 │                       ),
                 │                       norm_qk=RMSNorm.Config(
-                │                               channels_in=8,
-                │                               channels_out=8,
+                │                               channels_in=6,
+                │                               channels_out=6,
                 │                               eps=1e-06,
                 │                               elementwise_affine=True,
                 │                               device=None,
@@ -49,9 +49,9 @@ Qwen3.Config(
                 │                       attn_kernel=SdpaFused.Config()
                 │               ),
                 │               ffn=SwiGLU.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
-                │                       channels_hidden=32,
+                │                       channels_in=8,
+                │                       channels_out=8,
+                │                       channels_hidden=7,
                 │                       expansion=2.6666666666666665,
                 │                       round_to=256,
                 │                       gate=True,
@@ -65,16 +65,16 @@ Qwen3.Config(
                 │                       shard='colwise'
                 │               ),
                 │               norm1=RMSNorm.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=8,
+                │                       channels_out=8,
                 │                       eps=1e-06,
                 │                       elementwise_affine=True,
                 │                       device=None,
                 │                       dtype=None
                 │               ),
                 │               norm2=RMSNorm.Config(
-                │                       channels_in=16,
-                │                       channels_out=16,
+                │                       channels_in=8,
+                │                       channels_out=8,
                 │                       eps=1e-06,
                 │                       elementwise_affine=True,
                 │                       device=None,
@@ -86,20 +86,20 @@ Qwen3.Config(
                 │       )
                 ],
                 proj_out=Sequential.Config(
-                        channels_in=16,
-                        channels_out=32,
+                        channels_in=8,
+                        channels_out=9,
                         elements=[
                                 RMSNorm.Config(
-                                        channels_in=16,
-                                        channels_out=16,
+                                        channels_in=8,
+                                        channels_out=8,
                                         eps=1e-06,
                                         elementwise_affine=True,
                                         device=None,
                                         dtype=None
                                 ),
                                 Linear.Config(
-                                        channels_in=16,
-                                        channels_out=32,
+                                        channels_in=8,
+                                        channels_out=9,
                                         bias=False,
                                         depth_index=(),
                                         device=None,

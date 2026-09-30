@@ -22,6 +22,7 @@ Batch contract (what the trainer consumes) -- every yielded batch is a dict:
 
 from __future__ import annotations
 
+from dataclasses import field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -43,6 +44,7 @@ from torch import Tensor
 import numpy as np
 import torch
 
+from priml.baselines.sudoku.puzzle_spec import SudokuSpec
 from priml.lib.custom_json import DictCodec, IntCodec
 
 
@@ -79,7 +81,8 @@ def resolve_working_dir(
 def augment_sudoku(
     inputs: Tensor,
     labels: Tensor,
-    vocab_size: int = 11,
+    *,
+    spec: SudokuSpec,
     digits_only: bool = False,
     generator: torch.Generator | None = None,
 ) -> tuple[Tensor, Tensor]:
@@ -88,8 +91,7 @@ def augment_sudoku(
     Args:
         inputs: [B, 81] token ids.
         labels: [B, 81] token ids.
-        vocab_size: Number of tokens in the permutation table (default 11:
-            0=pad, 1=blank/unknown, 2-10=digits 1-9).
+        spec: Dataset-owned grid geometry and token vocabulary.
         digits_only: If True, permute the digit tokens 2-10 only, keeping the
             blank marker (token 1) fixed -- the TRM-reference shuffle. False
             (legacy, bit-identical to prior runs) permutes tokens 1-9: the
@@ -105,7 +107,7 @@ def augment_sudoku(
         labels_aug: [B, 81] labels under the same permutation and symmetry.
 
     """
-    n = 9
+    n = spec.grid_shape[0]
     B = inputs.shape[0]
     device = inputs.device
 
@@ -114,7 +116,9 @@ def augment_sudoku(
     # token 10); digits_only starts at 2, the actual digit tokens.
     lo = 2 if digits_only else 1
     perms = (
-        torch.arange(vocab_size, device=device, dtype=torch.long).expand(B, -1).clone()
+        torch.arange(spec.vocab_size, device=device, dtype=torch.long)
+        .expand(B, -1)
+        .clone()
     )
     rand_vals = torch.rand(B, n, device=device, generator=generator)
     perms[:, lo : n + lo] = rand_vals.argsort(dim=1) + lo
@@ -240,6 +244,9 @@ class PuzzleDataset:
     class Config(Fig["PuzzleDataset"]):
         """Configuration for device-cached sudoku data loading."""
 
+        spec: SudokuSpec = field(default_factory=SudokuSpec)
+        """Puzzle geometry and token vocabulary."""
+
         base_dir: Path | str | None = None
         """Resource root; ``None`` resolves beneath ``/opt/scratch``. The
         trainer may inject an explicit root here."""
@@ -351,6 +358,7 @@ class PuzzleDataset:
             augment=self.config.augment,
             augment_digits_only=self.config.augment_digits_only,
             augment_seed=self.config.augment_seed,
+            spec=self.config.spec,
         )
         self._active_train_iter = iter_obj
         return iter_obj
@@ -370,6 +378,7 @@ class PuzzleDataset:
             shuffle=False,
             num_instances=self.config.eval_num_instances,
             max_samples=self.config.max_samples,
+            spec=self.config.spec,
         )
         if self.config.eval_instance_indices:
             return _subset_eval_iterator(iterator, self.config.eval_instance_indices)
@@ -475,13 +484,19 @@ class _PuzzleBatchIterator:
         augment: bool = False,
         augment_digits_only: bool = False,
         augment_seed: int | None = None,
+        spec: SudokuSpec,
     ):
         if epoch_offset < 0:
             raise ValueError(f"epoch_offset must be non-negative, got {epoch_offset}.")
         split = "train" if train else "test"
         data = load_puzzle_dataset(dataset_dir, split, max_samples=max_samples)
         instance_bounds = data["group_indices"]
-        self.vocab_size = data["vocab_size"]
+        self.spec = spec
+        if data["vocab_size"] != self.spec.vocab_size:
+            raise ValueError("Prepared vocabulary does not match dataset spec.")
+        if data["seq_len"] != math.prod(self.spec.grid_shape):
+            raise ValueError("Prepared grid does not match dataset spec.")
+        self.vocab_size = self.spec.vocab_size
         self.seq_len = data["seq_len"]
 
         if num_instances is not None and num_instances < len(instance_bounds) - 1:
@@ -569,7 +584,7 @@ class _PuzzleBatchIterator:
                 inputs, labels = augment_sudoku(
                     inputs,
                     labels,
-                    vocab_size=self.vocab_size,
+                    spec=self.spec,
                     digits_only=self.augment_digits_only,
                     generator=self._augment_generator,
                 )

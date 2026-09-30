@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Mapping
 
     from priml.baselines.sudoku.puzzle_data import PuzzleBatch
+    from priml.baselines.sudoku.puzzle_spec import SudokuSpec
     from priml.train.custom_types import TrainStepOutput
 
 
@@ -169,17 +170,26 @@ def recipe_checkpointer() -> Checkpointer.Config:
     return Checkpointer.Config(keep_last_n=8, keep_every=10_000)
 
 
-def sudoku_group_indices() -> Tensor:
+def sudoku_group_indices(spec: SudokuSpec) -> Tensor:
     """Return the cell indices of every sudoku constraint group.
 
+    Args:
+      spec: Dataset-owned grid and constraint-box geometry.
+
     Returns:
-      group_indices: ``[27, 9]`` long tensor; rows 0-8 are the 9 grid rows,
+      group_indices: ``[27, 9]`` long tensor by default; rows 0-8 are the 9 grid rows,
         rows 9-17 the 9 columns, rows 18-26 the 9 boxes, each listing the 9
         row-major cell indices (0-80) of that group.
 
     """
-    cells = torch.arange(81).reshape(9, 9)
-    boxes = cells.reshape(3, 3, 3, 3).permute(0, 2, 1, 3).reshape(9, 9)
+    rows, cols = spec.grid_shape
+    box_rows, box_cols = spec.box_shape
+    cells = torch.arange(rows * cols).reshape(rows, cols)
+    boxes = (
+        cells.reshape(rows // box_rows, box_rows, cols // box_cols, box_cols)
+        .permute(0, 2, 1, 3)
+        .reshape(-1, box_rows * box_cols)
+    )
     return torch.cat([cells, cells.T, boxes])
 
 
@@ -221,14 +231,14 @@ def csp_cardinality_per_sample(
         with Recurrent Transformer. ICLR 2023.
 
     """
-    if logits.shape[-2] != 81:
-        raise ValueError("logits must be the 81 prefix-stripped cells")
+    if logits.shape[-2] != group_indices.shape[-1] ** 2:
+        raise ValueError("logits must contain the prefix-stripped grid cells")
     probs = (logits.float() / temperature).softmax(dim=-1)[..., 1:]
     mass = probs[:, group_indices].sum(dim=-2)
     with torch.no_grad():
         present = nn.functional.one_hot(
             labels.long().clamp(min=0),
-            num_classes=11,
+            num_classes=logits.shape[-1],
         ).sum(dim=-2)
         target = (present > 0).float()[..., 1:].unsqueeze(-2)
     return (mass - target).square().mean(dim=(-2, -1))
@@ -520,6 +530,13 @@ class Trainer:
         def finalize(self) -> Self:
             # The dataset batch size is THE batch size: the sparse puzzle
             # embedding's local gradient buffer must match it exactly.
+            self.dataset.spec.finalize()
+            spec = self.dataset.spec
+            self.model.puzzle_grid_shape = (math.prod(spec.grid_shape),)
+            self.model.vocab_size = spec.vocab_size
+            if self.model.pos2d_grid_shape is not None:
+                self.model.pos2d_grid_shape = spec.grid_shape
+                self.model.pos2d_box_shape = spec.box_shape
             self.model.puzzle_emb_batch_size = self.dataset.batch_size
             # One device for data and compute unless the dataset was pointed
             # elsewhere explicitly.
@@ -551,14 +568,19 @@ class Trainer:
             raise ValueError(
                 f"eval_min_act_steps must be >= 1, got {config.eval_min_act_steps}.",
             )
+        rows, cols = config.dataset.spec.grid_shape
+        box_rows, box_cols = config.dataset.spec.box_shape
         if config.csp_loss_weight > 0 and (
-            config.model.num_puzzle_grid_tokens != 81 or config.model.vocab_size != 11
+            rows != cols
+            or min(rows, cols, box_rows, box_cols) < 1
+            or rows % box_rows
+            or cols % box_cols
+            or box_rows * box_cols != rows
+            or config.model.num_puzzle_grid_tokens != rows * cols
+            or config.model.vocab_size != rows + 2
         ):
             raise ValueError(
-                "csp_loss_weight > 0 requires a sudoku-shaped model (81 grid "
-                f"tokens, vocab_size 11); got grid "
-                f"{config.model.num_puzzle_grid_tokens}, vocab "
-                f"{config.model.vocab_size}.",
+                "csp_loss_weight > 0 requires sudoku grid, boxes, and vocabulary to agree.",
             )
         self.config = config
         self.runtime = config.runtime.make()
@@ -642,7 +664,7 @@ class Trainer:
         self._pool_halted = torch.ones(bs, device=self.device, dtype=torch.bool)
         self._pool_puzzle_ids = torch.zeros(bs, device=self.device, dtype=torch.int32)
         self._pool_feedback = torch.zeros_like(self._pool_inputs)
-        self._csp_groups = sudoku_group_indices().to(self.device)
+        self._csp_groups = sudoku_group_indices(config.dataset.spec).to(self.device)
 
         self.dataset = config.dataset.make()
         self.checkpointer: Checkpointer | None = (
@@ -1562,11 +1584,11 @@ class Trainer:
 
     def _clamp_givens(self, decoded: Tensor, inputs: Tensor) -> Tensor:
         """Return the decoded grid with every given cell forced back to its input digit."""
-        given = (inputs >= 2) & (inputs <= 10)
+        given = (inputs >= 2) & (inputs < self.config.dataset.spec.vocab_size)
         return torch.where(given, inputs, decoded)
 
     # Per-step draw order from the dedicated scramble generator is a contract:
-    # ``rand(bs)`` -> ``rand(bs, grid_len)`` -> ``randint(2, 11, (bs, grid_len))``.
+    # ``rand(bs)`` -> ``rand(bs, grid_len)`` -> ``randint(2, vocab_size, (bs, grid_len))``.
     def _scramble_feedback(self, feedback: Tensor, inputs: Tensor) -> Tensor:
         """Corrupt random non-given cells of randomly selected feedback grids."""
         config = self.config
@@ -1579,10 +1601,10 @@ class Trainer:
             torch.rand(bs, grid_len, device=self.device, generator=self._scramble_gen)
             < config.feedback_scramble_cells / grid_len
         )
-        given = (inputs >= 2) & (inputs <= 10)
+        given = (inputs >= 2) & (inputs < self.config.dataset.spec.vocab_size)
         random_digits = torch.randint(
             2,
-            11,
+            config.dataset.spec.vocab_size,
             (bs, grid_len),
             device=self.device,
             generator=self._scramble_gen,

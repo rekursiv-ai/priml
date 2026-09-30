@@ -165,6 +165,44 @@ ArcTrainLoop(
                 │       )
                 ),
                 dataset=Arc2Data.Config(
+                        augmentation=ArcAugmentation.Config(
+                                num_aug=1_000,
+                                seed=42,
+                                retries_factor=5,
+                                transform=ColorDihedral.Config(
+                                        transforms=(0, 1, 2, 3, 4, 5, 6, 7),
+                                        colors=(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                                        separator='|||'
+                                ),
+                                spec=ArcSpec(
+                                        max_grid=30,
+                                        vocab_pad=0,
+                                        vocab_eos=1,
+                                        vocab_color_offset=2,
+                                        puzzle_id_separator='|||'
+                                ),
+                                spatial=SpatialAugmentation.Config(
+                                        spec=ArcSpec(
+                                                max_grid=30,
+                                                vocab_pad=0,
+                                                vocab_eos=1,
+                                                vocab_color_offset=2,
+                                                puzzle_id_separator='|||'
+                                        ),
+                                        train_scale_weights={1: 1.0},
+                                        translation_prob=1.0,
+                                        scale_prob=1.0
+                                ),
+                                spatial_eval_views=False,
+                                spatial_eval_scale=2
+                        ),
+                        spec=ArcSpec(
+                                max_grid=30,
+                                vocab_pad=0,
+                                vocab_eos=1,
+                                vocab_color_offset=2,
+                                puzzle_id_separator='|||'
+                        ),
                         base_dir='/opt/scratch',
                         working_dir=PosixPath('/opt/scratch/datasets/arcagi2/arc2concept-aug-1000'),
                         batch_size=256,

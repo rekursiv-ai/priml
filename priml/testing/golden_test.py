@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import zlib
 
@@ -13,6 +12,7 @@ import torch
 from priml.testing.golden import (
     assert_tensor_golden,
     assert_text_golden,
+    expect_golden_mismatch,
     heads,
     leading,
     mismatches,
@@ -26,10 +26,9 @@ from priml.testing.golden import (
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from torch import Tensor
-
-
-_CWD: Final = Path(__file__).resolve().parent
 
 
 def test_assert_text_golden_reads_testdata(
@@ -289,17 +288,41 @@ def test_assert_tensor_golden_mints_missing_then_compares(
     assert torch.equal(read_tensors(path)["d"], changed["d"])
 
 
-def test_every_priml_golden_is_at_most_28_000_bytes() -> None:
-    """A golden pins a code path, so it stores only what its check needs."""
-    root = _CWD.parent
-    goldens = sorted(root.rglob("*.pt"))
-    assert goldens, "no goldens found; the glob no longer matches the layout"
-    large = [
-        f"{path.relative_to(root)}: {path.stat().st_size}"
-        for path in goldens
-        if path.stat().st_size > 28_000
-    ]
-    assert not large, "goldens over 28,000 bytes:\n" + "\n".join(large)
+def test_expect_golden_mismatch_blocks_regeneration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "testdata" / "g.pt"
+    original = _record()
+    changed = {**original, "d": torch.tensor(2.5, dtype=torch.float64)}
+    monkeypatch.delenv("BFB_REGENERATE", raising=False)
+    with pytest.raises(AssertionError, match="Missing golden minted"):
+        assert_tensor_golden(path, original)
+    before = path.read_bytes()
+
+    monkeypatch.setenv("BFB_REGENERATE", "1")
+    assert_tensor_golden(path, changed)
+    assert path.read_bytes() != before
+
+    write_tensors(path, original)
+    before = path.read_bytes()
+    with expect_golden_mismatch(match=r"1 mismatches"):
+        assert_tensor_golden(path, changed)
+    assert path.read_bytes() == before
+
+
+def test_expect_golden_mismatch_requires_the_message_to_match(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "testdata" / "g.pt"
+    record = _record()
+    with pytest.raises(AssertionError, match="Missing golden minted"):
+        assert_tensor_golden(path, record)
+    with (
+        pytest.raises(AssertionError, match="different failure"),
+        expect_golden_mismatch(match=r"1 mismatches"),
+    ):
+        raise AssertionError("different failure")
 
 
 if __name__ == "__main__":

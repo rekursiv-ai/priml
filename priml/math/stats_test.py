@@ -86,7 +86,8 @@ def test_cov_1d_cross_is_the_scalar_cross_covariance():
 
 def test_jsd_is_zero_for_identical_members_and_log2_for_disjoint_ones():
     torch.manual_seed(2)
-    identical = torch.log_softmax(torch.randn(1, 5), dim=-1).expand(3, 5)
+    base = torch.log_softmax(torch.randn(3, 5), dim=-1)
+    identical = base[:1].expand(3, 5)
     torch.testing.assert_close(jsd(identical), torch.tensor(0.0), atol=1e-6, rtol=0)
 
     disjoint = torch.tensor([[1.0, 0.0], [0.0, 1.0]]).log()
@@ -182,7 +183,7 @@ def test_pca_eigenvalues_ascending():
 def test_pca_whiten_unit_variance():
     torch.manual_seed(5)
     x = torch.randn(200, 5)
-    mix = torch.randn(5, 5)
+    mix = torch.randn(5, 6)[:, :5]
     x = x @ mix  # Add correlation.
     _, eigenvectors = pca(x, whiten=True, eps=1e-5)
     projected = (x - x.mean(0)) @ eigenvectors
@@ -274,7 +275,7 @@ def test_pca_zca_whitens():
     """ZCA via pca: V_raw @ diag(1/sqrt(lam)) @ V_raw^T should whiten."""
     torch.manual_seed(6)
     x = torch.randn(200, 4)
-    mix = torch.randn(4, 4)
+    mix = torch.randn(4, 5)[:, :4]
     x = x @ mix
     eigenvalues, V_raw = pca(x)
     # ZCA whitening matrix: V @ diag(1/sqrt(λ)) @ V^T.

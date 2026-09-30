@@ -90,10 +90,10 @@ class FactoredPositions(nn.Module):
     class Config(Fig["FactoredPositions"]):
         """Grid factorization and table initialization."""
 
-        grid_shape: tuple[int, int] = (9, 9)
+        grid_shape: tuple[int, int] = (0, 0)
         """``(rows, cols)`` factorization of the flat grid."""
 
-        box_shape: tuple[int, int] = (3, 3)
+        box_shape: tuple[int, int] = (0, 0)
         """``(rows, cols)`` of one constraint box tiling the grid."""
 
         channels_out: int = -1
@@ -187,6 +187,8 @@ class FactoredPositions(nn.Module):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        if min(*config.grid_shape, *config.box_shape) < 1:
+            raise ValueError("FactoredPositions requires grid_shape and box_shape.")
         rows, cols = config.grid_shape
         box_rows, box_cols = config.box_shape
         if rows % box_rows or cols % box_cols:
@@ -369,7 +371,7 @@ class GridEmbedding(nn.Module):
 
         _: KW_ONLY
 
-        grid_shape: tuple[int, ...] = (81,)
+        grid_shape: tuple[int, ...] = ()
         """Token layout per puzzle. A flat ``(81,)`` and a ``(9, 9)`` grid
         describe the same 81 tokens; the shape is what a channel factorizes."""
 
@@ -469,6 +471,8 @@ class GridEmbedding(nn.Module):
                 f"channels_out must be positive; got {config.channels_out}. It "
                 "is normally inherited from the model during finalize.",
             )
+        if not config.grid_shape:
+            raise ValueError("GridEmbedding requires grid_shape from the dataset.")
         self.config = config
         self.embed_scale: float = config.channels_out**0.5
         self.embed_tokens = _token_table(config).make()
