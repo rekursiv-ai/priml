@@ -36,8 +36,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-pytestmark = pytest.mark.compute_large_fixture
-
 TILE: Final = 8
 
 
@@ -91,6 +89,7 @@ def _center(frame: np.ndarray) -> np.ndarray:
     return frame[row : row + TILE, column : column + TILE]
 
 
+@pytest.mark.compute_large_fixture
 def test_a_frame_is_the_players_own_view(renderer: Renderer) -> None:
     # The same 9x11 window the policy reads, so a replay shows what the agent
     # knew rather than what it could not have known.
@@ -100,6 +99,7 @@ def test_a_frame_is_the_players_own_view(renderer: Renderer) -> None:
     assert frame.dtype == np.uint8
 
 
+@pytest.mark.compute_large_fixture
 def test_each_worker_draws_its_own_world(renderer: Renderer) -> None:
     state = generated_world(num_envs=3, seed=0)
     frames = [renderer.render(state, index=index) for index in range(3)]
@@ -107,6 +107,7 @@ def test_each_worker_draws_its_own_world(renderer: Renderer) -> None:
     assert not np.array_equal(frames[1], frames[2])
 
 
+@pytest.mark.compute_large_fixture
 def test_the_player_is_drawn_at_the_centre(renderer: Renderer) -> None:
     bare = _state()
     bare.player_position[:] = torch.tensor([20, 20], dtype=torch.int32)
@@ -117,6 +118,7 @@ def test_the_player_is_drawn_at_the_centre(renderer: Renderer) -> None:
     assert not np.array_equal(_center(with_player), neighbour)
 
 
+@pytest.mark.compute_large_fixture
 def test_facing_changes_the_player_sprite(renderer: Renderer) -> None:
     left = _state()
     left.player_direction[:] = int(Action.LEFT)
@@ -128,6 +130,7 @@ def test_facing_changes_the_player_sprite(renderer: Renderer) -> None:
     )
 
 
+@pytest.mark.compute_large_fixture
 def test_a_sleeping_player_is_drawn_asleep(renderer: Renderer) -> None:
     awake = _state()
     asleep = _state()
@@ -135,6 +138,7 @@ def test_a_sleeping_player_is_drawn_asleep(renderer: Renderer) -> None:
     assert not np.array_equal(renderer.render(awake), renderer.render(asleep))
 
 
+@pytest.mark.compute_large_fixture
 def test_beyond_the_map_edge_is_flat_grey(renderer: Renderer) -> None:
     # Not black and not grass: the edge of the world has to read as an edge.
     state = _state()
@@ -146,6 +150,7 @@ def test_beyond_the_map_edge_is_flat_grey(renderer: Renderer) -> None:
     assert pixel == sprites.OUT_OF_BOUNDS_COLOR
 
 
+@pytest.mark.compute_large_fixture
 def test_an_unlit_tile_is_black(renderer: Renderer) -> None:
     # Darkness genuinely hides the world here, exactly as it does in the
     # observation the agent reads.
@@ -158,6 +163,7 @@ def test_an_unlit_tile_is_black(renderer: Renderer) -> None:
     assert maximum == 0
 
 
+@pytest.mark.compute_large_fixture
 def test_night_tints_the_surface_but_not_the_caves(renderer: Renderer) -> None:
     day = _state()
     night = _state()
@@ -173,6 +179,7 @@ def test_night_tints_the_surface_but_not_the_caves(renderer: Renderer) -> None:
     assert np.array_equal(renderer.render(cave_day), renderer.render(cave_night))
 
 
+@pytest.mark.compute_large_fixture
 def test_a_blocked_ladder_looks_different_from_an_open_one(
     renderer: Renderer,
 ) -> None:
@@ -190,6 +197,7 @@ def test_a_blocked_ladder_looks_different_from_an_open_one(
     )
 
 
+@pytest.mark.compute_large_fixture
 def test_a_creature_in_view_is_drawn(renderer: Renderer) -> None:
     empty = _state()
     occupied = _state()
@@ -198,6 +206,7 @@ def test_a_creature_in_view_is_drawn(renderer: Renderer) -> None:
     assert not np.array_equal(renderer.render(empty), renderer.render(occupied))
 
 
+@pytest.mark.compute_large_fixture
 def test_a_creature_outside_the_view_is_not_drawn(renderer: Renderer) -> None:
     # Clamping instead of skipping would paint a distant mob on the view edge,
     # showing the agent something it cannot see.
@@ -208,6 +217,7 @@ def test_a_creature_outside_the_view_is_not_drawn(renderer: Renderer) -> None:
     assert np.array_equal(renderer.render(empty), renderer.render(distant))
 
 
+@pytest.mark.compute_large_fixture
 def test_a_dead_creature_is_not_drawn(renderer: Renderer) -> None:
     empty = _state()
     ghost = _state()
@@ -216,6 +226,7 @@ def test_a_dead_creature_is_not_drawn(renderer: Renderer) -> None:
     assert np.array_equal(renderer.render(empty), renderer.render(ghost))
 
 
+@pytest.mark.compute_large_fixture
 def test_the_vulnerable_boss_looks_different(renderer: Renderer) -> None:
     frames: list[np.ndarray] = []
     for vulnerable in (False, True):
@@ -229,6 +240,7 @@ def test_the_vulnerable_boss_looks_different(renderer: Renderer) -> None:
     assert not np.array_equal(frames[0], frames[1])
 
 
+@pytest.mark.compute_large_fixture
 def test_rendering_does_not_mutate_the_world(renderer: Renderer) -> None:
     state = generated_world(num_envs=1, seed=1)
     before = state.map.clone()
@@ -236,17 +248,20 @@ def test_rendering_does_not_mutate_the_world(renderer: Renderer) -> None:
     assert torch.equal(before, state.map)
 
 
+@pytest.mark.compute_large_fixture
 def test_the_same_world_draws_the_same_frame(renderer: Renderer) -> None:
     state = _state()
     assert np.array_equal(renderer.render(state), renderer.render(state))
 
 
+@pytest.mark.compute_large_fixture
 def test_a_degenerate_tile_size_is_refused(sprite_dir: Path) -> None:
     with pytest.raises(ValueError, match="positive"):
         Renderer(block_pixels=0, asset_dir=sprite_dir)
 
 
 @pytest.mark.network_github
+@pytest.mark.compute_large_fixture
 def test_a_real_sprite_downloads_and_loads(tmp_path: Path) -> None:
     """One genuine asset downloads and decodes as nontrivial pixel art.
 
@@ -268,6 +283,7 @@ def test_a_real_sprite_downloads_and_loads(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.compute_large_fixture
 def test_constructing_a_renderer_requests_the_headless_driver(
     sprite_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -289,6 +305,7 @@ def test_constructing_a_renderer_requests_the_headless_driver(
     assert os.environ["SDL_VIDEODRIVER"] == "dummy"
 
 
+@pytest.mark.compute_large_fixture
 def test_constructing_a_renderer_creates_no_display_surface(
     sprite_dir: Path,
 ) -> None:
@@ -301,6 +318,36 @@ def test_constructing_a_renderer_creates_no_display_surface(
     """
     Renderer(block_pixels=TILE, asset_dir=sprite_dir)
     assert pygame.display.get_surface() is None
+
+
+def test_renderer_covers_composition_and_shading_branches(renderer: Renderer) -> None:
+    state = _state()
+    state.item_map[:, 0, 20, 21] = int(ItemType.LADDER_DOWN)
+    state.monsters_killed[:, 0] = constants.MONSTERS_KILLED_TO_CLEAR_LEVEL
+    state.map[:, 0, 20, 21] = int(BlockType.DARKNESS)
+    state.melee_mobs.mask[:, 0, 0] = True
+    state.melee_mobs.position[:, 0, 0] = torch.tensor([20, 21], dtype=torch.int32)
+    state.mob_projectiles.mask[:, 0, 0] = True
+    state.mob_projectiles.position[:, 0, 0] = torch.tensor([20, 19], dtype=torch.int32)
+    state.player_projectiles.mask[:, 0, 0] = True
+    state.player_projectiles.position[:, 0, 0] = torch.tensor(
+        [19, 20],
+        dtype=torch.int32,
+    )
+    state.light_map[:, 0, 20, 20] = 0.5
+    state.light_level[:] = 0.5
+    frame = renderer.render(state)
+    assert frame.shape == (*renderer.frame_shape, 3)
+    assert frame.dtype == np.uint8
+
+    state.player_level[:] = 1
+    state.is_sleeping[:] = True
+    assert renderer.render(state).shape == frame.shape
+
+
+def test_renderer_rejects_an_invalid_worker_index(renderer: Renderer) -> None:
+    with pytest.raises(IndexError):
+        renderer.render(_state(), index=2)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,12 @@ def test_random_crop_content():
         assert bool((images == val).any())
 
 
+def test_random_crop_rejects_width_oversized_crop():
+    images = torch.randn(2, 3, 6, 5)
+    with pytest.raises(ValueError, match="exceeds input width"):
+        random_crop(images, 6)
+
+
 def test_random_crop_rejects_oversized_crop():
     """crop_size larger than the input asserts instead of cropping garbage (M1)."""
     images = torch.randn(2, 3, 4, 5)
@@ -67,6 +73,15 @@ def test_cutout_zeros():
     # Each image gets 3 * 8 * 8 = 192 zeros (when cutout fully inside).
     assert zeros > 0
     assert zeros <= 2 * 3 * 8 * 8
+
+
+def test_pad_crop_flip_explicit_flip_modes():
+    images = torch.ones(2, 3, 4, 5)
+    assert torch.equal(
+        pad_crop_flip(images, 4, pad=1, flip=False),
+        torch.ones_like(images[..., :4]),
+    )
+    assert pad_crop_flip(images, 4, pad=1, flip=True).shape == images[..., :4].shape
 
 
 def test_pad_crop_flip_shape():

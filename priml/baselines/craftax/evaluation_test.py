@@ -13,14 +13,16 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.baselines.craftax.evaluation import (
+    evaluation_mode,
+    evaluation_transaction,
+)
 from priml.baselines.craftax.gtrxl_train_step import CraftaxGTrXLTrainStep
 from priml.baselines.craftax.pqn_train_step import CraftaxPQNTrainStep
 from priml.baselines.craftax.rnn_train_step import CraftaxRNNTrainStep
 from priml.baselines.craftax.train_step import CraftaxTrainStep
 from priml.train.parallelism import NoParallel
 
-
-pytestmark = pytest.mark.compute_training
 
 type CraftaxStep = (
     CraftaxTrainStep | CraftaxRNNTrainStep | CraftaxPQNTrainStep | CraftaxGTrXLTrainStep
@@ -194,6 +196,7 @@ def _seed_finished_banks(step: CraftaxStep) -> None:
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[case.name for case in _CASES])
+@pytest.mark.compute_training
 def test_eval_loss_preserves_complete_training_lifecycle(case: _Case) -> None:
     step = case.build()
     step.train_step()
@@ -207,6 +210,7 @@ def test_eval_loss_preserves_complete_training_lifecycle(case: _Case) -> None:
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[case.name for case in _CASES])
+@pytest.mark.compute_training
 def test_checkpoint_round_trips_complete_training_lifecycle(case: _Case) -> None:
     step = case.build()
     step.train_step()
@@ -220,6 +224,28 @@ def test_checkpoint_round_trips_complete_training_lifecycle(case: _Case) -> None
     resumed.load_state_dict(saved)
 
     _assert_tree_equal(before, _snapshot(resumed, case.fields))
+
+
+def test_evaluation_restores_training_mode_and_state() -> None:
+    model = torch.nn.BatchNorm1d(2)
+    model.train()
+    state = model.state_dict()
+    with evaluation_mode(model):
+        assert not model.training
+    assert model.training
+
+    def restore(saved: dict[str, Tensor]) -> None:
+        model.load_state_dict(saved)
+
+    with evaluation_transaction(model=model, save=model.state_dict, restore=restore):
+        model.eval()
+        running_mean = model.running_mean
+        assert running_mean is not None
+        running_mean.add_(1)
+    assert model.training
+    restored = model.running_mean
+    assert restored is not None
+    assert torch.equal(restored, state["running_mean"])
 
 
 if __name__ == "__main__":

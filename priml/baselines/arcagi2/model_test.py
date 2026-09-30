@@ -151,6 +151,23 @@ def test_full_model_cost_matches_torch() -> None:
     )
 
 
+def test_rotary_block_factor_branches() -> None:
+    config = RotaryBlock.Config(channels_in=4)
+    assert isinstance(config.attn, SelfAttention.Config)
+    config.attn.channels_in = 4
+    config.attn.num_heads = 2
+    config.attn.channels_head = 2
+    block = config.make()
+    factors = block.factors(3, device=torch.device("cpu"))
+    assert factors is not None
+    assert factors[0].shape[0] == 3
+    assert block(torch.zeros(2, 3, 4)).shape == (2, 3, 4)
+    no_rope = RotaryBlock.Config(channels_in=4, rope=None).make()
+    assert no_rope.factors(3, device=torch.device("cpu")) is None
+    with pytest.raises(ValueError, match="without a rope"):
+        no_rope(torch.zeros(2, 3, 4))
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

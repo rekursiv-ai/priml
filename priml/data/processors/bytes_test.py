@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
+from unittest.mock import patch
 
 import io
 import os
@@ -1111,6 +1112,185 @@ def test_get_bytes_from_file_reports_an_unreadable_path(tmp_path: Path) -> None:
     assert "GetBytesFromFile" in reasons[0]
     # A sample with no path at all is a routing outcome, not a failure.
     assert not cast(dict[str, object], out[2]).get("filter_reasons")
+
+
+def test_decode_video_field_validation_and_handle_cleanup() -> None:
+    processor = DecodeVideo(DecodeVideo.Config())
+    samples: list[DecodeVideo.Input] = [
+        {},
+        {"frames": 2, "height": 2, "width": 2},
+        {"media": b"x"},
+        {"media": b"x", "frames": 1, "height": 2, "width": 2},
+        {"media": b"x", "frames": 2, "height": 2, "width": 2, "target_height": 1},
+        {
+            "media": b"x",
+            "frames": 2,
+            "height": 2,
+            "width": 2,
+            "target_frames": 0,
+            "target_height": 1,
+            "target_width": 1,
+        },
+        {
+            "media": b"x",
+            "frames": 2,
+            "height": 2,
+            "width": 2,
+            "target_frames": 2,
+            "target_height": 1,
+            "target_width": 1,
+        },
+    ]
+    with patch.object(processor, "_process_video", return_value=None):
+        output = list(processor(iter(samples)))
+    assert len(output) == len(samples)
+    assert "filter_reasons" in output[-2]
+    assert "_tar_handle" not in output[-1]
+
+
+def test_crop_image_backend_error_and_decode_video_helpers() -> None:
+    image = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(known_formats=["jpg"], use_turbojpeg=True),
+    )
+    assert (
+        image._extract_fields({"media": b"x", "frames": 2, "height": 2, "width": 2})
+        is None
+    )
+    with patch(
+        "priml.data.processors.bytes.decode_jpeg_turbojpeg",
+        side_effect=ValueError("bad"),
+    ):
+        decoded = image._process_image(b"x", "jpg", 2, 2, None)
+    assert decoded is not None
+    assert decoded[0] is None
+    image.turbo_jpeg = None
+    with pytest.raises(ValueError, match="turbo_jpeg"):
+        image._process_image(b"x", "jpg", 2, 2, None)
+
+    processor = DecodeVideo(DecodeVideo.Config())
+    assert (
+        processor._process_video(
+            None,
+            "x",
+            "avi",
+            frames=2,
+            height=2,
+            width=2,
+            target_frames=None,
+            target_height=None,
+            target_width=None,
+        )
+        is None
+    )
+    assert (
+        processor._process_video(
+            None,
+            "x",
+            None,
+            frames=2,
+            height=2,
+            width=2,
+            target_frames=None,
+            target_height=None,
+            target_width=None,
+        )
+        is None
+    )
+    with patch.object(processor, "_decode", return_value=None) as decode:
+        assert (
+            processor._process_video(
+                None,
+                "x",
+                None,
+                frames=2,
+                height=2,
+                width=2,
+                target_frames=3,
+                target_height=1,
+                target_width=1,
+                media=b"x",
+            )
+            is None
+        )
+        decode.assert_called_once()
+    sample = cast(
+        DecodeVideo.Input,
+        {"media": b"x", "frames": 2, "height": 2, "width": 2, "_tar_handle": object()},
+    )
+    with patch.object(processor, "_process_video", return_value=None):
+        output = next(processor(iter([sample])))
+    assert "_tar_handle" not in output
+
+
+def test_decode_video_read_media_and_decode_oserror() -> None:
+    processor = DecodeVideo(DecodeVideo.Config())
+    assert processor._read_media(None, "x", None) == b""
+    with patch(
+        "priml.data.processors.bytes.subprocess.Popen",
+        side_effect=OSError,
+    ):
+        assert processor._decode(b"x", height=1, width=1, keep_frames=1) is None
+
+
+def test_decode_video_reads_tar_and_handles_decode_stream_failures() -> None:
+    class Tar:
+        name: str | None = None
+
+        def getmember(self, name: str) -> tarfile.TarInfo:
+            if name == "x.mp4":
+                return tarfile.TarInfo(name)
+            raise KeyError(name)
+
+        def extractfile(self, member: str | tarfile.TarInfo) -> io.BytesIO:
+            del member
+            return io.BytesIO(b"payload")
+
+    processor = DecodeVideo(DecodeVideo.Config())
+    tar = Tar()
+    assert processor._read_media(tar, "x", "mp4") == b"payload"
+    assert processor._read_media(tar, "missing", "mp4") == b""
+
+    class Stdout:
+        def read(self, size: int) -> bytes:
+            del size
+            return b"x"
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Stdout()
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: int = 0) -> None:
+            del timeout
+
+    with patch(
+        "priml.data.processors.bytes.subprocess.Popen",
+        return_value=Process(),
+    ):
+        assert processor._decode(b"x", height=2, width=2, keep_frames=1) is None
+
+
+def test_crop_image_integer_dtype_and_unknown_format() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(buffer, format="PNG")
+    processor = CropDuringDecodeImage(
+        CropDuringDecodeImage.Config(dtype=torch.int16, known_formats=["png"]),
+    )
+    sample = cast(
+        CropDuringDecodeImage.Input,
+        {"media": buffer.getvalue(), "format": "png", "height": 4, "width": 4},
+    )
+    out = next(processor(iter([sample])))
+    tensor = out.get("media_tensor")
+    assert tensor is not None
+    assert tensor.dtype == torch.int16
 
 
 if __name__ == "__main__":

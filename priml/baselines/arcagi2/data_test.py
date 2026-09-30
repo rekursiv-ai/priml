@@ -9,6 +9,7 @@ import json
 from torch import Tensor
 
 import numpy as np
+import pytest
 import torch
 
 from priml.baselines.arcagi2.data import Arc2Data
@@ -89,6 +90,15 @@ def test_reference_batches(tmp_path: Path) -> None:
         assert isinstance(left, Tensor)
         assert isinstance(right, Tensor)
         assert torch.equal(left, right), "mid-pass resume"
+
+
+def test_arc2_requires_resident_data_and_checkpoint_fields(tmp_path: Path) -> None:
+    write_tree(tmp_path)
+    config = Arc2Data.Config(working_dir=tmp_path, batch_size=2, device="cpu")
+    data = config.make()
+    state = {key: value for key, value in data.state_dict().items() if key != "passes"}
+    with pytest.raises(KeyError):
+        data.load_state_dict(state)
 
 
 if __name__ == "__main__":

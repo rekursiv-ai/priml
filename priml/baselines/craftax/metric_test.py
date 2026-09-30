@@ -81,6 +81,19 @@ def _episodes(count: int, *, unlocked: list[float] | None = None) -> dict[str, o
     }
 
 
+def test_a_score_rollout_counts_one_episode_per_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(constants, "MAX_TIMESTEPS", 2)
+    score = _score(steps=2)
+    score.update(torch.zeros(2, 43), actor=_actor())
+    values = score.compute()
+    assert values["episodes"] == 2.0
+    assert score.state_dict()["rollout_index"] == 1
+    score.reset()
+    assert score.compute() == {"episodes": 0.0}
+
+
 def test_it_satisfies_the_metric_protocol() -> None:
     assert isinstance(_score(), MetricProtocol)
 

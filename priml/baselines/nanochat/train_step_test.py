@@ -813,6 +813,151 @@ def test_three_steps_bfb() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("budget_warmup_steps", -1, "budget_warmup_steps"),
+        ("rows_per_pass", 0, "rows_per_pass"),
+        ("tokens_per_optimizer_step", 0, "tokens_per_optimizer_step"),
+        ("momentum_warmup_steps", 0, "momentum_warmup_steps"),
+    ],
+)
+def test_train_config_rejects_invalid_accumulation_settings(
+    field: str,
+    value: int,
+    message: str,
+) -> None:
+    config = NanoChatTrainStep.Config()
+    setattr(config, field, value)
+    with pytest.raises(ValueError, match=message):
+        config.finalize()
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_cuda_synchronize_path() -> None:
+    step = _smoke_step()
+    step.parallelism.device = torch.device("cuda")
+    step._synchronize()
+
+
+def test_no_pending_divergence_and_gradient_clipping_paths() -> None:
+    step = _smoke_step()
+    step._assert_not_diverged()
+    step.config.gradient_clip_norm = float("inf")
+    assert step._clip_gradients() == {}
+    step.config.gradient_clip_norm = 1.0
+    parameter = next(step.model.parameters())
+    parameter.grad = torch.ones_like(parameter)
+    result = step._clip_gradients()
+    assert isinstance(result["grad_norm"], Tensor)
+
+
+def test_fused_ngram_binding_routes_every_table_to_rmsprop() -> None:
+    trajectory = _EndpointTrajectory()
+    step = trajectory._step
+    assert isinstance(step.model, MemoryNanoChatLM)
+    assert isinstance(step.optimizer, CompositeOptimizer)
+    tables = step.model._tables()
+    for table in tables:
+        table.prepare_gradient_sinks(dirty_bitmaps=True)
+    step._bind_ngram_gradients(step.model)
+    members = step.optimizer.optimizers
+    rmsprop = [member for member in members if isinstance(member, BiasCorrectedRMSProp)]
+    assert rmsprop
+    expected: set[Tensor] = set()
+    for table in tables:
+        for part in table.tables:
+            assert isinstance(part, nn.Embedding)
+            expected.add(part.weight)
+    actual = {parameter for member in rmsprop for parameter in member.gradient_sinks}
+    assert actual == expected
+    for member in rmsprop:
+        assert set(member.gradient_sinks) <= expected
+
+    first = rmsprop[0]
+    first.param_groups[0]["params"] = []
+    with pytest.raises(ValueError, match="must route to RMSProp"):
+        step._bind_ngram_gradients(step.model)
+
+
+def test_ngram_train_step_runs_one_cpu_update() -> None:
+    step = _step(config=train_step.NgramTrainStep.Config())
+    assert isinstance(step, train_step.NgramTrainStep)
+    result = step.train_step(**_batch())
+    assert result["loss"].shape == (1,)
+
+
+def test_a_two_pass_update_charges_the_budget_and_guards_the_worst_pass() -> None:
+    step = _step(tokens_per_optimizer_step=4 * SEQ)
+    step.config.budget_warmup_steps = 0
+    batch = _batch()
+    first = step.train_step(**batch)
+    assert step.global_step == 0
+    assert not step.accumulation_complete
+    assert first.get("metrics") == {}
+    second = step.train_step(**batch)
+    assert step.global_step == 1
+    assert step.accumulation_complete
+    assert second.get("metrics")
+    assert step.elapsed_sec > 0
+    step.config.divergence_threshold = 1e-6
+    step.train_step(**batch)
+    with pytest.raises(RuntimeError, match="diverged"):
+        step.train_step(**batch)
+
+
+def test_call_eval_and_partial_epoch_cleanup() -> None:
+    step = _smoke_step()
+    batch = _smoke_batch(step)
+    logits = step.call_eval(**batch)
+    assert logits.shape[:2] == batch["media"].shape
+    step._pending_passes = 1
+    step._pending_worst = torch.tensor(2.0)
+    step.on_epoch_end()
+    assert step.accumulation_complete
+    assert step._pending_worst is None
+
+
+def test_load_state_requires_budget_clock() -> None:
+    step = _smoke_step()
+    with pytest.raises(ValueError, match="local_step"):
+        step.load_state_dict({})
+
+
+def test_bounded_cross_entropy_masks_ignored_targets_and_has_gradients() -> None:
+    loss = train_step.BoundedTokenCrossEntropy.Config().make()
+    logits = torch.tensor([[[-2.0, 1.0, 3.0], [1.0, -1.0, 2.0]]], requires_grad=True)
+    labels = torch.tensor([[2, -1]])
+    result = loss(logits, label=labels)["loss"]
+    expected = torch.logsumexp(logits[0, 0].detach(), 0) - logits[0, 0, 2].detach()
+    # The logits literal is one sequence, so the per-token loss is [1, tokens].
+    torch.testing.assert_close(
+        result,
+        torch.stack((expected, torch.tensor(0.0))).reshape(1, 2),
+    )
+    result.sum().backward()
+    assert logits.grad is not None
+    assert torch.equal(logits.grad[0, 1], torch.zeros(3))
+
+
+def test_train_step_rejects_invalid_budget_and_gradient_settings() -> None:
+    config = NanoChatTrainStep.Config()
+    config.train_budget_sec = 0
+    with pytest.raises(ValueError, match="train_budget_sec"):
+        config.finalize()
+    config = NanoChatTrainStep.Config()
+    config.gradient_clip_norm = 0
+    with pytest.raises(ValueError, match="gradient_clip_norm"):
+        config.finalize()
+
+
+def test_learning_rates_reports_a_plain_optimizer() -> None:
+    parameter = torch.nn.Parameter(torch.ones(2, 3))
+    optimizer = torch.optim.SGD([parameter], lr=0.25)
+    assert train_step._learning_rates(optimizer) == {"all": 0.25}
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

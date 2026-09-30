@@ -7,6 +7,7 @@ from torch import Tensor, nn
 import pytest
 import torch
 
+from priml.baselines.nanochat import ngram
 from priml.baselines.nanochat.ngram import (
     HashedNgramTables,
     NgramEmbedding,
@@ -15,6 +16,19 @@ from priml.baselines.nanochat.ngram import (
 )
 from priml.model.embedding import Embedding
 from priml.testing.cost import assert_cost_matches_torch
+
+
+class _FakeKernel:
+    def __getitem__(self, grid: tuple[int, ...]) -> _FakeKernel:
+        del grid
+        return self
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
+def _fake_kernel() -> _FakeKernel:
+    return _FakeKernel()
 
 
 def test_ngram_embedding_zeros_incomplete_prefix_and_receives_gradients() -> None:
@@ -336,6 +350,167 @@ def test_cuda_fused_mix_matches_autograd_and_marks_rows(sources: int) -> None:
     clear_marked_sinks(sinks, bitmaps)
     assert all(torch.count_nonzero(sink) == 0 for sink in sinks)
     assert all(torch.count_nonzero(bitmap) == 0 for bitmap in bitmaps)
+
+
+def test_ngram_configs_validate_hash_geometry() -> None:
+    with pytest.raises(ValueError, match="divide"):
+        HashedNgramTables.Config(channels_out=3, hash_multipliers=((1,), (1,))).make()
+    with pytest.raises(ValueError, match="same n-gram"):
+        HashedNgramTables.Config(channels_out=4, hash_multipliers=((1,), (1, 2))).make()
+
+
+def test_ngram_mix_rejects_bad_inputs() -> None:
+    value = torch.zeros(2, 3, 4, 6)
+    gate = torch.zeros(2, 3, 4)
+    weight = torch.zeros(5, 12)
+    index = torch.zeros(2, 3, dtype=torch.long)
+    sink = torch.zeros_like(weight)
+    with pytest.raises(ValueError, match="1 <= len"):
+        ngram_mix(value, [], [], [], [], [])
+    with pytest.raises(ValueError, match="ndim"):
+        ngram_mix(
+            torch.zeros(2, 3, 4),
+            [gate],
+            [weight, weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match="dtype"):
+        ngram_mix(
+            value,
+            [gate],
+            [weight, weight],
+            [index, index],
+            [sink.half(), sink],
+            [],
+        )
+    with pytest.raises(ValueError, match="shape"):
+        ngram_mix(
+            value,
+            [gate],
+            [weight, weight],
+            [index, index],
+            [torch.zeros(4, 2), sink],
+            [],
+        )
+    with pytest.raises(ValueError, match=r"index\.numel"):
+        ngram_mix(
+            value,
+            [gate],
+            [weight, weight],
+            [torch.zeros(2, 4, dtype=torch.long), index],
+            [sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match=r"gate\.shape"):
+        ngram_mix(
+            value,
+            [torch.zeros(2, 3, 5)],
+            [weight, weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match="len\\(weights\\)"):
+        ngram_mix(value, [gate], [weight], [index], [sink], [])
+    with pytest.raises(ValueError, match="contiguous"):
+        ngram_mix(
+            value.transpose(-1, -2),
+            [gate],
+            [weight, weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match=r"index\.dtype"):
+        ngram_mix(
+            value,
+            [gate],
+            [weight, weight],
+            [index.to(torch.int32), index],
+            [sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match=r"w\.shape"):
+        ngram_mix(
+            value,
+            [gate],
+            [torch.zeros(3, 12), weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
+    noncontiguous_sink = torch.zeros(12, 5).transpose(0, 1)
+    with pytest.raises(ValueError, match=r"s\.is_contiguous"):
+        ngram_mix(
+            value,
+            [gate],
+            [weight, weight],
+            [index, index],
+            [noncontiguous_sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match=r"w\.dtype"):
+        ngram_mix(
+            value.half(),
+            [gate],
+            [weight, weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
+    with pytest.raises(ValueError, match=r"index\.is_contiguous"):
+        ngram_mix(value, [gate], [weight, weight], [index.t(), index], [sink, sink], [])
+    with pytest.raises(ValueError, match=r"gate\.numel"):
+        ngram_mix(
+            value,
+            [torch.zeros(2, 6, 4)],
+            [weight, weight],
+            [index, index],
+            [sink, sink],
+            [],
+        )
+
+
+def test_cpu_backward_reference_and_empty_sink_clear() -> None:
+    values = torch.randn(2, 3, 4, 6)
+    gate = torch.randn(2, 3, 4)
+    weights = [torch.randn(13, 12) for _ in range(2)]
+    indices = [torch.tensor([[1, 2, 3], [4, 5, 6]]) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    gradients = ngram._mix_backward_reference(values, [gate], weights, indices, sinks)
+    assert gradients[0].shape == gate.shape
+    assert all(torch.count_nonzero(sink) > 0 for sink in sinks)
+    clear_marked_sinks([], [])
+
+
+def test_ngram_cuda_host_dispatch_accepts_cpu_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = torch.randn(2, 3, 4, 6)
+    gate = torch.randn(2, 3, 4)
+    # _clear_marked_sinks_cuda needs rows divisible by its 8-row program.
+    weights = [torch.randn(16, 12) for _ in range(2)]
+    indices = [torch.tensor([[1, 2, 3], [4, 5, 6]]) for _ in weights]
+    sinks = [torch.zeros_like(weight) for weight in weights]
+    bitmaps = [torch.zeros(16, dtype=torch.uint8) for _ in weights]
+    monkeypatch.setattr(ngram, "_compiled_ngram_forward", _fake_kernel)
+    monkeypatch.setattr(ngram, "_compiled_ngram_backward", _fake_kernel)
+    monkeypatch.setattr(ngram, "_compiled_sink_clear", _fake_kernel)
+    assert (
+        ngram._mix_forward_cuda(values, [gate], weights, indices).shape == values.shape
+    )
+    gradients = ngram._mix_backward_cuda(
+        values,
+        [gate],
+        weights,
+        indices,
+        sinks,
+        bitmaps=bitmaps,
+    )
+    assert gradients[0].shape == gate.shape
+    ngram._clear_marked_sinks_cuda(sinks, bitmaps)
 
 
 if __name__ == "__main__":

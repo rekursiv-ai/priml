@@ -30,9 +30,6 @@ if TYPE_CHECKING:
     from priml.baselines.craftax.restart import RestartPolicy
 
 
-pytestmark = pytest.mark.compute_large_fixture
-
-
 def _env(
     num_envs: int = 4,
     seed: int = 0,
@@ -52,15 +49,37 @@ def _env(
     return config.make()
 
 
+def test_a_restored_state_replays_the_same_transition() -> None:
+    config = CraftaxEnv.Config()
+    config.num_envs = 2
+    config.device = "cpu"
+    config.view = (3, 5)
+    config.optimistic_reset_ratio = 1
+    env = config.make()
+    observation = env.reset()
+    assert observation.shape == (2, env.observation_size)
+    state = copy.deepcopy(env.state_dict())
+    actions = torch.tensor([3, 5])
+    transition = env.step(actions)
+    assert transition.observation.shape == observation.shape
+    assert transition.reward.shape == (2,)
+    env.load_state_dict(state)
+    replay = env.step(actions)
+    assert torch.equal(replay.observation, transition.observation)
+    assert torch.equal(replay.reward, transition.reward)
+
+
 def _actions(env: CraftaxEnv, count: int, seed: int = 0) -> Tensor:
     generator = torch.Generator().manual_seed(seed)
     return torch.randint(0, env.num_actions, (count,), generator=generator)
 
 
+@pytest.mark.compute_large_fixture
 def test_it_satisfies_the_environment_protocol() -> None:
     assert isinstance(_env(), BatchedEnvironmentProtocol)
 
 
+@pytest.mark.compute_large_fixture
 def test_it_declares_the_published_geometry() -> None:
     env = _env()
     assert env.num_actions == 43
@@ -68,6 +87,7 @@ def test_it_declares_the_published_geometry() -> None:
     assert env.reward_ceiling == 226.0
 
 
+@pytest.mark.compute_large_fixture
 def test_reset_returns_one_observation_per_worker() -> None:
     env = _env()
     rendered = env.reset()
@@ -75,11 +95,13 @@ def test_reset_returns_one_observation_per_worker() -> None:
     assert bool(torch.isfinite(rendered).all())
 
 
+@pytest.mark.compute_large_fixture
 def test_reset_can_change_the_batch_size() -> None:
     env = _env()
     assert env.reset(7).shape == (7, observation.observation_size())
 
 
+@pytest.mark.compute_large_fixture
 def test_stepping_returns_a_full_transition() -> None:
     env = _env()
     env.reset()
@@ -96,6 +118,7 @@ def test_reading_the_world_before_reset_is_refused() -> None:
         _ = _env().state
 
 
+@pytest.mark.compute_large_fixture
 def test_the_same_seed_replays_the_same_episode() -> None:
     def rollout() -> list[float]:
         env = _env(seed=5)
@@ -107,10 +130,12 @@ def test_the_same_seed_replays_the_same_episode() -> None:
     assert rollout() == rollout()
 
 
+@pytest.mark.compute_large_fixture
 def test_different_seeds_give_different_worlds() -> None:
     assert not torch.equal(_env(seed=1).reset(), _env(seed=2).reset())
 
 
+@pytest.mark.compute_large_fixture
 def test_a_finished_worker_restarts_without_disturbing_the_others() -> None:
     # This is what lets a rollout stay rectangular: the batch never shrinks
     # and the surviving workers keep their episodes.
@@ -128,6 +153,7 @@ def test_a_finished_worker_restarts_without_disturbing_the_others() -> None:
     assert torch.equal(env.state.map[0], survivor)
 
 
+@pytest.mark.compute_large_fixture
 def test_a_restarted_worker_gets_a_fresh_world() -> None:
     env = _env()
     env.reset()
@@ -137,6 +163,7 @@ def test_a_restarted_worker_gets_a_fresh_world() -> None:
     assert not torch.equal(env.state.map[1], doomed)
 
 
+@pytest.mark.compute_large_fixture
 def test_the_observation_after_a_restart_is_the_new_episode() -> None:
     # The terminal observation is deliberately not visible: the learner sees
     # where the next episode begins.
@@ -147,6 +174,7 @@ def test_the_observation_after_a_restart_is_the_new_episode() -> None:
     assert torch.equal(transition.observation[1], observation.render(env.state)[1])
 
 
+@pytest.mark.compute_large_fixture
 def test_achievements_are_reported_only_when_an_episode_ends() -> None:
     env = _env()
     env.reset()
@@ -161,6 +189,7 @@ def test_achievements_are_reported_only_when_an_episode_ends() -> None:
     assert ending.info["Achievements/collect_wood"].tolist() == [100.0, 0.0, 0.0, 0.0]
 
 
+@pytest.mark.compute_large_fixture
 def test_an_episode_ends_when_the_step_limit_is_reached() -> None:
     env = _env()
     env.reset()
@@ -168,6 +197,7 @@ def test_an_episode_ends_when_the_step_limit_is_reached() -> None:
     assert env.step(_actions(env, 4)).done.all()
 
 
+@pytest.mark.compute_large_fixture
 def test_a_long_rollout_stays_finite_and_rectangular() -> None:
     """Many steps in sequence keep the shape and stay numerically sane.
 
@@ -186,6 +216,7 @@ def test_a_long_rollout_stays_finite_and_rectangular() -> None:
         assert bool(torch.isfinite(transition.reward).all())
 
 
+@pytest.mark.compute_large_fixture
 def test_a_checkpoint_resumes_the_identical_episode() -> None:
     env = _env(seed=9)
     env.reset()
@@ -222,6 +253,7 @@ def _worlds(env: CraftaxEnv) -> int:
     return len({tuple(env.state.map[i].flatten()[:32].tolist()) for i in range(4)})
 
 
+@pytest.mark.compute_large_fixture
 def test_optimistic_reset_shares_one_world_across_several_workers() -> None:
     """The throughput treatment: generate few worlds, deal them to many.
 
@@ -236,6 +268,7 @@ def test_optimistic_reset_shares_one_world_across_several_workers() -> None:
     assert _worlds(env) == 1
 
 
+@pytest.mark.compute_large_fixture
 def test_a_ratio_of_one_gives_every_worker_its_own_world() -> None:
     # The correlation the ratio buys is opt-out, not mandatory.
     env = _env(reset_ratio=1)
@@ -245,6 +278,7 @@ def test_a_ratio_of_one_gives_every_worker_its_own_world() -> None:
     assert _worlds(env) == 4
 
 
+@pytest.mark.compute_large_fixture
 def test_optimistic_reset_still_restarts_every_finished_worker() -> None:
     # Sharing worlds must not mean skipping a restart: the point is cheapness,
     # not fewer resets.
@@ -256,6 +290,7 @@ def test_optimistic_reset_still_restarts_every_finished_worker() -> None:
     assert env.state.timestep.tolist() == [0, 0, 0, 0]
 
 
+@pytest.mark.compute_large_fixture
 def test_optimistic_reset_leaves_living_workers_alone() -> None:
     env = _env(reset_ratio=4)
     env.reset()
@@ -266,6 +301,7 @@ def test_optimistic_reset_leaves_living_workers_alone() -> None:
     assert torch.equal(env.state.map[0], survivor)
 
 
+@pytest.mark.compute_large_fixture
 def test_only_as_many_worlds_are_generated_as_are_needed() -> None:
     """One finished worker costs one world, not a whole pool.
 
@@ -295,6 +331,7 @@ def test_only_as_many_worlds_are_generated_as_are_needed() -> None:
     assert generated == [1]
 
 
+@pytest.mark.compute_large_fixture
 def test_the_pool_caps_how_many_worlds_one_step_generates() -> None:
     # The ratio is a ceiling: sixteen workers finishing together must not
     # generate sixteen worlds when the ratio allows two.
@@ -318,6 +355,7 @@ def test_the_pool_caps_how_many_worlds_one_step_generates() -> None:
     assert generated == [2]
 
 
+@pytest.mark.compute_large_fixture
 def test_a_degenerate_reset_ratio_is_refused() -> None:
     config = CraftaxEnv.Config()
     config.optimistic_reset_ratio = 0
@@ -339,6 +377,7 @@ def test_an_empty_view_is_refused() -> None:
         config.make()
 
 
+@pytest.mark.compute_large_fixture
 def test_a_reserve_generates_a_whole_pool_then_deals_from_it() -> None:
     env = _reserve_env()
     env.reset()
@@ -356,6 +395,7 @@ def test_a_reserve_generates_a_whole_pool_then_deals_from_it() -> None:
     assert int(env.state.timestep[1]) == 0
 
 
+@pytest.mark.compute_large_fixture
 def test_a_reserve_refills_when_too_few_worlds_remain() -> None:
     env = _reserve_env()
     env.reset()
@@ -369,6 +409,7 @@ def test_a_reserve_refills_when_too_few_worlds_remain() -> None:
     assert spy.generated == [4, 4]
 
 
+@pytest.mark.compute_large_fixture
 def test_a_checkpoint_resumes_the_identical_episode_from_a_reserve() -> None:
     # The pool's unused worlds and where dealing stopped are part of the world:
     # a resumed run must hand the next finished worker the same fresh world.
@@ -389,6 +430,7 @@ def test_a_checkpoint_resumes_the_identical_episode_from_a_reserve() -> None:
 @pytest.mark.gpu_torch_cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("restart", [RestartOnDemand.Config, RestartFromReserve.Config])
+@pytest.mark.compute_large_fixture
 def test_cuda_graphs_step_bit_for_bit_like_eager(
     restart: Callable[[], Makeable[RestartPolicy]],
 ) -> None:

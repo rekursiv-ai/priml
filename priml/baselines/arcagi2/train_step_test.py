@@ -310,6 +310,13 @@ def test_reference_trajectory_bites() -> None:
     assert mismatches(expected, record)
 
 
+def test_arc_step_requires_atomic_act() -> None:
+    config = training_config(4, None)
+    config.act = None
+    with pytest.raises(ValueError, match="requires an atomic ACT"):
+        config.make()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

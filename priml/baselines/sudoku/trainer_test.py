@@ -443,6 +443,90 @@ def _put(out: dict[str, Tensor], prefix: str, values: Mapping[str, Tensor]) -> N
         out[f"{prefix}/{key}"] = stored(value)
 
 
+def test_trainer_execution_variants(tmp_path: Path) -> None:
+    config = port_config("exp004", "fp32", tmp_path)
+    config.dataset.working_dir = tmp_path / "data"
+    config.grad_clip_max_norm = None
+    config.log_body_norms = True
+    config.dataset.eval_batch_size = 1
+    write_dataset(tmp_path / "data")
+    subject = config.make()
+    assert isinstance(subject.evaluate(), dict)
+    subject.config.emulate_precision_casts = False
+    with subject._eval_compile_disabled():
+        pass
+    result = subject.train_step(**next(iter(subject.dataset.train_dataloader())))
+    assert "metrics" in result
+    assert "lr" in result["metrics"]
+    assert isinstance(subject.evaluate(), dict)
+    subject.config.eval_warmup_batches = 1
+    subject._warm_eval_compile()
+    empty = subject.eval_loss(
+        media=torch.zeros(2, 16, dtype=torch.int32),
+        label=torch.zeros(2, 16, dtype=torch.int32),
+        valid_count=0,
+    )
+    assert empty["model"].shape[0] == 2
+    subject.config.max_steps = 2
+    subject.config.max_time = 0.0
+    subject.run()
+
+
+def test_trainer_optional_constructor_and_stop_guards(tmp_path: Path) -> None:
+    config = port_config("exp004", "fp32", tmp_path)
+    config.dataset.working_dir = tmp_path / "data"
+    config.train_q_halt = False
+    config.doc = "notes"
+    write_dataset(tmp_path / "data")
+    subject = config.make()
+    assert all(not p.requires_grad for p in subject.model.q_head.parameters())
+    config = port_config("exp004", "fp32", tmp_path)
+    config.dataset.working_dir = tmp_path / "data"
+    config.use_ema = False
+    assert config.make().ema_shadow is None
+    config = port_config("exp004", "fp32", tmp_path)
+    config.dataset.working_dir = tmp_path / "data"
+    config.max_steps = float("inf")
+    config.max_time = float("inf")
+    with pytest.raises(ValueError, match="no finite stop"):
+        config.make().run()
+
+
+def test_trainer_run_and_resume_guard_branches(tmp_path: Path) -> None:
+    config = port_config("exp004", "fp32", tmp_path)
+    config.dataset.working_dir = tmp_path / "data"
+    write_dataset(tmp_path / "data")
+    subject = config.make()
+    subject._guard_resume_config(False)
+    subject._guard_resume_config(True)
+    subject._guard_resume_config(True)
+    subject.config.doc = "changed"
+    subject._guard_resume_config(True)
+    subject.config.max_steps = 0
+    subject.run("launcher-arg")
+    assert subject.global_step == 0
+
+
+def test_trainer_constructor_rejects_invalid_protocol_configs(tmp_path: Path) -> None:
+    config = port_config("exp004", "fp32", tmp_path)
+    config.experiment_name = ""
+    with pytest.raises(ValueError, match="experiment_name"):
+        config.make()
+    config = port_config("exp004", "fp32", tmp_path)
+    config.eval_act_steps = -1
+    with pytest.raises(ValueError, match="eval_act_steps"):
+        config.make()
+    config = port_config("exp004", "fp32", tmp_path)
+    config.eval_min_act_steps = 0
+    with pytest.raises(ValueError, match="eval_min_act_steps"):
+        config.make()
+    config = port_config("exp004", "fp32", tmp_path)
+    config.csp_loss_weight = 1.0
+    config.dataset.spec = SudokuSpec(grid_shape=(4, 4), box_shape=(3, 3), vocab_size=6)
+    with pytest.raises(ValueError, match="csp_loss_weight"):
+        config.make()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

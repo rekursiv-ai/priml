@@ -13,13 +13,45 @@ import pytest
 import torch
 
 from priml.cost import Cost
-from priml.model.embedding import Embedding, MultiHotEmbedding
+from priml.model import embedding
+from priml.model.embedding import Embedding, MultiHotEmbedding, _power_of_two
 from priml.model.init import normal
 from priml.testing.bfb import assert_bfb_against_golden
 from priml.testing.cost import assert_cost_matches_torch
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+class _FakeKernel:
+    def __getitem__(self, grid: tuple[int, ...]) -> _FakeKernel:
+        del grid
+        return self
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
+class _FakeBackwardKernels:
+    accumulate = _FakeKernel()
+    decode = _FakeKernel()
+
+
+class _FakeProperties:
+    multi_processor_count = 2
+
+
+def _fake_embed_kernel() -> _FakeKernel:
+    return _FakeKernel()
+
+
+def _fake_backward_kernels() -> _FakeBackwardKernels:
+    return _FakeBackwardKernels()
+
+
+def _fake_device_properties(device: object) -> _FakeProperties:
+    del device
+    return _FakeProperties()
 
 
 def test_embedding_config_pprint() -> None:
@@ -55,6 +87,47 @@ def test_embedding_reset():
 def test_embedding_padding_idx():
     m = Embedding.Config(1000, 64, padding_idx=0).make()
     assert m(torch.zeros(1, dtype=torch.long)).abs().sum() == 0
+
+
+def test_embedding_config_and_reset_dtype() -> None:
+    config = Embedding.Config(8, 4, dtype=torch.float64, padding_idx=2)
+    model = config.make()
+    assert model.weight.dtype == torch.float64
+    assert torch.equal(model.weight[2], torch.zeros(4, dtype=torch.float64))
+    model.reset_parameters()
+    assert torch.equal(model.weight[2], torch.zeros(4, dtype=torch.float64))
+
+
+def test_multi_hot_torch_paths_and_kernel_validation() -> None:
+    config = _small_layout()
+    embedding = config.make()
+    rows = _draw_packed(config, batch=2)
+    assert torch.equal(embedding(rows), embedding.forward_torch(rows))
+    with pytest.raises(TypeError, match="stores bf16"):
+        embedding.float().forward_triton(rows)
+    with pytest.raises(ValueError, match="8 fields"):
+        embedding.backward_triton(
+            rows,
+            torch.ones(2, config.channels_concat).bfloat16(),
+        )
+    wide = _eight_field_layout()
+    wide.channels_out = 8
+    invalid = wide.make()
+    packed = _draw_packed(wide, batch=2)
+    with pytest.raises(ValueError, match="2\\^k >= 16"):
+        invalid.backward_triton(packed, torch.ones(2, wide.channels_concat).bfloat16())
+
+
+def test_power_of_two_and_non_cuda_backward_dispatch() -> None:
+    assert [_power_of_two(value) for value in (2, 3, 8, 9)] == [2, 4, 8, 16]
+    config = _small_layout()
+    embedding = config.make()
+    rows = _draw_packed(config, batch=2)
+    gradient = torch.ones(2, config.channels_concat).bfloat16()
+    assert torch.equal(
+        embedding.backward(rows, gradient),
+        embedding.backward_torch(rows, gradient),
+    )
 
 
 def test_the_table_realizes_the_spread_it_was_asked_for():
@@ -328,6 +401,39 @@ def _draw_packed(
     )
     scalars = torch.rand(batch, time, config.num_scalars, generator=generator)
     return torch.cat((ids.flatten(-2), scalars), dim=-1).squeeze(1)
+
+
+def test_multi_hot_embedding_kernel_host_dispatch_with_fake_launches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _small_layout()
+    embedding_module = config.make()
+    rows = _draw_packed(config, batch=2)
+    monkeypatch.setattr(embedding, "_embed_kernel", _fake_embed_kernel)
+    assert embedding_module.forward_triton(rows).shape == (2, config.channels_concat)
+
+    wide = _eight_field_layout()
+    wide_embedding = wide.make()
+    wide_rows = _draw_packed(wide, batch=2)
+    monkeypatch.setattr(embedding, "_backward_kernels", _fake_backward_kernels)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        _fake_device_properties,
+    )
+    gradient = torch.ones(2, wide.channels_concat, dtype=torch.bfloat16)
+    assert wide_embedding.backward_triton(wide_rows, gradient).shape == (
+        wide.channels_in,
+        wide.channels_out,
+    )
+
+
+def test_multi_hot_embedding_cost_counts_cpu_gather_and_scatter() -> None:
+    config = _small_layout()
+    cost = config.cost(seq_len=3, batch_size=2, dtype=torch.float32)
+    assert cost.params == 0
+    assert cost.params_active == 0
+    assert cost["flops", "adjoint", "selection"].sum() == 3 * 2 * 3 * 4 * 2
 
 
 if __name__ == "__main__":

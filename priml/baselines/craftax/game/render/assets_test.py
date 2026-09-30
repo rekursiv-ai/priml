@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import urllib.error
 import urllib.request
@@ -40,6 +40,35 @@ def test_the_revision_defaults_to_a_tag(
     with pytest.raises(RuntimeError):
         assets.fetch("zombie.png", directory=tmp_path)
     assert "/v1.6.1/" in seen[0]
+
+
+def test_a_successful_download_is_atomically_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: object,
+        ) -> None:
+            del exc_type, exc_value, traceback
+
+        def read(self) -> bytes:
+            return b"payload"
+
+    def open_response(url: str, *, timeout: int) -> Response:
+        del url, timeout
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_response)
+    path = assets.fetch("zombie.png", directory=tmp_path)
+    assert path.read_bytes() == b"payload"
+    assert not list(tmp_path.glob("*.partial"))
 
 
 def test_a_cached_sprite_is_not_downloaded_again(

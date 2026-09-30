@@ -18,7 +18,10 @@ import pygame
 import pytest
 import torch
 
-from priml.baselines.craftax.game import constants
+from priml.baselines.craftax.game import (
+    constants,
+    step,
+)
 from priml.baselines.craftax.game.constants import Action
 from priml.baselines.craftax.game.render import play, sprites
 from priml.baselines.craftax.game.render.pixels import Renderer
@@ -227,6 +230,50 @@ def test_recording_leaves_the_policy_untouched(
         asset_dir=sprite_dir,
     )
     assert torch.equal(before, layer.weight.detach())
+
+
+def test_play_closes_cleanly_on_quit(
+    sprite_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pygame.event, "wait", lambda: pygame.event.Event(pygame.QUIT))
+    state = play.play(seed=2, block_pixels=8, asset_dir=sprite_dir)
+    assert state.num_envs == 1
+
+
+def test_play_handles_unknown_and_known_keys(
+    sprite_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = iter(
+        (
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_q),
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_w),
+            pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE),
+        ),
+    )
+    monkeypatch.setattr(pygame.event, "wait", lambda: next(events))
+
+    def done(state: object) -> torch.Tensor:
+        del state
+        return torch.tensor([True])
+
+    monkeypatch.setattr(step, "is_done", done)
+    state = play.play(seed=3, block_pixels=8, asset_dir=sprite_dir)
+    assert state.num_envs == 1
+
+
+def test_record_writes_a_short_episode(tmp_path: Path, sprite_dir: Path) -> None:
+    steps = play.record(
+        _policy(),
+        tmp_path / "short.mp4",
+        seed=4,
+        max_steps=2,
+        block_pixels=8,
+        asset_dir=sprite_dir,
+    )
+    assert steps == 2
+    assert (tmp_path / "short.mp4").stat().st_size > 0
 
 
 if __name__ == "__main__":

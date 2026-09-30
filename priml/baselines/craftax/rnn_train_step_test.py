@@ -18,9 +18,6 @@ from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
-pytestmark = pytest.mark.compute_training
-
-
 def _config(**overrides: object) -> CraftaxRNNTrainStep.Config:
     config = CraftaxRNNTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
@@ -53,10 +50,12 @@ def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:
     return result.get("metrics", {})
 
 
+@pytest.mark.compute_training
 def test_it_satisfies_the_training_step_protocol() -> None:
     assert isinstance(_step(), TrainStepProtocol)
 
 
+@pytest.mark.compute_training
 def test_the_network_is_sized_from_the_environment() -> None:
     step = _step()
     model = step.model
@@ -68,15 +67,18 @@ def test_the_network_is_sized_from_the_environment() -> None:
     assert actor.out_features == step.env.num_actions
 
 
+@pytest.mark.compute_training
 def test_one_step_consumes_the_declared_interactions() -> None:
     assert _step().steps_per_update == 4 * 3
 
 
+@pytest.mark.compute_training
 def test_the_loops_batch_passes_through_untouched() -> None:
     batch: dict[str, object] = {"observation": object()}
     assert _step().preprocess_batch(batch) is batch
 
 
+@pytest.mark.compute_training
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
     result = _step().train_step()
     assert math.isfinite(float(result["loss"]))
@@ -94,6 +96,7 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
         assert math.isfinite(float(_metrics(result)[name])), name
 
 
+@pytest.mark.compute_training
 def test_each_epoch_visits_every_minibatch() -> None:
     step = _config(num_epochs=2, num_minibatches=2).make()
     with patch.object(step.optimizer, "step", wraps=step.optimizer.step) as optimizer:
@@ -101,6 +104,7 @@ def test_each_epoch_visits_every_minibatch() -> None:
     assert optimizer.call_count == 4
 
 
+@pytest.mark.compute_training
 def test_a_step_changes_the_policy() -> None:
     step = _step()
     model = step.model
@@ -111,6 +115,7 @@ def test_a_step_changes_the_policy() -> None:
     assert not torch.equal(before, embed.weight.detach())
 
 
+@pytest.mark.compute_training
 def test_a_rollout_records_the_state_it_began_from() -> None:
     # That one vector is the whole replay record: unlike the transformer,
     # there is no per-layer cache to rebuild.
@@ -121,12 +126,14 @@ def test_a_rollout_records_the_state_it_began_from() -> None:
     assert rollout.previous_done.shape == (3, 4)
 
 
+@pytest.mark.compute_training
 def test_memory_carries_across_updates() -> None:
     step = _step()
     step.train_step()
     assert float(step._state.abs().max()) > 0.0
 
 
+@pytest.mark.compute_training
 def test_minibatches_split_workers_and_never_time() -> None:
     """Whole trajectories move together; cutting time would sever history."""
     step = _step()
@@ -138,6 +145,7 @@ def test_minibatches_split_workers_and_never_time() -> None:
         assert minibatch["initial_state"].shape == (2, 5)
 
 
+@pytest.mark.compute_training
 def test_a_replayed_trajectory_reproduces_the_rollout_exactly() -> None:
     """The recorded state replays the recurrence with no drift at all.
 
@@ -163,6 +171,7 @@ def test_a_replayed_trajectory_reproduces_the_rollout_exactly() -> None:
     assert torch.equal(log_prob, minibatch["log_prob"])
 
 
+@pytest.mark.compute_training
 def test_the_learning_rate_anneals_toward_zero() -> None:
     step = _config(total_train_steps=4).make()
     rates: list[float] = []
@@ -173,12 +182,14 @@ def test_the_learning_rate_anneals_toward_zero() -> None:
     assert rates[-1] < rates[0]
 
 
+@pytest.mark.compute_training
 def test_annealing_can_be_switched_off() -> None:
     step = _config(anneal_learning_rate=False, learning_rate=1e-3).make()
     step.train_step()
     assert step.optimizer.param_groups[0]["lr"] == pytest.approx(1e-3)
 
 
+@pytest.mark.compute_training
 def test_the_same_seed_reproduces_the_same_update() -> None:
     def run() -> float:
         return float(_config(seed=7).make().train_step()["loss"])
@@ -186,6 +197,7 @@ def test_the_same_seed_reproduces_the_same_update() -> None:
     assert run() == run()
 
 
+@pytest.mark.compute_training
 def test_evaluation_does_not_change_the_policy() -> None:
     step = _step()
     model = step.model
@@ -197,6 +209,7 @@ def test_evaluation_does_not_change_the_policy() -> None:
     assert torch.equal(before, embed.weight.detach())
 
 
+@pytest.mark.compute_training
 def test_action_logits_can_be_read_for_arbitrary_observations() -> None:
     step = _step()
     logits = step.call_eval(observation=torch.zeros(3, step.env.observation_size))
@@ -204,6 +217,7 @@ def test_action_logits_can_be_read_for_arbitrary_observations() -> None:
     assert not logits.requires_grad
 
 
+@pytest.mark.compute_training
 def test_evaluation_actor_carries_gru_state_and_forwards_done() -> None:
     step = _step()
     actor = step.make_evaluation_actor()
@@ -238,6 +252,7 @@ def test_evaluation_actor_carries_gru_state_and_forwards_done() -> None:
     assert step.model.training
 
 
+@pytest.mark.compute_training
 def test_a_checkpoint_resumes_an_identical_run() -> None:
     step = _config(seed=3).make()
     step.train_step()
@@ -249,6 +264,7 @@ def test_a_checkpoint_resumes_an_identical_run() -> None:
     assert float(resumed.train_step()["loss"]) == expected
 
 
+@pytest.mark.compute_training
 def test_a_checkpoint_restores_the_recurrent_state() -> None:
     # Without it a resumed run acts from an empty memory its weights do not
     # expect, and the first rollout after every resume is off-policy.
@@ -289,6 +305,24 @@ def test_an_invalid_setting_is_refused(field: str, value: object) -> None:
 def test_minibatches_that_do_not_divide_the_workers_are_refused() -> None:
     with pytest.raises(ValueError, match="divide"):
         _config(num_minibatches=3).make()
+
+
+def test_gru_step_trains_evaluates_acts_and_restores() -> None:
+    step = _config().make()
+    result = step.train_step()
+    assert torch.isfinite(result["loss"])
+    step.eval_loss()
+    observation = torch.zeros(2, step.env.observation_size)
+    assert step.call_eval(observation=observation).shape == (2, step.env.num_actions)
+    actor = step.make_evaluation_actor()
+    actor.reset(num_envs=2, device=torch.device("cpu"))
+    actor.act(
+        observation,
+        torch.zeros(2, dtype=torch.bool),
+        generator=torch.Generator(),
+    )
+    saved = copy.deepcopy(step.state_dict())
+    step.load_state_dict(saved)
 
 
 if __name__ == "__main__":

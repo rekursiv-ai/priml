@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from priml.loss.policy_gradient import LogProbs, TorchPPO
-from priml.loss.policy_gradient_kernel import TritonPPO
+from priml.loss.policy_gradient_kernel import TritonPPO, _require_cuda
 from priml.testing.policy_gradient import random_minibatch
 
 
@@ -46,6 +46,16 @@ def test_off_cuda_every_stage_is_refused() -> None:
             values=batch["values"],
             returns=batch["values"],
         )
+
+
+def test_invalid_horizon_and_cpu_tensor_are_refused_without_cuda() -> None:
+    rule = TritonPPO.Config().make()
+    with pytest.raises(ValueError, match="positive multiple"):
+        rule.check_horizon(0)
+    with pytest.raises(ValueError, match="positive multiple"):
+        rule.check_horizon(TritonPPO.Config.ADVANTAGE_WIDTH + 1)
+    with pytest.raises(ValueError, match="runs on a CUDA device"):
+        _require_cuda(torch.zeros(2))
 
 
 def test_the_kernels_take_the_reference_rules_coefficients() -> None:

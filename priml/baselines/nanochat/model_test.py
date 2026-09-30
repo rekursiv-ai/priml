@@ -20,6 +20,7 @@ from priml.baselines.nanochat.model import (
     MemoryNanoChatLM,
     NanoChatLM,
     OutputNormFeedForward,
+    ScaledSoftCap,
     SourceReuseTransformerBlock,
 )
 from priml.baselines.nanochat.ngram import HashedNgramTables
@@ -1074,6 +1075,17 @@ def test_output_norm_feed_forward_reset_initializes_affine_output_norm() -> None
     ffn.reset_parameters()
 
     assert torch.equal(norm_out.weight, torch.ones(4))
+
+
+def test_scaled_soft_cap_returns_float32_logits() -> None:
+    config = ScaledSoftCap.Config(cap=2.0, output_cap=3.0)
+    config.channels_in = config.channels_out = 3
+    module = config.make()
+    values = torch.tensor([[-2.0, 0.0, 2.0]])
+    result = module(values)
+    assert result.dtype == torch.float32
+    assert result.shape == values.shape
+    assert torch.all(result.abs() <= 3.0)
 
 
 if __name__ == "__main__":

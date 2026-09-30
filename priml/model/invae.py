@@ -133,7 +133,7 @@ class ResnetBlock(nn.Module):
                 )
 
     @override
-    def forward(self, x, temb):
+    def forward(self, x: Tensor, temb: Tensor | None) -> Tensor:
         h = x
         h = self.norm1(h)
         h = nonlinearity(h)
@@ -192,7 +192,7 @@ class AttnBlock(nn.Module):
         )
 
     @override
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         h_ = x
         h_ = self.norm(h_)
         q = self.q(h_)
@@ -496,7 +496,7 @@ class DiagonalGaussianDistribution:
         )
         return x
 
-    def kl(self, other=None):
+    def kl(self, other: "DiagonalGaussianDistribution | None" = None) -> Tensor:
         if self.deterministic:
             return torch.Tensor([0.0])
         if other is None:
@@ -513,7 +513,11 @@ class DiagonalGaussianDistribution:
             dim=[1, 2, 3],
         )
 
-    def nll(self, sample, dims=[1, 2, 3]):
+    def nll(
+        self,
+        sample: Tensor,
+        dims: list[int] = [1, 2, 3],
+    ) -> Tensor:
         if self.deterministic:
             return torch.Tensor([0.0])
         logtwopi = np.log(2.0 * np.pi)

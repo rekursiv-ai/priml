@@ -27,6 +27,7 @@ import pytest
 import tiktoken
 import torch
 
+from priml.baselines.nanochat import data
 from priml.baselines.nanochat.data import (
     NanoChatData,
     ReferenceEvaluation,
@@ -726,6 +727,101 @@ def test_prepared_data_requires_both_manifests(corpus: Path) -> None:
     config.device = "cpu"
     with pytest.raises(ValueError, match="both manifests"):
         config.make()
+
+
+def test_pack_row_prefers_largest_fit_and_crops_shortest() -> None:
+    row = torch.empty(5, dtype=torch.long)
+    buffer = [[1, 2], [3, 4, 5], [6, 7, 8, 9, 10, 11]]
+    position = data._pack_row(row, buffer, position=0)
+    assert position == 3
+    assert row[:3].tolist() == [3, 4, 5]
+    assert len(buffer) == 2
+    position = data._pack_row(row, buffer, position=position)
+    assert position == 5
+    assert row[3:].tolist() == [1, 2]
+
+
+def test_stream_and_config_validation_errors(tmp_path: Path) -> None:
+    config = NanoChatData.Config(batch_size=0)
+    with pytest.raises(ValueError, match="batch_size"):
+        config.make()
+    config = NanoChatData.Config(eval_tokens=1, eval_batch_size=2, max_seq_len=3)
+    with pytest.raises(ValueError, match="whole number"):
+        config.make()
+    with pytest.raises(FileNotFoundError, match="missing"):
+        data._shard_paths(tmp_path / "absent", indices=[2])
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_cuda_prefetch_stream_matches_serial(corpus: Path) -> None:
+    data = _data(corpus, device="cuda")
+    stream = data.train_dataloader()
+    batch = next(iter(stream))
+    assert batch["media"].device.type == "cuda"
+    assert batch["media"].shape == (2, SEQ)
+
+
+def test_tokenizer_rejects_missing_recipe_and_negative_lengths(corpus: Path) -> None:
+    recipe = corpus / "tokenizer" / "tokenizer_recipe.json"
+    original = recipe.read_text()
+    recipe.write_text(json.dumps({"bos_token": BOS}))
+    with pytest.raises(ValueError, match="token_bytes_sha256"):
+        Tokenizer.from_directory(corpus / "tokenizer")
+    recipe.write_text(original)
+    values = _load_array(corpus / "tokenizer" / "token_bytes.npy")
+    assert isinstance(values, np.ndarray)
+    values[0] = -1
+    np.save(corpus / "tokenizer" / "token_bytes.npy", values)
+    recipe.write_text(
+        json.dumps(
+            {"bos_token": BOS, "token_bytes_sha256": token_bytes_fingerprint(values)},
+        ),
+    )
+    with pytest.raises(ValueError, match="negative"):
+        Tokenizer.from_directory(corpus / "tokenizer")
+
+
+def test_prepared_array_helpers_reject_shape_and_dtype(tmp_path: Path) -> None:
+    path = tmp_path / "array.npy"
+    np.save(path, np.zeros((2, 3), dtype=np.uint16))
+    with pytest.raises(ValueError, match="geometry/dtype"):
+        data._array(path, shape=(3, 2), dtype=np.dtype(np.uint16))
+    np.save(tmp_path / "float.npy", np.zeros(2, dtype=np.float32))
+    with pytest.raises(ValueError, match="one integer"):
+        data._byte_table(tmp_path, metadata={"file": "float.npy"}, vocab=2)
+
+
+def test_reference_validation_rejects_bad_protocol(tmp_path: Path) -> None:
+    path = tmp_path / "bad.npz"
+    np.savez(
+        path,
+        inputs=np.zeros((2, 3), dtype=np.int64),
+        targets=np.zeros((2, 3), dtype=np.int64),
+        score_mask=np.ones((2, 3), dtype=np.bool_),
+        token_bytes=np.ones(4, dtype=np.int64),
+        reference_bytes=np.ones(2, dtype=np.int64),
+        literal_bytes=np.ones(2, dtype=np.int64),
+        batch_size=2,
+        vocab_size=4,
+        bos_token_id=0,
+        protocol="wrong",
+    )
+    with pytest.raises(ValueError, match="protocol"):
+        ReferenceEvaluation.Config(path=path).make()
+
+
+def test_cpu_prefetch_worker_path_replays_prepared_rows(
+    prepared_config: NanoChatData.Config,
+) -> None:
+    dataset = prepared_config.make()
+    stream = dataset.train_dataloader()
+    stream.prefetch = True
+    stream.max_batches = 1
+    batches = list(stream)
+    assert len(batches) == 1
+    assert batches[0]["media"].shape == (1, 4)
+    assert batches[0]["label"].shape == (1, 4)
 
 
 if __name__ == "__main__":

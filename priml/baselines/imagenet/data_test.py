@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import io
@@ -13,7 +14,11 @@ from torch import Tensor
 import pytest
 import torch
 
-from priml.baselines.imagenet.data import ImageNetData, deit_train_data_pipeline
+from priml.baselines.imagenet.data import (
+    ImageNetData,
+    deit_eval_data_pipeline,
+    deit_train_data_pipeline,
+)
 from priml.data.pipeline.batching import Batcher
 from priml.data.pipeline.dataset import DataPipeline
 from priml.data.pipeline.tensorize import AsTensor
@@ -24,7 +29,6 @@ from priml.lib.custom_json import DictCodec
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 def test_working_dir_propagates_through_imagenet_pipelines(tmp_path: Path) -> None:
@@ -78,6 +82,17 @@ def test_deit_train_data_pipeline_tensorizes_labels_before_mixing() -> None:
     kinds = [type(p) for p in deit_train_data_pipeline().processors]
     batcher = kinds.index(Batcher.Config)
     assert kinds[batcher + 1 : batcher + 3] == [AsTensor.Config, MixupCutmix.Config]
+
+
+def test_deit_eval_data_pipeline_uses_validation_and_integer_labels() -> None:
+    config = deit_eval_data_pipeline()
+    assert isinstance(config.source, ExtractedImageNetSource.Config)
+    assert config.source.split == "val"
+    assert config.source.validation_labels_file == Path("validation_labels.txt")
+    assert any(
+        isinstance(processor, AsTensor.Config) and processor.dtype == torch.int64
+        for processor in config.processors
+    )
 
 
 class _ListSource:

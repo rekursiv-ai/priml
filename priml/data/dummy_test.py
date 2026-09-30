@@ -52,6 +52,14 @@ def test_num_workers_propagates_to_loader():
     assert dataset.eval_dataloader().num_workers == 2
 
 
+def test_state_roundtrip_and_legacy_state() -> None:
+    dataset = _make()
+    state = dataset.state_dict()
+    dataset.load_state_dict({})
+    dataset.load_state_dict(state)
+    assert dataset.state_dict() == state
+
+
 def test_collate_produces_media_and_label():
     """Collate yields a dict with media and label batched tensors."""
     dataset = _make()

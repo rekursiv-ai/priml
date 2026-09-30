@@ -8,7 +8,12 @@ import pytest
 import torch
 
 from priml.baselines.craftax.game import constants, interact
-from priml.baselines.craftax.game.constants import Achievement, Action, BlockType
+from priml.baselines.craftax.game.constants import (
+    Achievement,
+    Action,
+    BlockType,
+    ItemType,
+)
 from priml.baselines.craftax.game.state import EnvState, empty_state
 
 
@@ -39,6 +44,15 @@ def _all(num_envs: int = 2) -> Tensor:
 def _quiet() -> torch.Generator:
     # Seeded so the sapling draw never fires and cannot confound a test.
     return torch.Generator().manual_seed(0)
+
+
+def test_item_at_reads_the_current_floor_and_ladder_checks_kind() -> None:
+    state = _state()
+    state.item_map[:, 0, 10, 11] = int(ItemType.LADDER_DOWN)
+    item = interact.item_at(state, torch.tensor([[10, 11], [10, 11]]))
+    assert item.tolist() == [int(ItemType.LADDER_DOWN)] * 2
+    assert interact.is_ladder(item, ItemType.LADDER_DOWN).tolist() == [True, True]
+    assert interact.is_ladder(item, ItemType.LADDER_UP).tolist() == [False, False]
 
 
 def test_chopping_a_tree_yields_wood_and_leaves_grass() -> None:

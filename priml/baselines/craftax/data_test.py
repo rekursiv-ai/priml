@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import cast
 
+import importlib.util
+
 import pytest
 import torch
 
+from priml.baselines.craftax import conftest
 from priml.baselines.craftax.data import CraftaxRollouts
 from priml.data.custom_types import DatasetProtocol
 from priml.train.custom_types import TrainStepProtocol
@@ -101,6 +104,29 @@ def test_it_carries_the_pass_count() -> None:
     restored.load_state_dict(rollouts.state_dict())
     assert restored.timer_epoch.global_count == 2
     rollouts.load_state_dict({"anything": 1})
+
+
+def test_loading_into_an_active_iterator_updates_its_cursor() -> None:
+    rollouts = _rollouts()
+    iterator = rollouts.train_dataloader()
+    next(iter(iterator))
+    rollouts.load_state_dict({"train_position": 2})
+    assert list(iterator) == [{"valid_count": 1}]
+
+
+def test_native_test_helpers_cover_optional_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_spec(name: str, package: str | None = None) -> None:
+        del package
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", missing_spec)
+    assert not conftest._reference_is_installed()
+    with pytest.raises(ModuleNotFoundError):
+        conftest.reference("missing_module")
+    assert conftest.generated_world(num_envs=2, seed=2).num_envs == 2
+    assert conftest.as_tensor([1, 2]).tolist() == [1, 2]
 
 
 def test_checkpoint_resumes_the_unfinished_cadence() -> None:

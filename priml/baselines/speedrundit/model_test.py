@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from torch import nn
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from priml.baselines.speedrundit.model import ModelOutput, SpeedrunDiT
 from priml.baselines.speedrundit.objective import SpeedrunObjective
@@ -20,6 +21,10 @@ from priml.math.diffusion.time_shift import time_shift
 from priml.math.position_embedding import image_token_positions
 from priml.model.attention.rope import RoPE
 from priml.optimizers.muon import Muon
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def tiny_model() -> SpeedrunDiT:
@@ -173,6 +178,129 @@ def test_shift_and_sampler_return_expected_latent_shapes() -> None:
         shift_time=False,
     )
     assert torch.isfinite(guided).all()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"encoder_blocks": 4, "decoder_blocks": 3}, "shorter than SPRINT"),
+        ({"projection_depths": (3, 2)}, "strictly increasing"),
+        ({"projection_depths": (2, 7)}, "outside the model"),
+        ({"patch_size": 3}, "divisible by patch_size"),
+    ],
+)
+def test_inconsistent_geometry_is_rejected(
+    overrides: dict[str, object],
+    match: str,
+) -> None:
+    config = tiny_model().config.copy_tree()
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    with pytest.raises(ValueError, match=match):
+        config.make()
+
+
+def test_forward_rejects_a_latent_of_the_wrong_shape() -> None:
+    with pytest.raises(ValueError, match="latent shape does not match"):
+        tiny_model()(
+            torch.randn(3, 2, 4, 5),
+            torch.rand(3),
+            torch.tensor([0, 1, 2]),
+            torch.randn(3, 8),
+        )
+
+
+def test_forward_rejects_a_cls_token_of_the_wrong_width() -> None:
+    with pytest.raises(ValueError, match=r"cls_token must have shape"):
+        tiny_model()(
+            # SpeedrunDiT.forward requires a square input_size x input_size latent.
+            torch.randn(3, 2, 4, 4),
+            torch.rand(3),
+            torch.tensor([0, 1, 2]),
+            torch.randn(3, 5),
+        )
+
+
+def test_computed_rope_matches_the_reference_buffers() -> None:
+    reference = tiny_model().eval()
+    config = reference.config.copy_tree()
+    config.reference_rope = False
+    computed = config.make().eval()
+    computed.load_state_dict(reference.state_dict())
+    args = (
+        # SpeedrunDiT.forward requires a square input_size x input_size latent.
+        torch.randn(3, 2, 4, 4),
+        torch.rand(3),
+        torch.tensor([0, 1, 2]),
+        torch.randn(3, 8),
+    )
+    with torch.no_grad():
+        expected = reference(*args)
+        actual = computed(*args)
+    assert torch.allclose(actual.velocity, expected.velocity)
+    assert torch.allclose(actual.cls_velocity, expected.cls_velocity)
+
+
+def test_training_path_drop_broadcasts_the_coin_across_ranks(tmp_path: Path) -> None:
+    config = tiny_model().config.copy_tree()
+    config.path_drop_prob = 1.0
+    model = config.make().train()
+    args = (
+        # SpeedrunDiT.forward requires a square input_size x input_size latent.
+        torch.randn(3, 2, 4, 4),
+        torch.rand(3),
+        torch.tensor([0, 1, 2]),
+        torch.randn(3, 8),
+    )
+    dist.init_process_group(
+        backend="gloo",
+        init_method=(tmp_path / "gloo-rendezvous").resolve().as_uri(),
+        rank=0,
+        world_size=1,
+    )
+    try:
+        torch.manual_seed(0)
+        dropped = model(*args, route_tokens=False)
+    finally:
+        dist.destroy_process_group()
+    torch.manual_seed(0)
+    forced = model(*args, route_tokens=False, drop_sparse_path=True)
+    assert torch.equal(dropped.velocity, forced.velocity)
+
+
+def test_sampler_requires_two_steps() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        sample_latents(
+            tiny_model(),
+            # SpeedrunDiT.forward requires a square input_size x input_size latent.
+            torch.randn(3, 2, 4, 4),
+            torch.randn(3, 8),
+            torch.tensor([1, 2, 3]),
+            num_steps=1,
+        )
+
+
+def test_sampler_restores_training_mode_and_shifts_time() -> None:
+    model = tiny_model().train()
+    # SpeedrunDiT.forward requires a square input_size x input_size latent.
+    latents = torch.randn(3, 2, 4, 4)
+    cls = torch.randn(3, 8)
+    labels = torch.tensor([1, 2, 3])
+    torch.manual_seed(0)
+    shifted, _ = sample_latents(model, latents, cls, labels, num_steps=2)
+    torch.manual_seed(0)
+    plain, _ = sample_latents(
+        model,
+        latents,
+        cls,
+        labels,
+        num_steps=2,
+        shift_time=False,
+    )
+    assert model.training
+    assert shifted.shape == latents.shape
+    # 2 * 4 * 4 latent dimensions against a 4096 base shift every interior time.
+    assert not torch.equal(shifted, plain)
 
 
 def test_zero_cls_guidance_keeps_conditional_cls_drift() -> None:

@@ -18,9 +18,6 @@ from priml.train.custom_types import TrainStepOutput, TrainStepProtocol
 from priml.train.parallelism import NoParallel
 
 
-pytestmark = pytest.mark.compute_training
-
-
 def _config(**overrides: object) -> CraftaxPQNTrainStep.Config:
     config = CraftaxPQNTrainStep.Config()
     config.parallelism = NoParallel.Config(device="cpu")
@@ -51,25 +48,30 @@ def _metrics(result: TrainStepOutput) -> dict[str, float | Tensor]:
     return result.get("metrics", {})
 
 
+@pytest.mark.compute_training
 def test_it_satisfies_the_training_step_protocol() -> None:
     assert isinstance(_step(), TrainStepProtocol)
 
 
+@pytest.mark.compute_training
 def test_the_network_is_sized_from_the_environment() -> None:
     step = _step()
     assert step.model.encoder.in_features == step.env.observation_size
     assert step.model.head.out_features == step.env.num_actions
 
 
+@pytest.mark.compute_training
 def test_one_step_consumes_the_declared_interactions() -> None:
     assert _step().steps_per_update == 4 * 3
 
 
+@pytest.mark.compute_training
 def test_the_loops_batch_passes_through_untouched() -> None:
     batch: dict[str, object] = {"observation": object()}
     assert _step().preprocess_batch(batch) is batch
 
 
+@pytest.mark.compute_training
 def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
     result = _step().train_step()
     assert math.isfinite(float(result["loss"]))
@@ -77,6 +79,7 @@ def test_a_step_optimizes_and_reports_its_diagnostics() -> None:
         assert math.isfinite(float(_metrics(result)[name])), name
 
 
+@pytest.mark.compute_training
 def test_annealing_can_be_switched_off() -> None:
     step = _config(anneal_learning_rate=False, learning_rate=1e-3).make()
     # Two updates: the first is scheduled at progress zero, where an anneal
@@ -86,6 +89,7 @@ def test_annealing_can_be_switched_off() -> None:
     assert step.optimizer.param_groups[0]["lr"] == pytest.approx(1e-3)
 
 
+@pytest.mark.compute_training
 def test_each_epoch_visits_every_minibatch() -> None:
     step = _config(num_epochs=2, num_minibatches=2).make()
     with patch.object(step.optimizer, "step", wraps=step.optimizer.step) as optimizer:
@@ -93,6 +97,7 @@ def test_each_epoch_visits_every_minibatch() -> None:
     assert optimizer.call_count == 4
 
 
+@pytest.mark.compute_training
 def test_a_step_changes_the_network() -> None:
     step = _step()
     before = step.model.encoder.weight.detach().clone()
@@ -100,6 +105,7 @@ def test_a_step_changes_the_network() -> None:
     assert not torch.equal(before, step.model.encoder.weight.detach())
 
 
+@pytest.mark.compute_training
 def test_it_trains_without_a_target_network() -> None:
     """The whole claim: one network, regressed against its own values.
 
@@ -111,6 +117,7 @@ def test_it_trains_without_a_target_network() -> None:
     assert not any("target" in name for name in modules)
 
 
+@pytest.mark.compute_training
 def test_it_keeps_no_replay_buffer() -> None:
     # Every rollout is discarded after its update; nothing accumulates.
     step = _step()
@@ -120,6 +127,7 @@ def test_it_keeps_no_replay_buffer() -> None:
     assert not any("buffer" in key or "replay" in key for key in saved)
 
 
+@pytest.mark.compute_training
 def test_targets_are_built_once_before_optimizing() -> None:
     """Recomputing them per epoch would chase a value already moved.
 
@@ -133,6 +141,7 @@ def test_targets_are_built_once_before_optimizing() -> None:
     assert torch.equal(before, rollout.target)
 
 
+@pytest.mark.compute_training
 def test_a_rollout_records_both_recurrent_tensors() -> None:
     step = _step()
     rollout = step.collect()
@@ -141,6 +150,7 @@ def test_a_rollout_records_both_recurrent_tensors() -> None:
     assert rollout.previous_action.shape == (3, 4)
 
 
+@pytest.mark.compute_training
 def test_exploration_decays_across_the_run() -> None:
     step = _config(total_train_steps=10, epsilon_decay_fraction=1.0).make()
     rates: list[float] = []
@@ -151,6 +161,7 @@ def test_exploration_decays_across_the_run() -> None:
     assert rates[-1] < rates[0]
 
 
+@pytest.mark.compute_training
 def test_full_exploration_ignores_the_networks_preference() -> None:
     # At epsilon 1 every action is random, which is what makes the first
     # updates informative rather than a self-fulfilling greedy loop.
@@ -163,12 +174,14 @@ def test_full_exploration_ignores_the_networks_preference() -> None:
     assert len(set(rollout.action.flatten().tolist())) > 4
 
 
+@pytest.mark.compute_training
 def test_no_exploration_takes_the_greedy_action() -> None:
     step = _config(epsilon_start=0.0, epsilon_finish=0.0).make()
     rollout = step.collect()
     assert torch.equal(rollout.action, rollout.q_value.argmax(dim=-1))
 
 
+@pytest.mark.compute_training
 def test_collection_does_not_update_the_running_statistics() -> None:
     """A rollout is inference.
 
@@ -181,6 +194,7 @@ def test_collection_does_not_update_the_running_statistics() -> None:
     assert int(step.model.normalize.steps) == before
 
 
+@pytest.mark.compute_training
 def test_the_same_seed_reproduces_the_same_update() -> None:
     def run() -> float:
         return float(_config(seed=7).make().train_step()["loss"])
@@ -188,6 +202,7 @@ def test_the_same_seed_reproduces_the_same_update() -> None:
     assert run() == run()
 
 
+@pytest.mark.compute_training
 def test_evaluation_does_not_change_the_network() -> None:
     step = _step()
     before = step.model.encoder.weight.detach().clone()
@@ -196,6 +211,7 @@ def test_evaluation_does_not_change_the_network() -> None:
     assert torch.equal(before, step.model.encoder.weight.detach())
 
 
+@pytest.mark.compute_training
 def test_action_values_can_be_read_for_arbitrary_observations() -> None:
     step = _step()
     values = step.call_eval(observation=torch.zeros(3, step.env.observation_size))
@@ -203,6 +219,7 @@ def test_action_values_can_be_read_for_arbitrary_observations() -> None:
     assert not values.requires_grad
 
 
+@pytest.mark.compute_training
 def test_a_positional_observation_scores_like_a_named_one() -> None:
     step = _step()
     observation = torch.zeros(3, step.env.observation_size)
@@ -212,6 +229,7 @@ def test_a_positional_observation_scores_like_a_named_one() -> None:
     )
 
 
+@pytest.mark.compute_training
 def test_evaluation_actor_is_greedy_and_carries_lstm_inputs() -> None:
     step = _step()
     actor = step.make_evaluation_actor()
@@ -251,6 +269,7 @@ def test_evaluation_actor_is_greedy_and_carries_lstm_inputs() -> None:
     assert step.model.training
 
 
+@pytest.mark.compute_training
 def test_a_checkpoint_resumes_an_identical_run() -> None:
     step = _config(seed=3).make()
     step.train_step()
@@ -262,6 +281,7 @@ def test_a_checkpoint_resumes_an_identical_run() -> None:
     assert float(resumed.train_step()["loss"]) == expected
 
 
+@pytest.mark.compute_training
 def test_a_checkpoint_restores_both_recurrent_tensors() -> None:
     step = _config(seed=3).make()
     step.train_step()
@@ -272,6 +292,7 @@ def test_a_checkpoint_restores_both_recurrent_tensors() -> None:
     assert torch.equal(resumed._state[1], step._state[1])
 
 
+@pytest.mark.compute_training
 def test_a_checkpoint_restores_the_normalization_statistics() -> None:
     # They are buffers, not parameters, so a state dict that missed them
     # would resume with a network normalizing by nothing.
@@ -314,6 +335,24 @@ def test_an_invalid_setting_is_refused(field: str, value: object) -> None:
 def test_minibatches_that_do_not_divide_the_workers_are_refused() -> None:
     with pytest.raises(ValueError, match="divide"):
         _config(num_minibatches=3).make()
+
+
+def test_lstm_step_trains_evaluates_acts_and_restores() -> None:
+    step = _config().make()
+    result = step.train_step()
+    assert torch.isfinite(result["loss"])
+    step.eval_loss()
+    observation = torch.zeros(2, step.env.observation_size)
+    assert step.call_eval(observation=observation).shape == (2, step.env.num_actions)
+    actor = step.make_evaluation_actor()
+    actor.reset(num_envs=2, device=torch.device("cpu"))
+    actor.act(
+        observation,
+        torch.zeros(2, dtype=torch.bool),
+        generator=torch.Generator(),
+    )
+    saved = copy.deepcopy(step.state_dict())
+    step.load_state_dict(saved)
 
 
 if __name__ == "__main__":

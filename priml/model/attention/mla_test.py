@@ -155,6 +155,28 @@ def test_mla_mismatched_widths_reject_at_make() -> None:
         config.make()
 
 
+def test_mla_cached_forward_requires_an_updated_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _tiny()
+
+    def no_cache_update(*args: object, **kwargs: object) -> tuple[Tensor, None]:
+        del args, kwargs
+        return torch.zeros(2, 3, 128), None
+
+    monkeypatch.setattr(module, "_forward", no_cache_update)
+    with pytest.raises(ValueError, match="updated"):
+        module.forward_cached(
+            torch.randn(2, 3, 128),
+            cache=module.alloc_kv_cache(batch=2, max_seq=4),
+        )
+
+
+def test_mla_rejects_indivisible_tensor_parallel_heads() -> None:
+    with pytest.raises(ValueError, match="divide num_heads"):
+        _tiny().assert_shardable_over(3)
+
+
 def test_forward_shape():
     m = _tiny()
     x = torch.randn(2, 6, 128)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import field
 from importlib.metadata import version
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, cast, override
 
@@ -21,6 +22,7 @@ from priml.baselines.nanochat.attention import (
     Flash4Attention,
     _flash4_backward_fake,
     _flash4_backward_kernel,
+    _flash4_forward,
     _qk_backward,
     _qk_backward_fake,
     _qk_backward_reference,
@@ -480,6 +482,25 @@ class _LayoutInterface(ModuleType):
         return self.gradients[0], self.gradients[1], self.gradients[2]
 
 
+def _invalid_flash4_import(name: str) -> object:
+    del name
+    return object()
+
+
+def test_flash4_host_helpers_validate_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _FakeInterface()
+    q = torch.randn(2, 3, 4, 6)
+    output, lse = _flash4_forward(backend, q, q, q, 2)
+    assert output.shape == q.shape
+    assert lse.shape == (2, 4, 3)
+    module = priml.baselines.nanochat.attention
+    module._make_flash4_ops.cache_clear()
+    monkeypatch.setattr(module, "import_module", _invalid_flash4_import)
+    with pytest.raises(TypeError, match="FA4"):
+        module._make_flash4_ops()
+    module._make_flash4_ops.cache_clear()
+
+
 @pytest.mark.gpu_flash_attention
 @pytest.mark.gpu_torch_cuda
 def test_cuda_matches_official_autograd() -> None:
@@ -675,6 +696,225 @@ def _run_all_attention_gates(module: nn.Module, x: Tensor) -> Tensor:
         bigram_value=torch.ones_like(x),
         trigram_value=torch.ones_like(x),
     )
+
+
+def test_causal_attention_rejects_non_tensor_memories_and_supports_fused_rope() -> None:
+    config = CausalAttention.Config()
+    config.channels_in = 8
+    config.channels_head = 4
+    config.num_heads = 2
+    config.gate_channels = 8
+    config.kernel = SdpaNaive.Config()
+    config.fused_qk_rope = True
+    config.norm_qk = RMSNorm.Config(elementwise_affine=False, eps=None)
+    attention = config.make()
+    x = torch.randn(2, 3, 8)
+    # Rotary factors use a singleton head axis for production broadcasting.
+    cos_sin = (torch.ones(3, 1, 2), torch.zeros(3, 1, 2))
+    with pytest.raises(ValueError, match="bigram_value"):
+        attention(x, cos_sin=cos_sin, bigram_value=3)
+    with pytest.raises(ValueError, match="trigram_value"):
+        attention(x, cos_sin=cos_sin, trigram_value=3)
+    output = attention(x, cos_sin=cos_sin)
+    assert output.shape == x.shape
+
+    gated = CausalAttention.Config()
+    gated.channels_in = 16
+    gated.channels_head = 4
+    gated.num_heads = 4
+    gated.gate_channels = 8
+    gated.bigram = True
+    gated.kernel = SdpaNaive.Config()
+    built = gated.make()
+    built.bigram_gate = None
+    with pytest.raises(ValueError, match="gate is not None"):
+        built(
+            torch.randn(2, 3, 16),
+            cos_sin=cos_sin,
+            bigram_value=torch.randn(2, 3, 16),
+        )
+
+
+def test_qk_validation_rejects_bad_shapes_and_widths() -> None:
+    with pytest.raises(ValueError, match="ndim"):
+        fused_qk_norm_rope(
+            torch.zeros(2, 3, 4),
+            torch.zeros(2, 3, 4),
+            torch.ones(3, 2),
+            torch.zeros(3, 2),
+        )
+    # Zero width is the explicit degenerate input rejected by this validator.
+    with pytest.raises(ValueError, match="half"):
+        fused_qk_norm_rope(
+            torch.zeros(2, 3, 2, 0),
+            torch.zeros(2, 3, 2, 0),
+            torch.ones(3, 2),
+            torch.zeros(3, 2),
+        )
+    q = torch.zeros(2, 3, 4, 6)
+    with pytest.raises(ValueError, match="shape"):
+        fused_qk_norm_rope(q, q[..., :3], torch.ones(3, 2), torch.zeros(3, 2))
+    for width, message in ((5, "% 2"), (6, "half")):
+        bad = torch.zeros(2, 3, 4, width)
+        with pytest.raises(ValueError, match=message):
+            fused_qk_norm_rope(bad, bad, torch.ones(3, 2), torch.zeros(3, 2))
+
+
+def test_receipt_parser_and_runtime_file_errors(tmp_path: Path) -> None:
+    module = priml.baselines.nanochat.attention
+    assert module._parse_receipt("a=1\na=2")[1] == "duplicate receipt field a"
+    assert "malformed" in module._parse_receipt("broken")[1]
+    assert "empty" in module._parse_receipt("=x")[1]
+    assert "missing required" in module.runtime_files_error(tmp_path)
+    (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
+    (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
+    (tmp_path / "flash_attn_3").mkdir()
+    (tmp_path / "flash_attn_3" / "_C1.so").write_bytes(b"x")
+    assert module.runtime_files_error(tmp_path) == ""
+    assert module._extension_path(tmp_path).name == "_C1.so"
+    assert module._sha256(tmp_path / "flash_attn_config.py")
+
+
+def test_artifact_identity_and_receipt_mismatch_details(tmp_path: Path) -> None:
+    module = priml.baselines.nanochat.attention
+    identity = module.artifact_path(cache_root=tmp_path)
+    assert identity.parent == tmp_path
+    receipt = module.expected_receipt(
+        binary_sha256="bad",
+        interface_sha256="bad",
+        config_sha256="bad",
+    )
+    error = module.receipt_validation_error(
+        receipt,
+        expected={**receipt, "binary_sha256": "good", "torch": "other"},
+    )
+    assert "binary_sha256 mismatch" in error
+    assert "torch mismatch" in error
+
+
+def test_artifact_validation_reports_receipt_and_runtime_failures(
+    tmp_path: Path,
+) -> None:
+    module = priml.baselines.nanochat.attention
+    (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
+    (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
+    (tmp_path / "flash_attn_3").mkdir()
+    (tmp_path / "flash_attn_3" / "_C1.so").write_bytes(b"x")
+    (tmp_path / "READY").write_text("bad", encoding="utf-8")
+    assert "malformed" in module.artifact_validation_error(tmp_path)
+    (tmp_path / "READY").write_bytes(bytes([255]))
+    assert "UTF-8" in module.artifact_validation_error(tmp_path)
+    (tmp_path / "READY").write_text("source_revision=wrong", encoding="utf-8")
+    assert "missing receipt field" in module.artifact_validation_error(tmp_path)
+    with pytest.raises(FileNotFoundError, match="exactly one"):
+        module._extension_path(tmp_path.parent)
+
+
+def test_flash3_dispatches_through_qualified_fake_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFlash:
+        def flash_attn_func(
+            self,
+            q: Tensor,
+            k: Tensor,
+            v: Tensor,
+            *,
+            causal: bool,
+            window_size: tuple[int, int],
+        ) -> Tensor:
+            assert causal
+            assert window_size == (2, 0)
+            return q + k + v
+
+    module = priml.baselines.nanochat.attention
+
+    def capability() -> tuple[int, int]:
+        return (9, 0)
+
+    def load() -> FakeFlash:
+        return FakeFlash()
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
+    monkeypatch.setattr(module, "load_flash3", load)
+    attention = Flash3Attention(Flash3Attention.Config())
+    q = torch.zeros(2, 3, 4, 6)
+    assert torch.equal(attention(q, q, q, window=2), torch.zeros_like(q))
+
+
+def test_artifact_missing_ready_and_load_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = priml.baselines.nanochat.attention
+    (tmp_path / "flash_attn_interface.py").write_text("x", encoding="utf-8")
+    (tmp_path / "flash_attn_config.py").write_text("x", encoding="utf-8")
+    (tmp_path / "flash_attn_3").mkdir()
+    (tmp_path / "flash_attn_3" / "_C1.so").write_bytes(b"x")
+    assert module.artifact_validation_error(tmp_path) == "missing READY receipt"
+    (tmp_path / "READY").mkdir()
+    assert "not a regular file" in module.artifact_validation_error(tmp_path)
+    (tmp_path / "READY").rmdir()
+    (tmp_path / "READY").write_text("placeholder", encoding="utf-8")
+
+    def unreadable(path: Path, **_kwargs: object) -> str:
+        del path
+        raise OSError("no read")
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    assert "could not read" in module.artifact_validation_error(tmp_path)
+    monkeypatch.undo()
+
+    def invalid(path: Path) -> str:
+        del path
+        return "bad artifact"
+
+    monkeypatch.setattr(module, "artifact_validation_error", invalid)
+    assert not module.is_prepared(cache_root=tmp_path)
+    with pytest.raises(RuntimeError, match="invalid"):
+        module.load_flash3(cache_root=tmp_path)
+
+
+def test_flash3_rejects_non_sm90_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 9))
+    with pytest.raises(RuntimeError, match="requires SM90"):
+        Flash3Attention(Flash3Attention.Config())
+
+
+def test_flash3_rejects_unqualified_revision() -> None:
+    with pytest.raises(ValueError, match="revision identifies"):
+        priml.baselines.nanochat.attention.Flash3Attention(
+            Flash3Attention.Config(revision="wrong"),
+        )
+
+
+def test_loaded_module_error_detects_foreign_and_pathless_modules(
+    tmp_path: Path,
+) -> None:
+    module = priml.baselines.nanochat.attention
+    foreign = ModuleType("foreign")
+    foreign.__file__ = str(tmp_path.parent / "foreign.py")
+    sys.modules["foreign"] = foreign
+    try:
+        assert "already imported" in module._loaded_module_error("foreign", tmp_path)
+    finally:
+        del sys.modules["foreign"]
+    pathless = ModuleType("pathless")
+    pathless.__file__ = None
+    sys.modules["pathless"] = pathless
+    try:
+        assert "no file path" in module._loaded_module_error("pathless", tmp_path)
+    finally:
+        del sys.modules["pathless"]
+
+
+def test_receipt_validation_reports_missing_and_unexpected_fields() -> None:
+    error = priml.baselines.nanochat.attention.receipt_validation_error(
+        {"extra": "x"},
+        expected={"source": "y"},
+    )
+    assert "missing receipt field source" in error
+    assert "unexpected receipt field extra" in error
 
 
 if __name__ == "__main__":

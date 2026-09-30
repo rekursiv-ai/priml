@@ -47,6 +47,8 @@ def test_a_bound_kernel_calls_its_helper() -> None:
 
 def test_a_launch_size_must_be_a_positive_power_of_two() -> None:
     require_power_of_two(block=1, num_warps=4)
+    with pytest.raises(ValueError, match=r"num_warps must be a positive power of two"):
+        require_power_of_two(block=8, num_warps=3)
     for size in (0, -2, 6):
         with pytest.raises(ValueError, match=f"num_warps .* not {size}"):
             require_power_of_two(block=8, num_warps=size)

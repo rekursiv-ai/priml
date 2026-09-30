@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from torch import Tensor
 
 import torch
+import torch.distributed as dist
 
 from priml.baselines.sudoku.metric import GridAccuracy
+
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _packed(predictions: Tensor, prefix: int = 1) -> Tensor:
@@ -87,6 +94,22 @@ def test_state_round_trips() -> None:
     restored = GridAccuracy.Config().make()
     restored.load_state_dict(state)
     assert restored.compute() == metric.compute()
+
+
+def test_compute_reduces_initialized_gloo_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metric = GridAccuracy.Config().make()
+    labels = torch.full((2, 9), 3, dtype=torch.int64)
+    metric.update(_packed(labels), label=labels)
+
+    def fake_all_reduce(counts: Tensor, **_kwargs: object) -> None:
+        del counts
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda: "gloo")
+    monkeypatch.setattr(dist, "all_reduce", fake_all_reduce)
+    assert metric.compute() == {"exact": 1.0, "cell": 1.0}
 
 
 def test_reset_clears_every_count() -> None:

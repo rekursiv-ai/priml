@@ -17,6 +17,7 @@ from torch import Tensor
 import pytest
 import torch
 
+from priml.model import min_gru
 from priml.model.min_gru import (
     MinGRU,
     MinGRUBlock,
@@ -24,11 +25,44 @@ from priml.model.min_gru import (
     ScanForward,
     TorchScan,
     TritonScan,
+    _check_layout,
+    _runs_triton,
+    _scan_affine,
+    _terminals_view,
 )
 from priml.testing.bfb import assert_bfb_against_golden
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+def _allow_cpu_scan(combined: Tensor) -> None:
+    del combined
+
+
+def _force_triton(*tensors: Tensor) -> bool:
+    del tensors
+    return True
+
+
+class _FakeKernel:
+    def __getitem__(self, grid: tuple[int, ...]) -> _FakeKernel:
+        del grid
+        return self
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
+class _FakeScanKernels:
+    forward = _FakeKernel()
+    backward = _FakeKernel()
+    step = _FakeKernel()
+
+
+def _fake_kernels(**helpers: object) -> _FakeScanKernels:
+    del helpers
+    return _FakeScanKernels()
 
 
 def test_min_gru_matches_hand_forward_and_returns_layer_state() -> None:
@@ -113,6 +147,53 @@ def test_min_gru_rejects_an_empty_time_dimension() -> None:
     with pytest.raises(ValueError, match="time"):
         # Degenerate zero-time input is intentional for this pytest.raises case.
         model(torch.zeros(2, 0, 3))
+
+
+def test_min_gru_validates_constructor_and_call_shapes() -> None:
+    for values in ((0, 2, 1), (2, 0, 1), (2, 2, 0)):
+        with pytest.raises(ValueError, match="positive"):
+            MinGRU(values[0], values[1], values[2])
+    model = MinGRU(2, 4, layers=2)
+    inputs = torch.randn(3, 5, 2)
+    with pytest.raises(ValueError, match="shape"):
+        model(inputs[..., 0])
+    with pytest.raises(ValueError, match="width"):
+        model(torch.randn(4, 5, 3))
+    with pytest.raises(ValueError, match="reset"):
+        model(inputs, reset=torch.zeros(3, 4))
+    with pytest.raises(ValueError, match="state"):
+        model(inputs, state=torch.zeros(2, 3, 5))
+    with pytest.raises(ValueError, match="Batch"):
+        model.initial_state(0)
+
+
+def test_scan_config_cost_and_triton_cpu_dispatch() -> None:
+    config = MinGRUBlock.Config()
+    config.channels_hidden = 4
+    config.finalize()
+    estimate = config.cost(seq_len=2, batch_size=3, dtype=torch.float32)
+    assert estimate.params > 0
+    block = config.make()
+    inputs = torch.randn(2, 3, 4)
+    state = torch.zeros(2, 4)
+    terminals = torch.zeros(2, 3)
+    with pytest.raises(ValueError, match="CUDA"):
+        TritonScan.Config().make()(torch.randn(2, 3, 12), inputs, state, terminals)
+    with pytest.raises(ValueError, match="CUDA"):
+        TritonScan.Config().make().step(torch.randn(2, 12), inputs[:, 0], state)
+    output, final = block(inputs, state, terminals)
+    assert output.shape == inputs.shape
+    assert final.shape == state.shape
+
+
+def test_scan_private_metadata_paths() -> None:
+    decay = torch.full((2, 3, 4), 0.5)
+    result = _scan_affine(decay, innovation=decay, initial=torch.zeros(2, 4))
+    assert result.shape == decay.shape
+    assert not _runs_triton(decay)
+    assert _terminals_view(torch.ones(2, 3, dtype=torch.bool)).dtype == torch.uint8
+    with pytest.raises(ValueError, match="contiguous"):
+        _check_layout(torch.zeros(2, 3), torch.zeros(3, 2).t())
 
 
 def test_min_gru_has_gradient_through_inputs_and_parameters() -> None:
@@ -857,6 +938,58 @@ def _kernels_only() -> TritonScan:
     scan = TritonScan.Config().make()
     scan.reference = _NoFallback(TorchScan.Config())
     return scan
+
+
+def test_triton_scan_uses_fake_host_launches_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(min_gru, "_require_cuda", _allow_cpu_scan)
+    monkeypatch.setattr(min_gru, "_runs_triton", _force_triton)
+    monkeypatch.setattr(min_gru, "_kernels", _fake_kernels)
+    scan = TritonScan.Config(block=4, num_warps=2).make()
+    combined, inputs, initial, terminals = _inputs(batch=2, time=3, width=4)
+    result = scan(combined, inputs, initial, terminals)
+    assert result.outputs.shape == inputs.shape
+    output, state = scan.step(
+        combined[:, 0].contiguous(),
+        inputs[:, 0].contiguous(),
+        initial,
+    )
+    assert output.shape == inputs[:, 0].shape
+    assert state.shape == initial.shape
+    backward = scan.backward(
+        combined,
+        inputs,
+        result.states,
+        terminals,
+        torch.ones_like(result.outputs),
+    )
+    assert backward.grad_combined.shape == combined.shape
+
+
+def test_triton_scan_uses_torch_reference_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(min_gru, "_require_cuda", _allow_cpu_scan)
+    scan = TritonScan.Config(block=4, num_warps=2).make()
+    combined, inputs, initial, terminals = _inputs(batch=2, time=3, width=4)
+    result = scan(combined, inputs, initial, terminals)
+    assert result.outputs.shape == inputs.shape
+    output, state = scan.step(
+        combined[:, 0].contiguous(),
+        inputs[:, 0].contiguous(),
+        initial,
+    )
+    assert output.shape == inputs[:, 0].shape
+    assert state.shape == initial.shape
+    backward = scan.backward(
+        combined,
+        inputs,
+        result.states,
+        terminals,
+        torch.ones_like(result.outputs),
+    )
+    assert backward.grad_combined.shape == combined.shape
 
 
 if __name__ == "__main__":

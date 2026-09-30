@@ -505,6 +505,17 @@ def _capture(store: dict[str, Tensor], name: str) -> Callable[[Tensor], None]:
     return capture
 
 
+def test_optional_prefix_and_checkpoint_branches() -> None:
+    config = port_config("exp004")
+    subject = PortSubject.from_config(config)
+    with pytest.raises(TypeError, match="needs puzzle_identifiers"):
+        subject.step._prefix_kwargs(None)
+    state = subject.step.state_dict()
+    restored = PortSubject.from_config(config)
+    restored.step.load_state_dict(state)
+    assert restored.step.state_dict().keys() == state.keys()
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 

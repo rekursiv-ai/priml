@@ -46,7 +46,7 @@ class FakeTeacher(nn.Module):
         return feature, feature, feature
 
 
-def test_train_step_updates_model_and_advances_budget() -> None:
+def _small_step_config() -> SpeedrunTrainStep.Config:
     config = SpeedrunTrainStep.Config()
     config.model = tiny_model().config
     config.teacher = FakeTeacher.Config()
@@ -55,8 +55,11 @@ def test_train_step_updates_model_and_advances_budget() -> None:
     config.dtype_autocast = None
     config.compile = None
     config.train_budget_steps = 2
-    step = config.make()
-    batch = step.preprocess_batch(
+    return config
+
+
+def _small_batch(step: SpeedrunTrainStep) -> dict[str, object]:
+    return step.preprocess_batch(
         {
             # SpeedrunDiT.forward enforces cfg.in_channels and cfg.input_size.
             "image": torch.zeros(5, 3, 4, 4, dtype=torch.uint8),
@@ -65,10 +68,65 @@ def test_train_step_updates_model_and_advances_budget() -> None:
             "label": torch.tensor([0, 1, 2, 3, 0]),
         },
     )
-    result = step.train_step(**batch)
+
+
+def test_train_step_updates_model_and_advances_budget() -> None:
+    step = _small_step_config().make()
+    result = step.train_step(**_small_batch(step))
     assert step.global_step == 1
     assert result["loss"].shape == (5,)
     assert torch.isfinite(result["loss"]).all()
+
+
+def test_accumulation_averages_micro_batch_gradients_before_stepping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _small_step_config()
+    config.accumulate_grad_batches = 2
+    step = config.make()
+    batch = _small_batch(step)
+    torch.manual_seed(0)
+    step.train_step(**batch)
+    assert step.global_step == 0
+    first = {
+        name: parameter.grad.clone()
+        for name, parameter in step.model.named_parameters()
+        if parameter.grad is not None
+    }
+    seen: dict[str, Tensor] = {}
+
+    def record_grads() -> None:
+        for name, parameter in step.model.named_parameters():
+            if parameter.grad is not None:
+                seen[name] = parameter.grad.clone()
+
+    # The optimizer step is replaced so the averaged gradients stay readable.
+    monkeypatch.setattr(step, "step", record_grads)
+    torch.manual_seed(0)
+    step.train_step(**batch)
+    # Identical seeded micro-batches give identical gradients, so their summed
+    # accumulation divided by two recovers the first micro-batch's gradient.
+    assert first.keys() == seen.keys()
+    assert all(torch.allclose(seen[name], grad) for name, grad in first.items())
+    assert (step.accumulation_steps, step.accumulated_samples) == (0, 0)
+
+
+def test_train_and_eval_losses_report_every_term_without_updating() -> None:
+    step = _small_step_config().make()
+    batch = _small_batch(step)
+    before = [p.detach().clone() for p in step.model.parameters()]
+    for result in (step.train_loss(**batch), step.eval_loss(**batch)):
+        assert result["loss"].shape == (5,)
+        assert set(result.get("metrics", {})) == {
+            "velocity_loss",
+            "cls_loss",
+            "projection_loss",
+            "cfm_loss",
+        }
+    assert step.global_step == 0
+    assert all(
+        torch.equal(a, b) for a, b in zip(before, step.model.parameters(), strict=True)
+    )
 
 
 class _SmokeSteps(nn.Module):

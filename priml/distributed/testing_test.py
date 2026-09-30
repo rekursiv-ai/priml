@@ -14,7 +14,10 @@ import socket
 import tempfile
 import time
 
-from torch import Tensor
+from torch import (
+    Tensor,
+    multiprocessing as tm,
+)
 
 import pytest
 import torch

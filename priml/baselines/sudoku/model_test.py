@@ -14,10 +14,13 @@ import torch
 
 from priml.baselines.sudoku.embedding import GridEmbedding
 from priml.baselines.sudoku.model import (
+    CoreCompile,
     CoreOutput,
     DeepRecurrence,
     ForwardOutput,
     SudokuNet,
+    fan_in_normal,
+    lattice_positions,
 )
 from priml.baselines.sudoku.prefix import RegisterTokens
 from priml.cost import Cost, cost
@@ -474,6 +477,36 @@ def _carried_magnitude(*, prenorm: bool) -> float:
         out = model(tokens, z_slow, z_fast)
         z_slow, z_fast = out.z_slow, out.z_fast
     return float(z_slow.abs().max())
+
+
+def test_initialization_and_lattice_degenerate_branch() -> None:
+    weight = torch.empty(3, 4)
+    fan_in_normal(weight, depth=2)
+    assert torch.isfinite(weight).all()
+    positions = lattice_positions(6, grid_shape=(6,), device=torch.device("cpu"))
+    assert torch.equal(positions, torch.arange(6))
+    grid_positions = lattice_positions(6, grid_shape=(2, 3), device=torch.device("cpu"))
+    assert grid_positions.shape == (6, 2)
+
+
+def test_core_compile_and_rotary_optional_paths() -> None:
+    config = _config(channels_in=4, vocab_size=11, grid_shape=(2, 3))
+    model = config.make()
+    tokens = torch.randint(0, 11, (2, 6))
+    output = model(tokens)
+    assert output.logits.shape == (2, 6, 11)
+    assert output.all_logits == ()
+    with model.eager(enabled=False):
+        assert model.compiled is False
+    compiled = _config(channels_in=4, vocab_size=11, grid_shape=(2, 3))
+    compiled.compile_core = CoreCompile.Config()
+    compiled_model = compiled.make()
+    assert compiled_model.compiled
+    assert compiled_model.device.type == "cpu"
+    compiled_model(torch.randint(0, 11, (2, 6)))
+    reasoning = _config(channels_in=4, vocab_size=11, grid_shape=(2, 3))
+    reasoning.compile_core = CoreCompile.Config(unit="reasoning")
+    assert reasoning.make().compiled
 
 
 if __name__ == "__main__":

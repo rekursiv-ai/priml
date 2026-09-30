@@ -7,7 +7,7 @@ from typing import cast
 
 import math
 
-from torch import Tensor
+from torch import Tensor, nn
 from torch.optim import Optimizer
 
 import pytest
@@ -15,6 +15,7 @@ import torch
 
 from priml.baselines.nanochat import optimizers
 from priml.lib.custom_json import DictCodec, FloatCodec
+from priml.optimizers.composite import CompositeOptimizer
 from priml.optimizers.normuon import NorMuon
 
 
@@ -322,6 +323,70 @@ def test_first_weight_decay_pulse_wins_and_triangle_reaches_peak() -> None:
     update = config.make()
     assert update.weight_decay_multiplier(0.5) == 1.5
     assert update.weight_decay_multiplier(0.375) == 1.25
+
+
+def test_sparse_rmsprop_rejects_incompatible_tables() -> None:
+    weight = torch.nn.Parameter(torch.ones(2, 3))
+    config = optimizers.BiasCorrectedRMSProp.Config(rowwise=False, sparse_rows=True)
+    optimizer = config.make()([weight])
+    optimizer.gradient_bitmaps[weight] = torch.zeros(2, dtype=torch.uint8)
+    weight.grad = torch.ones_like(weight)
+    with pytest.raises(ValueError, match="requires rowwise"):
+        optimizer.step()
+
+    config = optimizers.BiasCorrectedRMSProp.Config(
+        rowwise=True,
+        sparse_rows=True,
+        weight_decay=0.1,
+    )
+    parameter = nn.Parameter(torch.ones(2, 3))
+    optimizer = config.make()([parameter])
+    optimizer.gradient_bitmaps[parameter] = torch.zeros(2, dtype=torch.uint8)
+    parameter.grad = torch.ones_like(parameter)
+    with pytest.raises(ValueError, match="decoupled decay"):
+        optimizer.step()
+
+
+def test_scheduled_update_rejects_nonpositive_warmdown() -> None:
+    with pytest.raises(ValueError, match="muon_warmdown"):
+        optimizers.ScheduledOptimizerUpdate.Config(muon_warmdown=0).make()
+
+
+def test_scheduled_update_drives_each_optimizer_family() -> None:
+    matrix = nn.Parameter(torch.ones(2, 3))
+    table = nn.Parameter(torch.ones(3, 4))
+    dense = nn.Parameter(torch.ones(4, 5))
+    muon = NorMuon.Config(lr=0.1, weight_decay=0.01).make()([matrix])
+    rmsprop = optimizers.BiasCorrectedRMSProp.Config(lr=0.1).make()([table])
+    adam = torch.optim.Adam([dense], lr=0.2, betas=(0.8, 0.99))
+    members = CompositeOptimizer([muon, rmsprop, adam])
+    for member in members.optimizers:
+        for group in member.param_groups:
+            group["initial_lr"] = group["lr"]
+            group["initial_weight_decay"] = group.get("weight_decay", 0.0)
+            if "beta2" in group:
+                group["initial_beta2"] = group["beta2"]
+            if "betas" in group:
+                group["initial_betas"] = group["betas"]
+
+    class Config:
+        momentum_warmup_steps = 2
+        momentum_start = 0.8
+        momentum_end = 0.9
+
+    class ScheduleStep:
+        config = Config()
+        progress_learning_schedule = 0.75
+        completed_updates = 1
+        optimizer = members
+        model = nn.Module()
+
+    result = optimizers.ScheduledOptimizerUpdate.Config(
+        skip_member=2,
+        adam_beta1_members=(2,),
+    ).make()(ScheduleStep())
+    assert result["lr/muon_multiplier"] < 1.0
+    assert result["lr/adam_multiplier"] < 1.0
 
 
 if __name__ == "__main__":

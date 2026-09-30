@@ -21,7 +21,16 @@ from priml.baselines.arcagi1.metric import (
     CanonicalPassK,
     PassK,
     PerOutputPass,
+    SignalDumpPayload,
+    SignalDumpTracker,
     StrictPass,
+    _any_rank,
+    _gather_grids,
+    _gather_list,
+    _hash_bytes,
+    _model_output_header_width,
+    _shape,
+    _uint8_rows,
 )
 
 
@@ -455,6 +464,49 @@ def test_canonical_construction_defers_reading_the_tree(tmp_path: Path) -> None:
 def _pass_at(scores: Mapping[str, object]) -> dict[str, object]:
     """Keep only the ``pass@K`` scores; report-only rankings are tested elsewhere."""
     return {key: value for key, value in scores.items() if key.startswith("pass@")}
+
+
+def test_global_prediction_gather(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = CanonicalPassK.Config().make()
+    digest = "0" * 64
+    candidate._preds = {"task": {digest: [(digest, 0.5)]}}
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda: "gloo")
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+
+    def gather(output: list[Tensor], value: Tensor) -> None:
+        output[0].copy_(value)
+
+    monkeypatch.setattr(torch.distributed, "all_gather", gather)
+    assert candidate._global_preds() == candidate._preds
+
+
+def test_signal_tracker_branches(tmp_path: Path) -> None:
+    tracker = SignalDumpTracker.Config(working_dir=tmp_path / "dump.npz").make()
+    tracker.log_metrics({}, 1, prefix="train/")
+    tracker.log_metrics({}, 1, prefix="eval/")
+    with pytest.raises(TypeError, match="expected metrics"):
+        tracker.log_metrics({"extras": 3}, 1, prefix="eval/")
+    payload = SignalDumpPayload(rows=[], grids={}, steps=[], pass_ks=())
+    tracker.log_metrics({"extras": {"signal_dump": payload}}, 2, prefix="eval/")
+    tracker.log_images("x", [], 1)
+    tracker.log_notes("x")
+    tracker.close()
+
+
+def test_metric_private_helpers_and_width_errors() -> None:
+    values = torch.tensor([[0, 257], [3, 4]])
+    assert [row.tolist() for row in _uint8_rows(values)] == [[0, 1], [3, 4]]
+    assert _shape(np.zeros((2, 3), dtype=np.uint8)) == (2, 3)
+    assert _any_rank(True)
+    assert _gather_list([1, 2]) == [1, 2]
+    assert _gather_grids({"x": np.zeros((2, 3), dtype=np.uint8)})["x"].shape == (2, 3)
+    assert _model_output_header_width(out_width=10, media_len=9, k_steps=0) == 1
+    with pytest.raises(ValueError, match="Expected len"):
+        _hash_bytes("bad")
+    with pytest.raises(ValueError, match="expected 1"):
+        _model_output_header_width(out_width=14, media_len=9, k_steps=0)
 
 
 if __name__ == "__main__":

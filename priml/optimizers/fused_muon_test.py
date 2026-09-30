@@ -267,6 +267,34 @@ def test_a_missing_gradient_is_an_error() -> None:
         optimizer.step()
 
 
+def test_invalid_hyperparameters_are_rejected() -> None:
+    for field_name in ("lr", "momentum", "max_grad_norm", "eps"):
+        config = FusedMuon.Config()
+        setattr(config, field_name, -1.0)
+        with pytest.raises(ValueError, match=f"FusedMuon {field_name}"):
+            config.make()([_parameter(2, 3)])
+
+
+def test_step_returns_closure_result_and_accepts_tensor_rate() -> None:
+    parameter = _parameter(2, 3)
+    optimizer = FusedMuon.Config().make()([parameter])
+    optimizer.param_groups[0]["lr"] = torch.tensor(0.01)
+    parameter.grad = torch.ones_like(parameter)
+    result = optimizer.step(lambda: torch.tensor(3.0))
+    assert isinstance(result, torch.Tensor)
+    assert result == 3
+    assert optimizer.param_groups[0]["lr"].dtype == torch.float32
+
+
+def test_fused_apply_requires_a_device_rate() -> None:
+    parameter = torch.empty(2, 3, dtype=torch.bfloat16)
+    master = torch.zeros(2, 3)
+    update = torch.ones(2, 3, dtype=torch.bfloat16)
+    optimizer = FusedMuon.Config().make()([_parameter(2, 3)])
+    with pytest.raises(TypeError, match="device tensor"):
+        optimizer._apply_cuda(parameter, master, update, lr=0.01, scale=1.0)
+
+
 def test_the_state_round_trips_fp32_masters_for_bf16_parameters() -> None:
     weight = _parameter(4, 2)
     optimizer = FusedMuon.Config().make()([weight])

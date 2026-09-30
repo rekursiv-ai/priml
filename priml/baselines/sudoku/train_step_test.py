@@ -168,6 +168,31 @@ def test_feedback_reaches_the_channel() -> None:
     assert channel._feedback_ids is None
 
 
+def test_schedule_and_loss_seams() -> None:
+    step = _step()
+    assert step.progress_learning_schedule >= 0.0
+    assert step.train_loss(**_batch())["loss"].ndim == 0
+    assert step.call_eval(**_batch()).shape == (4, 81, 11)
+    with pytest.raises(ValueError, match="Expected not args"):
+        step.call_eval("unexpected", **_batch())
+
+
+def test_unclipped_step_and_no_ema() -> None:
+    config = SudokuTrainStep.Config()
+    config.parallelism = NoParallel.Config(device="cpu")
+    config.compile = None
+    config.dtype_autocast = None
+    config.gradient_clip_norm = float("inf")
+    config.use_ema = False
+    config.model.channels_in = 16
+    config.model.num_layers = 1
+    config.model.vocab_size = 11
+    config.model.embedding = GridEmbedding.Config(grid_shape=(81,))
+    step = config.make()
+    assert step.ema_shadow is None
+    assert step.train_step(**_batch())["loss"].shape == (1,)
+
+
 def test_horizon_must_be_positive() -> None:
     config = SudokuTrainStep.Config()
     config.total_train_steps = 0

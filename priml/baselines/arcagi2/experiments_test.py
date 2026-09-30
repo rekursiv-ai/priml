@@ -154,6 +154,13 @@ def test_train_loop_evaluation_checkpoint_and_resume(tmp_path: Path) -> None:
     )
 
 
+def test_finalize_without_rope() -> None:
+    config = exp000()
+    config.step.model.rope = None
+    finalized = config.finalize()
+    assert finalized.step.model.rope is None
+
+
 if __name__ == "__main__":
     from priml.lib.testing.main import test_main
 
