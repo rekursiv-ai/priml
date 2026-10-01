@@ -178,7 +178,9 @@ better. `—` means no measured comparison is available.
 BPE experiments use the base evaluator. Unigram experiments replay the rows
 selected by the BPE reference tokenizer, preserving their source bytes and
 document boundaries. Padding and boundary tokens are excluded from scoring.
-A replay that exceeds the model context is rejected rather than truncated.
+A replay longer than the model context is never truncated: it continues in
+extra windows, each scoring only targets not yet scored, with context from its
+own row. The 16K Unigram rows all fit, so their archive has no such windows.
 
 `bpb` uses the reference evaluator's decoded-token byte denominator.
 `literal_bpb` uses the literal UTF-8 byte count. These denominators can differ

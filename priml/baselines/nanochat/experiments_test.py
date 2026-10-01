@@ -120,9 +120,9 @@ def test_hash_configuration_ignores_the_default_device(
     )
 
 
-def test_experiment_ladder_has_twenty_three_rungs() -> None:
-    """Expose all twenty-three numbered experiment factories."""
-    expected = {f"exp{index:03d}" for index in range(23)}
+def test_experiment_ladder_has_twenty_four_rungs() -> None:
+    """Expose all twenty-four numbered experiment factories."""
+    expected = {f"exp{index:03d}" for index in range(24)}
     assert expected == {
         name
         for name in vars(experiments)
@@ -133,6 +133,20 @@ def test_experiment_ladder_has_twenty_three_rungs() -> None:
 @pytest.mark.compute_large_fixture
 def test_exp022_matches_its_full_config_golden() -> None:
     assert_pprint_golden(test_file=__file__, name="exp022", config=experiments.exp022())
+
+
+def test_exp023_changes_only_the_prepared_inputs() -> None:
+    changed = experiments.exp023()
+    assert "convextok16k" in str(changed.dataset.prepared_train_manifest)
+    assert "convextok16k" in str(changed.dataset.prepared_eval_manifest)
+    original = experiments.exp022()
+    changed.experiment_name = original.experiment_name
+    changed.dataset.prepared_train_manifest = original.dataset.prepared_train_manifest
+    changed.dataset.prepared_eval_manifest = original.dataset.prepared_eval_manifest
+    assert (
+        changed.copy_tree().finalize().serialize()
+        == original.copy_tree().finalize().serialize()
+    )
 
 
 @pytest.mark.parametrize(
@@ -179,6 +193,7 @@ def test_16k_experiments_use_safe_large_matrix_compilation(
         ("exp020", experiments.exp020),
         ("exp021", experiments.exp021),
         ("exp022", experiments.exp022),
+        ("exp023", experiments.exp023),
     ],
 )
 def test_memory_experiments_finalize_without_runtime_io(

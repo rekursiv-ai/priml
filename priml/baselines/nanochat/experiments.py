@@ -31,9 +31,10 @@ a separate cumulative sequence from ``exp000``, checkpointing the major
 improvements from the research campaigns. It adds n-gram memory, output norms,
 residual and attention gates, layer pooling, nonuniform FFNs, sparse table
 optimization, and fused attention kernels. ``exp020`` switches to prepared
-16K Unigram tokens with byte-matched reference evaluation.
+16K Unigram tokens with byte-matched reference evaluation, and ``exp023``
+swaps them for a ConvexTok vocabulary (``priml.baselines.convextok``).
 
-``exp004`` through ``exp022`` default to 525 charged training seconds for
+``exp004`` through ``exp023`` default to 525 charged training seconds for
 H-series GPUs, excluding compilation warmup and evaluation. Each factory
 includes a commented 300-second budget for B200. In this added sequence,
 ``exp004`` through ``exp015`` also use Hopper-only FA3 and need an
@@ -44,6 +45,8 @@ check an installation.
 For prepared Unigram experiments, run the preparation script without the BPE
 flags, then use its ``--stage train --experiment exp022`` entry. It verifies
 the prepared inputs and binds their identities before launching training.
+``exp023`` prepares through ``convextok.prepare.donor_convextok16k`` instead;
+see that baseline's README.
 """
 
 from __future__ import annotations
@@ -1248,6 +1251,43 @@ def exp022() -> NgramTrainLoop.Config:
     for tables in (model.bigrams, model.trigrams):
         for table in tables.values():
             table.init_after = torch.nn.init.zeros_
+    # Uncomment for B200's 300-second budget; leave commented for H-series.
+    # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
+    return cfg
+
+
+def exp023() -> NgramTrainLoop.Config:
+    """Fork exp022 with the following changes.
+
+    - Replace the 16,384-token Unigram vocabulary with ConvexTok's: 16,374
+      ordinary pieces fitted on raw shards 0-6 and ten reserved IDs.
+
+    Hypothesis:
+      ConvexTok picks its pieces by a linear-programming relaxation of the
+      token-count objective instead of pruning an overshot BPE seed. A
+      vocabulary that segments text into fewer tokens shows the model more
+      bytes per step, so the same time budget should reach a lower BPB.
+
+    References:
+      Tempus, Whittington, Schmidt, Komm, Pimentel. Tokenisation via Convex
+      Relaxations. https://arxiv.org/abs/2605.22821
+
+    Results:
+      H200, 525s: 0.890578 mean BPB (3 seeds); exp022 in the same runs, 0.888754.
+      H200, 300s: 0.925462 mean BPB (3 seeds); exp022 in the same runs, 0.923618.
+      Worse by 0.0018 at both budgets, in 5 of 6 seed pairs, though the pairs
+      spread too widely (sd 0.0023 and 0.0014) for 3 seeds to settle it. ConvexTok
+      needs 0.7% fewer tokens for the reference bytes; the steps match.
+
+    """
+    cfg = exp022()
+    cfg.experiment_name = "exp023"
+    cfg.dataset.prepared_train_manifest = (
+        "/datasets/nanochat/convextok16k/prepared/train/PREPARED_MANIFEST.json"
+    )
+    cfg.dataset.prepared_eval_manifest = (
+        "/datasets/nanochat/convextok16k/prepared/eval/PACKED_EVAL_MANIFEST.json"
+    )
     # Uncomment for B200's 300-second budget; leave commented for H-series.
     # cfg.max_time = cfg.step.train_budget_sec = 300.0 # Seconds.
     return cfg

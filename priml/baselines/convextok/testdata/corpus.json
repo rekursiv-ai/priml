@@ -1,0 +1,21 @@
+{
+ "texts": [
+  "The quick brown fox jumps over the lazy dog. The dog sleeps.",
+  "A lazy afternoon: the fox and the dog share bread, jam, and tea.",
+  "Numbers like 12, 345 and 6789 appear; so do 12 and 34.",
+  "Tokenisation via convex relaxations picks a vocabulary; the vocabulary compresses text.",
+  "Zyxw qvbn pfft! Quirky glyphs: café, naïve, 🦙 llama, 🦙 again.",
+  "def add(a, b):\n    return a + b\nprint(add(2, 3))",
+  "The the the fox fox dog dog tea tea bread bread.",
+  "Relaxations of linear programs give lower bounds; rounding gives tokens."
+ ],
+ "heldout": [
+  "The lazy fox shares tea with the brown dog.",
+  "Rounding the relaxation gives a vocabulary of tokens for text.",
+  "print(add(40, 2))  # 42",
+  "Naïve café glyphs and 🦙 appear again, again."
+ ],
+ "vocab_size": 400,
+ "budget": 134,
+ "split_pattern": "'(?i:[sdmt]|ll|ve|re)|[^\\r\\n\\p{L}\\p{N}]?+\\p{L}+|\\p{N}{1,2}| ?[^\\s\\p{L}\\p{N}]++[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+"
+}

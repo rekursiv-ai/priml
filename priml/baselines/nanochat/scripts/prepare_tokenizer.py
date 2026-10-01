@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 import hashlib
 import json
@@ -14,6 +14,7 @@ import math
 import tempfile
 
 from configgle import Fig
+from tokenizers import decoders, models, pre_tokenizers
 
 import rustbpe
 import tokenizers
@@ -350,9 +351,6 @@ def frequency_model(
         ("".join(alphabet[value] for value in piece), math.log(max(1, count) / total))
         for piece, count in zip(pieces, counts, strict=True)
     ]
-    models = cast(_TokenizersNamespace, tokenizers.models)
-    pre_tokenizers = cast(_PreTokenizersNamespace, tokenizers.pre_tokenizers)
-    decoders = cast(_DecodersNamespace, tokenizers.decoders)
     model = tokenizers.Tokenizer(
         models.Unigram(vocab, unk_id=None, byte_fallback=False),
     )
@@ -455,17 +453,3 @@ class ByteLevelTokenizer:
                 raise ValueError("Token pieces do not conserve literal UTF-8 bytes.")
             output.append([self.bos_token_id, *ids])
         return output
-
-
-class _TokenizersNamespace(Protocol):
-    Unigram: Callable[..., object]
-
-
-class _PreTokenizersNamespace(Protocol):
-    Sequence: Callable[..., object]
-    Split: Callable[..., object]
-    ByteLevel: Callable[..., object]
-
-
-class _DecodersNamespace(Protocol):
-    ByteLevel: Callable[..., object]

@@ -47,7 +47,9 @@ Added prepared Unigram workflow:
     selects one operation; its default, all, runs preparation in order.
     --stage verify checks prepared inputs, and --stage dump bundles them.
     --stage train binds the prepared paths and launches through Priml, using
-    exp022 unless --experiment selects another recipe. Metrics and the
+    exp022 unless --experiment selects another recipe, by ladder name or by a
+    factory's dotted import path. --train-budget-sec replaces the recipe's
+    budget in both its schedule and its stop time. Metrics and the
     resolved configuration are saved in --run-directory; --save-checkpoint
     also retains the final model state. --directory relocates the inputs.
 
@@ -71,7 +73,15 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, Self, cast, override
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Protocol,
+    Self,
+    cast,
+    override,
+    runtime_checkable,
+)
 from urllib import request
 
 import argparse
@@ -125,7 +135,7 @@ else:
     parquet = lazy_import("pyarrow.parquet")
     torch = lazy_import("torch")
 
-from configgle import Fig
+from configgle import Fig, Makeable
 
 from priml.baselines.nanochat.data import (
     NanoChatData,
@@ -1014,16 +1024,48 @@ def pack_row(
 
 def _document_batches(config: RowPreparation.Config) -> Iterator[list[str]]:
     for shard in config.train_shard_indices:
-        shard_file = parquet.ParquetFile(
-            config.raw_dir / f"shard_{shard:05d}.parquet",
-        )
-        for group in range(shard_file.num_row_groups):
+        source = parquet.ParquetFile(config.raw_dir / f"shard_{shard:05d}.parquet")
+        for group in range(source.num_row_groups):
             texts = cast(
                 list[str],
-                shard_file.read_row_group(group).column("text").to_pylist(),
+                source.read_row_group(group).column("text").to_pylist(),
             )
             for start in range(0, len(texts), config.documents_per_refill):
                 yield texts[start : start + config.documents_per_refill]
+
+
+class TokenizerBuild(Protocol):
+    """A fitting run that writes ``tokenizer.json`` into its working directory."""
+
+    def build(self) -> None:
+        """Fit and save the tokenizer."""
+        ...
+
+
+class TokenizerFitting(Makeable[TokenizerBuild], Protocol):
+    """What ``Preparation`` needs of whatever fills its ``tokenizer`` slot.
+
+    Where the fitted tokenizer goes, and how many IDs the row encoder reserves
+    after its ordinary pieces. Stated as a shape rather than as
+    ``UnigramPreparation.Config`` so another fitting algorithm drops into the
+    slot without editing ``Preparation``.
+    """
+
+    working_dir: Path
+    """Destination of ``tokenizer.json``, pushed down by ``Preparation.finalize``."""
+
+    reserved_count: int
+    """IDs appended after the ordinary pieces; the first is BOS."""
+
+
+@runtime_checkable
+class _FitsSample(Protocol):
+    sample_dir: Path
+
+
+@runtime_checkable
+class _FitsShards(Protocol):
+    raw_dir: Path
 
 
 class Preparation:
@@ -1048,10 +1090,8 @@ class Preparation:
         )
         """Original-corpus vocabulary fitting sample."""
 
-        tokenizer: UnigramPreparation.Config = field(
-            default_factory=UnigramPreparation.Config,
-        )
-        """Tokenizer fitting procedure."""
+        tokenizer: TokenizerFitting = field(default_factory=UnigramPreparation.Config)
+        """Tokenizer fitting procedure; fitted on the sample or the raw shards."""
 
         rows: RowPreparation.Config = field(default_factory=RowPreparation.Config)
         """Training geometry and separate packed evaluation contract."""
@@ -1070,10 +1110,14 @@ class Preparation:
             self.sample.val_shard = self.corpus.val_shard
             self.sample.raw_dir = self.corpus.raw_dir
             self.sample.working_dir = self.working_dir / "sample"
-            self.tokenizer.sample_dir = self.sample.working_dir
+            if isinstance(self.tokenizer, _FitsSample):
+                self.tokenizer.sample_dir = self.sample.working_dir
+            if isinstance(self.tokenizer, _FitsShards):
+                self.tokenizer.raw_dir = self.corpus.raw_dir
             self.tokenizer.working_dir = self.working_dir / self.tokenizer_name
             self.rows.raw_dir = self.corpus.working_dir
             self.rows.tokenizer.path = self.tokenizer.working_dir / "tokenizer.json"
+            self.rows.tokenizer.reserved_count = self.tokenizer.reserved_count
             self.rows.working_dir = self.tokenizer.working_dir / "prepared"
             return super().finalize()
 
@@ -1147,6 +1191,7 @@ class Preparation:
         build_reference_eval(
             reference_dir=reference,
             unigram_path=self.config.rows.tokenizer.path,
+            reserved_count=self.config.rows.tokenizer.reserved_count,
             output=self.config.working_dir / "reference-eval",
         )
 
@@ -1220,30 +1265,42 @@ class Preparation:
         *,
         run_directory: Path,
         seed: int,
+        train_budget_sec: float | None = None,
     ) -> NgramTrainLoop.Config:
         """Bind an experiment to locally rebuilt inputs and local-only reporting.
 
         Args:
-          name: Public experiment factory in experiments.py.
+          name: Public experiment factory in experiments.py, or any factory's
+            dotted import path.
           run_directory: New directory for training outputs.
           seed: Training seed.
+          train_budget_sec: Training seconds for both the schedule and the stop;
+            None keeps the factory's.
 
         Returns:
           config: Original model and training recipe with portable input locations.
 
         """
-        module = importlib.import_module("priml.baselines.nanochat.experiments")
-        if name not in {f"exp{index:03d}" for index in range(4, 24)}:
-            raise ValueError(f"Unknown NanoChat experiment: {name}.")
-        factory = cast(Callable[[], object], getattr(module, name))
+        module, _, factory_name = name.rpartition(".")
+        if not module:
+            if name not in {f"exp{index:03d}" for index in range(4, 24)}:
+                raise ValueError(f"Unknown NanoChat experiment: {name}.")
+            module = "priml.baselines.nanochat.experiments"
+        factory = cast(
+            Callable[[], object],
+            getattr(importlib.import_module(module), factory_name),
+        )
         config = factory()
         if not isinstance(config, NgramTrainLoop.Config):
             raise TypeError("The experiment must return NgramTrainLoop.Config.")
         config.base_dir = "/"
         config.working_dir = validated_output_path(run_directory)
         config.seed = seed
+        if train_budget_sec is not None:
+            config.max_time = config.step.train_budget_sec = train_budget_sec
         config.dataset.working_dir = (
-            self.config.working_dir / self.config.experiment_corpora.get(name, "raw")
+            self.config.working_dir
+            / self.config.experiment_corpora.get(config.experiment_name, "raw")
         )
         config.dataset.tokenizer_dir = self.config.corpus.raw_dir / "tokenizer"
         if config.dataset.prepared_train_manifest:
@@ -1267,6 +1324,7 @@ def build_reference_eval(
     *,
     reference_dir: Path,
     unigram_path: Path,
+    reserved_count: int,
     output: Path,
 ) -> None:
     """Build byte-matched replays from reference rows and fitted tokenizers.
@@ -1274,6 +1332,7 @@ def build_reference_eval(
     Args:
       reference_dir: Packed reference arrays, manifest, and tokenizer.pkl.
       unigram_path: Existing fitted tokenizer JSON, never retrained here.
+      reserved_count: IDs the row encoder appends after the fitted pieces.
       output: New output directory for bpe.npz and unigram.npz.
 
     """
@@ -1296,6 +1355,7 @@ def build_reference_eval(
             reference=reference,
             tokenizer=tokenizer,
             batch_size=IntCodec.coerce(manifest["eval_batch_size"], default=None),
+            reserved_count=reserved_count,
         )
         with (destination / f"{name}.npz").open("xb") as stream:
             savez(stream, allow_pickle=False, **arrays)
@@ -1354,8 +1414,12 @@ def prepare_reference_rows(
     reference: tiktoken.Encoding,
     tokenizer: tokenizers.Tokenizer | None,
     batch_size: int,
+    reserved_count: int,
 ) -> dict[str, ndarray]:
     """Build reference or Unigram rows with identical source-byte accounting.
+
+    A replay longer than the context continues in extra windows appended after
+    the reference rows, padded to whole batches; see ``_windows``.
 
     Args:
       inputs: Original reference input rows, including each leading BOS.
@@ -1363,6 +1427,8 @@ def prepare_reference_rows(
       reference: Frozen BPE tokenizer used to select the rows.
       tokenizer: Frozen Unigram tokenizer; None preserves the reference IDs.
       batch_size: Reference batch size, retained for BPE reduction parity.
+      reserved_count: IDs after the tokenizer's pieces, the first being BOS;
+        the reference keeps its own vocabulary, so None ignores it.
 
     Returns:
       arrays: Saveable replay archive with per-window byte accounting.
@@ -1392,13 +1458,16 @@ def prepare_reference_rows(
         dtype=int64,
     )
     output_bos = int(tokenizer.get_vocab_size()) if tokenizer is not None else bos
-    output_vocab = output_bos + 16 if tokenizer is not None else reference.n_vocab
+    output_vocab = (
+        output_bos + reserved_count if tokenizer is not None else reference.n_vocab
+    )
     width = int(cast(int, inputs.shape[1]))
     output: list[tuple[ndarray, ndarray, ndarray]] = []
     reference_counts: list[int] = []
     literal_counts: list[int] = []
     original_rows: list[int] = []
     fragment_lengths: list[int] = []
+    continuations: list[tuple[int, tuple[ndarray, ndarray, ndarray]]] = []
     incomplete_suffixes = 0
     for row_index, row in enumerate(cast(Iterator[NDArray[np.int64]], targets)):
         sequence: list[int] = []
@@ -1432,14 +1501,19 @@ def prepare_reference_rows(
         if tokenizer is None:
             output.append((inputs[row_index], row, historical[row] > 0))
         else:
-            if len(sequence) > width + 1:
-                raise ValueError(
-                    f"Reference row {row_index} exceeds the model context: "
-                    f"{len(sequence) - 1} targets > {width}.",
-                )
-            output.append(_pad_row(sequence, bos=output_bos, width=width))
+            first, *rest = _windows(sequence, bos=output_bos, width=width)
+            output.append(first)
+            continuations.extend((row_index, window) for window in rest)
         reference_counts.append(int(historical[row].sum()))
         literal_counts.append(literal_count)
+        original_rows.append(row_index)
+    # Continuations carry no bytes; filler rows keep every batch full width.
+    filler = _pad_row([output_bos], bos=output_bos, width=width)
+    padding = -(len(output) + len(continuations)) % batch_size if continuations else 0
+    for row_index, window in [*continuations, *[(-1, filler)] * padding]:
+        output.append(window)
+        reference_counts.append(0)
+        literal_counts.append(0)
         original_rows.append(row_index)
     return {
         "inputs": stack([row[0] for row in output]).astype(int64),
@@ -1461,10 +1535,36 @@ def prepare_reference_rows(
                 len(tokenizer.decode([i], skip_special_tokens=False).encode())
                 for i in range(output_bos)
             ]
-            + [0] * 16,
+            + [0] * reserved_count,
             dtype=int64,
         ),
     }
+
+
+# A replay that fits is one padded row. A longer one continues in windows whose last
+# target lies ``width`` targets on; each sees the ``width`` tokens before it and scores
+# only targets no earlier window scored, so nothing is truncated and no context crosses
+# into another row.
+def _windows(
+    sequence: list[int],
+    *,
+    bos: int,
+    width: int,
+) -> list[tuple[ndarray, ndarray, ndarray]]:
+    """Split a replay into context windows that score each of its targets once."""
+    if len(sequence) <= width + 1:
+        return [_pad_row(sequence, bos=bos, width=width)]
+    tokens = array(sequence, dtype=int64)
+    windows: list[tuple[ndarray, ndarray, ndarray]] = []
+    for scored in range(0, len(sequence) - 1, width):
+        end = min(scored + width, len(sequence) - 1)
+        targets = tokens[end - width + 1 : end + 1]
+        mask: NDArray[np.bool_] = cast(
+            NDArray[np.bool_],
+            (arange(width) >= scored - end + width) & (targets != bos),
+        )
+        windows.append((tokens[end - width : end], targets, mask))
+    return windows
 
 
 def _pad_row(
@@ -2081,6 +2181,7 @@ def main() -> int:
             args.experiment,
             run_directory=args.run_directory,
             seed=args.seed,
+            train_budget_sec=args.train_budget_sec,
         )
         training.pprint(hide_default_values=False)
         launch_training(training, save_checkpoint=args.save_checkpoint)
@@ -2125,6 +2226,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument("--experiment", default="exp022")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--train-budget-sec", type=float, default=None)
     parser.add_argument("--save-checkpoint", action="store_true")
     parser.add_argument(
         "--run-directory",
@@ -2149,6 +2251,7 @@ class _Arguments(Protocol):
     print_config: bool
     experiment: str
     seed: int
+    train_budget_sec: float | None
     save_checkpoint: bool
     run_directory: Path
     output: Path

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from threading import Event
-from typing import Final, Protocol, cast
+from typing import Final, cast
 from unittest.mock import patch
 
 import io
@@ -25,9 +25,11 @@ import subprocess
 import sys
 import tarfile
 
+from configgle import Fig
 from numpy import array, array_equal, int64, zeros
 from numpy.typing import NDArray
 from pyarrow import Table, parquet
+from tokenizers import decoders, models, pre_tokenizers
 
 import numpy as np
 import pyarrow as pa
@@ -56,7 +58,10 @@ from priml.baselines.nanochat.scripts.prepare_data import (
     prepare_reference_rows,
     unique_rows,
 )
-from priml.baselines.nanochat.scripts.prepare_tokenizer import byte_alphabet
+from priml.baselines.nanochat.scripts.prepare_tokenizer import (
+    UnigramPreparation,
+    byte_alphabet,
+)
 from priml.lib.custom_json import DictCodec
 from priml.train.checkpointer import Checkpointer
 
@@ -304,6 +309,7 @@ def test_recipe_configuration_does_not_read_files() -> None:
     assert len(config.corpus.donor_source_ids) == 490
     assert config.corpus.revision == "915333b4f8b8684f39aeaafea600fea6f43fb703"
     assert config.corpus.train_shard_indices == (*range(7), *range(8, 15))
+    assert isinstance(config.tokenizer, UnigramPreparation.Config)
     assert config.tokenizer.vocab_size == 16_384
 
 
@@ -327,6 +333,78 @@ def test_online_milestones_use_their_prepared_corpus(
     assert training.dataset.working_dir == config.working_dir / corpus
     assert training.dataset.prepared_train_manifest == ""
     assert training.dataset.val_shard == 7
+
+
+def test_a_factory_outside_the_ladder_is_named_by_its_import_path(
+    tmp_path: Path,
+) -> None:
+    """Resolve a dotted factory, keying its corpus by the experiment it returns."""
+    config = donor_unigram16k()
+    config.working_dir = tmp_path / "inputs"
+    training = config.make().training_config(
+        "priml.baselines.nanochat.experiments.exp019",
+        run_directory=tmp_path / "run",
+        seed=42,
+    )
+    assert training.experiment_name == "exp019"
+    assert training.dataset.working_dir == config.working_dir / "donor-original"
+
+
+def test_a_training_budget_moves_the_schedule_and_the_stop_together(
+    tmp_path: Path,
+) -> None:
+    config = donor_unigram16k()
+    config.working_dir = tmp_path / "inputs"
+    preparation = config.make()
+    default = preparation.training_config(
+        "exp019",
+        run_directory=tmp_path / "default",
+        seed=42,
+    )
+    budgeted = preparation.training_config(
+        "exp019",
+        run_directory=tmp_path / "budgeted",
+        seed=42,
+        train_budget_sec=300.0,
+    )
+    assert default.max_time == default.step.train_budget_sec == 525.0
+    assert budgeted.max_time == budgeted.step.train_budget_sec == 300.0
+
+
+class _ShardFitting:
+    """A tokenizer recipe that reads the raw shards instead of the fitting sample."""
+
+    class Config(Fig["_ShardFitting"]):
+        """Declare the fields the preparation pushes down."""
+
+        raw_dir: Path = Path("/unset")
+        """Original shards."""
+
+        working_dir: Path = Path("/unset")
+        """Destination of the tokenizer."""
+
+        reserved_count: int = 10
+        """IDs the row encoder appends after the ordinary pieces."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    def build(self) -> None:
+        """Write nothing; only the wiring is under test."""
+
+
+def test_the_tokenizer_slot_takes_a_shard_fitted_recipe(tmp_path: Path) -> None:
+    """Another fitting algorithm drops in; its reserved IDs reach the row encoder."""
+    config = donor_unigram16k()
+    config.working_dir = tmp_path
+    config.tokenizer = _ShardFitting.Config()
+    config.tokenizer_name = "shards"
+    finalized = config.copy_tree().finalize()
+    assert isinstance(finalized.tokenizer, _ShardFitting.Config)
+    assert finalized.tokenizer.raw_dir == tmp_path / "raw"
+    assert finalized.tokenizer.working_dir == tmp_path / "shards"
+    assert finalized.rows.tokenizer.path == tmp_path / "shards/tokenizer.json"
+    assert finalized.rows.tokenizer.reserved_count == 10
 
 
 @pytest.mark.compute_large_fixture
@@ -354,7 +432,9 @@ def test_preparation_builds_and_relocates(
     config.corpus.donor_destination_shards = 1
     config.sample.train_shard_indices = (0, 1)
     config.sample.rows_per_shard = 4
-    config.tokenizer.vocab_size = 272
+    tokenizer = config.tokenizer
+    assert isinstance(tokenizer, UnigramPreparation.Config)
+    tokenizer.vocab_size = 272
     config.baseline.num_train_shards = 2
     config.baseline.vocab_size = 272
     config.baseline.train_chars = 100
@@ -402,7 +482,7 @@ def test_preparation_builds_and_relocates(
     assert training.dataset.reference_evaluation is not None
     replay = training.dataset.reference_evaluation.make()
     assert isinstance(replay, ReferenceEvaluation)
-    assert replay.vocab_size == config.tokenizer.vocab_size
+    assert replay.vocab_size == tokenizer.vocab_size
     assert training.seed == 1102
     assert not (tmp_path / "training").exists()
     for path in moved.rglob("*MANIFEST.json"):
@@ -596,6 +676,30 @@ def test_crop_discards_shortest_document_tail() -> None:
     assert lengths == [4, 3]
 
 
+@pytest.mark.cli_python_subprocess
+def test_training_documents_read_in_a_fresh_interpreter(tmp_path: Path) -> None:
+    """``--stage rows`` runs alone, so it cannot lean on an earlier stage's imports."""
+    _write_shard(tmp_path, 0, ["alpha", "beta"])
+    program = (
+        "from pathlib import Path\n"
+        "from priml.baselines.nanochat.scripts import prepare_data\n"
+        "config = prepare_data.RowPreparation.Config()\n"
+        f"config.raw_dir = Path({str(tmp_path)!r})\n"
+        "config.train_shard_indices = (0,)\n"
+        "print(list(prepare_data._document_batches(config)))\n"
+    )
+    result = subprocess.run(  # noqa: S603 -- Fixed interpreter and test-owned program.
+        [sys.executable, "-c", program],
+        env={**os.environ, "PYTHONPATH": str(_CWD.parents[4])},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[['alpha', 'beta']]"
+
+
 @pytest.mark.parametrize("relative", [False, True])
 @pytest.mark.cli_python_subprocess
 def test_cli_prints_factory_without_preparing_inputs(
@@ -626,22 +730,7 @@ def test_cli_prints_factory_without_preparing_inputs(
     assert not destination.exists()
 
 
-class _TokenizersModels(Protocol):
-    Unigram: Callable[..., object]
-
-
-class _TokenizersPreTokenizers(Protocol):
-    ByteLevel: Callable[..., object]
-
-
-class _TokenizersDecoders(Protocol):
-    ByteLevel: Callable[..., object]
-
-
 def _unigram() -> tokenizers.Tokenizer:
-    models = cast(_TokenizersModels, tokenizers.models)
-    pre_tokenizers = cast(_TokenizersPreTokenizers, tokenizers.pre_tokenizers)
-    decoders = cast(_TokenizersDecoders, tokenizers.decoders)
     backend = tokenizers.Tokenizer(
         models.Unigram([(piece, -6.0) for piece in byte_alphabet().values()]),
     )
@@ -689,6 +778,7 @@ def test_reference_replay() -> None:
         reference=reference,
         tokenizer=None,
         batch_size=2,
+        reserved_count=16,
     )
     unigram = prepare_reference_rows(
         inputs,
@@ -696,6 +786,7 @@ def test_reference_replay() -> None:
         reference=reference,
         tokenizer=_unigram(),
         batch_size=2,
+        reserved_count=16,
     )
     assert array_equal(bpe["inputs"], inputs)
     assert array_equal(bpe["targets"], targets)
@@ -746,15 +837,51 @@ def test_reference_replay() -> None:
     )
 
 
-def test_overflow_is_rejected_without_changing_context() -> None:
-    with pytest.raises(ValueError, match=r"exceeds.*context"):
-        prepare_reference_rows(
-            array([[257, 256, 256]], dtype=int64),
-            targets=array([[256, 256, 256]], dtype=int64),
-            reference=_reference(),
-            tokenizer=_unigram(),
-            batch_size=1,
-        )
+def test_reference_replay_reserves_the_encoders_ids() -> None:
+    """The replay vocabulary is the ordinary pieces plus the row encoder's reserve."""
+    replay = prepare_reference_rows(
+        array([[257, 97, 98]], dtype=int64),
+        targets=array([[97, 98, 99]], dtype=int64),
+        reference=_reference(),
+        tokenizer=_unigram(),
+        batch_size=1,
+        reserved_count=10,
+    )
+    bos = _unigram().get_vocab_size()
+    assert int(replay["bos_token_id"]) == bos
+    assert int(replay["vocab_size"]) == bos + 10
+    assert len(replay["token_bytes"]) == bos + 10
+
+
+def test_overflow_continues_in_windows_that_score_each_target_once() -> None:
+    """A replay longer than the context keeps every byte, each scored exactly once.
+
+    Twelve byte tokens replay three BPE tokens in a width-3 context. Four windows
+    each score three targets, seeing only the three tokens before their last one;
+    the row's bytes stay on its first window, and filler rows keep whole batches.
+    """
+    backend = _unigram()
+    replay = prepare_reference_rows(
+        array([[257, 256, 256]], dtype=int64),
+        targets=array([[256, 256, 256]], dtype=int64),
+        reference=_reference(),
+        tokenizer=backend,
+        batch_size=3,
+        reserved_count=16,
+    )
+    bos = backend.get_vocab_size()
+    sequence = [bos, *backend.encode("abcd" * 3, add_special_tokens=False).ids]
+    inputs = cast(NDArray[np.int64], replay["inputs"])
+    targets = cast(NDArray[np.int64], replay["targets"])
+    mask = cast(NDArray[np.bool_], replay["score_mask"])
+    assert inputs.shape == (6, 3)
+    assert cast(list[int], targets[mask].tolist()) == sequence[1:]
+    windows = cast(Iterator[NDArray[np.int64]], inputs[:4])
+    for window, end in zip(windows, (3, 6, 9, 12), strict=True):
+        assert cast(list[int], window.tolist()) == sequence[end - 3 : end]
+    assert not mask[4:].any()
+    assert cast(list[int], replay["reference_bytes"].tolist()) == [12, 0, 0, 0, 0, 0]
+    assert cast(list[int], replay["literal_bytes"].tolist()) == [12, 0, 0, 0, 0, 0]
 
 
 if __name__ == "__main__":

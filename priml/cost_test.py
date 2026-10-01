@@ -593,7 +593,8 @@ def test_peak_intensity_is_the_ridge() -> None:
 def test_peak_names_a_form_factor_without_moving_the_bare_name() -> None:
     # A bare name keeps meaning the form factor the table was sourced from, so
     # every recorded result is unchanged by the form-factor entries existing.
-    assert peak()["a100", BF, "bytes", "matmul"] == 2.039e12
+    # The table holds TB/s: 2.039 * 1e12 rounds to 2039000000000.0002, not 2.039e12.
+    assert peak()["a100", BF, "bytes", "matmul"] == 2.039 * 1e12
     assert peak()["h100", BF, "bytes", "matmul"] == 3.35e12
     # The PCIe boards move less memory, and compute is identical across forms.
     assert peak()["a100-40g", BF, "bytes", "matmul"] == 1.555e12
