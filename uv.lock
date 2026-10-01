@@ -309,7 +309,7 @@ wheels = [
 [[package]]
 name = "configgle"
 version = "1.4.0"
-source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#91751e3477756fa08c7a541db6e91ed01b52643e" }
+source = { git = "https://github.com/rekursiv-ai/configgle?branch=main#44944d687e1a15263ea89cdc231c4a85c22a01f2" }
 dependencies = [
     { name = "typing-extensions" },
 ]
